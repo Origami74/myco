@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="720" viewBox="0 0 1000 720" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="mTeal" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#0d9488"/></marker>
+    <marker id="mGreen" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#16a34a"/></marker>
+    <marker id="mAmber" markerWidth="12" markerHeight="12" refX="6" refY="6" orient="auto"><path d="M1,1 L11,6 L1,11 Z" fill="#d97706"/></marker>
+    <marker id="mSlate" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#475569"/></marker>
+  </defs>
+
+  <rect width="1000" height="720" fill="#ffffff"/>
+  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">Two layers: FIPS live routing vs nsite store-and-forward</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">The load-bearing boundary behind diagram 03 — transit vs persistence. DRAFT for review.</text>
+
+  <!-- ===================== LANE A: FIPS transport ===================== -->
+  <rect x="40" y="90" width="920" height="222" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <rect x="40" y="90" width="8" height="222" rx="4" fill="#0d9488"/>
+  <text x="66" y="120" font-size="16" font-weight="700" fill="#0f172a">Layer A — FIPS transport (live-path routing)</text>
+
+  <!-- live path link (under nodes) -->
+  <line x1="190" y1="180" x2="350" y2="180" stroke="#0d9488" stroke-width="3" marker-end="url(#mTeal)"/>
+  <line x1="430" y1="180" x2="590" y2="180" stroke="#0d9488" stroke-width="3" marker-end="url(#mTeal)"/>
+  <line x1="670" y1="180" x2="830" y2="180" stroke="#0d9488" stroke-width="3" marker-end="url(#mTeal)"/>
+
+  <!-- A nodes -->
+  <g>
+    <rect x="110" y="150" width="80" height="60" rx="10" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+    <text x="150" y="178" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">N1</text>
+    <text x="150" y="197" font-size="10.5" fill="#64748b" text-anchor="middle">node</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="80" height="60" rx="10" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+    <text x="390" y="178" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">N2</text>
+    <text x="390" y="197" font-size="10.5" fill="#64748b" text-anchor="middle">hop</text>
+  </g>
+  <g>
+    <rect x="590" y="150" width="80" height="60" rx="10" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+    <text x="630" y="178" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">N3</text>
+    <text x="630" y="197" font-size="10.5" fill="#64748b" text-anchor="middle">hop</text>
+  </g>
+  <g>
+    <rect x="830" y="150" width="80" height="60" rx="10" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+    <text x="870" y="178" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">N4</text>
+    <text x="870" y="197" font-size="10.5" fill="#64748b" text-anchor="middle">node</text>
+  </g>
+
+  <text x="510" y="232" font-size="11.5" font-weight="600" fill="#0d8478" text-anchor="middle">a live path: hop-by-hop, needs a connected path RIGHT NOW</text>
+
+  <!-- A annotations -->
+  <text x="66" y="262" font-size="12.5" fill="#475569">Noise XK end-to-end + Noise IK per hop — transit nodes route bytes but can't read the payload.</text>
+  <text x="66" y="288" font-size="12.5" fill="#475569">Stateless forwarding: <tspan font-weight="700" fill="#b91c1c">does NOT survive partition</tspan> — break the path and nothing arrives.</text>
+
+  <!-- ===================== "rides on top of" connector ===================== -->
+  <path d="M500,400 L500,326" fill="none" stroke="#475569" stroke-width="2.4" marker-end="url(#mSlate)"/>
+  <rect x="322" y="340" width="356" height="44" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="500" y="358" font-size="11.5" font-weight="700" fill="#0f172a" text-anchor="middle">rides on top of</text>
+  <text x="500" y="375" font-size="11" fill="#475569" text-anchor="middle">Layer B uses whatever live links Layer A happens to provide</text>
+
+  <!-- ===================== LANE B: nsite store-and-forward ===================== -->
+  <rect x="40" y="400" width="920" height="262" rx="12" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
+  <rect x="40" y="400" width="8" height="262" rx="4" fill="#16a34a"/>
+  <text x="66" y="430" font-size="16" font-weight="700" fill="#0f172a">Layer B — nsite store-and-forward <tspan font-weight="700" fill="#16a34a">(net-new)</tspan></text>
+
+  <!-- ANNOUNCE: green thin arrows rippling N1 -> N2 -> N3 -> N4 (above nodes) -->
+  <path d="M150,470 C220,448 280,448 350,470" fill="none" stroke="#16a34a" stroke-width="1.8" marker-end="url(#mGreen)"/>
+  <path d="M390,470 C460,448 520,448 590,470" fill="none" stroke="#16a34a" stroke-width="1.8" marker-end="url(#mGreen)"/>
+  <path d="M630,470 C700,448 760,448 830,470" fill="none" stroke="#16a34a" stroke-width="1.8" marker-end="url(#mGreen)"/>
+  <text x="490" y="456" font-size="11" font-weight="700" fill="#15803d" text-anchor="middle">ANNOUNCE: manifest fans out (small, TTL 5)</text>
+
+  <!-- B nodes with cache disc -->
+  <g>
+    <rect x="110" y="486" width="80" height="74" rx="10" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+    <text x="150" y="510" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">N1</text>
+    <circle cx="150" cy="533" r="13" fill="#ecfdf5" stroke="#16a34a" stroke-width="1.6"/>
+    <text x="150" y="537" font-size="9.5" font-weight="700" fill="#15803d" text-anchor="middle">copy</text>
+    <text x="150" y="575" font-size="10" fill="#64748b" text-anchor="middle">t0 · origin</text>
+  </g>
+  <g>
+    <rect x="350" y="486" width="80" height="74" rx="10" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+    <text x="390" y="510" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">N2</text>
+    <circle cx="390" cy="533" r="13" fill="#ecfdf5" stroke="#16a34a" stroke-width="1.6"/>
+    <text x="390" y="537" font-size="9.5" font-weight="700" fill="#15803d" text-anchor="middle">copy</text>
+    <text x="390" y="575" font-size="10" fill="#64748b" text-anchor="middle">t1 · cached</text>
+  </g>
+  <g>
+    <rect x="590" y="486" width="80" height="74" rx="10" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+    <text x="630" y="510" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">N3</text>
+    <circle cx="630" cy="533" r="13" fill="#ecfdf5" stroke="#16a34a" stroke-width="1.6"/>
+    <text x="630" y="537" font-size="9.5" font-weight="700" fill="#15803d" text-anchor="middle">copy</text>
+    <text x="630" y="575" font-size="10" fill="#64748b" text-anchor="middle">t2 · cached</text>
+  </g>
+  <g>
+    <rect x="830" y="486" width="80" height="74" rx="10" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+    <text x="870" y="510" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">N4</text>
+    <circle cx="870" cy="533" r="13" fill="#ecfdf5" stroke="#16a34a" stroke-width="1.6"/>
+    <text x="870" y="537" font-size="9.5" font-weight="700" fill="#15803d" text-anchor="middle">copy</text>
+    <text x="870" y="575" font-size="10" fill="#64748b" text-anchor="middle">t2 · cached</text>
+  </g>
+
+  <!-- PULL: single orange thick arrow along ONE path only (below nodes) -->
+  <path d="M190,595 L830,595" fill="none" stroke="#d97706" stroke-width="3.4" marker-end="url(#mAmber)"/>
+  <text x="510" y="588" font-size="11.5" font-weight="700" fill="#b45309" text-anchor="middle">PULL: blob on demand (large, one path)</text>
+
+  <!-- B annotations -->
+  <text x="66" y="628" font-size="12.5" fill="#475569">Each node caches + re-serves → <tspan font-weight="700" fill="#15803d">becomes a new source</tspan>. <tspan font-weight="700" fill="#15803d">SURVIVES partition.</tspan></text>
+  <text x="66" y="650" font-size="12.5" fill="#475569">Self-authenticating data (signature + sha256) — any cache is as trustworthy as the origin.</text>
+
+  <!-- ===================== bottom one-liner ===================== -->
+  <text x="500" y="698" font-size="13" font-weight="600" fill="#0f172a" text-anchor="middle">FIPS gives transit; the nsite layer gives persistence. &#8220;Pillars of Propagation.&#8221;</text>
+</svg>

@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="500" viewBox="0 0 980 500" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="bti" markerWidth="12" markerHeight="12" refX="6.5" refY="6" orient="auto"><path d="M1,1 L11,6 L1,11 Z" fill="#4f46e5"/></marker>
+  </defs>
+  <rect width="980" height="500" fill="#ffffff"/>
+
+  <text x="490" y="56" font-size="29" font-weight="800" fill="#0f172a" text-anchor="middle">How apps spread</text>
+  <text x="490" y="88" font-size="15.5" fill="#475569" text-anchor="middle">Like passing a note — each person keeps a copy and can pass it on.</text>
+
+  <!-- ALICE (greyed: she passed it on and walks away) -->
+  <g opacity="0.5">
+    <rect x="115" y="170" width="110" height="175" rx="18" fill="#1e293b"/>
+    <rect x="125" y="184" width="90" height="147" rx="7" fill="#f1f5f9"/>
+    <g transform="translate(137,205)">
+      <rect width="66" height="50" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+      <rect width="66" height="13" rx="6" fill="#16a34a"/>
+      <rect x="7" y="22" width="50" height="4" rx="2" fill="#cbd5e1"/><rect x="7" y="31" width="38" height="4" rx="2" fill="#e2e8f0"/><rect x="7" y="40" width="44" height="4" rx="2" fill="#e2e8f0"/>
+    </g>
+    <circle cx="207" cy="180" r="13" fill="#16a34a"/><text x="207" y="185" font-size="14" font-weight="800" fill="#fff" text-anchor="middle">✓</text>
+    <text x="170" y="362" font-size="16" font-weight="700" fill="#334155" text-anchor="middle">Alice</text>
+  </g>
+  <text x="170" y="384" font-size="12" fill="#94a3b8" text-anchor="middle">👋 walks away — and it still spreads</text>
+
+  <!-- BEN -->
+  <rect x="435" y="170" width="110" height="175" rx="18" fill="#1e293b"/>
+  <rect x="445" y="184" width="90" height="147" rx="7" fill="#f1f5f9"/>
+  <g transform="translate(457,205)">
+    <rect width="66" height="50" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+    <rect width="66" height="13" rx="6" fill="#16a34a"/>
+    <rect x="7" y="22" width="50" height="4" rx="2" fill="#cbd5e1"/><rect x="7" y="31" width="38" height="4" rx="2" fill="#e2e8f0"/><rect x="7" y="40" width="44" height="4" rx="2" fill="#e2e8f0"/>
+  </g>
+  <circle cx="527" cy="180" r="13" fill="#16a34a"/><text x="527" y="185" font-size="14" font-weight="800" fill="#fff" text-anchor="middle">✓</text>
+  <text x="490" y="362" font-size="16" font-weight="700" fill="#0f172a" text-anchor="middle">Ben</text>
+
+  <!-- CARL -->
+  <rect x="755" y="170" width="110" height="175" rx="18" fill="#1e293b"/>
+  <rect x="765" y="184" width="90" height="147" rx="7" fill="#f1f5f9"/>
+  <g transform="translate(777,205)">
+    <rect width="66" height="50" rx="6" fill="#ffffff" stroke="#cbd5e1"/>
+    <rect width="66" height="13" rx="6" fill="#16a34a"/>
+    <rect x="7" y="22" width="50" height="4" rx="2" fill="#cbd5e1"/><rect x="7" y="31" width="38" height="4" rx="2" fill="#e2e8f0"/><rect x="7" y="40" width="44" height="4" rx="2" fill="#e2e8f0"/>
+  </g>
+  <circle cx="847" cy="180" r="13" fill="#16a34a"/><text x="847" y="185" font-size="14" font-weight="800" fill="#fff" text-anchor="middle">✓</text>
+  <text x="810" y="362" font-size="16" font-weight="700" fill="#0f172a" text-anchor="middle">Carl</text>
+
+  <!-- bluetooth hops -->
+  <path d="M227,255 L431,255" fill="none" stroke="#4f46e5" stroke-width="2.6" stroke-dasharray="6 5" marker-end="url(#bti)"/>
+  <g transform="translate(307,232)"><rect width="44" height="44" rx="12" fill="#4f46e5"/><path d="M16 14 L30 30 L23 36 L23 8 L30 14 L16 30" fill="none" stroke="#fff" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/></g>
+  <text x="329" y="295" font-size="11.5" fill="#4f46e5" text-anchor="middle">Bluetooth · offline</text>
+
+  <path d="M547,255 L751,255" fill="none" stroke="#4f46e5" stroke-width="2.6" stroke-dasharray="6 5" marker-end="url(#bti)"/>
+  <g transform="translate(627,232)"><rect width="44" height="44" rx="12" fill="#4f46e5"/><path d="M16 14 L30 30 L23 36 L23 8 L30 14 L16 30" fill="none" stroke="#fff" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/></g>
+  <text x="649" y="295" font-size="11.5" fill="#4f46e5" text-anchor="middle">Bluetooth · offline</text>
+
+  <!-- bottom band -->
+  <rect x="60" y="410" width="860" height="68" rx="12" fill="#ecfdf5" stroke="#16a34a"/>
+  <text x="490" y="438" font-size="14" font-weight="600" fill="#15803d" text-anchor="middle">Everyone who installs an app can pass it on — so apps spread on their own.</text>
+  <text x="490" y="461" font-size="13" fill="#166534" text-anchor="middle">No internet, no servers, no single person who has to stay online.</text>
+</svg>

@@ -1,0 +1,35 @@
+# Reference checkouts & symlinks — other projects we read but never ship
+# (symlinks to ../fips and site-deck, plus clones of nostr-vpn / bitchat-android / fips-android)
+/reference/
+
+# Local agent settings
+.claude/settings.local.json
+
+# macOS
+.DS_Store
+
+# --- Rust ---
+/target/
+**/target/
+*.rs.bk
+
+# --- Android / Gradle / Kotlin ---
+.gradle/
+**/build/
+local.properties
+*.apk
+*.aab
+*.keystore
+captures/
+.externalNativeBuild/
+.cxx/
+# native libs generated from the Rust crate
+**/src/main/jniLibs/
+
+# --- IDE ---
+.idea/
+*.iml
+.vscode/
+
+# --- Node (web tooling, if added later) ---
+node_modules/

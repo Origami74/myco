@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="bt" markerWidth="12" markerHeight="12" refX="6.5" refY="6" orient="auto"><path d="M1,1 L11,6 L1,11 Z" fill="#4f46e5"/></marker>
+  </defs>
+  <rect width="960" height="560" fill="#ffffff"/>
+
+  <text x="480" y="58" font-size="29" font-weight="800" fill="#0f172a" text-anchor="middle">Install apps from the people around you</text>
+  <text x="480" y="90" font-size="15.5" fill="#475569" text-anchor="middle">Get apps from people nearby over Bluetooth — and keep using them, even offline.</text>
+
+  <!-- offline reassurance chip -->
+  <g transform="translate(372,118)">
+    <rect x="0" y="0" width="216" height="34" rx="17" fill="#ecfdf5" stroke="#16a34a"/>
+    <!-- small cloud with slash -->
+    <g transform="translate(16,9)">
+      <path d="M4,13 a6,6 0 0,1 1,-11 a7,7 0 0,1 12,3 a5,5 0 0,1 0,8 Z" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1"/>
+      <line x1="0" y1="16" x2="20" y2="0" stroke="#ef4444" stroke-width="2"/>
+    </g>
+    <text x="120" y="22" font-size="13.5" font-weight="700" fill="#15803d" text-anchor="middle">works offline ✓</text>
+  </g>
+
+  <!-- YOU phone -->
+  <text x="185" y="232" font-size="13" font-weight="700" fill="#334155" text-anchor="middle">YOU</text>
+  <rect x="120" y="244" width="130" height="196" rx="20" fill="#1e293b"/>
+  <rect x="132" y="262" width="106" height="160" rx="8" fill="#f1f5f9"/>
+  <!-- mini site on screen -->
+  <g transform="translate(150,286)">
+    <rect width="70" height="52" rx="5" fill="#ffffff" stroke="#cbd5e1"/>
+    <rect width="70" height="12" rx="5" fill="#2563eb"/>
+    <rect x="7" y="20" width="50" height="4" rx="2" fill="#cbd5e1"/>
+    <rect x="7" y="30" width="40" height="4" rx="2" fill="#e2e8f0"/>
+    <rect x="7" y="40" width="46" height="4" rx="2" fill="#e2e8f0"/>
+  </g>
+  <text x="185" y="408" font-size="10.5" fill="#64748b" text-anchor="middle">your apps</text>
+
+  <!-- A FRIEND phone -->
+  <text x="775" y="232" font-size="13" font-weight="700" fill="#334155" text-anchor="middle">A FRIEND</text>
+  <rect x="710" y="244" width="130" height="196" rx="20" fill="#1e293b"/>
+  <rect x="722" y="262" width="106" height="160" rx="8" fill="#f1f5f9"/>
+  <g transform="translate(740,286)">
+    <rect width="70" height="52" rx="5" fill="#ffffff" stroke="#cbd5e1"/>
+    <rect width="70" height="12" rx="5" fill="#16a34a"/>
+    <rect x="7" y="20" width="50" height="4" rx="2" fill="#cbd5e1"/>
+    <rect x="7" y="30" width="40" height="4" rx="2" fill="#e2e8f0"/>
+    <rect x="7" y="40" width="46" height="4" rx="2" fill="#e2e8f0"/>
+  </g>
+  <text x="775" y="408" font-size="10.5" fill="#64748b" text-anchor="middle">their apps</text>
+
+  <!-- bluetooth arc + flying card -->
+  <path d="M258,300 C400,250 560,250 702,300" fill="none" stroke="#4f46e5" stroke-width="2.4" stroke-dasharray="6 5" marker-end="url(#bt)"/>
+  <!-- BT badge -->
+  <g transform="translate(458,252)">
+    <rect width="44" height="44" rx="12" fill="#4f46e5"/>
+    <path d="M16 14 L30 30 L23 36 L23 8 L30 14 L16 30" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+  </g>
+  <text x="480" y="232" font-size="12" font-weight="700" fill="#4f46e5" text-anchor="middle">Bluetooth</text>
+
+  <!-- flying site card -->
+  <g transform="translate(438,318)">
+    <rect width="84" height="58" rx="7" fill="#ffffff" stroke="#2563eb" stroke-width="1.5"/>
+    <rect width="84" height="13" rx="7" fill="#2563eb"/>
+    <circle cx="9" cy="6.5" r="1.6" fill="#fff"/><circle cx="15" cy="6.5" r="1.6" fill="#fff"/><circle cx="21" cy="6.5" r="1.6" fill="#fff"/>
+    <rect x="9" y="22" width="60" height="4" rx="2" fill="#cbd5e1"/>
+    <rect x="9" y="32" width="48" height="4" rx="2" fill="#e2e8f0"/>
+    <rect x="9" y="42" width="54" height="4" rx="2" fill="#e2e8f0"/>
+  </g>
+  <text x="480" y="398" font-size="11.5" fill="#475569" text-anchor="middle">a whole app travels in one tap</text>
+
+  <!-- examples row -->
+  <text x="480" y="456" font-size="13" font-weight="700" fill="#334155" text-anchor="middle">apps you can get:</text>
+  <g font-size="12" fill="#475569" text-anchor="middle">
+    <g transform="translate(230,470)">
+      <rect width="150" height="44" rx="10" fill="#eff6ff" stroke="#2563eb"/>
+      <text x="75" y="28" font-weight="600" fill="#1d4ed8">🎮 a game</text>
+    </g>
+    <g transform="translate(405,470)">
+      <rect width="150" height="44" rx="10" fill="#fffbeb" stroke="#f59e0b"/>
+      <text x="75" y="28" font-weight="600" fill="#b45309">🗺️ a local map</text>
+    </g>
+    <g transform="translate(580,470)">
+      <rect width="150" height="44" rx="10" fill="#ecfdf5" stroke="#16a34a"/>
+      <text x="75" y="28" font-weight="600" fill="#15803d">💬 a block-party chat</text>
+    </g>
+  </g>
+
+  <text x="480" y="540" font-size="13.5" font-style="italic" fill="#64748b" text-anchor="middle">No app store. No servers. Just people sharing.</text>
+</svg>

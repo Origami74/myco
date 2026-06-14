@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="760" viewBox="0 0 1000 760" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="iTeal" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#0d9488"/></marker>
+    <marker id="iRose" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#e11d48"/></marker>
+    <marker id="iSlate" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#475569"/></marker>
+    <marker id="iGreen" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#16a34a"/></marker>
+  </defs>
+
+  <rect width="1000" height="760" fill="#ffffff"/>
+  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">Two identities — device key vs nsite-author key</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">They were one thing in an earlier sketch; they are not. The site you want and the peer you fetch it from are different keys. DRAFT for review.</text>
+
+  <!-- TOP-RIGHT chip: QR shares device npub -->
+  <rect x="560" y="78" width="400" height="42" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <text x="760" y="98" font-size="11" font-weight="700" fill="#0f172a" text-anchor="middle">QR shares your DEVICE npub</text>
+  <text x="760" y="113" font-size="10.5" fill="#475569" text-anchor="middle">myco://pair/&lt;base64&gt;  (npub + memorable name)</text>
+
+  <!-- ===================== LEFT COLUMN: DEVICE KEY ===================== -->
+  <rect x="40" y="134" width="450" height="402" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <rect x="40" y="134" width="8" height="402" rx="4" fill="#0d9488"/>
+  <text x="66" y="164" font-size="16" font-weight="700" fill="#0f172a">DEVICE KEY — one per device</text>
+  <text x="66" y="183" font-size="11" fill="#0d8478">your own secret; the basis of every derived form below</text>
+
+  <!-- row: npub -->
+  <rect x="66" y="198" width="398" height="62" rx="10" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+  <text x="80" y="220" font-size="13" font-weight="700" fill="#0f172a">npub</text>
+  <text x="80" y="238" font-size="10.5" fill="#475569">UI · QR pairing · BLE link auth ·</text>
+  <text x="80" y="253" font-size="10.5" fill="#475569">the address of YOUR relay + Blossom</text>
+
+  <!-- arrow down -->
+  <line x1="100" y1="260" x2="100" y2="272" stroke="#0d9488" stroke-width="2" marker-end="url(#iTeal)"/>
+
+  <!-- row: node_addr -->
+  <rect x="66" y="274" width="398" height="58" rx="10" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+  <text x="80" y="296" font-size="13" font-weight="700" fill="#0f172a">node_addr = SHA256(npub)[0:16]</text>
+  <text x="80" y="320" font-size="10.5" fill="#475569">FIPS mesh routing (packet headers, spanning tree)</text>
+
+  <!-- arrow down -->
+  <line x1="100" y1="332" x2="100" y2="344" stroke="#0d9488" stroke-width="2" marker-end="url(#iTeal)"/>
+
+  <!-- row: fd00 -->
+  <rect x="66" y="346" width="398" height="58" rx="10" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+  <text x="80" y="368" font-size="13" font-weight="700" fill="#0f172a">fd00:: = fd ‖ node_addr[0:15]</text>
+  <text x="80" y="392" font-size="10.5" fill="#475569">IPv6 ULA via the TUN</text>
+
+  <!-- footer note -->
+  <rect x="66" y="424" width="398" height="92" rx="10" fill="#ecfdf5" stroke="#16a34a"/>
+  <text x="80" y="448" font-size="11.5" font-weight="700" fill="#15803d">Reaches your services:</text>
+  <text x="80" y="467" font-size="11" fill="#166534">&lt;npub_device&gt;.fips:4869  (relay)</text>
+  <text x="80" y="483" font-size="11" fill="#166534">&lt;npub_device&gt;.fips:24242  (Blossom)</text>
+  <text x="80" y="505" font-size="11.5" font-weight="700" fill="#b91c1c">NEVER authors nsites.</text>
+
+  <!-- ===================== RIGHT COLUMN: NSITE AUTHOR KEY ===================== -->
+  <rect x="510" y="134" width="450" height="402" rx="12" fill="#fff1f2" stroke="#e11d48" stroke-width="2"/>
+  <rect x="510" y="134" width="8" height="402" rx="4" fill="#e11d48"/>
+  <text x="536" y="164" font-size="16" font-weight="700" fill="#0f172a">NSITE AUTHOR KEY — external, many</text>
+  <text x="536" y="183" font-size="11" fill="#be123c">someone else's pubkey; you only ever see its public side</text>
+
+  <!-- row: URL host -->
+  <rect x="536" y="198" width="398" height="62" rx="10" fill="#ffffff" stroke="#e11d48" stroke-width="2"/>
+  <text x="550" y="220" font-size="13" font-weight="700" fill="#0f172a">appears ONLY as the URL host</text>
+  <text x="550" y="243" font-size="11.5" fill="#475569">&lt;npub_author&gt;.nsite</text>
+
+  <!-- row: REQ filter -->
+  <rect x="536" y="278" width="398" height="78" rx="10" fill="#ffffff" stroke="#e11d48" stroke-width="2"/>
+  <text x="550" y="300" font-size="13" font-weight="700" fill="#0f172a">and as the REQ filter</text>
+  <text x="550" y="322" font-size="10.5" fill="#475569">{ kinds: [15128 / 35128],</text>
+  <text x="550" y="338" font-size="10.5" fill="#475569">&#160;&#160;authors: [&lt;author_pubkey&gt;] }</text>
+
+  <!-- footer note -->
+  <rect x="536" y="424" width="398" height="92" rx="10" fill="#fff1f2" stroke="#e11d48"/>
+  <text x="550" y="448" font-size="11.5" font-weight="700" fill="#be123c">You hold + re-serve their</text>
+  <text x="550" y="467" font-size="11.5" font-weight="700" fill="#be123c">signed events.</text>
+  <text x="550" y="490" font-size="11" fill="#9f1239">You never hold their secret key</text>
+  <text x="550" y="506" font-size="11" fill="#9f1239">and never sign for them.</text>
+
+  <!-- ===================== BOTTOM BAND: the consequence ===================== -->
+  <rect x="40" y="556" width="920" height="178" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+  <rect x="40" y="556" width="8" height="178" rx="4" fill="#16a34a"/>
+  <text x="66" y="584" font-size="16" font-weight="700" fill="#0f172a">The consequence — the site you want is a different key from the peer you fetch it from</text>
+
+  <!-- site you want = AUTHOR -->
+  <rect x="66" y="600" width="260" height="56" rx="10" fill="#fff1f2" stroke="#e11d48" stroke-width="2"/>
+  <text x="196" y="623" font-size="12.5" font-weight="700" fill="#0f172a" text-anchor="middle">site you want = AUTHOR npub</text>
+  <text x="196" y="642" font-size="10.5" fill="#9f1239" text-anchor="middle">identifies the content</text>
+
+  <!-- not-equal -->
+  <text x="378" y="636" font-size="30" font-weight="700" fill="#ef4444" text-anchor="middle">&#8800;</text>
+
+  <!-- peer you fetch from = HOLDER -->
+  <rect x="430" y="600" width="300" height="56" rx="10" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <text x="580" y="623" font-size="12.5" font-weight="700" fill="#0f172a" text-anchor="middle">peer you fetch from = HOLDER</text>
+  <text x="580" y="642" font-size="10.5" fill="#0d8478" text-anchor="middle">reached at &lt;npub_holder&gt;.fips</text>
+
+  <!-- example: Bob / Alice / Carl -->
+  <text x="784" y="615" font-size="11.5" font-weight="700" fill="#0f172a" text-anchor="middle">tiny example</text>
+  <rect x="752" y="624" width="64" height="34" rx="8" fill="#eef2ff" stroke="#475569"/>
+  <text x="784" y="640" font-size="11" font-weight="700" fill="#0f172a" text-anchor="middle">Bob</text>
+  <text x="784" y="652" font-size="9.5" fill="#64748b" text-anchor="middle">wants the site</text>
+
+  <!-- example arrows / labels -->
+  <text x="120" y="688" font-size="11.5" fill="#475569">Bob wants <tspan font-weight="700" fill="#be123c">Alice's</tspan> site</text>
+  <text x="120" y="706" font-size="10.5" fill="#9f1239">author = Alice</text>
+
+  <line x1="290" y1="694" x2="360" y2="694" stroke="#475569" stroke-width="2" marker-end="url(#iSlate)"/>
+  <text x="325" y="686" font-size="10" fill="#475569" text-anchor="middle">but fetches</text>
+
+  <text x="378" y="688" font-size="11.5" fill="#475569">from <tspan font-weight="700" fill="#0d8478">Carl's</tspan> relay</text>
+  <text x="378" y="706" font-size="10.5" fill="#0d8478">holder = Carl  ·  reached at &lt;npub_carl&gt;.fips</text>
+
+  <text x="610" y="694" font-size="11.5" fill="#334155">⇒ three distinct labels:</text>
+  <text x="610" y="711" font-size="10.5" fill="#64748b"><tspan font-weight="700" fill="#be123c">Alice (author)</tspan>, <tspan font-weight="700" fill="#0d8478">Carl (holder)</tspan>, <tspan font-weight="700" fill="#0f172a">Bob (reader)</tspan> — none signs for another.</text>
+</svg>

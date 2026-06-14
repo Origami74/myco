@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="720" viewBox="0 0 1000 720" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="aSlate" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#475569"/></marker>
+    <marker id="aTeal" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#0d9488"/></marker>
+    <marker id="aGreen" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#16a34a"/></marker>
+    <g id="qr">
+      <rect width="70" height="70" rx="4" fill="#ffffff" stroke="#cbd5e1"/>
+      <rect x="4" y="4" width="22" height="22" fill="#0f172a"/><rect x="10" y="10" width="10" height="10" fill="#fff"/>
+      <rect x="44" y="4" width="22" height="22" fill="#0f172a"/><rect x="50" y="10" width="10" height="10" fill="#fff"/>
+      <rect x="4" y="44" width="22" height="22" fill="#0f172a"/><rect x="10" y="50" width="10" height="10" fill="#fff"/>
+      <rect x="44" y="44" width="6" height="6" fill="#0f172a"/><rect x="58" y="44" width="6" height="6" fill="#0f172a"/>
+      <rect x="52" y="52" width="6" height="6" fill="#0f172a"/><rect x="44" y="60" width="6" height="6" fill="#0f172a"/>
+      <rect x="60" y="60" width="6" height="6" fill="#0f172a"/><rect x="32" y="32" width="6" height="6" fill="#0f172a"/>
+      <rect x="32" y="8" width="6" height="6" fill="#0f172a"/><rect x="8" y="32" width="6" height="6" fill="#0f172a"/>
+      <rect x="38" y="16" width="6" height="6" fill="#0f172a"/><rect x="16" y="38" width="6" height="6" fill="#0f172a"/>
+    </g>
+  </defs>
+
+  <rect width="1000" height="720" fill="#ffffff"/>
+  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">Pairing &amp; transitive peer discovery</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">A QR carries only an npub. Mutual scan also authorizes polling the other side's collected peer list.</text>
+
+  <!-- ===================== TOP PANEL: mutual QR ===================== -->
+  <rect x="40" y="84" width="920" height="262" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="62" y="112" font-size="16" font-weight="700" fill="#0f172a">① Mutual QR pairing</text>
+
+  <!-- Alice phone -->
+  <rect x="120" y="128" width="150" height="196" rx="18" fill="#1e293b"/>
+  <rect x="132" y="146" width="126" height="160" rx="6" fill="#f1f5f9"/>
+  <text x="195" y="166" font-size="11" font-weight="700" fill="#334155" text-anchor="middle">ALICE · my QR</text>
+  <use href="#qr" x="160" y="178"/>
+  <text x="195" y="278" font-size="10" fill="#64748b" text-anchor="middle">npub1alice…</text>
+
+  <!-- Ben phone -->
+  <rect x="730" y="128" width="150" height="196" rx="18" fill="#1e293b"/>
+  <rect x="742" y="146" width="126" height="160" rx="6" fill="#f1f5f9"/>
+  <text x="805" y="166" font-size="11" font-weight="700" fill="#334155" text-anchor="middle">BEN · my QR</text>
+  <use href="#qr" x="770" y="178"/>
+  <text x="805" y="278" font-size="10" fill="#64748b" text-anchor="middle">npub1ben…</text>
+
+  <!-- crossing scan arrows -->
+  <path d="M270,196 C430,196 560,196 728,210" fill="none" stroke="#475569" stroke-width="2.2" marker-end="url(#aSlate)"/>
+  <text x="500" y="190" font-size="12" fill="#334155" text-anchor="middle">Alice scans Ben's QR  →  stores npub1ben</text>
+  <path d="M730,256 C560,266 430,266 272,256" fill="none" stroke="#475569" stroke-width="2.2" marker-end="url(#aSlate)"/>
+  <text x="500" y="284" font-size="12" fill="#334155" text-anchor="middle">Ben scans Alice's QR  →  stores npub1alice</text>
+
+  <text x="500" y="318" font-size="12.5" font-weight="600" fill="#0d9488" text-anchor="middle">npub = FIPS address  ⇒  reach that peer's relay (:4869) + Blossom (:24242) over the mesh</text>
+
+  <!-- ===================== BOTTOM PANEL: transitive reach ===================== -->
+  <rect x="40" y="362" width="920" height="332" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="62" y="390" font-size="16" font-weight="700" fill="#0f172a">② Transitive reach — after mutual pairing, Alice fetches from Ben <tspan font-weight="400" fill="#475569">and</tspan> Ben's collected peers</text>
+
+  <!-- edges first (under nodes) -->
+  <!-- Alice - Ben (paired, direct) -->
+  <path d="M250,520 L420,520" fill="none" stroke="#0d9488" stroke-width="3" marker-end="url(#aTeal)"/>
+  <text x="335" y="508" font-size="11.5" font-weight="600" fill="#0d8478" text-anchor="middle">paired · BLE / direct</text>
+  <!-- Ben - Carl, Ben - Dana (Ben's collected peers) -->
+  <path d="M580,500 L760,452" fill="none" stroke="#475569" stroke-width="2.2" marker-end="url(#aSlate)"/>
+  <path d="M580,545 L760,612" fill="none" stroke="#475569" stroke-width="2.2" marker-end="url(#aSlate)"/>
+  <text x="690" y="470" font-size="11" fill="#475569" text-anchor="middle">Ben's collected peers</text>
+  <!-- Alice transitive reach to Carl & Dana (dashed, multi-hop) -->
+  <path d="M170,490 C300,395 620,388 800,430" fill="none" stroke="#16a34a" stroke-width="2.4" stroke-dasharray="7 5" marker-end="url(#aGreen)"/>
+  <path d="M165,552 C260,690 640,700 800,640" fill="none" stroke="#16a34a" stroke-width="2.4" stroke-dasharray="7 5" marker-end="url(#aGreen)"/>
+  <text x="470" y="408" font-size="11.5" font-weight="600" fill="#16a34a" text-anchor="middle">now reachable: poll Ben's peer list → fetch from Carl &amp; Dana (multi-hop over FIPS)</text>
+
+  <!-- node helper: rect 120x58 -->
+  <!-- Alice -->
+  <rect x="80" y="491" width="130" height="58" rx="10" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+  <circle cx="98" cy="510" r="5" fill="#0d9488"/>
+  <text x="116" y="514" font-size="13" font-weight="700" fill="#0f172a">Alice</text>
+  <text x="92" y="536" font-size="10.5" fill="#64748b">relay + blossom</text>
+  <!-- Ben -->
+  <rect x="420" y="491" width="130" height="58" rx="10" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+  <circle cx="438" cy="510" r="5" fill="#0d9488"/>
+  <text x="456" y="514" font-size="13" font-weight="700" fill="#0f172a">Ben</text>
+  <text x="432" y="536" font-size="10.5" fill="#64748b">relay + blossom</text>
+  <!-- Carl -->
+  <rect x="760" y="424" width="130" height="58" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="2"/>
+  <circle cx="778" cy="443" r="5" fill="#94a3b8"/>
+  <text x="796" y="447" font-size="13" font-weight="700" fill="#0f172a">Carl</text>
+  <text x="772" y="469" font-size="10.5" fill="#64748b">relay + blossom</text>
+  <!-- Dana -->
+  <rect x="760" y="584" width="130" height="58" rx="10" fill="#ffffff" stroke="#94a3b8" stroke-width="2"/>
+  <circle cx="778" cy="603" r="5" fill="#94a3b8"/>
+  <text x="796" y="607" font-size="13" font-weight="700" fill="#0f172a">Dana</text>
+  <text x="772" y="629" font-size="10.5" fill="#64748b">relay + blossom</text>
+
+  <!-- authorization callout -->
+  <rect x="300" y="568" width="300" height="46" rx="8" fill="#ecfdf5" stroke="#16a34a"/>
+  <text x="450" y="588" font-size="11.5" font-weight="600" fill="#15803d" text-anchor="middle">Mutual scan = authorization:</text>
+  <text x="450" y="604" font-size="11.5" fill="#166534" text-anchor="middle">Ben lets Alice poll his peer list</text>
+</svg>

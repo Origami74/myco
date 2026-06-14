@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="600" viewBox="0 0 1000 600" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="bSlate" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#475569"/></marker>
+    <marker id="bGreen" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#16a34a"/></marker>
+    <marker id="bAmber" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#d97706"/></marker>
+  </defs>
+
+  <rect width="1000" height="600" fill="#ffffff"/>
+  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">nsite-as-app — browse request lifecycle</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">The WebView loads &lt;site&gt;.nsite (→ 127.0.0.1, the local gateway). Cross-device fetch is native, over FIPS — never .fips in the browser.</text>
+
+  <!-- Row 1 -->
+  <!-- Library -->
+  <rect x="44" y="110" width="150" height="74" rx="10" fill="#eef2ff" stroke="#475569"/>
+  <text x="119" y="143" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">Library</text>
+  <text x="119" y="162" font-size="10.5" fill="#64748b" text-anchor="middle">tap a site / app</text>
+
+  <!-- WebView -->
+  <rect x="244" y="110" width="150" height="74" rx="10" fill="#eef2ff" stroke="#475569"/>
+  <text x="319" y="138" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">WebView</text>
+  <text x="319" y="156" font-size="10.5" fill="#64748b" text-anchor="middle">no url bar · reload</text>
+  <text x="319" y="172" font-size="10.5" fill="#64748b" text-anchor="middle">loads &lt;site&gt;.nsite</text>
+
+  <!-- Gateway -->
+  <rect x="444" y="110" width="150" height="74" rx="10" fill="#fff7ed" stroke="#d97706"/>
+  <text x="519" y="143" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">Local gateway</text>
+  <text x="519" y="162" font-size="10.5" fill="#64748b" text-anchor="middle">resolve site host</text>
+
+  <!-- Cache decision diamond -->
+  <polygon points="700,110 772,147 700,184 628,147" fill="#fffbeb" stroke="#d97706"/>
+  <text x="700" y="143" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">cached?</text>
+  <text x="700" y="160" font-size="10" fill="#92400e" text-anchor="middle">local copy fresh?</text>
+
+  <!-- Serve -->
+  <rect x="820" y="110" width="138" height="74" rx="10" fill="#ecfdf5" stroke="#16a34a"/>
+  <text x="889" y="138" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">Serve</text>
+  <text x="889" y="156" font-size="10.5" fill="#64748b" text-anchor="middle">from filesystem</text>
+  <text x="889" y="172" font-size="10.5" font-weight="600" fill="#15803d" text-anchor="middle">cache hit · &lt;1ms</text>
+
+  <!-- Row1 arrows -->
+  <line x1="194" y1="147" x2="240" y2="147" stroke="#475569" stroke-width="2" marker-end="url(#bSlate)"/>
+  <line x1="394" y1="147" x2="440" y2="147" stroke="#475569" stroke-width="2" marker-end="url(#bSlate)"/>
+  <line x1="594" y1="147" x2="624" y2="147" stroke="#475569" stroke-width="2" marker-end="url(#bSlate)"/>
+  <line x1="772" y1="147" x2="816" y2="147" stroke="#16a34a" stroke-width="2.4" marker-end="url(#bGreen)"/>
+  <text x="797" y="138" font-size="10.5" font-weight="700" fill="#15803d" text-anchor="middle">hit</text>
+
+  <!-- miss down -->
+  <path d="M700,184 L700,250" stroke="#d97706" stroke-width="2.4" marker-end="url(#bAmber)"/>
+  <text x="716" y="222" font-size="11" font-weight="700" fill="#b45309">miss / stale</text>
+
+  <!-- Row 2: fetch-from-peer pipeline -->
+  <rect x="40" y="258" width="920" height="150" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="60" y="284" font-size="13" font-weight="700" fill="#0f172a">Fetch from a reachable peer (over FIPS / BLE) — sync once, then it's local forever</text>
+
+  <!-- a: manifest -->
+  <rect x="250" y="300" width="180" height="78" rx="10" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="340" y="328" font-size="12.5" font-weight="700" fill="#0f172a" text-anchor="middle">① Manifest</text>
+  <text x="340" y="346" font-size="10.5" fill="#64748b" text-anchor="middle">query peer relay</text>
+  <text x="340" y="362" font-size="10.5" fill="#64748b" text-anchor="middle">kind 15128 / 35128</text>
+
+  <!-- b: blobs -->
+  <rect x="470" y="300" width="180" height="78" rx="10" fill="#fff7ed" stroke="#d97706"/>
+  <text x="560" y="328" font-size="12.5" font-weight="700" fill="#0f172a" text-anchor="middle">② Blobs</text>
+  <text x="560" y="346" font-size="10.5" fill="#64748b" text-anchor="middle">pull from peer Blossom</text>
+  <text x="560" y="362" font-size="10.5" fill="#64748b" text-anchor="middle">by sha256 hash</text>
+
+  <!-- c: verify + swap -->
+  <rect x="690" y="300" width="180" height="78" rx="10" fill="#f0fdfa" stroke="#0d9488"/>
+  <text x="780" y="328" font-size="12.5" font-weight="700" fill="#0f172a" text-anchor="middle">③ Verify + cache</text>
+  <text x="780" y="346" font-size="10.5" fill="#64748b" text-anchor="middle">check sha256 · all-or</text>
+  <text x="780" y="362" font-size="10.5" fill="#64748b" text-anchor="middle">nothing atomic swap</text>
+
+  <line x1="430" y1="339" x2="466" y2="339" stroke="#475569" stroke-width="2" marker-end="url(#bSlate)"/>
+  <line x1="650" y1="339" x2="686" y2="339" stroke="#475569" stroke-width="2" marker-end="url(#bSlate)"/>
+  <!-- entry from miss -->
+  <path d="M700,250 L700,272 L340,272 L340,298" fill="none" stroke="#d97706" stroke-width="2.2" marker-end="url(#bAmber)"/>
+  <!-- back up to Serve -->
+  <path d="M870,330 L905,330 L905,190" fill="none" stroke="#16a34a" stroke-width="2.4" marker-end="url(#bGreen)"/>
+  <text x="912" y="250" font-size="10.5" font-weight="700" fill="#15803d" transform="rotate(90,912,250)" text-anchor="middle">serve when ready</text>
+
+  <!-- loading page note -->
+  <rect x="244" y="196" width="320" height="34" rx="8" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="404" y="217" font-size="11" fill="#1d4ed8" text-anchor="middle">while syncing &gt;1s: loading page polls, then redirects</text>
+
+  <!-- bottom note -->
+  <text x="40" y="448" font-size="12.5" fill="#475569">Site host = <tspan font-weight="700" fill="#0f172a">npub1…</tspan> (root) or <tspan font-weight="700" fill="#0f172a">&lt;pubkeyB36&gt;&lt;dTag&gt;</tspan> (named).  Manifest entries map <tspan font-weight="700" fill="#0f172a">path → sha256</tspan>; each path's bytes are a Blossom blob.</text>
+  <text x="40" y="472" font-size="12.5" fill="#475569">Trust/sandbox of what an nsite's JS may call back into (relay / blossom / signing) is an <tspan font-weight="700" fill="#b45309">open design question</tspan> (see questions).</text>
+</svg>

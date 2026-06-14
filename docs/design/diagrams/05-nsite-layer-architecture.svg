@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1020" height="760" viewBox="0 0 1020 760" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="cSlate" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#475569"/></marker>
+    <marker id="cTeal" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#0d9488"/></marker>
+    <marker id="cAmber" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#d97706"/></marker>
+    <marker id="cPurple" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#7c3aed"/></marker>
+    <marker id="cGreen" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#16a34a"/></marker>
+  </defs>
+
+  <rect width="1020" height="760" fill="#ffffff"/>
+  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">The nsite layer — myco-core wraps the reusable nsite-deck crate</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">The content layer is a separate, transport-agnostic crate; myco-core adds FIPS, BLE and the FFI. One .so. DRAFT for review.</text>
+
+  <!-- crate legend -->
+  <g font-size="11.5">
+    <rect x="340" y="90" width="14" height="14" rx="3" fill="#7c3aed"/><text x="360" y="101" fill="#334155">nsite-deck crate (reusable): gateway · relay · Blossom · sync</text>
+    <rect x="340" y="112" width="14" height="14" rx="3" fill="#0d9488"/><text x="360" y="123" fill="#334155">myco-core (app): FIPS endpoint · BLE · FFI reducer</text>
+  </g>
+
+  <!-- ===================== WebView (outside, top) ===================== -->
+  <rect x="60" y="92" width="240" height="66" rx="12" fill="#eef2ff" stroke="#475569" stroke-width="2"/>
+  <text x="180" y="121" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">WebView (no URL bar)</text>
+  <text x="180" y="140" font-size="10.5" fill="#64748b" text-anchor="middle">Kotlin-owned UI surface</text>
+
+  <!-- WebView -> Gateway arrow -->
+  <path d="M180,158 L180,228" fill="none" stroke="#475569" stroke-width="2.4" marker-end="url(#cSlate)"/>
+  <text x="194" y="186" font-size="11" font-weight="600" fill="#334155">http://&lt;host&gt;.nsite</text>
+  <text x="194" y="202" font-size="11" font-weight="600" fill="#334155">→ 127.0.0.1</text>
+
+  <!-- ===================== fips-mobile container ===================== -->
+  <rect x="40" y="232" width="760" height="468" rx="14" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <text x="62" y="262" font-size="16" font-weight="700" fill="#0f172a">myco-core</text>
+  <text x="148" y="262" font-size="12.5" fill="#475569">(app crate · depends on nsite-deck · one .so · one Tokio runtime)</text>
+
+  <!-- Gateway (HTTP) -->
+  <rect x="64" y="282" width="210" height="96" rx="12" fill="#fff7ed" stroke="#d97706" stroke-width="2"/>
+  <text x="169" y="309" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Gateway (HTTP)</text>
+  <text x="169" y="330" font-size="10.5" fill="#475569" text-anchor="middle">host resolution</text>
+  <text x="169" y="346" font-size="10.5" fill="#475569" text-anchor="middle">cache hit / miss</text>
+  <text x="169" y="362" font-size="10.5" fill="#475569" text-anchor="middle">loading page while syncing</text>
+
+  <!-- Embedded relay -->
+  <rect x="320" y="282" width="210" height="96" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="425" y="309" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Embedded relay</text>
+  <text x="425" y="330" font-size="10.5" fill="#475569" text-anchor="middle">ws://localhost:4869</text>
+  <text x="425" y="346" font-size="10.5" fill="#475569" text-anchor="middle">stores + serves</text>
+  <text x="425" y="362" font-size="10.5" fill="#475569" text-anchor="middle">manifest events 15128 / 35128</text>
+
+  <!-- Embedded Blossom -->
+  <rect x="576" y="282" width="200" height="96" rx="12" fill="#fff7ed" stroke="#d97706" stroke-width="2"/>
+  <text x="676" y="309" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Embedded Blossom</text>
+  <text x="676" y="330" font-size="10.5" fill="#475569" text-anchor="middle">http://localhost:24242</text>
+  <text x="676" y="346" font-size="10.5" fill="#475569" text-anchor="middle">blobs by sha256</text>
+
+  <!-- Sync engine -->
+  <rect x="64" y="442" width="210" height="100" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <text x="169" y="469" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Sync engine</text>
+  <text x="169" y="490" font-size="10.5" fill="#475569" text-anchor="middle">pull manifest + blobs</text>
+  <text x="169" y="506" font-size="10.5" fill="#475569" text-anchor="middle">from a peer, verify sha256</text>
+  <text x="169" y="522" font-size="10.5" fill="#475569" text-anchor="middle">atomic-swap into cache</text>
+
+  <!-- FIPS endpoint -->
+  <rect x="320" y="442" width="456" height="100" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <text x="548" y="469" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">FIPS endpoint — the mesh</text>
+  <text x="548" y="490" font-size="10.5" fill="#475569" text-anchor="middle">FSP port-mux exposes localhost ports (4869 / 24242) to peers</text>
+  <text x="548" y="506" font-size="10.5" fill="#475569" text-anchor="middle">reachable as &lt;npub&gt;.fips · Noise XK end-to-end</text>
+  <text x="548" y="522" font-size="10.5" fill="#475569" text-anchor="middle">spanning-tree routing over UDP / TCP / BLE</text>
+
+  <!-- internal arrows -->
+  <!-- Gateway -> relay -->
+  <line x1="274" y1="318" x2="316" y2="318" stroke="#7c3aed" stroke-width="2.2" marker-end="url(#cPurple)"/>
+  <text x="295" y="308" font-size="10" font-weight="600" fill="#6d28d9" text-anchor="middle">REQ manifest</text>
+
+  <!-- Gateway -> Blossom (curved over the top of relay) -->
+  <path d="M274,300 C420,262 470,262 576,300" fill="none" stroke="#d97706" stroke-width="2.2" marker-end="url(#cAmber)"/>
+  <text x="425" y="266" font-size="10" font-weight="600" fill="#b45309" text-anchor="middle">GET blob by sha256</text>
+
+  <!-- Gateway -> Sync engine (on miss) -->
+  <path d="M169,378 L169,438" fill="none" stroke="#d97706" stroke-width="2.4" marker-end="url(#cAmber)"/>
+  <text x="183" y="414" font-size="10.5" font-weight="700" fill="#b45309">on miss</text>
+
+  <!-- Sync engine -> FIPS endpoint -->
+  <line x1="274" y1="492" x2="316" y2="492" stroke="#0d9488" stroke-width="2.4" marker-end="url(#cTeal)"/>
+  <text x="295" y="484" font-size="9.5" font-weight="600" fill="#0d8478" text-anchor="middle">PeerSource</text>
+
+  <!-- ===================== external: peer relay+Blossom (right) ===================== -->
+  <rect x="836" y="424" width="160" height="100" rx="12" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
+  <text x="916" y="451" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">Peer</text>
+  <text x="916" y="470" font-size="10.5" fill="#475569" text-anchor="middle">relay + Blossom</text>
+  <text x="916" y="490" font-size="10" fill="#15803d" text-anchor="middle">&lt;peer&gt;.fips:4869</text>
+  <text x="916" y="505" font-size="10" fill="#15803d" text-anchor="middle">&lt;peer&gt;.fips:24242</text>
+
+  <!-- FIPS endpoint -> peer (pull over FIPS) -->
+  <path d="M776,486 L832,478" fill="none" stroke="#0d9488" stroke-width="2.6" marker-end="url(#cTeal)"/>
+  <text x="806" y="465" font-size="10.5" font-weight="700" fill="#0d8478" text-anchor="middle">pull over FIPS</text>
+
+  <!-- ===================== external: connected peers (right, fanout) ===================== -->
+  <rect x="836" y="282" width="160" height="78" rx="12" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
+  <text x="916" y="312" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">Connected peers</text>
+  <text x="916" y="332" font-size="10.5" fill="#475569" text-anchor="middle">subscribed relays</text>
+
+  <!-- relay -> connected peers (fanout) -->
+  <path d="M530,316 C660,300 720,300 832,310" fill="none" stroke="#16a34a" stroke-width="2.4" marker-end="url(#cGreen)"/>
+  <text x="688" y="368" font-size="10.5" font-weight="700" fill="#15803d" text-anchor="middle">fanout: re-broadcast events</text>
+  <text x="688" y="383" font-size="10" fill="#166534" text-anchor="middle">(source-excluded · FanoutSink seam)</text>
+
+  <!-- pull-only note for blobs -->
+  <rect x="836" y="376" width="160" height="34" rx="8" fill="#fef2f2" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="916" y="392" font-size="9.5" fill="#b91c1c" text-anchor="middle">Blobs are pull-only —</text>
+  <text x="916" y="404" font-size="9.5" fill="#b91c1c" text-anchor="middle">never fanned out</text>
+
+  <!-- ===================== side note box (bottom) ===================== -->
+  <rect x="40" y="712" width="956" height="36" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="60" y="735" font-size="12" fill="#475569">Crate split: <tspan font-weight="700" fill="#0f172a">nsite-deck</tspan> (reusable, transport-agnostic) reaches peers only through the <tspan font-weight="700" fill="#0f172a">PeerSource</tspan> / <tspan font-weight="700" fill="#0f172a">FanoutSink</tspan> seams that <tspan font-weight="700" fill="#0f172a">myco-core</tspan> implements over FIPS.</text>
+</svg>

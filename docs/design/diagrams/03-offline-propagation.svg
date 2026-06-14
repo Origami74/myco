@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="672" viewBox="0 0 1000 672" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="pIndigo" markerWidth="12" markerHeight="12" refX="6.5" refY="6" orient="auto"><path d="M1,1 L11,6 L1,11 Z" fill="#4f46e5"/></marker>
+    <g id="site">
+      <rect width="48" height="40" rx="5" fill="#dcfce7" stroke="#16a34a"/>
+      <rect width="48" height="11" rx="5" fill="#16a34a"/>
+      <circle cx="9" cy="5.5" r="1.8" fill="#fff"/><circle cx="16" cy="5.5" r="1.8" fill="#fff"/><circle cx="23" cy="5.5" r="1.8" fill="#fff"/>
+      <rect x="7" y="18" width="34" height="3" rx="1.5" fill="#16a34a"/>
+      <rect x="7" y="26" width="26" height="3" rx="1.5" fill="#86efac"/>
+      <rect x="7" y="32" width="30" height="3" rx="1.5" fill="#86efac"/>
+    </g>
+  </defs>
+
+  <rect width="1000" height="672" fill="#ffffff"/>
+  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">Offline propagation — "Pillars of Propagation"</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">An nsite hops device-to-device over Bluetooth with no internet. Each hop keeps a verified copy and re-serves it.</text>
+
+  <!-- no internet badge -->
+  <g transform="translate(792,86)">
+    <ellipse cx="70" cy="22" rx="62" ry="20" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="70" y="27" font-size="12" fill="#94a3b8" text-anchor="middle">no internet</text>
+    <line x1="18" y1="40" x2="122" y2="4" stroke="#ef4444" stroke-width="2.5"/>
+  </g>
+
+  <!-- nodes -->
+  <!-- Alice -->
+  <rect x="70" y="150" width="180" height="210" rx="14" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+  <text x="160" y="178" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">ALICE</text>
+  <text x="160" y="197" font-size="11" fill="#64748b" text-anchor="middle">holder · t0</text>
+  <use href="#site" x="136" y="210"/>
+  <text x="160" y="282" font-size="11.5" fill="#334155" text-anchor="middle">holds a cached nsite</text>
+  <text x="160" y="299" font-size="11.5" fill="#334155" text-anchor="middle">(authored elsewhere)</text>
+  <text x="160" y="336" font-size="10.5" fill="#94a3b8" text-anchor="middle">later: offline / out of range</text>
+
+  <!-- Ben -->
+  <rect x="410" y="150" width="180" height="210" rx="14" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+  <text x="500" y="178" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">BEN</text>
+  <text x="500" y="197" font-size="11" fill="#64748b" text-anchor="middle">relay-of-relays · t1</text>
+  <use href="#site" x="476" y="210"/>
+  <text x="500" y="282" font-size="11.5" fill="#334155" text-anchor="middle">caches Alice's signed</text>
+  <text x="500" y="299" font-size="11.5" fill="#334155" text-anchor="middle">events + sha256 blobs</text>
+  <text x="500" y="336" font-size="10.5" font-weight="600" fill="#16a34a" text-anchor="middle">becomes a new source</text>
+
+  <!-- Carl -->
+  <rect x="750" y="150" width="180" height="210" rx="14" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+  <text x="840" y="178" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">CARL</text>
+  <text x="840" y="197" font-size="11" fill="#64748b" text-anchor="middle">receiver · t2</text>
+  <use href="#site" x="816" y="210"/>
+  <text x="840" y="282" font-size="11.5" fill="#334155" text-anchor="middle">gets Alice's site from</text>
+  <text x="840" y="299" font-size="11.5" fill="#334155" text-anchor="middle">Ben — Alice not present</text>
+  <text x="840" y="336" font-size="10.5" fill="#94a3b8" text-anchor="middle">verifies sig + hashes</text>
+
+  <!-- BLE hops -->
+  <path d="M250,232 L408,232" fill="none" stroke="#4f46e5" stroke-width="2.6" marker-end="url(#pIndigo)"/>
+  <text x="329" y="222" font-size="11" font-weight="700" fill="#4f46e5" text-anchor="middle">① BLE hop (t1)</text>
+  <text x="329" y="252" font-size="10.5" fill="#6366f1" text-anchor="middle">sync events + blobs</text>
+
+  <path d="M590,232 L748,232" fill="none" stroke="#4f46e5" stroke-width="2.6" marker-end="url(#pIndigo)"/>
+  <text x="669" y="222" font-size="11" font-weight="700" fill="#4f46e5" text-anchor="middle">② BLE hop (t2)</text>
+  <text x="669" y="252" font-size="10.5" fill="#6366f1" text-anchor="middle">Ben re-serves</text>
+
+  <!-- two-mechanism callouts -->
+  <rect x="40" y="402" width="440" height="118" rx="12" fill="#f0fdfa" stroke="#0d9488"/>
+  <text x="60" y="428" font-size="14" font-weight="700" fill="#0f766e">FIPS transport — live routing only</text>
+  <text x="60" y="452" font-size="12" fill="#334155">Moves a request hop-by-hop across the spanning</text>
+  <text x="60" y="470" font-size="12" fill="#334155">tree — but ONLY if an end-to-end path exists at</text>
+  <text x="60" y="488" font-size="12" fill="#334155">that moment. Reused from fips-core. Does not, by</text>
+  <text x="60" y="506" font-size="12" fill="#334155">itself, let data survive a partition.</text>
+
+  <rect x="520" y="402" width="440" height="118" rx="12" fill="#ecfdf5" stroke="#16a34a"/>
+  <text x="540" y="428" font-size="14" font-weight="700" fill="#15803d">nsite store-and-forward — NET-NEW</text>
+  <text x="540" y="452" font-size="12" fill="#334155">Each hop keeps the verified copy and becomes a</text>
+  <text x="540" y="470" font-size="12" fill="#334155">new source. This is the layer that survives offline</text>
+  <text x="540" y="488" font-size="12" fill="#334155">/ partition. Reference: bitchat StoreForwardManager</text>
+  <text x="540" y="506" font-size="12" fill="#334155">+ GCS sync, applied to Nostr events &amp; blobs.</text>
+
+  <!-- self-authenticating band -->
+  <rect x="40" y="536" width="920" height="104" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="60" y="564" font-size="14" font-weight="700" fill="#0f172a">Why any source is trustworthy</text>
+  <text x="60" y="590" font-size="12.5" fill="#334155">Nostr events are signed by the author's key; Blossom blobs are content-addressed (sha256). So Carl can verify Alice's</text>
+  <text x="60" y="610" font-size="12.5" fill="#334155">site is authentic even though it arrived via Ben — the data carries its own integrity, independent of the path it took.</text>
+  <text x="60" y="630" font-size="12.5" font-style="italic" fill="#64748b">"After receiving data from a far-away relay, that same connection is never again needed for the same information to propagate."</text>
+</svg>

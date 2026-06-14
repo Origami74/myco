@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1020" height="780" viewBox="0 0 1020 780" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="cGreen" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#16a34a"/></marker>
+    <marker id="cAmber" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#d97706"/></marker>
+    <marker id="cRose" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#e11d48"/></marker>
+  </defs>
+
+  <rect width="1020" height="780" fill="#ffffff"/>
+  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">What an nsite is — manifest event + content-addressed blobs</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">A site = one signed Nostr event mapping path → sha256, plus the referenced blobs in any Blossom store. DRAFT for review.</text>
+
+  <!-- ===================== IDENTITY CHIPS ===================== -->
+  <text x="40" y="98" font-size="13" font-weight="700" fill="#0f172a">Two URL / identity forms</text>
+
+  <!-- root site chip -->
+  <rect x="40" y="110" width="450" height="58" rx="12" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
+  <text x="60" y="134" font-size="13" font-weight="700" fill="#0f172a">root site</text>
+  <text x="60" y="156" font-size="11.5" fill="#475569"><tspan font-weight="700" fill="#15803d">npub1….nsite</tspan>  →  kind <tspan font-weight="700" fill="#0f172a">15128</tspan>  ·  one per author pubkey</text>
+
+  <!-- named site chip -->
+  <rect x="510" y="110" width="470" height="58" rx="12" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
+  <text x="530" y="134" font-size="13" font-weight="700" fill="#0f172a">named site</text>
+  <text x="530" y="156" font-size="11.5" fill="#475569"><tspan font-weight="700" fill="#15803d">&lt;pubkeyB36&gt;&lt;dTag&gt;.nsite</tspan>  →  kind <tspan font-weight="700" fill="#0f172a">35128</tspan>  ·  one per pubkey + d-tag</text>
+
+  <!-- ===================== AUTHOR (EXTERNAL) ===================== -->
+  <rect x="40" y="196" width="270" height="58" rx="12" fill="#fff1f2" stroke="#e11d48" stroke-width="2"/>
+  <text x="58" y="220" font-size="13" font-weight="700" fill="#0f172a">AUTHOR <tspan font-size="10.5" font-weight="700" fill="#e11d48">· EXTERNAL</tspan></text>
+  <text x="58" y="240" font-size="11" fill="#9f1239"><tspan font-weight="700">npub_author</tspan> — not this device, only the signature</text>
+
+  <!-- author signs the manifest -->
+  <path d="M175,254 L175,288" fill="none" stroke="#e11d48" stroke-width="2.2" marker-end="url(#cRose)"/>
+  <text x="186" y="276" font-size="11" font-weight="700" fill="#9f1239">signs</text>
+
+  <!-- ===================== LEFT: MANIFEST EVENT CARD ===================== -->
+  <rect x="40" y="292" width="430" height="358" rx="14" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
+  <text x="62" y="322" font-size="15" font-weight="700" fill="#0f172a">Manifest event</text>
+  <text x="62" y="343" font-size="11.5" fill="#475569">kind <tspan font-weight="700" fill="#0f172a">15128 / 35128</tspan> — signed by <tspan font-weight="700" fill="#9f1239">AUTHOR (npub_author)</tspan></text>
+
+  <!-- path → hash tag rows (monospace) -->
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="11.5">
+    <!-- row 1 -->
+    <rect x="62" y="358" width="386" height="40" rx="8" fill="#ffffff" stroke="#86efac"/>
+    <text x="74" y="375" fill="#334155">["path","/index.html",</text>
+    <text x="74" y="391" fill="#15803d" font-weight="700">  "sha256:a1b2…"]</text>
+    <!-- row 2 -->
+    <rect x="62" y="406" width="386" height="40" rx="8" fill="#ffffff" stroke="#86efac"/>
+    <text x="74" y="423" fill="#334155">["path","/style.css",</text>
+    <text x="74" y="439" fill="#15803d" font-weight="700">  "sha256:c3d4…"]</text>
+    <!-- row 3 -->
+    <rect x="62" y="454" width="386" height="40" rx="8" fill="#ffffff" stroke="#86efac"/>
+    <text x="74" y="471" fill="#334155">["path","/app.js",</text>
+    <text x="74" y="487" fill="#15803d" font-weight="700">  "sha256:e5f6…"]</text>
+    <!-- optional title row -->
+    <rect x="62" y="502" width="386" height="28" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+    <text x="74" y="521" fill="#64748b">["title","My nsite"]</text>
+  </g>
+
+  <text x="62" y="556" font-size="11" fill="#475569" font-weight="600">tags map each path → a blob hash;</text>
+  <text x="62" y="574" font-size="11" fill="#475569">the event is author-signed</text>
+  <text x="62" y="592" font-size="11" fill="#475569">(<tspan font-weight="700" fill="#15803d">self-authenticating</tspan>).</text>
+  <text x="62" y="620" font-size="10.5" fill="#64748b">REQ this event by author pubkey from any relay;</text>
+  <text x="62" y="636" font-size="10.5" fill="#64748b">verify the signature, then trust the path → hash map.</text>
+
+  <!-- ===================== RIGHT: BLOSSOM STORE ===================== -->
+  <rect x="600" y="292" width="380" height="358" rx="14" fill="#fff7ed" stroke="#d97706" stroke-width="2"/>
+  <text x="622" y="322" font-size="15" font-weight="700" fill="#0f172a">Blossom store</text>
+  <text x="622" y="343" font-size="11.5" fill="#475569"><tspan font-weight="700" fill="#b45309">content-addressed</tspan> — any source works</text>
+
+  <!-- blob chips, y-centres aligned to manifest rows -->
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+    <!-- blob a1b2 (aligns row 1 centre y=378) -->
+    <rect x="622" y="358" width="336" height="40" rx="8" fill="#ffffff" stroke="#fdba74"/>
+    <text x="638" y="375" font-size="12" font-weight="700" fill="#b45309">a1b2…</text>
+    <text x="638" y="391" font-size="11" fill="#475569">→ /index.html bytes</text>
+    <!-- blob c3d4 (aligns row 2 centre y=426) -->
+    <rect x="622" y="406" width="336" height="40" rx="8" fill="#ffffff" stroke="#fdba74"/>
+    <text x="638" y="423" font-size="12" font-weight="700" fill="#b45309">c3d4…</text>
+    <text x="638" y="439" font-size="11" fill="#475569">→ /style.css bytes</text>
+    <!-- blob e5f6 (aligns row 3 centre y=474) -->
+    <rect x="622" y="454" width="336" height="40" rx="8" fill="#ffffff" stroke="#fdba74"/>
+    <text x="638" y="471" font-size="12" font-weight="700" fill="#b45309">e5f6…</text>
+    <text x="638" y="487" font-size="11" fill="#475569">→ /app.js bytes</text>
+  </g>
+
+  <text x="622" y="528" font-size="11" fill="#475569" font-weight="600">blob name = sha256(bytes);</text>
+  <text x="622" y="546" font-size="11" fill="#475569">the <tspan font-weight="700" fill="#b45309">hash IS the identity</tspan>.</text>
+  <text x="622" y="574" font-size="10.5" fill="#64748b">Same bytes ⇒ same hash on every store,</text>
+  <text x="622" y="590" font-size="10.5" fill="#64748b">so a blob is interchangeable across peers.</text>
+  <text x="622" y="618" font-size="10.5" fill="#64748b">Re-hash on receipt; a mismatch ⇒ reject</text>
+  <text x="622" y="634" font-size="10.5" fill="#64748b">(tamper-evident, no trust in the source).</text>
+
+  <!-- ===================== ARROWS: path row → matching blob ===================== -->
+  <path d="M450,378 L596,378" fill="none" stroke="#16a34a" stroke-width="2.2" marker-end="url(#cGreen)"/>
+  <path d="M450,426 L596,426" fill="none" stroke="#16a34a" stroke-width="2.2" marker-end="url(#cGreen)"/>
+  <path d="M450,474 L596,474" fill="none" stroke="#16a34a" stroke-width="2.2" marker-end="url(#cGreen)"/>
+  <text x="523" y="370" font-size="9.5" fill="#15803d" text-anchor="middle">a1b2…</text>
+  <text x="523" y="418" font-size="9.5" fill="#15803d" text-anchor="middle">c3d4…</text>
+  <text x="523" y="466" font-size="9.5" fill="#15803d" text-anchor="middle">e5f6…</text>
+  <text x="523" y="498" font-size="10" font-weight="700" fill="#16a34a" text-anchor="middle">match by hash</text>
+
+  <!-- ===================== BOTTOM NOTE BAND ===================== -->
+  <rect x="40" y="676" width="940" height="78" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="60" y="704" font-size="12.5" fill="#475569"><tspan font-weight="700" fill="#0f172a">To serve a site:</tspan> fetch the manifest (REQ by author pubkey), then pull each referenced blob by its sha256 and verify before caching.</text>
+  <text x="60" y="728" font-size="12.5" fill="#475569">Any source works — <tspan font-weight="700" fill="#15803d">signatures</tspan> (on the event) + <tspan font-weight="700" fill="#b45309">hashes</tspan> (on the blobs) make the data <tspan font-weight="700" fill="#0f172a">self-authenticating</tspan>.</text>
+</svg>

@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1020" height="720" viewBox="0 0 1020 720" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="mGreen" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#16a34a"/></marker>
+    <marker id="mPurple" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#7c3aed"/></marker>
+    <marker id="mRed" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#ef4444"/></marker>
+    <marker id="mSlate" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#475569"/></marker>
+  </defs>
+
+  <rect width="1020" height="720" fill="#ffffff"/>
+  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">Relay-mesh fanout — multiplex events to connected peers</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">The embedded relay re-broadcasts each accepted event to all OTHER connected peers — events only, source-excluded. DRAFT for review.</text>
+
+  <!-- ============ Peer A (left) ============ -->
+  <rect x="44" y="250" width="150" height="74" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <circle cx="64" cy="272" r="5" fill="#0d9488"/>
+  <text x="119" y="284" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Peer A</text>
+  <text x="119" y="304" font-size="10.5" fill="#475569" text-anchor="middle">source / origin</text>
+
+  <!-- ① inbound EVENT from A into dedup gate -->
+  <path d="M194,278 L300,278" fill="none" stroke="#16a34a" stroke-width="2.6" marker-end="url(#mGreen)"/>
+  <text x="247" y="266" font-size="11" font-weight="700" fill="#15803d" text-anchor="middle">&#9312; receives EVENT</text>
+  <text x="247" y="296" font-size="10.5" fill="#15803d" text-anchor="middle">(manifest)</text>
+
+  <!-- ============ dedup gate (slate) ============ -->
+  <rect x="306" y="222" width="172" height="130" rx="12" fill="#eef2ff" stroke="#475569" stroke-width="2"/>
+  <text x="392" y="248" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">dedup gate</text>
+  <text x="392" y="270" font-size="10.5" fill="#475569" text-anchor="middle">seen-set (16-byte</text>
+  <text x="392" y="286" font-size="10.5" fill="#475569" text-anchor="middle">SHA-256 id) + TTL 5</text>
+  <text x="392" y="310" font-size="11" font-weight="700" fill="#0f172a" text-anchor="middle">already seen?</text>
+  <text x="392" y="332" font-size="11" font-weight="700" fill="#ef4444" text-anchor="middle">&#10007; DROP</text>
+
+  <!-- fresh event passes gate into relay -->
+  <path d="M478,300 L548,300" fill="none" stroke="#16a34a" stroke-width="2.6" marker-end="url(#mGreen)"/>
+  <text x="513" y="289" font-size="10.5" font-weight="700" fill="#15803d" text-anchor="middle">fresh</text>
+
+  <!-- duplicate dropped: red looping/stopped arrow -->
+  <path d="M392,352 C392,392 348,392 348,358" fill="none" stroke="#ef4444" stroke-width="2.4" stroke-dasharray="6 4" marker-end="url(#mRed)"/>
+  <text x="392" y="408" font-size="10.5" font-weight="700" fill="#ef4444" text-anchor="middle">duplicate id &#8594; dropped</text>
+
+  <!-- ============ YOUR relay (center, purple) ============ -->
+  <rect x="552" y="232" width="190" height="120" rx="14" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2.6"/>
+  <text x="647" y="270" font-size="16" font-weight="700" fill="#0f172a" text-anchor="middle">YOUR relay</text>
+  <text x="647" y="294" font-size="14" font-weight="700" fill="#7c3aed" text-anchor="middle">(:4869)</text>
+  <text x="647" y="318" font-size="10.5" fill="#475569" text-anchor="middle">accept &#8594; store once,</text>
+  <text x="647" y="334" font-size="10.5" fill="#475569" text-anchor="middle">fan out once</text>
+
+  <!-- ============ Peers B / C / D (right) ============ -->
+  <!-- Peer B -->
+  <rect x="836" y="150" width="148" height="66" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <circle cx="856" cy="172" r="5" fill="#0d9488"/>
+  <text x="910" y="178" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Peer B</text>
+  <text x="910" y="198" font-size="10.5" fill="#475569" text-anchor="middle">connected peer</text>
+
+  <!-- Peer C -->
+  <rect x="836" y="259" width="148" height="66" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <circle cx="856" cy="281" r="5" fill="#0d9488"/>
+  <text x="910" y="287" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Peer C</text>
+  <text x="910" y="307" font-size="10.5" fill="#475569" text-anchor="middle">connected peer</text>
+
+  <!-- Peer D -->
+  <rect x="836" y="368" width="148" height="66" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <circle cx="856" cy="390" r="5" fill="#0d9488"/>
+  <text x="910" y="396" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Peer D</text>
+  <text x="910" y="416" font-size="10.5" fill="#475569" text-anchor="middle">connected peer</text>
+
+  <!-- ② fan out arrows to B / C / D -->
+  <path d="M742,278 C786,250 800,200 832,185" fill="none" stroke="#16a34a" stroke-width="2.6" marker-end="url(#mGreen)"/>
+  <path d="M742,295 L832,292" fill="none" stroke="#16a34a" stroke-width="2.6" marker-end="url(#mGreen)"/>
+  <path d="M742,312 C786,340 800,386 832,398" fill="none" stroke="#16a34a" stroke-width="2.6" marker-end="url(#mGreen)"/>
+  <text x="790" y="246" font-size="11" font-weight="700" fill="#15803d" text-anchor="middle">&#9313; fan out EVENT</text>
+  <text x="790" y="262" font-size="10.5" fill="#15803d" text-anchor="middle">(TTL&#8722;1)</text>
+
+  <!-- source-excluded: dashed red arrow back toward A, crossed out -->
+  <path d="M552,332 C440,420 280,420 196,310" fill="none" stroke="#ef4444" stroke-width="2.4" stroke-dasharray="7 5" marker-end="url(#mRed)"/>
+  <!-- ✗ cross on the excluded path -->
+  <g stroke="#ef4444" stroke-width="3">
+    <line x1="258" y1="412" x2="282" y2="436"/>
+    <line x1="282" y1="412" x2="258" y2="436"/>
+  </g>
+  <text x="380" y="462" font-size="11" font-weight="700" fill="#ef4444" text-anchor="middle">source-excluded — never echoed back to A</text>
+
+  <!-- ============ BOTTOM band: two callouts ============ -->
+  <!-- green callout: events fan out -->
+  <rect x="40" y="512" width="460" height="118" rx="12" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
+  <text x="62" y="538" font-size="14" font-weight="700" fill="#15803d">Events fan out</text>
+  <text x="62" y="562" font-size="11.5" fill="#166534">Manifests (small, self-authenticating) ripple one relay-</text>
+  <text x="62" y="580" font-size="11.5" fill="#166534">hop at a time.</text>
+  <text x="62" y="604" font-size="11.5" fill="#166534">Push-based: a neighbour volunteers a site;</text>
+  <text x="62" y="622" font-size="11.5" fill="#166534">you needn't ask.</text>
+
+  <!-- amber callout: blobs do NOT fan out -->
+  <rect x="520" y="512" width="460" height="118" rx="12" fill="#fff7ed" stroke="#d97706" stroke-width="2"/>
+  <text x="542" y="538" font-size="14" font-weight="700" fill="#b45309">Blobs do NOT fan out</text>
+  <text x="542" y="562" font-size="11.5" fill="#92400e">Blossom content stays PULL-ONLY (on demand),</text>
+  <text x="542" y="580" font-size="11.5" fill="#92400e">fetched only when a site is actually opened.</text>
+  <text x="542" y="608" font-size="11.5" font-weight="700" fill="#b45309">Push every blob and BLE would melt.</text>
+
+  <!-- small note -->
+  <text x="40" y="672" font-size="12" fill="#475569">Same intake feeds the local store + the fanout, so an event is <tspan font-weight="700" fill="#0f172a">stored once</tspan> and <tspan font-weight="700" fill="#0f172a">re-broadcast once</tspan>.</text>
+</svg>
