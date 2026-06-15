@@ -72,7 +72,7 @@
   <text x="540" y="452" font-size="12" fill="#334155">Each hop keeps the verified copy and becomes a</text>
   <text x="540" y="470" font-size="12" fill="#334155">new source. This is the layer that survives offline</text>
   <text x="540" y="488" font-size="12" fill="#334155">/ partition. Reference: bitchat StoreForwardManager</text>
-  <text x="540" y="506" font-size="12" fill="#334155">+ GCS sync, applied to Nostr events &amp; blobs.</text>
+  <text x="540" y="506" font-size="12" fill="#334155">+ negentropy (NIP-77) reconcile — manifest events only.</text>
 
   <!-- self-authenticating band -->
   <rect x="40" y="536" width="920" height="104" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>

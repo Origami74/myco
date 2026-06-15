@@ -296,8 +296,10 @@ above the transport, in the nsite/relay store-and-re-serve layer:
 - **Store-and-forward cache** (bitchat's `StoreForwardManager`, ~12 h
   retention) → the local relay/blossom retaining peers' signed events and
   sha256 blobs to re-serve later, offline.
-- **GCS set-reconciliation sync** (16-byte packet IDs) → an efficient
-  "what blobs/events do you have that I don't" exchange.
+- **Set-reconciliation sync** (bitchat's GCS `REQUEST_SYNC`, 16-byte packet IDs)
+  → an efficient "what events do you have that I don't" exchange; Myco implements
+  this as **negentropy / NIP-77** (events only — blobs stay pull-by-sha256). See
+  [propagation.md §5](propagation.md).
 - **TTL-bounded flood with probabilistic relay** → the manifest-flood
   propagation TTL (proposed default 5 hops; author-signed manifests flood via
   relay-mesh fanout, blobs stay pull-only).

@@ -127,6 +127,13 @@ These run against the **local** relay first (fast path) and, on a miss, against
 the source peer's relay over `.fips` (`ws://<npub>.fips:4869`). See
 [../design/nsite-layer.md §5](../design/nsite-layer.md).
 
+> **Set reconciliation.** Between two connected relays, Myco reconciles the
+> manifest **event** set with **negentropy ([NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md))**
+> run over these same filters (`NEG-OPEN` → `NEG-MSG` rounds → the missing ids),
+> then pulls only the diff. Blobs are never reconciled — they stay content-addressed
+> pull-by-sha256. See [../design/propagation.md §5](../design/propagation.md) and
+> [../design/nsite-layer.md §2.4](../design/nsite-layer.md).
+
 ### Kind 34128 — legacy, NOT used
 
 The original nsite design used kind `34128`: one event *per file*, with the path
@@ -168,8 +175,9 @@ author-signed manifests above:
   it" event exists; possession of the manifest is the advertisement.
 
 Loop-suppression and dedup during the flood are done over the **manifest events
-themselves** — 16-byte SHA-256 IDs computed over each manifest event, exchanged
-as a GCS (Golomb-coded set) so a peer offers only manifests you lack. TTL=5,
+themselves** — 16-byte SHA-256 IDs in a per-node seen-set — while steady-state
+catch-up between connected relays uses **negentropy (NIP-77)** reconciliation so a
+peer offers only manifests you lack (events only; blobs stay pull-by-sha256). TTL=5,
 that dedup story, transitive peer discovery, and the privacy question of *which
 manifests you choose to replicate* are all detailed in
 [../design/propagation.md](../design/propagation.md).

@@ -78,9 +78,10 @@ mirroring how `fips-core` abstracts its radio behind `BleIo`:
   - **`BlobStore`** — `get` / `has` / `put` blobs by sha256, backed by
     `myco-blossom` (§2.2).
 - **transport seams** (provided by `myco-core` over FIPS):
-  - **`PeerSource`** — *pull*: `fetch_manifest(author, dTag)` and
-    `fetch_blob(sha256)` from some reachable source. The sync engine (§2.4) calls
-    this; it does not care *how* the bytes arrive.
+  - **`PeerSource`** — *pull / reconcile*: `fetch_manifest(author, dTag)`,
+    `fetch_blob(sha256)`, and `reconcile(filter)` (negentropy / NIP-77 set
+    reconciliation — see §2.4) against some reachable source. The sync engine
+    (§2.4) calls these; it does not care *how* the bytes arrive.
   - **`FanoutSink`** — *push*: `broadcast(event)` to connected peers. The relay
     (§2.1) calls this when it accepts an event; it does not know who the peers are
     or what carries the bytes.
@@ -129,7 +130,10 @@ The Go reference uses [Khatru](https://github.com/fiatjaf/khatru) over a BoltDB
 event store and advertises NIPs 1, 9, 11, 12, 15, 16, 20, 33
 ([embedded.go](../../reference/site-deck/internal/relay/embedded.go)). The Rust
 port needs the same minimal surface: accept `EVENT`, answer `REQ` with a stored
-event set, honour `CLOSE`, and serve a NIP-11 document.
+event set, honour `CLOSE`, and serve a NIP-11 document — plus, net-new vs. the Go
+reference, speak **negentropy ([NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md))**
+(`NEG-OPEN` / `NEG-MSG` / `NEG-CLOSE`) for set reconciliation (§2.4) and advertise
+NIP-77 in its NIP-11.
 
 **Embedded from day one — relay *backend* is a pluggable seam.** The relay and
 Blossom are both **bundled and in-process from day one**; they are simple enough
@@ -230,6 +234,20 @@ changes: **the source** is a reachable FIPS peer instead of public
 relays/Blossom (§5), and v0 **does not** build version directories or do an
 atomic swap — it serves direct from the content-addressed store, deferring the
 reference's htdocs/version-dir machinery to the roadmap (§4.4).
+
+**Set reconciliation (negentropy / NIP-77).** Rather than blindly re-pulling a
+peer's full manifest set, the sync engine reconciles **event** sets with a
+connected peer using **negentropy ([NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md))**
+— range-based reconciliation that settles "which manifests do you have that I
+don't" in ~log bandwidth, which matters on a constrained BLE link. It runs over the
+peer's relay (`NEG-OPEN` on a manifest filter → `NEG-MSG` rounds → the missing
+ids), then the diff is fetched as usual; **blobs stay content-addressed
+pull-by-sha256 and are not part of reconciliation**. The `negentropy` Rust crate is
+already in the rust-nostr dependency graph (used by `nostr-relay-pool`), so this is
+a proven dependency, not new R&D. This is the **pull / catch-up** counterpart to the
+push-based relay-mesh fanout (§2.1): fanout gossips newly-accepted manifests live;
+negentropy reconciles whatever was missed while disconnected or on first contact. A
+basic reconcile lands in **roadmap P2** (alongside fanout); scale hardening is **P4**.
 
 ---
 

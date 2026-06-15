@@ -200,25 +200,33 @@ small meshes always relay to preserve connectivity
 A node never relays its own packets and never relays a packet already addressed
 to it.
 
-### Set-reconciliation sync (GCS), not blind reflooding
+### Set-reconciliation sync (negentropy / NIP-77), not blind reflooding
 
-For steady-state convergence between neighbours, Myco follows bitchat's
-GCS-filter sync (`REQUEST_SYNC`,
-[../../reference/bitchat-android/docs/sync.md](../../reference/bitchat-android/docs/sync.md)):
-each node periodically sends a neighbour a compact **Golomb-Coded Set** of the
-IDs it has already seen; the neighbour replies with only the items *missing* from
-that set. This is strictly local (not relayed), so it converges content between
-directly connected nodes without wide-area flooding.
+For steady-state convergence between neighbours, Myco uses **negentropy
+([NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md)) set
+reconciliation** — the Nostr-native, range-based protocol (`NEG-OPEN` / `NEG-MSG` /
+`NEG-CLOSE`): two connected relays exchange compact range fingerprints and converge
+on exactly "which **events** does each side hold that the other lacks" in ~log
+bandwidth, then each pulls only its missing manifests. It is strictly local
+(neighbour-to-neighbour, not relayed), so it converges content between directly
+connected nodes without wide-area flooding. We pick the Nostr-native NIP-77 over
+bitchat's `REQUEST_SYNC` **Golomb-Coded Set** digest (the conceptual reference,
+[../../reference/bitchat-android/docs/sync.md](../../reference/bitchat-android/docs/sync.md))
+because Myco's units are Nostr events and the `negentropy` Rust crate already ships
+in the rust-nostr stack — we are not bitchat-wire-compatible anyway. **Blobs are not
+reconciled**: they stay content-addressed pull-by-sha256.
 
-- **Packet/object IDs: 16-byte (128-bit) SHA-256 prefixes**, exactly as
+- **Dedup / seen-set IDs: 16-byte (128-bit) SHA-256 prefixes**, mirroring
   bitchat's `PacketIdUtil` (ID = first 16 bytes of SHA-256 over the canonical
-  bytes). Myco's units are Nostr events and Blossom blobs, so the natural
-  IDs are:
-  - manifests → first 16 bytes of SHA-256 over the canonical serialized event
-    (the Nostr event `id` is already a SHA-256 of the serialization; truncating
-    to 16 bytes gives the GCS element).
-  - blobs → the blob's sha256 (already content-addressed); use the 16-byte
-    prefix for the filter.
+  bytes). These drive the TTL-flood **seen-set** (loop/dup suppression for the
+  fanout), *not* the negentropy filter — negentropy reconciles manifest events
+  only (above):
+  - manifests → first 16 bytes of the Nostr event `id` (itself a SHA-256 of the
+    canonical serialization); this 16-byte prefix is the fanout seen-set element,
+    while negentropy itself reconciles over the full event ids.
+  - blobs → the blob's sha256 (already content-addressed) — used to **pull** and
+    to track what's held, **never** as a reconciliation/filter element (blobs are
+    not reconciled; see above).
 - **Dedup.** A node maintains a rolling "seen" set of these IDs and never
   re-processes or re-floods an ID already in the set — the same role bitchat's
   seen-set plays, which is what makes TTL flood terminate.
@@ -288,6 +296,6 @@ and a cache is a first-class source.
 - **Transitive authorization depth & revocation.** See §3 — how far past a single
   pairing does reach extend, and how is a pairing (and its transitively-learned
   peers) revoked?
-- **Sync scope & cost on BLE.** GCS sync cadence and filter size tuned for
-  bitchat's GATT links may need different parameters over FIPS L2CAP; **TBD /
-  open** pending the two-device demo.
+- **Sync scope & cost on BLE.** Negentropy (NIP-77) reconcile cadence and
+  `NEG-MSG` round size may need different parameters over FIPS L2CAP than over
+  bitchat's GATT links; **TBD / open** pending the two-device demo.

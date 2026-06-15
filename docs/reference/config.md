@@ -128,6 +128,11 @@ fanout       = true        # relay-mesh fanout: re-broadcast accepted events to 
                            # both ways once relays connect (roadmap P2). Events only;
                            # blobs stay pull-only. See nsite-layer.md §2.1.
 announce_ttl = 5           # max hops for manifest flood/replication (blobs stay pull-only)
+reconcile    = true        # negentropy (NIP-77) set reconciliation between connected
+                           # relays: settle "which manifests does my peer have that I
+                           # don't" in ~log bandwidth, then pull the diff. EVENTS only;
+                           # blobs stay pull-only. Basic recon = roadmap P2. See
+                           # nsite-layer.md §2.4 / propagation.md §5.
 
 # ---------------------------------------------------------------------------
 # [dns] — the DNS interceptor / TUN. Routes ONLY fd00::/8 (the mesh ULA) and
@@ -237,6 +242,7 @@ exchange, not by MAC, so MAC randomization is harmless. Backed by the native
 | Key | Type | Proposed default | Notes |
 | --- | --- | --- | --- |
 | `announce_ttl` | u8 | `5` | hop limit for flooding/replicating author-signed manifest events (kind 15128/35128), re-emitted unmodified. Blobs stay **pull-only** (HYBRID model). |
+| `reconcile` | bool | `true` | negentropy (NIP-77) set reconciliation between connected relays; events only, blobs stay pull-only; basic recon lands in roadmap P2. |
 
 ### `[dns]`
 

@@ -98,14 +98,19 @@ exists. **Stand up relay-mesh fanout early:** once two relays are connected over
 FIPS, each re-broadcasts events it accepts to every other connected peer (source
 excluded), so manifests gossip **both ways**, not just A→B pull — with the
 minimal loop/dup guard (seen-set on the 16-byte SHA-256 event id + TTL 5) that
-fanout requires. Blobs stay pull-only. See
-[nsite-layer.md §2.1](./design/nsite-layer.md) and
-[propagation.md §2](./design/propagation.md).
+fanout requires. Blobs stay pull-only. **Pull a basic negentropy (NIP-77) reconcile
+into this phase too**, so a (re)connecting peer efficiently catches up on missing
+manifests (`NEG-OPEN` on a manifest filter → fetch the diff), not by live fanout
+alone — events only; blobs stay pull-only. See
+[nsite-layer.md §2.1, §2.4](./design/nsite-layer.md) and
+[propagation.md §2, §5](./design/propagation.md).
 
 **Exit criterion.** Device B QR-pairs to A and, over an IP-based FIPS path,
 syncs and opens A's nsite as a fullscreen app (its own task) on B; B's local
-relay + Blossom now hold A's events and blobs; **and a manifest accepted by
-either relay appears on the other via fanout** (source-excluded, not re-echoed).
+relay + Blossom now hold A's events and blobs; **a manifest accepted by either
+relay appears on the other via fanout** (source-excluded, not re-echoed); **and a
+peer that missed events catches up via a basic negentropy (NIP-77) reconcile**
+rather than re-pulling the full set.
 
 **Design docs.** [identity-pairing.md](./design/identity-pairing.md) (QR payload,
 peer-as-source) · [nsite-layer.md](./design/nsite-layer.md) (§5 sync over FIPS) ·
@@ -138,9 +143,10 @@ BLE byte-bridge) · [run-two-device-demo.md](./how-to/run-two-device-demo.md) ·
 
 **Goal.** Make a node a durable **new source** that survives the origin going
 offline, and scale the P2 relay-mesh fanout across the pairing graph. The
-per-link manifest fanout already exists (P2); P4 adds the harder pieces:
-**GCS set-reconciliation sync** (so a reconnecting node efficiently catches up on
-"what events do you have that I don't" rather than relying on live fanout alone),
+per-link manifest fanout and a basic negentropy reconcile already exist (P2); P4
+adds the harder pieces: **negentropy (NIP-77) set-reconciliation at scale** (harden
+the P2 reconcile across the pairing graph — efficiently catching up on "what events
+do you have that I don't" rather than relying on live fanout alone),
 the mutual-scan **transitive peer-list poll** so reach grows past directly paired
 peers, and **LRU eviction** (default 2 GB) with Library-pinned sites exempt. Blobs
 remain **pull-only**, now **pull-from-many** (any holder, verified by sig/hash).
