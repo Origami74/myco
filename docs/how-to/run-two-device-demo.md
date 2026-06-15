@@ -39,23 +39,27 @@ see [../design/concepts.md](../design/concepts.md),
 
 We'll call the two phones **A** (source/holder) and **B** (browser).
 
-### Why Android dials and how that shapes the demo
+### Per-peer PSM discovery and how that shapes the demo
 
-Android cannot bind the fixed default FIPS PSM `0x0085` as a listener:
-`listenUsingInsecureL2capChannel()` returns a *dynamically assigned* PSM, while
-`createL2capChannel(psm)` can dial any PSM. So the proposed `AndroidBleIo` makes
-Android the **central / dialer**, learning each peer's PSM from its BLE advert
-and using it in `connect()`. FIPS identifies peers by the in-band pubkey
-exchange (`[0x00][pubkey:32]`, 33 bytes), **not** by MAC, so Android MAC
-randomization is harmless. (See
+The fixed default FIPS PSM `0x0085` is only a **legacy default**; Myco does not
+rely on it. PSM assignment is symmetric and **per-peer**: every node advertises
+its own **OS-assigned** L2CAP listener PSM (in service-data and/or a readable
+GATT characteristic), and every dialer **reads the peer's PSM before
+`connect()`**. On Android, `listenUsingInsecureL2capChannel()` returns the
+dynamically-assigned listener PSM and `createL2capChannel(psm)` dials any PSM;
+Apple's `CBPeripheralManager.publishL2CAPChannel` likewise yields an OS-assigned
+`CBL2CAPPSM`. So both peers can listen *and* dial — there is no fixed
+well-known PSM and no "one side is forced to be central" constraint. FIPS
+identifies peers by the in-band pubkey exchange (`[0x00][pubkey:32]`, 33 bytes),
+**not** by MAC, so Android MAC randomization is harmless. (See
 [../../reference/fips/src/transport/ble/io.rs](../../reference/fips/src/transport/ble/io.rs)
 and the BLE specifics in [../design/identity-pairing.md](../design/identity-pairing.md).)
 
-For a two-device demo this means **at least one side must successfully dial the
-other's dynamically-assigned PSM**. With both devices being Android, the
-cross-probe tiebreaker (smaller `node_addr`'s outbound connection wins) decides
-which side's dial is kept. **(once the AndroidBleIo BLE transport lands —
-Phase: BLE peering.)**
+For a two-device demo this means **each side reads the other's advertised PSM
+and dials it**. The cross-probe tiebreaker (smaller `node_addr`'s outbound
+connection wins) decides which of the two dials is kept. **(once the AndroidBleIo
+BLE transport + universal PSM discovery land — Phase: P1 (BLE peering over
+FIPS).)**
 
 ---
 
@@ -158,23 +162,26 @@ Pairing exchanges identity so each device can find and authenticate the other
 over the mesh. Myco reuses nostr-vpn's QR machinery (CameraX + ML Kit
 `BarcodeScanning`, a payload-prefix check, plus a deep-link intent filter; see
 [reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)).
-**(once the pairing UI lands — Phase: QR pairing.)**
+**(once the pairing UI lands — Phase P3: pairing + sync.)**
 
 1. On **A**, open **Show pairing QR**. A renders a code carrying the proposed
-   payload `myco://pair/<base64>` — **npub + memorable name only**. It carries
+   payload `myco://pair/<base64>` — **`{ npub, name, pairSecret }`**, where
+   `pairSecret` is a long, single-use random string (≈256 bits). It carries
    **no MAC and no PSM**; those are learned later over BLE adverts.
    (See [../design/identity-pairing.md](../design/identity-pairing.md).)
 2. On **B**, open **Scan to pair** and point the camera at A's code. B validates
-   the `myco://pair/` prefix, decodes A's npub, and adds A as a known peer
-   (so `<npubA>.fips` / `<aliasA>.fips` will resolve).
-3. The demo only needs the **one-way** direction (B reads A's site), so this is
-   all that's required. A *mutual* relationship is formed by invite-pairing (a
-   one-time secret; post-v1 — see
-   [../design/identity-pairing.md § 6.1](../design/identity-pairing.md)), not by a
-   second scan.
+   the `myco://pair/` prefix, decodes A's npub, then **completes the mandatory
+   handshake** against A's on-device `<npubA>.fips` pairing endpoint: B echoes
+   `pairSecret` back over that Noise-encrypted channel, A matches it and taps **OK**.
+   A acks, and the two are now **mutually paired** — each holds the other, so
+   `<npubA>.fips` / `<aliasA>.fips` resolves on B and vice-versa.
+3. Pairing is always this single handshake — there is **no one-way fetch-only
+   scan**. See [../design/identity-pairing.md § 6.1](../design/identity-pairing.md).
 
-Pairing here only seeds **identity**; it does **not** require connectivity. The
-actual radio link is brought up in Step 6.
+Because the handshake is a live round-trip, the two phones must be **reachable when
+B scans** — so in this offline demo bring up the BLE link (Step 6) first, or pair
+over any available FIPS path. Pairing establishes the mutual identity relationship;
+content sync follows.
 
 ---
 
@@ -197,14 +204,14 @@ and `.nsite`; it does **not** capture `0.0.0.0/0`).
 
 ## Step 6 — Bring up the BLE link and browse
 
-**(once the AndroidBleIo BLE transport + offline re-serve land — Phases: BLE
-peering, then offline propagation.)**
+**(once the AndroidBleIo BLE transport + offline re-serve land — Phases P1 (BLE
+peering) then P2–P4 (content + offline browse).)**
 
 1. Each device advertises the 128-bit FIPS service UUID (UUID-only adverts, no
-   identity material) and scans. Adverts carry the dynamically-assigned L2CAP
-   PSM so the peer can dial it.
-2. Android (central/dialer) reads the peer's PSM from its advert and
-   `createL2capChannel(psm)` dials it. After the L2CAP connect, the pre-handshake
+   identity material) and scans. Adverts carry the **OS-assigned** L2CAP listener
+   PSM so the peer can dial it (no fixed `0x0085`).
+2. Each device reads the peer's advertised PSM and dials it with
+   `createL2capChannel(psm)`. After the L2CAP connect, the pre-handshake
    pubkey exchange (`[0x00][pubkey:32]`) runs, then **Noise IK** authenticates the
    link. The cross-probe tiebreaker (smaller `node_addr` wins) resolves the
    double-dial. (See

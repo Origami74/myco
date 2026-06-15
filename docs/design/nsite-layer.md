@@ -82,9 +82,11 @@ mirroring how `fips-core` abstracts its radio behind `BleIo`:
     `fetch_blob(sha256)`, and `reconcile(filter)` (negentropy / NIP-77 set
     reconciliation — see §2.4) against some reachable source. The sync engine
     (§2.4) calls these; it does not care *how* the bytes arrive.
-  - **`FanoutSink`** — *push*: `broadcast(event)` to connected peers. The relay
-    (§2.1) calls this when it accepts an event; it does not know who the peers are
-    or what carries the bytes.
+  - **`FanoutSink`** — *push*: `broadcast(event)` to connected peers. The
+    **nsite-deck propagator** (§2.1) drives this — it subscribes to the relevant
+    relays and re-publishes accepted manifests to peer relays; the seam does not
+    know who the peers are or what carries the bytes. The relay itself never
+    fans out (it is a plain NIP-01 store + socket).
 
 So `myco-core` is the only crate that names FIPS *or* a concrete relay/Blossom: it
 instantiates `myco-relay` + `myco-blossom`, hands them to `nsite-deck` as the
@@ -164,10 +166,12 @@ The store MUST keep only the newest event per slot, matching the dedup the Go
 sync does by `(kind, d-tag)`
 ([service.go `deduplicateManifests`](../../reference/site-deck/internal/sync/service.go)).
 
-**Relay-mesh fanout (multiplex to connected peers).** Beyond serving the local
-gateway, the embedded relay is a node in a *relay mesh*: when it accepts a Nostr
-event — whether pushed in by a peer or pulled in by the sync engine — it
-**re-broadcasts that event to every other connected peer** (an `["EVENT", …]` to
+**Propagator fanout (multiplex to connected peers).** The embedded relay is a
+**plain NIP-01 store + socket** — it never fans out. Fanout is done by a separate
+**propagator process inside `nsite-deck`**: it **subscribes** to the relevant
+relays (the local relay plus every connected peer's relay) and, when a new Nostr
+manifest arrives — whether pushed in by a peer or pulled in by the sync engine —
+it **publishes that event to every other connected peer** (an `["EVENT", …]` to
 each `<peer>.fips:4869`), excluding the peer it came from. This is what makes the
 "announce widely" half of propagation push-based and automatic instead of a
 flood the app has to orchestrate (see [./propagation.md §2](./propagation.md)).
@@ -182,13 +186,13 @@ Constraints:
   back to its sender or re-flooding one already forwarded. Same dedup the
   propagation layer uses ([./propagation.md §5](./propagation.md)).
 - **Re-emitted unmodified.** Forwarded events keep the author's signature intact;
-  the relay never re-signs. Forwarding an already-signed event is relay
-  behaviour, not authoring.
+  the propagator never re-signs. Forwarding an already-signed event is normal
+  publish behaviour, not authoring.
 
-This is wanted **early** (roadmap P2 — see [../reference/config.md](../reference/config.md)
-`[propagation] fanout`), so two connected relays gossip events both ways as soon
+This is wanted **early** (roadmap P3 — see [../reference/config.md](../reference/config.md)
+`[propagation] fanout`), so two connected nodes gossip events both ways as soon
 as a FIPS link exists, with the heavier transitive-discovery and scale-dedup
-machinery layered on later (P4). See [diagrams/07-relay-mesh-fanout.svg](diagrams/07-relay-mesh-fanout.svg).
+machinery layered on later (P5). See [diagrams/07-relay-mesh-fanout.svg](diagrams/07-relay-mesh-fanout.svg).
 
 ### 2.2 Embedded Blossom
 
@@ -245,9 +249,10 @@ ids), then the diff is fetched as usual; **blobs stay content-addressed
 pull-by-sha256 and are not part of reconciliation**. The `negentropy` Rust crate is
 already in the rust-nostr dependency graph (used by `nostr-relay-pool`), so this is
 a proven dependency, not new R&D. This is the **pull / catch-up** counterpart to the
-push-based relay-mesh fanout (§2.1): fanout gossips newly-accepted manifests live;
-negentropy reconciles whatever was missed while disconnected or on first contact. A
-basic reconcile lands in **roadmap P2** (alongside fanout); scale hardening is **P4**.
+push-based propagator fanout (§2.1): the propagator gossips newly-accepted manifests
+live; negentropy reconciles whatever was missed while disconnected or on first
+contact. A basic reconcile lands in **roadmap P3** (alongside fanout); scale
+hardening is **P5**.
 
 ---
 
@@ -297,8 +302,7 @@ Rust port reproduces them exactly.
 
 **Host suffix.** Like nsite-deck, Myco serves under `<host>.nsite` — an A
 record to `127.0.0.1` provided by the DNS interceptor (`*.nsite → 127.0.0.1`).
-(`.localhost` is an alternative under consideration — see the open question
-below.) Either way the browser reaches the localhost gateway over IPv4 — which is why it works in
+The browser reaches the localhost gateway over IPv4 — which is why it works in
 **any** WebView including Chromium, where IPv6-only `.fips` resolution is
 suppressed. The browser **never** resolves `.fips`; only the native sync engine
 does (§5, and [../reference/ports.md](../reference/ports.md)).
@@ -313,11 +317,10 @@ bound ([handlers.go](../../reference/site-deck/internal/gateway/handlers.go));
 the Rust port keeps the same logic. An unresolvable host bounces the browser to
 the Library UI's "not in your Library" page rather than surfacing a raw error.
 
-> **Open question — host suffix.** `.localhost` vs `.nsite` for the WebView
-> host. `.localhost` needs no DNS interception at all (RFC 6761 — resolvers MUST
-> map it to loopback), but custom subdomains of `.localhost` are not universally
-> honoured. `.nsite` needs the `*.nsite → 127.0.0.1` interceptor but is what the
-> reference already implements. **TBD / open.**
+> **Locked — host suffix.** The WebView/browser loads nsites under `<host>.nsite`
+> **only**; `.localhost` is **dropped**. Custom subdomains of `.localhost` are not
+> universally honoured, so the `*.nsite → 127.0.0.1` interceptor is the path — it
+> is also what the reference already implements. **Locked.**
 
 ---
 
@@ -374,12 +377,22 @@ late requests join the in-flight one), then:
 - **Sync completes within ~1s** → serve direct (§4.2).
 - **Sync takes longer than ~1s** → return a **loading page** (HTTP 503 with a
   spinner) that subscribes to the local relay for the manifest (to show
-  title/description as soon as it arrives) and polls a status endpoint; when the
-  status flips to `ready` (manifest stored + all referenced blobs present), the
-  page redirects to the real content. This is the `writeLoadingPage` /
-  `handleLoadingStatus` pair in the reference.
-- **Sync fails** → a friendly sync-error page (no source reachable, missing
-  blobs, etc.).
+  title/description as soon as it arrives) and polls a status endpoint; the page
+  renders the status copy below and, when the status flips to `ready` (manifest
+  stored + all referenced blobs present), redirects to the real content. This is
+  the `writeLoadingPage` / `handleLoadingStatus` pair in the reference.
+
+The status endpoint returns the FFI `siteStatus` shape (`{ state, filesPulled,
+filesTotal, message }`, see [../reference/ffi-surface.md](../reference/ffi-surface.md)).
+The loading/error page renders one row per state, with the exact user-facing copy
+and action:
+
+| `state` | Page copy | Action |
+| --- | --- | --- |
+| `syncing` | `Getting <title>… <n>/<total> files` | none (progress) |
+| `unreachable` | `Can't reach anyone who has this app yet. Bring the device you got it from nearby, then Retry.` | **Retry** |
+| `incomplete` | `This app didn't download completely. Try again.` | **Retry**; abort the sync and do **not** cache (matches §5.2 step 4 verify) |
+| unknown host / not in Library | — | bounce the browser to the Library "not in your Library" page (§3.2) |
 
 The 1-second threshold and the poll-then-redirect loading page are taken
 directly from the reference and are a **proposed default** (tunable).
@@ -467,7 +480,7 @@ and [../../reference/fips/docs/design/fips-ipv6-adapter.md](../../reference/fips
 
 > **Note.** The *sync engine* (native Rust) is what dials `<npub>.fips`. The
 > WebView never does. See [../reference/ports.md](../reference/ports.md) for the
-> exact `.fips` vs `.nsite`/`.localhost` split.
+> exact `.fips` vs `.nsite` split.
 
 ### 5.2 The pull sequence
 
@@ -528,6 +541,20 @@ the split the project calls the Pillars of Propagation; the policy around it
 (announce widely the author-signed manifests, pull the blobs on demand) is
 [./propagation.md](./propagation.md).
 
+### 5.4 Eager refresh of pinned sites
+
+Library-pinned sites are kept current in the background so they stay
+offline-ready *before* the next open. The **nsite-deck propagator** (§2.1) keeps
+an internal subscription for kinds **15128 / 35128** across the relays it is
+connected to; when a **newer** manifest arrives for a Library-pinned
+`(author, dTag)`, it **auto-runs the §5.2 pull in the background** — fetch the
+manifest's blobs by hash from a reachable holder's `.fips` Blossom, verify each
+sha256, and mirror the verified blobs + the signed manifest into the local
+Blossom + relay. The pinned app is then up to date for the next open with no
+foreground sync. This reuses the §5.2 sequence verbatim (including the
+abort-on-mismatch verify, step 4); only the *trigger* differs — a newer manifest
+seen on subscription rather than a browse request.
+
 ---
 
 ## 6. Offline serving from cache
@@ -540,8 +567,10 @@ store and never needs the network again:
   identical to the online path. The nsite opens and runs fully with no radio
   (any in-app reload/navigation it implements works against the local stores).
 - **Uncached site, offline** → the sync has no reachable source, so the gateway
-  shows the sync-error / "not reachable" page (HTTP 503). It is not a crash;
-  the moment a holding peer comes into BLE range, a retry succeeds.
+  shows the `unreachable` page (HTTP 503): *"Can't reach anyone who has this app
+  yet. Bring the device you got it from nearby, then Retry."* with a **Retry**
+  action (§4.3). It is not a crash; the moment a holding peer comes into BLE
+  range, the retry succeeds.
 
 This is the offline guarantee in
 [sync-architecture.md](../../reference/site-deck/docs/sync-architecture.md): all
@@ -593,7 +622,6 @@ below governs the **Blossom blob store**.
   an nsite's JavaScript may call back into (e.g. query reachable peers, trigger
   a sync) is a later milestone and an explicit open design question (called out
   on [diagram 04](diagrams/04-nsite-browse-flow.svg)). **TBD / open.**
-- **Host suffix** — `.localhost` vs `.nsite` (§3.2). **TBD / open.**
 - **htdocs serving cache** — the deferred path-named cache and its Android
   atomic-swap mechanism (symlink-rename vs `current.json` pointer file)
   (§4.4). **Deferred to the roadmap — TBD / open.**
@@ -602,6 +630,12 @@ below governs the **Blossom blob store**.
 - **Relay store choice** — full `nostr-rs-relay`-style store vs a hand-rolled
   `rusqlite` store sized to the tiny query surface Myco actually uses (§2.1).
   **TBD / open.**
+- **nsite-scoped propagation (capability-gated)** — whether the propagator's
+  fanout should be scoped per nsite / gated by a pairing capability rather than
+  flooding every accepted manifest to every connected peer. Tracked in
+  [./propagation.md](./propagation.md)'s "nsite-scoped propagation
+  (capability-gated)" open question (ties into the mandatory mutual pairing
+  handshake, identity-pairing §6.1). **TBD / open.**
 
 ---
 

@@ -66,7 +66,7 @@ any particular relay, blob store, or transport:
 | Crate | Role | Reusable? |
 | --- | --- | --- |
 | `myco-core` | app crate: FIPS endpoint, `AndroidBleIo`, JNI/JSON FFI, and the wiring that picks which backends to plug in | no — Myco-specific |
-| `nsite-deck` | the nsite host: gateway (manifest → path → sha256 → serve) + sync engine; impl-agnostic | **yes** — the reusable core |
+| `nsite-deck` | the nsite host: gateway (manifest → path → sha256 → serve) + sync engine + the **propagator** (a process that subscribes to local + peer relays and publishes accepted events onward, and eager-refreshes pinned sites); impl-agnostic | **yes** — the reusable core |
 | `myco-relay` | a generic embedded Nostr relay (event store + `ws://…:4869` server) | yes — any Nostr app |
 | `myco-blossom` | a generic embedded Blossom blob store (content-addressed store + `http://…:24242` server) | yes — any Blossom need |
 
@@ -77,8 +77,11 @@ everything outside itself through **four trait seams**, which `myco-core` wires 
   (store/query manifest events) and **`BlobStore`** (`get`/`has`/`put` blobs by
   sha256). **Citrine-forward is just an alternate `RelayBackend`.**
 - **transport seams** (provided by `myco-core` over FIPS) — **`PeerSource`** (pull a
-  manifest + blobs from a reachable peer) and **`FanoutSink`** (re-broadcast an
-  accepted event to connected peers).
+  manifest + blobs from a reachable peer) and **`FanoutSink`** (publish an event onward
+  to connected peers). The `FanoutSink` is driven by the nsite-deck **propagator**, which
+  *subscribes* to the relevant relays (local + connected peers) and *publishes* (`EVENT`)
+  to peer relays — `myco-relay` is a plain NIP-01 store + socket and does no forwarding
+  itself. The same propagator runs eager-pinned-refresh (see layer 4 / store-and-forward).
 
 All four cross-compile into the single `libmyco_core.so`. Relay and Blossom sitting
 **outside** `nsite-deck` is deliberate: a Nostr relay and a Blossom server are
@@ -97,8 +100,12 @@ traits rather than embedding them. `myco-core` is the only crate that names FIPS
 Its UI is four surfaces: the **Library** (your installed nsites/apps), **Pair**
 (the QR pairing screen — scan + show), **Discover** (your circle — "nsites around
 me" / transitively-discovered sites), and **Settings** (identity, storage,
-relay backend). To *manage* an nsite — info, remove, re-pair, add-to-home-screen —
-you go to Myco. Myco does **not** host the nsite itself: launching an nsite hands
+relay backend). Alongside these four is a **Developer UI** — a diagnostic surface,
+distinct from Library / Pair / Discover / Settings, that consumes the existing FFI
+`ble` / `blePeers` state to render BLE adapter/scanning status and, per peer,
+`node_addr` / `npub` (once Noise completes) / connected / `psm` / `rssi`. To *manage*
+an nsite — info, remove, re-pair, add-to-home-screen — you go to Myco. Myco does
+**not** host the nsite itself: launching an nsite hands
 off to a separate fullscreen `NsiteActivity` (layer 2). There is no Myco-imposed
 browser chrome, no bottom bar, no URL bar. See [app-shell.md](./app-shell.md) for
 the launch model, Recents behaviour, intents (`myco://app/<host>`), and
@@ -266,29 +273,37 @@ localhost relay/Blossom ports, which is what exposes `<npub>.fips:4869`/`:24242`
 **Transports.** UDP / TCP / Tor are reused from fips-core unchanged. **BLE** is
 the v1 transport and the one net-new transport piece:
 
-- FIPS BLE is **L2CAP CoC** (SeqPacket), fixed default PSM `0x0085` (133),
-  with a UUID-only advert (no identity material), a pre-handshake pubkey exchange
-  of `[0x00][pubkey:32]` over the stream, then Noise IK. The cross-probe
-  tiebreaker: the smaller node_addr's outbound connection wins.
+- FIPS BLE is **L2CAP CoC** (SeqPacket), with a UUID-only advert (no identity
+  material), a pre-handshake pubkey exchange of `[0x00][pubkey:32]` over the stream,
+  then Noise IK. The cross-probe tiebreaker: the smaller node_addr's outbound
+  connection wins. There is **no fixed well-known PSM**: PSM assignment is per-peer.
+  `0x0085` (133) is only a **legacy default**, and fixed-`0x0085` Linux wire compat is
+  **intentionally dropped**.
 - The platform surface is upstream `fips`'s **`BleIo` trait**
   (`fips::transport::ble::io::BleIo`: `listen`/`connect`/`start_advertising`/
   `start_scanning`/`local_addr`/…), and the transport is generic over it
-  (`BleTransport<I: BleIo>`). Linux backs it with `BluerIo`; Myco adds
-  **`AndroidBleIo`** (option A: native L2CAP CoC), targeting **Linux interop**.
-  Caveat: upstream `Node::new` currently **hardwires `BluerIo`**, so injecting a
-  custom `BleIo` is one of the two upstream-`fips` changes Myco needs (see
-  [build.md § 4c](../how-to/build.md)). FIPS owns all connection tracking, the
-  pool, the tiebreaker, Noise, and reconnect — **bitchat is not used as a
-  transport.**
-- Android L2CAP specifics force a dial direction: `listenUsingInsecureL2cap­Channel()`
-  returns a *dynamically* assigned PSM (you cannot bind the fixed default PSM 133 as a
-  listener), while `createL2capChannel(psm)` can dial any PSM. So **Android is the
-  central/dialer**; `AndroidBleIo` keeps an `addr→PSM` map learned from adverts
-  and uses it in `connect()`. FIPS identifies peers by the pubkey exchange, not by
-  MAC, so Android MAC randomization is harmless. Requires **API 29+** (minSdk 29).
+  (`BleTransport<I: BleIo>`). There are **three backends**: **`Bluer`** (Linux,
+  upstream), **`AndroidBleIo`** (native L2CAP CoC), and **`BluestIo`** (macOS — the
+  "bluest" CoreBluetooth crate, reusing the fips `macos-ble-rebased` branch under a
+  `ble-macos` cargo feature; framed as the **dev/test** backend). Caveat: upstream
+  `Node::new` currently **hardwires `BluerIo`**, so injecting a custom `BleIo` is one
+  of the upstream-`fips` changes Myco needs (see [build.md § 4c](../how-to/build.md)).
+  FIPS owns all connection tracking, the pool, the tiebreaker, Noise, and reconnect —
+  **bitchat is not used as a transport.**
+- **Universal per-peer PSM discovery.** Dynamic listener-PSM assignment is the general
+  case, not an Android quirk: Android's `listenUsingInsecureL2capChannel()` and Apple's
+  `CBPeripheralManager.publishL2CAPChannel` (→ an OS-assigned `CBL2CAPPSM`) both let the
+  OS pick the listener PSM; BlueZ is the **outlier** that can bind a fixed PSM. So every
+  node **advertises its own OS-assigned listener PSM** (via service-data and/or a readable
+  GATT characteristic), and every dialer **reads the peer's PSM before `connect()`**. This
+  is symmetric — there is no "Android must be central" constraint; the smaller-`node_addr`
+  tiebreaker works normally. FIPS identifies peers by the pubkey exchange, not by MAC, so
+  Android MAC randomization is harmless. Android requires **API 29+** (minSdk 29).
 
-**Provenance.** Reuse fips-core for everything except `AndroidBleIo`, which is
-net-new (the only platform-specific code in this layer). bitchat-android is a
+**Provenance.** Reuse fips-core for everything except the platform BLE backends:
+`AndroidBleIo` is net-new, `BluestIo` (macOS, dev/test) reuses the fips
+`macos-ble-rebased` work, and per-peer PSM advertise/discover is added across all
+backends (it breaks the fixed `0x0085` default). bitchat-android is a
 **pattern reference only** for the propagation layer — its transport (GATT-only,
 wire-incompatible with FIPS L2CAP) and crypto are *not* used.
 

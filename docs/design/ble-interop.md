@@ -42,8 +42,24 @@ The alternatives were rejected:
   a second process to keep alive, and buys nothing over a direct trait impl.
 
 So: one new trait implementation, written against the **local**
-`reference/fips` checkout so we can patch fips-core if the PSM problem forces
-it (see [Linux dials Android](#scenario-3-linux-dials-android)).
+`reference/fips` checkout so we can patch fips-core for universal per-peer PSM
+discovery (see [The PSM problem](#the-psm-problem)).
+
+### macOS BluestIo: the dev/test backend
+
+We also stand up a **macOS** `BleIo` backend, `BluestIo`, built on the
+[`bluest`](https://crates.io/crates/bluest) CoreBluetooth crate. Rather than
+writing it from scratch, we **reuse the fips branch `macos-ble-rebased`**
+(commit `0ae9e01`) behind a `ble-macos` cargo feature; it uses 2-byte
+length-prefix L2CAP framing. macOS's listener PSM is OS-assigned by
+`CBPeripheralManager.publishL2CAPChannel()`, so it slots straight into
+universal PSM discovery alongside Android.
+
+`BluestIo` is framed as the **dev/test backend**: a Mac can build and run the
+core, so Android↔Mac becomes a buildable, debuggable test pair for the BLE
+link without two physical Android handsets. (Like the app-owned TUN change,
+it's a test-oriented patch in the four-patch local-fips set — see
+[build.md §4c](./build.md).)
 
 ## The BleIo trait surface
 
@@ -114,98 +130,117 @@ insecure variants throughout; Bluetooth-layer encryption/bonding adds a
 pairing UX we don't want and duplicates Noise.
 
 That asymmetry — **listener can't pick its PSM, dialer can pick any PSM** — is
-the entire PSM problem.
+the PSM problem, and it's shared with Apple's CoreBluetooth (see below); only
+BlueZ escapes it.
 
 ## The PSM problem
 
-FIPS's Linux backend binds the fixed default `DEFAULT_PSM = 0x0085` (133) as its
-L2CAP listener and dials that same PSM
-([../../reference/fips/src/transport/ble/mod.rs](../../reference/fips/src/transport/ble/mod.rs#L49)).
-The whole mesh agrees on one number. Android can't play that game: a
-`listenUsingInsecureL2capChannel()` listener is assigned *some* PSM by the
-OS, and it generally won't be 133. So a Linux peer that blindly dials 133
-will not reach an Android listener.
+**Dynamically assigned listener PSMs are the general case, not an Android
+quirk.** Two of the three platforms we care about hand the listener its PSM
+from the OS:
 
-The adverts don't carry the PSM either. FIPS adverts are **UUID-only**
+- **Android** — `listenUsingInsecureL2capChannel()` returns an
+  OS-assigned PSM; the app cannot pick it.
+- **Apple (macOS/iOS)** — `CBPeripheralManager.publishL2CAPChannel()` opens
+  a channel and asynchronously delivers an OS-assigned `CBL2CAPPSM`; again the
+  app cannot pick it.
+- **Linux/BlueZ** — the outlier. It *can* bind a fixed PSM, which is why
+  FIPS's Linux backend hard-codes `DEFAULT_PSM = 0x0085` (133) as its L2CAP
+  listener and dials that same number
+  ([../../reference/fips/src/transport/ble/mod.rs](../../reference/fips/src/transport/ble/mod.rs#L49)).
+
+So the fixed-PSM assumption baked into FIPS is a *BlueZ* assumption. The
+moment either end is Android or Apple, "everyone agrees on 133" breaks: that
+listener is on *some* OS-assigned PSM, and a peer that blindly dials 133 will
+not reach it.
+
+Compounding it, the adverts don't carry the PSM. FIPS adverts are **UUID-only**
 ([../../reference/fips/src/transport/ble/discovery.rs](../../reference/fips/src/transport/ble/discovery.rs))
 — deliberately, so no identity or routing material leaks before the Noise
 handshake. A scanner learns "a FIPS peer is at this BLE address," nothing
 more. There is currently no channel for "…and its listener PSM is N."
 
-The consequences differ by who dials whom:
+### The fix: universal PSM discovery
 
-| Scenario | Listener PSM | Dialer | Works today? | Fix |
-| --- | --- | --- | --- | --- |
-| **1. Android → Linux** | Linux listens on fixed `0x0085` | Android `createL2capChannel(0x0085)` | **Yes, no change** | — |
-| **2. Android ↔ Android** | each side's OS-assigned PSM | the other Android | **No** out of the box | Solved Android-side: an addr→PSM advert map (below) |
-| **3. Linux → Android** | Android's OS-assigned PSM | Linux dials fixed `0x0085` | **No** | Make Android the central, or a small fips-core patch (below) |
+Rather than special-case Android against a fixed-PSM Linux, we make PSM
+discovery **symmetric across all backends**. Every node:
 
-This is also why **Android is the natural central/dialer** in the v1 demo:
-the dialer side has all the freedom, the listener side has none.
+1. **Advertises its own OS-assigned listener PSM** — alongside the UUID-only
+   FIPS service advert, in a separate app-private carrier: a 16-bit
+   service-data value under the FIPS UUID and/or a readable GATT
+   characteristic (the exact carrier is settled in
+   [../reference/ble-wire.md](../reference/ble-wire.md#per-peer-psm-advertisement-scheme)).
+2. **Reads a peer's advertised PSM before it dials** — the scanner builds a
+   `BleAddr → PSM` map from adverts, and the dial uses the *learned* PSM, not
+   the hard-coded `0x0085`.
 
-### Scenario 1: Android dials Linux
+Both sides listen and both sides may dial; whoever ends up dialing already
+knows the other's PSM. No fixed well-known PSM is required, and the existing
+smaller-`node_addr` cross-probe tiebreaker decides the dial direction
+normally. `0x0085` survives only as a **legacy default** for the case where no
+PSM has been learned yet.
 
-The happy path, and the v1 target. Linux runs `BluerIo`, listens on `0x0085`,
-advertises the FIPS UUID. Android scans, finds the UUID, calls
-`createInsecureL2capChannel(0x0085)`. Connected. The pubkey exchange and
-Noise IK run on top. No code changes to fips-core, no advert tricks. **This
-is the path the two-device demo will exercise first** — except the v1 demo is
-two *Androids*, which is scenario 2; scenario 1 is the Linux-interop target
-that proves wire compatibility against the reference implementation.
+This is a real fips-core change — advertising-own-PSM and reading-peer-PSM —
+applied to **all backends** (Linux/Android/macOS), not an Android-only shim
+below the trait. The wire-level carrier and framing are specified in
+[../reference/ble-wire.md](../reference/ble-wire.md). Because we build against
+the **local** `reference/fips` checkout, the patch is ours to make.
 
-### Scenario 2: Android ↔ Android (the v1 demo)
+### Fixed-0x0085 Linux wire compat is intentionally dropped
+
+We do **not** preserve interop with a stock, unpatched `BluerIo` that only
+listens/dials `0x0085`. A Linux peer must run the patched fips-core that
+advertises and reads per-peer PSMs to join the mesh. Trying to keep a
+fixed-PSM fallback path alive would force every Android/macOS listener to also
+bind 0x0085 (which their OSes won't allow) or force Linux to be
+dial-only — neither is worth the asymmetry. Universal discovery is the single
+path.
+
+The consequences by who dials whom, under universal discovery:
+
+| Scenario | Listener PSM | Dialer reaches it by… | Works |
+| --- | --- | --- | --- |
+| **Android ↔ Android** | each side's OS-assigned PSM | reading the peer's advertised PSM | yes (patched) |
+| **Android ↔ macOS** | each side's OS-assigned PSM | reading the peer's advertised PSM | yes (patched) — the buildable dev/test pair |
+| **Android/macOS ↔ Linux** | Linux's PSM (patched advert) | reading the peer's advertised PSM | yes (patched Linux) |
+
+### Android ↔ Android (the v1 demo)
 
 Both phones are Android. Each one's listener got an OS-assigned PSM; neither
-knows the other's. Android must be both central *and* peripheral, but only
-the central can choose the PSM to dial, and it doesn't know which one.
+knows the other's out of the box. Universal PSM discovery resolves it: each
+phone advertises its current listener PSM (the 16-bit service-data value /
+GATT characteristic above), each scanner reads the peer's PSM into its
+`BleAddr → PSM` map, and the dial uses the learned PSM. Both phones listen and
+both may dial; the smaller-`node_addr` tiebreaker decides which dial survives.
+The map is populated from adverts during scanning, so by the time the
+`scan_probe_loop` dials, the PSM is known. (Open question: the learn-then-dial
+race if a peer's advert hasn't been seen yet — retry on the next scan tick,
+which the `scan_probe_loop` cooldown already provides.)
 
-**Proposed fix, entirely Android-side, no fips-core change: an addr→PSM
-advert map.** Alongside the UUID-only FIPS service advert, the Android
-peripheral advertises its current listener PSM in a separate, app-private
-field — a 16-bit service-data value under the FIPS UUID (or a second
-characteristic; the exact carrier is settled in
-[../reference/ble-wire.md](../reference/ble-wire.md#android-addrpsm-advertisement-scheme)).
-Each Android scanner reads that field, builds a `BleAddr → PSM` map, and when
-`BleIo::connect(addr, psm)` is called it **substitutes the learned PSM** for
-the `0x0085` that FIPS passes in.
+### Android ↔ macOS (the buildable dev/test pair)
 
-Crucially this stays *below* the trait. FIPS still calls
-`connect(addr, 0x0085)`; `AndroidBleIo` quietly looks up the real PSM for
-`addr` and dials that. From FIPS's perspective nothing changed. The map is
-populated from adverts during scanning, so by the time the scan/probe loop
-dials, the PSM is known. (Open question: the learn-then-dial race if a peer's
-advert hasn't been seen yet — retry on the next scan tick, which the
-`scan_probe_loop` cooldown already provides.)
+macOS runs the reused `BluestIo` backend (below). Its listener PSM is
+OS-assigned by `CBPeripheralManager.publishL2CAPChannel()`, exactly as
+Android's is — so the *same* universal-discovery mechanism applies with no
+special-casing. Each side advertises its PSM, each reads the other's, either
+side may dial. Because macOS is a backend we can actually build and run on a
+laptop, Android↔Mac is the practical de-risk pair for exercising the BLE link
+without needing two physical Android handsets.
 
-### Scenario 3: Linux dials Android
+### Android/macOS ↔ Linux
 
-The genuinely hard case, and the one we explicitly **defer past v1**. A Linux
-peer running stock `BluerIo` dials `0x0085`. Android's listener is on some
-other PSM. Linux can't learn Android's PSM because (a) the advert is
-UUID-only and (b) `BluerIo` wouldn't parse an extra field even if present.
+A Linux peer running the **patched** `BluerIo` advertises its own listener PSM
+(even though BlueZ *could* bind a fixed one, it advertises whatever it bound)
+and reads peers' advertised PSMs the same way. There is no "Linux dials a
+fixed 0x0085" path and no "Android must be the central" constraint: dial
+direction is decided by the ordinary smaller-`node_addr` tiebreaker, the same
+as any other pair. A stock, unpatched Linux node that only knows `0x0085` is
+out of scope by design (see *fixed-0x0085 compat dropped*, above).
 
-Two ways out, neither needed for the two-Android demo:
-
-1. **Keep Android as the central.** If every cross-pair link is initiated by
-   the Android side, Linux never needs to dial Android. The mesh's
-   cross-probe tiebreaker complicates this — the tiebreaker wants the
-   *smaller node_addr* to dial — so "Android always dials" can fight the
-   tiebreaker. Workable only if we accept that an Android-vs-Linux pair
-   always lets Android win the dial, which may need a per-transport tiebreaker
-   override.
-2. **A small fips-core patch: per-peer PSM in the advert.** Teach `BluerIo`
-   to (a) advertise its own listener PSM in the same service-data field
-   Android uses, and (b) consume a peer's advertised PSM and pass it to
-   `connect()` instead of the hard-coded `0x0085`. This makes the addr→PSM
-   scheme symmetric across Linux and Android and removes the "Android must be
-   central" constraint. Because we build against the **local** `reference/fips`
-   checkout, this patch is ours to make. It is the cleaner long-term fix; it's
-   out of scope for v1 only because v1 is two Androids.
-
-**Recommendation:** ship v1 on the Android-side addr→PSM map (scenario 2),
-target scenario 1 for Linux-interop validation, and land the fips-core
-per-peer-PSM patch (scenario 3, option 2) when Linux↔Android two-way
-initiation is on the roadmap.
+**Recommendation:** implement universal per-peer PSM discovery in fips-core
+across all backends, ship the two-Android demo on it, and use Android↔macOS
+(`BluestIo`) as the buildable dev/test pair while bringing up the link. Linux
+interop comes for free once its `BluerIo` runs the same patched discovery.
 
 ## Why MAC randomization is harmless
 
@@ -225,10 +260,10 @@ it's simply dialed again and re-identified by the same pubkey; the FIPS peer
 (keyed on npub) is untouched — the same session-independence property the TCP
 and Tor transports rely on. So Android privacy defaults cost us nothing here.
 
-The one wrinkle: the addr→PSM map (scenario 2) is keyed on `BleAddr`, which
-*does* rotate. The map must therefore be short-lived (re-learned each scan
-cycle) rather than a durable cache — see
-[../reference/ble-wire.md](../reference/ble-wire.md#android-addrpsm-advertisement-scheme).
+The one wrinkle: the `BleAddr → PSM` discovery map is keyed on `BleAddr`,
+which *does* rotate. The map must therefore be short-lived (re-learned each
+scan cycle) rather than a durable cache — see
+[../reference/ble-wire.md](../reference/ble-wire.md#per-peer-psm-advertisement-scheme).
 
 ## Device and ROM variance
 
@@ -311,16 +346,13 @@ link"; bitchat's lessons begin one layer up.
 
 ## Open questions
 
-- **Scenario 3 final call.** Android-always-central (with a tiebreaker
-  override) vs. the fips-core per-peer-PSM patch — decide when Linux↔Android
-  two-way initiation is scheduled. Leaning toward the patch.
 - **Advert carrier for the PSM.** Service-data field vs. a readable GATT
   characteristic vs. extended advertising — settled in the wire doc, pending
-  hardware testing of legacy-advert size limits.
-- **addr→PSM map under MAC rotation.** Confirm re-learn-per-scan is fast
-  enough that the first dial after discovery rarely misses.
+  hardware testing of legacy-advert size limits. (Both carriers may coexist:
+  service-data for fast scan-time learning, a GATT characteristic as the
+  authoritative read.)
+- **`BleAddr → PSM` map under MAC rotation.** Confirm re-learn-per-scan is
+  fast enough that the first dial after discovery rarely misses.
 - **Foreground-service FGS types and OEM battery exemptions.** Per-OEM
   behavior is **TBD** until tested.
-- **Cross-probe tiebreaker vs. Android-as-central.** Whether the
-  smaller-node_addr-dials rule needs a per-transport override on BLE.
 - **Device/ROM matrix.** Which phones the v1 demo targets — **TBD**.

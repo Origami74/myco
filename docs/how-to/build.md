@@ -207,12 +207,15 @@ just install      # build + adb install -r
 
 Myco depends on the **canonical upstream `fips` crate** — not a nostr-vpn fork of
 it (a LOCKED decision; see [architecture.md § Crate workspace](../design/architecture.md)).
-It builds against a **local** FIPS source tree so we can carry a **minimal patch for
-the two Android-enabling seams upstream `fips` does not yet expose** — (1) an
-**app-owned TUN** (the `VpnService` owns the fd; FIPS exchanges packet bytes over a
-channel instead of calling `tun::create`) and (2) **custom `BleIo` injection** (plug
-in `AndroidBleIo` instead of the hardwired Linux `BluerIo`) — while those land
-upstream (see §4c). The mechanism is borrowed directly from nostr-vpn:
+It builds against a **local** FIPS source tree so we can carry **four local patches
+for seams upstream `fips` does not yet expose** — (1) an **app-owned TUN** (the
+`VpnService` owns the fd; FIPS exchanges packet bytes over a channel instead of
+calling `tun::create`), (2) **custom `BleIo` injection** (plug in `AndroidBleIo`
+instead of the hardwired Linux `BluerIo`), (3) **per-peer PSM advertise/discover**
+(every backend advertises its OS-assigned L2CAP PSM and dials the peer's learned PSM,
+replacing the fixed `0x0085` — see [ble-interop.md](../design/ble-interop.md)), and
+(4) a **reused/fixed macOS `BleIo`** (the `bluest` CoreBluetooth backend, for the
+Android↔Mac dev/test pair) — all detailed in §4c. The mechanism is borrowed directly from nostr-vpn:
 [reference/nostr-vpn/android/app/build.gradle.kts](../../reference/nostr-vpn/android/app/build.gradle.kts)
 reads an env var and emits `--config patch.crates-io.<crate>.path="…"` flags into
 the `cargo ndk` invocation.
@@ -262,9 +265,10 @@ cargo ndk -t arm64-v8a --platform 29 build -p myco-core --release \
 > `fips-core` / `fips-endpoint` / `fips-identity` three-crate assumption does **not**
 > match upstream and is dropped.
 >
-> **Upstream gaps the local patch carries (Phase 0).** Two capabilities Myco needs
-> are **not in upstream `fips`** today — they were nostr-vpn customizations, and the
-> plan is to get them *from/into upstream*, not to fork:
+> **Local patches the fips checkout carries (Phases P0–P1).** Four capabilities Myco
+> needs are **not in upstream `fips`** today. Two (1–2) are nostr-vpn customizations we
+> aim to contribute *upstream*; one (3) is a wire-breaking change to weigh with upstream;
+> one (4) is a **local, test-only** reuse (like the TUN change, never a dependency):
 >
 > 1. **App-owned TUN.** Upstream `Node::new(Config)`
 >    ([reference/fips/src/bin/fips.rs](../../reference/fips/src/bin/fips.rs)) always
@@ -276,12 +280,29 @@ cargo ndk -t arm64-v8a --platform 29 build -p myco-core --release \
 > 2. **Custom `BleIo` injection.** `Node::new` hardwires the Linux `BluerIo`
 >    ([reference/fips/src/node/mod.rs](../../reference/fips/src/node/mod.rs)); the
 >    generic `BleTransport<I: BleIo>` is the right seam, but the embedder cannot pass
->    its own `BleIo`. Myco injects `AndroidBleIo`, so this is the **second upstream
->    change**.
+>    its own `BleIo`. Myco injects `AndroidBleIo` (and, for dev, `BluestIo`), so this is
+>    the **second upstream change**.
+> 3. **Per-peer PSM advertise/discover.** Upstream binds *and* dials the fixed
+>    `DEFAULT_PSM = 0x0085`
+>    ([reference/fips/src/transport/ble/mod.rs](../../reference/fips/src/transport/ble/mod.rs));
+>    but Android (`listenUsingInsecureL2capChannel`) and macOS CoreBluetooth
+>    (`publishL2CAPChannel`) get an **OS-assigned** listener PSM and cannot bind a fixed
+>    one. The patch makes **every backend advertise its own PSM and dial the peer's
+>    learned PSM** — symmetric per-peer discovery that **intentionally drops fixed-`0x0085`
+>    wire compat**. `BleIo::connect(addr, psm)` already takes a per-call PSM and config
+>    `psm()` is `self.psm.unwrap_or(DEFAULT_BLE_PSM)`, so the change is the advert carrier
+>    plus discovery capture. See [ble-interop.md](../design/ble-interop.md) and
+>    [ble-wire.md](../reference/ble-wire.md).
+> 4. **Reused/fixed macOS `BleIo` (test-only).** A CoreBluetooth backend (`BluestIo`, the
+>    `bluest` crate) already exists on the fips branch **`macos-ble-rebased`** (commit
+>    `0ae9e01`, `ble-macos` cargo feature, 2-byte length-prefix L2CAP framing). It was
+>    buggy precisely because of the PSM issue (#3 above), so we reuse it with the discovery
+>    fix to make **Android↔Mac** a buildable test pair. The macOS dev build is a host build
+>    (`cargo build -p myco-core --features ble-macos`), not a cargo-ndk cross-compile.
 >
-> nostr-vpn's implementations are the **reference for what each patch must do**, not a
-> dependency. Until both land upstream they live as a minimal patch on the local
-> `reference/fips` checkout, carried via the §4b override.
+> nostr-vpn's implementations are the **reference** for patches 1–2; patch 4 reuses the
+> macOS branch. All four live as a minimal patch on the local `reference/fips` checkout,
+> carried via the §4b override.
 
 ### 4d. `Cargo.lock` hygiene
 
@@ -344,9 +365,11 @@ two-device demo: [run-two-device-demo.md](./run-two-device-demo.md).
 ## Open questions
 
 - **Upstream `fips` seams (§4c):** the single-`fips`-crate dependency is
-  **resolved/LOCKED**; what remains open is *landing the two upstream
-  contributions* — the app-owned TUN and custom `BleIo` injection — in upstream
-  `fips` (vs. carrying them as a local patch). **Tracked in §4c / roadmap P0.**
+  **resolved/LOCKED**; what remains open is *which of the four local patches go
+  upstream* — the app-owned TUN and custom `BleIo` injection are the upstream
+  candidates, the per-peer PSM change is a wire-breaking proposal to weigh with
+  upstream, and the macOS `BleIo` reuse stays a local test-only patch — vs. carrying
+  them all on the local checkout. **Tracked in §4c / roadmap P0–P1.**
 - **`flake.nix`:** Myco has no Nix dev shell yet. **TBD / open.**
 - **`compileSdk`/`targetSdk`:** proposed at 36 to match reference; not yet pinned
   for Myco. **TBD / open.**

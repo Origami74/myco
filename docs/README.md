@@ -95,10 +95,11 @@ and DNS-intercepts `*.fips` (→ `fd00::`, IPv6 mesh sync) and `*.nsite`
 resolves `.fips`; only relay/Blossom **sync** traffic does. Offline propagation
 is **net-new at the nsite/relay layer** (FIPS transport is live-path only): your
 local relay + Blossom retain authors' signed events and content-addressed blobs and
-re-serve them, so your device becomes a new source. The v1 target is a two-device
-Android demo over BLE, fully offline — one phone browses the other's nsite. See
-the [roadmap](./roadmap.md) for the phased plan and [getting started](./getting-started.md)
-for orientation.
+re-serve them, so your device becomes a new source. The first milestone (P1) is
+BLE peering over FIPS — two devices forming an offline BLE link — and the v1
+product headline (P4) is a two-device Android demo over BLE, fully offline: one
+phone browses the other's nsite. See the [roadmap](./roadmap.md) for the phased
+plan and [getting started](./getting-started.md) for orientation.
 
 > These are **design docs for a not-yet-built app**, written in proposal voice.
 > Open questions are marked **TBD / open**.
@@ -117,11 +118,11 @@ decision.
 | [concepts.md](./design/concepts.md) | Canonical terminology and glossary: device vs nsite-author identity (and the device key's three derived forms), `.fips` vs `.nsite`, what an nsite is, the embedded relay+Blossom, and the Pillars-of-Propagation framing. Read this first. |
 | [architecture.md](./design/architecture.md) | The six-layer single-device stack, the Kotlin↔Rust FFI boundary, the role of the kept TUN, and a per-component reused-vs-net-new provenance table. |
 | [app-shell.md](./design/app-shell.md) | The app/launch model: Myco as the manager app (Library, Pair, Discover, Settings) versus each nsite as its own fullscreen `NsiteActivity` task; `myco://app/<host>` intents, Recents cards via `TaskDescription`, pinned home-screen shortcuts, and per-nsite origin isolation. |
-| [identity-pairing.md](./design/identity-pairing.md) | How a device establishes its identity and how two devices become peers: identity storage, the `myco://pair/<base64>` QR payload, peer-as-data-source, and transitive authorization via invite-pairing (a one-time secret; post-v1). |
+| [identity-pairing.md](./design/identity-pairing.md) | How a device establishes its identity and how two devices become peers: identity storage, the `myco://pair/<base64>` QR payload, peer-as-data-source, and transitive authorization via invite-pairing — the mandatory, always-mutual handshake (echo a one-time long-random secret over Noise + confirm; v1). |
 | [nsite-layer.md](./design/nsite-layer.md) | The content layer: the embedded relay, Blossom, and localhost gateway; the manifest/URL scheme; the resolve→cache→serve flow; and sync-over-FIPS that pulls a peer's manifest + blobs. |
 | [propagation.md](./design/propagation.md) | Offline propagation: the live-path (FIPS) vs store-and-forward (nsite) split, the hybrid model (flood the author-signed manifest events, pull blobs on demand), transitive discovery, dedup/anti-loop, and cache retention. |
-| [ble-interop.md](./design/ble-interop.md) | BLE transport strategy: native `AndroidBleIo` over fips-core's `BleIo` trait, why L2CAP not GATT, the PSM problem and its addr→PSM fix, MAC randomization, and the foreground-service requirement. |
-| [security.md](./design/security.md) | Trust model: self-authenticating data, inherited FIPS Noise crypto, dropping the membership roster, QR-is-TOFU pairing, the nsite sandbox, and a threats/mitigations table. |
+| [ble-interop.md](./design/ble-interop.md) | BLE transport strategy: native `AndroidBleIo` (and a macOS `BluestIo` test backend) over fips-core's `BleIo` trait, why L2CAP not GATT, the PSM problem and universal per-peer PSM discovery, MAC randomization, and the foreground-service requirement. |
+| [security.md](./design/security.md) | Trust model: self-authenticating data, inherited FIPS Noise crypto, dropping the membership roster, scan-and-confirm (handshake-mandatory) pairing, the nsite sandbox, and a threats/mitigations table. |
 | [diagrams/](./design/diagrams/README.md) | The four design diagrams (system layering, pairing & transitive discovery, offline propagation, nsite browse flow) and the established facts baked into them. |
 
 ### Reference
@@ -133,7 +134,7 @@ look-it-up surface.
 | --- | --- |
 | [ports.md](./reference/ports.md) | The localhost ports (relay 4869, Blossom 24242, gateway) and exactly how each is — or is deliberately not — exposed over FIPS; the WebView/localhost vs sync-engine/`.fips` split. |
 | [nostr-kinds.md](./reference/nostr-kinds.md) | The Nostr event kinds Myco reads, stores, and replicates: nsite manifests (15128 root / 35128 named) and FIPS discovery kinds. The app authors none of them. |
-| [ble-wire.md](./reference/ble-wire.md) | On-wire BLE facts: link type (L2CAP CoC SeqPacket), `DEFAULT_PSM` 0x0085, the FIPS service UUID, advert format, the 33-byte pubkey pre-handshake, MTU handling, and the Android addr→PSM scheme. |
+| [ble-wire.md](./reference/ble-wire.md) | On-wire BLE facts: link type (L2CAP CoC SeqPacket), the FIPS service UUID, advert format (incl. the per-peer PSM carrier), the 33-byte pubkey pre-handshake, MTU handling, and universal per-peer PSM discovery (no fixed PSM). |
 | [config.md](./reference/config.md) | The proposed `config.toml` model (identity, node, cache, peers, BLE, propagation, DNS), the field reference, and what is explicitly stripped relative to nostr-vpn. |
 | [ffi-surface.md](./reference/ffi-surface.md) | The Kotlin↔Rust JNI/JSON reducer contract: opaque-handle lifecycle, the `dispatch(actionJson)→stateJson` reducer with a `rev` counter, the action/state shapes, and the BLE byte-bridge. |
 

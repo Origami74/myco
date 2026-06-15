@@ -20,7 +20,7 @@ sync-over-FIPS), [../design/nsite-layer.md §3.2](../design/nsite-layer.md)
 | --- | --- | --- | --- | --- |
 | Embedded Nostr relay | `127.0.0.1` (localhost) | **4869** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:4869` |
 | Embedded Blossom server | `127.0.0.1` (localhost) | **24242** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:24242` |
-| Local HTTP gateway | `127.0.0.1` (localhost) | **TBD** (e.g. 80 / 8080) | WebView only | **No** — localhost-only, never over the mesh |
+| Local HTTP gateway | `127.0.0.1` (localhost) | **80** | any browser on the device (system-wide `*.nsite` interception) | **No** — localhost-only, never over the mesh |
 | DNS interceptor | inside the VpnService/TUN reader (not a bound socket) | n/a | the whole device's resolver | n/a — it *produces* the addresses below |
 | FIPS IPv6 adapter | FSP port **256** (internal mesh port, not a localhost socket) | 256 | FIPS session layer | n/a — this is the mesh transport that *carries* IPv6 to `fd00::` |
 
@@ -67,9 +67,12 @@ blobs by sha256 are **established defaults**
 
 ## 3. Local HTTP gateway — localhost-only
 
-- **Listen:** `http://127.0.0.1:<gateway-port>`. The WebView loads
-  `http://<host>.localhost` (or `<host>.nsite`) and the request lands here.
-- **Consumers:** the **WebView only**. This is the nsite-deck model: an IPv4
+- **Listen:** `http://127.0.0.1:80`. A browser loads `http://<host>.nsite`
+  (no port) and the request lands here. Because `*.nsite → 127.0.0.1` is
+  intercepted system-wide (§4) and the gateway listens on `:80`,
+  `http://<host>.nsite` (no port) resolves in **any** browser on the device —
+  not just the in-app WebView.
+- **Consumers:** any browser on the device. This is the nsite-deck model: an IPv4
   localhost host works in **any** browser, including Chromium (whose AAAA/ULA
   suppression only ever affected IPv6-only `.fips`).
 - **Over FIPS:** **no — deliberately.** The gateway is never exposed on the mesh.
@@ -83,10 +86,13 @@ blobs by sha256 are **established defaults**
   derived htdocs cache in v0 (a path-named serving cache is a deferred roadmap
   optimization); the content-addressed Blossom store is the only retained store.
 
-> **Open question — gateway port.** nsite-deck listens on `:80`. On Android,
-> binding `:80` needs no privilege for an app's own loopback, but a high port
-> (e.g. `:8080`) avoids any ambiguity and is simpler to reason about. The
-> WebView would then load `http://<host>.localhost:8080`. **TBD / open.**
+> **Resolved — gateway listens on `:80`.** Binding `:80` on an app's own loopback
+> needs no privilege on Android, and `:80` is what lets `http://<host>.nsite` (no
+> port) resolve in **any** browser on the device, not just the in-app WebView —
+> because the `*.nsite → 127.0.0.1` interception is system-wide (§4). Fallback: if a
+> device rejects binding loopback `:80`, fall back to a high port (e.g. `:8080`) for
+> the in-app WebView only. This is IPv4 `.nsite` browsing; reaching IPv6 `.fips`
+> content from a browser *outside* the app is the separate, later NAT46 milestone.
 
 ## 4. DNS interceptor — not a port, a TUN-resident resolver
 
@@ -110,7 +116,7 @@ and refuses everything else so the system falls through to normal DNS:
   `0.0.0.0/0` — there is no tunnel-all-internet.
 
 > **`.fips` is AAAA-only / IPv6; `.nsite` is A / IPv4.** This split is why the
-> WebView uses `.nsite` (or `.localhost`) and never `.fips`: Chromium suppresses
+> WebView (and any other browser on the device) uses `.nsite` and never `.fips`: Chromium suppresses
 > IPv6-ULA resolution for typed hostnames, so an IPv6-only `.fips` host would not
 > load in the WebView, while an IPv4 `127.0.0.1` host always does.
 
@@ -146,7 +152,7 @@ delivering `curl http://<npub>.fips:port/` end to end
 ## The two worlds, in one picture
 
 ```
- WebView ──IPv4─► http://<host>.nsite|.localhost ──► 127.0.0.1:<gateway>   (localhost only)
+ Browser ──IPv4─► http://<host>.nsite ──► 127.0.0.1:80 (gateway)   (any browser; localhost only)
                                                           │
                                                    cache hit → serve
                                                    cache miss → sync engine ↓

@@ -8,9 +8,11 @@
 ![Install apps from the people around you](docs/design/diagrams/intro-01-what-it-is.svg)
 
 Myco is a peer-to-peer app-sharing network. Meet someone, **pair** with a quick
-QR scan, and their apps land in your **Library**, ready to use offline. Anything
-you install you can pass on to the next person — so apps spread from phone to
-phone, on their own, with no servers and no single point that has to stay online.
+QR scan, and their apps land in your **Library**, ready to use offline. Pairing
+always goes both ways: the code you scan carries a one-time invite, so the moment
+you connect, apps can flow in either direction between you. Anything you install
+you can pass on to the next person — so apps spread from phone to phone, on their
+own, with no servers and no single point that has to stay online.
 
 ![Get started in 3 steps](docs/design/diagrams/intro-02-get-started.svg)
 

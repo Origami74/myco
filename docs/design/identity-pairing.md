@@ -136,10 +136,10 @@ change.
 myco://pair/<base64(JSON)>
 ```
 
-where the JSON carries **only**:
+where the JSON carries:
 
 ```json
-{ "npub": "npub1…", "name": "green sammy" }
+{ "npub": "npub1…", "name": "green sammy", "pairSecret": "…" }
 ```
 
 The **memorable name** is a human handle for this device — a colour + name like
@@ -147,7 +147,14 @@ The **memorable name** is a human handle for this device — a colour + name lik
 (and editable). It's carried in the QR so peers recognise you by it in their
 **Library** and **circle**, and because it's something you can say out loud, it
 doubles as a quick check that you paired with the right person. It grants no
-authority. The `base64`
+authority.
+
+The **`pairSecret`** is a **long, high-entropy random string** (≈256 bits) — a
+**single-use** bearer token (see §6.1). It authenticates the mandatory pairing
+handshake — proving the peer actually scanned *this* invite — but is itself **not**
+a membership or authorization token. Its unguessable length is the whole defence:
+there is no key-exchange ceremony, just **echo-and-match** over the already-encrypted
+mesh channel (§6.1). The `base64`
 is URL-safe, unpadded — matching the encoding nostr-vpn uses for its own payloads
 ([invite.rs:10](../../reference/nostr-vpn/crates/nostr-vpn-core/src/invite.rs)).
 
@@ -173,7 +180,7 @@ carries a versioned, multi-field membership document:
 | nvpn://invite/ field | Why Myco drops it |
 | --- | --- |
 | `networkId`, `networkName` | no network construct exists |
-| `inviteSecret` | no join-as-membership; nothing to authorize against |
+| `inviteSecret` | **kept, but reframed:** Myco carries a one-time `pairSecret` — a long random string echoed back over the Noise-encrypted channel — that proves the peer saw your invite, *not* a join-as-membership / authorization token |
 | `admins[]` | no admin role; data is self-authenticating, not authority-gated |
 | `participants[]` | no roster; you collect peers one npub at a time |
 | `inviterEndpoints[]`, `relays[]` | endpoints derive from npub via `<npub>.fips`; no relay hints needed |
@@ -182,26 +189,32 @@ The upstream parser even *requires* an admin to exist
 ([invite.rs:89–110](../../reference/nostr-vpn/crates/nostr-vpn-core/src/invite.rs)) —
 an invite with no admin is an error. Myco has no such concept. We keep the
 prefix-and-base64 *envelope* shape and the URL-safe-no-pad encoding, and throw
-away the entire membership document inside it. Our envelope decodes to two
-fields, neither of which grants any authority.
+away the entire membership document inside it. Our envelope decodes to three
+fields (`npub`, `name`, `pairSecret`), where `pairSecret` authenticates the
+pairing handshake but grants **no membership or admin authority**.
 
 ## 5. Peer as data source
 
 When you scan a peer's `myco://pair/<base64>` (or open the deep link), the app:
 
-1. Decodes and validates the npub (+ memorable name).
+1. Decodes and validates the npub, memorable name, and `pairSecret`.
 2. Derives `node_addr` and the `fd00::` ULA from the npub (§1) — no network call.
-3. Adds two sources to your source set, addressed deterministically:
+3. **Initiates the mandatory handshake** against the inviter's on-device pairing
+   endpoint at `<npub>.fips` (§6.1): echoes `pairSecret` back over that
+   Noise-encrypted channel, the inviter matches it and confirms.
+4. On a completed handshake, adds two sources to your source set, addressed
+   deterministically:
    - relay at `<npub>.fips:4869`
    - Blossom at `<npub>.fips:24242`
-4. Stores the npub (and memorable name) in your **circle** (the local peer list).
+5. Stores the npub (and memorable name) in your **circle** (the local peer list).
 
-That is the entire effect of "pairing." There is **no handshake to accept, no
-roster to be added to, no admin to approve it.** Adding a source cannot be
-rejected by the peer because it is a purely local act — you are simply deciding
-to *try fetching from* them. Whether anything is actually reachable is a
-liveness question resolved later over FIPS (live-path only; see
-[propagation.md](./propagation.md)), not a permission question.
+Pairing is **handshake-mandatory and always mutual**: scanning is not a purely
+local act — it initiates the secret-echo handshake against the inviter's on-device
+`<npub>.fips` endpoint, and completion makes you a **mutual** source (each side
+holds the other; see §6). **Both devices must be reachable at pairing time** —
+they're physically together when the QR is scanned, so the BLE link is up.
+Whether anything is actually reachable later is a liveness question resolved over
+FIPS (live-path only; see [propagation.md](./propagation.md)).
 
 Why this is safe without authorization: all content the peer serves is
 **self-authenticating** — Nostr events are signed by their (external) author and
@@ -221,46 +234,52 @@ trust cost; verification happens at fetch/serve time, covered in
 
 ## 6. Mutual pairing and transitive authorization
 
-A one-way scan lets you fetch a peer's **own** content (§5) — that is the **v1
-default** and needs no handshake. A **mutual pairing** is the richer, *consented*
-relationship: it additionally authorizes each side to **poll the other for their
-collected peer list**, transitively widening reach (the right half of
+Every pairing is **mutual** (§5): completing the handshake makes each side a
+source for the other and additionally authorizes each side to **poll the other
+for their collected peer list**, transitively widening reach (the right half of
 [diagram 02](diagrams/02-pairing-transitive-discovery.svg)).
 
 A mutual pairing is formed by **invite-pairing with a one-time secret** (§6.1) —
-**not** by both parties scanning each other. (This *replaces* the earlier
-mutual-scan idea: a single scan plus a secret-authenticated round-trip over the
-mesh yields the mutual relationship, and the secret is what *proves* the peer
-actually saw your invite.) Invite-pairing is a **post-v1** mode; v1 ships only the
-one-way, fetch-only scan (§5).
+**not** by both parties scanning each other. A single scan plus a
+secret-authenticated round-trip over the mesh yields the mutual relationship, and
+the secret is what *proves* the peer actually saw your invite. Invite-pairing is
+**the** pairing method; there is no separate one-way, no-handshake mode.
 
-### 6.1 Invite-pairing via a one-time secret (post-v1)
+### 6.1 Invite-pairing via a one-time secret
 
 Modeled on **NIP-46 (Nostr Connect)** — a connection token carrying a one-time
 secret plus a rendezvous, where the other side connects, authenticates with the
 secret, and an ack completes the handshake. FIPS supplies the rendezvous (the
 mesh), so no public relay is required.
 
-1. **Invite token** (shown as a QR / link): `{npub_A, one_time_secret,
-   memorable_name}`. `<npub_A>.fips` is derivable from `npub_A` (§1), so the token
-   carries no address. The secret is high-entropy, **single-use**, and
-   **TTL-bounded**.
+1. **Invite token** (shown as a QR / link): `{npub_A, name, pairSecret}`.
+   `<npub_A>.fips` is derivable from `npub_A` (§1), so the token carries no address.
+   The `pairSecret` is a **long random string** (≈256 bits), **single-use**, and
+   optionally **TTL-bounded**.
 2. **B scans once** and opens a connection to **A's pairing endpoint at
    `<npub_A>.fips`** — an **on-device** endpoint (an FSP port or a channel on the
-   embedded relay; no third party) — authenticating with the one-time secret and
-   sending `{npub_B, name}`. So the secret is never a replayable bearer token, the
-   exchange runs a **PAKE (e.g. SPAKE2) keyed by the secret**: a captured invite
-   cannot be replayed or offline-guessed.
-3. **A returns an ack** (+ A's memorable name), validates the single-use secret,
-   and stores B in its circle — completing a **mutual** pairing from a **single**
-   scan. Both sides now hold each other, so each may poll the other's peer list.
+   embedded relay; no third party). That channel is already **Noise-XK encrypted and
+   authenticated to A's device key** (§1), so B is talking to the real A in
+   confidence. B simply **echoes the `pairSecret` back** over it, along with
+   `{npub_B, name}`. No key-exchange protocol is needed: because the secret is a long
+   random string, echoing it *inside the encrypted channel* reveals nothing to anyone
+   else and cannot be guessed.
+3. **A matches the secret** against the one it generated (single-use, not yet
+   redeemed) and shows a **confirm prompt** — B's npub + memorable name — that A's
+   user taps **OK** to accept. A then **acks** (+ A's memorable name), marks the
+   secret consumed, and stores B in its circle — a **mutual** pairing from a
+   **single** scan. Both sides now hold each other, so each may poll the other's
+   peer list.
 
-This *strengthens* the bare trust-on-first-use of a one-way scan (see
-[security.md § 4](./security.md)): the secret cryptographically authenticates that
-the peer saw your invite, closing the relay-MITM gap that one-way TOFU leaves open.
-Because the endpoint is on-device, invite-pairing works peer-to-peer / offline, the
-same trust model as today — both sides must be reachable when B completes (an
-optional public rendezvous for fully-async pairing is a possible later extension).
+This is **stronger** than a bare trust-on-first-use scan (see
+[security.md § 4](./security.md)): two things already hold the line — FIPS **Noise
+XK** authenticates and encrypts the channel to `<npub_A>.fips` (no relay-MITM,
+nothing on the wire to capture), and the **OK prompt** keeps a human in the loop to
+confirm the memorable name. The long random `pairSecret` supplies the missing piece —
+proof the peer actually scanned *this* invite (and anti-spam, since your npub is
+public). Because the endpoint is on-device, invite-pairing works peer-to-peer /
+offline — both sides must be reachable when B completes (an optional public
+rendezvous for fully-async pairing is a possible later extension).
 
 Once mutually paired:
 
@@ -268,10 +287,11 @@ Once mutually paired:
   derives Carl's and Dana's `<npub>.fips` addresses (§1) and can fetch their
   nsites too — multi-hop over FIPS, with Ben as an intermediate hop on the live
   path.
-- **The completed invite-pairing is the authorization.** Ben only answers Alice's
-  peer-list poll because they completed invite-pairing — a lightweight, symmetric
-  consent. It is *not* an admin grant and confers no write access: Alice can read
-  Ben's list of npubs, that is all.
+- **The completed invite-pairing is the authorization.** Because every pairing is
+  mutual, Ben answers Alice's peer-list poll precisely because they completed
+  invite-pairing — a lightweight, symmetric consent that exists in v1. It is *not*
+  an admin grant and confers no write access: Alice can read Ben's list of npubs,
+  that is all.
 - The shared data is a **list of npubs** (the cheapest possible currency:
   re-deriving everything else from each npub is free). No endpoints or membership
   tokens cross this poll.
@@ -287,15 +307,18 @@ pull-only (fetched only when a site is opened).
 
 ### Open questions
 
-- **Peer-list poll wire format & endpoint.** Is the poll a dedicated Nostr event
-  kind on the peer's relay, a Blossom-style listing, or a new FSP request?
-  **TBD / open.**
-- **Pairing proof — resolved by §6.1.** The one-time secret in invite-pairing
-  *is* the proof Alice paired with Ben: a captured invite cannot complete the
-  PAKE-bound handshake. What remains open is the **invite-pairing wire detail** —
-  the token format, the PAKE choice (SPAKE2?), the on-device endpoint (a dedicated
-  FSP port vs. a NIP-46-style channel on the embedded relay), and single-use / TTL
-  / rate-limit enforcement. **TBD / open.**
+- **Peer-list poll wire format & endpoint.** Because all pairings are now mutual,
+  the **transitive peer-list-poll authorization exists in v1** (any completed
+  pairing authorizes the poll) — but the poll *mechanism itself* can still land
+  later. Is the poll a dedicated Nostr event kind on the peer's relay, a
+  Blossom-style listing, or a new FSP request? **TBD / open.**
+- **Invite-pairing wire detail — the v1 mechanism.** The long random `pairSecret`
+  in invite-pairing (§6.1) *is* the proof Alice paired with Ben: echoed back inside
+  the Noise-encrypted channel, an unguessable single-use string a captured/relayed
+  invite cannot reproduce. Invite-pairing is **the** v1 pairing path, so these are v1
+  must-build, with detail still open: the token format and secret length, the
+  on-device endpoint (a dedicated FSP port vs. a NIP-46-style channel on the embedded
+  relay), and single-use / TTL / rate-limit enforcement. **TBD / open.**
 - **Revocation / unpairing.** Removing a peer locally stops *us* polling them,
   but there is no negative announcement. Whether a peer should stop answering an
   old mutual pairing after the counterpart removed them is **TBD / open**.

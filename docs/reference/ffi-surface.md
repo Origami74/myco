@@ -129,7 +129,7 @@ pub enum NativeAppAction {
     RemoveFromLibrary { author: String, dTag: Option<String> },
 
     // --- peers ---
-    Pair    { npub: String, name: Option<String> },   // name = memorable handle (colour + name)
+    Pair    { npub: String, name: Option<String>, pairSecret: String },  // QR: npub + memorable name + one-time long-random secret; triggers the mandatory mutual handshake
     Unpair { npub: String },
 
     // --- discovery ---
@@ -167,11 +167,23 @@ Notes:
   button. Kotlin resolves the `myco://app/<host>` intent to that
   activity, dispatches `OpenNsite` to ensure the blobs are present (readiness),
   then loads `<host>.nsite` via the localhost gateway. Reload / in-app
-  navigation are the nsite developer's responsibility. **TBD/open:** how Kotlin
-  observes readiness — a "pending → ready" status on the synced site that later
-  `Tick`s resolve (see Blocking actions, below).
-- BLE **role is fixed to central** on Android (see
-  [config.md § `[ble]`](./config.md#ble)); there is no role action in v1.
+  navigation are the nsite developer's responsibility. Kotlin observes readiness
+  via the `status: SiteStatus` field carried on the site's `LibraryItem` /
+  `DiscoveredNsite` entry: `OpenNsite` flips it to `state: "syncing"` and later
+  `Tick`s advance `filesPulled`/`filesTotal` until `state: "ready"` (load the
+  gateway), `"unreachable"` (no holder yet), or `"incomplete"` (verify failed —
+  abort, do not cache). Kotlin renders the matching sync-state copy below.
+- **Pairing is a mandatory mutual handshake.** `Pair` carries the QR-scanned
+  `{ npub, name, pairSecret }`; the core completes the §6.1 invite-pairing handshake
+  against the peer's on-device `<npub>.fips` endpoint — echo the one-time
+  `pairSecret` (a long random string) back over the Noise-encrypted channel, the peer
+  matches it and confirms. `PairedPeer.pairing` tracks it
+  (`pending` → `complete`/`failed`). There is no one-way fetch-only pairing. See
+  [identity-pairing.md § 6.1](../design/identity-pairing.md).
+- BLE **role is symmetric** — every node both advertises its OS-assigned PSM
+  (peripheral) and dials the peer's learned PSM (central); it is **not** fixed to
+  central (see [config.md § `[ble]`](./config.md#ble) and
+  [ble-interop.md](../design/ble-interop.md)). There is no role action in v1.
 - A Kotlin `NativeActions` helper object builds these JSON objects (cf.
   nostr-vpn `NativeActions`), e.g.
   `NativeActions.pair(npub, name) = action("pair", "npub" to npub, "name" to name)`.
@@ -266,6 +278,7 @@ pub struct LibraryItem {
     pub url_host: String,        // npub1… (root) or <pubkeyB36><dTag> (named)
     pub pinned: bool,
     pub last_updated: u64,
+    pub status: SiteStatus,      // sync/readiness for OpenNsite (see below)
 }
 
 #[serde(rename_all = "camelCase")]
@@ -276,12 +289,22 @@ pub struct DiscoveredNsite {
     pub created_at: u64,
     pub source: String,          // "relay" | "ble" | "cache"
     pub in_library: bool,
+    pub status: SiteStatus,      // sync/readiness for OpenNsite (see below)
+}
+
+#[serde(rename_all = "camelCase")]
+pub struct SiteStatus {
+    pub state: String,           // "syncing" | "ready" | "unreachable" | "incomplete"
+    pub files_pulled: u64,
+    pub files_total: u64,
+    pub message: String,         // human-readable detail (see sync-state copy below)
 }
 
 #[serde(rename_all = "camelCase")]
 pub struct PairedPeer {
     pub npub: String,
     pub name: String,            // memorable name (colour + name)
+    pub pairing: String,         // "pending" | "complete" | "failed" — §6.1 invite-pairing handshake state
     pub reachable: bool,         // currently reachable over mesh/BLE
     pub last_seen_text: String,
 }
@@ -298,7 +321,7 @@ pub struct BlePeer {
 #[serde(rename_all = "camelCase")]
 pub struct BleStatus {
     pub enabled: bool,
-    pub role: String,            // "central" (fixed on Android in v1)
+    pub role: String,            // node is both peripheral + central (symmetric per-peer PSM discovery); not fixed central
     pub scanning: bool,
     pub adapter_name: String,
 }

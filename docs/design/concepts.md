@@ -169,9 +169,11 @@ home-screen pinning, per-nsite origin isolation — is in
 Every Myco device runs **its own** Nostr relay and Blossom server in-process.
 No external services are required.
 
-- **Embedded Nostr relay** — default `ws://localhost:4869`. Stores and serves the
-  signed manifest events (kinds 15128/35128), and **fans them out** to connected
-  peers (a relay-mesh multiplex — events only, source-excluded; see
+- **Embedded Nostr relay** — default `ws://localhost:4869`. A plain NIP-01 store +
+  socket: it **stores and serves** the signed manifest events (kinds 15128/35128).
+  It does **not** fan out on its own — a separate **nsite-deck propagator** does the
+  forwarding, by subscribing to the relevant relays (local + connected peers) and
+  publishing those events on to peer relays (events only, source-excluded; see
   [propagation.md](./propagation.md)).
 - **Embedded Blossom server** — default `http://localhost:24242`. Stores and
   serves the sha256-addressed blobs (Blossom BUD-01).
@@ -281,12 +283,13 @@ mechanisms that Myco deliberately keeps separate:
 The **proposed default propagation mode is hybrid**: *announce availability
 widely, pull content on demand.* What floods is the author-signed **manifest
 event** itself (kind 15128 / 35128) — small, self-authenticating, and re-emitted
-**unmodified** by relays so the author's signature stays valid. There is no new
-"announcement" kind and no holder signature: re-emitting an author's manifest is
-plain relay behaviour. "Announce widely" = flood those manifest events with a TTL
-of 5 hops; "pull on demand" = fetch the large **blobs** only when a site is
-opened. Discovery ("nsites around me") is just the manifests you have received via
-flood or queried from reachable relays. This split — FIPS for the live hop, the
+**unmodified** so the author's signature stays valid. The flooding is done by the
+**nsite-deck propagator** (subscribe to local + peer relays, publish on to peer
+relays), not by the relay itself. There is no new "announcement" kind and no holder
+signature: the propagator forwards the author's manifest verbatim. "Announce widely"
+= flood those manifest events with a TTL of 5 hops; "pull on demand" = fetch the
+large **blobs** only when a site is opened. Discovery ("nsites around me") is just
+the manifests you have received via flood or queried from reachable relays. This split — FIPS for the live hop, the
 nsite layer for survival across partition — is drawn in
 [diagrams/03-offline-propagation.svg](./diagrams/03-offline-propagation.svg).
 

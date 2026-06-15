@@ -186,41 +186,64 @@ replication — are **additive and deferred to a later milestone** (NIP-42 is
 non-breaking on the wire). The only coarse knob today is the FIPS peer ACL ("block
 this peer", above).
 
-## 4. Pairing trust: QR is trust-on-first-use
+## 4. Pairing trust: scan-and-confirm, mutual by default
 
 Pairing is the one moment a human asserts "this is who I think it is."
 
-- The QR payload is `myco://pair/<base64>` carrying an **npub + optional
-  memorable name only** — no MAC, no PSM (those are learned later over BLE adverts; see
+- The QR payload is `myco://pair/<base64>` carrying JSON
+  **`{ npub, name, pairSecret }`** — the inviter's npub, an optional memorable
+  name, and a **`pairSecret`**: a long, high-entropy random string (≈256 bits),
+  single-use, that the scanning peer echoes back to complete the handshake. There
+  is still no MAC and no PSM in the payload (those are
+  learned later over BLE adverts; see
   [diagrams/02-pairing-transitive-discovery.svg](diagrams/02-pairing-transitive-discovery.svg)).
   Myco reuses nostr-vpn's existing QR machinery (CameraX + ML Kit
   BarcodeScanning, payload-prefix check, deep-link intent filter;
   [../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)).
-- **The trust model is TOFU (trust-on-first-use).** Scanning a QR binds an npub
-  to "the device the person across the table showed me." The cryptographic
-  guarantee afterward is strong: every later BLE/mesh contact with that peer is
-  Noise-authenticated against that exact pubkey, so a man-in-the-middle who did
-  not have the private key cannot impersonate the paired peer on subsequent
-  connections.
-- **What QR does not protect against** is a malicious QR at pairing time. If you
-  scan an attacker's npub believing it is your friend's, every later
-  authenticated session is faithfully authenticated *to the attacker*. There is
-  no out-of-band identity verification (no safety-number comparison) in v1.
-  Because npubs are public and self-asserted, the security of pairing rests
-  entirely on the human seeing the right screen. **Open:** whether to add an
-  optional verification step (e.g. comparing a short authentication string /
-  memorable-name confirmation) for higher-assurance pairing.
-- **Mutual pairing strengthens TOFU.** A bare one-way scan is fetch-only and rests
-  on TOFU. The richer *mutual* relationship is instead formed by **invite-pairing**
-  — a one-time secret whose PAKE-bound handshake authenticates that the peer
-  actually saw your invite (post-v1; see
-  [identity-pairing.md § 6.1](./identity-pairing.md)). That closes the malicious-QR
-  gap above for the mutual case: a captured invite cannot complete the handshake.
+- **The trust model is scan-and-confirm over an already-encrypted channel, not
+  bare TOFU.** Scanning the QR does not merely bind an npub on faith — it initiates
+  the mandatory **invite-pairing handshake** against the inviter's on-device
+  `<npub>.fips` endpoint. That channel is already **Noise-XK authenticated and
+  encrypted** to the inviter's device key, so the scanner just **echoes the
+  `pairSecret` back** inside it; the inviter matches the (single-use) secret and the
+  human taps **OK** to confirm the memorable name
+  ([identity-pairing.md § 6.1](./identity-pairing.md)). No password-authenticated
+  key exchange is needed — FIPS already supplies the authenticated, confidential
+  channel, and the long random secret is simply an unguessable proof-of-scan.
+  Completing the handshake makes the two devices **mutual sources** of each other.
+  This is the only pairing path; pairing is **always mutual** and **always
+  handshake-gated**. The cryptographic guarantee afterward is strong: every later
+  BLE/mesh contact is Noise-authenticated against that exact pubkey, so a
+  man-in-the-middle without the private key cannot impersonate the paired peer on
+  subsequent connections.
+- **The handshake closes the relay-MITM / malicious-QR gap by default.** Three
+  things stack up: the channel to `<npub>.fips` is Noise-authenticated to the
+  inviter's key (a passive relay between the two devices learns nothing and cannot
+  impersonate either end), the `pairSecret` is a single-use, unguessable random
+  string echoed *inside* that encrypted channel (a captured or relayed invite cannot
+  reproduce or replay it), and the inviter's **OK prompt** shows the scanner's npub +
+  memorable name so the human rejects a wrong or racing peer. This is a meaningful
+  improvement over the old bare-TOFU posture, where scanning an attacker's npub
+  silently authenticated every later session *to the attacker*. Pairing still rests
+  on the human scanning the intended invite. **Open:** whether to add an
+  *additional* out-of-band step (e.g. comparing a short authentication string) for
+  higher-assurance pairing on top of the OK confirmation.
+- **Both devices must be reachable at pairing time.** The handshake is a live
+  round-trip, so inviter and scanner must both be online to each other when the
+  QR is scanned. In practice they are physically together, so the BLE link is up
+  — the handshake runs over BLE (or IP). There is no deferred / offline pairing:
+  if the inviter's `<npub>.fips` endpoint is not reachable, pairing does not
+  complete.
+- **`pairSecret` authenticates, it does not authorize.** Holding the secret lets
+  a peer complete the handshake; it confers **no membership and no admin
+  authority** (there is no roster or admin to join — §3). After pairing, the
+  relationship is exactly "mutual data source," nothing more.
 - **Transitive discovery.** Once paired, peers may learn of *further* peers
   through the mesh. Discovery is not the same as pairing: a transitively
-  discovered npub is still just a data source whose every artifact you verify.
-  No transitively discovered peer gains any authority a directly paired one
-  lacks, because pairing confers no authority beyond "exchange verifiable data."
+  discovered npub is still just a data source whose every artifact you verify,
+  and it has **not** completed the mutual handshake with you. No transitively
+  discovered peer gains any authority a directly paired one lacks, because
+  pairing confers no authority beyond "exchange verifiable data."
 
 ## 5. The nsite sandbox
 
@@ -269,6 +292,16 @@ per-capability permission model, user-in-the-loop prompts, per-nsite capability
 scoping, and a clear UI for what an nsite is asking to do. Designing that is
 deferred; v1 sidesteps it entirely by shipping pure-static.
 
+One concrete instance of this is propagation.md's open question on
+**nsite-scoped propagation (capability-gated)** — whether a loaded nsite could
+influence what the propagator gossips onward (see
+[propagation.md](./propagation.md)). That is exactly the kind of affordance that
+is **not** free expansion of an untrusted nsite: any such hook is a **bounded,
+permissioned capability** subject to the per-capability permission model above
+(user-in-the-loop, per-nsite scoping), never an implicit power the WebView
+sandbox grants by default. It is called out there as an open question, not a v1
+capability.
+
 ## 6. Threats and mitigations
 
 | Threat | What an attacker gains | Mitigation |
@@ -278,7 +311,7 @@ deferred; v1 sidesteps it entirely by shipping pure-static.
 | **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | LRU cache (default cap **2 GB**); Library sites are **pinned** (exempt from eviction); per-source caps / rate limits (TBD). Junk that fails verification is never stored (§1). |
 | **Identity / link spoofing** | Pretends to be a paired peer | Noise IK/XK over secp256k1; identity is pubkey not MAC; spoof cannot complete handshake (§2). |
 | **Replay** | Re-injects captured datagrams | 2048-entry sliding replay window at both FMP and FSP layers (§2). |
-| **Malicious QR at pairing** | Gets you to pair with the attacker's npub (TOFU break) | Human verification at scan time; optional safety-string check is an open proposal (§4). |
+| **Malicious / relayed QR at pairing** | Tries to bind the attacker's npub as your paired peer | Scan-and-confirm over Noise: the single-use, unguessable `pairSecret` is echoed back inside the Noise-authenticated channel to the inviter's `<npub>.fips` and confirmed by the inviter's OK prompt, so a captured/relayed invite cannot bind (§4). Optional out-of-band safety-string check on top is an open proposal (§4). |
 | **Malicious nsite content** | Untrusted JS in the WebView | Pure-static v1, no capability API; per-nsite origin isolation + CSP; WebView never resolves `.fips` (§5). |
 | **Capability-API abuse** (future) | nsite JS reaches host affordances (query peers, write blobs) | Out of scope for v1; the app never signs/publishes events, so no `sign()` capability exists; needs explicit permission model if any capability is ever introduced (§5). |
 | **Propagation-privacy leak** | Observers learn what you host / re-serve | See below — partial mitigation only (open). |

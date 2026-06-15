@@ -59,8 +59,9 @@ and as this device's relay/Blossom address), the **node_addr**
 (`SHA256(npub)[0:16]`, the FIPS routing identifier), and the **`fd00::/8` ULA**
 (`fd ‖ node_addr[0:15]`, what `<npub_device>.fips` resolves to). The load-bearing
 consequence: once you have a peer's device npub, you can compute where they live
-on the mesh with **no further exchange** — which is why a QR code carrying only
-an npub is enough to pair. Note this device npub is a *holder* address: the site
+on the mesh with **no further exchange** — so the QR code need only carry that
+npub plus a one-time `pairSecret` to bootstrap the handshake. Note this device
+npub is a *holder* address: the site
 you fetch from a peer is identified by its own *author* npub, a different key.
 There is one device identity per device in v1; multi-persona is a later
 milestone. See [design/concepts.md](./design/concepts.md) and

@@ -39,14 +39,15 @@ does not let data survive a partition.
 ### Layer B — nsite store-and-forward: net-new, survives partition
 
 The behaviour "cache Alice's site and re-serve it to Carl later, offline" is
-**net-new** and is implemented at the nsite/relay layer. The embedded relay and
-Blossom server ([../../reference/site-deck](../../reference/site-deck)) retain
-peers' signed events and content-addressed blobs and thereby **become a new
-source**. When Ben's device caches Alice's site, Ben can serve it to Carl over a
-fresh BLE hop even though Alice's original holder is nowhere in sight.
-Re-emitting Alice's already-signed manifest relay-to-relay is ordinary relay
-behaviour — Ben is a *holder*, not the author; his device never signs anything
-on Alice's behalf.
+**net-new** and is implemented at the nsite/relay layer. The embedded relay
+(`myco-relay`, a plain NIP-01 store + socket) and Blossom server
+([../../reference/site-deck](../../reference/site-deck)) retain peers' signed
+events and content-addressed blobs and thereby **become a new source**. When
+Ben's device caches Alice's site, Ben can serve it to Carl over a fresh BLE hop
+even though Alice's original holder is nowhere in sight. The re-emission of
+Alice's already-signed manifest relay-to-relay is done by the **nsite-deck
+propagator** (not by the relay itself; see §2) — Ben is a *holder*, not the
+author; his device never signs anything on Alice's behalf.
 
 This is the layer that survives offline / partition. It is patterned on
 bitchat's offline mesh primitives (used as a *pattern reference only* — its
@@ -93,18 +94,21 @@ is normal relay behaviour, not authoring, and requires no holder signature.
 - **Only manifests propagate multi-hop. Blobs stay pull-only** — there is no
   TTL-flood of blobs.
 
-#### Mechanism: relay-mesh fanout
+#### Mechanism: the nsite-deck propagator
 
-The flood is not a bespoke protocol — it is the embedded relay acting as a
-**relay-mesh node**. When the relay accepts an event (pushed by a peer or pulled
-in by sync), it **fans it out to every other connected peer** — an
-`["EVENT", …]` to each `<peer>.fips:4869`, source excluded — so a manifest ripples
-outward one relay-hop at a time. "Connected peers" are your live FIPS links
-(directly paired peers and, transitively, their peers — §3). This is push-based:
-a node need not ask for a site to learn it exists; a connected neighbour
-volunteers the manifest. The relay store, the sync engine, and this fanout share
-one event intake, so an event learned by any path is both stored locally and
-re-broadcast once. Loop/duplicate suppression is in §5; the relay-side
+The flood is not a bespoke protocol, and it is **not relay behaviour** — the
+embedded `myco-relay` is a plain NIP-01 store + socket that never fans anything
+out on its own. The fanout is the job of a separate **propagator** process
+inside `nsite-deck`. The propagator holds an internal **subscription** to the
+relevant relays (the local `myco-relay` plus the relays of connected peers) and,
+when it sees a manifest, **publishes** it — an `["EVENT", …]` to each
+`<peer>.fips:4869` relay, source excluded — so a manifest ripples outward one
+relay-hop at a time. "Connected peers" are your live FIPS links (directly paired
+peers and, transitively, their peers — §3). This is push-based: a node need not
+ask for a site to learn it exists; the propagator at a connected neighbour
+volunteers the manifest. The relay store, the sync engine, and the propagator
+share one event intake, so an event learned by any path is both stored locally
+and re-published once. Loop/duplicate suppression is in §5; the propagator-side
 behaviour is specified in [./nsite-layer.md §2.1](./nsite-layer.md). It is wanted
 **early** (roadmap P2), with transitive discovery and scale-dedup layered on at
 P4.
@@ -123,11 +127,16 @@ reconcile on a new link** — fire a one-shot reconcile the moment a peer connec
 
 ### Pull (fetch content on demand)
 
-When a user opens a site (or the app decides to pre-fetch a pinned one), the app
-*pulls* the actual content from a holder whose manifest it has: it already has
-(or queries for) the manifest event, then fetches each referenced blob by sha256
-from that holder's Blossom server (`<npub_holder>.fips:24242`), verifies, and
-caches. The manifest identifies the site by the **author** pubkey; the holder it
+When a user opens a site — or when the **propagator eagerly pre-fetches a pinned
+one** — the app *pulls* the actual content from a holder whose manifest it has:
+it already has (or queries for) the manifest event, then fetches each referenced
+blob by sha256 from that holder's Blossom server (`<npub_holder>.fips:24242`),
+verifies, and caches. The pre-fetch is owned by the propagator's **pinned-site
+subscription** (an internal subscription for kinds `15128`/`35128`): when a
+*newer* manifest arrives for a Library-pinned `(author, dTag)`, the propagator
+auto-runs this blob pull in the background so pinned apps stay current and
+offline-ready before the user next opens them (see
+[./nsite-layer.md §5.4](./nsite-layer.md)). The manifest identifies the site by the **author** pubkey; the holder it
 is pulled from is a *different* key, reached at `<npub_holder>.fips`. A holder's
 relay is queried with `{kinds:[15128 or 35128], authors:[<author_pubkey>]}`. The
 browse lifecycle is detailed in
@@ -146,13 +155,18 @@ How does Alice come to receive manifests from nodes she never paired with? Via
 transitive discovery, authorized by a **mutual pairing**. See
 [diagrams/02-pairing-transitive-discovery.svg](diagrams/02-pairing-transitive-discovery.svg).
 
-- **Pairing.** A one-way scan of a `myco://pair/<base64>` card (device npub +
-  memorable name; no MAC/PSM — those are learned over BLE adverts) is fetch-only —
-  a device's npub *is* its FIPS address, so Alice can reach Ben's relay (`:4869`)
-  and Blossom (`:24242`) over the mesh. A **mutual** relationship is instead formed
-  by **invite-pairing** (a one-time secret; post-v1 — see
-  [identity-pairing.md § 6.1](./identity-pairing.md)), not by both sides scanning.
-  (The device key is only ever a mesh/relay address; never an nsite author key.)
+- **Pairing.** Pairing is **handshake-mandatory and always mutual**. Scanning a
+  `myco://pair/<base64>` card (carrying `{ npub, name, pairSecret }`; no MAC/PSM —
+  those are learned over BLE adverts) does not merely grant fetch access: it
+  initiates the **invite-pairing handshake** against the inviter's on-device
+  `<npub>.fips` endpoint — the scanner echoes `pairSecret` back over that
+  Noise-encrypted channel and the inviter confirms — and completion makes **both**
+  devices a source for the other. The one-time `pairSecret` (a long random string)
+  authenticates the handshake but grants no membership or admin authority. A device's npub *is* its FIPS address, so once
+  paired Alice can reach Ben's relay (`:4869`) and Blossom (`:24242`) over the
+  mesh. This invite-pairing handshake ([identity-pairing.md § 6.1](./identity-pairing.md))
+  is the **only** pairing path. (The device key is only ever a mesh/relay address;
+  never an nsite author key.)
 - **Mutual pairing = authorization.** A mutual pairing authorizes Alice to **poll
   Ben's collected peer list**. Ben, in effect, introduces his peers to Alice.
 - **Transitive reach.** Having learned Ben's peers (Carl, Dana, …), Alice can
@@ -165,6 +179,10 @@ This is the social analogue of bitchat's neighbour-gossip TLV
 where a node advertises which peers it is directly connected to. Myco adapts
 the idea to *authorized* polling of a curated peer list rather than unsolicited
 topology gossip — pairing is the consent gate.
+
+Because every pairing is now mutual (handshake-mandatory), the **authorization to
+poll a paired peer's list exists in v1** — the consent gate is the completed
+handshake. The poll *mechanism* itself can still land later.
 
 **TBD / open:** the exact authorization mechanism. Is "Ben lets Alice poll his
 list" enforced (e.g. Ben only answers a peer-list query from npubs he has
@@ -294,9 +312,10 @@ To be unambiguous, because this is the most common point of confusion:
   between online nodes. Nothing in this document's announce/pull/cache/sync
   behaviour comes from FIPS.
 - **Myco's relay + nsite layer provides:** everything in §§2–6 — the
-  manifest flood, the on-demand blob pull, transitive discovery, dedup/anti-loop,
-  and the cache that makes a node a re-serving source. This is the layer that
-  "survives a partition."
+  manifest flood (driven by the **nsite-deck propagator**, not the plain NIP-01
+  `myco-relay` store), the on-demand blob pull and eager pinned-refresh (also the
+  propagator), transitive discovery, dedup/anti-loop, and the cache that makes a
+  node a re-serving source. This is the layer that "survives a partition."
 
 If a future reader is tempted to "just add store-and-forward to FIPS," the
 answer is no: it belongs here, at the layer where the data is self-authenticating
@@ -327,3 +346,13 @@ and a cache is a first-class source.
 - **Sync scope & cost on BLE.** Negentropy (NIP-77) reconcile cadence and
   `NEG-MSG` round size may need different parameters over FIPS L2CAP than over
   bitchat's GATT links; **TBD / open** pending the two-device demo.
+- **nsite-scoped propagation (capability-gated).** A loaded nsite might want to
+  widen what gets gossiped — e.g. a kind-1 client nsite asking the propagator to
+  also reconcile/forward kind-1 notes. But nsites are **untrusted, sandboxed
+  content**, so this can only ever be a **bounded, permissioned capability**, not
+  an open door. The propagator's subscribed kinds/filters are the natural control
+  point: **default-deny**, with explicit limits on kinds, rate, storage, and scope,
+  gated behind user consent. **TBD / open:** the capability's exact shape and
+  enforcement. See [security.md § 5](./security.md),
+  [nsite-layer.md § 7](./nsite-layer.md), and the roadmap "nsite capability API"
+  item.

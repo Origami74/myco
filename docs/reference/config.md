@@ -117,15 +117,16 @@ npub  = "npub1bob…"
 # name omitted
 
 # ---------------------------------------------------------------------------
-# [ble] — offline transport. Android is the CENTRAL/dialer (it cannot bind the
-# fixed default PSM 0x0085 as a listener). addr->PSM map is learned at runtime from
-# adverts, not persisted here.
+# [ble] — offline transport. Symmetric per-peer PSM discovery: every node
+# advertises its OS-assigned listener PSM and every dialer reads the peer's PSM
+# before connect(). No fixed listener role; the addr->PSM map is learned at
+# runtime from adverts, never persisted. 0x0085 is only a LEGACY default.
 # ---------------------------------------------------------------------------
 [ble]
-enabled = true
-role    = "central"        # FIXED for Android in v1 (listenUsingInsecureL2capChannel
-                           # yields a dynamic PSM, so we cannot be the listener on the fixed default
-                           # listener). "peripheral"/"both" are TBD/open, post-v1.
+enabled = true             # master switch for the L2CAP CoC transport
+# No persisted default_psm and no fixed role: each peer's PSM is read from its
+# advert (service-data / readable GATT characteristic) just before connect().
+# 0x0085 survives only as a legacy default, not a wire requirement.
 
 # ---------------------------------------------------------------------------
 # [propagation] — HYBRID default: announce widely, pull content on demand. The
@@ -134,10 +135,12 @@ role    = "central"        # FIXED for Android in v1 (listenUsingInsecureL2capCh
 # valid). Only those manifests flood; the large BLOBS stay pull-only.
 # ---------------------------------------------------------------------------
 [propagation]
-fanout       = true        # relay-mesh fanout: re-broadcast accepted events to all
-                           # other connected peers (source-excluded). Manifests gossip
-                           # both ways once relays connect (roadmap P2). Events only;
-                           # blobs stay pull-only. See nsite-layer.md §2.1.
+fanout       = true        # the nsite-deck PROPAGATOR forwards accepted events: it
+                           # SUBSCRIBES to local + connected-peer relays and PUBLISHES
+                           # ("EVENT") to peer relays (source-excluded). The myco-relay
+                           # itself is a plain NIP-01 store+socket and never re-broadcasts.
+                           # Manifests gossip both ways once relays connect (roadmap P3).
+                           # Events only; blobs stay pull-only. See nsite-layer.md §2.1.
 announce_ttl = 5           # max hops for manifest flood/replication (blobs stay pull-only)
 reconcile    = true        # negentropy (NIP-77) set reconciliation between connected
                            # relays: settle "which manifests does my peer have that I
@@ -148,6 +151,12 @@ eager_sync_on_connect = true   # Plumtree lazy-pull: fire a one-shot negentropy 
                                #   when a peer FIRST connects (bitchat fires ~5s after a new
                                #   neighbour appears). Neighbour-local, never relayed.
 reconcile_interval_s  = 30     # slow periodic neighbour-local reconcile cadence (bitchat ~30s)
+eager_refresh_pinned  = true   # the PROPAGATOR keeps an internal sub for kinds 15128/35128;
+                               #   when a NEWER manifest for a Library-pinned (author, dTag)
+                               #   arrives, it auto-runs the blob pull (fetch-by-hash from
+                               #   paired holders' .fips Blossom, verify, mirror) in the
+                               #   background so pinned apps stay current/offline-ready before
+                               #   next open. See nsite-layer.md §5.4.
 
 # ---------------------------------------------------------------------------
 # [dns] — the DNS interceptor / TUN. Routes ONLY fd00::/8 (the mesh ULA) and
@@ -254,7 +263,11 @@ payload `myco://pair/<base64>`; MAC/PSM arrive later over BLE adverts). See
 | Key | Type | Proposed default | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | master switch for the L2CAP CoC transport. |
-| `role` | enum | `"central"` | **fixed** to central on Android in v1; `peripheral`/`both` are **TBD/open**. |
+
+There is **no `role` or `default_psm` key**: BLE is symmetric per-peer PSM discovery
+— every node both advertises its own OS-assigned PSM and dials the peer's learned PSM
+(`0x0085` survives only as a legacy default). See
+[../design/ble-interop.md](../design/ble-interop.md).
 
 Android requires API 29+ for L2CAP. The `addr -> PSM` map learned from adverts is
 runtime-only and not persisted. FIPS identifies peers by the in-band pubkey
@@ -314,8 +327,11 @@ Stripped relative to nostr-vpn, per locked decisions:
   the online discovery path, or stays purely peer-to-peer in v1. **TBD/open.**
 - **Eviction policy beyond LRU.** Whether `lfu`/`fifo` are ever needed, or
   whether age/size weighting suffices. **TBD/open.**
-- **BLE role.** Whether post-v1 Android can act as peripheral (advertising a
-  dynamic PSM peers learn out-of-band) to allow Android↔Android without a Linux
-  central. **TBD/open.**
+- **BLE role.** Resolved in design: every node is **both** peripheral (advertises
+  its OS-assigned PSM) and central (dials the peer's learned PSM) — symmetric
+  per-peer PSM discovery, with no Linux-central requirement (see
+  [../design/ble-interop.md](../design/ble-interop.md)). What remains open is
+  per-stack concurrency: whether a given Android radio can advertise, scan, and hold
+  L2CAP channels simultaneously. **TBD/open.**
 - **Per-peer trust / blocklist.** Whether `[[peers]]` needs a `blocked` flag or
   a separate denylist for propagation. **TBD/open.**
