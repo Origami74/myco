@@ -60,7 +60,8 @@ npub = "npub1…"            # bech32 public key (derived addresses computed fro
 alias = ""                 # optional human label for this device's <alias>.fips name
 
 # ---------------------------------------------------------------------------
-# [node] — the embedded relay + blossom server (Rust, myco-core crate).
+# [node] — the embedded relay + blossom server (Rust: the myco-relay /
+#          myco-blossom crates, wired in by myco-core).
 # Defaults match the nsite-deck reference ports.
 # ---------------------------------------------------------------------------
 [node]

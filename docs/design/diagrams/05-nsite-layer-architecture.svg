@@ -8,13 +8,15 @@
   </defs>
 
   <rect width="1020" height="760" fill="#ffffff"/>
-  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">The nsite layer — myco-core wraps the reusable nsite-deck crate</text>
-  <text x="40" y="63" font-size="13" fill="#64748b">The content layer is a separate, transport-agnostic crate; myco-core adds FIPS, BLE and the FFI. One .so. DRAFT for review.</text>
+  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">The nsite layer — four crates, one .so (myco-core wires nsite-deck + myco-relay + myco-blossom)</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">nsite-deck (gateway + sync) is impl-agnostic; it consumes myco-relay/myco-blossom via traits and reaches peers via myco-core's FIPS seams. DRAFT for review.</text>
 
   <!-- crate legend -->
   <g font-size="11.5">
-    <rect x="340" y="90" width="14" height="14" rx="3" fill="#7c3aed"/><text x="360" y="101" fill="#334155">nsite-deck crate (reusable): gateway · relay · Blossom · sync</text>
-    <rect x="340" y="112" width="14" height="14" rx="3" fill="#0d9488"/><text x="360" y="123" fill="#334155">myco-core (app): FIPS endpoint · BLE · FFI reducer</text>
+    <rect x="320" y="86" width="14" height="14" rx="3" fill="#7c3aed"/><text x="340" y="97" fill="#334155">nsite-deck (reusable): gateway · sync — impl-agnostic</text>
+    <rect x="320" y="106" width="14" height="14" rx="3" fill="#2563eb"/><text x="340" y="117" fill="#334155">myco-relay (reusable): embedded Nostr relay</text>
+    <rect x="700" y="86" width="14" height="14" rx="3" fill="#d97706"/><text x="720" y="97" fill="#334155">myco-blossom (reusable): embedded blob store</text>
+    <rect x="700" y="106" width="14" height="14" rx="3" fill="#0d9488"/><text x="720" y="117" fill="#334155">myco-core (app): FIPS · BLE · FFI · wiring</text>
   </g>
 
   <!-- ===================== WebView (outside, top) ===================== -->
@@ -29,18 +31,18 @@
 
   <!-- ===================== fips-mobile container ===================== -->
   <rect x="40" y="232" width="760" height="468" rx="14" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
-  <text x="62" y="262" font-size="16" font-weight="700" fill="#0f172a">myco-core</text>
-  <text x="148" y="262" font-size="12.5" fill="#475569">(app crate · depends on nsite-deck · one .so · one Tokio runtime)</text>
+  <text x="62" y="262" font-size="16" font-weight="700" fill="#0f172a">libmyco_core.so</text>
+  <text x="210" y="262" font-size="12.5" fill="#475569">one process · one Tokio runtime · myco-core wires the crates below</text>
 
   <!-- Gateway (HTTP) -->
-  <rect x="64" y="282" width="210" height="96" rx="12" fill="#fff7ed" stroke="#d97706" stroke-width="2"/>
+  <rect x="64" y="282" width="210" height="96" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
   <text x="169" y="309" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Gateway (HTTP)</text>
   <text x="169" y="330" font-size="10.5" fill="#475569" text-anchor="middle">host resolution</text>
   <text x="169" y="346" font-size="10.5" fill="#475569" text-anchor="middle">cache hit / miss</text>
   <text x="169" y="362" font-size="10.5" fill="#475569" text-anchor="middle">loading page while syncing</text>
 
   <!-- Embedded relay -->
-  <rect x="320" y="282" width="210" height="96" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+  <rect x="320" y="282" width="210" height="96" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
   <text x="425" y="309" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Embedded relay</text>
   <text x="425" y="330" font-size="10.5" fill="#475569" text-anchor="middle">ws://localhost:4869</text>
   <text x="425" y="346" font-size="10.5" fill="#475569" text-anchor="middle">stores + serves</text>
@@ -53,11 +55,11 @@
   <text x="676" y="346" font-size="10.5" fill="#475569" text-anchor="middle">blobs by sha256</text>
 
   <!-- Sync engine -->
-  <rect x="64" y="442" width="210" height="100" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <rect x="64" y="442" width="210" height="100" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
   <text x="169" y="469" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Sync engine</text>
   <text x="169" y="490" font-size="10.5" fill="#475569" text-anchor="middle">pull manifest + blobs</text>
   <text x="169" y="506" font-size="10.5" fill="#475569" text-anchor="middle">from a peer, verify sha256</text>
-  <text x="169" y="522" font-size="10.5" fill="#475569" text-anchor="middle">atomic-swap into cache</text>
+  <text x="169" y="522" font-size="10.5" fill="#475569" text-anchor="middle">store into local Blossom</text>
 
   <!-- FIPS endpoint -->
   <rect x="320" y="442" width="456" height="100" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
@@ -69,11 +71,11 @@
   <!-- internal arrows -->
   <!-- Gateway -> relay -->
   <line x1="274" y1="318" x2="316" y2="318" stroke="#7c3aed" stroke-width="2.2" marker-end="url(#cPurple)"/>
-  <text x="295" y="308" font-size="10" font-weight="600" fill="#6d28d9" text-anchor="middle">REQ manifest</text>
+  <text x="295" y="308" font-size="10" font-weight="600" fill="#6d28d9" text-anchor="middle">RelayBackend</text>
 
   <!-- Gateway -> Blossom (curved over the top of relay) -->
   <path d="M274,300 C420,262 470,262 576,300" fill="none" stroke="#d97706" stroke-width="2.2" marker-end="url(#cAmber)"/>
-  <text x="425" y="266" font-size="10" font-weight="600" fill="#b45309" text-anchor="middle">GET blob by sha256</text>
+  <text x="425" y="266" font-size="10" font-weight="600" fill="#b45309" text-anchor="middle">BlobStore</text>
 
   <!-- Gateway -> Sync engine (on miss) -->
   <path d="M169,378 L169,438" fill="none" stroke="#d97706" stroke-width="2.4" marker-end="url(#cAmber)"/>
@@ -111,5 +113,5 @@
 
   <!-- ===================== side note box (bottom) ===================== -->
   <rect x="40" y="712" width="956" height="36" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
-  <text x="60" y="735" font-size="12" fill="#475569">Crate split: <tspan font-weight="700" fill="#0f172a">nsite-deck</tspan> (reusable, transport-agnostic) reaches peers only through the <tspan font-weight="700" fill="#0f172a">PeerSource</tspan> / <tspan font-weight="700" fill="#0f172a">FanoutSink</tspan> seams that <tspan font-weight="700" fill="#0f172a">myco-core</tspan> implements over FIPS.</text>
+  <text x="60" y="735" font-size="12" fill="#475569">Four crates, one .so: <tspan font-weight="700" fill="#0f172a">nsite-deck</tspan> consumes <tspan font-weight="700" fill="#0f172a">myco-relay</tspan> / <tspan font-weight="700" fill="#0f172a">myco-blossom</tspan> via <tspan font-weight="700" fill="#0f172a">RelayBackend</tspan> / <tspan font-weight="700" fill="#0f172a">BlobStore</tspan>, and reaches peers via <tspan font-weight="700" fill="#0f172a">PeerSource</tspan> / <tspan font-weight="700" fill="#0f172a">FanoutSink</tspan> — all wired by <tspan font-weight="700" fill="#0f172a">myco-core</tspan>.</text>
 </svg>

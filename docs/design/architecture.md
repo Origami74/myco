@@ -21,10 +21,13 @@ and the browse lifecycle in [diagrams/04-nsite-browse-flow.svg](./diagrams/04-ns
 ## Overview
 
 Myco runs entirely on one phone: an Android **manager app** over a single Rust
-native library (`myco-core`) that bundles the FIPS endpoint, the embedded
-Nostr relay, and the embedded Blossom server. Kotlin owns the UI, the per-nsite
-WebView, the radio (BLE), and the `VpnService`/TUN; Rust owns identity, the
-mesh, and the nsite services. They talk across a JNI/JSON reducer boundary.
+native library (`libmyco_core.so`) built from a small **Cargo workspace** —
+`myco-core` (the app crate) on top of three reusable crates: `nsite-deck` (the
+transport-agnostic nsite host: gateway + sync), `myco-relay` (a generic embedded
+Nostr relay), and `myco-blossom` (a generic embedded Blossom blob store). Kotlin
+owns the UI, the per-nsite WebView, the radio (BLE), and the `VpnService`/TUN;
+Rust owns identity, the mesh, and the nsite services. They talk across a JNI/JSON
+reducer boundary.
 
 Myco itself is the manager — Library / Pair / Discover / Settings, with its own
 homescreen icon — and each nsite launches as **its own fullscreen "app"** in a
@@ -42,8 +45,8 @@ The stack, top to bottom:
   1  Android UI            (Jetpack Compose) — Myco manager: Library, Pair, Discover, Settings
   2  NsiteActivity         (fullscreen WebView, one task per nsite) — loads http://<host>.nsite, no chrome
   3  Local gateway + DNS   — *.nsite → 127.0.0.1; resolve manifest; serve files
-  4  Embedded relay+Blossom (Rust) — ws://…:4869 / http://…:24242 + S&F cache
-  5  myco-core / FFI      (Rust) — JNI/JSON reducer; binds services into FIPS
+  4  Embedded relay+Blossom (Rust) — myco-relay :4869 / myco-blossom :24242 + S&F cache
+  5  myco-core / FFI      (Rust) — wires nsite-deck + relay + Blossom; binds into FIPS
   6  FIPS core + transports (fips-core/endpoint) — mesh, crypto, BLE/UDP/TCP/Tor
      ── plus ── Android VpnService/TUN: routes fd00::/8, intercepts .fips/.nsite
 ```
@@ -51,6 +54,38 @@ The stack, top to bottom:
 (The diagram collapses UI + browser into one band and shows six bands; this doc
 splits the per-nsite WebView out to make the "loads localhost only" boundary
 explicit.)
+
+---
+
+## Crate workspace
+
+The native library is one `.so` built from **four crates**, split along **reuse
+boundaries** — so the genuinely reusable piece (the nsite know-how) stays free of
+any particular relay, blob store, or transport:
+
+| Crate | Role | Reusable? |
+| --- | --- | --- |
+| `myco-core` | app crate: FIPS endpoint, `AndroidBleIo`, JNI/JSON FFI, and the wiring that picks which backends to plug in | no — Myco-specific |
+| `nsite-deck` | the nsite host: gateway (manifest → path → sha256 → serve) + sync engine; impl-agnostic | **yes** — the reusable core |
+| `myco-relay` | a generic embedded Nostr relay (event store + `ws://…:4869` server) | yes — any Nostr app |
+| `myco-blossom` | a generic embedded Blossom blob store (content-addressed store + `http://…:24242` server) | yes — any Blossom need |
+
+`nsite-deck` never names a concrete relay, blob store, or radio. It reaches
+everything outside itself through **four trait seams**, which `myco-core` wires up:
+
+- **storage seams** (provided by `myco-relay` / `myco-blossom`) — **`RelayBackend`**
+  (store/query manifest events) and **`BlobStore`** (`get`/`has`/`put` blobs by
+  sha256). **Citrine-forward is just an alternate `RelayBackend`.**
+- **transport seams** (provided by `myco-core` over FIPS) — **`PeerSource`** (pull a
+  manifest + blobs from a reachable peer) and **`FanoutSink`** (re-broadcast an
+  accepted event to connected peers).
+
+All four cross-compile into the single `libmyco_core.so`. Relay and Blossom sitting
+**outside** `nsite-deck` is deliberate: a Nostr relay and a Blossom server are
+generic primitives, independently useful (there is, notably, no good Android
+Blossom app) — so they are their own crates, and `nsite-deck` consumes them through
+traits rather than embedding them. `myco-core` is the only crate that names FIPS
+*or* a concrete relay/Blossom.
 
 ---
 
@@ -123,7 +158,7 @@ Because `.nsite` is IPv4/localhost, this works in any browser, including
 Chromium. Only the relay+Blossom **sync** in step 4 ever touches `.fips`.
 
 **Provenance.** Port from site-deck. The upstream gateway is Go; here it is
-**re-implemented in Rust** inside `myco-core` (one language, one `.so`).
+**re-implemented in Rust** inside `nsite-deck` (one language, one `.so`).
 The HTTP listener may live in Kotlin or Rust — **TBD / open**; either way the
 resolution logic ports from site-deck.
 
@@ -152,32 +187,38 @@ added to the Library are **pinned** (exempt). (The derived, path-named **htdocs*
 serving cache of layer 3 is a separate, deferred store on top.)
 
 **Provenance.** Port from site-deck (which embeds Khatru, a Go relay/Blossom).
-Myco re-implements the relay + Blossom in **Rust** inside a **separate, reusable
-crate, `nsite-deck`** — gateway + relay + Blossom + sync + cache, deliberately
-knowing nothing about FIPS/BLE/Android so other apps can reuse it. It depends on
-two host-provided transport seams (`PeerSource` to pull, `FanoutSink` to push);
-`myco-core` supplies the FIPS-backed implementations. See
-[nsite-layer.md § A reusable crate](./nsite-layer.md). (The diagram tags this
+Myco re-implements them in **Rust** as **two generic, reusable crates** —
+`myco-relay` (event store + WS server, implementing `RelayBackend`) and
+`myco-blossom` (content-addressed store + HTTP server, implementing `BlobStore`).
+They sit **outside** the `nsite-deck` crate, which consumes them only through
+those traits, so each is independently reusable (Citrine-forward is just an
+alternate `RelayBackend`; there is no good Android Blossom app, which is exactly
+why a standalone `myco-blossom` is worth having). See
+[nsite-layer.md § The crate workspace](./nsite-layer.md). (The diagram tags this
 band "PORT · lang TBD"; the language is now **locked to Rust** — treat that label
 as stale.)
 
 ### 5. myco-core + the FFI boundary (Rust) — **reuse (nostr-vpn) + net-new glue**
 
 **Responsibilities.** The **app crate** and the single native library. It is the
-thin Myco-specific layer that wires everything together; the content layer lives
-in `nsite-deck` (layer 4), which it depends on. `myco-core`:
+thin Myco-specific layer that wires everything together: it depends on
+`nsite-deck` (the content layer) and on `myco-relay` + `myco-blossom` (the backend
+impls it plugs into `nsite-deck`'s storage seams). `myco-core`:
 
 - exposes the **JNI/JSON reducer** FFI to Kotlin (below),
 - holds the device **identity** (the `nsec`) in `filesDir`,
-- runs the `nsite-deck` relay + Blossom and **binds them into FIPS** so peers
-  reach them at `<npub>.fips:4869` / `:24242` via FSP port multiplexing,
+- instantiates `myco-relay` + `myco-blossom` (or a Citrine-forward `RelayBackend`),
+  wires them into `nsite-deck` as the `RelayBackend` / `BlobStore`, and **binds
+  them into FIPS** so peers reach them at `<npub>.fips:4869` / `:24242` via FSP
+  port multiplexing,
 - drives the FIPS endpoint (layer 6) and implements `AndroidBleIo`,
-- provides `nsite-deck`'s transport seams over FIPS: the **`PeerSource`** (fetch
-  a manifest + blobs from a holder at `<npub>.fips`, verify each against its
-  sha256, retain in the local relay + Blossom) and the **`FanoutSink`** (`EVENT`
-  to each connected `<peer>.fips:4869`).
+- implements the **transport seams** the content + relay crates consume over FIPS:
+  the **`PeerSource`** (fetch a manifest + blobs from a holder at `<npub>.fips`,
+  verify each against its sha256, retain in the local relay + Blossom) and the
+  **`FanoutSink`** (`EVENT` to each connected `<peer>.fips:4869`).
 
-`myco-core` + `nsite-deck` cross-compile into one `libmyco_core.so`.
+`myco-core`, `nsite-deck`, `myco-relay`, and `myco-blossom` cross-compile into one
+`libmyco_core.so`.
 
 **Provenance.** Reuse the nostr-vpn embedding pattern and FFI scaffolding;
 net-new glue to wire `nsite-deck` to FIPS. nostr-vpn embeds FIPS in-process via
@@ -287,11 +328,11 @@ Provenance for each band, matching the legend in
 | Myco manager UI (Library, Pair, Discover, Settings) | **net-new** | nostr-vpn's network/roster/exit UI does not survive the strip; Library = source of truth for "installed" |
 | QR pairing (CameraX + ML Kit, deep-link intent) | **reuse (nostr-vpn)** | re-pointed at `myco://pair/<base64>` (npub + memorable name) |
 | `NsiteActivity` (fullscreen WebView per nsite, no chrome) | **net-new (thin)** | own task/instance; standard WebView; nsite-deck "loads localhost" pattern |
-| Local gateway + `*.nsite` resolution | **port (site-deck)** | Go → **Rust**; HTTP-listener placement TBD/open |
-| Embedded Nostr relay (`:4869`) | **port (site-deck) → Rust** | was Khatru/Go; now Rust in `myco-core`; embedded default, optional Citrine-forward backend |
-| Embedded Blossom (`:24242`) | **port (site-deck) → Rust** | always embedded; content-addressed blobs, BUD-01 |
+| Local gateway + `*.nsite` resolution | **port (site-deck)** | Go → **Rust** in `nsite-deck`; HTTP-listener placement TBD/open |
+| Embedded Nostr relay (`:4869`) | **port (site-deck) → Rust** | was Khatru/Go; now the **`myco-relay`** crate (impl `RelayBackend`); embedded default, optional Citrine-forward backend |
+| Embedded Blossom (`:24242`) | **port (site-deck) → Rust** | now the **`myco-blossom`** crate (impl `BlobStore`); always embedded; content-addressed blobs, BUD-01 |
 | Store-and-forward cache (re-serve peers' events/blobs) | **net-new** | the offline-propagation mechanism; Blossom blob store, LRU 2 GB, Library = pinned |
-| nsite sync (fetch + verify + retain over `.fips`) | **net-new** | runs in `myco-core`; v0 serves direct from relay + Blossom |
+| nsite sync (fetch + verify + retain over `.fips`) | **net-new** | runs in **`nsite-deck`**; v0 serves direct from relay + Blossom |
 | htdocs serving cache (path-named files under `current/`) | **deferred** | nsite-deck speed optimization; not needed for v0 |
 | FFI: JNI/JSON reducer, cdylib via cargo-ndk | **reuse (nostr-vpn)** | `dispatch→state(rev)`; opaque `jlong` over Tokio |
 | FIPS embedding (`FipsEndpoint::builder().without_system_tun()`) | **reuse (nostr-vpn)** | app owns TUN; FIPS moves opaque datagrams |

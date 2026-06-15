@@ -75,16 +75,20 @@ Myco/
   android/                Kotlin / Jetpack Compose app + WebView, BLE radio
     app/build.gradle.kts  arm64 abiFilter, minSdk 29, Rust build task
     app/src/main/jniLibs/arm64-v8a/libmyco_core.so   (build output)
-  myco-core/            Rust crate: one .so, one FFI surface
-                          (embedded Nostr relay + Blossom + FIPS endpoint + DNS intercept)
-  Cargo.toml              workspace root
+  myco-core/              app crate: FIPS endpoint, AndroidBleIo, JNI/JSON FFI, wiring
+  nsite-deck/             reusable: gateway + sync (impl-agnostic; trait seams only)
+  myco-relay/             reusable: embedded Nostr relay (impl RelayBackend)
+  myco-blossom/           reusable: embedded Blossom blob store (impl BlobStore)
+  Cargo.toml              workspace root (the four crates above)
   justfile                build / install / demo recipes
   reference/fips/         LOCAL FIPS checkout, wired in via patch.crates-io (see §4)
 ```
 
-`myco-core` is the **backend crate** (it depends on the reusable `nsite-deck`
-crate): together they build to a single `cdylib` (`libmyco_core.so`) exposing one
-JNI surface. Rather than a UniFFI / `uniffi-bindgen` codegen step, Myco follows
+`myco-core` is the **app crate** and the only `cdylib`: it depends on `nsite-deck`
+(gateway + sync) plus `myco-relay` + `myco-blossom` (the relay / Blossom backends it
+plugs into `nsite-deck`'s `RelayBackend` / `BlobStore` seams). All four crates
+build to a single `libmyco_core.so` exposing one JNI surface. Rather than a
+UniFFI / `uniffi-bindgen` codegen step, Myco follows
 nostr-vpn's **JNI + JSON-over-strings** FFI
 (`System.loadLibrary`, a Redux-style `dispatch(actionJson) -> stateJson`
 reducer over an opaque `jlong` handle; see

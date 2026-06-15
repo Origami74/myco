@@ -313,5 +313,9 @@ nsite layer for survival across partition — is drawn in
 | **FSP port-mux** | delivery of mesh datagrams to localhost ports, exposing `<npub>.fips:4869`/`:24242` |
 | **TUN** | the kept `VpnService`; routes `fd00::/8`, intercepts `.fips`/`.nsite`; not tunnel-all |
 | **store-and-forward** | net-new nsite-layer caching that lets a device re-serve a site offline |
-| **myco-core** | the Rust crate unifying FIPS endpoint + relay + Blossom behind one FFI `.so` |
+| **myco-core** | the app crate that wires `nsite-deck` + `myco-relay` + `myco-blossom` behind one FFI `.so`; the only crate that names FIPS or a concrete relay/Blossom |
+| **nsite-deck** | the reusable nsite host (gateway + sync); impl-agnostic — consumes the storage + transport seams, knows nothing about FIPS/BLE/Android |
+| **myco-relay / myco-blossom** | the generic, independently-reusable embedded relay / blob-store crates (impl `RelayBackend` / `BlobStore`) |
+| **RelayBackend / BlobStore** | nsite-deck's **storage** seams (provided by myco-relay / myco-blossom; Citrine-forward = an alternate `RelayBackend`) |
+| **PeerSource / FanoutSink** | nsite-deck's **transport** seams — pull from a peer / re-broadcast events — provided by `myco-core` over FIPS |
 | **the private network we dropped** | nostr-vpn's exit-node / WireGuard / roster-admin / `.nvpn` / LAN-multicast layer |

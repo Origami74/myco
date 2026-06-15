@@ -38,8 +38,8 @@ Local gateway (HTTP)  ───────────────────�
    │  blobs missing? ↓ (still syncing)           │
    ▼                                             │
 Embedded relay (ws://localhost:4869)             │  all in-process,
-   │  manifest event: kind 15128 / 35128         │  inside the
-   ▼                                             │  myco-core crate
+   │  manifest event: kind 15128 / 35128         │  across the
+   ▼                                             │  myco-* crates
 Embedded Blossom (http://localhost:24242)        │  (one .so)
    │  blobs by sha256                            │
    ▼                                             │
@@ -47,45 +47,71 @@ Sync engine ── over FIPS ──► reachable holder ───┘
    <npub_holder>.fips:4869 (relay)  ·  <npub_holder>.fips:24242 (blossom)
 ```
 
-### A reusable crate: `nsite-deck`
+### The crate workspace
 
-These four components — gateway, relay, Blossom, sync — are an **app-agnostic
-content layer**, and the design keeps them in a **separate, reusable Rust crate,
-`nsite-deck`**, so the same code can host nsites in other apps (a desktop
-viewer, a different mobile shell, a headless server) — not just Myco. The crate
-must know **nothing** about FIPS, BLE, or Android; it is "an embedded nsite host
-+ cache" and no more.
+The native library is built from **four crates**, split along **reuse
+boundaries** so the genuinely reusable piece stays free of any particular relay,
+blob store, or radio:
 
-It stays reusable by depending on **two transport seams** (traits the host app
-implements), mirroring how `fips-core` abstracts its radio behind `BleIo`:
+- **`nsite-deck`** *(reusable core)* — the app-agnostic **nsite host**: the
+  gateway (§3) and the sync engine (§2.4). This is the genuinely novel,
+  reusable know-how — manifest resolution (kind 15128/35128 → `path → sha256`),
+  serving an nsite under `<host>.nsite`, and orchestrating sync. It must know
+  **nothing** about FIPS, BLE, Android, *or* any concrete relay/Blossom: it is
+  "an embedded nsite host" and no more.
+- **`myco-relay`** *(reusable primitive)* — a generic embedded Nostr relay: the
+  event store + the `ws://localhost:4869` server. Useful to any Nostr app.
+- **`myco-blossom`** *(reusable primitive)* — a generic embedded Blossom blob
+  store: the content-addressed store + the `http://localhost:24242` server.
+  Useful to anything that needs Blossom (notably: there is **no good Android
+  Blossom app**, which is exactly why this is worth having standalone).
+- **`myco-core`** *(app crate)* — the thin Myco-specific glue: the FIPS
+  endpoint, `AndroidBleIo`, the JNI-JSON FFI reducer, identity/pairing, and the
+  wiring that picks which backends to plug in.
 
-- **`PeerSource`** — *pull*: `fetch_manifest(author, dTag)` and
-  `fetch_blob(sha256)` from some reachable source. The sync engine (§2.4) calls
-  this; it does not care *how* the bytes arrive.
-- **`FanoutSink`** — *push*: `broadcast(event)` to connected peers. The relay
-  (§2.1) calls this when it accepts an event; it does not know who the peers are
-  or what carries the bytes.
+`nsite-deck` reaches everything outside itself through **four trait seams**,
+mirroring how `fips-core` abstracts its radio behind `BleIo`:
 
-`myco-core` is then a thin **app crate** that: embeds the FIPS endpoint, owns
-identity / pairing / the JNI-JSON FFI reducer, implements `AndroidBleIo`, and
-provides the FIPS-backed `PeerSource` (fetch over `<npub>.fips`) and `FanoutSink`
-(`EVENT` to each connected `<peer>.fips:4869`). It depends on `nsite-deck`;
-together they cross-compile into the single `libmyco_core.so`. Kotlin owns the
-radio and the TUN; Rust owns the content layer and the mesh. See
+- **storage seams** (provided by `myco-relay` / `myco-blossom`):
+  - **`RelayBackend`** — store/query manifest events. The default is the embedded
+    `myco-relay`; **Citrine-forward is just an alternate `RelayBackend`** (§2.1).
+  - **`BlobStore`** — `get` / `has` / `put` blobs by sha256, backed by
+    `myco-blossom` (§2.2).
+- **transport seams** (provided by `myco-core` over FIPS):
+  - **`PeerSource`** — *pull*: `fetch_manifest(author, dTag)` and
+    `fetch_blob(sha256)` from some reachable source. The sync engine (§2.4) calls
+    this; it does not care *how* the bytes arrive.
+  - **`FanoutSink`** — *push*: `broadcast(event)` to connected peers. The relay
+    (§2.1) calls this when it accepts an event; it does not know who the peers are
+    or what carries the bytes.
+
+So `myco-core` is the only crate that names FIPS *or* a concrete relay/Blossom: it
+instantiates `myco-relay` + `myco-blossom`, hands them to `nsite-deck` as the
+`RelayBackend` / `BlobStore`, implements `PeerSource` / `FanoutSink` over FIPS, and
+binds the relay/Blossom ports into the mesh (`<npub>.fips:4869` / `:24242`). All
+four crates cross-compile into the single `libmyco_core.so`. Kotlin owns the radio
+and the TUN; Rust owns the content layer and the mesh. See
 [diagrams/01-system-layering.svg](diagrams/01-system-layering.svg) and
 [diagrams/05-nsite-layer-architecture.svg](diagrams/05-nsite-layer-architecture.svg).
 
+> **Why relay + Blossom are their own crates.** A Nostr relay and a Blossom
+> server are generic primitives — nothing about them is nsite-specific — so
+> keeping them *out* of `nsite-deck` is what lets `nsite-deck` stay a clean,
+> reusable nsite host, and lets the relay/Blossom be reused on their own. The
+> cost is two more crates in the workspace; each boundary is one the pluggable
+> backend already needed, so none of it is speculative.
+
 > **Why Rust, not Go.** The reference nsite-deck is Go (Khatru relay +
-> Khatru/Blossom). The locked decision is to re-implement the relay + Blossom in
-> Rust (in the `nsite-deck` crate) so there is **one** cross-compiled `.so` and
-> **one** FFI surface, rather than embedding a second Go runtime. The Go
-> reference remains the behavioural spec; the Rust port must match its wire
+> Khatru/Blossom). The locked decision is to re-implement relay + Blossom in
+> Rust (as `myco-relay` / `myco-blossom`) so there is **one** cross-compiled
+> `.so` and **one** FFI surface, rather than embedding a second Go runtime. The
+> Go reference remains the behavioural spec; the Rust port must match its wire
 > behaviour (kinds, manifest tags, URL scheme).
 
-> **Naming note.** The reusable crate shares the name *nsite-deck* with the Go
-> reference project it descends from; they are different codebases (Go reference
-> vs. our Rust crate). **TBD / open** whether to publish it under a less
-> overloaded crate name.
+> **Naming note.** The `nsite-deck` crate shares the name *nsite-deck* with the
+> Go reference project it descends from; they are different codebases (Go
+> reference vs. our Rust crate). **TBD / open** whether to publish it under a
+> less overloaded crate name.
 
 ---
 
@@ -97,7 +123,8 @@ radio and the TUN; Rust owns the content layer and the mesh. See
 
 ### 2.1 Embedded relay
 
-A NIP-01 relay with a local event store, listening on `ws://localhost:4869`.
+A NIP-01 relay with a local event store, listening on `ws://localhost:4869` — the
+**`myco-relay`** crate, which implements `nsite-deck`'s `RelayBackend` seam.
 The Go reference uses [Khatru](https://github.com/fiatjaf/khatru) over a BoltDB
 event store and advertises NIPs 1, 9, 11, 12, 15, 16, 20, 33
 ([embedded.go](../../reference/site-deck/internal/relay/embedded.go)). The Rust
@@ -107,7 +134,7 @@ event set, honour `CLOSE`, and serve a NIP-11 document.
 **Embedded from day one — relay *backend* is a pluggable seam.** The relay and
 Blossom are both **bundled and in-process from day one**; they are simple enough
 that there is no "forward to an external relay first, embed later" phase. The
-relay *backend*, however, is a **pluggable seam**: the **default** is the
+relay *backend*, however, is a **pluggable seam** (the `RelayBackend` trait): the **default** is the
 embedded store described here; an **optional** backend **forwards to a local
 relay app on the device — e.g. [Citrine](https://github.com/greenart7c3/Citrine)** —
 for developers who already run one. The embedded backend is the default and the
@@ -161,7 +188,8 @@ machinery layered on later (P4). See [diagrams/07-relay-mesh-fanout.svg](diagram
 
 ### 2.2 Embedded Blossom
 
-A content-addressed blob server on `http://localhost:24242`, **always embedded**
+A content-addressed blob server on `http://localhost:24242` — the **`myco-blossom`**
+crate, implementing the `BlobStore` seam — **always embedded**
 — unlike the relay, Blossom has **no pluggable forward-to-an-app backend**,
 because there is no good Android Blossom app to forward to, so embedding is the
 only sensible path. It implements the
