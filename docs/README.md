@@ -43,8 +43,8 @@ Getting started takes one in-person hello:
 
 Your code carries a **memorable name** — like *green sammy* or *blue james* — so
 the people you pair with always remember who you are, and can double-check they
-paired with the right person. Pairing goes both ways: scan each other and apps
-flow in both directions.
+paired with the right person. Pairing can go both ways: a one-time invite makes
+it mutual, so apps flow in both directions.
 
 ---
 
@@ -111,7 +111,7 @@ decision.
 | [concepts.md](./design/concepts.md) | Canonical terminology and glossary: device vs nsite-author identity (and the device key's three derived forms), `.fips` vs `.nsite`, what an nsite is, the embedded relay+Blossom, and the Pillars-of-Propagation framing. Read this first. |
 | [architecture.md](./design/architecture.md) | The six-layer single-device stack, the Kotlin↔Rust FFI boundary, the role of the kept TUN, and a per-component reused-vs-net-new provenance table. |
 | [app-shell.md](./design/app-shell.md) | The app/launch model: Myco as the manager app (Library, Pair, Discover, Settings) versus each nsite as its own fullscreen `NsiteActivity` task; `myco://app/<npub>[/<dTag>]` intents, Recents cards via `TaskDescription`, pinned home-screen shortcuts, and per-nsite origin isolation. |
-| [identity-pairing.md](./design/identity-pairing.md) | How a device establishes its identity and how two devices become peers: identity storage, the `myco://pair/<base64>` QR payload, peer-as-data-source, and transitive (mutual-scan) authorization. |
+| [identity-pairing.md](./design/identity-pairing.md) | How a device establishes its identity and how two devices become peers: identity storage, the `myco://pair/<base64>` QR payload, peer-as-data-source, and transitive authorization via invite-pairing (a one-time secret; post-v1). |
 | [nsite-layer.md](./design/nsite-layer.md) | The content layer: the embedded relay, Blossom, and localhost gateway; the manifest/URL scheme; the resolve→cache→serve flow; and sync-over-FIPS that pulls a peer's manifest + blobs. |
 | [propagation.md](./design/propagation.md) | Offline propagation: the live-path (FIPS) vs store-and-forward (nsite) split, the hybrid model (flood the author-signed manifest events, pull blobs on demand), transitive discovery, dedup/anti-loop, and cache retention. |
 | [ble-interop.md](./design/ble-interop.md) | BLE transport strategy: native `AndroidBleIo` over fips-core's `BleIo` trait, why L2CAP not GATT, the PSM problem and its addr→PSM fix, MAC randomization, and the foreground-service requirement. |

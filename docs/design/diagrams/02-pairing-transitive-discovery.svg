@@ -18,11 +18,11 @@
 
   <rect width="1000" height="720" fill="#ffffff"/>
   <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">Pairing &amp; transitive peer discovery</text>
-  <text x="40" y="63" font-size="13" fill="#64748b">A QR carries only an npub. Mutual scan also authorizes polling the other side's collected peer list.</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">An invite QR carries npub + a one-time secret. Completing invite-pairing (mutual, post-v1) authorizes polling the other side's collected peer list.</text>
 
-  <!-- ===================== TOP PANEL: mutual QR ===================== -->
+  <!-- ===================== TOP PANEL: mutual pairing (invite-pairing) ===================== -->
   <rect x="40" y="84" width="920" height="262" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>
-  <text x="62" y="112" font-size="16" font-weight="700" fill="#0f172a">① Mutual QR pairing</text>
+  <text x="62" y="112" font-size="16" font-weight="700" fill="#0f172a">① Mutual pairing — invite-pairing (one-time secret) · post-v1</text>
 
   <!-- Alice phone -->
   <rect x="120" y="128" width="150" height="196" rx="18" fill="#1e293b"/>
@@ -40,9 +40,9 @@
 
   <!-- crossing scan arrows -->
   <path d="M270,196 C430,196 560,196 728,210" fill="none" stroke="#475569" stroke-width="2.2" marker-end="url(#aSlate)"/>
-  <text x="500" y="190" font-size="12" fill="#334155" text-anchor="middle">Alice scans Ben's QR  →  stores npub1ben</text>
+  <text x="500" y="190" font-size="12" fill="#334155" text-anchor="middle">Alice scans Ben's invite QR  →  npub1ben + one-time secret</text>
   <path d="M730,256 C560,266 430,266 272,256" fill="none" stroke="#475569" stroke-width="2.2" marker-end="url(#aSlate)"/>
-  <text x="500" y="284" font-size="12" fill="#334155" text-anchor="middle">Ben scans Alice's QR  →  stores npub1alice</text>
+  <text x="500" y="284" font-size="12" fill="#334155" text-anchor="middle">Ben's .fips endpoint verifies secret  →  returns ack (now mutual)</text>
 
   <text x="500" y="318" font-size="12.5" font-weight="600" fill="#0d9488" text-anchor="middle">npub = FIPS address  ⇒  reach that peer's relay (:4869) + Blossom (:24242) over the mesh</text>
 
@@ -87,6 +87,6 @@
 
   <!-- authorization callout -->
   <rect x="300" y="568" width="300" height="46" rx="8" fill="#ecfdf5" stroke="#16a34a"/>
-  <text x="450" y="588" font-size="11.5" font-weight="600" fill="#15803d" text-anchor="middle">Mutual scan = authorization:</text>
+  <text x="450" y="588" font-size="11.5" font-weight="600" fill="#15803d" text-anchor="middle">Mutual pairing = authorization:</text>
   <text x="450" y="604" font-size="11.5" fill="#166534" text-anchor="middle">Ben lets Alice poll his peer list</text>
 </svg>

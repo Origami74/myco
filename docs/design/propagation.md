@@ -131,16 +131,17 @@ user actually needs, when they need it.
 ## 3. Transitive peer discovery
 
 How does Alice come to receive manifests from nodes she never paired with? Via
-transitive discovery, authorized by mutual QR pairing. See
+transitive discovery, authorized by a **mutual pairing**. See
 [diagrams/02-pairing-transitive-discovery.svg](diagrams/02-pairing-transitive-discovery.svg).
 
-- **Pairing.** Two users mutually scan QR codes. The payload carries only a
-  *device* npub (+ memorable name): `myco://pair/<base64>`; no MAC/PSM — those
-  are learned over BLE adverts. A device's npub *is* its FIPS address, so after a
-  scan Alice can reach Ben's relay (`:4869`) and Blossom (`:24242`) over the mesh.
-  (This device key is only ever a mesh/relay address; it is never an nsite author
-  key.)
-- **Mutual scan = authorization.** A mutual pairing authorizes Alice to **poll
+- **Pairing.** A one-way scan of a `myco://pair/<base64>` card (device npub +
+  memorable name; no MAC/PSM — those are learned over BLE adverts) is fetch-only —
+  a device's npub *is* its FIPS address, so Alice can reach Ben's relay (`:4869`)
+  and Blossom (`:24242`) over the mesh. A **mutual** relationship is instead formed
+  by **invite-pairing** (a one-time secret; post-v1 — see
+  [identity-pairing.md § 6.1](./identity-pairing.md)), not by both sides scanning.
+  (The device key is only ever a mesh/relay address; never an nsite author key.)
+- **Mutual pairing = authorization.** A mutual pairing authorizes Alice to **poll
   Ben's collected peer list**. Ben, in effect, introduces his peers to Alice.
 - **Transitive reach.** Having learned Ben's peers (Carl, Dana, …), Alice can
   now receive the manifests they hold and pull from them multi-hop over FIPS —

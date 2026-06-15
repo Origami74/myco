@@ -210,6 +210,12 @@ Pairing is the one moment a human asserts "this is who I think it is."
   entirely on the human seeing the right screen. **Open:** whether to add an
   optional verification step (e.g. comparing a short authentication string /
   memorable-name confirmation) for higher-assurance pairing.
+- **Mutual pairing strengthens TOFU.** A bare one-way scan is fetch-only and rests
+  on TOFU. The richer *mutual* relationship is instead formed by **invite-pairing**
+  — a one-time secret whose PAKE-bound handshake authenticates that the peer
+  actually saw your invite (post-v1; see
+  [identity-pairing.md § 6.1](./identity-pairing.md)). That closes the malicious-QR
+  gap above for the mutual case: a captured invite cannot complete the handshake.
 - **Transitive discovery.** Once paired, peers may learn of *further* peers
   through the mesh. Discovery is not the same as pairing: a transitively
   discovered npub is still just a data source whose every artifact you verify.

@@ -13,7 +13,7 @@ and [diagram 02 — Pairing & transitive peer discovery](diagrams/02-pairing-tra
 
 Related: [propagation.md](./propagation.md) (how a learned peer becomes a
 content source and how that reach goes transitive), [security.md](./security.md)
-(key storage threat model, self-authenticating data, what mutual scan does and
+(key storage threat model, self-authenticating data, what a mutual pairing does and
 does not authorize).
 
 ## 1. One device identity = three derived forms
@@ -219,28 +219,64 @@ trust cost; verification happens at fetch/serve time, covered in
 > learning an npub grants nothing on the peer's side — it only configures *your*
 > client to point at *their* always-derivable address.
 
-## 6. Transitive authorization (mutual scan)
+## 6. Mutual pairing and transitive authorization
 
-A one-way scan lets you fetch a peer's **own** content. A **mutual** scan —
-Alice scans Ben *and* Ben scans Alice — additionally authorizes a richer move:
-each side may **poll the other for their collected peer list**, transitively
-widening reach. This is the right half of
-[diagram 02](diagrams/02-pairing-transitive-discovery.svg).
+A one-way scan lets you fetch a peer's **own** content (§5) — that is the **v1
+default** and needs no handshake. A **mutual pairing** is the richer, *consented*
+relationship: it additionally authorizes each side to **poll the other for their
+collected peer list**, transitively widening reach (the right half of
+[diagram 02](diagrams/02-pairing-transitive-discovery.svg)).
 
-- After mutual pairing, Alice can ask Ben "who are your peers?" and learn Carl
-  and Dana. She then derives Carl's and Dana's `<npub>.fips` addresses (§1) and
-  can fetch their nsites too — multi-hop over FIPS, with Ben as an intermediate
-  hop on the live path.
-- **Mutuality is the authorization.** Ben only answers Alice's peer-list poll
-  if Ben has also scanned Alice. This is a lightweight, symmetric consent: I let
-  you see my address book only if I have likewise added you. It is *not* an admin
-  grant and confers no write access — Alice can read Ben's list of npubs, that
-  is all.
+A mutual pairing is formed by **invite-pairing with a one-time secret** (§6.1) —
+**not** by both parties scanning each other. (This *replaces* the earlier
+mutual-scan idea: a single scan plus a secret-authenticated round-trip over the
+mesh yields the mutual relationship, and the secret is what *proves* the peer
+actually saw your invite.) Invite-pairing is a **post-v1** mode; v1 ships only the
+one-way, fetch-only scan (§5).
+
+### 6.1 Invite-pairing via a one-time secret (post-v1)
+
+Modeled on **NIP-46 (Nostr Connect)** — a connection token carrying a one-time
+secret plus a rendezvous, where the other side connects, authenticates with the
+secret, and an ack completes the handshake. FIPS supplies the rendezvous (the
+mesh), so no public relay is required.
+
+1. **Invite token** (shown as a QR / link): `{npub_A, one_time_secret,
+   memorable_name}`. `<npub_A>.fips` is derivable from `npub_A` (§1), so the token
+   carries no address. The secret is high-entropy, **single-use**, and
+   **TTL-bounded**.
+2. **B scans once** and opens a connection to **A's pairing endpoint at
+   `<npub_A>.fips`** — an **on-device** endpoint (an FSP port or a channel on the
+   embedded relay; no third party) — authenticating with the one-time secret and
+   sending `{npub_B, name}`. So the secret is never a replayable bearer token, the
+   exchange runs a **PAKE (e.g. SPAKE2) keyed by the secret**: a captured invite
+   cannot be replayed or offline-guessed.
+3. **A returns an ack** (+ A's memorable name), validates the single-use secret,
+   and stores B in its circle — completing a **mutual** pairing from a **single**
+   scan. Both sides now hold each other, so each may poll the other's peer list.
+
+This *strengthens* the bare trust-on-first-use of a one-way scan (see
+[security.md § 4](./security.md)): the secret cryptographically authenticates that
+the peer saw your invite, closing the relay-MITM gap that one-way TOFU leaves open.
+Because the endpoint is on-device, invite-pairing works peer-to-peer / offline, the
+same trust model as today — both sides must be reachable when B completes (an
+optional public rendezvous for fully-async pairing is a possible later extension).
+
+Once mutually paired:
+
+- Alice can ask Ben "who are your peers?" and learn Carl and Dana. She then
+  derives Carl's and Dana's `<npub>.fips` addresses (§1) and can fetch their
+  nsites too — multi-hop over FIPS, with Ben as an intermediate hop on the live
+  path.
+- **The completed invite-pairing is the authorization.** Ben only answers Alice's
+  peer-list poll because they completed invite-pairing — a lightweight, symmetric
+  consent. It is *not* an admin grant and confers no write access: Alice can read
+  Ben's list of npubs, that is all.
 - The shared data is a **list of npubs** (the cheapest possible currency:
-  re-deriving everything else from each npub is free). No endpoints, secrets, or
-  membership tokens cross this poll.
-- Transitive reach is **not transitive trust.** Content fetched from Carl via
-  Ben is still verified by signature/hash at the consumer (§5). Ben cannot launder
+  re-deriving everything else from each npub is free). No endpoints or membership
+  tokens cross this poll.
+- Transitive reach is **not transitive trust.** Content fetched from Carl via Ben
+  is still verified by signature/hash at the consumer (§5). Ben cannot launder
   unsigned or tampered content through the poll; he can only *name* peers.
 
 How the poll is carried, how often, scope/TTL, and whether Carl's content is
@@ -254,11 +290,12 @@ pull-only (fetched only when a site is opened).
 - **Peer-list poll wire format & endpoint.** Is the poll a dedicated Nostr event
   kind on the peer's relay, a Blossom-style listing, or a new FSP request?
   **TBD / open.**
-- **Mutual-scan proof.** How does Ben *verify* Alice scanned him before
-  answering her poll — is it sufficient that Ben has Alice's npub in his own
-  peer list (purely local check), or is a challenge/response over the
-  Noise-authenticated link required? Leaning toward the local-list check;
-  needs sign-off in [security.md](./security.md). **TBD / open.**
+- **Pairing proof — resolved by §6.1.** The one-time secret in invite-pairing
+  *is* the proof Alice paired with Ben: a captured invite cannot complete the
+  PAKE-bound handshake. What remains open is the **invite-pairing wire detail** —
+  the token format, the PAKE choice (SPAKE2?), the on-device endpoint (a dedicated
+  FSP port vs. a NIP-46-style channel on the embedded relay), and single-use / TTL
+  / rate-limit enforcement. **TBD / open.**
 - **Revocation / unpairing.** Removing a peer locally stops *us* polling them,
   but there is no negative announcement. Whether a peer should stop answering an
   old mutual pairing after the counterpart removed them is **TBD / open**.

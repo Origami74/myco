@@ -167,8 +167,11 @@ over the mesh. Myco reuses nostr-vpn's QR machinery (CameraX + ML Kit
 2. On **B**, open **Scan to pair** and point the camera at A's code. B validates
    the `myco://pair/` prefix, decodes A's npub, and adds A as a known peer
    (so `<npubA>.fips` / `<aliasA>.fips` will resolve).
-3. Optionally pair the other direction (A scans B) so the relationship is
-   mutual. For one-way browse (B reads A's site) only B needs to know A.
+3. The demo only needs the **one-way** direction (B reads A's site), so this is
+   all that's required. A *mutual* relationship is formed by invite-pairing (a
+   one-time secret; post-v1 — see
+   [../design/identity-pairing.md § 6.1](../design/identity-pairing.md)), not by a
+   second scan.
 
 Pairing here only seeds **identity**; it does **not** require connectivity. The
 actual radio link is brought up in Step 6.
