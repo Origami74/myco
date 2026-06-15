@@ -170,6 +170,22 @@ service on the phone is inadvertently reachable via FSP port-multiplexing on a
 paired path, and whether the app should enforce an explicit port allowlist on
 the inbound mesh side.
 
+**v0: the relay and Blossom are open-read to any connected peer.** There is **no
+relay/Blossom auth in v0** — the embedded relay answers any connected peer's `REQ`
+with its stored events, and Blossom answers any `GET /<sha256>`. No NIP-42 `AUTH`,
+no per-peer read scoping. This is deliberate and aligned with propagation: a peer
+*must* be able to read your relay/Blossom to become a new source, and the data is
+public-by-design (author-signed manifests, content-addressed blobs) — so open-read
+leaks no secret. The honest exposure is **metadata, not confidentiality**: a
+connected peer can issue a broad `REQ` and **enumerate your whole manifest set** —
+learning *which sites you hold, installed, or cached for others*. That is the same
+privacy signal as *which manifests you choose to replicate* (see
+[propagation.md](./propagation.md)), not a content leak. Mitigations — NIP-42 `AUTH`
+on the relay, per-peer read-scoping, unlisted/private nsites, selective
+replication — are **additive and deferred to a later milestone** (NIP-42 is
+non-breaking on the wire). The only coarse knob today is the FIPS peer ACL ("block
+this peer", above).
+
 ## 4. Pairing trust: QR is trust-on-first-use
 
 Pairing is the one moment a human asserts "this is who I think it is."

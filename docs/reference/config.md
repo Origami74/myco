@@ -63,6 +63,8 @@ alias = ""                 # optional human label for this device's <alias>.fips
 # [node] — the embedded relay + blossom server (Rust: the myco-relay /
 #          myco-blossom crates, wired in by myco-core).
 # Defaults match the nsite-deck reference ports.
+# v0 is OPEN-READ: any connected FIPS peer can REQ the relay / GET any blob
+# (no NIP-42 AUTH or read ACL) — aligned with propagation; see security.md §3.
 # ---------------------------------------------------------------------------
 [node]
 relay_port   = 4869        # ws://localhost:4869  (embedded Nostr relay)

@@ -25,7 +25,7 @@ see the [index](./README.md). The v1 target (P3) is the
 | **P3** | AndroidBleIo (the v1 demo) | Two Androids, airplane mode + BLE: B browses A's nsite offline. |
 | **P4** | Propagation at scale (set-recon + transitive + eviction) | A cached site survives the origin going offline; reach goes transitive. |
 | **P5** | Linux interop | An Android dials a Linux `BluerIo` peer and syncs an nsite. |
-| **Later** | htdocs serving cache, home-screen pinning + app-shortcuts, WiFi-Direct, public-node peering, nsite capability API, NAT46 | (see below — each is its own milestone) |
+| **Later** | htdocs serving cache, home-screen pinning + app-shortcuts, WiFi-Direct, public-node peering, nsite capability API, relay read-auth, NAT46 | (see below — each is its own milestone) |
 
 ---
 
@@ -224,6 +224,12 @@ Out of scope for v1; each is its own milestone with its own design pass.
 - **Multi-persona identity.** More than one keypair per device (independent
   node_addr / ULA / Library) — [identity-pairing.md](./design/identity-pairing.md)
   (§3).
+- **Relay / Blossom read-auth.** v0 is **open-read** — any connected peer can
+  `REQ` your relay and `GET` any blob, which lets a peer enumerate your manifest
+  set (what you hold / installed). Restrict it with NIP-42 `AUTH` on the relay,
+  per-peer read-scoping, and **unlisted/private nsites** + selective replication.
+  All additive (NIP-42 is non-breaking on the wire) —
+  [security.md](./design/security.md) (§3).
 - **Re-surfacing the FIPS peer ACL** as a "block this peer" control —
   [security.md](./design/security.md) (§3).
 
