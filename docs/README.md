@@ -1,3 +1,5 @@
+<p align="center"><img src="myco-logo.png" alt="Myco" width="200"></p>
+
 # Myco
 
 > **Install apps from the people around you** — over Bluetooth, with no internet
@@ -10,6 +12,10 @@
 ![Get started in 3 steps](design/diagrams/intro-02-get-started.svg)
 
 ![How apps spread](design/diagrams/intro-03-how-it-spreads.svg)
+
+![Apps you install live on your home screen](design/diagrams/intro-04-on-your-homescreen.svg)
+
+![Every app gets its own window](design/diagrams/intro-05-each-its-own-app.svg)
 
 ---
 

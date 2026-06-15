@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/myco-logo.png" alt="Myco" width="200"></p>
+
 # Myco
 
 > **Install apps from the people around you** — over Bluetooth, with no internet
@@ -13,6 +15,13 @@ phone, on their own, with no servers and no single point that has to stay online
 ![Get started in 3 steps](docs/design/diagrams/intro-02-get-started.svg)
 
 ![How apps spread](docs/design/diagrams/intro-03-how-it-spreads.svg)
+
+The apps you collect get their own home-screen icons, and each one opens
+full-screen as its own app:
+
+![Apps you install live on your home screen](docs/design/diagrams/intro-04-on-your-homescreen.svg)
+
+![Every app gets its own window](docs/design/diagrams/intro-05-each-its-own-app.svg)
 
 ## How it works (for developers)
 

@@ -11,6 +11,8 @@ Structure mirrors `reference/fips/docs/design/diagrams/`.
 | [intro-01-what-it-is.svg](intro-01-what-it-is.svg) | Plain-language hero: install apps from the people around you over Bluetooth, works offline. |
 | [intro-02-get-started.svg](intro-02-get-started.svg) | The 3 steps: scan a friend's QR → install their apps → open one (works offline). |
 | [intro-03-how-it-spreads.svg](intro-03-how-it-spreads.svg) | "Like passing a note": an app hops Alice→Ben→Carl; it keeps spreading even after Alice leaves. |
+| [intro-04-on-your-homescreen.svg](intro-04-on-your-homescreen.svg) | Installed apps get their own home-screen icon (alongside Myco the manager) — a real icon you tap to open, no app store. |
+| [intro-05-each-its-own-app.svg](intro-05-each-its-own-app.svg) | Each nsite opens full-screen as its own app — separate Android Recents cards you switch between; re-opening the same one returns to its single window. |
 
 ### Technical (design docs)
 
