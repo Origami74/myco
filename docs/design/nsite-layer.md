@@ -33,8 +33,9 @@ WebView (no URL bar)
    ▼
 Local gateway (HTTP)  ──────────────────────────┐
    │  resolve host → siteKey                     │
-   │  cache hit? serve from filesystem (<1ms)    │
-   │  miss/stale? ↓                              │
+   │  manifest event → <path> → sha256           │
+   │  serve blob direct from local Blossom        │
+   │  blobs missing? ↓ (still syncing)           │
    ▼                                             │
 Embedded relay (ws://localhost:4869)             │  all in-process,
    │  manifest event: kind 15128 / 35128         │  inside the
@@ -79,7 +80,7 @@ radio and the TUN; Rust owns the content layer and the mesh. See
 > Rust (in the `nsite-deck` crate) so there is **one** cross-compiled `.so` and
 > **one** FFI surface, rather than embedding a second Go runtime. The Go
 > reference remains the behavioural spec; the Rust port must match its wire
-> behaviour (kinds, manifest tags, URL scheme, atomic swap).
+> behaviour (kinds, manifest tags, URL scheme).
 
 > **Naming note.** The reusable crate shares the name *nsite-deck* with the Go
 > reference project it descends from; they are different codebases (Go reference
@@ -102,6 +103,16 @@ event store and advertises NIPs 1, 9, 11, 12, 15, 16, 20, 33
 ([embedded.go](../../reference/site-deck/internal/relay/embedded.go)). The Rust
 port needs the same minimal surface: accept `EVENT`, answer `REQ` with a stored
 event set, honour `CLOSE`, and serve a NIP-11 document.
+
+**Embedded from day one — relay *backend* is a pluggable seam.** The relay and
+Blossom are both **bundled and in-process from day one**; they are simple enough
+that there is no "forward to an external relay first, embed later" phase. The
+relay *backend*, however, is a **pluggable seam**: the **default** is the
+embedded store described here; an **optional** backend **forwards to a local
+relay app on the device — e.g. [Citrine](https://github.com/greenart7c3/Citrine)** —
+for developers who already run one. The embedded backend is the default and the
+earliest path; forwarding is a configuration choice on top of it, not a
+prerequisite. (Blossom has no such seam — see §2.2.)
 
 **Proposed candidates / patterns:**
 
@@ -150,7 +161,10 @@ machinery layered on later (P4). See [diagrams/07-relay-mesh-fanout.svg](diagram
 
 ### 2.2 Embedded Blossom
 
-A content-addressed blob server on `http://localhost:24242`, implementing the
+A content-addressed blob server on `http://localhost:24242`, **always embedded**
+— unlike the relay, Blossom has **no pluggable forward-to-an-app backend**,
+because there is no good Android Blossom app to forward to, so embedding is the
+only sensible path. It implements the
 [BUD-01](https://github.com/hzrd149/blossom/blob/master/buds/01.md) surface the
 gateway and sync need:
 
@@ -180,11 +194,14 @@ re-implemented in Rust. The request lifecycle is §4.
 
 ### 2.4 The sync engine
 
-Pulls a manifest + its blobs from a source, verifies every blob's sha256,
-writes a new version directory, and atomically swaps it in. The Go reference is
-[service.go](../../reference/site-deck/internal/sync/service.go); the only
-Myco change is **the source**: a reachable FIPS peer instead of public
-relays/Blossom (§5).
+Pulls a manifest + its blobs from a source, verifies every blob's sha256, and
+mirrors them into the **local Blossom + relay** so the gateway can serve them
+direct (§4). The Go reference is
+[service.go](../../reference/site-deck/internal/sync/service.go); two Myco
+changes: **the source** is a reachable FIPS peer instead of public
+relays/Blossom (§5), and v0 **does not** build version directories or do an
+atomic swap — it serves direct from the content-addressed store, deferring the
+reference's htdocs/version-dir machinery to the roadmap (§4.4).
 
 ---
 
@@ -258,10 +275,18 @@ the Library UI's "not in your Library" page rather than surfacing a raw error.
 
 ---
 
-## 4. The gateway flow: resolve → cache → serve
+## 4. The gateway flow: resolve → manifest → blob → serve
 
 The browse-request lifecycle, per
 [diagrams/04-nsite-browse-flow.svg](diagrams/04-nsite-browse-flow.svg).
+
+> **v0 serves DIRECT from the local relay + Blossom.** There are no version
+> directories, no `current/` pointer, and no atomic swap in v0. Each request
+> resolves the manifest from the local relay, maps `<path> → sha256`, fetches
+> that blob from the local Blossom, and serves it with a content-type inferred
+> from the path extension. The reference's path-named **htdocs** serving cache
+> (write blobs out as files under a `current/` dir) is a **later speed
+> optimization, deferred to the roadmap** — not the v0 serving model (§4.4).
 
 ### 4.1 Resolve and normalize
 
@@ -271,55 +296,74 @@ The browse-request lifecycle, per
    `…/index.html`; an extensionless path is treated as a directory. (Matches the
    spec's index fallback.)
 
-### 4.2 Cache hit — the fast path
+### 4.2 Serve direct from the content-addressed store — the v0 path
 
-If `siteKey` is cached, serve the file straight off the filesystem
-(`current/<path>`), nginx-style — a single file read, sub-millisecond, no relay
-query and no blob fetch. Update the last-accessed timestamp for LRU. If the
-path is missing from a cached site, fall back to the site's `/404.html`, then a
-gateway 404. This is `serveFromCache`
-([handlers.go](../../reference/site-deck/internal/gateway/handlers.go)).
+If the site's manifest is in the local relay, serve the requested path direct,
+per request:
 
-### 4.3 Cache miss or stale — fetch, then serve
+1. **Look up the manifest event** for `siteKey` in the local relay
+   (kind `15128` / `35128`, newest per slot).
+2. **Map `<path> → sha256`** from the manifest's `["path", …, <sha256>]` tags.
+3. **Fetch that blob** from the local Blossom by hash (`GET /<sha256>`).
+4. **Serve it** with a `Content-Type` **inferred from the path extension** (the
+   manifest is path→hash only; the extension is the type signal), plus
+   `Content-Length`. Update the last-accessed timestamp for LRU.
 
-On a miss the gateway runs a single-flight sync (`startOrJoinSync`: at most one
-sync per `siteKey`, late requests join the in-flight one), then:
+If the path is not in the manifest, fall back to the site's `/404.html`, then a
+gateway 404.
 
-- **Sync completes within ~1s** → serve from the freshly built cache.
+**"All referenced blobs present?" check.** Before serving a site, the gateway
+verifies that **every** blob the manifest references is present in the local
+Blossom (a `HEAD /<sha256>` per tag, or an index lookup). If any are missing the
+site is **still syncing** — the gateway shows the loading page (§4.3) rather than
+serving a half-present site. Once all referenced blobs are present the site is
+servable direct, instantly, with no further network — including fully offline.
+
+### 4.3 Manifest missing or site incomplete — fetch, then serve
+
+If the manifest is absent, or the "all blobs present?" check fails, the gateway
+runs a single-flight sync (`startOrJoinSync`: at most one sync per `siteKey`,
+late requests join the in-flight one), then:
+
+- **Sync completes within ~1s** → serve direct (§4.2).
 - **Sync takes longer than ~1s** → return a **loading page** (HTTP 503 with a
   spinner) that subscribes to the local relay for the manifest (to show
   title/description as soon as it arrives) and polls a status endpoint; when the
-  status flips to `ready`, the page redirects to the real content. This is the
-  `writeLoadingPage` / `handleLoadingStatus` pair in the reference.
+  status flips to `ready` (manifest stored + all referenced blobs present), the
+  page redirects to the real content. This is the `writeLoadingPage` /
+  `handleLoadingStatus` pair in the reference.
 - **Sync fails** → a friendly sync-error page (no source reachable, missing
   blobs, etc.).
 
 The 1-second threshold and the poll-then-redirect loading page are taken
 directly from the reference and are a **proposed default** (tunable).
 
-### 4.4 Atomic version swap
+### 4.4 Deferred: the htdocs serving cache
 
-A site is never served half-updated. Sync builds an isolated new version, and
-only an all-or-nothing swap makes it live:
-
-```
-cache/<siteKey>/
-├─ current  ────────────►  v<timestamp>/   (atomic pointer swap)
-├─ v<timestamp>/           ← new version, fully built before swap
-│  ├─ index.html
-│  └─ …
-└─ v<older>/               ← kept (default: last 2 versions), then GC'd
-```
-
-The reference does this with a symlink renamed atomically over `current`
-([sync-architecture.md](../../reference/site-deck/docs/sync-architecture.md),
-`activateVersion` in [service.go](../../reference/site-deck/internal/sync/service.go)).
-
-> **Open question — symlinks on Android.** App-private storage on Android may
-> not honour POSIX symlink-rename atomicity the way the Linux reference assumes.
-> Proposed fallback: a `current.json` pointer file written atomically
-> (write-temp-then-rename), with the gateway reading the active version dir name
-> from it. **TBD / open.**
+> **Roadmap, not v0.** v0 serves direct from Blossom (§4.2) and needs none of
+> this. As a later **speed optimization**, the reference's path-named **htdocs**
+> cache writes each blob out as a real file under its manifest path in a
+> `current/` dir, so a hot path is a single nginx-style file read instead of a
+> manifest lookup + blob fetch:
+>
+> ```
+> htdocs/<siteKey>/
+> ├─ current  ────────────►  v<timestamp>/   (atomic pointer swap)
+> ├─ v<timestamp>/           ← new version, fully built before swap
+> │  ├─ index.html
+> │  └─ …
+> └─ v<older>/               ← kept (default: last 2 versions), then GC'd
+> ```
+>
+> The reference builds this with a version dir swapped atomically over
+> `current` — a symlink rename
+> ([sync-architecture.md](../../reference/site-deck/docs/sync-architecture.md),
+> `activateVersion` in [service.go](../../reference/site-deck/internal/sync/service.go)).
+> This htdocs cache is **derived** from the Blossom blob store (§6), never the
+> source of truth, and is purely a serving-speed optimization. When/if it lands,
+> the Android atomic-swap mechanism (symlink-rename vs an atomically-written
+> `current.json` pointer file) is itself an open question. **Deferred — TBD /
+> open.**
 
 ---
 
@@ -385,17 +429,19 @@ is detailed in [./propagation.md](./propagation.md)):
    Blossom first (a blob already cached for another site is the same blob) and
    only go to the peer on a miss.
 4. **Verify.** Re-hash each blob; `sha256(bytes)` MUST equal the manifest hash.
-   Any mismatch or missing blob **aborts the whole sync** (the half-built
-   version dir is deleted). This is what makes any source trustworthy: the data
-   is self-authenticating, so it does not matter *who* served it.
-5. **Write + mirror.** Write each verified file into `v<timestamp>/` under its
-   real path, and mirror the blob into the local Blossom (so this device can
-   re-serve it to the next peer — the propagation hop).
-6. **Activate.** Atomic version swap (§4.4), then store the author's signed
-   manifest event (unmodified) into the **local** relay so subsequent loads hit
-   the fast path and so the local relay can answer the loading page's
-   subscription. Re-emitting an already-signed event relay-to-relay like this is
-   normal relay behaviour, not authoring — the author's signature stays valid.
+   Any mismatch or missing blob **aborts the whole sync**. This is what makes any
+   source trustworthy: the data is self-authenticating, so it does not matter
+   *who* served it.
+5. **Mirror into local Blossom.** Store each verified blob (keyed by sha256) in
+   the **local Blossom**, so this device can both serve it direct (§4.2) and
+   re-serve it to the next peer — the propagation hop. No version dir is written
+   in v0; the content-addressed store *is* the cache.
+6. **Activate.** Store the author's signed manifest event (unmodified) into the
+   **local** relay. With all referenced blobs now present (§4.2's check), the
+   site is immediately servable direct; the stored manifest also lets the local
+   relay answer the loading page's subscription. Re-emitting an already-signed
+   event relay-to-relay like this is normal relay behaviour, not authoring — the
+   author's signature stays valid.
 
 Steps 1–6 mirror `Sync` in
 [service.go](../../reference/site-deck/internal/sync/service.go), with public
@@ -426,11 +472,13 @@ the split the project calls the Pillars of Propagation; the policy around it
 
 ## 6. Offline serving from cache
 
-Once a site has been synced, it is served entirely from the local filesystem
-cache and never needs the network again:
+Once a site has been synced — manifest in the local relay, all referenced blobs
+in the local Blossom — it is served entirely from the local content-addressed
+store and never needs the network again:
 
-- **Cached site, offline** → served instantly from `current/`, identical to the
-  online fast path. Reload and back-to-Library work with no radio.
+- **Cached site, offline** → served direct from the local relay + Blossom (§4.2),
+  identical to the online path. The nsite opens and runs fully with no radio
+  (any in-app reload/navigation it implements works against the local stores).
 - **Uncached site, offline** → the sync has no reachable source, so the gateway
   shows the sync-error / "not reachable" page (HTTP 503). It is not a crash;
   the moment a holding peer comes into BLE range, a retry succeeds.
@@ -456,18 +504,26 @@ beyond recency is **TBD / open**.
 
 ### Storage and eviction
 
-- **LRU cache, default cap 2 GB** (proposed default). Oldest-accessed sites are
-  evicted first when over cap, using a small SQLite index of
-  `(siteKey, size, last_accessed)`
+**Two stores, kept distinct.** The **Blossom blob store** is the
+content-addressed store Myco *retains*: blobs keyed by sha256, embedded from day
+one, it is both the store-and-forward source (what this device re-serves to the
+next peer) and what serving reads from direct (§4.2). The deferred **htdocs**
+cache (§4.4) is a *derived*, path-named serving cache layered on top — a speed
+optimization, never the source of truth, and not present in v0. The 2 GB cap
+below governs the **Blossom blob store**.
+
+- **LRU cache, default cap 2 GB** (proposed default), over the Blossom blob
+  store. Oldest-accessed sites are evicted first when over cap, using a small
+  SQLite index of `(siteKey, size, last_accessed)`
   ([cache/database.go](../../reference/site-deck/internal/cache/database.go),
   [cache/manager.go](../../reference/site-deck/internal/cache/manager.go)).
 - **Pinned sites are exempt.** A site the user adds to their Library is pinned and
   never evicted.
-- **Version retention.** Keep the last 2 versions per site by default (current +
-  previous), GC older ones after a swap.
 - **Blob dedup.** Because the local Blossom is content-addressed, a blob shared
   across sites (e.g. a common JS lib) is stored once and re-served to peers
   regardless of which site first pulled it.
+- **Version retention (deferred).** Multi-version retention + GC belongs to the
+  htdocs cache (§4.4); it is **not** part of the v0 serve-direct model.
 
 ---
 
@@ -478,8 +534,9 @@ beyond recency is **TBD / open**.
   a sync) is a later milestone and an explicit open design question (called out
   on [diagram 04](diagrams/04-nsite-browse-flow.svg)). **TBD / open.**
 - **Host suffix** — `.localhost` vs `.nsite` (§3.2). **TBD / open.**
-- **Atomic swap mechanism** on Android storage — symlink vs pointer file
-  (§4.4). **TBD / open.**
+- **htdocs serving cache** — the deferred path-named cache and its Android
+  atomic-swap mechanism (symlink-rename vs `current.json` pointer file)
+  (§4.4). **Deferred to the roadmap — TBD / open.**
 - **Multi-source / parallel pull** from several reachable holders (§5.2).
   **TBD / open.**
 - **Relay store choice** — full `nostr-rs-relay`-style store vs a hand-rolled

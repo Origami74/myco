@@ -12,10 +12,13 @@ A short orientation to **Myco**. For the full conceptual model read
 Myco is a peer-to-peer **app-sharing network**: an Android app for exchanging,
 browsing, and propagating **nsites** — static websites published on Nostr — over
 a [FIPS](../reference/fips/docs/README.md) mesh, including fully **offline over
-Bluetooth**. Each nsite is presented as an "app" inside an embedded browser:
-there is no URL bar, just a fixed bottom bar (Back · Reload · Library). The **Library**
-is your home grid of nsites; tapping one opens it in a WebView served entirely
-from your phone's localhost. Two phones in a pocket — no Wi-Fi, no cell — can
+Bluetooth**. **Myco itself is the manager app** — Library, Pair, Discover, and
+Settings. Each nsite **launches as its own fullscreen app**, with no Myco-imposed
+chrome (no URL bar, no Back/Reload bar; in-app navigation and refresh are the
+nsite developer's own responsibility). The **Library** is your grid of installed
+nsites; tapping one launches it as its own fullscreen task (its own card in
+Android Recents), served entirely from your phone's localhost. Two phones in a
+pocket — no Wi-Fi, no cell — can
 exchange and browse each other's sites over BLE. The framing is nak's "Pillars
 of Propagation": small relays and Blossom blobs hopping over crappy links in all
 directions, surviving outages via local propagation.

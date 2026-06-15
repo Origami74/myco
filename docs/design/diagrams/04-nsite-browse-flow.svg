@@ -7,19 +7,20 @@
 
   <rect width="1000" height="600" fill="#ffffff"/>
   <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">nsite-as-app — browse request lifecycle</text>
-  <text x="40" y="63" font-size="13" fill="#64748b">The WebView loads &lt;site&gt;.nsite (→ 127.0.0.1, the local gateway). Cross-device fetch is native, over FIPS — never .fips in the browser.</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">Each nsite opens as a fullscreen app (NsiteActivity) loading &lt;host&gt;.nsite (→ 127.0.0.1, the local gateway). Cross-device fetch is native, over FIPS.</text>
 
   <!-- Row 1 -->
-  <!-- Library -->
+  <!-- Myco Library -->
   <rect x="44" y="110" width="150" height="74" rx="10" fill="#eef2ff" stroke="#475569"/>
-  <text x="119" y="143" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">Library</text>
-  <text x="119" y="162" font-size="10.5" fill="#64748b" text-anchor="middle">tap a site / app</text>
+  <text x="119" y="139" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">Myco Library</text>
+  <text x="119" y="157" font-size="10.5" fill="#64748b" text-anchor="middle">tap → launch app</text>
+  <text x="119" y="172" font-size="10.5" fill="#64748b" text-anchor="middle">(new task)</text>
 
-  <!-- WebView -->
+  <!-- NsiteActivity -->
   <rect x="244" y="110" width="150" height="74" rx="10" fill="#eef2ff" stroke="#475569"/>
-  <text x="319" y="138" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">WebView</text>
-  <text x="319" y="156" font-size="10.5" fill="#64748b" text-anchor="middle">no url bar · reload</text>
-  <text x="319" y="172" font-size="10.5" fill="#64748b" text-anchor="middle">loads &lt;site&gt;.nsite</text>
+  <text x="319" y="138" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">NsiteActivity</text>
+  <text x="319" y="156" font-size="10.5" fill="#64748b" text-anchor="middle">fullscreen · no chrome</text>
+  <text x="319" y="172" font-size="10.5" fill="#64748b" text-anchor="middle">loads &lt;host&gt;.nsite</text>
 
   <!-- Gateway -->
   <rect x="444" y="110" width="150" height="74" rx="10" fill="#fff7ed" stroke="#d97706"/>
@@ -28,8 +29,8 @@
 
   <!-- Cache decision diamond -->
   <polygon points="700,110 772,147 700,184 628,147" fill="#fffbeb" stroke="#d97706"/>
-  <text x="700" y="143" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">cached?</text>
-  <text x="700" y="160" font-size="10" fill="#92400e" text-anchor="middle">local copy fresh?</text>
+  <text x="700" y="143" font-size="12.5" font-weight="700" fill="#0f172a" text-anchor="middle">blobs present?</text>
+  <text x="700" y="160" font-size="9.5" fill="#92400e" text-anchor="middle">all in local Blossom?</text>
 
   <!-- Serve -->
   <rect x="820" y="110" width="138" height="74" rx="10" fill="#ecfdf5" stroke="#16a34a"/>
@@ -66,9 +67,9 @@
 
   <!-- c: verify + swap -->
   <rect x="690" y="300" width="180" height="78" rx="10" fill="#f0fdfa" stroke="#0d9488"/>
-  <text x="780" y="328" font-size="12.5" font-weight="700" fill="#0f172a" text-anchor="middle">③ Verify + cache</text>
-  <text x="780" y="346" font-size="10.5" fill="#64748b" text-anchor="middle">check sha256 · all-or</text>
-  <text x="780" y="362" font-size="10.5" fill="#64748b" text-anchor="middle">nothing atomic swap</text>
+  <text x="780" y="328" font-size="12.5" font-weight="700" fill="#0f172a" text-anchor="middle">③ Verify + store</text>
+  <text x="780" y="346" font-size="10.5" fill="#64748b" text-anchor="middle">check sha256, then</text>
+  <text x="780" y="362" font-size="10.5" fill="#64748b" text-anchor="middle">store in local Blossom</text>
 
   <line x1="430" y1="339" x2="466" y2="339" stroke="#475569" stroke-width="2" marker-end="url(#bSlate)"/>
   <line x1="650" y1="339" x2="686" y2="339" stroke="#475569" stroke-width="2" marker-end="url(#bSlate)"/>
@@ -85,4 +86,5 @@
   <!-- bottom note -->
   <text x="40" y="448" font-size="12.5" fill="#475569">Site host = <tspan font-weight="700" fill="#0f172a">npub1…</tspan> (root) or <tspan font-weight="700" fill="#0f172a">&lt;pubkeyB36&gt;&lt;dTag&gt;</tspan> (named).  Manifest entries map <tspan font-weight="700" fill="#0f172a">path → sha256</tspan>; each path's bytes are a Blossom blob.</text>
   <text x="40" y="472" font-size="12.5" fill="#475569">Trust/sandbox of what an nsite's JS may call back into (relay / blossom / signing) is an <tspan font-weight="700" fill="#b45309">open design question</tspan> (see questions).</text>
+  <text x="40" y="494" font-size="12" fill="#94a3b8">v0 serves blobs straight from Blossom; an htdocs path-named serving cache is a deferred (roadmap) speed optimization.</text>
 </svg>

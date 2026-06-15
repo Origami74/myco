@@ -65,15 +65,29 @@ alias = ""                 # optional human label for this device's <alias>.fips
 # ---------------------------------------------------------------------------
 [node]
 relay_port   = 4869        # ws://localhost:4869  (embedded Nostr relay)
-blossom_port = 24242       # http://localhost:24242 (embedded Blossom server)
+blossom_port = 24242       # http://localhost:24242 (embedded Blossom server, ALWAYS embedded)
 autostart    = true        # start relay+blossom+FIPS endpoint on app launch
 
 # ---------------------------------------------------------------------------
-# [cache] — content store: signed events + sha256 blobs we retain and re-serve.
-# This is what makes us a new SOURCE for offline propagation.
+# [relay] — the relay BACKEND is a pluggable seam. Default = embedded (day one).
+# Optional = forward to a local relay app (e.g. Citrine) for devs who already
+# run one. Blossom is NOT pluggable: it is ALWAYS embedded (no good Android
+# Blossom app to forward to). Embedding is the default and earliest path.
+# ---------------------------------------------------------------------------
+[relay]
+backend = "embedded"       # "embedded" | "local-forward"  (default embedded)
+# forward_addr = "ws://127.0.0.1:7777"  # only used when backend = "local-forward"
+                                        # (e.g. a local Citrine relay)
+
+# ---------------------------------------------------------------------------
+# [cache] — content store: signed events + the Blossom content-addressed blob
+# store (sha256 blobs) we retain and re-serve. The blob store is the
+# store-and-forward source and what makes us a new SOURCE for offline
+# propagation; the cap below governs it. (The htdocs serving cache — a derived,
+# path-named cache on top — is DEFERRED to the roadmap and has no config yet.)
 # ---------------------------------------------------------------------------
 [cache]
-cap_bytes       = 2147483648   # 2 GB LRU cap (proposed default)
+cap_bytes       = 2147483648   # 2 GB LRU cap over the Blossom blob store (proposed default)
 eviction        = "lru"        # "lru" | "lfu" | "fifo"  (TBD/open: only lru in v1)
 pin_library_items  = true         # sites added to the Library are pinned, exempt from eviction
 
@@ -147,8 +161,21 @@ One identity per device in v1; multi-persona is a later milestone.
 | Key | Type | Proposed default | Notes |
 | --- | --- | --- | --- |
 | `relay_port` | u16 | `4869` | embedded Nostr relay, `ws://localhost:4869`. |
-| `blossom_port` | u16 | `24242` | embedded Blossom server, `http://localhost:24242`. |
+| `blossom_port` | u16 | `24242` | embedded Blossom server, `http://localhost:24242`. **Always embedded** — not pluggable. |
 | `autostart` | bool | `true` | start the node (relay + blossom + FIPS endpoint) on launch. |
+
+### `[relay]`
+
+The relay **backend** is a pluggable seam: the default is the embedded relay
+(day one), with an optional path to **forward to a local relay app** (e.g.
+[Citrine](https://github.com/greenart7c3/Citrine)) for devs who already run one.
+Embedding is the default and earliest path. **Blossom is not pluggable** — it is
+**always embedded** (there is no good Android Blossom app to forward to).
+
+| Key | Type | Proposed default | Notes |
+| --- | --- | --- | --- |
+| `backend` | enum | `"embedded"` | `"embedded"` (default) or `"local-forward"` (forward writes/reads to a local relay app like Citrine). |
+| `forward_addr` | string | absent | only when `backend = "local-forward"` — the local relay's address (e.g. `ws://127.0.0.1:7777`). **TBD/open:** exact handshake/sync with the external relay. |
 
 These services are exposed to mesh peers over FIPS FSP port-multiplexing at
 `<npub>.fips:4869` and `<npub>.fips:24242` — no separate gateway on a reachable
@@ -161,7 +188,7 @@ gateway.
 
 | Key | Type | Proposed default | Notes |
 | --- | --- | --- | --- |
-| `cap_bytes` | u64 | `2147483648` (2 GB) | LRU cap over retained events + blobs. |
+| `cap_bytes` | u64 | `2147483648` (2 GB) | LRU cap over retained events + the **Blossom content-addressed blob store** (the store-and-forward source). |
 | `eviction` | enum | `"lru"` | **TBD/open** — only `lru` in v1; `lfu`/`fifo` reserved. |
 | `pin_library_items` | bool | `true` | Library sites are pinned and exempt from eviction. |
 
@@ -169,6 +196,12 @@ Self-authenticating data (signed events, content-addressed blobs) means any
 retained item is trustworthy regardless of who served it, so the cache can
 become a new source for later, offline peers
 (see [propagation.md](../design/propagation.md)).
+
+The **htdocs** serving cache — a derived, path-named cache written on top of the
+blob store for fast static serving (nsite-deck's `current/` optimization) — is
+**deferred to the roadmap** and has **no config yet**. The cap above governs the
+Blossom blob store, which is the store we retain; htdocs would be a regenerable
+derivative.
 
 ### `[[peers]]`
 

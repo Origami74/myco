@@ -20,13 +20,18 @@ and the browse lifecycle in [diagrams/04-nsite-browse-flow.svg](./diagrams/04-ns
 
 ## Overview
 
-Myco runs entirely on one phone: an Android UI shell over a single Rust
+Myco runs entirely on one phone: an Android **manager app** over a single Rust
 native library (`myco-core`) that bundles the FIPS endpoint, the embedded
-Nostr relay, and the embedded Blossom server. Kotlin owns the UI, the WebView,
-the radio (BLE), and the `VpnService`/TUN; Rust owns identity, the mesh, and the
-nsite services. They talk across a JNI/JSON reducer boundary.
+Nostr relay, and the embedded Blossom server. Kotlin owns the UI, the per-nsite
+WebView, the radio (BLE), and the `VpnService`/TUN; Rust owns identity, the
+mesh, and the nsite services. They talk across a JNI/JSON reducer boundary.
 
-The single most important structural fact: **the WebView only ever loads
+Myco itself is the manager — Library / Pair / Discover / Settings, with its own
+homescreen icon — and each nsite launches as **its own fullscreen "app"** in a
+separate task (a `NsiteActivity` WebView, no Myco chrome). See
+[app-shell.md](./app-shell.md) for the launch model.
+
+The single most important structural fact: **a WebView only ever loads
 `http://<host>.nsite` (IPv4 localhost).** All cross-device fetching happens in
 native code over `.fips`. The browser never resolves `.fips`. Everything else in
 the stack exists to make that local page load resolvable from peer content.
@@ -34,8 +39,8 @@ the stack exists to make that local page load resolvable from peer content.
 The stack, top to bottom:
 
 ```
-  1  Android UI            (Jetpack Compose) — Library, browser chrome, QR pair
-  2  Embedded browser      (WebView) — loads http://<host>.nsite, no URL bar
+  1  Android UI            (Jetpack Compose) — Myco manager: Library, Pair, Discover, Settings
+  2  NsiteActivity         (fullscreen WebView, one task per nsite) — loads http://<host>.nsite, no chrome
   3  Local gateway + DNS   — *.nsite → 127.0.0.1; resolve manifest; serve files
   4  Embedded relay+Blossom (Rust) — ws://…:4869 / http://…:24242 + S&F cache
   5  myco-core / FFI      (Rust) — JNI/JSON reducer; binds services into FIPS
@@ -44,7 +49,8 @@ The stack, top to bottom:
 ```
 
 (The diagram collapses UI + browser into one band and shows six bands; this doc
-splits the WebView out to make the "loads localhost only" boundary explicit.)
+splits the per-nsite WebView out to make the "loads localhost only" boundary
+explicit.)
 
 ---
 
@@ -52,22 +58,38 @@ splits the WebView out to make the "loads localhost only" boundary explicit.)
 
 ### 1. Android UI (Jetpack Compose) — **net-new**
 
-**Responsibilities.** The Library (home grid of nsites-as-apps), the browser chrome
-(fixed bottom bar: Back · Reload · Library), the QR pairing screen (scan + show),
-"nsites around me" search, and storage/settings. Navigation is deliberately
-minimal: no URL bar; site info on long-press in the Library.
+**Responsibilities.** Myco is the **manager app**, with its own homescreen icon.
+Its UI is four surfaces: the **Library** (your installed nsites/apps), **Pair**
+(the QR pairing screen — scan + show), **Discover** (your circle — "nsites around
+me" / transitively-discovered sites), and **Settings** (identity, storage,
+relay backend). To *manage* an nsite — info, remove, re-pair, add-to-home-screen —
+you go to Myco. Myco does **not** host the nsite itself: launching an nsite hands
+off to a separate fullscreen `NsiteActivity` (layer 2). There is no Myco-imposed
+browser chrome, no bottom bar, no URL bar. See [app-shell.md](./app-shell.md) for
+the launch model, Recents behaviour, intents (`myco://app/<npub>[/<dTag>]`), and
+homescreen-pinning via `ShortcutManager` (Library is the source of truth for
+"installed"; homescreen presence is a soft hint).
 
 **Provenance.** Net-new. nostr-vpn's UI is network/roster/exit-node management —
 none of that survives the strip. The **QR pairing** sub-feature is reused
 (see layer 5 / FFI), but the screens around it are new.
 
-### 2. Embedded browser (WebView) — **net-new (thin)**
+### 2. NsiteActivity — fullscreen WebView per nsite — **net-new (thin)**
 
-**Responsibilities.** Render an nsite. The WebView loads exactly one kind of URL,
+**Responsibilities.** Render an nsite. Each nsite launches as its **own fullscreen
+"app"** — a `NsiteActivity` whose `WebView` fills the screen, with **no toolbar,
+no URL bar, and no Myco chrome**. It loads exactly one kind of URL,
 `http://<host>.nsite`, where `<host>` is `npub1…` (root site) or
-`<pubkeyB36><dTag>` (named site). It has no address bar and no cross-origin
-navigation affordance; the only controls are the bottom bar. In v1 the content
-is **pure static** (no privileged JS); a capability API is a later milestone.
+`<pubkeyB36><dTag>` (named site). The activity is `documentLaunchMode="always"`
+and launched with `FLAG_ACTIVITY_NEW_DOCUMENT`, so each nsite is its own task /
+instance and its own card in Android Recents (title + favicon + colour via
+`ActivityManager.TaskDescription`). Per-nsite **origin isolation is automatic**:
+each nsite is its own origin (`<host>.nsite`), so WebView storage/cookies
+partition per nsite. Refresh, in-app navigation, and pull-to-refresh are the
+**nsite developer's** responsibility, implemented inside the nsite — Myco adds no
+reload button and no back bar; Android Back walks the WebView history then
+finishes the task. In v1 the content is **pure static** (no privileged JS); a
+capability API is a later milestone. See [app-shell.md](./app-shell.md).
 
 **Provenance.** Net-new, but thin — it is a standard Android `WebView` pointed at
 localhost. The "nsite-deck model" (browser loads localhost, native code does the
@@ -76,17 +98,26 @@ fetching) is the pattern ported from site-deck.
 ### 3. Local gateway + name resolution — **port (site-deck)**
 
 **Responsibilities.** This is the localhost HTTP gateway and the `.nsite` name
-resolution, ported from nsite-deck. It:
+resolution, ported from nsite-deck. In v0 it serves **directly from the local
+relay + Blossom** — no derived serving cache. It:
 
 1. answers `*.nsite` DNS with `127.0.0.1` (an A record),
 2. receives the WebView's HTTP request, parses the left-most label into a pubkey
    (and optional `dTag`),
 3. looks up the site manifest event from the **local relay** (layer 4),
 4. on a cache miss, triggers a sync (layer 5 fetches over `.fips`), showing a
-   loading page that polls until ready,
+   loading page that polls until ready; before serving a site it checks that
+   **all referenced blobs are present** (else it is still syncing),
 5. resolves the requested path to a blob hash via the manifest's `path` tags
-   (falling back to `index.html`, then `/404.html`), fetches the blob from the
-   **local Blossom server**, verifies it against its sha256, and serves it.
+   (falling back to `index.html`, then `/404.html`), fetches that blob from the
+   **local Blossom server**, verifies it against its sha256, and serves it with a
+   content-type inferred from the path extension.
+
+So v0 is per-request: manifest → `sha256` → blob → serve, with **no version
+dirs, no atomic swap, and no sha→name file writing**. The htdocs serving cache
+(writing blobs out as path-named files under a `current/` dir for fast static
+serving) is **deferred to the roadmap** — a speed optimization, not needed for
+v0. See [nsite-layer.md](./nsite-layer.md).
 
 Because `.nsite` is IPv4/localhost, this works in any browser, including
 Chromium. Only the relay+Blossom **sync** in step 4 ever touches `.fips`.
@@ -99,16 +130,26 @@ resolution logic ports from site-deck.
 ### 4. Embedded Nostr relay + Blossom server — **port (site-deck) → Rust**
 
 **Responsibilities.** Hold the nsite data and serve it both to the local gateway
-and to peers:
+and to peers. **Both are embedded from day one** — they are simple, and there is
+no good Android app to forward to:
 
 - the **relay** (`ws://localhost:4869`) stores/serves signed manifest events
-  (kinds 15128/35128),
-- **Blossom** (`http://localhost:24242`) stores/serves sha256-addressed blobs.
+  (kinds 15128/35128). The relay *backend* is a **pluggable seam**: the default
+  is the embedded relay; optionally it can **forward to a local relay app (e.g.
+  Citrine)** for devs who already run one. Embedding is the default and earliest
+  path,
+- **Blossom** (`http://localhost:24242`) is **always embedded** — a small
+  content-addressed HTTP store (`GET /<sha256>`, `PUT /upload`, `HEAD`). There is
+  no good Android Blossom app to forward to, so embedding is the only sensible
+  path.
 
 This layer is also the **store-and-forward cache** that makes offline
 propagation work: it retains *peers'* signed events and blobs and re-serves
-them, so the device becomes a new source (a "relay-of-relays"). Eviction is an
-LRU cache, default cap 2 GB; sites added to the Library are **pinned** (exempt).
+them, so the device becomes a new source (a "relay-of-relays"). The
+content-addressed **Blossom blob store** is what we *retain* — the
+store-and-forward source, governed by an **LRU cache, default cap 2 GB**; sites
+added to the Library are **pinned** (exempt). (The derived, path-named **htdocs**
+serving cache of layer 3 is a separate, deferred store on top.)
 
 **Provenance.** Port from site-deck (which embeds Khatru, a Go relay/Blossom).
 Myco re-implements the relay + Blossom in **Rust** inside a **separate, reusable
@@ -132,8 +173,9 @@ in `nsite-deck` (layer 4), which it depends on. `myco-core`:
   reach them at `<npub>.fips:4869` / `:24242` via FSP port multiplexing,
 - drives the FIPS endpoint (layer 6) and implements `AndroidBleIo`,
 - provides `nsite-deck`'s transport seams over FIPS: the **`PeerSource`** (fetch
-  a manifest + blobs from a holder at `<npub>.fips`, verify, atomically cache)
-  and the **`FanoutSink`** (`EVENT` to each connected `<peer>.fips:4869`).
+  a manifest + blobs from a holder at `<npub>.fips`, verify each against its
+  sha256, retain in the local relay + Blossom) and the **`FanoutSink`** (`EVENT`
+  to each connected `<peer>.fips:4869`).
 
 `myco-core` + `nsite-deck` cross-compile into one `libmyco_core.so`.
 
@@ -242,14 +284,15 @@ Provenance for each band, matching the legend in
 
 | Layer / component | Provenance | Notes |
 | --- | --- | --- |
-| Android UI (Library, browser chrome, search, settings) | **net-new** | nostr-vpn's network/roster/exit UI does not survive the strip |
+| Myco manager UI (Library, Pair, Discover, Settings) | **net-new** | nostr-vpn's network/roster/exit UI does not survive the strip; Library = source of truth for "installed" |
 | QR pairing (CameraX + ML Kit, deep-link intent) | **reuse (nostr-vpn)** | re-pointed at `myco://pair/<base64>` (npub + memorable name) |
-| Embedded browser (WebView, no URL bar) | **net-new (thin)** | standard WebView; nsite-deck "loads localhost" pattern |
+| `NsiteActivity` (fullscreen WebView per nsite, no chrome) | **net-new (thin)** | own task/instance; standard WebView; nsite-deck "loads localhost" pattern |
 | Local gateway + `*.nsite` resolution | **port (site-deck)** | Go → **Rust**; HTTP-listener placement TBD/open |
-| Embedded Nostr relay (`:4869`) | **port (site-deck) → Rust** | was Khatru/Go; now Rust in `myco-core` |
-| Embedded Blossom (`:24242`) | **port (site-deck) → Rust** | content-addressed blobs, BUD-01 |
-| Store-and-forward cache (re-serve peers' events/blobs) | **net-new** | the offline-propagation mechanism; LRU 2 GB, Library = pinned |
-| nsite sync (fetch + verify + atomic cache over `.fips`) | **net-new** | runs in `myco-core` |
+| Embedded Nostr relay (`:4869`) | **port (site-deck) → Rust** | was Khatru/Go; now Rust in `myco-core`; embedded default, optional Citrine-forward backend |
+| Embedded Blossom (`:24242`) | **port (site-deck) → Rust** | always embedded; content-addressed blobs, BUD-01 |
+| Store-and-forward cache (re-serve peers' events/blobs) | **net-new** | the offline-propagation mechanism; Blossom blob store, LRU 2 GB, Library = pinned |
+| nsite sync (fetch + verify + retain over `.fips`) | **net-new** | runs in `myco-core`; v0 serves direct from relay + Blossom |
+| htdocs serving cache (path-named files under `current/`) | **deferred** | nsite-deck speed optimization; not needed for v0 |
 | FFI: JNI/JSON reducer, cdylib via cargo-ndk | **reuse (nostr-vpn)** | `dispatch→state(rev)`; opaque `jlong` over Tokio |
 | FIPS embedding (`FipsEndpoint::builder().without_system_tun()`) | **reuse (nostr-vpn)** | app owns TUN; FIPS moves opaque datagrams |
 | `VpnService`/TUN | **reuse (nostr-vpn), narrowed** | routes `fd00::/8` only; intercepts `.fips`/`.nsite`; no tunnel-all |

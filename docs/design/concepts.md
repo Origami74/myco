@@ -145,13 +145,21 @@ There are two manifest kinds:
 (Kind `34128`, legacy per-file events, may be supported for backward
 compatibility. See [nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md).)
 
-**Nsites as apps.** Myco presents each nsite as an "app" inside an embedded
-browser, not as a web page in a tabbed browser. There is **no URL bar**. The
-Library (home) is a grid of paired and cached sites; tapping one opens it in a
-WebView whose only chrome is a fixed bottom bar — **Back · Reload · Library(home)**.
-Site info appears on long-press in the Library. In v1, nsite content is **pure
-static** (HTML/CSS/JS with no privileged access); a capability API (query peers,
-manage the cache) is a later milestone. The browse lifecycle is in
+**Nsites as apps.** Each nsite is presented as its **own fullscreen "app"**,
+launched *by* Myco, not as a web page in a tabbed browser. **Myco itself is the
+manager app** — its home is the **Library** (your installed nsites/apps), with
+Pair, Discover, and Settings alongside. Tapping a Library entry launches that
+nsite as a **separate fullscreen task** (its own Android Recents card), a WebView
+with **no URL bar and no Myco chrome at all** — there is no fixed bottom bar, no
+Back · Reload · Library, and no long-press-in-the-Library browser. Refresh and
+in-app navigation are the **nsite developer's** responsibility, implemented
+inside the nsite; Android Back and Recents handle task-level navigation, and you
+return to Myco to *manage* a site (info, remove, re-pair, add-to-home-screen). In
+v1, nsite content is **pure static** (HTML/CSS/JS with no privileged access); a
+capability API (query peers, manage the cache) is a later milestone. The full
+shell and launch model — separate-task launch, deep links (`myco://app/<npub>`),
+home-screen pinning, per-nsite origin isolation — is in
+[app-shell.md](./app-shell.md); the browse lifecycle is in
 [diagrams/04-nsite-browse-flow.svg](./diagrams/04-nsite-browse-flow.svg).
 
 ---

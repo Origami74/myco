@@ -2,8 +2,8 @@
 
 The **v1 target** for Myco: a two-device Android demo over **BLE**, fully
 offline. One phone is seeded with an nsite (synced once while online, or
-side-loaded); the other QR-pairs to it and browses that site through the in-app
-WebView — with **both devices in airplane mode** (BLE on). No internet, no
+side-loaded); the other QR-pairs to it and **opens that site as a fullscreen
+app** (its own task) — with **both devices in airplane mode** (BLE on). No internet, no
 Wi-Fi, no cell. This is the headline "Pillars of Propagation over crappy links"
 scenario. (The app never authors nsites; it stores, serves, and replicates sites
 authored elsewhere by external tooling.)
@@ -145,10 +145,10 @@ its own loopback:
 adb -s <serialA> shell am start -a android.intent.action.VIEW -d "http://<npub_author>.nsite/"
 ```
 
-(The in-app WebView is the real target; the `am start` above is just a
-loopback smoke test. The browser never resolves `.fips` — only relay/Blossom
-**sync** traffic uses `.fips`. See [../design/concepts.md](../design/concepts.md)
-"`.fips` vs `.nsite`".)
+(Launching the site as a fullscreen `NsiteActivity` is the real target; the
+`am start` above is just a loopback smoke test. The WebView never resolves
+`.fips` — only relay/Blossom **sync** traffic uses `.fips`. See
+[../design/concepts.md](../design/concepts.md) "`.fips` vs `.nsite`".)
 
 ---
 
@@ -217,9 +217,11 @@ peering, then offline propagation.)**
    dedup by author+dTag). The discovered manifests are simply the author-signed
    manifest events B has received via flood or queried — so the site A holds
    appears.
-5. Tap the site. The in-app WebView loads `http://<npub_author>.nsite/` (the
-   nsite-deck model: no URL bar; bottom bar is Back · Reload · Library) — the host
-   is the **author's** npub. Under the hood B queries the **holder** A's relay
+5. Tap the site. It launches as a fullscreen `NsiteActivity` — a `WebView`
+   filling the screen, no Myco chrome (no URL bar, no Back/Reload bar; refresh and
+   in-app navigation are the nsite developer's responsibility) — in its own task,
+   loading `http://<npub_author>.nsite/`; the host is the **author's** npub. Under
+   the hood B queries the **holder** A's relay
    at `<npubA>.fips` with `{kinds:[15128 or 35128], authors:[<author_pubkey>]}`,
    pulls the author's signed manifest event and the referenced blobs over Blossom
    sync — **on demand** (HYBRID default: flood the author-signed manifests
@@ -262,10 +264,11 @@ ping6 <npubA>.fips        # one-hop reachability A<->B over BLE
 
 ### 7b. The site loads from cache
 
-In B's in-app WebView, the site renders. Then **break the link** — turn
-Bluetooth off on B (or walk A out of range) — and **Reload**. Because B cached
-the author's signed manifest event and blobs (fetched from holder A) in Step 6,
-the page **still loads from B's local stores**. This is the load-bearing proof of
+In B's fullscreen nsite app, the site renders. Then **break the link** — turn
+Bluetooth off on B (or walk A out of range) — and **re-launch the site from the
+Library** (or trigger the nsite's own in-app refresh). Because B cached the
+author's signed manifest event and blobs (fetched from holder A) in Step 6, the
+page **still loads from B's local stores**. This is the load-bearing proof of
 local propagation: the content outlives the live path. **(once offline re-serve
 lands.)**
 

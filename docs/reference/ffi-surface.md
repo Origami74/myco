@@ -119,8 +119,10 @@ pub enum NativeAppAction {
     StopNode,
 
     // --- site entry / Library ---
-    OpenNsite { author: String, dTag: Option<String> },      // resolve + sync a site (author-signed
-                                                             // kind 15128/35128 + its blobs) from peers/relays
+    OpenNsite { author: String, dTag: Option<String> },      // trigger resolve + sync to READINESS (author-signed
+                                                             // kind 15128/35128 + its blobs) from peers/relays.
+                                                             // Does NOT launch the UI: Kotlin starts the fullscreen
+                                                             // NsiteActivity (see note below).
     AddNsite  { author: String, dTag: Option<String> },      // aka register a site of interest, triggers a sync
     ImportNsite { manifest: String },        // DEV-ONLY: side-load an already-signed manifest + blobs created elsewhere
     AddToLibrary    { author: String, dTag: Option<String> },   // pin a site to the Library
@@ -155,6 +157,18 @@ Notes:
   already-signed manifest event (kind 15128/35128) plus its content-addressed
   blobs, produced by external nsite tooling; the app only stores and re-serves
   them. It is **not** an authoring path (no key, no signing).
+- **Launching an nsite is an Android-side concern, not an FFI one.** `OpenNsite`
+  only triggers the *sync / readiness* of a site over the mesh; it does not open
+  any UI. The actual launch is pure Kotlin: each nsite runs as its own
+  fullscreen `NsiteActivity` (a chrome-less `WebView`, `documentLaunchMode =
+  "always"`, started with `FLAG_ACTIVITY_NEW_DOCUMENT`) so every launch is its
+  own card in Android Recents — Myco imposes no toolbar, back bar, or reload
+  button. Kotlin resolves the `myco://app/<npub>[/<dTag>]` intent to that
+  activity, dispatches `OpenNsite` to ensure the blobs are present (readiness),
+  then loads `<host>.nsite` via the localhost gateway. Reload / in-app
+  navigation are the nsite developer's responsibility. **TBD/open:** how Kotlin
+  observes readiness — a "pending → ready" status on the synced site that later
+  `Tick`s resolve (see Blocking actions, below).
 - BLE **role is fixed to central** on Android (see
   [config.md § `[ble]`](./config.md#ble)); there is no role action in v1.
 - A Kotlin `NativeActions` helper object builds these JSON objects (cf.
@@ -172,7 +186,9 @@ field maps to a key in [config.md](./config.md). **Proposed; provisional.**
 pub struct SettingsPatch {
     pub alias:            Option<String>,   // <alias>.fips label
     pub relay_port:       Option<u16>,
-    pub blossom_port:     Option<u16>,
+    pub relay_backend:    Option<String>,   // "embedded" (default) | "local-forward" (e.g. Citrine)
+    pub relay_forward_addr: Option<String>, // only when relay_backend = "local-forward"
+    pub blossom_port:     Option<u16>,       // Blossom is ALWAYS embedded (no backend toggle)
     pub autostart:        Option<bool>,
     pub cache_cap_bytes:  Option<u64>,
     pub eviction:         Option<String>,   // "lru" (only value in v1)
@@ -234,8 +250,9 @@ pub struct NodeStatus {
     pub running: bool,
     pub relay_port: u16,
     pub relay_status: String,    // "stopped" | "listening" | "error"
+    pub relay_backend: String,   // "embedded" (default) | "local-forward" (forwarding to e.g. Citrine)
     pub blossom_port: u16,
-    pub blossom_status: String,
+    pub blossom_status: String,  // Blossom is always embedded
     pub mesh_ready: bool,
     pub status_text: String,
 }

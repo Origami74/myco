@@ -76,8 +76,12 @@ blobs by sha256 are **established defaults**
   Peers do not talk to your gateway; they talk to your relay (4869) and Blossom
   (24242) directly. There is no separate "gateway port" on a reachable path —
   the localhost relay/Blossom *are* the mesh endpoints. The gateway is a purely
-  local convenience that turns a WebView request into a cache lookup + (on miss)
-  a sync.
+  local convenience that **serves direct from the local relay + Blossom**: for a
+  request `<host>.nsite/<path>` it looks up the manifest event on the relay
+  (4869), maps `<path> → sha256`, fetches that blob from Blossom (24242), and
+  serves it with a content-type inferred from the path extension. There is no
+  derived htdocs cache in v0 (a path-named serving cache is a deferred roadmap
+  optimization); the content-addressed Blossom store is the only retained store.
 
 > **Open question — gateway port.** nsite-deck listens on `:80`. On Android,
 > binding `:80` needs no privilege for an app's own loopback, but a high port

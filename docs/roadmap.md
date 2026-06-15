@@ -20,12 +20,12 @@ see the [index](./README.md). The v1 target (P3) is the
 | Phase | Goal | Exit criterion |
 | --- | --- | --- |
 | **P0** | Scaffold & strip | App builds; nostr-vpn's private-network layer is gone; identity persists. |
-| **P1** | Relay + Blossom + gateway | A locally-seeded nsite loads in the in-app WebView from localhost. |
-| **P2** | QR pairing + sync + relay-mesh fanout | Two devices pair by QR; B browses A's site over `.fips`; manifests fan out both ways. |
+| **P1** | Embed relay + Blossom + gateway (serve-direct) | A locally-seeded nsite launches as a fullscreen `NsiteActivity` (its own task), served direct from the local relay + Blossom. |
+| **P2** | QR pairing + sync + relay-mesh fanout | Two devices pair by QR; B opens A's site as a fullscreen app over `.fips`; manifests fan out both ways. |
 | **P3** | AndroidBleIo (the v1 demo) | Two Androids, airplane mode + BLE: B browses A's nsite offline. |
 | **P4** | Propagation at scale (set-recon + transitive + eviction) | A cached site survives the origin going offline; reach goes transitive. |
 | **P5** | Linux interop | An Android dials a Linux `BluerIo` peer and syncs an nsite. |
-| **Later** | WiFi-Direct, public-node peering, nsite capability API, NAT46 | (see below — each is its own milestone) |
+| **Later** | htdocs serving cache, home-screen pinning + app-shortcuts, WiFi-Direct, public-node peering, nsite capability API, NAT46 | (see below — each is its own milestone) |
 
 ---
 
@@ -53,20 +53,29 @@ the TUN's role) · [concepts.md](./design/concepts.md) (what we dropped vs keep)
 
 ## P1 — Relay + Blossom + gateway
 
-**Goal.** Implement, in Rust inside `myco-core`, the embedded Nostr relay
-(`ws://localhost:4869`), the embedded Blossom server (`http://localhost:24242`),
-and the localhost HTTP gateway. Port the nsite-deck resolve→cache→serve flow:
-parse the `<host>.nsite` label into a siteKey, resolve the manifest
-(kinds 15128/35128) from the local relay, fetch blobs by sha256 from local
-Blossom, verify, and serve. Add a minimal site-entry path — a one-time
-side-load/import of an externally-authored nsite (its already-signed manifest
-event + blobs) into the local stores — so there is something to load. The app
-never authors, signs, or publishes nsites; it only stores and serves events
-authored elsewhere.
+**Goal.** Embed, in Rust inside `myco-core`, both the relay and Blossom from day
+one — they are simple. **Blossom is always embedded** (`http://localhost:24242`,
+a small content-addressed HTTP store: `GET /<sha256>`, `PUT /upload`, `HEAD`);
+there is no good Android Blossom app to forward to. **The relay is embedded too**
+(`ws://localhost:4869`), but the relay *backend* is a pluggable seam: default =
+embedded; optional = forward to a local relay app (e.g. Citrine) for devs who
+already run one. Add the localhost HTTP gateway, **serving direct** from the
+local relay + Blossom: per request for `<host>.nsite/<path>`, look up the
+manifest event (kinds 15128/35128) on the local relay, map `<path> → sha256`,
+fetch that blob from local Blossom, verify, and serve with a content-type
+inferred from the path extension — plus an "are all referenced blobs present?"
+check before serving (else the site is still syncing). No version dirs, no atomic
+swap, no sha→name file writing in v0. Open an nsite by launching a fullscreen
+`NsiteActivity` — a `WebView` filling the screen, no Myco chrome — in its own
+task. Add a minimal site-entry path — a one-time side-load/import of an
+externally-authored nsite (its already-signed manifest event + blobs) into the
+local stores — so there is something to load. The app never authors, signs, or
+publishes nsites; it only stores and serves events authored elsewhere.
 
-**Exit criterion.** A side-loaded nsite (authored by external tooling) loads
-end-to-end in the in-app WebView from `127.0.0.1`, served from the local relay +
-Blossom with hash verification — no network involved.
+**Exit criterion.** A side-loaded nsite (authored by external tooling) launches
+as a fullscreen `NsiteActivity` (its own task) and loads end-to-end from
+`127.0.0.1`, served **direct** from the local relay + Blossom with hash
+verification — no htdocs cache, no network involved.
 
 **Design docs.** [nsite-layer.md](./design/nsite-layer.md) (the whole content
 layer) · [nostr-kinds.md](./reference/nostr-kinds.md) (manifest kinds + tags) ·
@@ -89,9 +98,9 @@ fanout requires. Blobs stay pull-only. See
 [propagation.md §2](./design/propagation.md).
 
 **Exit criterion.** Device B QR-pairs to A and, over an IP-based FIPS path,
-syncs and browses A's nsite in B's WebView; B's local relay + Blossom now hold
-A's events and blobs; **and a manifest accepted by either relay appears on the
-other via fanout** (source-excluded, not re-echoed).
+syncs and opens A's nsite as a fullscreen app (its own task) on B; B's local
+relay + Blossom now hold A's events and blobs; **and a manifest accepted by
+either relay appears on the other via fanout** (source-excluded, not re-echoed).
 
 **Design docs.** [identity-pairing.md](./design/identity-pairing.md) (QR payload,
 peer-as-source) · [nsite-layer.md](./design/nsite-layer.md) (§5 sync over FIPS) ·
@@ -109,8 +118,9 @@ and Noise. Solve the PSM problem with the Android-side addr→PSM advert map
 transport with **both devices in airplane mode, BLE on**.
 
 **Exit criterion.** Two Android phones, fully offline (airplane mode), form a
-one-hop BLE link; B browses A's nsite in its WebView, A's events/blobs are cached
-on B, and `<npubA>.fips` resolves on B over the mesh DNS interceptor. This is the
+one-hop BLE link; B opens A's nsite as a fullscreen app (its own task), A's
+events/blobs are cached on B, and `<npubA>.fips` resolves on B over the mesh DNS
+interceptor. This is the
 [run-two-device-demo.md](./how-to/run-two-device-demo.md) success condition.
 
 **Design docs.** [ble-interop.md](./design/ble-interop.md) (option A, the PSM
@@ -166,6 +176,21 @@ needed patch).
 
 Out of scope for v1; each is its own milestone with its own design pass.
 
+- **htdocs serving cache.** A speed optimization on top of v0's serve-direct
+  gateway (nsite-deck's approach): write each referenced blob out as a path-named
+  file under a `current/` dir for fast static serving, rather than resolving
+  `<path> → sha256 →` blob per request. The content-addressed Blossom blob store
+  stays the retained store-and-forward source (and what the LRU 2 GB cap governs);
+  htdocs is a derived, path-named cache layered on top, not needed for v0 —
+  [nsite-layer.md](./design/nsite-layer.md).
+- **Home-screen pinning + app-shortcuts.** Offer "Add to home screen" for an
+  nsite via `ShortcutManager.requestPinShortcut()` (always user-confirmed — Android
+  shows a system dialog per pin; Myco cannot silently pin), plus dynamic
+  app-shortcuts. Knowing whether an nsite is pinned is best-effort only
+  (`getPinnedShortcuts()` is a soft hint; removal is under-reported and has no
+  callback), so the Library stays the source of truth for "installed" —
+  [nsite-layer.md](./design/nsite-layer.md),
+  [identity-pairing.md](./design/identity-pairing.md).
 - **WiFi-Direct transport.** A higher-throughput offline transport alongside BLE,
   for larger nsites where L2CAP MTU is the bottleneck. (BLE throughput is an open
   question in [run-two-device-demo.md](./how-to/run-two-device-demo.md).)
@@ -182,7 +207,8 @@ Out of scope for v1; each is its own milestone with its own design pass.
   [nsite-layer.md](./design/nsite-layer.md) (§7).
 - **NAT46 for external browsers.** Let a browser *outside* the app (system
   Chrome, etc.) reach mesh-hosted content, bridging the IPv4/IPv6 split beyond
-  the in-app WebView's localhost gateway — [ports.md](./reference/ports.md),
+  the localhost gateway each `NsiteActivity` WebView uses —
+  [ports.md](./reference/ports.md),
   [concepts.md](./design/concepts.md) (`.fips` vs `.nsite`).
 - **Multi-persona identity.** More than one keypair per device (independent
   node_addr / ULA / Library) — [identity-pairing.md](./design/identity-pairing.md)

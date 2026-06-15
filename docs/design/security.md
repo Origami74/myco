@@ -219,19 +219,21 @@ web-content surface, scoped down:
 
 - nsite JS runs in the WebView's normal sandbox. It is untrusted third-party
   code (the site author is not you).
-- Because content is served from `127.0.0.1`, **origin isolation matters.** Each
-  nsite must be a distinct web origin so one nsite's JS cannot read another's
-  storage/cookies or script it. Mapping every `*.nsite` host to `127.0.0.1`
-  risks collapsing distinct sites into one loopback origin. **Open question /
-  must-resolve-before-v1:** the gateway must ensure per-nsite origin separation
-  (e.g. distinct hostnames the WebView treats as distinct origins, and a
-  Content-Security-Policy that blocks off-origin/`.fips` access) so a malicious
-  nsite cannot reach the mesh, exfiltrate to a remote server, or tamper with a
-  sibling nsite. The WebView must **never** resolve `.fips` (locked decision),
-  which already keeps nsite JS off the sync transport.
+- **Per-nsite origin isolation is automatic.** Each nsite is its own web origin —
+  its `<host>.nsite` hostname — so the WebView partitions storage, cookies, and
+  scripting per nsite: one nsite's JS cannot read another's storage/cookies or
+  script it. This falls out of each nsite launching as its own fullscreen app
+  (its own `NsiteActivity`/WebView instance) at a distinct `<host>.nsite` origin,
+  rather than as a tab inside a shared shell. A Content-Security-Policy that
+  blocks off-origin/`.fips` access still belongs on top so a malicious nsite
+  cannot exfiltrate to a remote server (CSP enforcement is the remaining open
+  item, §7). The WebView must **never** resolve `.fips` (locked decision), which
+  already keeps nsite JS off the sync transport.
 - No `file://` access, no arbitrary network from nsite JS beyond what CSP
-  allows; the Library navigation is fixed (Back · Reload · Library), with no URL bar,
-  so a site cannot navigate the shell to an attacker origin.
+  allows. Each nsite is launched fullscreen with **no Myco chrome** — no URL bar,
+  no Back/Reload bar; in-app navigation and refresh are the nsite developer's own
+  responsibility. Myco does not host a shared navigation surface a site could
+  redirect to an attacker origin.
 
 **Later: capability API (call out the risk now).** A future milestone might
 propose giving nsite JS a capability API — query peers, write blobs, or other
@@ -295,8 +297,17 @@ everything cached, or only Library-pinned sites?
   is a source, not the author.
 - **No freshness guarantee.** Self-authentication proves origin/integrity, not
   recency; withholding a newer replaceable event is undetectable in general.
-- **Open:** per-nsite origin isolation + CSP enforcement at the gateway
-  (must-resolve-before-v1, §5).
+- **Per-nsite origin isolation** is automatic: each nsite is its own origin
+  (`<host>.nsite`), so WebView storage/cookies/scripting partition per nsite and
+  one nsite cannot read another's data (§5). **Open:** CSP enforcement on top to
+  bound off-origin exfiltration.
+- **Open / TBD — which nsite am I in?** With each nsite launching fullscreen and
+  **no URL bar or Myco chrome**, a user has no app-supplied indicator of which
+  nsite they are currently in. The Recents card title/icon come from the nsite's
+  own `ActivityManager.TaskDescription`, which is **author-controlled** — so a
+  malicious nsite can present another nsite's title/favicon/colour, an
+  impersonation/spoofing risk. How (or whether) Myco surfaces a trustworthy
+  "you are in `<host>.nsite`" signal without re-imposing chrome is unresolved.
 - **Open:** explicit inbound port allowlist on the FSP-multiplexed mesh surface
   on Android (§3).
 - **Open:** optional out-of-band pairing verification (§4).

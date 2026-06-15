@@ -61,13 +61,15 @@ made to work over Bluetooth with no internet.
 **Myco** is a peer-to-peer app-sharing network — an Android app for
 exchanging, installing, and propagating nsites (static apps published on Nostr)
 over a [FIPS](../reference/fips/docs/README.md) mesh, including fully **offline
-over Bluetooth**. Each nsite runs as an "app" inside an embedded browser
-with no URL bar — just Back, Reload, and Home. The vision is nak's
+over Bluetooth**. **Myco is the manager app** — Library, Pair, Discover, and
+Settings; each nsite **launches as its own fullscreen app** (its own
+WebView-backed task in Android Recents), with no Myco-imposed chrome — no URL
+bar, no Back/Reload bar. The vision is nak's
 "Pillars of Propagation": small relays and Blossom blobs hopping over crappy
 links in all directions, surviving outages via local propagation. Myco is a
 fork of [nostr-vpn](../reference/nostr-vpn/) with the private-network layer
-stripped out, plus an embedded Nostr relay, an embedded Blossom server, an
-embedded browser, and native BLE peering.
+stripped out, plus an embedded Nostr relay, an embedded Blossom server, the
+fullscreen nsite app-shell, and native BLE peering.
 
 The locked architecture in brief: the device has one **Nostr keypair** — its
 **device identity** — that serves as the mesh identity (the address of this
@@ -108,6 +110,7 @@ decision.
 | --- | --- |
 | [concepts.md](./design/concepts.md) | Canonical terminology and glossary: device vs nsite-author identity (and the device key's three derived forms), `.fips` vs `.nsite`, what an nsite is, the embedded relay+Blossom, and the Pillars-of-Propagation framing. Read this first. |
 | [architecture.md](./design/architecture.md) | The six-layer single-device stack, the Kotlin↔Rust FFI boundary, the role of the kept TUN, and a per-component reused-vs-net-new provenance table. |
+| [app-shell.md](./design/app-shell.md) | The app/launch model: Myco as the manager app (Library, Pair, Discover, Settings) versus each nsite as its own fullscreen `NsiteActivity` task; `myco://app/<npub>[/<dTag>]` intents, Recents cards via `TaskDescription`, pinned home-screen shortcuts, and per-nsite origin isolation. |
 | [identity-pairing.md](./design/identity-pairing.md) | How a device establishes its identity and how two devices become peers: identity storage, the `myco://pair/<base64>` QR payload, peer-as-data-source, and transitive (mutual-scan) authorization. |
 | [nsite-layer.md](./design/nsite-layer.md) | The content layer: the embedded relay, Blossom, and localhost gateway; the manifest/URL scheme; the resolve→cache→serve flow; and sync-over-FIPS that pulls a peer's manifest + blobs. |
 | [propagation.md](./design/propagation.md) | Offline propagation: the live-path (FIPS) vs store-and-forward (nsite) split, the hybrid model (flood the author-signed manifest events, pull blobs on demand), transitive discovery, dedup/anti-loop, and cache retention. |
