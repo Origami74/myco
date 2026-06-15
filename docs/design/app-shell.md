@@ -49,9 +49,10 @@ The proposed mechanics:
 
 - **`NsiteActivity`** is declared `android:documentLaunchMode="always"`, so each
   launch is a *distinct document* rather than reusing one activity instance.
-- It is launched with **`FLAG_ACTIVITY_NEW_DOCUMENT`** (optionally
-  `| FLAG_ACTIVITY_MULTIPLE_TASK`), with an intent carrying the **nsite id** (the
-  author npub and optional `dTag`).
+- It is launched with **`FLAG_ACTIVITY_NEW_DOCUMENT`** and **without**
+  `FLAG_ACTIVITY_MULTIPLE_TASK`, with the intent **data URI keyed by the nsite host
+  `<host>`** (§4) — so Android matches an existing task for that nsite and
+  **re-surfaces it** instead of creating a duplicate.
 - Each launch becomes its **own card in Android Recents**, showing the nsite's
   **title + favicon + colour** via
   [`ActivityManager.TaskDescription`](https://developer.android.com/reference/android/app/ActivityManager.TaskDescription),
@@ -60,11 +61,13 @@ The proposed mechanics:
   loads anything else; cross-device fetching is native code over `.fips`, which
   the WebView never sees.
 
-So "open an nsite" = start a new `NsiteActivity` task. Two nsites open at once are
-two Recents cards; the same nsite opened twice can be two cards (with
-`FLAG_ACTIVITY_MULTIPLE_TASK`) or a re-surfaced one — the multiple-task posture
-is **TBD / open** (do we want two live instances of one site, or always
-re-surface the existing task?).
+So "open an nsite" = start **or re-surface** that nsite's `NsiteActivity` task. Two
+*different* nsites open at once are two Recents cards; **opening the same nsite
+again — from the Library, a home-screen shortcut, or a cross-nsite link —
+re-surfaces the existing task** rather than spawning a second instance. There is
+**one live instance per nsite**, keyed by `<host>`; this is achieved by omitting
+`FLAG_ACTIVITY_MULTIPLE_TASK` and keying the document by the `<host>` intent data.
+(This resolves the earlier multiple-task open question.)
 
 ---
 
@@ -105,12 +108,16 @@ right task and describe it to Recents."
 Launching is mediated entirely by intents, so the same mechanism serves the
 Library, one nsite opening another, and a shared link:
 
-- The scheme is **`myco://app/<npub>[/<dTag>]`**, resolving to `NsiteActivity`.
-  `<npub>` is the **author** key (the site's identity), `<dTag>` selects a named
-  site (kind 35128) versus a root site (kind 15128).
+- The scheme is **`myco://app/<host>`**, resolving to `NsiteActivity`, where
+  `<host>` is the nsite's canonical single-token label — **`npub1…`** for a root
+  site (kind 15128) or **`<pubkeyB36><dTag>`** for a named site (kind 35128),
+  exactly as the nsite spec encodes it (base36 50-char pubkey directly followed by
+  the 1–13-char `dTag`, no separator — the same single label used by
+  `<host>.nsite`). One token, not an `npub/dTag` split.
 - **Myco's Library** launches an nsite by firing this intent.
 - **One nsite can open another** by the same intent (a link to
-  `myco://app/<other-npub>` starts that site as its own task) — subject to the
+  `myco://app/<other-host>` starts — or re-surfaces (§2) — *that* nsite as its
+  **own separate task**, never nested in the current WebView) — subject to the
   origin-isolation and capability constraints in [security.md](./security.md).
 - **A shared link** (`myco://app/…` handed to you out of band) opens the site
   directly, the same way.
@@ -171,7 +178,7 @@ the whole sandbox.
 The shell launches tasks; the **gateway** (see [nsite-layer.md](./nsite-layer.md))
 makes them resolvable. The seam between them is one URL:
 
-- `NsiteActivity` resolves its intent (`myco://app/<npub>[/<dTag>]`) to a host
+- `NsiteActivity` resolves its intent (`myco://app/<host>`) to a host
   label and loads **`http://<host>.nsite`** in its WebView — root site →
   `npub1…`, named site → `<pubkeyB36><dTag>`.
 - `*.nsite` is the localhost gateway (`127.0.0.1`, IPv4), so the load works in the
@@ -193,9 +200,6 @@ serves.** Neither owns the other's concern.
 - **Impersonation without chrome (§3).** No trusted, always-visible signal of
   which verified author npub a fullscreen nsite belongs to; `TaskDescription`
   and in-page content are author-controlled. **TBD / open.**
-- **Multiple-task posture (§2).** Whether opening the same nsite twice yields two
-  live instances (`FLAG_ACTIVITY_MULTIPLE_TASK`) or always re-surfaces the
-  existing task. **TBD / open.**
 - **Home-screen presence accuracy (§5).** `getPinnedShortcuts()` is unreliable
   for removal on non-stock launchers; we treat the Library as truth, but the
   exact UX for a stale "on home screen" hint is **TBD / open.**

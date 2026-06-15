@@ -109,6 +109,18 @@ behaviour is specified in [./nsite-layer.md §2.1](./nsite-layer.md). It is want
 **early** (roadmap P2), with transitive discovery and scale-dedup layered on at
 P4.
 
+**This is Plumtree.** The fanout is the **eager-push** half of a Plumtree-style
+epidemic broadcast; negentropy reconciliation (§5) is the **lazy-pull** half that
+repairs gaps. This mirrors how bitchat propagates messages offline (eager gossip +
+periodic reconciliation — we mirror the *cadence*, not bitchat's GCS wire; ours is
+negentropy). Two bitchat patterns keep convergence prompt without
+constant chatter, both **strictly neighbour-local (never relayed)**: (1) **eager
+reconcile on a new link** — fire a one-shot reconcile the moment a peer connects
+(bitchat sends a unicast sync ~5 s after a new neighbour appears); and (2) a slow
+**periodic neighbour reconcile** (bitchat ~30 s, bounded to ~100 recent items). See
+§5 for the negentropy mechanics and [../reference/config.md](../reference/config.md)
+`[propagation]` for the cadence knobs.
+
 ### Pull (fetch content on demand)
 
 When a user opens a site (or the app decides to pre-fetch a pinned one), the app
@@ -217,6 +229,13 @@ because Myco's units are Nostr events and the `negentropy` Rust crate already sh
 in the rust-nostr stack — we are not bitchat-wire-compatible anyway. **Blobs are not
 reconciled**: they stay content-addressed pull-by-sha256.
 
+**Cadence (the Plumtree lazy-pull).** Reconcile runs (a) **eagerly when a peer first
+connects** — a one-shot catch-up, mirroring the *cadence* of bitchat's unicast
+`REQUEST_SYNC` ~5 s after a new neighbour is seen (the timing, not its GCS wire) —
+and (b) **periodically** at a slow neighbour-local
+cadence (bitchat uses ~30 s, bounded to ~100 recent items). Both are strictly local,
+never relayed. Exact intervals and bounds over FIPS L2CAP are tunable (open questions).
+
 - **Dedup / seen-set IDs: 16-byte (128-bit) SHA-256 prefixes**, mirroring
   bitchat's `PacketIdUtil` (ID = first 16 bytes of SHA-256 over the canonical
   bytes). These drive the TTL-flood **seen-set** (loop/dup suppression for the
@@ -294,6 +313,14 @@ and a cache is a first-class source.
   mode. This trades propagation reach against metadata privacy and is unresolved.
   Note this is purely about *which already-signed manifests a holder chooses to
   replicate* — no holder-authored event is involved.
+- **Optimistic sharing vs. spam / chatter.** Eagerly fanning out *every* manifest
+  you hold maximizes discovery but risks flooding the mesh with chatter — the fine
+  line. Levers to weigh: scope the eager flood to your **circle / Library /
+  recently-touched** manifests rather than everything held; TTL + dedup seen-set;
+  **probabilistic relay** on larger meshes; a **recent-N retention bound** on what
+  you re-announce (bitchat caps sync to ~100 recent); rate-limiting; and possibly
+  **interest-based fanout** (only push a manifest a peer signalled interest in).
+  Where to sit on the optimistic↔conservative axis is **TBD / open**.
 - **Transitive authorization depth & revocation.** See §3 — how far past a single
   pairing does reach extend, and how is a pairing (and its transitively-learned
   peers) revoked?

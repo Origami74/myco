@@ -25,7 +25,7 @@ see the [index](./README.md). The v1 target (P3) is the
 | **P3** | AndroidBleIo (the v1 demo) | Two Androids, airplane mode + BLE: B browses A's nsite offline. |
 | **P4** | Propagation at scale (set-recon + transitive + eviction) | A cached site survives the origin going offline; reach goes transitive. |
 | **P5** | Linux interop | An Android dials a Linux `BluerIo` peer and syncs an nsite. |
-| **Later** | htdocs serving cache, home-screen pinning + app-shortcuts, WiFi-Direct, public-node peering, nsite capability API, invite-pairing, relay read-auth, NAT46 | (see below — each is its own milestone) |
+| **Later** | htdocs serving cache, home-screen pinning + app-shortcuts, WiFi-Direct, public-node peering, nsite capability API, open nsite links, invite-pairing, relay read-auth, NAT46 | (see below — each is its own milestone) |
 
 ---
 
@@ -216,6 +216,12 @@ Out of scope for v1; each is its own milestone with its own design pass.
   needing a per-capability permission model — see
   [security.md](./design/security.md) (§5) and
   [nsite-layer.md](./design/nsite-layer.md) (§7).
+- **Open `*.nsite` / `*.nsite.lol` links in Myco.** Register intent filters for
+  nsite hostnames (the `.nsite` TLD and public gateways like `nsite.lol`) so tapping
+  such a link anywhere opens it in Myco — **downloading the nsite if not already
+  held** (source order in [nsite-layer.md](./design/nsite-layer.md) §5) — instead of
+  a browser. Cross-nsite links open each site as its own task
+  ([app-shell.md](./design/app-shell.md) §4).
 - **NAT46 for external browsers.** Let a browser *outside* the app (system
   Chrome, etc.) reach mesh-hosted content, bridging the IPv4/IPv6 split beyond
   the localhost gateway each `NsiteActivity` WebView uses —

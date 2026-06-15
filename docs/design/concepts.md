@@ -157,7 +157,7 @@ inside the nsite; Android Back and Recents handle task-level navigation, and you
 return to Myco to *manage* a site (info, remove, re-pair, add-to-home-screen). In
 v1, nsite content is **pure static** (HTML/CSS/JS with no privileged access); a
 capability API (query peers, manage the cache) is a later milestone. The full
-shell and launch model — separate-task launch, deep links (`myco://app/<npub>`),
+shell and launch model — separate-task launch, deep links (`myco://app/<host>`),
 home-screen pinning, per-nsite origin isolation — is in
 [app-shell.md](./app-shell.md); the browse lifecycle is in
 [diagrams/04-nsite-browse-flow.svg](./diagrams/04-nsite-browse-flow.svg).

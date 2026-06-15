@@ -72,6 +72,15 @@ blossom_port = 24242       # http://localhost:24242 (embedded Blossom server, AL
 autostart    = true        # start relay+blossom+FIPS endpoint on app launch
 
 # ---------------------------------------------------------------------------
+# [sync] — how Myco fetches a MISSING event/blob. Source order is FIXED:
+#   1) local relay+Blossom  2) FIPS peers  3) servers/relays the nsite event lists.
+#   Tier 3 is the ONLINE (IP-internet) fallback and the LAST resort.
+# ---------------------------------------------------------------------------
+[sync]
+offline_only = false       # if true, NEVER fall back to IP-internet sources (tier 3)
+                           #   — local + FIPS-peer sources only. See nsite-layer.md §5.
+
+# ---------------------------------------------------------------------------
 # [relay] — the relay BACKEND is a pluggable seam. Default = embedded (day one).
 # Optional = forward to a local relay app (e.g. Citrine) for devs who already
 # run one. Blossom is NOT pluggable: it is ALWAYS embedded (no good Android
@@ -135,6 +144,10 @@ reconcile    = true        # negentropy (NIP-77) set reconciliation between conn
                            # don't" in ~log bandwidth, then pull the diff. EVENTS only;
                            # blobs stay pull-only. Basic recon = roadmap P2. See
                            # nsite-layer.md §2.4 / propagation.md §5.
+eager_sync_on_connect = true   # Plumtree lazy-pull: fire a one-shot negentropy reconcile
+                               #   when a peer FIRST connects (bitchat fires ~5s after a new
+                               #   neighbour appears). Neighbour-local, never relayed.
+reconcile_interval_s  = 30     # slow periodic neighbour-local reconcile cadence (bitchat ~30s)
 
 # ---------------------------------------------------------------------------
 # [dns] — the DNS interceptor / TUN. Routes ONLY fd00::/8 (the mesh ULA) and
@@ -171,6 +184,16 @@ One identity per device in v1; multi-persona is a later milestone.
 | `relay_port` | u16 | `4869` | embedded Nostr relay, `ws://localhost:4869`. |
 | `blossom_port` | u16 | `24242` | embedded Blossom server, `http://localhost:24242`. **Always embedded** — not pluggable. |
 | `autostart` | bool | `true` | start the node (relay + blossom + FIPS endpoint) on launch. |
+
+### `[sync]`
+
+How Myco fetches a **missing** event/blob. The source order is fixed: (1) local
+relay+Blossom, (2) FIPS peers, (3) servers/relays the nsite event lists — tier 3
+being the online (IP-internet) fallback and last resort.
+
+| Key | Type | Proposed default | Notes |
+| --- | --- | --- | --- |
+| `offline_only` | bool | `false` | never use IP-internet (tier-3) sources; local + FIPS-peer only. |
 
 ### `[relay]`
 
@@ -245,6 +268,8 @@ exchange, not by MAC, so MAC randomization is harmless. Backed by the native
 | --- | --- | --- | --- |
 | `announce_ttl` | u8 | `5` | hop limit for flooding/replicating author-signed manifest events (kind 15128/35128), re-emitted unmodified. Blobs stay **pull-only** (HYBRID model). |
 | `reconcile` | bool | `true` | negentropy (NIP-77) set reconciliation between connected relays; events only, blobs stay pull-only; basic recon lands in roadmap P2. |
+| `eager_sync_on_connect` | bool | `true` | one-shot reconcile when a peer connects (Plumtree lazy-pull). |
+| `reconcile_interval_s` | int | `30` | periodic neighbour-local reconcile cadence (seconds). |
 
 ### `[dns]`
 

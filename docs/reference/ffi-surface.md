@@ -161,9 +161,10 @@ Notes:
   only triggers the *sync / readiness* of a site over the mesh; it does not open
   any UI. The actual launch is pure Kotlin: each nsite runs as its own
   fullscreen `NsiteActivity` (a chrome-less `WebView`, `documentLaunchMode =
-  "always"`, started with `FLAG_ACTIVITY_NEW_DOCUMENT`) so every launch is its
+  "always"`, started with `FLAG_ACTIVITY_NEW_DOCUMENT` and **not** `FLAG_ACTIVITY_MULTIPLE_TASK`,
+  keyed by `<host>` so re-opening the same nsite re-surfaces its task) so each distinct nsite is its
   own card in Android Recents — Myco imposes no toolbar, back bar, or reload
-  button. Kotlin resolves the `myco://app/<npub>[/<dTag>]` intent to that
+  button. Kotlin resolves the `myco://app/<host>` intent to that
   activity, dispatches `OpenNsite` to ensure the blobs are present (readiness),
   then loads `<host>.nsite` via the localhost gateway. Reload / in-app
   navigation are the nsite developer's responsibility. **TBD/open:** how Kotlin

@@ -420,6 +420,19 @@ sync engine fetches from **public** relays/Blossom over the internet; Myco
 fetches from a **reachable FIPS peer** over the mesh — including offline over
 BLE.
 
+**Source resolution order.** For any missing event or blob, Myco tries sources in
+this order, stopping at the first hit:
+
+1. **Local relay + Blossom** — already held; serve direct (§4.2), no fetch.
+2. **FIPS peers** — a reachable holder over `.fips` (your circle and, transitively,
+   their peers; §5.1–5.2). The offline mesh path.
+3. **Servers/relays the nsite event lists** — the manifest's `["server", …]` hints
+   plus the author's NIP-65 `10002` relay list / BUD-03 `10063` Blossom servers.
+   This is the **online fallback** (needs IP internet), so it is the **last resort**
+   — and a Settings toggle (`[sync] offline_only`, see
+   [config.md](../reference/config.md)) disables it entirely so Myco never reaches
+   the IP internet (tiers 1–2 only).
+
 ### 5.1 Reaching the holder's services over `.fips`
 
 **Two different keys.** The site you want is identified by its **author** key
@@ -491,9 +504,10 @@ is detailed in [./propagation.md](./propagation.md)):
 
 Steps 1–6 mirror `Sync` in
 [service.go](../../reference/site-deck/internal/sync/service.go), with public
-relays/Blossom replaced by the single peer's `.fips` endpoints. The manifest's
-own `["server", …]` hints (public Blossom URLs) are **not** used on the offline
-path — there is no internet — though they remain a valid fallback when online.
+relays/Blossom replaced by the single peer's `.fips` endpoints. The manifest's own
+`["server", …]` hints (public Blossom URLs) are **tier 3** of the source-resolution
+order above — the online fallback, used only when reachable and only if
+`[sync] offline_only` is not set; on the offline mesh path they are skipped.
 
 > **Open question — source selection & multi-source pull.** v1 pulls from one
 > chosen holder. Pulling different blobs from different reachable holders in

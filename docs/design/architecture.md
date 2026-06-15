@@ -101,7 +101,7 @@ relay backend). To *manage* an nsite — info, remove, re-pair, add-to-home-scre
 you go to Myco. Myco does **not** host the nsite itself: launching an nsite hands
 off to a separate fullscreen `NsiteActivity` (layer 2). There is no Myco-imposed
 browser chrome, no bottom bar, no URL bar. See [app-shell.md](./app-shell.md) for
-the launch model, Recents behaviour, intents (`myco://app/<npub>[/<dTag>]`), and
+the launch model, Recents behaviour, intents (`myco://app/<host>`), and
 homescreen-pinning via `ShortcutManager` (Library is the source of truth for
 "installed"; homescreen presence is a soft hint).
 
