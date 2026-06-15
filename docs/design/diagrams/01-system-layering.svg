@@ -68,7 +68,7 @@
   <g>
     <rect x="40" y="538" width="900" height="98" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
     <rect x="40" y="538" width="8" height="98" rx="4" fill="#0d9488"/>
-    <text x="66" y="568" font-size="16" font-weight="700" fill="#0f172a">FIPS core mesh  (fips-core / fips-endpoint)</text>
+    <text x="66" y="568" font-size="16" font-weight="700" fill="#0f172a">FIPS core mesh  (upstream fips crate)</text>
     <text x="66" y="594" font-size="13" fill="#475569">identity: npub → node_addr = SHA256(npub)[:16] → fd00::/8   ·   .fips DNS   ·   spanning-tree routing</text>
     <text x="66" y="615" font-size="13" fill="#475569">Noise XK end-to-end + Noise IK hop-by-hop   ·   FSP port-mux delivers to localhost services</text>
     <text x="930" y="560" font-size="11" font-weight="700" fill="#0d9488" text-anchor="end">REUSE</text>

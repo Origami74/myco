@@ -47,7 +47,7 @@ The stack, top to bottom:
   3  Local gateway + DNS   — *.nsite → 127.0.0.1; resolve manifest; serve files
   4  Embedded relay+Blossom (Rust) — myco-relay :4869 / myco-blossom :24242 + S&F cache
   5  myco-core / FFI      (Rust) — wires nsite-deck + relay + Blossom; binds into FIPS
-  6  FIPS core + transports (fips-core/endpoint) — mesh, crypto, BLE/UDP/TCP/Tor
+  6  FIPS core + transports (upstream fips crate)  — mesh, crypto, BLE/UDP/TCP/Tor
      ── plus ── Android VpnService/TUN: routes fd00::/8, intercepts .fips/.nsite
 ```
 
@@ -220,11 +220,15 @@ impls it plugs into `nsite-deck`'s storage seams). `myco-core`:
 `myco-core`, `nsite-deck`, `myco-relay`, and `myco-blossom` cross-compile into one
 `libmyco_core.so`.
 
-**Provenance.** Reuse the nostr-vpn embedding pattern and FFI scaffolding;
-net-new glue to wire `nsite-deck` to FIPS. nostr-vpn embeds FIPS in-process via
-`FipsEndpoint::builder()` with `.without_system_tun()` — the app owns the TUN and
-hands FIPS only packet bytes, while FIPS moves opaque encrypted datagrams between
-npubs. Myco keeps exactly this and adds the nsite services on top.
+**Provenance.** Reuse the nostr-vpn embedding *pattern* and FFI scaffolding;
+net-new glue to wire `nsite-deck` to FIPS. Myco depends on the **canonical upstream
+`fips` crate**, embedded in-process via `Node::new(Config)` — *not* nostr-vpn's
+`FipsEndpoint::builder().without_system_tun()`, which is a nostr-vpn abstraction that
+does not exist upstream. The "app owns the TUN, FIPS gets only packet bytes" contract
+and custom-`BleIo` injection are two capabilities **not yet in upstream `fips`**; Myco
+contributes them upstream (nostr-vpn's fork is the reference for what they do) and
+carries them as a minimal local patch until merged. See
+[build.md § 4c](../how-to/build.md) for the two gaps and the local-FIPS wiring.
 
 #### The FFI contract (JNI / JSON reducer)
 
@@ -246,7 +250,8 @@ Two things cross the boundary *outside* the JSON reducer, because they are
 byte/­radio paths Kotlin must own:
 
 - **TUN packets** — Kotlin reads/writes the `VpnService` fd; raw IPv6 packet
-  bytes pass to/from Rust (the `.without_system_tun()` contract).
+  bytes pass to/from Rust (the **app-owned-TUN** contract — an upstream-`fips`
+  capability Myco adds; see [build.md § 4c](../how-to/build.md)).
 - **BLE bytes** — Android's BLE APIs are Java-only, so Kotlin owns the radio and
   hands raw L2CAP bytes to Rust's `AndroidBleIo` (see layer 6 / BLE).
 
@@ -265,12 +270,16 @@ the v1 transport and the one net-new transport piece:
   with a UUID-only advert (no identity material), a pre-handshake pubkey exchange
   of `[0x00][pubkey:32]` over the stream, then Noise IK. The cross-probe
   tiebreaker: the smaller node_addr's outbound connection wins.
-- The platform surface is fips-core's **`BleIo` trait**
-  (`listen`/`connect`/`start_advertising`/`start_scanning`/`local_addr`/…).
-  Linux backs it with `BluerIo`; Myco adds **`AndroidBleIo`** (option A:
-  native L2CAP CoC), targeting **Linux interop**. FIPS owns all connection
-  tracking, the pool, the tiebreaker, Noise, and reconnect — **bitchat is not
-  used as a transport.**
+- The platform surface is upstream `fips`'s **`BleIo` trait**
+  (`fips::transport::ble::io::BleIo`: `listen`/`connect`/`start_advertising`/
+  `start_scanning`/`local_addr`/…), and the transport is generic over it
+  (`BleTransport<I: BleIo>`). Linux backs it with `BluerIo`; Myco adds
+  **`AndroidBleIo`** (option A: native L2CAP CoC), targeting **Linux interop**.
+  Caveat: upstream `Node::new` currently **hardwires `BluerIo`**, so injecting a
+  custom `BleIo` is one of the two upstream-`fips` changes Myco needs (see
+  [build.md § 4c](../how-to/build.md)). FIPS owns all connection tracking, the
+  pool, the tiebreaker, Noise, and reconnect — **bitchat is not used as a
+  transport.**
 - Android L2CAP specifics force a dial direction: `listenUsingInsecureL2cap­Channel()`
   returns a *dynamically* assigned PSM (you cannot bind the fixed default PSM 133 as a
   listener), while `createL2capChannel(psm)` can dial any PSM. So **Android is the
@@ -307,8 +316,10 @@ sharply. It is **not** a tunnel-all-internet VPN.
   (→ `127.0.0.1`, A record), **system-wide** for every app on the phone.
   Non-`.fips`/non-`.nsite` queries are refused so the OS falls through to normal
   DNS.
-- The app **owns** the TUN; FIPS is embedded with `.without_system_tun()` and is
-  handed only packet bytes. The TUN fd is read/written in Kotlin.
+- The app **owns** the TUN and hands FIPS only packet bytes; the TUN fd is
+  read/written in Kotlin. This **app-owned-TUN** mode is a capability Myco adds to
+  upstream `fips` (it always creates its own system TUN today) — nostr-vpn's
+  `.without_system_tun()` is the reference; see [build.md § 4c](../how-to/build.md).
 
 System-wide `.fips`/`.nsite` resolution is the entire reason the TUN survives the
 strip: it is what makes "every app on the phone can resolve a mesh name" true,
@@ -335,7 +346,7 @@ Provenance for each band, matching the legend in
 | nsite sync (fetch + verify + retain over `.fips`) | **net-new** | runs in **`nsite-deck`**; v0 serves direct from relay + Blossom |
 | htdocs serving cache (path-named files under `current/`) | **deferred** | nsite-deck speed optimization; not needed for v0 |
 | FFI: JNI/JSON reducer, cdylib via cargo-ndk | **reuse (nostr-vpn)** | `dispatch→state(rev)`; opaque `jlong` over Tokio |
-| FIPS embedding (`FipsEndpoint::builder().without_system_tun()`) | **reuse (nostr-vpn)** | app owns TUN; FIPS moves opaque datagrams |
+| FIPS embedding (`Node::new(Config)` on upstream `fips`) | **reuse + upstream work** | app-owned TUN + custom `BleIo` injection are upstream gaps Myco adds (nostr-vpn's `.without_system_tun()` fork is the reference); see [§ 4c](../how-to/build.md) |
 | `VpnService`/TUN | **reuse (nostr-vpn), narrowed** | routes `fd00::/8` only; intercepts `.fips`/`.nsite`; no tunnel-all |
 | FIPS core (identity, routing, Noise IK/XK, FSP port-mux) | **reuse (fips-core)** | unchanged |
 | Transports UDP / TCP / Tor | **reuse (fips-core)** | unchanged |

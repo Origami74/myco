@@ -205,9 +205,14 @@ just install      # build + adb install -r
 
 ## 4. Wiring in the LOCAL `reference/fips` checkout
 
-Myco builds against a **local** FIPS source tree (a LOCKED decision), so we
-can patch PSM / dial-direction for Android L2CAP without waiting on upstream.
-The mechanism is borrowed directly from nostr-vpn:
+Myco depends on the **canonical upstream `fips` crate** — not a nostr-vpn fork of
+it (a LOCKED decision; see [architecture.md § Crate workspace](../design/architecture.md)).
+It builds against a **local** FIPS source tree so we can carry a **minimal patch for
+the two Android-enabling seams upstream `fips` does not yet expose** — (1) an
+**app-owned TUN** (the `VpnService` owns the fd; FIPS exchanges packet bytes over a
+channel instead of calling `tun::create`) and (2) **custom `BleIo` injection** (plug
+in `AndroidBleIo` instead of the hardwired Linux `BluerIo`) — while those land
+upstream (see §4c). The mechanism is borrowed directly from nostr-vpn:
 [reference/nostr-vpn/android/app/build.gradle.kts](../../reference/nostr-vpn/android/app/build.gradle.kts)
 reads an env var and emits `--config patch.crates-io.<crate>.path="…"` flags into
 the `cargo ndk` invocation.
@@ -223,22 +228,20 @@ export FIPSPOP_FIPS_REPO_PATH="$PWD/reference/fips"
 ### 4b. Emit `patch.crates-io` overrides
 
 The Gradle helper (adapted from `localFipsCargoConfigArgs()` in the reference)
-validates the path and emits one `--config` pair per FIPS crate:
+validates the path and emits the **single** `fips` override (upstream `fips` is
+one crate — see §4c):
 
 ```kotlin
 fun localFipsCargoConfigArgs(): List<String> {
     val fipsPath = System.getenv("FIPSPOP_FIPS_REPO_PATH")?.takeIf { it.isNotBlank() }
         ?: return emptyList()
     val fipsRoot = file(fipsPath)
-    // crate set is TBD — see note below
-    val crateNames = listOf("fips-core", "fips-endpoint", "fips-identity")
-    return crateNames.flatMap { crate ->
-        val dir = fipsRoot.resolve("crates/$crate").absolutePath
-        require(file(dir).isDirectory) {
-            "FIPSPOP_FIPS_REPO_PATH must point at a fips checkout with $crate"
-        }
-        listOf("--config", "patch.crates-io.$crate.path=\"$dir\"")
+    // Upstream FIPS is a SINGLE crate named `fips` (Cargo.toml: name = "fips",
+    // lib at src/lib.rs) — one override, not a crates/* split.
+    require(fipsRoot.resolve("Cargo.toml").isFile && fipsRoot.resolve("src/lib.rs").isFile) {
+        "FIPSPOP_FIPS_REPO_PATH must point at a fips checkout (Cargo.toml + src/lib.rs)"
     }
+    return listOf("--config", "patch.crates-io.fips.path=\"${fipsRoot.absolutePath}\"")
 }
 ```
 
@@ -246,32 +249,39 @@ Equivalently, by hand on the CLI:
 
 ```sh
 cargo ndk -t arm64-v8a --platform 29 build -p myco-core --release \
-  --config 'patch.crates-io.fips-core.path="reference/fips/crates/fips-core"' \
-  --config 'patch.crates-io.fips-endpoint.path="reference/fips/crates/fips-endpoint"' \
-  --config 'patch.crates-io.fips-identity.path="reference/fips/crates/fips-identity"'
+  --config 'patch.crates-io.fips.path="reference/fips"'
 ```
 
-### 4c. **Open issue — crate layout mismatch**
+### 4c. **Resolved — depend on the single upstream `fips` crate**
 
-> **TBD / open.** The nostr-vpn helper assumes a *multi-crate* FIPS checkout
-> (`crates/fips-core`, `crates/fips-endpoint`, `crates/fips-identity`). The
-> `reference/fips` checkout vendored here is a **single crate** named `fips`
+> **LOCKED (was open).** Upstream `fips` is a **single crate** named `fips`
 > ([reference/fips/Cargo.toml](../../reference/fips/Cargo.toml) declares
-> `name = "fips"`, with `src/transport/ble/` inline, no `crates/` directory).
+> `name = "fips"`, lib at `src/lib.rs`, `src/transport/ble/` inline — no `crates/`
+> split). Myco depends on that one crate, so the local-FIPS wiring is the **single
+> override** in §4b (`patch.crates-io.fips.path="reference/fips"`). The nostr-vpn
+> `fips-core` / `fips-endpoint` / `fips-identity` three-crate assumption does **not**
+> match upstream and is dropped.
 >
-> So the override list above is **not** correct against this exact checkout —
-> the crate names and paths depend on how `myco-core` actually declares its
-> FIPS dependency. Two outcomes, to be resolved when `myco-core` is written:
+> **Upstream gaps the local patch carries (Phase 0).** Two capabilities Myco needs
+> are **not in upstream `fips`** today — they were nostr-vpn customizations, and the
+> plan is to get them *from/into upstream*, not to fork:
 >
-> - **If** `myco-core` depends on the single `fips` crate, the wiring is one
->   override: `--config 'patch.crates-io.fips.path="reference/fips"'`.
-> - **If** we re-split FIPS into `fips-core` / `fips-endpoint` / `fips-identity`
->   to match the nostr-vpn embedding (`FipsEndpoint::builder().without_system_tun()`,
->   see [reference/nostr-vpn/crates/nostr-vpn-cli/src/fips_private_mesh/runtime_send.rs](../../reference/nostr-vpn/crates/nostr-vpn-cli/src/fips_private_mesh/runtime_send.rs)),
->   the three-crate list above applies.
+> 1. **App-owned TUN.** Upstream `Node::new(Config)`
+>    ([reference/fips/src/bin/fips.rs](../../reference/fips/src/bin/fips.rs)) always
+>    creates a real system TUN via the `tun` crate
+>    ([reference/fips/src/upper/tun.rs](../../reference/fips/src/upper/tun.rs)). On
+>    Android the `VpnService` owns the fd, so FIPS must instead exchange IPv6 packet
+>    bytes over a channel (the internal `tun_channel` mpsc already exists). This is
+>    nostr-vpn's `.without_system_tun()` contract, to be **contributed upstream**.
+> 2. **Custom `BleIo` injection.** `Node::new` hardwires the Linux `BluerIo`
+>    ([reference/fips/src/node/mod.rs](../../reference/fips/src/node/mod.rs)); the
+>    generic `BleTransport<I: BleIo>` is the right seam, but the embedder cannot pass
+>    its own `BleIo`. Myco injects `AndroidBleIo`, so this is the **second upstream
+>    change**.
 >
-> Resolving this is a Phase 0 task **(once the myco-core crate lands)**. Treat
-> the crate names in §4b as a placeholder, not a verified fact.
+> nostr-vpn's implementations are the **reference for what each patch must do**, not a
+> dependency. Until both land upstream they live as a minimal patch on the local
+> `reference/fips` checkout, carried via the §4b override.
 
 ### 4d. `Cargo.lock` hygiene
 
@@ -333,9 +343,10 @@ two-device demo: [run-two-device-demo.md](./run-two-device-demo.md).
 
 ## Open questions
 
-- **Crate split (§4c):** does `myco-core` depend on the single `fips` crate or
-  a re-split `fips-core`/`fips-endpoint`/`fips-identity`? Determines the
-  `patch.crates-io` override set. **TBD / open** until `myco-core` lands.
+- **Upstream `fips` seams (§4c):** the single-`fips`-crate dependency is
+  **resolved/LOCKED**; what remains open is *landing the two upstream
+  contributions* — the app-owned TUN and custom `BleIo` injection — in upstream
+  `fips` (vs. carrying them as a local patch). **Tracked in §4c / roadmap P0.**
 - **`flake.nix`:** Myco has no Nix dev shell yet. **TBD / open.**
 - **`compileSdk`/`targetSdk`:** proposed at 36 to match reference; not yet pinned
   for Myco. **TBD / open.**

@@ -243,11 +243,13 @@ membership-gated network. There is no admin and no roster.
   system-wide for every app on the phone. It does **not** capture `0.0.0.0/0` —
   there is no tunnel-all-internet. The TUN is what gives every app on the device
   `.fips`/`.nsite` resolution.
-- **The FIPS mesh** (fips-core / fips-endpoint): identity, routing, two-layer
-  Noise crypto, transports.
-- **The embedding pattern** from nostr-vpn: link FIPS in-process via
-  `FipsEndpoint::builder()` with `.without_system_tun()`, so the app owns the TUN
-  and hands FIPS only packet bytes.
+- **The FIPS mesh** (the single upstream `fips` crate): identity, routing,
+  two-layer Noise crypto, transports.
+- **The embedding pattern**: link the upstream `fips` crate in-process via
+  `Node::new(Config)` (nostr-vpn's `FipsEndpoint::builder().without_system_tun()`
+  is a fork-only abstraction — see [build.md § 4c](../how-to/build.md)). The app
+  owns the TUN and hands FIPS only packet bytes; that app-owned-TUN mode is itself
+  an upstream-`fips` capability Myco adds.
 - **QR pairing** (CameraX + ML Kit), reused and re-pointed at the Myco
   payload (`myco://pair/<base64>` carrying npub + memorable name).
 

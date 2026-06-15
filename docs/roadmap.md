@@ -31,14 +31,19 @@ see the [index](./README.md). The v1 target (P3) is the
 
 ## P0 — Scaffold & strip
 
-**Goal.** Stand up the Myco workspace (Kotlin/Compose app + the `myco-core`
-Rust crate, one `.so`, one JNI/JSON FFI surface), fork nostr-vpn, and **strip the
+**Goal.** Stand up the Myco workspace (Kotlin/Compose app + the four-crate Rust
+workspace `myco-core` + `nsite-deck` + `myco-relay` + `myco-blossom`, one `.so`,
+one JNI/JSON FFI surface), fork nostr-vpn's app scaffolding, and **strip the
 private-network layer** — exit-node, WireGuard upstream egress, roster/admin
 membership (kind 30388), join-requests-as-membership, `.nvpn` MagicDNS, and
-LAN-multicast pairing. Keep the FIPS embedding (`FipsEndpoint::builder()
-.without_system_tun()`) and the `VpnService`/TUN, narrowed to route only
-`fd00::/8` and DNS-intercept `*.fips`/`*.nsite`. Generate and persist the single
-Nostr identity in `filesDir`.
+LAN-multicast pairing. Depend on the **canonical upstream `fips` crate** (single
+crate, one `patch.crates-io.fips` override) embedded via `Node::new(Config)`, and
+land the **two Android-enabling seams upstream `fips` lacks** — an **app-owned TUN**
+(the `VpnService` owns the fd; FIPS exchanges packet bytes over a channel) and
+**custom `BleIo` injection** (for `AndroidBleIo`) — as upstream contributions, with
+nostr-vpn's fork as the reference (see [build.md § 4c](./how-to/build.md)). Keep the
+`VpnService`/TUN, narrowed to route only `fd00::/8` and DNS-intercept
+`*.fips`/`*.nsite`. Generate and persist the single Nostr identity in `filesDir`.
 
 **Exit criterion.** `just build` (or `./gradlew assembleDebug`) produces a single
 arm64 / minSdk 29 APK; the app launches, generates and persists an nsec, and

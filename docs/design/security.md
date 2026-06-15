@@ -81,7 +81,7 @@ What self-authentication does **not** give you:
 ## 2. Transport crypto inherited from FIPS
 
 Myco does not invent transport security; it inherits the FIPS two-layer
-crypto wholesale by embedding `fips-endpoint` + `fips-core` in-process (the
+crypto wholesale by embedding the upstream `fips` crate in-process (the
 same embedding nostr-vpn uses,
 [../../reference/nostr-vpn/crates/nostr-vpn-cli/src/fips_private_mesh/runtime_send.rs](../../reference/nostr-vpn/crates/nostr-vpn-cli/src/fips_private_mesh/runtime_send.rs)).
 
