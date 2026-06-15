@@ -225,7 +225,7 @@ the `cargo ndk` invocation.
 nostr-vpn uses `NVPN_FIPS_REPO_PATH`. Myco's analogue (proposed):
 
 ```sh
-export FIPSPOP_FIPS_REPO_PATH="$PWD/reference/fips"
+export MYCO_FIPS_REPO_PATH="$PWD/reference/fips"
 ```
 
 ### 4b. Emit `patch.crates-io` overrides
@@ -236,13 +236,13 @@ one crate — see §4c):
 
 ```kotlin
 fun localFipsCargoConfigArgs(): List<String> {
-    val fipsPath = System.getenv("FIPSPOP_FIPS_REPO_PATH")?.takeIf { it.isNotBlank() }
+    val fipsPath = System.getenv("MYCO_FIPS_REPO_PATH")?.takeIf { it.isNotBlank() }
         ?: return emptyList()
     val fipsRoot = file(fipsPath)
     // Upstream FIPS is a SINGLE crate named `fips` (Cargo.toml: name = "fips",
     // lib at src/lib.rs) — one override, not a crates/* split.
     require(fipsRoot.resolve("Cargo.toml").isFile && fipsRoot.resolve("src/lib.rs").isFile) {
-        "FIPSPOP_FIPS_REPO_PATH must point at a fips checkout (Cargo.toml + src/lib.rs)"
+        "MYCO_FIPS_REPO_PATH must point at a fips checkout (Cargo.toml + src/lib.rs)"
     }
     return listOf("--config", "patch.crates-io.fips.path=\"${fipsRoot.absolutePath}\"")
 }
