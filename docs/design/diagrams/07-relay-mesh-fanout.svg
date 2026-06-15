@@ -7,8 +7,8 @@
   </defs>
 
   <rect width="1020" height="720" fill="#ffffff"/>
-  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">Relay-mesh fanout — multiplex events to connected peers</text>
-  <text x="40" y="63" font-size="13" fill="#64748b">The embedded relay re-broadcasts each accepted event to all OTHER connected peers — events only, source-excluded. DRAFT for review.</text>
+  <text x="40" y="40" font-size="23" font-weight="700" fill="#0f172a">Event fanout — the nsite-deck propagator multiplexes to peers</text>
+  <text x="40" y="63" font-size="13" fill="#64748b">The nsite-deck propagator — not the relay — re-broadcasts each accepted event to all OTHER connected peers (events only, source-excluded). The relay stays a plain store.</text>
 
   <!-- ============ Peer A (left) ============ -->
   <rect x="44" y="250" width="150" height="74" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
@@ -39,10 +39,10 @@
 
   <!-- ============ YOUR relay (center, purple) ============ -->
   <rect x="552" y="232" width="190" height="120" rx="14" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2.6"/>
-  <text x="647" y="270" font-size="16" font-weight="700" fill="#0f172a" text-anchor="middle">YOUR relay</text>
-  <text x="647" y="294" font-size="14" font-weight="700" fill="#7c3aed" text-anchor="middle">(:4869)</text>
-  <text x="647" y="318" font-size="10.5" fill="#475569" text-anchor="middle">accept &#8594; store once,</text>
-  <text x="647" y="334" font-size="10.5" fill="#475569" text-anchor="middle">fan out once</text>
+  <text x="647" y="266" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">YOUR node</text>
+  <text x="647" y="290" font-size="12" font-weight="700" fill="#7c3aed" text-anchor="middle">relay :4869 — stores</text>
+  <text x="647" y="312" font-size="11" fill="#475569" text-anchor="middle">propagator —</text>
+  <text x="647" y="328" font-size="11" fill="#475569" text-anchor="middle">subscribes + fans out</text>
 
   <!-- ============ Peers B / C / D (right) ============ -->
   <!-- Peer B -->
@@ -67,7 +67,7 @@
   <path d="M742,278 C786,250 800,200 832,185" fill="none" stroke="#16a34a" stroke-width="2.6" marker-end="url(#mGreen)"/>
   <path d="M742,295 L832,292" fill="none" stroke="#16a34a" stroke-width="2.6" marker-end="url(#mGreen)"/>
   <path d="M742,312 C786,340 800,386 832,398" fill="none" stroke="#16a34a" stroke-width="2.6" marker-end="url(#mGreen)"/>
-  <text x="790" y="246" font-size="11" font-weight="700" fill="#15803d" text-anchor="middle">&#9313; fan out EVENT</text>
+  <text x="790" y="246" font-size="11" font-weight="700" fill="#15803d" text-anchor="middle">&#9313; propagator fans out</text>
   <text x="790" y="262" font-size="10.5" fill="#15803d" text-anchor="middle">(TTL&#8722;1)</text>
 
   <!-- source-excluded: dashed red arrow back toward A, crossed out -->
@@ -96,5 +96,5 @@
   <text x="542" y="608" font-size="11.5" font-weight="700" fill="#b45309">Push every blob and BLE would melt.</text>
 
   <!-- small note -->
-  <text x="40" y="672" font-size="12" fill="#475569">Same intake feeds the local store + the fanout, so an event is <tspan font-weight="700" fill="#0f172a">stored once</tspan> and <tspan font-weight="700" fill="#0f172a">re-broadcast once</tspan>.</text>
+  <text x="40" y="672" font-size="12" fill="#475569">The relay <tspan font-weight="700" fill="#0f172a">stores</tspan> each accepted event once; the nsite-deck propagator subscribes and <tspan font-weight="700" fill="#0f172a">re-broadcasts it once</tspan> (source-excluded).</text>
 </svg>

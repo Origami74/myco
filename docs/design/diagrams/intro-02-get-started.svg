@@ -27,7 +27,7 @@
   </g>
   <text x="177" y="320" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">Scan your friend's</text>
   <text x="177" y="342" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">QR code</text>
-  <text x="177" y="372" font-size="12" fill="#64748b" text-anchor="middle">a quick hello, in person</text>
+  <text x="177" y="372" font-size="12" fill="#64748b" text-anchor="middle">a quick hello — you pair both ways</text>
 
   <!-- Panel 2 -->
   <rect x="352" y="112" width="275" height="320" rx="16" fill="#f5f3ff" stroke="#ddd6fe"/>
