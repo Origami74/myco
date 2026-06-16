@@ -1,0 +1,87 @@
+import org.gradle.api.tasks.Exec
+
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// ---------------------------------------------------------------------------
+// Rust cross-compile: cargo-ndk builds `myco-core` for arm64 and drops
+// libmyco_core.so into jniLibs, which Gradle then packages. See
+// docs/how-to/build.md.
+// ---------------------------------------------------------------------------
+val repoRoot = layout.projectDirectory.dir("../..")
+val rustOutputDir = layout.projectDirectory.dir("src/main/jniLibs")
+
+/**
+ * Wire in a LOCAL `fips` checkout via `patch.crates-io`. Set MYCO_FIPS_REPO_PATH
+ * to the fips source tree (a single crate: Cargo.toml + src/lib.rs). See
+ * docs/how-to/build.md §4.
+ */
+fun localFipsCargoConfigArgs(): List<String> {
+    val fipsPath = System.getenv("MYCO_FIPS_REPO_PATH")?.takeIf { it.isNotBlank() }
+        ?: return emptyList()
+    val fipsRoot = file(fipsPath)
+    require(fipsRoot.resolve("Cargo.toml").isFile && fipsRoot.resolve("src/lib.rs").isFile) {
+        "MYCO_FIPS_REPO_PATH must point at a fips checkout (Cargo.toml + src/lib.rs)"
+    }
+    return listOf("--config", "patch.crates-io.fips.path=\"${fipsRoot.absolutePath}\"")
+}
+
+tasks.register<Exec>("buildRustArm64") {
+    workingDir = repoRoot.asFile
+    commandLine(
+        *(listOf(
+            "cargo", "ndk",
+            "--target", "arm64-v8a",
+            "--platform", "29",                       // minSdk 29 (L2CAP CoC)
+            "--output-dir", rustOutputDir.asFile.absolutePath,
+            "build",
+        ) + localFipsCargoConfigArgs()
+          + listOf("--package", "myco-core", "--release")
+        ).toTypedArray()
+    )
+}
+
+tasks.matching { it.name in listOf("mergeDebugNativeLibs", "mergeReleaseNativeLibs") }
+    .configureEach { dependsOn("buildRustArm64") }
+
+android {
+    namespace = "app.myco"
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = "app.myco"
+        minSdk = 29                                   // L2CAP CoC requirement
+        targetSdk = 36
+        versionCode = 1
+        versionName = "0.0.1"
+        ndk { abiFilters += "arm64-v8a" }             // arm64 only
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+        }
+    }
+
+    buildFeatures { compose = true }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = "17" }
+}
+
+dependencies {
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation(platform("androidx.compose:compose-bom:2024.10.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+}

@@ -1,0 +1,24 @@
+[package]
+name = "myco-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "myco_core"
+# `lib` (rlib) for host unit tests; `cdylib` for the Android `libmyco_core.so`.
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+fips = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+
+# The JNI surface only exists on Android. Host (macOS/Linux) builds skip it and
+# drive `AppRuntime` directly (see tests).
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

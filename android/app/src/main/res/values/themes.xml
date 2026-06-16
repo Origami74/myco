@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose owns the visual theme (Material3); the activity just needs a
+         no-action-bar base so the splash/window chrome is minimal. -->
+    <style name="Theme.Myco" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

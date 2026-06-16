@@ -1,0 +1,27 @@
+# Myco — Cargo workspace.
+#
+# Four crates build into one native library (`libmyco_core.so`):
+#   myco-core    — app crate: device identity, embedded FIPS node, JNI/JSON FFI
+#   nsite-deck   — reusable nsite host: gateway + sync + propagator (P2/P3)
+#   myco-relay   — embedded NIP-01 relay (RelayBackend) — nostr-relay-builder (P2)
+#   myco-blossom — embedded Blossom blob store (BlobStore) (P2)
+#
+# `fips` is a LOCAL checkout under reference/fips (gitignored), wired as a path
+# dependency. See docs/how-to/build.md.
+[workspace]
+resolver = "2"
+members = ["myco-core", "nsite-deck", "myco-relay", "myco-blossom"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Origami74/myco"
+
+[workspace.dependencies]
+fips = { path = "reference/fips" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+anyhow = "1"
+hex = "0.4"
