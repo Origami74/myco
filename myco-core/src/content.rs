@@ -124,12 +124,33 @@ impl Content {
     /// header length, then a JSON header (`status`, `contentType`, `headers`),
     /// then the raw body bytes. Kotlin slices the body after parsing the header.
     pub async fn gateway_get_framed(
-        &self,
+        self: Arc<Self>,
         host: &str,
         path: &str,
         range: Option<&str>,
     ) -> Vec<u8> {
-        frame_response(&self.gateway_get(host, path, range).await)
+        let mut resp = self.gateway_get(host, path, range).await;
+        // A 503 means the site isn't fully present yet. Replace the generic
+        // loading body with the real sync status, and (re)trigger a sync if none
+        // is in flight — so the loading page self-heals for a freshly scanned or
+        // home-screen-launched site that hasn't been pulled yet.
+        if resp.status == 503 {
+            if let Some(addr) = nsite_deck::resolve_host(host) {
+                let host_label = addr.host_label();
+                let status = self.sites.lock().unwrap().get(&host_label).cloned();
+                let syncing = status.as_ref().map(|s| s.state.as_str()) == Some("syncing");
+                if !syncing {
+                    tokio::spawn(Arc::clone(&self).open_site(addr));
+                }
+                resp = GatewayResponse {
+                    status: 503,
+                    content_type: "text/html; charset=utf-8".to_string(),
+                    body: loading_html(status.as_ref()).into_bytes(),
+                    headers: Vec::new(),
+                };
+            }
+        }
+        frame_response(&resp)
     }
 
     // --- site entry ---
@@ -415,6 +436,37 @@ impl Content {
     }
 }
 
+/// A status-aware loading page for a not-yet-ready site (meta-refresh re-checks
+/// the gateway every second, by which time the re-triggered sync has progressed).
+fn loading_html(status: Option<&SiteStatusView>) -> String {
+    let line = match status {
+        Some(s) if s.state == "syncing" => {
+            let t = if s.title.is_empty() { "this app".to_string() } else { s.title.clone() };
+            format!("Getting {t}… {}/{} files", s.files_pulled, s.files_total)
+        }
+        Some(s) if s.state == "unreachable" => "Can't reach anyone who has this app yet. \
+Check your connection (or bring the device you got it from nearby) — Myco keeps trying."
+            .to_string(),
+        Some(s) if s.state == "incomplete" => {
+            "This app didn't download completely. Retrying…".to_string()
+        }
+        _ => "Loading…".to_string(),
+    };
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+<meta http-equiv=\"refresh\" content=\"1\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>Loading…</title></head>\
+<body style=\"font-family:system-ui,sans-serif;text-align:center;padding-top:20vh;color:#555;background:#faf9fb\">\
+<p style=\"font-size:1.1rem;max-width:28rem;margin:0 auto;padding:0 1rem\">{}</p></body></html>",
+        html_escape_min(&line)
+    )
+}
+
+fn html_escape_min(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
 /// The framing the `gatewayGet` JNI returns: `[u32 BE header-len][header JSON][body]`.
 fn frame_response(resp: &GatewayResponse) -> Vec<u8> {
     let header = serde_json::json!({
@@ -489,7 +541,7 @@ mod tests {
     async fn import_dir_then_serve_and_wipe() {
         let dir = tmp("e2e");
         let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
+        let content = Arc::new(Content::open(&dir).unwrap());
 
         let site = build_test_site(
             &[("/index.html", b"<h1>hi</h1>"), ("/app.js", b"console.log(1)")],
@@ -514,7 +566,7 @@ mod tests {
         assert_eq!(content.cache_view().blob_count, 2);
 
         // Framed response round-trips: header len → header JSON → body.
-        let framed = content.gateway_get_framed(&host, "/", None).await;
+        let framed = content.clone().gateway_get_framed(&host, "/", None).await;
         let hlen = u32::from_be_bytes(framed[0..4].try_into().unwrap()) as usize;
         let header: serde_json::Value = serde_json::from_slice(&framed[4..4 + hlen]).unwrap();
         assert_eq!(header["status"], 200);

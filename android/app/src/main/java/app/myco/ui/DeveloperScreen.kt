@@ -9,8 +9,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
@@ -19,6 +23,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -34,6 +40,7 @@ import app.myco.core.BleAdvert
 import app.myco.core.BlePeer
 import app.myco.core.NativeActions
 import app.myco.core.SiteStatus
+import app.myco.share.NsiteShare
 import kotlin.math.pow
 import kotlinx.coroutines.delay
 
@@ -46,10 +53,13 @@ import kotlinx.coroutines.delay
 fun DeveloperScreen(
     client: AppCoreClient,
     onBleToggle: (Boolean) -> Unit,
-    onLaunchNsite: (String) -> Unit = {},
+    onLaunchNsite: (host: String, title: String) -> Unit = { _, _ -> },
+    onPinToHome: (host: String, title: String) -> Unit = { _, _ -> },
+    onScan: () -> Unit = {},
 ) {
     var state by remember { mutableStateOf(client.state()) }
     var linkInput by remember { mutableStateOf("") }
+    var shareUri by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         while (true) {
             delay(1000)
@@ -135,6 +145,7 @@ fun DeveloperScreen(
                         }
                     },
                 ) { Text("Fetch") }
+                OutlinedButton(onClick = onScan) { Text("Scan") }
                 OutlinedButton(
                     onClick = { state = client.dispatch(NativeActions.wipeStores()) },
                 ) { Text("Wipe") }
@@ -147,17 +158,41 @@ fun DeveloperScreen(
             if (state.sites.isEmpty()) {
                 Text("— no sites yet —", style = MaterialTheme.typography.bodyMedium)
             } else {
-                state.sites.forEach { SiteRow(it, onOpen = { onLaunchNsite(it.host) }) }
+                state.sites.forEach { site ->
+                    SiteRow(
+                        site,
+                        onOpen = { onLaunchNsite(site.host, site.title) },
+                        onPinToHome = { onPinToHome(site.host, site.title) },
+                        onShare = {
+                            // Combine the nsite id with this device's pairing info
+                            // (npub + a fresh one-time secret) into one QR.
+                            shareUri = NsiteShare.buildShareUri(
+                                nsiteHost = site.host,
+                                deviceNpub = state.ownNpub,
+                                deviceName = NsiteShare.deviceName(state.ownNpub),
+                                pairSecret = NsiteShare.newPairSecret(),
+                            )
+                        },
+                    )
+                }
             }
 
             Field("Version / rev", "${state.appVersion} / rev ${state.rev}")
         }
         }
     }
+
+    shareUri?.let { uri -> ShareQrDialog(uri, onDismiss = { shareUri = null }) }
 }
 
 @Composable
-private fun SiteRow(site: SiteStatus, onOpen: () -> Unit) {
+private fun SiteRow(
+    site: SiteStatus,
+    onOpen: () -> Unit,
+    onShare: () -> Unit,
+    onPinToHome: () -> Unit,
+) {
+    val ready = site.state == "ready"
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
             site.title.ifEmpty { site.host },
@@ -173,11 +208,41 @@ private fun SiteRow(site: SiteStatus, onOpen: () -> Unit) {
         }
         Mono("status", detail)
         Mono("host", site.host)
-        Row {
-            Button(onClick = onOpen, enabled = site.state == "ready") { Text("Open") }
-            Spacer(Modifier.width(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onOpen, enabled = ready) { Text("Open") }
+            OutlinedButton(onClick = onShare) { Text("Share") }
+        }
+        if (ready) {
+            OutlinedButton(onClick = onPinToHome) { Text("Add to home screen") }
         }
     }
+}
+
+/** Shows the share-an-nsite QR (nsite id + this device's pairing info). */
+@Composable
+private fun ShareQrDialog(uri: String, onDismiss: () -> Unit) {
+    val qr = remember(uri) { NsiteShare.qrBitmap(uri) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        title = { Text("Share this nsite") },
+        text = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Image(
+                    bitmap = qr.asImageBitmap(),
+                    contentDescription = "nsite share QR",
+                    modifier = Modifier.size(260.dp),
+                )
+                Text(
+                    "Scan with another Myco to open this app — and pair with this device if you haven't.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+    )
 }
 
 @Composable

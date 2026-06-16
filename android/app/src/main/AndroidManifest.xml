@@ -19,6 +19,9 @@
          over normal IP (the tier-3 online fallback). Browsing cached nsites needs
          no network. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- In-app QR scanner (reads a share QR). -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
@@ -32,22 +35,41 @@
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Handle scanned myco:// links (a share QR: open the nsite + carry the
+                 sharer's pairing info). BROWSABLE so a camera/QR scanner can hand
+                 it to Myco. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="myco" />
+            </intent-filter>
         </activity>
 
         <!-- Each opened nsite runs as a fullscreen, chrome-less WebView in its own
-             task (documentLaunchMode + FLAG_ACTIVITY_NEW_DOCUMENT), keyed by host
-             so re-opening re-surfaces the same Recents card. Launched internally. -->
+             task, keyed by host (the document data URI) so re-opening — whether
+             from the in-app list or a home-screen shortcut — re-surfaces the SAME
+             Recents card. `intoExisting` reuses the task whose data URI matches;
+             `always` would (wrongly) spawn a new task every launch. -->
         <activity
             android:name=".NsiteActivity"
             android:exported="false"
-            android:documentLaunchMode="always"
+            android:documentLaunchMode="intoExisting"
             android:autoRemoveFromRecents="false"
             android:label="@string/app_name" />
+
+        <!-- Portrait-locked QR scanner (the zxing default opens sideways). -->
+        <activity
+            android:name=".PortraitCaptureActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:stateNotNeeded="true" />
 
         <service
             android:name=".ble.BleService"

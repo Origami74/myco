@@ -83,5 +83,9 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    // QR generation for share-an-nsite (encodes the nsite id + pairing info)…
+    implementation("com.google.zxing:core:3.5.3")
+    // …and an in-app camera scanner to read one back.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

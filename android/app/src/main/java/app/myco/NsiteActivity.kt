@@ -1,6 +1,7 @@
 package app.myco
 
 import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.net.Uri
 import android.os.Bundle
 import android.webkit.WebResourceRequest
@@ -39,6 +40,9 @@ class NsiteActivity : ComponentActivity() {
             finish()
             return
         }
+        val title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
+        // Give the Recents card the nsite's own title + favicon, for a native feel.
+        applyTaskIcon("$hostLabel.nsite", title)
 
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
@@ -67,8 +71,31 @@ class NsiteActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    /**
+     * Set the Recents task label + icon from the nsite itself — the title from the
+     * manifest and the favicon (the blob the manifest maps at `/favicon.ico`,
+     * falling back to common icon paths), fetched from the local gateway off the
+     * UI thread. A real `.ico` may not decode; then the card just gets the title.
+     */
+    private fun applyTaskIcon(host: String, title: String) {
+        Thread {
+            val label = title.ifEmpty { "nsite" }
+            val icon = NsiteIcons.fetch(client, host)
+            runOnUiThread {
+                @Suppress("DEPRECATION")
+                val desc = if (icon != null) {
+                    ActivityManager.TaskDescription(label, icon)
+                } else {
+                    ActivityManager.TaskDescription(label)
+                }
+                setTaskDescription(desc)
+            }
+        }.start()
+    }
+
     companion object {
         const val EXTRA_HOST = "app.myco.extra.HOST"
+        const val EXTRA_TITLE = "app.myco.extra.TITLE"
 
         /** A per-host document URI so re-opening the same nsite re-surfaces its task. */
         fun documentUri(hostLabel: String): Uri = Uri.parse("myco://app/$hostLabel")
