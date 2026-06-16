@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import app.myco.core.AppCoreClient
 import app.myco.core.BleAdvert
 import app.myco.core.BlePeer
+import app.myco.core.CircleContact
 import app.myco.core.NativeActions
 import app.myco.core.SiteStatus
 import app.myco.share.NsiteShare
@@ -156,6 +157,27 @@ fun DeveloperScreen(
 
             Divider()
 
+            // --- Circle: paired peers we pull nsites from over the mesh ---
+            Text("Circle", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "People you've paired with by scanning their share QR. Their devices are the relays you pull from.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (state.circle.isEmpty()) {
+                Text("— no one yet —", style = MaterialTheme.typography.bodyMedium)
+            } else {
+                val onlineNpubs = state.blePeers.filter { it.connected }.map { it.npub }.toSet()
+                state.circle.forEach { contact ->
+                    CircleRow(
+                        contact = contact,
+                        online = contact.npub in onlineNpubs,
+                        onForget = { state = client.dispatch(NativeActions.removeFromCircle(contact.npub)) },
+                    )
+                }
+            }
+
+            Divider()
+
             // --- nsites (P2): paste a link to fetch over IP, then open offline ---
             Text("nsites", style = MaterialTheme.typography.titleMedium)
             OutlinedTextField(
@@ -243,6 +265,27 @@ private fun SiteRow(
         if (ready) {
             OutlinedButton(onClick = onPinToHome) { Text("Add to home screen") }
         }
+    }
+}
+
+/** One Circle contact: name (● online when their mesh peer is connected), npub,
+ *  and a Forget action. */
+@Composable
+private fun CircleRow(contact: CircleContact, online: Boolean, onForget: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                (if (online) "● " else "○ ") + contact.name.ifEmpty { "Unknown device" },
+                style = MaterialTheme.typography.labelMedium,
+                color = if (online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            )
+            Mono("npub", contact.npub)
+        }
+        TextButton(onClick = onForget) { Text("Forget") }
     }
 }
 

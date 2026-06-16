@@ -47,6 +47,13 @@ data class CacheStatus(
     val usedBytes: Long,
 )
 
+/** A Circle contact: a paired peer we pull nsites from over the mesh. */
+data class CircleContact(
+    val npub: String,
+    val name: String,
+    val addedAt: Long,
+)
+
 /** Parsed slice of the core's state snapshot (P1 BLE surface + P2 content). */
 data class AppState(
     val rev: Long,
@@ -69,6 +76,7 @@ data class AppState(
     val sites: List<SiteStatus>,
     val library: List<LibraryItem>,
     val cache: CacheStatus,
+    val circle: List<CircleContact>,
 ) {
     companion object {
         fun parse(json: String): AppState {
@@ -145,6 +153,21 @@ data class AppState(
                 blobCount = cacheJson.optLong("blobCount"),
                 usedBytes = cacheJson.optLong("usedBytes"),
             )
+            val circleJson = o.optJSONArray("circle")
+            val circle = buildList {
+                if (circleJson != null) {
+                    for (i in 0 until circleJson.length()) {
+                        val c = circleJson.optJSONObject(i) ?: continue
+                        add(
+                            CircleContact(
+                                npub = c.optString("npub"),
+                                name = c.optString("name"),
+                                addedAt = c.optLong("addedAt"),
+                            )
+                        )
+                    }
+                }
+            }
             return AppState(
                 rev = o.optLong("rev"),
                 error = o.optString("error"),
@@ -166,6 +189,7 @@ data class AppState(
                 sites = sites,
                 library = library,
                 cache = cache,
+                circle = circle,
             )
         }
     }
@@ -286,4 +310,12 @@ object NativeActions {
     fun removeFromLibrary(link: String): JSONObject =
         JSONObject().put("type", "remove_from_library").put("link", link)
     fun wipeStores(): JSONObject = JSONObject().put("type", "wipe_stores")
+
+    // --- circle (paired peers) ---
+    /** Add a paired peer (from a scanned share QR) to the Circle. */
+    fun addToCircle(npub: String, name: String): JSONObject =
+        JSONObject().put("type", "add_to_circle").put("npub", npub).put("name", name)
+    /** Forget a paired peer. */
+    fun removeFromCircle(npub: String): JSONObject =
+        JSONObject().put("type", "remove_from_circle").put("npub", npub)
 }

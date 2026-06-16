@@ -243,6 +243,18 @@ impl AppRuntime {
                 self.wipe_stores();
                 self.rev += 1;
             }
+            NativeAppAction::AddToCircle { npub, name } => {
+                if let Some(content) = &self.content {
+                    content.add_to_circle(&npub, &name);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::RemoveFromCircle { npub } => {
+                if let Some(content) = &self.content {
+                    content.remove_from_circle(&npub);
+                }
+                self.rev += 1;
+            }
         }
     }
 
@@ -393,6 +405,17 @@ impl AppRuntime {
             })
             .unwrap_or_default();
 
+        // Feed the connected-peer npubs to the content layer so `open_site` can
+        // pull from currently-reachable Circle members (and skip offline ones).
+        if let Some(content) = self.content.as_ref() {
+            let connected: Vec<String> = ble_peers
+                .iter()
+                .filter(|p| p.connected && !p.npub.is_empty())
+                .map(|p| p.npub.clone())
+                .collect();
+            content.set_connected_peers(connected);
+        }
+
         AppState {
             rev: self.rev,
             error: self.error.clone(),
@@ -425,6 +448,11 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.cache_view())
                 .unwrap_or_else(CacheView::empty),
+            circle: self
+                .content
+                .as_ref()
+                .map(|c| c.circle_snapshot())
+                .unwrap_or_default(),
         }
     }
 

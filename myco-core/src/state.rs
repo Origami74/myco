@@ -29,6 +29,8 @@ pub struct AppState {
     pub library: Vec<crate::content::LibraryItem>,
     /// Local relay/Blossom counts (for the developer screen + cache view).
     pub cache: crate::content::CacheView,
+    /// The user's **Circle**: paired peers we pull nsites from over the mesh.
+    pub circle: Vec<crate::content::CircleContact>,
 }
 
 /// The device identity, in the derived forms the UI shows.

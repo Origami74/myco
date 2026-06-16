@@ -10,7 +10,7 @@
 //! status into `sites`; the reducer never blocks on it (Kotlin polls `siteStatus`
 //! via `Tick`). See `docs/design/nsite-layer.md` and the FFI contract.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -52,6 +52,19 @@ pub struct LibraryItem {
     pub added_at: u64,
 }
 
+/// A **Circle** contact: a paired peer whose device we can pull nsites from over
+/// the mesh — your circle doubles as the set of relays we fetch from. Added when
+/// you scan someone's share QR. Persisted to `circle.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CircleContact {
+    /// The contact's device npub (their mesh/pairing identity).
+    pub npub: String,
+    /// A human label for the contact (from the share QR; a placeholder for now).
+    pub name: String,
+    pub added_at: u64,
+}
+
 /// Cache/store counts for the UI.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +95,13 @@ pub struct Content {
     source: Mutex<Option<Arc<dyn PeerSource>>>,
     library: Mutex<Vec<LibraryItem>>,
     library_path: PathBuf,
+    /// The Circle: paired peers we pull from over the mesh. Persisted.
+    circle: Mutex<Vec<CircleContact>>,
+    circle_path: PathBuf,
+    /// npubs of currently-connected mesh peers, refreshed by the runtime each poll.
+    /// `open_site` pulls from connected Circle members (bounded to who's reachable,
+    /// so it never blocks on an offline contact's connect timeout).
+    connected_peers: Mutex<Vec<String>>,
     /// host_label -> current sync status (drives the FFI `siteStatus`).
     sites: Mutex<HashMap<String, SiteStatusView>>,
 }
@@ -93,12 +113,17 @@ impl Content {
         let blobs = Arc::new(FsBlobStore::open(data_dir.join("blossom"))?);
         let library_path = data_dir.join("library.json");
         let library = load_library(&library_path);
+        let circle_path = data_dir.join("circle.json");
+        let circle = load_circle(&circle_path);
         Ok(Self {
             relay,
             blobs,
             source: Mutex::new(None),
             library: Mutex::new(library),
             library_path,
+            circle: Mutex::new(circle),
+            circle_path,
+            connected_peers: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
         })
     }
@@ -194,12 +219,24 @@ impl Content {
         }
 
         // Ordered sources: the mesh holder first (pull from whoever shared it),
-        // then the public IP online fallback.
+        // then any currently-connected Circle member (your paired peers double as
+        // relays), then the public IP online fallback.
         let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
+        let mut tried: HashSet<String> = HashSet::new();
         if let Some(npub) = holder.as_deref() {
-            match crate::ip_source::mesh_source_for(npub) {
-                Ok(mesh) => sources.push(Arc::new(mesh)),
-                Err(e) => tracing::warn!(error = %e, "skipping mesh source"),
+            if tried.insert(npub.to_string()) {
+                match crate::ip_source::mesh_source_for(npub) {
+                    Ok(mesh) => sources.push(Arc::new(mesh)),
+                    Err(e) => tracing::warn!(error = %e, "skipping mesh source"),
+                }
+            }
+        }
+        for npub in self.connected_circle_npubs() {
+            if tried.insert(npub.clone()) {
+                match crate::ip_source::mesh_source_for(&npub) {
+                    Ok(mesh) => sources.push(Arc::new(mesh)),
+                    Err(e) => tracing::warn!(error = %e, npub, "skipping circle mesh source"),
+                }
             }
         }
         if let Some(ip) = self.source.lock().unwrap().clone() {
@@ -380,6 +417,62 @@ impl Content {
         }
     }
 
+    // --- circle (paired peers we pull from) ---
+
+    /// Add (or rename) a paired peer in the Circle. Idempotent by npub.
+    pub fn add_to_circle(&self, npub: &str, name: &str) {
+        if npub.is_empty() {
+            return;
+        }
+        let mut circle = self.circle.lock().unwrap();
+        if let Some(c) = circle.iter_mut().find(|c| c.npub == npub) {
+            if !name.is_empty() {
+                c.name = name.to_string();
+            }
+        } else {
+            circle.push(CircleContact {
+                npub: npub.to_string(),
+                name: name.to_string(),
+                added_at: now_secs(),
+            });
+        }
+        let snapshot = circle.clone();
+        drop(circle);
+        save_circle(&self.circle_path, &snapshot);
+    }
+
+    /// Forget a peer (remove from the Circle).
+    pub fn remove_from_circle(&self, npub: &str) {
+        let mut circle = self.circle.lock().unwrap();
+        circle.retain(|c| c.npub != npub);
+        let snapshot = circle.clone();
+        drop(circle);
+        save_circle(&self.circle_path, &snapshot);
+    }
+
+    pub fn circle_snapshot(&self) -> Vec<CircleContact> {
+        self.circle.lock().unwrap().clone()
+    }
+
+    /// Record which mesh peers are connected right now (called by the runtime from
+    /// the node's peer snapshot), so `open_site` only tries reachable Circle members.
+    pub fn set_connected_peers(&self, npubs: Vec<String>) {
+        *self.connected_peers.lock().unwrap() = npubs;
+    }
+
+    /// Circle members that are connected mesh peers right now — the pull sources
+    /// to try (besides an explicit holder) without risking an offline timeout.
+    fn connected_circle_npubs(&self) -> Vec<String> {
+        let connected = self.connected_peers.lock().unwrap();
+        self.circle
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| connected.iter().any(|n| n == &c.npub))
+            .map(|c| c.npub.clone())
+            .collect()
+    }
+
     // --- wipe ---
 
     /// Clear the local relay + Blossom + Library + status (the `WipeStores` dev
@@ -552,6 +645,20 @@ fn save_library(path: &Path, items: &[LibraryItem]) {
     }
 }
 
+fn load_circle(path: &Path) -> Vec<CircleContact> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_circle(path: &Path, items: &[CircleContact]) {
+    if let Ok(json) = serde_json::to_vec(items) {
+        let tmp = path.with_extension("json.tmp");
+        let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,6 +756,39 @@ mod tests {
         assert_eq!(sites[0].state, "ready");
         assert_eq!(sites[0].host, host);
         assert_eq!(sites[0].title, "Persisted");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn circle_add_remove_persists_and_filters_to_connected() {
+        let dir = tmp("circle");
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let content = Content::open(&dir).unwrap();
+            content.add_to_circle("npub1alice", "Alice");
+            content.add_to_circle("npub1bob", "Bob");
+            content.add_to_circle("npub1alice", "Alice 2"); // idempotent by npub (rename)
+            let snap = content.circle_snapshot();
+            assert_eq!(snap.len(), 2, "two distinct contacts");
+            assert_eq!(
+                snap.iter().find(|c| c.npub == "npub1alice").unwrap().name,
+                "Alice 2",
+                "re-adding renames in place"
+            );
+
+            // Only connected members are offered as pull sources.
+            content.set_connected_peers(vec!["npub1bob".to_string()]);
+            assert_eq!(content.connected_circle_npubs(), vec!["npub1bob".to_string()]);
+
+            content.remove_from_circle("npub1bob");
+            assert_eq!(content.circle_snapshot().len(), 1);
+        }
+        // Persists across a reopen (restart).
+        let content = Content::open(&dir).unwrap();
+        let snap = content.circle_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].npub, "npub1alice");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

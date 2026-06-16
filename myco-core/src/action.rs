@@ -44,6 +44,14 @@ pub enum NativeAppAction {
     /// P2 (returns the empty set); real discovery lands with peer sync (P3).
     SearchNsites { query: Option<String> },
     /// Clear the local relay + Blossom + Library + site status (dev/test reset).
-    /// Content only — the device identity is untouched.
+    /// Content only — the device identity (and the Circle) are untouched.
     WipeStores,
+
+    // --- circle (paired peers) ---
+    /// Add a paired peer to the **Circle**: the contact list of devices we pull
+    /// nsites from over the mesh. Dispatched when a share QR is scanned. `npub` is
+    /// the peer's device identity; `name` a human label from the QR.
+    AddToCircle { npub: String, name: String },
+    /// Forget a peer (remove from the Circle).
+    RemoveFromCircle { npub: String },
 }

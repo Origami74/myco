@@ -195,17 +195,20 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Open a shared nsite: kick off its sync and open the fullscreen view. The
-     * sharer's pairing info travels in the QR; completing the mutual Noise
-     * handshake is the P3 receive side, so for now we acknowledge it.
+     * Open a shared nsite: add the sharer to your Circle, kick off its sync, and
+     * open the fullscreen view. The sharer's device becomes a paired peer we pull
+     * from over the mesh (holder = their npub); the public IP source is the fallback.
      */
     private fun openSharedNsite(info: NsiteShare.ShareInfo) {
-        // Pull from the sharer's device over the mesh first (holder = their npub),
-        // falling back to the public IP source.
+        if (info.npub.isNotEmpty()) {
+            // Scanning someone's share QR adds them to your Circle (the contact list
+            // of peers whose devices we pull nsites from).
+            core.dispatch(NativeActions.addToCircle(info.npub, info.name))
+        }
         core.dispatch(NativeActions.openNsite(info.nsiteHost, holder = info.npub))
         launchNsite(info.nsiteHost, info.name)
         if (info.npub.isNotEmpty()) {
-            Toast.makeText(this, "Shared by ${info.name} — pulling over the mesh", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "${info.name} added to your Circle — pulling over the mesh", Toast.LENGTH_SHORT).show()
         }
     }
 
