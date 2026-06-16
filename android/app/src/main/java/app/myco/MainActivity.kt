@@ -23,8 +23,6 @@ import app.myco.share.NsiteShare
 import app.myco.ui.MycoApp
 import app.myco.ui.theme.MycoTheme
 import app.myco.vpn.MycoVpnService
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 
 /**
  * Developer-UI entry point: device identity, node status, BLE diagnostics, and
@@ -41,10 +39,6 @@ class MainActivity : ComponentActivity() {
         if (prefs.getBoolean(PREF_BLE, true) && bleCorePermsGranted()) {
             BleService.start(this)
         }
-    }
-
-    private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
-        result.contents?.let { handleScannedText(it) }
     }
 
     private val vpnConsentLauncher =
@@ -74,7 +68,7 @@ class MainActivity : ComponentActivity() {
                     onBleToggle = { enabled -> setBleEnabled(enabled) },
                     onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
                     onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
-                    onScan = { startScan() },
+                    onScanned = { text -> handleScannedText(text) },
                     initialMeshEnabled = prefs.getBoolean(PREF_MESH, false),
                     onMeshToggle = { enabled -> setMeshEnabled(enabled) },
                 )
@@ -166,35 +160,29 @@ class MainActivity : ComponentActivity() {
         }.start()
     }
 
-    // --- share QR: scan + deep-link ---
+    // --- share QR: scan (in-app PairScreen) + deep-link ---
 
-    private fun startScan() {
-        scanLauncher.launch(
-            ScanOptions()
-                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                .setPrompt("Scan a Myco share QR")
-                .setBeepEnabled(false)
-                .setOrientationLocked(true)
-                .setCaptureActivity(PortraitCaptureActivity::class.java),
-        )
-    }
-
-    /** A scanned QR is either a `myco://share/…` payload or a raw nsite link. */
+    /** A scanned QR is a `myco://pair/…` pairing code, a `myco://share/…` shared
+     *  nsite, or a raw nsite link. */
     private fun handleScannedText(text: String) {
-        val info = NsiteShare.parseShareUri(text)
-        if (info != null) {
-            openSharedNsite(info)
-        } else {
-            // Fall back to treating it as a pasteable nsite link.
-            core.dispatch(NativeActions.openNsite(text))
-            Toast.makeText(this, "Opening nsite…", Toast.LENGTH_SHORT).show()
+        NsiteShare.parsePairUri(text)?.let { pair ->
+            core.dispatch(NativeActions.addToCircle(pair.npub, pair.name))
+            Toast.makeText(this, "${pair.name} added to your Circle", Toast.LENGTH_SHORT).show()
+            return
         }
+        NsiteShare.parseShareUri(text)?.let { info ->
+            openSharedNsite(info)
+            return
+        }
+        // Fall back to treating it as a pasteable nsite link.
+        core.dispatch(NativeActions.openNsite(text))
+        Toast.makeText(this, "Opening nsite…", Toast.LENGTH_SHORT).show()
     }
 
     private fun handleDeepLink(intent: Intent?) {
         val data = intent?.data ?: return
         if (data.scheme != NsiteShare.SCHEME) return
-        NsiteShare.parseShareUri(data.toString())?.let { openSharedNsite(it) }
+        handleScannedText(data.toString())
     }
 
     /**

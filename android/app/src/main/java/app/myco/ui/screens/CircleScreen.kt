@@ -57,7 +57,7 @@ import app.myco.ui.theme.avatarColorFor
 fun CircleScreen(
     state: AppState,
     client: AppCoreClient,
-    onScan: () -> Unit,
+    onPair: () -> Unit,
 ) {
     var forget by remember { mutableStateOf<CircleContact?>(null) }
     val connected = state.blePeers.filter { it.connected }.map { it.npub }.toSet()
@@ -70,10 +70,10 @@ fun CircleScreen(
         item {
             ScreenHeader("Circle", state, subtitle = "Paired peers — also the relays you pull from.")
             Spacer(Modifier.height(8.dp))
-            OutlinedButton(onClick = onScan) {
+            OutlinedButton(onClick = onPair) {
                 Icon(Icons.Filled.QrCodeScanner, contentDescription = null)
                 Spacer(Modifier.size(8.dp))
-                Text("Scan to pair")
+                Text("Pair a device")
             }
         }
         if (state.circle.isEmpty()) {

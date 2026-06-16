@@ -26,6 +26,41 @@ import java.security.SecureRandom
 object NsiteShare {
     const val SCHEME = "myco"
     const val SHARE_PREFIX = "myco://share/"
+    const val PAIR_PREFIX = "myco://pair/"
+
+    /** A device-only pairing payload (no nsite): `myco://pair/<base64url(json)>`
+     *  with `{ v, npub, name, secret }` — the "My code" QR on the Pair screen. */
+    fun buildPairUri(deviceNpub: String, deviceName: String, pairSecret: String): String {
+        val json = JSONObject()
+            .put("v", 1)
+            .put("npub", deviceNpub)
+            .put("name", deviceName)
+            .put("secret", pairSecret)
+        val b64 = Base64.encodeToString(
+            json.toString().toByteArray(Charsets.UTF_8),
+            Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
+        )
+        return "$PAIR_PREFIX$b64"
+    }
+
+    /** The decoded contents of a `myco://pair/…` QR. */
+    data class PairInfo(val npub: String, val name: String, val secret: String)
+
+    /** Decode a scanned `myco://pair/<base64url(json)>` URI, or null if malformed. */
+    fun parsePairUri(uri: String): PairInfo? {
+        val b64 = uri.removePrefix(PAIR_PREFIX)
+        if (b64 == uri) return null
+        return runCatching {
+            val json = JSONObject(
+                String(Base64.decode(b64, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP), Charsets.UTF_8)
+            )
+            PairInfo(
+                npub = json.optString("npub"),
+                name = json.optString("name"),
+                secret = json.optString("secret"),
+            ).takeIf { it.npub.isNotEmpty() }
+        }.getOrNull()
+    }
 
     fun buildShareUri(
         nsiteHost: String,

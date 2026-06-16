@@ -82,12 +82,11 @@ fun AppsScreen(
     client: AppCoreClient,
     onLaunchNsite: (host: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
-    onScan: () -> Unit,
+    onAddApp: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     var sheetFor by remember { mutableStateOf<SiteStatus?>(null) }
     var shareUri by remember { mutableStateOf<String?>(null) }
-    var showAdd by remember { mutableStateOf(false) }
 
     val apps = state.sites.filter {
         query.isBlank() || it.title.contains(query, true) || it.host.contains(query, true)
@@ -119,7 +118,7 @@ fun AppsScreen(
             )
         }
         item {
-            AddTile { showAdd = true }
+            AddTile { onAddApp() }
         }
         if (apps.isEmpty() && query.isBlank()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
@@ -155,14 +154,6 @@ fun AppsScreen(
     }
 
     shareUri?.let { uri -> ShareQrDialog(uri) { shareUri = null } }
-
-    if (showAdd) {
-        AddAppDialog(
-            onDismiss = { showAdd = false },
-            onPaste = { link -> client.dispatch(NativeActions.openNsite(link)); showAdd = false },
-            onScan = { showAdd = false; onScan() },
-        )
-    }
 }
 
 @Composable
@@ -367,33 +358,6 @@ private fun ShareQrDialog(uri: String, onDismiss: () -> Unit) {
                     color = Slate,
                     style = MaterialTheme.typography.bodySmall,
                     textAlign = TextAlign.Center,
-                )
-            }
-        },
-    )
-}
-
-@Composable
-private fun AddAppDialog(onDismiss: () -> Unit, onPaste: (String) -> Unit, onScan: () -> Unit) {
-    var link by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = {
-            Button(onClick = { if (link.isNotBlank()) onPaste(link.trim()) }, enabled = link.isNotBlank()) {
-                Text("Fetch")
-            }
-        },
-        dismissButton = { OutlinedButton(onClick = onScan) { Text("Scan QR") } },
-        title = { Text("Add an app") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Paste an nsite link, or scan a friend's share QR.", color = Slate, style = MaterialTheme.typography.bodySmall)
-                OutlinedTextField(
-                    value = link,
-                    onValueChange = { link = it },
-                    singleLine = true,
-                    placeholder = { Text("npub… / <npub>.nsite.lol") },
-                    modifier = Modifier.fillMaxWidth(),
                 )
             }
         },

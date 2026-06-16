@@ -47,10 +47,12 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
+import app.myco.ui.screens.AddScreen
 import app.myco.ui.screens.AppsScreen
 import app.myco.ui.screens.CircleScreen
 import app.myco.ui.screens.DevScreen
 import app.myco.ui.screens.DiscoverScreen
+import app.myco.ui.screens.PairScreen
 import app.myco.ui.screens.SettingsScreen
 import app.myco.ui.theme.EmeraldSoft
 import app.myco.ui.theme.Slate
@@ -81,7 +83,7 @@ fun MycoApp(
     onBleToggle: (Boolean) -> Unit,
     onLaunchNsite: (host: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
-    onScan: () -> Unit,
+    onScanned: (String) -> Unit,
     initialMeshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
 ) {
@@ -98,31 +100,37 @@ fun MycoApp(
     }
 
     val nav = rememberNavController()
+    val onPair = { nav.navigate("pair") }
+    val onAddApp = { nav.navigate("add") }
     Scaffold(
         bottomBar = {
             val current by nav.currentBackStackEntryAsState()
-            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                TABS.forEach { tab ->
-                    val selected = current?.destination?.hierarchy?.any { it.route == tab.route } == true
-                    NavigationBarItem(
-                        selected = selected,
-                        onClick = {
-                            nav.navigate(tab.route) {
-                                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
-                                launchSingleTop = true
-                                restoreState = true
-                            }
-                        },
-                        icon = { Icon(tab.icon, contentDescription = tab.label) },
-                        label = { Text(tab.label) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = MaterialTheme.colorScheme.primary,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            indicatorColor = EmeraldSoft,
-                            unselectedIconColor = Slate,
-                            unselectedTextColor = Slate,
-                        ),
-                    )
+            // The full-screen Pair / Add surfaces hide the bottom bar.
+            val route = current?.destination?.route
+            if (route != "pair" && route != "add") {
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                    TABS.forEach { tab ->
+                        val selected = current?.destination?.hierarchy?.any { it.route == tab.route } == true
+                        NavigationBarItem(
+                            selected = selected,
+                            onClick = {
+                                nav.navigate(tab.route) {
+                                    popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            },
+                            icon = { Icon(tab.icon, contentDescription = tab.label) },
+                            label = { Text(tab.label) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                indicatorColor = EmeraldSoft,
+                                unselectedIconColor = Slate,
+                                unselectedTextColor = Slate,
+                            ),
+                        )
+                    }
                 }
             }
         },
@@ -130,9 +138,9 @@ fun MycoApp(
         Surface(modifier = Modifier.padding(padding), color = MaterialTheme.colorScheme.background) {
             NavHost(navController = nav, startDestination = "apps") {
                 composable("apps") {
-                    AppsScreen(state, client, onLaunchNsite = onLaunchNsite, onPinToHome = onPinToHome, onScan = onScan)
+                    AppsScreen(state, client, onLaunchNsite = onLaunchNsite, onPinToHome = onPinToHome, onAddApp = onAddApp)
                 }
-                composable("circle") { CircleScreen(state, client, onScan = onScan) }
+                composable("circle") { CircleScreen(state, client, onPair = onPair) }
                 composable("discover") { DiscoverScreen(state, client, onLaunchNsite = onLaunchNsite) }
                 composable("settings") {
                     SettingsScreen(
@@ -144,6 +152,20 @@ fun MycoApp(
                     )
                 }
                 composable("dev") { DevScreen(state) }
+                composable("pair") {
+                    PairScreen(
+                        state = state,
+                        onScanned = { text -> nav.popBackStack(); onScanned(text) },
+                        onBack = { nav.popBackStack() },
+                    )
+                }
+                composable("add") {
+                    AddScreen(
+                        state = state,
+                        onScanned = { text -> nav.popBackStack(); onScanned(text) },
+                        onBack = { nav.popBackStack() },
+                    )
+                }
             }
         }
     }
