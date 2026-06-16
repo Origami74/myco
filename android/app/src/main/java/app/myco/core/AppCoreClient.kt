@@ -54,6 +54,17 @@ data class CircleContact(
     val addedAt: Long,
 )
 
+/** An nsite discovered on a Circle peer's relay ("nsites around me"). */
+data class DiscoveredNsite(
+    val host: String,
+    val authorNpub: String,
+    val dTag: String?,
+    val title: String,
+    /** The Circle peer who has it — the holder to pull from on open. */
+    val holderNpub: String,
+    val holderName: String,
+)
+
 /** Parsed slice of the core's state snapshot (P1 BLE surface + P2 content). */
 data class AppState(
     val rev: Long,
@@ -77,6 +88,7 @@ data class AppState(
     val library: List<LibraryItem>,
     val cache: CacheStatus,
     val circle: List<CircleContact>,
+    val discovered: List<DiscoveredNsite>,
 ) {
     companion object {
         fun parse(json: String): AppState {
@@ -168,6 +180,24 @@ data class AppState(
                     }
                 }
             }
+            val discoveredJson = o.optJSONArray("discovered")
+            val discovered = buildList {
+                if (discoveredJson != null) {
+                    for (i in 0 until discoveredJson.length()) {
+                        val d = discoveredJson.optJSONObject(i) ?: continue
+                        add(
+                            DiscoveredNsite(
+                                host = d.optString("host"),
+                                authorNpub = d.optString("authorNpub"),
+                                dTag = if (d.isNull("dTag")) null else d.optString("dTag"),
+                                title = d.optString("title"),
+                                holderNpub = d.optString("holderNpub"),
+                                holderName = d.optString("holderName"),
+                            )
+                        )
+                    }
+                }
+            }
             return AppState(
                 rev = o.optLong("rev"),
                 error = o.optString("error"),
@@ -190,6 +220,7 @@ data class AppState(
                 library = library,
                 cache = cache,
                 circle = circle,
+                discovered = discovered,
             )
         }
     }
@@ -318,4 +349,7 @@ object NativeActions {
     /** Forget a paired peer. */
     fun removeFromCircle(npub: String): JSONObject =
         JSONObject().put("type", "remove_from_circle").put("npub", npub)
+
+    /** Discover nsites on connected Circle peers' relays ("nsites around me"). */
+    fun searchNsites(): JSONObject = JSONObject().put("type", "search_nsites")
 }

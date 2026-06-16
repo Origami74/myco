@@ -40,9 +40,14 @@ pub enum NativeAppAction {
     AddToLibrary { link: String },
     /// Unpin a site from the Library.
     RemoveFromLibrary { link: String },
-    /// Query reachable relays for kind 15128/35128 ("nsites around me"). Stub in
-    /// P2 (returns the empty set); real discovery lands with peer sync (P3).
-    SearchNsites { query: Option<String> },
+    /// Discover nsites on connected Circle peers' relays ("nsites around me"):
+    /// query each reachable member's mesh relay for kind 15128/35128 manifests.
+    /// Spawn-not-block; results land in `discovered`. `query` is an optional title
+    /// filter (unused for now).
+    SearchNsites {
+        #[serde(default)]
+        query: Option<String>,
+    },
     /// Clear the local relay + Blossom + Library + site status (dev/test reset).
     /// Content only — the device identity (and the Circle) are untouched.
     WipeStores,

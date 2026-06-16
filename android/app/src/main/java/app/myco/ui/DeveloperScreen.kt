@@ -39,6 +39,7 @@ import app.myco.core.AppCoreClient
 import app.myco.core.BleAdvert
 import app.myco.core.BlePeer
 import app.myco.core.CircleContact
+import app.myco.core.DiscoveredNsite
 import app.myco.core.NativeActions
 import app.myco.core.SiteStatus
 import app.myco.share.NsiteShare
@@ -176,6 +177,40 @@ fun DeveloperScreen(
                 }
             }
 
+            // "nsites around me": query connected Circle peers' relays over the mesh.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Around me (${state.discovered.size})",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                OutlinedButton(
+                    onClick = { state = client.dispatch(NativeActions.searchNsites()) },
+                ) { Text("Discover") }
+            }
+            if (state.discovered.isEmpty()) {
+                Text(
+                    "— tap Discover to find nsites your Circle is hosting —",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                state.discovered.forEach { d ->
+                    DiscoveredRow(
+                        d = d,
+                        onOpen = {
+                            // Start the pull from the holder, then open the viewer
+                            // (it shows the loading page until the sync completes).
+                            state = client.dispatch(NativeActions.openNsite(d.host, d.holderNpub))
+                            onLaunchNsite(d.host, d.title)
+                        },
+                    )
+                }
+            }
+
             Divider()
 
             // --- nsites (P2): paste a link to fetch over IP, then open offline ---
@@ -286,6 +321,27 @@ private fun CircleRow(contact: CircleContact, online: Boolean, onForget: () -> U
             Mono("npub", contact.npub)
         }
         TextButton(onClick = onForget) { Text("Forget") }
+    }
+}
+
+/** One discovered nsite ("around me"): title + which Circle peer is hosting it,
+ *  with an Open that pulls from that holder. */
+@Composable
+private fun DiscoveredRow(d: DiscoveredNsite, onOpen: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                d.title.ifEmpty { d.host },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Mono("from", d.holderName.ifEmpty { d.holderNpub })
+        }
+        Button(onClick = onOpen) { Text("Open") }
     }
 }
 

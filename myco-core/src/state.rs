@@ -31,6 +31,8 @@ pub struct AppState {
     pub cache: crate::content::CacheView,
     /// The user's **Circle**: paired peers we pull nsites from over the mesh.
     pub circle: Vec<crate::content::CircleContact>,
+    /// nsites discovered on Circle peers' relays (`SearchNsites` — "around me").
+    pub discovered: Vec<crate::content::DiscoveredNsite>,
 }
 
 /// The device identity, in the derived forms the UI shows.

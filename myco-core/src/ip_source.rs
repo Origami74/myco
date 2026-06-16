@@ -97,6 +97,21 @@ pub fn mesh_source_for(holder_npub: &str) -> anyhow::Result<IpPeerSource> {
     .with_timeout(Duration::from_secs(20)))
 }
 
+/// Discover the nsite manifests a relay holds — kind 15128 (root) + 35128 (named)
+/// — for "nsites around me" (querying a Circle peer's mesh relay). The whole call
+/// is hard-bounded by `timeout`; returns signature-verified manifest events. A
+/// dead/slow peer relay yields an empty set rather than stalling discovery.
+pub async fn discover_manifests(relay_url: &str, timeout: Duration, limit: usize) -> Vec<Event> {
+    let filter = serde_json::json!({
+        "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
+        "limit": limit,
+    });
+    match tokio::time::timeout(timeout, query_relay(relay_url, filter)).await {
+        Ok(Ok(events)) => events.into_iter().filter(|e| e.verify().is_ok()).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Query one relay for a single filter, collecting events until EOSE. The whole
 /// call (connect + REQ + read) is hard-bounded by a `timeout` at the call site,
 /// so a dead relay can't hang the sync on a slow TCP/TLS connect.
@@ -320,6 +335,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(miss, None);
+    }
+
+    #[tokio::test]
+    async fn discover_manifests_reads_kind_filtered_sites() {
+        // A signed manifest advertised on a peer's (mock) mesh relay.
+        let site = nsite_deck::testing::build_test_site(
+            &[("/index.html", b"<h1>around me</h1>")],
+            None,
+            Some("Nearby Site"),
+        );
+        let relay_url = mock_relay(serde_json::to_string(&site.manifest).unwrap()).await;
+
+        let events = discover_manifests(&relay_url, Duration::from_secs(5), 50).await;
+        assert_eq!(events.len(), 1, "discovery returns the verified manifest");
+        let m = nsite_deck::Manifest::from_event(events.into_iter().next().unwrap()).unwrap();
+        assert_eq!(m.title.as_deref(), Some("Nearby Site"));
+        assert_eq!(m.author, site.author);
     }
 
     /// Live network check against a real public nsite (the link the user gave).

@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use futures_util::future::join_all;
 use nostr::nips::nip19::{FromBech32, ToBech32};
 use nostr::PublicKey;
 use nsite_deck::gateway::{self, Readiness};
@@ -65,6 +66,22 @@ pub struct CircleContact {
     pub added_at: u64,
 }
 
+/// An nsite **discovered** on a Circle peer's mesh relay ("nsites around me").
+/// `holder_*` is the paired peer whose relay we found it on — opening it pulls
+/// from them. Ephemeral (rebuilt each discovery run; not persisted).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredNsite {
+    /// The `<host>` label to open.
+    pub host: String,
+    pub author_npub: String,
+    pub d_tag: Option<String>,
+    pub title: String,
+    /// The Circle peer who has it (the relay we found it on) — the pull holder.
+    pub holder_npub: String,
+    pub holder_name: String,
+}
+
 /// Cache/store counts for the UI.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,6 +119,9 @@ pub struct Content {
     /// `open_site` pulls from connected Circle members (bounded to who's reachable,
     /// so it never blocks on an offline contact's connect timeout).
     connected_peers: Mutex<Vec<String>>,
+    /// nsites discovered on Circle peers' relays ("nsites around me"). Rebuilt by
+    /// each `SearchNsites` run; ephemeral (not persisted).
+    discovered: Mutex<Vec<DiscoveredNsite>>,
     /// host_label -> current sync status (drives the FFI `siteStatus`).
     sites: Mutex<HashMap<String, SiteStatusView>>,
 }
@@ -124,6 +144,7 @@ impl Content {
             circle: Mutex::new(circle),
             circle_path,
             connected_peers: Mutex::new(Vec::new()),
+            discovered: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
         })
     }
@@ -473,6 +494,72 @@ impl Content {
             .collect()
     }
 
+    /// Connected Circle members as `(npub, name)` — discovery targets.
+    fn connected_circle_contacts(&self) -> Vec<(String, String)> {
+        let connected = self.connected_peers.lock().unwrap();
+        self.circle
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| connected.iter().any(|n| n == &c.npub))
+            .map(|c| (c.npub.clone(), c.name.clone()))
+            .collect()
+    }
+
+    // --- discovery ("nsites around me") ---
+
+    /// Discover nsites on connected Circle peers' relays: query each reachable
+    /// member's mesh relay (`ws://[fd00::peer]:4869`) for manifest events in
+    /// parallel, then rebuild the discovered list. Spawn-not-block; the UI polls
+    /// `discovered`. Opening a result pulls from that peer (its npub is the holder).
+    pub async fn discover_from_circle(self: Arc<Self>) {
+        let members = self.connected_circle_contacts();
+        let queries = members.into_iter().map(|(npub, name)| async move {
+            let Ok(peer) = fips::PeerIdentity::from_npub(&npub) else {
+                return Vec::new();
+            };
+            let relay_url = format!("ws://[{}]:4869", peer.address().to_ipv6());
+            let events = crate::ip_source::discover_manifests(
+                &relay_url,
+                std::time::Duration::from_secs(15),
+                200,
+            )
+            .await;
+            events
+                .into_iter()
+                .filter_map(|ev| nsite_deck::Manifest::from_event(ev).ok())
+                .map(|m| {
+                    let addr = SiteAddr { author: m.author, d_tag: m.d_tag.clone() };
+                    DiscoveredNsite {
+                        host: addr.host_label(),
+                        author_npub: m.author.to_bech32().unwrap_or_default(),
+                        d_tag: m.d_tag,
+                        title: m.title.unwrap_or_default(),
+                        holder_npub: npub.clone(),
+                        holder_name: name.clone(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let results = join_all(queries).await;
+        // Dedup by (host, holder): the same site may appear once per holder.
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        let mut found = Vec::new();
+        for batch in results {
+            for d in batch {
+                if seen.insert((d.host.clone(), d.holder_npub.clone())) {
+                    found.push(d);
+                }
+            }
+        }
+        *self.discovered.lock().unwrap() = found;
+    }
+
+    pub fn discovered_snapshot(&self) -> Vec<DiscoveredNsite> {
+        self.discovered.lock().unwrap().clone()
+    }
+
     // --- wipe ---
 
     /// Clear the local relay + Blossom + Library + status (the `WipeStores` dev
@@ -482,6 +569,7 @@ impl Content {
         self.blobs.wipe().await?;
         self.library.lock().unwrap().clear();
         self.sites.lock().unwrap().clear();
+        self.discovered.lock().unwrap().clear();
         let _ = std::fs::remove_file(&self.library_path);
         Ok(())
     }
