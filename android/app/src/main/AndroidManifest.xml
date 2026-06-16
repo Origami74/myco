@@ -15,6 +15,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- App-owned TUN: the VpnService routes only fd00::/8 (the mesh ULA). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- P2 content entry: fetch a pasted nsite link from public relays/Blossom
          over normal IP (the tier-3 online fallback). Browsing cached nsites needs
          no network. -->
@@ -75,5 +77,20 @@
             android:name=".ble.BleService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- The app-owned TUN. BIND_VPN_SERVICE + the android.net.VpnService
+             intent-filter mark it as a VpnService; specialUse FGS keeps it alive. -->
+        <service
+            android:name=".vpn.MycoVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Mesh network adapter routing fd00::/8 over FIPS" />
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

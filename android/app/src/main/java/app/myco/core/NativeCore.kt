@@ -49,4 +49,12 @@ internal object NativeCore {
 
     /** Rust → Kotlin pull (blocks up to timeoutMs): >0 len, 0 timeout, -1 closed. */
     external fun bleChannelNextSend(bridgeHandle: Long, chId: Long, out: ByteArray, timeoutMs: Int): Int
+
+    // --- TUN packet bridge (the app-owned TUN; the VpnService pumps these) ---
+    /** Kotlin → Rust: route an IPv6 packet read from the TUN fd into the mesh. */
+    external fun tunSendPacket(packet: ByteArray, len: Int): Boolean
+
+    /** Rust → Kotlin: pull the next IPv6 packet for the TUN fd, blocking up to
+     *  timeoutMs. Returns bytes written into `out`, or 0 on timeout. */
+    external fun tunNextPacket(out: ByteArray, timeoutMs: Int): Int
 }

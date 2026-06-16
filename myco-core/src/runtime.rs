@@ -286,7 +286,9 @@ impl AppRuntime {
                 }
             }
         }
-        let node = self.node.take().expect("node present after rebuild");
+        // `mut` is used only on Android (enable_app_owned_tun); allow on the host.
+        #[allow(unused_mut)]
+        let mut node = self.node.take().expect("node present after rebuild");
         let rt = match self.rt.as_ref() {
             Some(rt) => rt,
             None => {
@@ -294,6 +296,15 @@ impl AppRuntime {
                 return;
             }
         };
+        // Enable the app-owned TUN before the node moves into the loop task: the
+        // Android VpnService owns the fd, so FIPS exchanges IPv6 packet bytes over
+        // channels (and skips system-TUN creation). The JNI packet bridge pumps
+        // these channels. Android-only (the host has no VpnService).
+        #[cfg(target_os = "android")]
+        {
+            let (tun_outbound_tx, tun_inbound_rx) = node.enable_app_owned_tun();
+            crate::tun_bridge::install(tun_outbound_tx, tun_inbound_rx);
+        }
         // Clone the lock-free read handle out before the node moves into the loop
         // task — peer state is then readable while run_rx_loop owns the node.
         let handle = node.control_read_handle();

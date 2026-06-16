@@ -6,11 +6,13 @@ import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
 import android.graphics.drawable.Icon
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions
 import androidx.core.content.ContextCompat
 import app.myco.ble.BleService
@@ -19,6 +21,7 @@ import app.myco.core.MycoCore
 import app.myco.core.NativeActions
 import app.myco.share.NsiteShare
 import app.myco.ui.DeveloperScreen
+import app.myco.vpn.MycoVpnService
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 
@@ -43,6 +46,11 @@ class MainActivity : ComponentActivity() {
         result.contents?.let { handleScannedText(it) }
     }
 
+    private val vpnConsentLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) startMeshNow()
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         core = MycoCore.client(this)
@@ -52,6 +60,12 @@ class MainActivity : ComponentActivity() {
             if (bleCorePermsGranted()) BleService.start(this) else requestBlePermissionsIfNeeded()
         }
 
+        // The mesh adapter (app-owned TUN) is opt-in; if it was on and consent is
+        // still granted, bring it back up.
+        if (prefs.getBoolean(PREF_MESH, false) && VpnService.prepare(this) == null) {
+            startMeshNow()
+        }
+
         setContent {
             DeveloperScreen(
                 client = core,
@@ -59,10 +73,34 @@ class MainActivity : ComponentActivity() {
                 onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
                 onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
                 onScan = { startScan() },
+                initialMeshEnabled = prefs.getBoolean(PREF_MESH, false),
+                onMeshToggle = { enabled -> setMeshEnabled(enabled) },
             )
         }
 
         handleDeepLink(intent)
+    }
+
+    // --- mesh adapter (app-owned TUN) ---
+
+    private fun setMeshEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(PREF_MESH, enabled).apply()
+        if (enabled) {
+            // Android requires user consent before any app can run a VPN.
+            val consent = VpnService.prepare(this)
+            if (consent != null) vpnConsentLauncher.launch(consent) else startMeshNow()
+        } else {
+            MycoVpnService.stop(this)
+        }
+    }
+
+    private fun startMeshNow() {
+        val ula = core.state().fipsIpv6
+        if (ula.isNotEmpty()) {
+            MycoVpnService.start(this, ula)
+        } else {
+            Toast.makeText(this, "Mesh address not ready yet", Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -202,5 +240,6 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val PREF_BLE = "ble_enabled"
+        const val PREF_MESH = "mesh_enabled"
     }
 }

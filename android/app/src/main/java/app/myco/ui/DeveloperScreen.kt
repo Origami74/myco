@@ -56,10 +56,13 @@ fun DeveloperScreen(
     onLaunchNsite: (host: String, title: String) -> Unit = { _, _ -> },
     onPinToHome: (host: String, title: String) -> Unit = { _, _ -> },
     onScan: () -> Unit = {},
+    initialMeshEnabled: Boolean = false,
+    onMeshToggle: (Boolean) -> Unit = {},
 ) {
     var state by remember { mutableStateOf(client.state()) }
     var linkInput by remember { mutableStateOf("") }
     var shareUri by remember { mutableStateOf<String?>(null) }
+    var meshEnabled by remember { mutableStateOf(initialMeshEnabled) }
     LaunchedEffect(Unit) {
         while (true) {
             delay(1000)
@@ -103,6 +106,28 @@ fun DeveloperScreen(
             Field("Adapter", state.bleAdapterName)
             Field("Scanning", state.bleScanning.toString())
             Field("Role", state.bleRole)
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Allow system-wide access to the mesh", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Routes fd00::/8 so this device can reach (and be reached by) peers. Uses the VPN slot.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(
+                    checked = meshEnabled,
+                    onCheckedChange = {
+                        meshEnabled = it
+                        onMeshToggle(it)
+                    },
+                )
+            }
+            Field("Mesh ULA", state.fipsIpv6)
 
             Text(
                 "Peers (${state.blePeers.size})",

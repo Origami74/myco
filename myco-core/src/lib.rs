@@ -15,12 +15,19 @@ mod identity_store;
 mod ip_source;
 mod runtime;
 mod state;
+// The bridge is pumped only by the Android VpnService (via tun_bridge_jni) and
+// installed only on Android, so its fns read as dead on the host build.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod tun_bridge;
 
 #[cfg(target_os = "android")]
 mod jni_abi;
 
 #[cfg(target_os = "android")]
 mod ble_bridge_jni;
+
+#[cfg(target_os = "android")]
+mod tun_bridge_jni;
 
 pub use action::NativeAppAction;
 pub use runtime::AppRuntime;

@@ -39,15 +39,22 @@ pub struct IdentityView {
     pub own_pubkey_hex: String,
     pub node_addr_hex: String,
     pub fips_addr: String, // <npub>.fips
+    /// This node's mesh ULA (`fd00:: = fd + node_addr[0..15]`) — the address the
+    /// Android VpnService assigns to the app-owned TUN.
+    pub fips_ipv6: String,
 }
 
 impl IdentityView {
     pub fn from_identity(id: &fips::Identity) -> Self {
         let npub = id.npub();
+        let fips_ipv6 = fips::FipsAddress::from_node_addr(id.node_addr())
+            .to_ipv6()
+            .to_string();
         Self {
             own_pubkey_hex: hex::encode(id.pubkey().serialize()),
             node_addr_hex: id.node_addr().to_string(),
             fips_addr: format!("{npub}.fips"),
+            fips_ipv6,
             own_npub: npub,
         }
     }
