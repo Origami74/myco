@@ -16,14 +16,48 @@ devices forming a FIPS BLE link offline — and the v1 product headline is the
 
 ---
 
+## Status — 2026-06-16
+
+P0–P3 are built and the **device-to-device offline pull works**: device B scans
+A's share QR, pulls A's nsite straight off A's phone over the FIPS BLE mesh (no
+internet), and browses it as a fullscreen app. Two product features shipped
+**beyond** the original P3 scope:
+
+- **Circle** — a persisted contact list of paired peers (added by scanning their
+  share QR). A Circle member's device doubles as a relay we pull from; `open_site`
+  tries the explicit holder, then any connected Circle member, then the IP fallback.
+- **Discovery** ("nsites around me") — query connected Circle peers' mesh relays
+  for the nsite manifests they host (kind 15128/35128), no QR needed; opening a
+  result pulls from that holder.
+
+The **app-owned TUN** (`VpnService`, opt-in, **scoped to Myco's uid** via
+`addAllowedApplication` so other apps keep their normal internet) landed here
+rather than P2; content entry became **paste-a-link over IP** (then serve
+offline), and the in-app WebView serves TUN-independently via
+`shouldInterceptRequest`.
+
+**Deferred** (not yet built): the mutual pairing-secret echo — pairing is
+currently **one-directional** (the scanner adds the sharer); the nsite-deck
+**propagator** (both-way manifest gossip), **NIP-77 negentropy** reconcile, and
+**eager pinned-refresh** (P3's ambitious sync sub-goals — pushed toward P5); the
+formal **airplane-mode P4** teeth-check; **system-wide browsing** for external
+browsers (the NAT46 "Later" item); **faster reconnect** after an app restart; an
+always-on/lockdown warning.
+
+**Next: a product UX pass (P3.5)** — turn the single developer screen into a real
+consumer UI before widening capability further.
+
+---
+
 ## Phase overview
 
 | Phase | Goal | Exit criterion |
 | --- | --- | --- |
-| **P0** | Minimal scaffold + FIPS up | arm64 / minSdk 29 APK builds (plus the macOS core build); app persists an nsec and shows its npub; no relay/Blossom/nsite/TUN yet. |
-| **P1** | BLE peering over FIPS + developer UI (the de-risk milestone) | Two devices (Android↔Android and/or Android↔Mac), offline, form a FIPS BLE link via universal per-peer PSM discovery; each shows the other connected in the developer UI. |
-| **P2** | Relay + Blossom + gateway (serve-direct) | A side-loaded nsite launches as a fullscreen `NsiteActivity` (its own task), served direct from the local relay + Blossom over the localhost gateway. |
-| **P3** | Handshake-mandatory pairing + sync + nsite-deck propagator | Two devices complete the mandatory scan-and-confirm handshake; B opens A's site as a fullscreen app over `.fips`; the propagator forwards manifests both ways. |
+| **P0** ✅ | Minimal scaffold + FIPS up | arm64 / minSdk 29 APK builds (plus the macOS core build); app persists an nsec and shows its npub; no relay/Blossom/nsite/TUN yet. |
+| **P1** ✅ | BLE peering over FIPS + developer UI (the de-risk milestone) | Two devices (Android↔Android and/or Android↔Mac), offline, form a FIPS BLE link via universal per-peer PSM discovery; each shows the other connected in the developer UI. |
+| **P2** ✅ | Relay + Blossom + gateway (serve-direct) | A nsite (entered by paste-a-link over IP) launches as a fullscreen `NsiteActivity` (its own task), served direct from the local relay + Blossom over the in-app gateway. |
+| **P3** ✅\* | Pairing + sync over the mesh — **\*plus Circle + Discovery; propagator/negentropy/mutual-echo deferred** | B scans A's share QR and pulls A's nsite over the FIPS BLE mesh, opening it as a fullscreen app; A's events/blobs are mirrored on B. |
+| **P3.5** 🔜 | **Product UX (UI pass)** | A non-developer can pair, find, open, and manage nsites in a real consumer UI — no raw npubs/cache counters. |
 | **P4** | Full offline browse demo (the v1 headline) | Two Androids in airplane mode + BLE: B browses A's nsite offline. |
 | **P5** | Propagation at scale (set-recon + transitive + eviction) | A cached site survives the origin going offline; reach goes transitive. |
 | **P6** | Linux interop | An Android and a Linux peer form a FIPS BLE link via per-peer PSM discovery and sync an nsite. |
@@ -138,6 +172,15 @@ patch) ·
 
 ## P3 — Handshake-mandatory pairing + sync + nsite-deck propagator
 
+**Status (2026-06-16).** The exit-criterion path is **done** — B scans A's share
+QR and pulls A's nsite over the FIPS BLE mesh, opening it fullscreen, with A's
+events/blobs mirrored on B. What shipped is a **leaner** slice than the goal below
+plus two extras: the in-app **Circle** (paired peers as pull sources) and
+**Discovery** ("nsites around me"). **Deferred:** the mutual `pairSecret` echo
+(pairing is one-directional for now), the nsite-deck **propagator** (both-way
+gossip), **NIP-77 negentropy** reconcile, and **eager pinned-refresh** — pushed
+toward P5. The ambitious original scope is retained below as the target.
+
 **Goal.** Reuse nostr-vpn's QR machinery (CameraX + ML Kit, deep-link intent),
 re-pointed at the `myco://pair/<base64>` payload, which now carries JSON
 `{ npub, name, pairSecret }`. **Pairing is handshake-mandatory and always
@@ -183,6 +226,25 @@ pinned-refresh) · [ports.md](./reference/ports.md) (`.fips` vs `.nsite`, FSP
 port-mux) · [security.md](./design/security.md) (scan-and-confirm pairing,
 self-authenticating data) ·
 [diagrams/02-pairing-transitive-discovery.svg](./design/diagrams/02-pairing-transitive-discovery.svg).
+
+## P3.5 — Product UX (UI pass)
+
+**Goal.** Everything through P3 lives on a single scrolling **developer screen**
+(identity, BLE diagnostics, Circle, Discover, nsites, cache). Turn it into a real
+consumer UI **without changing the underlying FFI/state**: a home/Library of
+installed nsites, the Circle and Discover surfaces as first-class screens, the
+share / scan / pair flows as guided actions, and a cleaner nsite viewer. The
+developer screen stays reachable as a diagnostics view. Scope is **UI/UX only** —
+no new transport or sync behavior. Exact screens, navigation, and visual design
+to be scoped with the design pass.
+
+**Exit criterion.** A non-developer can pair with a peer, find an nsite (via a
+scanned QR or Discovery), open it, and manage their Library + Circle — without
+ever reading a raw npub or cache counter. (Specifics filled in as the UX is
+scoped.)
+
+**Design docs.** [app-shell.md](./design/app-shell.md) (screens + navigation) ·
+[ffi-surface.md](./reference/ffi-surface.md) (the state the UI renders — unchanged).
 
 ## P4 — Full offline browse demo (the v1 headline)
 
