@@ -82,7 +82,10 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    // Bottom-nav shell (Apps · Circle · Discover · Settings · Dev). minSdk-29 safe.
+    implementation("androidx.navigation:navigation-compose:2.8.4")
     // QR generation for share-an-nsite (encodes the nsite id + pairing info)…
     implementation("com.google.zxing:core:3.5.3")
     // …and an in-app camera scanner to read one back.

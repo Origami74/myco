@@ -20,7 +20,8 @@ import app.myco.core.AppCoreClient
 import app.myco.core.MycoCore
 import app.myco.core.NativeActions
 import app.myco.share.NsiteShare
-import app.myco.ui.DeveloperScreen
+import app.myco.ui.MycoApp
+import app.myco.ui.theme.MycoTheme
 import app.myco.vpn.MycoVpnService
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
@@ -67,15 +68,17 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            DeveloperScreen(
-                client = core,
-                onBleToggle = { enabled -> setBleEnabled(enabled) },
-                onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
-                onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
-                onScan = { startScan() },
-                initialMeshEnabled = prefs.getBoolean(PREF_MESH, false),
-                onMeshToggle = { enabled -> setMeshEnabled(enabled) },
-            )
+            MycoTheme {
+                MycoApp(
+                    client = core,
+                    onBleToggle = { enabled -> setBleEnabled(enabled) },
+                    onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
+                    onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
+                    onScan = { startScan() },
+                    initialMeshEnabled = prefs.getBoolean(PREF_MESH, false),
+                    onMeshToggle = { enabled -> setMeshEnabled(enabled) },
+                )
+            }
         }
 
         handleDeepLink(intent)
