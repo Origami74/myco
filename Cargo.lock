@@ -2142,12 +2142,14 @@ dependencies = [
  "myco-relay",
  "nostr",
  "nsite-deck",
+ "paranoid-android",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2166,6 +2168,15 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tracing",
+]
+
+[[package]]
+name = "ndk-sys"
+version = "0.5.0+25.2.9519653"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c196769dd60fd4f363e11d948139556a344e79d451aeb2fa2fd040738ef7691"
+dependencies = [
+ "jni-sys 0.3.1",
 ]
 
 [[package]]
@@ -2479,6 +2490,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "paranoid-android"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "101795d63d371b43e38d6e7254677657be82f17022f7f7893c268f33ac0caadc"
+dependencies = [
+ "lazy_static",
+ "ndk-sys",
+ "sharded-slab",
+ "smallvec",
+ "tracing-core",
+ "tracing-subscriber",
 ]
 
 [[package]]

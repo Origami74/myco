@@ -35,3 +35,7 @@ tokio-tungstenite = { workspace = true }
 # drive `AppRuntime` directly (see tests).
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
+# Bridge `tracing` (ours + fips) to Android logcat so the sync/FSP/BLE internals
+# are visible with `adb logcat -s myco`.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+paranoid-android = "0.2"

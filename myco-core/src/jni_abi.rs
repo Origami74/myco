@@ -67,10 +67,33 @@ pub extern "system" fn Java_app_myco_core_NativeCore_appNew(
     data_dir: JString,
     app_version: JString,
 ) -> jlong {
+    init_android_logging();
     let data_dir = get_string(&mut env, &data_dir);
     let app_version = get_string(&mut env, &app_version);
     let rt = AppRuntime::new(&data_dir, &app_version);
     Box::into_raw(Box::new(AppHandle { rt: Mutex::new(rt) })) as jlong
+}
+
+/// Route `tracing` (myco-core + fips) to Android logcat under the tag `myco`, so
+/// the sync engine / FSP / BLE internals are visible (`adb logcat -s myco`).
+/// Idempotent; level DEBUG.
+fn init_android_logging() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let writer = paranoid_android::AndroidLogMakeWriter::new("myco".to_owned());
+        let _ = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(writer),
+            )
+            .with(tracing_subscriber::filter::LevelFilter::DEBUG)
+            .try_init();
+        tracing::info!("myco-core logcat bridge active (tag=myco, level=DEBUG)");
+    });
 }
 
 #[no_mangle]
