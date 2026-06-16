@@ -17,6 +17,9 @@ mod state;
 #[cfg(target_os = "android")]
 mod jni_abi;
 
+#[cfg(target_os = "android")]
+mod ble_bridge_jni;
+
 pub use action::NativeAppAction;
 pub use runtime::AppRuntime;
 pub use state::{AppState, IdentityView, NodeStatus};

@@ -51,11 +51,13 @@ fn locked_state<F: FnOnce(&mut AppRuntime) -> String>(handle: jlong, f: F) -> St
 
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_initializeAndroidContext(
-    _env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     _context: JObject,
 ) {
-    // P0: no-op. The JavaVM / BLE radio bridge is wired in P1.
+    // Capture the JavaVM so the BLE byte-bridge can attach tokio worker threads
+    // before issuing control upcalls into the Kotlin radio.
+    crate::ble_bridge_jni::capture_java_vm(&env);
 }
 
 #[no_mangle]
