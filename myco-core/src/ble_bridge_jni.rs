@@ -155,9 +155,9 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleBridgeNew(
         Err(_) => return 0,
     };
     let bridge = AndroidBleBridge::new(Arc::new(KotlinRadio { radio: global }));
-    // One radio per process; if a bridge is already set (service restart) keep
-    // the first — the node holds it. P1 starts once.
-    let _ = set_android_ble_bridge(Arc::clone(&bridge));
+    // Inject (replacing any prior bridge) so the node — fresh or rebuilt after a
+    // BLE off/on cycle — picks up this radio.
+    set_android_ble_bridge(Arc::clone(&bridge));
     Box::into_raw(Box::new(bridge)) as jlong
 }
 

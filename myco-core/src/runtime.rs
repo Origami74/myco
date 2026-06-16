@@ -18,6 +18,9 @@ use crate::state::{AppState, BlePeer, BleStatus, IdentityView, NodeStatus};
 /// — that is the TUN/sync path, which arrives in P2.
 pub struct AppRuntime {
     app_version: String,
+    /// App-private data dir, kept so the node can be rebuilt on a BLE off→on
+    /// cycle (run_rx_loop consumes the node, so restart needs a fresh one).
+    data_dir: String,
     rev: u64,
     error: String,
     identity: IdentityView,
@@ -48,46 +51,18 @@ impl AppRuntime {
     }
 
     fn try_new(data_dir: &str, app_version: &str) -> anyhow::Result<Self> {
-        let dir = Path::new(data_dir);
-        std::fs::create_dir_all(dir)?;
+        std::fs::create_dir_all(Path::new(data_dir))?;
 
         // Multi-thread runtime so the node's spawned tasks self-drive between
         // FFI polls (see the struct doc).
         let rt = Runtime::new().map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
 
-        // Identity: generate-or-load and persist the nsec.
-        let nsec = identity_store::load_or_generate(dir)?;
-
-        // Embed FIPS: construct the node from the persisted key. P1 keeps it
-        // (unlike P0, which dropped it) so StartNode can run its transports.
-        // No TUN yet; BLE transport instances are added when the Android backend
-        // lands (P1 M4) — on the host there is no BLE backend, so the node simply
-        // starts with no transports.
-        let mut config = fips::Config::new();
-        config.node.identity.nsec = Some(nsec);
-        config.node.identity.persistent = true;
-        config.tun.enabled = false;
-        // No control socket: we read peer state via the in-process control read
-        // handle (peer_views), not the Unix socket. The tick still publishes the
-        // snapshot regardless of this flag.
-        config.node.control.enabled = false;
-        // On Android, configure a BLE transport instance so node.start() brings up
-        // the AndroidIo backend (the Kotlin radio drives it via the injected
-        // bridge). Host builds have no BLE backend, so this is Android-only.
-        #[cfg(target_os = "android")]
-        {
-            config.transports.ble = fips::config::TransportInstances::Single(fips::config::BleConfig {
-                auto_connect: Some(true),
-                ..Default::default()
-            });
-        }
-        let node = fips::Node::new(config)
-            .map_err(|e| anyhow::anyhow!("fips Node::new failed: {e}"))?;
-
+        let node = Self::build_node(data_dir)?;
         let identity = IdentityView::from_identity(node.identity());
 
         Ok(Self {
             app_version: app_version.to_string(),
+            data_dir: data_dir.to_string(),
             rev: 0,
             error: String::new(),
             identity,
@@ -101,9 +76,36 @@ impl AppRuntime {
         })
     }
 
+    /// Build a fresh embedded fips node from the persisted identity. Called at
+    /// construction and again on a BLE off→on cycle (run_rx_loop consumes the
+    /// node, so re-enabling needs a new one).
+    fn build_node(data_dir: &str) -> anyhow::Result<fips::Node> {
+        let nsec = identity_store::load_or_generate(Path::new(data_dir))?;
+        let mut config = fips::Config::new();
+        config.node.identity.nsec = Some(nsec);
+        config.node.identity.persistent = true;
+        config.tun.enabled = false;
+        // No control socket: peer state is read via the in-process control read
+        // handle (peer_views), not the Unix socket. The tick publishes the
+        // snapshot regardless of this flag.
+        config.node.control.enabled = false;
+        // On Android, configure a BLE transport instance so node.start() brings up
+        // the AndroidIo backend (the Kotlin radio drives it via the injected
+        // bridge). Host builds have no BLE backend, so this is Android-only.
+        #[cfg(target_os = "android")]
+        {
+            config.transports.ble = fips::config::TransportInstances::Single(fips::config::BleConfig {
+                auto_connect: Some(true),
+                ..Default::default()
+            });
+        }
+        fips::Node::new(config).map_err(|e| anyhow::anyhow!("fips Node::new failed: {e}"))
+    }
+
     fn from_error(app_version: &str, msg: &str) -> Self {
         Self {
             app_version: app_version.to_string(),
+            data_dir: String::new(),
             rev: 0,
             error: msg.to_string(),
             identity: IdentityView::default(),
@@ -149,15 +151,17 @@ impl AppRuntime {
         if self.node_running {
             return;
         }
-        let node = match self.node.take() {
-            Some(n) => n,
-            None => {
-                // The node is consumed by the loop task on first start; a clean
-                // restart would need to rebuild it (P1 starts once).
-                self.error = "node already started".to_string();
-                return;
+        // Rebuild the node if a prior stop consumed it (BLE toggled off then on).
+        if self.node.is_none() {
+            match Self::build_node(&self.data_dir) {
+                Ok(n) => self.node = Some(n),
+                Err(e) => {
+                    self.error = format!("rebuild node: {e}");
+                    return;
+                }
             }
-        };
+        }
+        let node = self.node.take().expect("node present after rebuild");
         let rt = match self.rt.as_ref() {
             Some(rt) => rt,
             None => {
