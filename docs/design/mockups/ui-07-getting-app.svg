@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="770" viewBox="0 0 360 770" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <rect width="360" height="770" fill="#ffffff"/>
+
+  <!-- ===== phone shell ===== -->
+  <rect x="20" y="18" width="320" height="712" rx="44" fill="#1e293b"/>
+  <rect x="31" y="29" width="298" height="690" rx="34" fill="#ffffff"/>
+  <rect x="148" y="33" width="64" height="15" rx="7.5" fill="#1e293b"/>
+
+  <!-- status bar -->
+  <text x="52" y="53" font-size="11.5" font-weight="700" fill="#0f172a">9:41</text>
+  <g fill="#0f172a">
+    <rect x="270" y="49" width="3" height="6" rx="1"/>
+    <rect x="275" y="46" width="3" height="9" rx="1"/>
+    <rect x="280" y="43" width="3" height="12" rx="1"/>
+  </g>
+  <rect x="294" y="46" width="17" height="9" rx="2.5" fill="none" stroke="#0f172a" stroke-width="1.2"/>
+  <rect x="296" y="48" width="11" height="5" rx="1" fill="#0f172a"/>
+  <rect x="311.5" y="48.5" width="2" height="4" rx="1" fill="#0f172a"/>
+
+  <!-- ===== chrome-less: the app's own fullscreen, shown while it downloads ===== -->
+
+  <!-- progress ring around the app icon (iOS-install style) -->
+  <circle cx="180" cy="300" r="58" fill="none" stroke="#e2e8f0" stroke-width="6"/>
+  <circle cx="180" cy="300" r="58" fill="none" stroke="#0d9488" stroke-width="6"
+          stroke-linecap="round" stroke-dasharray="234 365" transform="rotate(-90 180 300)"/>
+
+  <!-- app icon (the real favicon; dimmed until ready) -->
+  <g opacity="0.6">
+    <rect x="148" y="268" width="64" height="64" rx="18" fill="#16a34a"/>
+    <text x="180" y="312" font-size="30" text-anchor="middle">💬</text>
+  </g>
+
+  <!-- app title -->
+  <text x="180" y="408" font-size="21" font-weight="800" fill="#0f172a" text-anchor="middle">Party Chat</text>
+
+  <!-- file progress -->
+  <text x="180" y="436" font-size="13.5" font-weight="600" fill="#0d9488" text-anchor="middle">Downloading · 9 of 14 files</text>
+
+  <!-- source pill -->
+  <rect x="120" y="456" width="120" height="28" rx="14" fill="#f1f5f9"/>
+  <circle cx="139" cy="470" r="3.4" fill="#0d9488"/>
+  <text x="150" y="474" font-size="11.5" font-weight="600" fill="#475569">from Ana · mesh</text>
+
+  <!-- gentle hint -->
+  <text x="180" y="560" font-size="12" fill="#94a3b8" text-anchor="middle">Opens in place the moment it's ready.</text>
+
+  <text x="180" y="744" font-size="12.5" font-style="italic" fill="#64748b" text-anchor="middle">Tap a still-downloading app → its own fullscreen status,</text>
+  <text x="180" y="761" font-size="12.5" font-style="italic" fill="#64748b" text-anchor="middle">no Myco chrome. The icon arrives first, then the rest loads.</text>
+</svg>

@@ -657,28 +657,72 @@ impl Content {
 
 /// A status-aware loading page for a not-yet-ready site (meta-refresh re-checks
 /// the gateway every second, by which time the re-triggered sync has progressed).
+/// The chrome-less "getting this app" status screen (ui-07-getting-app.svg): the
+/// app's favicon inside a determinate progress ring, its title, and an X/Y file
+/// count. Self-refreshes each second; the favicon (fetched first) appears early.
 fn loading_html(status: Option<&SiteStatusView>) -> String {
-    let line = match status {
-        Some(s) if s.state == "syncing" => {
-            let t = if s.title.is_empty() { "this app".to_string() } else { s.title.clone() };
-            format!("Getting {t}… {}/{} files", s.files_pulled, s.files_total)
-        }
-        Some(s) if s.state == "unreachable" => "Can't reach anyone who has this app yet. \
-Check your connection (or bring the device you got it from nearby) — Myco keeps trying."
-            .to_string(),
-        Some(s) if s.state == "incomplete" => {
-            "This app didn't download completely. Retrying…".to_string()
-        }
-        _ => "Loading…".to_string(),
+    const CIRC: f64 = 427.3; // 2π·68, the ring circumference
+    // Poll the favicon every 300ms (cycling the common paths) so the icon fades in
+    // the instant its blob lands — the sync fetches it first, ahead of the 1s reload.
+    const ICON_JS: &str = "<script>(function(){var i=document.getElementById('ic'),\
+s=['/favicon.ico','/favicon.png','/apple-touch-icon.png'],n=0,d=false;\
+i.onload=function(){if(i.naturalWidth>0){d=true;i.style.opacity=1}};\
+i.onerror=function(){if(d)return;n=(n+1)%s.length;setTimeout(function(){i.src=s[n]},300)};})();</script>";
+    let (title, state, present, total) = match status {
+        Some(s) => (
+            if s.title.is_empty() { "This app".to_string() } else { s.title.clone() },
+            s.state.as_str(),
+            s.files_pulled,
+            s.files_total,
+        ),
+        None => ("This app".to_string(), "syncing", 0, 0),
+    };
+    // Ring fill + accent color per state.
+    let frac: f64 = match state {
+        "unreachable" => 0.0,
+        _ if total > 0 => (present as f64 / total as f64).clamp(0.0, 1.0),
+        _ => 0.06, // a small "starting" sliver when the total isn't known yet
+    };
+    let dash = frac * CIRC;
+    let (line, color) = match state {
+        "unreachable" => (
+            "Can't reach anyone with this app yet — Myco keeps trying.".to_string(),
+            "#64748b",
+        ),
+        "incomplete" => ("Didn't finish downloading — retrying…".to_string(), "#d97706"),
+        "syncing" if total > 0 => (format!("Downloading · {present} of {total} files"), "#059669"),
+        _ => ("Getting this app…".to_string(), "#059669"),
     };
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
 <meta http-equiv=\"refresh\" content=\"1\">\
-<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-<title>Loading…</title></head>\
-<body style=\"font-family:system-ui,sans-serif;text-align:center;padding-top:20vh;color:#555;background:#faf9fb\">\
-<p style=\"font-size:1.1rem;max-width:28rem;margin:0 auto;padding:0 1rem\">{}</p></body></html>",
-        html_escape_min(&line)
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<title>{title_esc}</title>\
+<style>html,body{{height:100%;margin:0}}\
+body{{display:flex;flex-direction:column;align-items:center;justify-content:center;\
+font-family:-apple-system,system-ui,'Segoe UI',Roboto,sans-serif;background:#fff;color:#0f172a}}\
+.ring{{position:relative;width:148px;height:148px}}\
+.ring svg{{transform:rotate(-90deg)}}\
+.icon{{position:absolute;inset:0;margin:auto;width:76px;height:76px;border-radius:20px;object-fit:cover;background:#f1f5f9}}\
+.title{{margin-top:26px;font-size:1.5rem;font-weight:800}}\
+.status{{margin-top:8px;font-size:.95rem;font-weight:600;color:{color}}}\
+.hint{{margin-top:40px;font-size:.85rem;color:#94a3b8}}</style></head>\
+<body><div class=\"ring\">\
+<svg width=\"148\" height=\"148\" viewBox=\"0 0 148 148\">\
+<circle cx=\"74\" cy=\"74\" r=\"68\" fill=\"none\" stroke=\"#e2e8f0\" stroke-width=\"7\"/>\
+<circle cx=\"74\" cy=\"74\" r=\"68\" fill=\"none\" stroke=\"{color}\" stroke-width=\"7\" stroke-linecap=\"round\" stroke-dasharray=\"{dash:.1} {circ:.1}\"/>\
+</svg>\
+<img class=\"icon\" id=\"ic\" src=\"/favicon.ico\" style=\"opacity:0;transition:opacity .3s\">\
+</div>\
+<div class=\"title\">{title_esc}</div>\
+<div class=\"status\">{line_esc}</div>\
+<div class=\"hint\">Opens in place the moment it's ready.</div>{script}</body></html>",
+        title_esc = html_escape_min(&title),
+        line_esc = html_escape_min(&line),
+        color = color,
+        dash = dash,
+        circ = CIRC,
+        script = ICON_JS,
     )
 }
 
