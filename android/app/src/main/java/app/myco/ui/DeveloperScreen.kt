@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +46,9 @@ fun DeveloperScreen(client: AppCoreClient, onBleToggle: (Boolean) -> Unit) {
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        // SelectionContainer makes every Text long-press-selectable + copyable
+        // (npub, node_addr, peer fields). The Switch stays interactive.
+        SelectionContainer {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -88,6 +92,7 @@ fun DeveloperScreen(client: AppCoreClient, onBleToggle: (Boolean) -> Unit) {
             }
 
             Field("Version / rev", "${state.appVersion} / rev ${state.rev}")
+        }
         }
     }
 }
