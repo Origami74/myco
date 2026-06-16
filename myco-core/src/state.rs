@@ -2,7 +2,7 @@ use serde::Serialize;
 
 /// One JSON snapshot per `state()` call. `rev` lets the UI skip no-op redraws;
 /// `error` is empty when healthy. Mirrors `docs/reference/ffi-surface.md`,
-/// narrowed to the P0 surface.
+/// narrowed to the P1 surface (identity + node + BLE).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppState {
@@ -11,6 +11,12 @@ pub struct AppState {
     pub app_version: String,
     pub identity: IdentityView,
     pub node: NodeStatus,
+    /// BLE adapter/transport status (the developer-UI control plane).
+    pub ble: BleStatus,
+    /// Peers seen/connected over the radio. Identified by `node_addr` from the
+    /// in-band pubkey exchange, never by MAC. Empty until the BLE backend runs
+    /// (Android, P1 M4).
+    pub ble_peers: Vec<BlePeer>,
 }
 
 /// The device identity, in the derived forms the UI shows.
@@ -40,4 +46,35 @@ impl IdentityView {
 pub struct NodeStatus {
     pub running: bool,
     pub status_text: String,
+}
+
+/// BLE adapter/transport status — the control/observation plane the developer
+/// UI renders. The byte plane (the radio) is separate (Android, P1 M4).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BleStatus {
+    /// Master switch (the `SetBleEnabled` action).
+    pub enabled: bool,
+    /// The node is both peripheral and central — symmetric per-peer PSM
+    /// discovery, not fixed-central. Informational for the UI.
+    pub role: String,
+    /// Whether the scan loop is currently running.
+    pub scanning: bool,
+    /// Adapter label (a fixed tag on Android; "—" until the backend reports).
+    pub adapter_name: String,
+}
+
+/// One peer seen or connected over BLE. Keyed by `node_addr` from the in-band
+/// `[0x00][pubkey:32]` exchange (never the rotating MAC); `npub` resolves once
+/// the Noise handshake completes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlePeer {
+    pub node_addr_hex: String,
+    /// Resolved once the pubkey/Noise handshake completes; empty before then.
+    pub npub: String,
+    pub connected: bool,
+    /// Learned from the peer's advert (the `BleAddr → PSM` map).
+    pub psm: u16,
+    pub rssi: Option<i32>,
 }

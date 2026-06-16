@@ -1944,6 +1944,7 @@ dependencies = [
  "jni",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

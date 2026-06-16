@@ -17,6 +17,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 hex = { workspace = true }
+tokio = { workspace = true }
 
 # The JNI surface only exists on Android. Host (macOS/Linux) builds skip it and
 # drive `AppRuntime` directly (see tests).
