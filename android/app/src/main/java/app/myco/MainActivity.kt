@@ -198,9 +198,10 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Open a shared nsite: add the sharer to your Circle, kick off its sync, and
-     * open the fullscreen view. The sharer's device becomes a paired peer we pull
-     * from over the mesh (holder = their npub); the public IP source is the fallback.
+     * Receive a shared nsite: add the sharer to your Circle and kick off its sync.
+     * We do **not** open the fullscreen view here — the app appears in the Apps
+     * drawer with a download ring (iOS-install style) and opens when tapped. The
+     * sharer's device becomes a paired peer we pull from (holder = their npub).
      */
     private fun openSharedNsite(info: NsiteShare.ShareInfo) {
         if (info.npub.isNotEmpty()) {
@@ -209,10 +210,8 @@ class MainActivity : ComponentActivity() {
             core.dispatch(NativeActions.addToCircle(info.npub, info.name))
         }
         core.dispatch(NativeActions.openNsite(info.nsiteHost, holder = info.npub))
-        launchNsite(info.nsiteHost, info.name)
-        if (info.npub.isNotEmpty()) {
-            Toast.makeText(this, "${info.name} added to your Circle — pulling over the mesh", Toast.LENGTH_SHORT).show()
-        }
+        val who = info.name.ifEmpty { "a peer" }
+        Toast.makeText(this, "Downloading from $who — find it in Apps", Toast.LENGTH_SHORT).show()
     }
 
     // --- permissions ---

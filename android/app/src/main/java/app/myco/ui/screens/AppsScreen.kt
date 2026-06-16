@@ -1,6 +1,8 @@
 package app.myco.ui.screens
 
 import android.graphics.Bitmap
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -29,6 +31,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -47,7 +50,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -70,7 +75,7 @@ import kotlinx.coroutines.withContext
  * each opening as its own fullscreen task. Long-press an app for its sheet
  * (share, add-to-home, info); the "+" tile adds one by pasting a link or scanning.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun AppsScreen(
     state: AppState,
@@ -107,6 +112,8 @@ fun AppsScreen(
             NsiteTile(
                 client = client,
                 site = site,
+                modifier = Modifier.animateItem(),
+                // Ready → open the app; still downloading → its live status page.
                 onClick = { onLaunchNsite(site.host, site.title) },
                 onLongClick = { sheetFor = site },
             )
@@ -176,6 +183,7 @@ private fun SearchField(query: String, onChange: (String) -> Unit) {
 private fun NsiteTile(
     client: AppCoreClient,
     site: SiteStatus,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -185,9 +193,23 @@ private fun NsiteTile(
             runCatching { NsiteIcons.fetch(client, "${site.host}.nsite") }.getOrNull()
         }
     }
+    val ready = site.state == "ready"
+    val syncing = site.state == "syncing"
+    val stalled = site.state == "unreachable" || site.state == "incomplete"
+    val total = site.filesTotal.toInt()
+    val pulled = site.filesPulled.toInt()
+    // Smoothly interpolate the ring between the 1 s status polls; dim the icon
+    // while it isn't ready (iOS app-install style).
+    val fraction by animateFloatAsState(
+        if (total > 0) (pulled.toFloat() / total).coerceIn(0f, 1f) else 0f,
+        animationSpec = tween(700),
+        label = "dl",
+    )
+    val iconAlpha by animateFloatAsState(if (ready) 1f else 0.4f, tween(450), label = "alpha")
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        modifier = modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
         Box(
             modifier = Modifier
@@ -199,31 +221,51 @@ private fun NsiteTile(
         ) {
             val bmp = icon
             if (bmp != null) {
-                Image(bmp.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize())
+                Image(bmp.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize().alpha(iconAlpha))
             } else {
                 Text(
                     initialOf(site),
-                    color = androidx.compose.ui.graphics.Color.White,
+                    color = Color.White,
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.alpha(iconAlpha),
                 )
             }
-            if (site.state != "ready") {
+            if (syncing) {
+                // Scrim for ring contrast on bright favicons, then the progress ring.
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.22f)))
+                if (total > 0) {
+                    CircularProgressIndicator(
+                        progress = { fraction },
+                        modifier = Modifier.fillMaxSize().padding(12.dp),
+                        strokeWidth = 4.dp,
+                        color = Color.White,
+                        trackColor = Color.White.copy(alpha = 0.30f),
+                    )
+                } else {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(26.dp),
+                        strokeWidth = 3.dp,
+                        color = Color.White,
+                    )
+                }
+            } else if (stalled) {
                 Box(
                     modifier = Modifier
-                        .size(10.dp)
                         .align(Alignment.TopEnd)
-                        .padding(0.dp)
+                        .padding(6.dp)
+                        .size(11.dp)
                         .background(MaterialTheme.colorScheme.error, RoundedCornerShape(50)),
                 )
             }
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            site.title.ifEmpty { site.host.take(8) },
+            if (syncing && total > 0) "$pulled/$total" else site.title.ifEmpty { site.host.take(8) },
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.labelMedium,
+            color = if (syncing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
             textAlign = TextAlign.Center,
         )
     }
