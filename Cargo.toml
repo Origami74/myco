@@ -30,4 +30,22 @@ hex = "0.4"
 # Multi-thread runtime so the embedded fips node's background tasks (BLE
 # accept/scan/probe loops, Noise handshakes) keep progressing between FFI polls,
 # without the app having to drive the node's main packet loop (that's P2+).
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
+
+# --- P2 content layer (relay + Blossom + gateway) ---
+# The rust-nostr `nostr` crate supplies Event types, NIP-01 id computation,
+# Schnorr signature verification, and NIP-19 (npub) — the cryptographic /
+# serialization primitives. The relay STORE and the WS/REQ surface are
+# hand-rolled (the query surface Myco uses is tiny; no relay framework, and
+# negentropy/NIP-77 is not needed until P3). See docs/design/nsite-layer.md §2.1.
+nostr = { version = "0.44", default-features = false, features = ["std"] }
+async-trait = "0.1"
+sha2 = "0.10"
+thiserror = "2"
+
+# IP online-fallback sync (P2 M3): query public relays (WS) + pull blobs from
+# public Blossom (HTTPS) to side-load a pasted nsite link over normal internet.
+# rustls (not native-tls) so it cross-compiles cleanly for Android.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }

@@ -12,12 +12,24 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 fips = { workspace = true }
+nsite-deck = { path = "../nsite-deck" }
+myco-relay = { path = "../myco-relay" }
+myco-blossom = { path = "../myco-blossom" }
+nostr = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true }
+reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+nsite-deck = { path = "../nsite-deck", features = ["testing"] }
+tokio-tungstenite = { workspace = true }
 
 # The JNI surface only exists on Android. Host (macOS/Linux) builds skip it and
 # drive `AppRuntime` directly (see tests).

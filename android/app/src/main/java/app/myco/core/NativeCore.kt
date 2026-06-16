@@ -19,6 +19,16 @@ internal object NativeCore {
     external fun refreshJson(handle: Long): String
     external fun dispatchJson(handle: Long, actionJson: String): String
 
+    /**
+     * Serve one nsite request for the in-app WebView's `shouldInterceptRequest`
+     * (the TUN-independent serve path). Returns a framed byte array:
+     * `[u32 BE header-len][header JSON][body]`, where the header JSON is
+     * `{status, contentType, headers}`. `range` is the request's `Range` header
+     * (empty string if none). Blocks while the in-process gateway serves direct
+     * from the local relay + Blossom.
+     */
+    external fun gatewayGet(handle: Long, host: String, path: String, range: String): ByteArray
+
     // --- BLE byte-bridge (see docs/reference/ffi-surface.md "BLE bridge") ---
     // The Kotlin radio (BleRadio) calls these to push inbound bytes/events and
     // pull outbound bytes. The Rust core calls back into the BleRadio object for

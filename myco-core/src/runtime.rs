@@ -1,10 +1,13 @@
 use std::path::Path;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fips::control::read_handle::ControlReadHandle;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 
 use crate::action::NativeAppAction;
+use crate::content::{CacheView, Content};
 use crate::identity_store;
 use crate::state::{AppState, BleAdvert, BlePeer, BleStatus, IdentityView, NodeStatus};
 
@@ -37,6 +40,9 @@ pub struct AppRuntime {
     /// The background task running `node.start()` + `run_rx_loop()`. Aborting it
     /// drops the node and stops its transports.
     loop_task: Option<JoinHandle<()>>,
+    /// The content layer (embedded relay + Blossom + gateway + Library). `None`
+    /// only on a startup error (no valid data dir).
+    content: Option<Arc<Content>>,
 }
 
 impl AppRuntime {
@@ -60,6 +66,20 @@ impl AppRuntime {
         let node = Self::build_node(data_dir)?;
         let identity = IdentityView::from_identity(node.identity());
 
+        // The content layer (relay + Blossom + gateway + Library) lives for the
+        // whole process; it is independent of the node's start/stop lifecycle.
+        let content = Arc::new(Content::open(Path::new(data_dir))?);
+
+        // Install the IP online-fallback pull source so a pasted nsite link can
+        // be fetched over normal internet (the P2 content-entry path). Gated by
+        // `sync.offline_only` (a P3 setting); on by default in P2.
+        content.set_source(Arc::new(crate::ip_source::IpPeerSource::with_defaults()));
+
+        // Re-list Library ("installed") sites as ready/incomplete by checking the
+        // persisted stores — the relay + Blossom survive a restart, the in-memory
+        // status map does not.
+        rt.spawn(content.clone().refresh_library_status());
+
         Ok(Self {
             app_version: app_version.to_string(),
             data_dir: data_dir.to_string(),
@@ -73,6 +93,7 @@ impl AppRuntime {
             node: Some(node),
             read_handle: None,
             loop_task: None,
+            content: Some(content),
         })
     }
 
@@ -116,6 +137,7 @@ impl AppRuntime {
             node: None,
             read_handle: None,
             loop_task: None,
+            content: None,
         }
     }
 
@@ -144,7 +166,85 @@ impl AppRuntime {
                 };
                 self.rev += 1;
             }
+            NativeAppAction::OpenNsite { link } => {
+                self.open_nsite(&link);
+                self.rev += 1;
+            }
+            NativeAppAction::ImportNsite { dir } => {
+                self.import_nsite(&dir);
+                self.rev += 1;
+            }
+            NativeAppAction::AddToLibrary { link } => {
+                if let (Some(content), Some(addr)) =
+                    (&self.content, nsite_deck::parse_link(&link))
+                {
+                    content.add_to_library(&addr, None, now_secs());
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::RemoveFromLibrary { link } => {
+                if let (Some(content), Some(addr)) =
+                    (&self.content, nsite_deck::parse_link(&link))
+                {
+                    content.remove_from_library(&addr);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SearchNsites { .. } => {
+                // Discovery needs reachable peer relays — a P3 stub for now.
+                self.rev += 1;
+            }
+            NativeAppAction::WipeStores => {
+                self.wipe_stores();
+                self.rev += 1;
+            }
         }
+    }
+
+    /// Spawn a sync-to-readiness for a pasted link (spawn-not-block; readiness is
+    /// observed via `siteStatus` on `Tick`).
+    fn open_nsite(&mut self, link: &str) {
+        let Some(addr) = nsite_deck::parse_link(link) else {
+            self.error = format!("unrecognized nsite link: {link}");
+            return;
+        };
+        let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
+            return;
+        };
+        rt.spawn(content.open_site(addr));
+    }
+
+    /// Spawn a dev side-load of a bundle directory.
+    fn import_nsite(&mut self, dir: &str) {
+        let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
+            return;
+        };
+        let dir = dir.to_string();
+        rt.spawn(async move {
+            match content.import_dir(Path::new(&dir)).await {
+                Ok(outcome) => tracing::info!(?outcome, dir, "imported nsite bundle"),
+                Err(e) => tracing::error!(error = %e, dir, "import nsite failed"),
+            }
+        });
+    }
+
+    /// Clear local content. Blocks (it is fast: clear maps + remove files) so the
+    /// next `state()` reflects the empty stores immediately.
+    fn wipe_stores(&mut self) {
+        let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
+            return;
+        };
+        if let Err(e) = rt.block_on(content.wipe()) {
+            self.error = format!("wipe failed: {e}");
+        }
+    }
+
+    /// The content layer + a Tokio handle, for the out-of-band `gatewayGet` JNI
+    /// path (cloned out so the gateway serves without holding the runtime mutex).
+    pub fn gateway_context(&self) -> Option<(Arc<Content>, tokio::runtime::Handle)> {
+        let content = self.content.clone()?;
+        let handle = self.rt.as_ref()?.handle().clone();
+        Some((content, handle))
     }
 
     fn start_node(&mut self) {
@@ -250,6 +350,21 @@ impl AppRuntime {
             },
             ble_peers,
             ble_adverts: self.ble_adverts(),
+            sites: self
+                .content
+                .as_ref()
+                .map(|c| c.sites_snapshot())
+                .unwrap_or_default(),
+            library: self
+                .content
+                .as_ref()
+                .map(|c| c.library_snapshot())
+                .unwrap_or_default(),
+            cache: self
+                .content
+                .as_ref()
+                .map(|c| c.cache_view())
+                .unwrap_or_else(CacheView::empty),
         }
     }
 
@@ -276,6 +391,14 @@ impl AppRuntime {
         serde_json::to_string(&self.state())
             .unwrap_or_else(|e| format!(r#"{{"error":"serialize failed: {e}"}}"#))
     }
+}
+
+/// Seconds since the Unix epoch (Library `added_at` timestamps).
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// `AppRuntime` is shared across JVM threads behind a `Mutex` (see `jni_abi`),

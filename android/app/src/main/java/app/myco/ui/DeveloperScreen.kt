@@ -9,8 +9,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Button
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -27,6 +32,8 @@ import androidx.compose.ui.unit.dp
 import app.myco.core.AppCoreClient
 import app.myco.core.BleAdvert
 import app.myco.core.BlePeer
+import app.myco.core.NativeActions
+import app.myco.core.SiteStatus
 import kotlin.math.pow
 import kotlinx.coroutines.delay
 
@@ -36,8 +43,13 @@ import kotlinx.coroutines.delay
  * core once a second (== Tick) so BLE state advances and peers appear.
  */
 @Composable
-fun DeveloperScreen(client: AppCoreClient, onBleToggle: (Boolean) -> Unit) {
+fun DeveloperScreen(
+    client: AppCoreClient,
+    onBleToggle: (Boolean) -> Unit,
+    onLaunchNsite: (String) -> Unit = {},
+) {
     var state by remember { mutableStateOf(client.state()) }
+    var linkInput by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
         while (true) {
             delay(1000)
@@ -104,8 +116,66 @@ fun DeveloperScreen(client: AppCoreClient, onBleToggle: (Boolean) -> Unit) {
                 state.bleAdverts.forEach { AdvertRow(it) }
             }
 
+            Divider()
+
+            // --- nsites (P2): paste a link to fetch over IP, then open offline ---
+            Text("nsites", style = MaterialTheme.typography.titleMedium)
+            OutlinedTextField(
+                value = linkInput,
+                onValueChange = { linkInput = it },
+                singleLine = true,
+                label = { Text("Paste an nsite link (npub… / <npub>.nsite.lol)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        if (linkInput.isNotBlank()) {
+                            state = client.dispatch(NativeActions.openNsite(linkInput.trim()))
+                        }
+                    },
+                ) { Text("Fetch") }
+                OutlinedButton(
+                    onClick = { state = client.dispatch(NativeActions.wipeStores()) },
+                ) { Text("Wipe") }
+            }
+            Mono(
+                "cache",
+                "${state.cache.relayEvents} events · ${state.cache.blobCount} blobs · ${state.cache.usedBytes} B",
+            )
+
+            if (state.sites.isEmpty()) {
+                Text("— no sites yet —", style = MaterialTheme.typography.bodyMedium)
+            } else {
+                state.sites.forEach { SiteRow(it, onOpen = { onLaunchNsite(it.host) }) }
+            }
+
             Field("Version / rev", "${state.appVersion} / rev ${state.rev}")
         }
+        }
+    }
+}
+
+@Composable
+private fun SiteRow(site: SiteStatus, onOpen: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            site.title.ifEmpty { site.host },
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        val detail = when (site.state) {
+            "syncing" -> "syncing… ${site.filesPulled}/${site.filesTotal}"
+            "ready" -> "ready"
+            "unreachable" -> "unreachable — ${site.message}"
+            "incomplete" -> "incomplete — ${site.message}"
+            else -> site.state
+        }
+        Mono("status", detail)
+        Mono("host", site.host)
+        Row {
+            Button(onClick = onOpen, enabled = site.state == "ready") { Text("Open") }
+            Spacer(Modifier.width(8.dp))
         }
     }
 }

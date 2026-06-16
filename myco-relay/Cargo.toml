@@ -6,3 +6,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+nsite-deck = { path = "../nsite-deck" }
+nostr = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+nsite-deck = { path = "../nsite-deck", features = ["testing"] }
+tokio = { workspace = true, features = ["rt", "macros"] }

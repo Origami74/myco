@@ -10,7 +10,7 @@
 use std::sync::Mutex;
 
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jlong, jstring};
+use jni::sys::{jbyteArray, jlong, jstring};
 use jni::JNIEnv;
 
 use crate::runtime::AppRuntime;
@@ -116,4 +116,46 @@ pub extern "system" fn Java_app_myco_core_NativeCore_dispatchJson(
     let action = get_string(&mut env, &action_json);
     let json = locked_state(handle, |rt| rt.dispatch_json(&action));
     jstr(&mut env, json)
+}
+
+/// Serve one nsite request for the in-app WebView's `shouldInterceptRequest`.
+///
+/// Returns a framed byte array `[u32 BE header-len][header JSON][body]` (see
+/// `content::frame_response`). This is the **TUN-independent** in-app serve path:
+/// the WebView loads `http://<host>.nsite/…`, its interceptor calls here, and the
+/// gateway serves direct from the in-process relay + Blossom. The runtime mutex is
+/// only held long enough to clone out an `Arc<Content>` + Tokio handle, so
+/// concurrent subresource requests don't serialize on it.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_gatewayGet(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    host: JString,
+    path: JString,
+    range: JString,
+) -> jbyteArray {
+    let host = get_string(&mut env, &host);
+    let path = get_string(&mut env, &path);
+    let range = get_string(&mut env, &range);
+    let range_opt = (!range.is_empty()).then_some(range.as_str());
+
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.gateway_context()
+        }
+        None => None,
+    };
+
+    let framed = match ctx {
+        Some((content, rt_handle)) => {
+            rt_handle.block_on(content.gateway_get_framed(&host, &path, range_opt))
+        }
+        None => Vec::new(),
+    };
+
+    env.byte_array_from_slice(&framed)
+        .map(|a| a.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }

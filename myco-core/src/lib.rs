@@ -10,7 +10,9 @@
 //! Android-only JNI glue, so [`AppRuntime`] is unit-testable on macOS/Linux.
 
 mod action;
+mod content;
 mod identity_store;
+mod ip_source;
 mod runtime;
 mod state;
 

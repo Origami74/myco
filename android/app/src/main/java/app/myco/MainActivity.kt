@@ -1,6 +1,7 @@
 package app.myco
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -38,8 +39,19 @@ class MainActivity : ComponentActivity() {
                         BleService.stop(this)
                     }
                 },
+                onLaunchNsite = { hostLabel -> launchNsite(hostLabel) },
             )
         }
+    }
+
+    /** Open an nsite as its own fullscreen task (keyed by host so it re-surfaces). */
+    private fun launchNsite(hostLabel: String) {
+        val intent = Intent(this, NsiteActivity::class.java).apply {
+            data = NsiteActivity.documentUri(hostLabel)
+            putExtra(NsiteActivity.EXTRA_HOST, hostLabel)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
+        }
+        startActivity(intent)
     }
 
     private fun requestBlePermissionsIfNeeded() {

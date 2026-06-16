@@ -20,6 +20,15 @@ pub struct AppState {
     /// Raw scan adverts (address / PSM / RSSI) — the radio-level "discovered
     /// devices" view, distinct from the mesh-level `ble_peers`.
     pub ble_adverts: Vec<BleAdvert>,
+
+    // --- content layer (P2) ---
+    /// Per-site sync/readiness, keyed by `<host>` label. Kotlin polls this after
+    /// `OpenNsite` to know when to launch the fullscreen NsiteActivity.
+    pub sites: Vec<crate::content::SiteStatusView>,
+    /// Pinned/opened sites.
+    pub library: Vec<crate::content::LibraryItem>,
+    /// Local relay/Blossom counts (for the developer screen + cache view).
+    pub cache: crate::content::CacheView,
 }
 
 /// The device identity, in the derived forms the UI shows.
