@@ -1,6 +1,7 @@
-<p align="center"><img src="docs/myco-logo.png" alt="Myco" width="200"></p>
+
 
 # Myco
+![](docs/myco-banner.png)
 
 > **Install apps from the people around you** — over Bluetooth, with no internet
 > and no app store.
