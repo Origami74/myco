@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="770" viewBox="0 0 360 770" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <rect width="360" height="770" fill="#ffffff"/>
+
+  <!-- phone shell -->
+  <rect x="20" y="18" width="320" height="712" rx="44" fill="#1e293b"/>
+  <rect x="31" y="29" width="298" height="690" rx="34" fill="#ffffff"/>
+  <rect x="148" y="33" width="64" height="15" rx="7.5" fill="#1e293b"/>
+
+  <!-- status bar -->
+  <text x="52" y="53" font-size="11.5" font-weight="700" fill="#0f172a">9:41</text>
+  <g fill="#0f172a"><rect x="270" y="49" width="3" height="6" rx="1"/><rect x="275" y="46" width="3" height="9" rx="1"/><rect x="280" y="43" width="3" height="12" rx="1"/></g>
+  <rect x="294" y="46" width="17" height="9" rx="2.5" fill="none" stroke="#0f172a" stroke-width="1.2"/>
+  <rect x="296" y="48" width="11" height="5" rx="1" fill="#0f172a"/><rect x="311.5" y="48.5" width="2" height="4" rx="1" fill="#0f172a"/>
+
+  <!-- top app bar -->
+  <text x="52" y="105" font-size="23" font-weight="800" fill="#0f172a">Dev</text>
+  <rect x="236" y="83" width="74" height="28" rx="14" fill="#ecfdf5" stroke="#86efac"/>
+  <circle cx="251" cy="97" r="6" fill="#bbf7d0"/><circle cx="251" cy="97" r="3.2" fill="#16a34a"/>
+  <text x="262" y="101" font-size="11.5" font-weight="700" fill="#15803d">4 peers</text>
+  <text x="52" y="127" font-size="12" fill="#64748b">Technical details — myco-core state.</text>
+
+  <!-- ===== NODE & FIPS ===== -->
+  <rect x="52" y="134" width="256" height="116" rx="14" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="68" y="154" font-size="10.5" font-weight="700" fill="#0d9488" letter-spacing="0.8">NODE &amp; FIPS</text>
+  <text x="68" y="176" font-size="11.5" fill="#64748b">Status</text>
+  <circle cx="250" cy="172" r="3.5" fill="#22c55e"/><text x="294" y="176" font-size="11" font-weight="700" fill="#15803d" text-anchor="end">running</text>
+  <text x="68" y="196" font-size="11.5" fill="#64748b">node_addr</text>
+  <text x="294" y="196" font-size="11" font-family="Menlo,monospace" fill="#0f172a" text-anchor="end">3f9ad2c7…b1</text>
+  <text x="68" y="216" font-size="11.5" fill="#64748b">fips ipv6</text>
+  <text x="294" y="216" font-size="11" font-family="Menlo,monospace" fill="#0f172a" text-anchor="end">fd00:5a…:a1b2</text>
+  <text x="68" y="236" font-size="11.5" fill="#64748b">mtu</text>
+  <text x="294" y="236" font-size="11" font-family="Menlo,monospace" fill="#0f172a" text-anchor="end">1280</text>
+
+  <!-- ===== BLE ===== -->
+  <rect x="52" y="262" width="256" height="96" rx="14" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="68" y="282" font-size="10.5" font-weight="700" fill="#0d9488" letter-spacing="0.8">BLE</text>
+  <text x="68" y="304" font-size="11.5" fill="#64748b">adapter</text>
+  <text x="294" y="304" font-size="11" font-family="Menlo,monospace" fill="#0f172a" text-anchor="end">Pixel 7</text>
+  <text x="68" y="324" font-size="11.5" fill="#64748b">scanning</text>
+  <circle cx="258" cy="320" r="3.5" fill="#22c55e"/><text x="294" y="324" font-size="11" font-weight="700" fill="#15803d" text-anchor="end">active</text>
+  <text x="68" y="344" font-size="11.5" fill="#64748b">role</text>
+  <text x="294" y="344" font-size="11" font-family="Menlo,monospace" fill="#0f172a" text-anchor="end">central + peripheral</text>
+
+  <!-- ===== PEERS ===== -->
+  <rect x="52" y="370" width="256" height="176" rx="14" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="68" y="390" font-size="10.5" font-weight="700" fill="#0d9488" letter-spacing="0.8">PEERS · 4</text>
+  <!-- column header -->
+  <text x="80" y="408" font-size="8.5" font-family="Menlo,monospace" fill="#94a3b8">node_addr</text>
+  <text x="150" y="408" font-size="8.5" font-family="Menlo,monospace" fill="#94a3b8">npub</text>
+  <text x="236" y="408" font-size="8.5" font-family="Menlo,monospace" fill="#94a3b8">psm</text>
+  <text x="284" y="408" font-size="8.5" font-family="Menlo,monospace" fill="#94a3b8" text-anchor="end">rssi</text>
+  <line x1="66" y1="414" x2="294" y2="414" stroke="#eef2f6" stroke-width="1"/>
+  <!-- peer rows -->
+  <g font-family="Menlo,monospace" font-size="9.5">
+    <circle cx="72" cy="429" r="3.2" fill="#22c55e"/><text x="80" y="432" fill="#0f172a">3f9a…b1</text><text x="150" y="432" fill="#475569">npub1q9x…h4k</text><text x="236" y="432" fill="#475569">0x83</text><text x="290" y="432" fill="#475569" text-anchor="end">-52</text>
+    <line x1="66" y1="441" x2="294" y2="441" stroke="#eef2f6" stroke-width="1"/>
+    <circle cx="72" cy="456" r="3.2" fill="#22c55e"/><text x="80" y="459" fill="#0f172a">7c2e…04</text><text x="150" y="459" fill="#475569">npub1m2v…7za</text><text x="236" y="459" fill="#475569">0x91</text><text x="290" y="459" fill="#475569" text-anchor="end">-67</text>
+    <line x1="66" y1="468" x2="294" y2="468" stroke="#eef2f6" stroke-width="1"/>
+    <circle cx="72" cy="483" r="3.2" fill="#22c55e"/><text x="80" y="486" fill="#0f172a">a14f…9d</text><text x="150" y="486" fill="#475569">npub1l8p…q0e</text><text x="236" y="486" fill="#475569">0x85</text><text x="290" y="486" fill="#475569" text-anchor="end">-71</text>
+    <line x1="66" y1="495" x2="294" y2="495" stroke="#eef2f6" stroke-width="1"/>
+    <circle cx="72" cy="510" r="3.2" fill="#cbd5e1"/><text x="80" y="513" fill="#94a3b8">e0b3…22</text><text x="150" y="513" fill="#cbd5e1">npub1r4t…s9c</text><text x="236" y="513" fill="#cbd5e1">—</text><text x="290" y="513" fill="#cbd5e1" text-anchor="end">—</text>
+  </g>
+  <text x="80" y="533" font-size="9" fill="#94a3b8">npub shows once Noise completes · last row disconnected</text>
+
+  <!-- ===== CACHE ===== -->
+  <rect x="52" y="558" width="256" height="68" rx="14" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="116" y="592" font-size="16" font-weight="800" fill="#0f172a" text-anchor="middle">1,284</text>
+  <text x="116" y="608" font-size="9.5" fill="#94a3b8" text-anchor="middle">relay events</text>
+  <line x1="170" y1="572" x2="170" y2="612" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="200" y="592" font-size="16" font-weight="800" fill="#0f172a" text-anchor="middle">312</text>
+  <text x="200" y="608" font-size="9.5" fill="#94a3b8" text-anchor="middle">blobs</text>
+  <line x1="234" y1="572" x2="234" y2="612" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="272" y="592" font-size="16" font-weight="800" fill="#0d9488" text-anchor="middle">1.2 GB</text>
+  <text x="272" y="608" font-size="9.5" fill="#94a3b8" text-anchor="middle">used</text>
+
+  <!-- bottom navigation -->
+  <line x1="31" y1="640" x2="329" y2="640" stroke="#e2e8f0" stroke-width="1"/>
+  <g fill="#94a3b8"><rect x="59" y="658" width="7" height="7" rx="2"/><rect x="70" y="658" width="7" height="7" rx="2"/><rect x="59" y="669" width="7" height="7" rx="2"/><rect x="70" y="669" width="7" height="7" rx="2"/></g>
+  <text x="68" y="702" font-size="10.5" font-weight="600" fill="#94a3b8" text-anchor="middle">Apps</text>
+  <circle cx="143" cy="667" r="9" fill="none" stroke="#94a3b8" stroke-width="2"/><circle cx="143" cy="658" r="2.6" fill="#94a3b8"/><circle cx="136" cy="672" r="2.6" fill="#94a3b8"/><circle cx="150" cy="672" r="2.6" fill="#94a3b8"/>
+  <text x="143" y="702" font-size="10.5" font-weight="600" fill="#94a3b8" text-anchor="middle">Circle</text>
+  <g stroke="#94a3b8" stroke-width="2" stroke-linecap="round"><line x1="208" y1="660" x2="226" y2="660"/><line x1="208" y1="667" x2="226" y2="667"/><line x1="208" y1="674" x2="226" y2="674"/></g>
+  <g fill="#ffffff" stroke="#94a3b8" stroke-width="2"><circle cx="214" cy="660" r="2.6"/><circle cx="221" cy="667" r="2.6"/><circle cx="212" cy="674" r="2.6"/></g>
+  <text x="217" y="702" font-size="10.5" font-weight="600" fill="#94a3b8" text-anchor="middle">Settings</text>
+  <!-- Dev (active) -->
+  <rect x="266" y="652" width="52" height="30" rx="15" fill="#ccfbf1"/>
+  <g fill="none" stroke="#0d9488" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="288,661 282,667 288,673"/><polyline points="296,661 302,667 296,673"/><line x1="293" y1="659" x2="291" y2="675"/></g>
+  <text x="292" y="702" font-size="10.5" font-weight="700" fill="#0d9488" text-anchor="middle">Dev</text>
+
+  <text x="180" y="752" font-size="12.5" font-style="italic" fill="#64748b" text-anchor="middle">The Dev tab — node, BLE, live peers (node_addr/npub/psm/rssi) and cache counts.</text>
+</svg>

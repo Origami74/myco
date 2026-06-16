@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="770" viewBox="0 0 360 770" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <marker id="devArr" markerWidth="11" markerHeight="11" refX="6" refY="5.5" orient="auto"><path d="M1,1 L10,5.5 L1,10 Z" fill="#0d9488"/></marker>
+  </defs>
+  <rect width="360" height="770" fill="#ffffff"/>
+
+  <!-- phone shell -->
+  <rect x="20" y="18" width="320" height="712" rx="44" fill="#1e293b"/>
+  <rect x="31" y="29" width="298" height="690" rx="34" fill="#ffffff"/>
+  <rect x="148" y="33" width="64" height="15" rx="7.5" fill="#1e293b"/>
+
+  <!-- status bar -->
+  <text x="52" y="53" font-size="11.5" font-weight="700" fill="#0f172a">9:41</text>
+  <g fill="#0f172a"><rect x="270" y="49" width="3" height="6" rx="1"/><rect x="275" y="46" width="3" height="9" rx="1"/><rect x="280" y="43" width="3" height="12" rx="1"/></g>
+  <rect x="294" y="46" width="17" height="9" rx="2.5" fill="none" stroke="#0f172a" stroke-width="1.2"/>
+  <rect x="296" y="48" width="11" height="5" rx="1" fill="#0f172a"/><rect x="311.5" y="48.5" width="2" height="4" rx="1" fill="#0f172a"/>
+
+  <!-- top app bar -->
+  <text x="52" y="109" font-size="23" font-weight="800" fill="#0f172a">Settings</text>
+  <rect x="236" y="87" width="74" height="28" rx="14" fill="#ecfdf5" stroke="#86efac"/>
+  <circle cx="251" cy="101" r="6" fill="#bbf7d0"/><circle cx="251" cy="101" r="3.2" fill="#16a34a"/>
+  <text x="262" y="105" font-size="11.5" font-weight="700" fill="#15803d">4 peers</text>
+
+  <!-- ===== DEVICE ===== -->
+  <text x="56" y="135" font-size="10.5" font-weight="700" fill="#94a3b8" letter-spacing="0.8">DEVICE</text>
+  <rect x="52" y="142" width="256" height="106" rx="16" fill="#f8fafc" stroke="#e2e8f0"/>
+  <!-- identity -->
+  <circle cx="80" cy="170" r="14" fill="#eef2f6"/>
+  <circle cx="76" cy="166" r="4" fill="none" stroke="#475569" stroke-width="1.8"/><line x1="79" y1="169" x2="86" y2="176" stroke="#475569" stroke-width="1.8" stroke-linecap="round"/><line x1="83" y1="173" x2="86" y2="170" stroke="#475569" stroke-width="1.8" stroke-linecap="round"/>
+  <text x="104" y="166" font-size="13.5" font-weight="600" fill="#0f172a">Device identity</text>
+  <text x="104" y="182" font-size="10.5" font-family="Menlo,monospace" fill="#94a3b8">npub1q9x…h4k</text>
+  <path d="M291 165 L297 170 L291 175" fill="none" stroke="#cbd5e1" stroke-width="2" stroke-linecap="round"/>
+  <line x1="66" y1="196" x2="294" y2="196" stroke="#eef2f6" stroke-width="1"/>
+  <!-- storage -->
+  <circle cx="80" cy="222" r="14" fill="#eef2f6"/>
+  <g stroke="#475569" stroke-width="1.7" stroke-linecap="round"><line x1="73" y1="218" x2="87" y2="218"/><line x1="73" y1="222" x2="87" y2="222"/><line x1="73" y1="226" x2="87" y2="226"/></g>
+  <text x="104" y="216" font-size="13.5" font-weight="600" fill="#0f172a">Storage</text>
+  <rect x="104" y="226" width="150" height="5" rx="2.5" fill="#e2e8f0"/><rect x="104" y="226" width="90" height="5" rx="2.5" fill="#0d9488"/>
+  <text x="104" y="244" font-size="10.5" fill="#94a3b8">1.2 GB of 2 GB used</text>
+  <path d="M291 217 L297 222 L291 227" fill="none" stroke="#cbd5e1" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- ===== MESH ===== -->
+  <text x="56" y="271" font-size="10.5" font-weight="700" fill="#94a3b8" letter-spacing="0.8">MESH</text>
+  <rect x="52" y="278" width="256" height="88" rx="16" fill="#f8fafc" stroke="#e2e8f0"/>
+  <!-- bluetooth mesh -->
+  <circle cx="80" cy="304" r="14" fill="#eef2f6"/>
+  <path d="M80 297 L84 301 L77 306 L80 308 L80 297 M80 311 L84 307 L77 302" fill="none" stroke="#2563eb" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+  <text x="104" y="300" font-size="13.5" font-weight="600" fill="#0f172a">Bluetooth mesh</text>
+  <text x="104" y="316" font-size="10.5" fill="#94a3b8">Find &amp; link nearby peers offline</text>
+  <rect x="266" y="292" width="42" height="24" rx="12" fill="#0d9488"/><circle cx="296" cy="304" r="9" fill="#ffffff"/>
+  <line x1="66" y1="332" x2="294" y2="332" stroke="#eef2f6" stroke-width="1"/>
+  <!-- auto-sync -->
+  <circle cx="80" cy="348" r="14" fill="#eef2f6"/>
+  <path d="M86 351 a6 6 0 1 1 -2 -4.4" fill="none" stroke="#475569" stroke-width="1.6" stroke-linecap="round"/><path d="M82 341 L86 345 L82 348 Z" fill="#475569"/>
+  <text x="104" y="352" font-size="13.5" font-weight="600" fill="#0f172a">Auto-sync pinned apps</text>
+  <rect x="266" y="336" width="42" height="24" rx="12" fill="#0d9488"/><circle cx="296" cy="348" r="9" fill="#ffffff"/>
+
+  <!-- ===== ADVANCED ===== -->
+  <text x="56" y="389" font-size="10.5" font-weight="700" fill="#94a3b8" letter-spacing="0.8">ADVANCED</text>
+  <rect x="52" y="396" width="256" height="100" rx="16" fill="#f8fafc" stroke="#e2e8f0"/>
+  <!-- developer options (highlighted) -->
+  <rect x="56" y="400" width="248" height="48" rx="12" fill="#f0fdfa"/>
+  <circle cx="80" cy="424" r="14" fill="#ccfbf1"/>
+  <g fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polyline points="78,419 73,424 78,429"/><polyline points="83,419 88,424 83,429"/></g>
+  <text x="104" y="420" font-size="13.5" font-weight="700" fill="#0f766e">Developer options</text>
+  <text x="104" y="436" font-size="10" fill="#0d9488">Show technical details + the Dev tab</text>
+  <rect x="266" y="412" width="42" height="24" rx="12" fill="#0d9488"/><circle cx="296" cy="424" r="9" fill="#ffffff"/>
+  <line x1="66" y1="456" x2="294" y2="456" stroke="#eef2f6" stroke-width="1"/>
+  <!-- about -->
+  <circle cx="80" cy="476" r="14" fill="#eef2f6"/>
+  <circle cx="80" cy="476" r="7" fill="none" stroke="#475569" stroke-width="1.6"/><circle cx="80" cy="472.5" r="1.1" fill="#475569"/><line x1="80" y1="475" x2="80" y2="480" stroke="#475569" stroke-width="1.6" stroke-linecap="round"/>
+  <text x="104" y="480" font-size="13.5" font-weight="600" fill="#0f172a">About</text>
+  <text x="294" y="480" font-size="11" fill="#94a3b8" text-anchor="end">Myco v0.3.0</text>
+
+  <!-- connector: this toggle is what reveals the Dev tab -->
+  <path d="M314 424 C330 470 330 600 300 648" fill="none" stroke="#0d9488" stroke-width="1.8" stroke-dasharray="4 4" marker-end="url(#devArr)"/>
+  <text x="332" y="540" font-size="10" font-weight="700" fill="#0d9488" transform="rotate(90 332 540)">adds the Dev tab</text>
+
+  <!-- bottom navigation -->
+  <line x1="31" y1="640" x2="329" y2="640" stroke="#e2e8f0" stroke-width="1"/>
+  <g fill="#94a3b8"><rect x="59" y="658" width="7" height="7" rx="2"/><rect x="70" y="658" width="7" height="7" rx="2"/><rect x="59" y="669" width="7" height="7" rx="2"/><rect x="70" y="669" width="7" height="7" rx="2"/></g>
+  <text x="68" y="702" font-size="10.5" font-weight="600" fill="#94a3b8" text-anchor="middle">Apps</text>
+  <circle cx="143" cy="667" r="9" fill="none" stroke="#94a3b8" stroke-width="2"/><circle cx="143" cy="658" r="2.6" fill="#94a3b8"/><circle cx="136" cy="672" r="2.6" fill="#94a3b8"/><circle cx="150" cy="672" r="2.6" fill="#94a3b8"/>
+  <text x="143" y="702" font-size="10.5" font-weight="600" fill="#94a3b8" text-anchor="middle">Circle</text>
+  <!-- Settings (active) -->
+  <rect x="191" y="652" width="52" height="30" rx="15" fill="#ccfbf1"/>
+  <g stroke="#0d9488" stroke-width="2" stroke-linecap="round"><line x1="208" y1="660" x2="226" y2="660"/><line x1="208" y1="667" x2="226" y2="667"/><line x1="208" y1="674" x2="226" y2="674"/></g>
+  <g fill="#ccfbf1" stroke="#0d9488" stroke-width="2"><circle cx="214" cy="660" r="2.6"/><circle cx="221" cy="667" r="2.6"/><circle cx="212" cy="674" r="2.6"/></g>
+  <text x="217" y="702" font-size="10.5" font-weight="700" fill="#0d9488" text-anchor="middle">Settings</text>
+  <!-- Dev (now visible) -->
+  <g fill="none" stroke="#94a3b8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="288,661 282,667 288,673"/><polyline points="296,661 302,667 296,673"/><line x1="293" y1="659" x2="291" y2="675"/></g>
+  <text x="292" y="702" font-size="10.5" font-weight="600" fill="#94a3b8" text-anchor="middle">Dev</text>
+
+  <text x="180" y="752" font-size="12.5" font-style="italic" fill="#64748b" text-anchor="middle">Turning on “Developer options” is what adds the Dev tab to the bottom bar.</text>
+</svg>

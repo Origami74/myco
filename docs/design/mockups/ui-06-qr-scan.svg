@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="770" viewBox="0 0 360 770" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="scanLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#2dd4bf" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="360" height="770" fill="#ffffff"/>
+
+  <!-- phone shell -->
+  <rect x="20" y="18" width="320" height="712" rx="44" fill="#1e293b"/>
+  <rect x="31" y="29" width="298" height="690" rx="34" fill="#ffffff"/>
+  <rect x="148" y="33" width="64" height="15" rx="7.5" fill="#1e293b"/>
+
+  <!-- status bar -->
+  <text x="52" y="53" font-size="11.5" font-weight="700" fill="#0f172a">9:41</text>
+  <g fill="#0f172a"><rect x="270" y="49" width="3" height="6" rx="1"/><rect x="275" y="46" width="3" height="9" rx="1"/><rect x="280" y="43" width="3" height="12" rx="1"/></g>
+  <rect x="294" y="46" width="17" height="9" rx="2.5" fill="none" stroke="#0f172a" stroke-width="1.2"/>
+  <rect x="296" y="48" width="11" height="5" rx="1" fill="#0f172a"/><rect x="311.5" y="48.5" width="2" height="4" rx="1" fill="#0f172a"/>
+
+  <!-- top bar: back + title (this screen is pushed from the + bubble) -->
+  <path d="M62 100 L52 109 L62 118" fill="none" stroke="#0f172a" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="76" y="113" font-size="17" font-weight="800" fill="#0f172a">Pair a device</text>
+  <rect x="236" y="96" width="74" height="26" rx="13" fill="#ecfdf5" stroke="#86efac"/>
+  <circle cx="251" cy="109" r="5.5" fill="#bbf7d0"/><circle cx="251" cy="109" r="3" fill="#16a34a"/>
+  <text x="261" y="113" font-size="11" font-weight="700" fill="#15803d">4 peers</text>
+
+  <!-- segmented toggle: Scan | My code -->
+  <rect x="52" y="134" width="256" height="36" rx="18" fill="#f1f5f9"/>
+  <rect x="55" y="137" width="125" height="30" rx="15" fill="#0d9488"/>
+  <text x="117" y="156" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">Scan</text>
+  <text x="243" y="156" font-size="12.5" font-weight="700" fill="#64748b" text-anchor="middle">My code</text>
+
+  <!-- ===== camera viewfinder ===== -->
+  <rect x="52" y="184" width="256" height="300" rx="22" fill="#0f172a"/>
+  <!-- a friend's phone showing its Myco code -->
+  <rect x="120" y="274" width="120" height="120" rx="10" fill="#ffffff"/>
+  <!-- finder patterns -->
+  <g fill="#0f172a">
+    <rect x="128" y="282" width="28" height="28"/><rect x="204" y="282" width="28" height="28"/><rect x="128" y="358" width="28" height="28"/>
+  </g>
+  <g fill="#ffffff">
+    <rect x="132" y="286" width="20" height="20"/><rect x="208" y="286" width="20" height="20"/><rect x="132" y="362" width="20" height="20"/>
+  </g>
+  <g fill="#0f172a">
+    <rect x="136" y="290" width="12" height="12"/><rect x="212" y="290" width="12" height="12"/><rect x="136" y="366" width="12" height="12"/>
+  </g>
+  <!-- data modules -->
+  <g fill="#0f172a">
+    <rect x="164" y="284" width="6" height="6"/><rect x="180" y="284" width="6" height="6"/><rect x="188" y="292" width="6" height="6"/><rect x="164" y="300" width="6" height="6"/><rect x="172" y="300" width="6" height="6"/><rect x="196" y="300" width="6" height="6"/>
+    <rect x="132" y="320" width="6" height="6"/><rect x="148" y="320" width="6" height="6"/><rect x="164" y="328" width="6" height="6"/><rect x="180" y="320" width="6" height="6"/><rect x="196" y="328" width="6" height="6"/><rect x="212" y="320" width="6" height="6"/><rect x="228" y="328" width="6" height="6"/>
+    <rect x="140" y="336" width="6" height="6"/><rect x="172" y="340" width="6" height="6"/><rect x="204" y="340" width="6" height="6"/><rect x="220" y="336" width="6" height="6"/><rect x="156" y="344" width="6" height="6"/><rect x="188" y="344" width="6" height="6"/>
+    <rect x="168" y="360" width="6" height="6"/><rect x="184" y="368" width="6" height="6"/><rect x="200" y="360" width="6" height="6"/><rect x="216" y="368" width="6" height="6"/><rect x="228" y="360" width="6" height="6"/><rect x="172" y="378" width="6" height="6"/><rect x="196" y="380" width="6" height="6"/><rect x="212" y="378" width="6" height="6"/>
+  </g>
+
+  <!-- scan reticle (corner brackets) -->
+  <g fill="none" stroke="#2dd4bf" stroke-width="4" stroke-linecap="round">
+    <path d="M80 262 L80 234 L108 234"/>
+    <path d="M252 234 L280 234 L280 262"/>
+    <path d="M80 406 L80 434 L108 434"/>
+    <path d="M252 434 L280 434 L280 406"/>
+  </g>
+  <!-- scanning line -->
+  <rect x="92" y="332" width="176" height="3" rx="1.5" fill="url(#scanLine)"/>
+
+  <!-- flash toggle (camera control) -->
+  <circle cx="280" cy="206" r="13" fill="#ffffff" opacity="0.18"/>
+  <path d="M282 199 L274 209 L280 209 L278 215 L286 205 L280 205 Z" fill="#ffffff"/>
+
+  <!-- instruction -->
+  <text x="180" y="514" font-size="15" font-weight="700" fill="#0f172a" text-anchor="middle">Point at your friend’s Myco code</text>
+  <text x="180" y="536" font-size="12" fill="#64748b" text-anchor="middle">Pairing is mutual — they confirm on their phone too.</text>
+
+  <!-- show-my-code shortcut -->
+  <rect x="92" y="558" width="176" height="42" rx="21" fill="#ffffff" stroke="#cbd5e1"/>
+  <g fill="#334155"><rect x="120" y="571" width="6" height="6"/><rect x="129" y="571" width="6" height="6"/><rect x="120" y="580" width="6" height="6"/><rect x="129" y="580" width="6" height="6" opacity="0.4"/></g>
+  <text x="180" y="584" font-size="12.5" font-weight="700" fill="#334155" text-anchor="middle">Show my code</text>
+
+  <text x="180" y="752" font-size="12.5" font-style="italic" fill="#64748b" text-anchor="middle">Opened by the “+” bubble (or “Pair a device” in Circle): scan a code, or flip to show your own.</text>
+</svg>
