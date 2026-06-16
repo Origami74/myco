@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Myco mycelium mark, inset to sit within the adaptive-icon safe zone
+     (108dp layer; ~10dp inset keeps the circular mark clear of mask edges). -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/myco_mark"
+    android:insetLeft="10dp"
+    android:insetTop="10dp"
+    android:insetRight="10dp"
+    android:insetBottom="10dp" />
