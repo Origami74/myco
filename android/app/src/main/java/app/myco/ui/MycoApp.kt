@@ -86,6 +86,7 @@ fun MycoApp(
     onScanned: (String) -> Unit,
     initialMeshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
+    onOfflineOnlyToggle: (Boolean) -> Unit,
 ) {
     var state by remember { mutableStateOf(client.state()) }
     // Mesh toggle is hoisted here so it survives tab switches.
@@ -149,6 +150,7 @@ fun MycoApp(
                         onBleToggle = onBleToggle,
                         meshEnabled = meshEnabled,
                         onMeshToggle = { on -> meshEnabled = on; onMeshToggle(on) },
+                        onOfflineOnlyToggle = onOfflineOnlyToggle,
                     )
                 }
                 composable("dev") { DevScreen(state) }

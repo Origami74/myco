@@ -49,6 +49,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         core = MycoCore.client(this)
+        // Restore the mesh-only (no IP fallback) preference into the core.
+        core.dispatch(NativeActions.setOfflineOnly(prefs.getBoolean(PREF_OFFLINE_ONLY, false)))
 
         // BLE on by default, and remembered thereafter.
         if (prefs.getBoolean(PREF_BLE, true)) {
@@ -71,6 +73,7 @@ class MainActivity : ComponentActivity() {
                     onScanned = { text -> handleScannedText(text) },
                     initialMeshEnabled = prefs.getBoolean(PREF_MESH, false),
                     onMeshToggle = { enabled -> setMeshEnabled(enabled) },
+                    onOfflineOnlyToggle = { enabled -> setOfflineOnly(enabled) },
                 )
             }
         }
@@ -90,6 +93,12 @@ class MainActivity : ComponentActivity() {
         } else {
             MycoVpnService.stop(this)
         }
+    }
+
+    /** Toggle mesh-only (no IP fallback); persisted + applied to the core. */
+    private fun setOfflineOnly(enabled: Boolean) {
+        prefs.edit().putBoolean(PREF_OFFLINE_ONLY, enabled).apply()
+        core.dispatch(NativeActions.setOfflineOnly(enabled))
     }
 
     private fun startMeshNow() {
@@ -237,5 +246,6 @@ class MainActivity : ComponentActivity() {
     private companion object {
         const val PREF_BLE = "ble_enabled"
         const val PREF_MESH = "mesh_enabled"
+        const val PREF_OFFLINE_ONLY = "offline_only"
     }
 }

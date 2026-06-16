@@ -18,6 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lan
 import androidx.compose.material3.AlertDialog
@@ -58,6 +59,7 @@ fun SettingsScreen(
     onBleToggle: (Boolean) -> Unit,
     meshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
+    onOfflineOnlyToggle: (Boolean) -> Unit,
 ) {
     var showIdentity by remember { mutableStateOf(false) }
     var confirmWipe by remember { mutableStateOf(false) }
@@ -102,6 +104,14 @@ fun SettingsScreen(
                 subtitle = "Let the whole device reach the mesh (uses the VPN slot)",
                 checked = meshEnabled,
                 onToggle = onMeshToggle,
+            )
+            RowDivider()
+            ToggleRow(
+                icon = Icons.Filled.CloudOff,
+                title = "Mesh-only",
+                subtitle = "Never use the internet relay/Blossom fallback — pull only over the mesh",
+                checked = state.offlineOnly,
+                onToggle = onOfflineOnlyToggle,
             )
         }
 

@@ -59,4 +59,9 @@ pub enum NativeAppAction {
     AddToCircle { npub: String, name: String },
     /// Forget a peer (remove from the Circle).
     RemoveFromCircle { npub: String },
+
+    /// Toggle "mesh-only": when enabled, never use the public IP relay/Blossom
+    /// fallback — pull only over the mesh. Lets you verify the mesh path even
+    /// when this device has internet (e.g. it's acting as a hotspot).
+    SetOfflineOnly { enabled: bool },
 }

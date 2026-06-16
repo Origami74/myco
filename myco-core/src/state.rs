@@ -33,6 +33,8 @@ pub struct AppState {
     pub circle: Vec<crate::content::CircleContact>,
     /// nsites discovered on Circle peers' relays (`SearchNsites` — "around me").
     pub discovered: Vec<crate::content::DiscoveredNsite>,
+    /// "Mesh-only": the IP online fallback is disabled (pull only over the mesh).
+    pub offline_only: bool,
 }
 
 /// The device identity, in the derived forms the UI shows.

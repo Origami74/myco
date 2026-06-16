@@ -89,6 +89,7 @@ data class AppState(
     val cache: CacheStatus,
     val circle: List<CircleContact>,
     val discovered: List<DiscoveredNsite>,
+    val offlineOnly: Boolean,
 ) {
     companion object {
         fun parse(json: String): AppState {
@@ -221,6 +222,7 @@ data class AppState(
                 cache = cache,
                 circle = circle,
                 discovered = discovered,
+                offlineOnly = o.optBoolean("offlineOnly"),
             )
         }
     }
@@ -352,4 +354,8 @@ object NativeActions {
 
     /** Discover nsites on connected Circle peers' relays ("nsites around me"). */
     fun searchNsites(): JSONObject = JSONObject().put("type", "search_nsites")
+
+    /** Toggle mesh-only: when enabled, don't use the public IP relay/Blossom fallback. */
+    fun setOfflineOnly(enabled: Boolean): JSONObject =
+        JSONObject().put("type", "set_offline_only").put("enabled", enabled)
 }

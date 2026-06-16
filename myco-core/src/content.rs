@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::join_all;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use nostr::nips::nip19::{FromBech32, ToBech32};
 use nostr::PublicKey;
 use nsite_deck::gateway::{self, Readiness};
@@ -110,6 +112,10 @@ pub struct Content {
     /// The pull source for not-yet-present sites. `None` in P2 M2 (local only);
     /// set to the IP online-fallback source in M3, the FIPS source in P3.
     source: Mutex<Option<Arc<dyn PeerSource>>>,
+    /// "Mesh-only": when true, `open_site` never uses the IP online fallback —
+    /// it pulls only over the mesh (holder + connected Circle peers). Lets you
+    /// verify the mesh path even when this device has internet (e.g. a hotspot).
+    offline_only: AtomicBool,
     library: Mutex<Vec<LibraryItem>>,
     library_path: PathBuf,
     /// The Circle: paired peers we pull from over the mesh. Persisted.
@@ -139,6 +145,7 @@ impl Content {
             relay,
             blobs,
             source: Mutex::new(None),
+            offline_only: AtomicBool::new(false),
             library: Mutex::new(library),
             library_path,
             circle: Mutex::new(circle),
@@ -152,6 +159,15 @@ impl Content {
     /// Install the pull source (IP fallback in M3; FIPS in P3).
     pub fn set_source(&self, source: Arc<dyn PeerSource>) {
         *self.source.lock().unwrap() = Some(source);
+    }
+
+    /// Toggle "mesh-only": when on, the IP online fallback is never used.
+    pub fn set_offline_only(&self, v: bool) {
+        self.offline_only.store(v, Ordering::Relaxed);
+    }
+
+    pub fn is_offline_only(&self) -> bool {
+        self.offline_only.load(Ordering::Relaxed)
     }
 
     /// The relay store (shared), for the mesh WS server.
@@ -260,8 +276,11 @@ impl Content {
                 }
             }
         }
-        if let Some(ip) = self.source.lock().unwrap().clone() {
-            sources.push(ip);
+        // The IP online fallback — unless mesh-only is enforced.
+        if !self.is_offline_only() {
+            if let Some(ip) = self.source.lock().unwrap().clone() {
+                sources.push(ip);
+            }
         }
         if sources.is_empty() {
             self.set_status(&addr, "unreachable", 0, 0, "Can't reach anyone who has this app yet.");

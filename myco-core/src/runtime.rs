@@ -259,6 +259,12 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
+            NativeAppAction::SetOfflineOnly { enabled } => {
+                if let Some(content) = &self.content {
+                    content.set_offline_only(enabled);
+                }
+                self.rev += 1;
+            }
         }
     }
 
@@ -462,6 +468,7 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.discovered_snapshot())
                 .unwrap_or_default(),
+            offline_only: self.content.as_ref().map(|c| c.is_offline_only()).unwrap_or(false),
         }
     }
 
