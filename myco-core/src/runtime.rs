@@ -1,6 +1,8 @@
 use std::path::Path;
 
+use fips::control::read_handle::ControlReadHandle;
 use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
 
 use crate::action::NativeAppAction;
 use crate::identity_store;
@@ -24,8 +26,14 @@ pub struct AppRuntime {
     node_status: String,
     /// Tokio runtime hosting the node's tasks. `None` only if it failed to build.
     rt: Option<Runtime>,
-    /// The embedded fips node. `None` if construction failed.
+    /// The embedded fips node, held until `StartNode` moves it into the loop task.
     node: Option<fips::Node>,
+    /// Lock-free read view of the running node's peer state (cloned out of the
+    /// node before it moves into the loop task; safe to read while the loop runs).
+    read_handle: Option<ControlReadHandle>,
+    /// The background task running `node.start()` + `run_rx_loop()`. Aborting it
+    /// drops the node and stops its transports.
+    loop_task: Option<JoinHandle<()>>,
 }
 
 impl AppRuntime {
@@ -59,6 +67,20 @@ impl AppRuntime {
         config.node.identity.nsec = Some(nsec);
         config.node.identity.persistent = true;
         config.tun.enabled = false;
+        // No control socket: we read peer state via the in-process control read
+        // handle (peer_views), not the Unix socket. The tick still publishes the
+        // snapshot regardless of this flag.
+        config.node.control.enabled = false;
+        // On Android, configure a BLE transport instance so node.start() brings up
+        // the AndroidIo backend (the Kotlin radio drives it via the injected
+        // bridge). Host builds have no BLE backend, so this is Android-only.
+        #[cfg(target_os = "android")]
+        {
+            config.transports.ble = fips::config::TransportInstances::Single(fips::config::BleConfig {
+                auto_connect: Some(true),
+                ..Default::default()
+            });
+        }
         let node = fips::Node::new(config)
             .map_err(|e| anyhow::anyhow!("fips Node::new failed: {e}"))?;
 
@@ -74,6 +96,8 @@ impl AppRuntime {
             node_status: "fips node constructed (not started)".to_string(),
             rt: Some(rt),
             node: Some(node),
+            read_handle: None,
+            loop_task: None,
         })
     }
 
@@ -88,6 +112,8 @@ impl AppRuntime {
             node_status: "error".to_string(),
             rt: None,
             node: None,
+            read_handle: None,
+            loop_task: None,
         }
     }
 
@@ -123,30 +149,48 @@ impl AppRuntime {
         if self.node_running {
             return;
         }
-        match (&self.rt, &mut self.node) {
-            (Some(rt), Some(node)) => match rt.block_on(node.start()) {
-                Ok(()) => {
-                    self.node_running = true;
-                    self.node_status = "running".to_string();
-                }
-                Err(e) => {
-                    self.error = format!("node start failed: {e}");
-                    self.node_status = "start failed".to_string();
-                }
-            },
-            _ => self.error = "no node to start".to_string(),
-        }
+        let node = match self.node.take() {
+            Some(n) => n,
+            None => {
+                // The node is consumed by the loop task on first start; a clean
+                // restart would need to rebuild it (P1 starts once).
+                self.error = "node already started".to_string();
+                return;
+            }
+        };
+        let rt = match self.rt.as_ref() {
+            Some(rt) => rt,
+            None => {
+                self.error = "no runtime".to_string();
+                return;
+            }
+        };
+        // Clone the lock-free read handle out before the node moves into the loop
+        // task — peer state is then readable while run_rx_loop owns the node.
+        let handle = node.control_read_handle();
+        let task = rt.spawn(async move {
+            let mut node = node;
+            if let Err(e) = node.start().await {
+                tracing::error!("fips node start failed: {e}");
+                return;
+            }
+            // Runs until the packet channel closes or the task is aborted.
+            if let Err(e) = node.run_rx_loop().await {
+                tracing::warn!("fips rx loop ended: {e}");
+            }
+        });
+        self.read_handle = Some(handle);
+        self.loop_task = Some(task);
+        self.node_running = true;
+        self.node_status = "running".to_string();
     }
 
     fn stop_node(&mut self) {
-        match (&self.rt, &mut self.node) {
-            (Some(rt), Some(node)) => {
-                if let Err(e) = rt.block_on(node.stop()) {
-                    self.error = format!("node stop failed: {e}");
-                }
-            }
-            _ => {}
+        // Aborting the loop task drops the node, stopping its transports.
+        if let Some(task) = self.loop_task.take() {
+            task.abort();
         }
+        self.read_handle = None;
         self.node_running = false;
         self.node_status = "stopped".to_string();
     }
@@ -165,6 +209,26 @@ impl AppRuntime {
     }
 
     pub fn state(&self) -> AppState {
+        // Live peers, read lock-free from the node's tick-published snapshot
+        // (empty until the loop runs / peers are seen). On Android every peer is
+        // a BLE peer (the only transport configured).
+        let ble_peers: Vec<BlePeer> = self
+            .read_handle
+            .as_ref()
+            .map(|h| {
+                h.peer_views()
+                    .into_iter()
+                    .map(|p| BlePeer {
+                        node_addr_hex: p.node_addr_hex,
+                        npub: p.npub,
+                        connected: p.connected,
+                        psm: 0,    // not surfaced in the snapshot yet
+                        rssi: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         AppState {
             rev: self.rev,
             error: self.error.clone(),
@@ -177,14 +241,10 @@ impl AppRuntime {
             ble: BleStatus {
                 enabled: self.ble_enabled,
                 role: "peripheral+central".to_string(),
-                // Placeholder: the real scan state comes from the BLE transport
-                // once the Android backend reports it (P1 M4).
                 scanning: self.ble_enabled && self.node_running,
-                adapter_name: "—".to_string(),
+                adapter_name: if self.node_running { "ble0".to_string() } else { "—".to_string() },
             },
-            // Populated from the BLE transport's discovery/pool once the Android
-            // backend exists (P1 M4); empty on the host (no BLE backend).
-            ble_peers: Vec::<BlePeer>::new(),
+            ble_peers,
         }
     }
 
