@@ -58,18 +58,26 @@ class MycoVpnService : VpnService() {
         // clamp (effective - 60) applied in the native bridge. Use the FIPS hint
         // only when it's already >= 1280 (a larger-MTU transport).
         val mtu = if (mtuHint in 1280..1500) mtuHint else 1280
+        val builder = Builder()
+            .setSession("Myco mesh")
+            .setMtu(mtu)
+            .addAddress(ula, 128) // this node's IPv6 ULA
+            // A dummy IPv4 address (no IPv4 route) keeps the IPv4 family
+            // "configured" so Myco's own IPv4 (the online fallback) bypasses the
+            // VPN instead of being blacked out by an IPv6-only tunnel.
+            .addAddress("10.255.255.254", 32)
+            .addRoute("fd00::", 8) // route ONLY the mesh ULA range
+            .setConfigureIntent(configIntent())
+        // Restrict the VPN to Myco itself: only our sync engine uses the mesh, so
+        // every OTHER app bypasses the tunnel entirely and keeps its normal
+        // internet untouched.
+        try {
+            builder.addAllowedApplication(packageName)
+        } catch (e: Exception) {
+            Log.w(TAG, "addAllowedApplication($packageName) failed", e)
+        }
         val pfd = try {
-            Builder()
-                .setSession("Myco mesh")
-                .setMtu(mtu)
-                .addAddress(ula, 128) // this node's IPv6 ULA
-                // A dummy IPv4 address (no IPv4 route) keeps the IPv4 family
-                // "configured" so real IPv4 traffic bypasses the VPN instead of
-                // being blacked out — without it an IPv6-only VPN drops all IPv4.
-                .addAddress("10.255.255.254", 32)
-                .addRoute("fd00::", 8) // route ONLY the mesh ULA range
-                .setConfigureIntent(configIntent())
-                .establish()
+            builder.establish()
         } catch (t: Throwable) {
             Log.e(TAG, "establish failed", t)
             null
