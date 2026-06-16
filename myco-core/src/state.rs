@@ -42,6 +42,9 @@ pub struct IdentityView {
     /// This node's mesh ULA (`fd00:: = fd + node_addr[0..15]`) — the address the
     /// Android VpnService assigns to the app-owned TUN.
     pub fips_ipv6: String,
+    /// FIPS's effective IPv6 MTU (`transport_mtu - 77`) — the MTU the VpnService
+    /// sets on the TUN so the kernel never hands FIPS oversized packets.
+    pub fips_mtu: u16,
 }
 
 impl IdentityView {
@@ -55,6 +58,7 @@ impl IdentityView {
             node_addr_hex: id.node_addr().to_string(),
             fips_addr: format!("{npub}.fips"),
             fips_ipv6,
+            fips_mtu: 0, // set by the runtime from node.effective_ipv6_mtu()
             own_npub: npub,
         }
     }

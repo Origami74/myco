@@ -60,7 +60,8 @@ impl IpPeerSource {
             relays,
             blossom_servers,
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(20))
+                // Generous: a blob can be MBs over a slow BLE mesh link.
+                .timeout(Duration::from_secs(60))
                 .build()
                 .unwrap_or_default(),
             timeout: Duration::from_secs(8),

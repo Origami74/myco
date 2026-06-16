@@ -7,15 +7,17 @@
 //! the fd (mesh → app). The ends live in statics, not on `AppRuntime`, so the
 //! blocking `next_packet` never holds the reducer lock — mirroring the BLE bridge.
 
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::mpsc::Sender as MeshSender;
 
-/// Clamp outbound TCP SYNs to a safe IPv6 MSS — the app-owned path bypasses the
-/// system-TUN reader's clamp (see `fips` `Node::enable_app_owned_tun` docs).
-/// 1220 = 1280 (the IPv6 minimum MTU) − 40 (IPv6 header) − 20 (TCP header).
-const MAX_MSS: u16 = 1220;
+/// Clamp outbound TCP SYNs to FIPS's MSS (the app-owned path bypasses the
+/// system-TUN reader's clamp; see `fips` `Node::enable_app_owned_tun`). Set on
+/// install to `effective_ipv6_mtu - 60`; the default is FIPS's effective MTU for
+/// the 1280 transport floor (`1280 - 77 - 60`).
+static MAX_MSS: AtomicU16 = AtomicU16::new(1143);
 
 #[allow(clippy::type_complexity)]
 static OUTBOUND: OnceLock<Mutex<Option<MeshSender<Vec<u8>>>>> = OnceLock::new();
@@ -30,17 +32,23 @@ fn inbound() -> &'static Mutex<Option<std::sync::mpsc::Receiver<Vec<u8>>>> {
     INBOUND.get_or_init(|| Mutex::new(None))
 }
 
-/// Install the node's app-owned-TUN channel ends. Replaces any prior install (the
-/// node is rebuilt on a BLE off→on cycle, yielding fresh channels).
-pub fn install(outbound_tx: MeshSender<Vec<u8>>, inbound_rx: std::sync::mpsc::Receiver<Vec<u8>>) {
+/// Install the node's app-owned-TUN channel ends and the MSS ceiling
+/// (`effective_ipv6_mtu - 60`). Replaces any prior install (the node is rebuilt on
+/// a BLE off→on cycle, yielding fresh channels).
+pub fn install(
+    outbound_tx: MeshSender<Vec<u8>>,
+    inbound_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    max_mss: u16,
+) {
     *outbound().lock().unwrap() = Some(outbound_tx);
     *inbound().lock().unwrap() = Some(inbound_rx);
+    MAX_MSS.store(max_mss, Ordering::Relaxed);
 }
 
 /// app → mesh: clamp the TCP MSS, then route an IPv6 packet read from the TUN fd
 /// into the mesh. Returns `false` if no TUN is installed or the queue is full.
 pub fn send_packet(mut packet: Vec<u8>) -> bool {
-    fips::upper::tcp_mss::clamp_tcp_mss(&mut packet, MAX_MSS);
+    fips::upper::tcp_mss::clamp_tcp_mss(&mut packet, MAX_MSS.load(Ordering::Relaxed));
     match outbound().lock().unwrap().as_ref() {
         Some(tx) => tx.try_send(packet).is_ok(),
         None => false,
@@ -63,7 +71,7 @@ mod tests {
     async fn install_send_next_roundtrip() {
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
         let (in_tx, in_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        install(out_tx, in_rx);
+        install(out_tx, in_rx, 1143);
 
         // app → mesh: send_packet pushes into the node-side outbound channel.
         // (A short non-TCP packet is left unchanged by the MSS clamp.)

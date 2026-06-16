@@ -15,6 +15,7 @@ tracing = { workspace = true }
 axum = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true }
+socket2 = { workspace = true }
 
 [dev-dependencies]
 nsite-deck = { path = "../nsite-deck", features = ["testing"] }

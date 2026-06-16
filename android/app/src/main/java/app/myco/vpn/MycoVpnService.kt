@@ -38,11 +38,14 @@ class MycoVpnService : VpnService() {
             stopSelf()
             return START_NOT_STICKY
         }
-        startTun(intent?.getStringExtra(EXTRA_ULA).orEmpty())
+        startTun(
+            intent?.getStringExtra(EXTRA_ULA).orEmpty(),
+            intent?.getIntExtra(EXTRA_MTU, 0) ?: 0,
+        )
         return START_STICKY
     }
 
-    private fun startTun(ula: String) {
+    private fun startTun(ula: String, mtuHint: Int) {
         if (running.get()) return
         if (ula.isEmpty()) {
             stopSelf()
@@ -50,11 +53,20 @@ class MycoVpnService : VpnService() {
         }
         startForegroundCompat()
 
+        // The TUN MTU must be >= the IPv6 minimum (1280); FIPS's effective MTU
+        // (transport_mtu - 77) is usually below that, so the real fit is the MSS
+        // clamp (effective - 60) applied in the native bridge. Use the FIPS hint
+        // only when it's already >= 1280 (a larger-MTU transport).
+        val mtu = if (mtuHint in 1280..1500) mtuHint else 1280
         val pfd = try {
             Builder()
                 .setSession("Myco mesh")
-                .setMtu(MTU)
-                .addAddress(ula, 128) // this node's ULA
+                .setMtu(mtu)
+                .addAddress(ula, 128) // this node's IPv6 ULA
+                // A dummy IPv4 address (no IPv4 route) keeps the IPv4 family
+                // "configured" so real IPv4 traffic bypasses the VPN instead of
+                // being blacked out — without it an IPv6-only VPN drops all IPv4.
+                .addAddress("10.255.255.254", 32)
                 .addRoute("fd00::", 8) // route ONLY the mesh ULA range
                 .setConfigureIntent(configIntent())
                 .establish()
@@ -63,6 +75,13 @@ class MycoVpnService : VpnService() {
             null
         }
         if (pfd == null) {
+            Log.e(TAG, "establish() returned null — VPN not consented or Builder rejected (ula=$ula)")
+            android.widget.Toast.makeText(
+                this,
+                "Couldn't start the mesh adapter — another VPN may be active. " +
+                    "Turn off any always-on VPN, then try again.",
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
             stopSelf()
             return
         }
@@ -76,7 +95,7 @@ class MycoVpnService : VpnService() {
     /** TUN fd → mesh: read IPv6 packets and hand them to FIPS. */
     private fun readLoop(pfd: ParcelFileDescriptor) {
         val input = FileInputStream(pfd.fileDescriptor)
-        val buf = ByteArray(MTU + 64)
+        val buf = ByteArray(2048)
         while (running.get()) {
             val n = try {
                 input.read(buf)
@@ -91,7 +110,7 @@ class MycoVpnService : VpnService() {
     /** mesh → TUN fd: pull IPv6 packets from FIPS and write them. */
     private fun writeLoop(pfd: ParcelFileDescriptor) {
         val output = FileOutputStream(pfd.fileDescriptor)
-        val buf = ByteArray(MTU + 64)
+        val buf = ByteArray(2048)
         while (running.get()) {
             val n = NativeCore.tunNextPacket(buf, 1000)
             if (n > 0) {
@@ -156,15 +175,17 @@ class MycoVpnService : VpnService() {
 
     companion object {
         const val EXTRA_ULA = "app.myco.extra.ULA"
+        const val EXTRA_MTU = "app.myco.extra.MTU"
         private const val ACTION_STOP = "app.myco.vpn.STOP"
         private const val CHANNEL = "myco_mesh"
         private const val NOTIF_ID = 42
-        private const val MTU = 1280
         private const val TAG = "MycoVpn"
 
-        fun start(context: Context, ula: String) {
+        fun start(context: Context, ula: String, mtu: Int) {
             context.startService(
-                Intent(context, MycoVpnService::class.java).putExtra(EXTRA_ULA, ula),
+                Intent(context, MycoVpnService::class.java)
+                    .putExtra(EXTRA_ULA, ula)
+                    .putExtra(EXTRA_MTU, mtu),
             )
         }
 

@@ -88,6 +88,7 @@ class MainActivity : ComponentActivity() {
         if (enabled) {
             // Android requires user consent before any app can run a VPN.
             val consent = VpnService.prepare(this)
+            android.util.Log.i("MycoVpn", "setMeshEnabled(true): consent needed=${consent != null}")
             if (consent != null) vpnConsentLauncher.launch(consent) else startMeshNow()
         } else {
             MycoVpnService.stop(this)
@@ -95,9 +96,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startMeshNow() {
-        val ula = core.state().fipsIpv6
+        val state = core.state()
+        val ula = state.fipsIpv6
+        android.util.Log.i("MycoVpn", "startMeshNow: ula=$ula mtu=${state.fipsMtu}")
         if (ula.isNotEmpty()) {
-            MycoVpnService.start(this, ula)
+            MycoVpnService.start(this, ula, state.fipsMtu)
         } else {
             Toast.makeText(this, "Mesh address not ready yet", Toast.LENGTH_SHORT).show()
         }

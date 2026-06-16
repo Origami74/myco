@@ -23,6 +23,10 @@ pub enum SyncOutcome {
     Incomplete { present: usize, total: usize },
 }
 
+/// How many times to retry a single blob fetch before declaring a site
+/// incomplete — a constrained mesh link (BLE) drops transiently.
+const BLOB_FETCH_RETRIES: usize = 4;
+
 /// Lowercase-hex sha256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -96,6 +100,7 @@ pub async fn sync_site(
     blobs: &dyn BlobStore,
     source: &dyn PeerSource,
     addr: &SiteAddr,
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> anyhow::Result<SyncOutcome> {
     let Some(manifest_event) = source
         .fetch_manifest(&addr.author, addr.d_tag.as_deref())
@@ -112,24 +117,35 @@ pub async fn sync_site(
         manifest.blob_hashes().map(|h| h.to_string()).collect();
     let total = needed.len();
     let mut present = 0usize;
+    progress(present, total);
 
     for hash in &needed {
         if blobs.has(hash).await {
             present += 1;
+            progress(present, total);
             continue;
         }
-        let fetched = source.fetch_blob(hash, &manifest.servers).await?;
+        // Retry each blob — a constrained mesh (BLE) link drops transiently, and
+        // aborting the whole site on one hiccup is what made syncs read
+        // "incomplete" mid-download.
+        let mut fetched: Option<Vec<u8>> = None;
+        for _ in 0..BLOB_FETCH_RETRIES {
+            match source.fetch_blob(hash, &manifest.servers).await {
+                // Self-authenticating: only accept bytes that hash to the name.
+                Ok(Some(bytes)) if sha256_hex(&bytes) == *hash => {
+                    fetched = Some(bytes);
+                    break;
+                }
+                Ok(_) => {} // missing or mismatch — retry
+                Err(_) => {} // transport error — retry
+            }
+        }
         let Some(bytes) = fetched else {
             return Ok(SyncOutcome::Incomplete { present, total });
         };
-        let got = sha256_hex(&bytes);
-        if got != *hash {
-            // Self-authenticating: a mismatch means the source served bad bytes;
-            // abort rather than cache corruption.
-            return Ok(SyncOutcome::Incomplete { present, total });
-        }
         blobs.put(&bytes).await?;
         present += 1;
+        progress(present, total);
     }
 
     // All blobs verified+stored → activate by storing the signed manifest.

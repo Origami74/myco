@@ -52,3 +52,6 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # The embedded relay (WS, NIP-01) + Blossom (HTTP) servers that serve the node's
 # manifest events + blobs to mesh peers over `.fips` (P3).
 axum = { version = "0.8", features = ["ws"] }
+# Bind the mesh servers IPV6_V6ONLY so `[::]:port` doesn't collide with another
+# app squatting on `127.0.0.1:port` (the mesh is IPv6-only anyway).
+socket2 = "0.6"

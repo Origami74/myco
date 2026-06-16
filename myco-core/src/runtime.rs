@@ -64,7 +64,10 @@ impl AppRuntime {
         let rt = Runtime::new().map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
 
         let node = Self::build_node(data_dir)?;
-        let identity = IdentityView::from_identity(node.identity());
+        let mut identity = IdentityView::from_identity(node.identity());
+        // FIPS's effective IPv6 MTU (transport_mtu - 77). The VpnService sets this
+        // on the TUN and the MSS clamp derives from it, so packets fit the mesh.
+        identity.fips_mtu = node.effective_ipv6_mtu();
 
         // The content layer (relay + Blossom + gateway + Library) lives for the
         // whole process; it is independent of the node's start/stop lifecycle.
@@ -82,33 +85,51 @@ impl AppRuntime {
 
         // Serve the relay + Blossom over the mesh so paired peers can pull this
         // device's nsites at ws://<npub>.fips:4869 / http://<npub>.fips:24242.
-        // Bound on `[::]` so the node's ULA on the app-owned TUN is reachable;
-        // Android-only (the host has no TUN, and binding fixed ports would clash
-        // across parallel host tests). See docs/reference/ports.md.
+        // Bound IPV6_V6ONLY (the mesh is IPv6-only) so `[::]:port` doesn't collide
+        // with another app squatting on `127.0.0.1:port`; a port already in use
+        // surfaces as a warning. Android-only (the host has no TUN). ports.md.
+        #[allow(unused_mut)]
+        let mut mesh_warning = String::new();
         #[cfg(target_os = "android")]
         {
             use std::net::SocketAddr;
+            let _guard = rt.enter(); // runtime context for TcpListener::from_std
             let relay = content.relay();
             let blobs = content.blobs();
-            rt.spawn(async move {
-                let addr: SocketAddr = "[::]:4869".parse().expect("relay addr");
-                if let Err(e) = myco_relay::server::serve(relay, addr).await {
-                    tracing::error!(error = %e, "mesh relay server exited");
+            match myco_relay::server::bind("[::]:4869".parse::<SocketAddr>().unwrap()) {
+                Ok(listener) => {
+                    rt.spawn(async move {
+                        if let Err(e) = myco_relay::server::serve_on(relay, listener).await {
+                            tracing::error!(error = %e, "mesh relay server exited");
+                        }
+                    });
                 }
-            });
-            rt.spawn(async move {
-                let addr: SocketAddr = "[::]:24242".parse().expect("blossom addr");
-                if let Err(e) = myco_blossom::server::serve(blobs, addr).await {
-                    tracing::error!(error = %e, "mesh blossom server exited");
+                Err(e) => {
+                    mesh_warning = format!("relay port 4869 unavailable (another app using it?): {e}");
                 }
-            });
+            }
+            match myco_blossom::server::bind("[::]:24242".parse::<SocketAddr>().unwrap()) {
+                Ok(listener) => {
+                    rt.spawn(async move {
+                        if let Err(e) = myco_blossom::server::serve_on(blobs, listener).await {
+                            tracing::error!(error = %e, "mesh blossom server exited");
+                        }
+                    });
+                }
+                Err(e) => {
+                    if !mesh_warning.is_empty() {
+                        mesh_warning.push_str("; ");
+                    }
+                    mesh_warning.push_str(&format!("blossom port 24242 unavailable: {e}"));
+                }
+            }
         }
 
         Ok(Self {
             app_version: app_version.to_string(),
             data_dir: data_dir.to_string(),
             rev: 0,
-            error: String::new(),
+            error: mesh_warning,
             identity,
             ble_enabled: false,
             node_running: false,
@@ -302,8 +323,11 @@ impl AppRuntime {
         // these channels. Android-only (the host has no VpnService).
         #[cfg(target_os = "android")]
         {
+            // MSS ceiling from FIPS's effective IPv6 MTU (transport_mtu-77) minus
+            // the IPv6+TCP headers — same as the system-TUN path's max_mss.
+            let max_mss = node.effective_ipv6_mtu().saturating_sub(60);
             let (tun_outbound_tx, tun_inbound_rx) = node.enable_app_owned_tun();
-            crate::tun_bridge::install(tun_outbound_tx, tun_inbound_rx);
+            crate::tun_bridge::install(tun_outbound_tx, tun_inbound_rx, max_mss);
         }
         // Clone the lock-free read handle out before the node moves into the loop
         // task — peer state is then readable while run_rx_loop owns the node.

@@ -42,7 +42,9 @@ import app.myco.core.NativeActions
 import app.myco.core.SiteStatus
 import app.myco.share.NsiteShare
 import kotlin.math.pow
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
  * P1 developer screen: device identity, embedded-node status, and the BLE
@@ -66,9 +68,10 @@ fun DeveloperScreen(
     LaunchedEffect(Unit) {
         while (true) {
             delay(1000)
-            // Pure read: the node advances on its own background loop, so the UI
-            // only needs to read fresh state (no Tick, so `rev` doesn't churn).
-            state = client.state()
+            // Read off the main thread: state() crosses JNI and walks the blob dir
+            // (cache counts), which would jank the UI during a sync. Pure read (no
+            // Tick), so `rev` doesn't churn.
+            state = withContext(Dispatchers.IO) { client.state() }
         }
     }
 

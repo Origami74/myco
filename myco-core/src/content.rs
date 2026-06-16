@@ -210,12 +210,23 @@ impl Content {
             return;
         }
 
+        // Live progress so the UI shows "X/Y files" instead of sitting at 0/0.
+        let progress = |present: usize, total: usize| {
+            self.set_status(&addr, "syncing", present as u64, total as u64, "Downloading…");
+        };
+
         // Try each in order; the first that goes Ready wins. Keep the best
         // non-ready outcome (incomplete > unreachable) to report if none succeed.
         let mut best = SyncOutcome::Unreachable;
         for source in &sources {
-            match sync::sync_site(self.relay.as_ref(), self.blobs.as_ref(), source.as_ref(), &addr)
-                .await
+            match sync::sync_site(
+                self.relay.as_ref(),
+                self.blobs.as_ref(),
+                source.as_ref(),
+                &addr,
+                &progress,
+            )
+            .await
             {
                 Ok(SyncOutcome::Ready) => {
                     let title = self.lookup_title(&addr).await;

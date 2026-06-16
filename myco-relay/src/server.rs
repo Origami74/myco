@@ -22,8 +22,29 @@ use crate::RelayStore;
 
 /// Serve the relay on `addr` until the future is dropped/aborted.
 pub async fn serve(store: Arc<RelayStore>, addr: SocketAddr) -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_on(store, listener).await
+    serve_on(store, bind(addr)?).await
+}
+
+/// Bind a listener for the relay. For an IPv6 address this is **`IPV6_V6ONLY`**,
+/// so `[::]:port` does not collide with another app squatting on
+/// `127.0.0.1:port` — the mesh is IPv6-only. Returns the bind error so the caller
+/// can warn the user (e.g. the port is already in use). Must be called within a
+/// Tokio runtime.
+pub fn bind(addr: SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
+    let domain = if addr.is_ipv6() {
+        socket2::Domain::IPV6
+    } else {
+        socket2::Domain::IPV4
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(true)?;
+    }
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+    Ok(tokio::net::TcpListener::from_std(socket.into())?)
 }
 
 /// Serve on an already-bound listener (lets the caller pick an ephemeral port).
