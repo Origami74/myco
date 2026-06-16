@@ -188,9 +188,13 @@ private fun NsiteTile(
     onLongClick: () -> Unit,
 ) {
     var icon by remember(site.host) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(site.host) {
-        icon = withContext(Dispatchers.IO) {
-            runCatching { NsiteIcons.fetch(client, "${site.host}.nsite") }.getOrNull()
+    // Re-check for the icon as blobs arrive (the sync fetches it first), until found
+    // — so the real app icon appears as soon as possible, then the rest downloads.
+    LaunchedEffect(site.host, site.filesPulled) {
+        if (icon == null) {
+            icon = withContext(Dispatchers.IO) {
+                runCatching { NsiteIcons.fetch(client, "${site.host}.nsite") }.getOrNull()
+            }
         }
     }
     val ready = site.state == "ready"

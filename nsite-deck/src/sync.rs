@@ -113,8 +113,24 @@ pub async fn sync_site(
         .map_err(|e| anyhow::anyhow!("fetched manifest verification failed: {e}"))?;
     let manifest = Manifest::from_event(manifest_event.clone())?;
 
-    let needed: std::collections::HashSet<String> =
-        manifest.blob_hashes().map(|h| h.to_string()).collect();
+    // Fetch the icon (and landing page) blobs first, so the UI can show the real
+    // app icon while the rest of the site still downloads (iOS-install style).
+    const PRIORITY_PATHS: &[&str] =
+        &["/favicon.ico", "/favicon.png", "/apple-touch-icon.png", "/index.html"];
+    let mut needed: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in PRIORITY_PATHS {
+        if let Some(hash) = manifest.paths.get(*p) {
+            if seen.insert(hash.clone()) {
+                needed.push(hash.clone());
+            }
+        }
+    }
+    for hash in manifest.blob_hashes() {
+        if seen.insert(hash.to_string()) {
+            needed.push(hash.to_string());
+        }
+    }
     let total = needed.len();
     let mut present = 0usize;
     progress(present, total);
