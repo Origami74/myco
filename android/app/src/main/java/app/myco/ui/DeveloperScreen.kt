@@ -25,7 +25,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import app.myco.core.AppCoreClient
+import app.myco.core.BleAdvert
 import app.myco.core.BlePeer
+import kotlin.math.pow
 import kotlinx.coroutines.delay
 
 /**
@@ -91,6 +93,17 @@ fun DeveloperScreen(client: AppCoreClient, onBleToggle: (Boolean) -> Unit) {
                 state.blePeers.forEach { PeerRow(it) }
             }
 
+            Text(
+                "Discovered (radio) (${state.bleAdverts.size})",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            if (state.bleAdverts.isEmpty()) {
+                Text("— none —", style = MaterialTheme.typography.bodyMedium)
+            } else {
+                state.bleAdverts.forEach { AdvertRow(it) }
+            }
+
             Field("Version / rev", "${state.appVersion} / rev ${state.rev}")
         }
         }
@@ -110,6 +123,25 @@ private fun PeerRow(peer: BlePeer) {
         Mono("psm / rssi", "${peer.psm}${peer.rssi?.let { " / $it dBm" } ?: ""}")
     }
 }
+
+@Composable
+private fun AdvertRow(a: BleAdvert) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Mono("addr", a.addr)
+        Mono("psm / rssi / dist", "${a.psm} / ${a.rssi} dBm / ~${"%.1f".format(approxMeters(a.rssi))} m")
+    }
+}
+
+/**
+ * Very rough distance estimate from RSSI via the log-distance path-loss model:
+ * d ≈ 10^((txPower@1m − rssi) / (10·n)). BLE RSSI→distance is unreliable
+ * (multipath, orientation, chipset), so this is a ballpark, not a measurement.
+ */
+private const val TX_POWER_AT_1M = -59.0 // typical BLE reference RSSI at 1 m
+private const val PATH_LOSS_N = 2.0      // free-space-ish exponent
+
+private fun approxMeters(rssi: Int): Double =
+    10.0.pow((TX_POWER_AT_1M - rssi) / (10.0 * PATH_LOSS_N))
 
 @Composable
 private fun Mono(label: String, value: String) {

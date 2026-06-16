@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 
 use crate::action::NativeAppAction;
 use crate::identity_store;
-use crate::state::{AppState, BlePeer, BleStatus, IdentityView, NodeStatus};
+use crate::state::{AppState, BleAdvert, BlePeer, BleStatus, IdentityView, NodeStatus};
 
 /// The app runtime behind the FFI. Owns the device identity, a multi-thread
 /// Tokio runtime, and the embedded fips node. A `Mutex<AppRuntime>` is what the
@@ -249,7 +249,27 @@ impl AppRuntime {
                 adapter_name: if self.node_running { "ble0".to_string() } else { "—".to_string() },
             },
             ble_peers,
+            ble_adverts: self.ble_adverts(),
         }
+    }
+
+    /// Raw scan adverts (address / PSM / RSSI) from the BLE radio bridge. The
+    /// radio is Android-only; on the host there is no bridge.
+    #[cfg(target_os = "android")]
+    fn ble_adverts(&self) -> Vec<BleAdvert> {
+        fips::transport::ble::android_io::android_ble_bridge()
+            .map(|b| {
+                b.advert_views()
+                    .into_iter()
+                    .map(|a| BleAdvert { addr: a.addr, psm: a.psm, rssi: a.rssi })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn ble_adverts(&self) -> Vec<BleAdvert> {
+        Vec::new()
     }
 
     pub fn state_json(&self) -> String {

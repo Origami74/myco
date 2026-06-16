@@ -11,6 +11,13 @@ data class BlePeer(
     val rssi: Int?,
 )
 
+/** A raw scan advert (radio-level view, keyed by BLE address). */
+data class BleAdvert(
+    val addr: String,
+    val psm: Int,
+    val rssi: Int,
+)
+
 /** Parsed slice of the core's state snapshot (P1 surface: identity + node + BLE). */
 data class AppState(
     val rev: Long,
@@ -27,6 +34,7 @@ data class AppState(
     val bleScanning: Boolean,
     val bleAdapterName: String,
     val blePeers: List<BlePeer>,
+    val bleAdverts: List<BleAdvert>,
 ) {
     companion object {
         fun parse(json: String): AppState {
@@ -51,6 +59,15 @@ data class AppState(
                     }
                 }
             }
+            val advertsJson = o.optJSONArray("bleAdverts")
+            val adverts = buildList {
+                if (advertsJson != null) {
+                    for (i in 0 until advertsJson.length()) {
+                        val a = advertsJson.optJSONObject(i) ?: continue
+                        add(BleAdvert(addr = a.optString("addr"), psm = a.optInt("psm"), rssi = a.optInt("rssi")))
+                    }
+                }
+            }
             return AppState(
                 rev = o.optLong("rev"),
                 error = o.optString("error"),
@@ -66,6 +83,7 @@ data class AppState(
                 bleScanning = ble.optBoolean("scanning"),
                 bleAdapterName = ble.optString("adapterName"),
                 blePeers = peers,
+                bleAdverts = adverts,
             )
         }
     }
@@ -93,8 +111,20 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
         }
     }
 
+    /** The opaque native handle (passed to bleBridgeNew). 0 if closed. */
+    fun handle(): Long = handle
+
     private fun requireHandle(): Long {
         check(handle != 0L) { "native app core is closed" }
         return handle
     }
+}
+
+/** Builders for the reducer actions (see docs/reference/ffi-surface.md). */
+object NativeActions {
+    fun tick(): JSONObject = JSONObject().put("type", "tick")
+    fun startNode(): JSONObject = JSONObject().put("type", "start_node")
+    fun stopNode(): JSONObject = JSONObject().put("type", "stop_node")
+    fun setBleEnabled(enabled: Boolean): JSONObject =
+        JSONObject().put("type", "set_ble_enabled").put("enabled", enabled)
 }

@@ -154,7 +154,7 @@ class BleRadio(context: Context) {
                 val psm = if (sd != null && sd.size >= 2) {
                     (sd[0].toInt() and 0xFF) or ((sd[1].toInt() and 0xFF) shl 8) // 16-bit LE
                 } else 0
-                NativeCore.bleDeliverScan(bridgeHandle, addr, psm)
+                NativeCore.bleDeliverScan(bridgeHandle, addr, psm, result.rssi)
             }
 
             override fun onScanFailed(errorCode: Int) {

@@ -17,6 +17,9 @@ pub struct AppState {
     /// in-band pubkey exchange, never by MAC. Empty until the BLE backend runs
     /// (Android, P1 M4).
     pub ble_peers: Vec<BlePeer>,
+    /// Raw scan adverts (address / PSM / RSSI) — the radio-level "discovered
+    /// devices" view, distinct from the mesh-level `ble_peers`.
+    pub ble_adverts: Vec<BleAdvert>,
 }
 
 /// The device identity, in the derived forms the UI shows.
@@ -77,4 +80,17 @@ pub struct BlePeer {
     /// Learned from the peer's advert (the `BleAddr → PSM` map).
     pub psm: u16,
     pub rssi: Option<i32>,
+}
+
+/// One discovered scan advert — the radio-level view (per BLE address), where
+/// PSM and RSSI are actually known (the mesh `BlePeer` is keyed by node_addr).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BleAdvert {
+    /// `BleAddr` string (`adapter/AA:BB:..`); the MAC rotates with privacy.
+    pub addr: String,
+    /// Advertised listener PSM (0 if absent).
+    pub psm: u16,
+    /// Signal strength, dBm (negative).
+    pub rssi: i32,
 }

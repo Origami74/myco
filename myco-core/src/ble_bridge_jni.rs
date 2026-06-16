@@ -223,10 +223,11 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverScan(
     handle: jlong,
     addr: JString,
     psm: jint,
+    rssi: jint,
 ) {
     let Some(bridge) = (unsafe { bridge_ref(handle) }) else { return };
     if let Some(ble_addr) = jstring_to_addr(&mut env, &addr) {
-        bridge.deliver_scan(ble_addr, psm.max(0) as u16);
+        bridge.deliver_scan(ble_addr, psm.max(0) as u16, rssi);
     }
 }
 
