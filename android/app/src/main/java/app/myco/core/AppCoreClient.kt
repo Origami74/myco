@@ -270,8 +270,11 @@ object NativeActions {
         JSONObject().put("type", "set_ble_enabled").put("enabled", enabled)
 
     // --- content (P2) ---
-    fun openNsite(link: String): JSONObject =
+    /** `holder` is a sharer's device npub (from a share QR) to pull from over the
+     *  mesh first; null for a plain pasted link. */
+    fun openNsite(link: String, holder: String? = null): JSONObject =
         JSONObject().put("type", "open_nsite").put("link", link)
+            .apply { if (!holder.isNullOrEmpty()) put("holder", holder) }
     fun importNsite(dir: String): JSONObject =
         JSONObject().put("type", "import_nsite").put("dir", dir)
     fun addToLibrary(link: String): JSONObject =

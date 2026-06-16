@@ -21,6 +21,8 @@ use async_trait::async_trait;
 use nostr::{Event, PublicKey};
 use nsite_deck::seams::{ManifestFilter, RelayBackend};
 
+pub mod server;
+
 /// A replaceable-slot key: `(kind, author, d-tag)`. For replaceable kinds the
 /// d-tag is `None`; for addressable kinds it is the `d` tag value.
 type Slot = (u16, [u8; 32], Option<String>);

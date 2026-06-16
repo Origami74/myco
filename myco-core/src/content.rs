@@ -108,6 +108,16 @@ impl Content {
         *self.source.lock().unwrap() = Some(source);
     }
 
+    /// The relay store (shared), for the mesh WS server.
+    pub fn relay(&self) -> Arc<RelayStore> {
+        self.relay.clone()
+    }
+
+    /// The blob store (shared), for the mesh Blossom server.
+    pub fn blobs(&self) -> Arc<FsBlobStore> {
+        self.blobs.clone()
+    }
+
     // --- gateway (the in-app WebView serve path) ---
 
     /// Serve one `<host>.nsite/<path>` request direct from the local stores.
@@ -140,7 +150,9 @@ impl Content {
                 let status = self.sites.lock().unwrap().get(&host_label).cloned();
                 let syncing = status.as_ref().map(|s| s.state.as_str()) == Some("syncing");
                 if !syncing {
-                    tokio::spawn(Arc::clone(&self).open_site(addr));
+                    // A WebView load doesn't know the holder; the IP fallback (and
+                    // any earlier mesh attempt's cached result) covers the retry.
+                    tokio::spawn(Arc::clone(&self).open_site(addr, None));
                 }
                 resp = GatewayResponse {
                     status: 503,
@@ -155,11 +167,13 @@ impl Content {
 
     // --- site entry ---
 
-    /// Ensure a site is present, syncing from the pull source if needed, updating
-    /// its `siteStatus`. Safe to call repeatedly (single sites converge); meant to
-    /// be `spawn`ed, never awaited under the reducer lock.
-    pub async fn open_site(self: Arc<Self>, addr: SiteAddr) {
-        let host = addr.host_label();
+    /// Ensure a site is present, syncing if needed, updating its `siteStatus`.
+    /// Source order (`docs/design/nsite-layer.md` §5): local → the **holder**'s
+    /// relay/Blossom over the mesh (whoever shared it) → the public IP fallback.
+    /// `holder` is the sharer's device npub from a share QR (`None` for a pasted
+    /// link). Safe to call repeatedly; meant to be `spawn`ed, never awaited under
+    /// the reducer lock.
+    pub async fn open_site(self: Arc<Self>, addr: SiteAddr, holder: Option<String>) {
         self.set_status(&addr, "syncing", 0, 0, "Loading…");
 
         // Already complete locally? Serve direct, no fetch.
@@ -167,8 +181,8 @@ impl Content {
             Ok(Readiness::Ready(m)) => {
                 let n = m.paths.len() as u64;
                 self.set_status_titled(&addr, m.title.as_deref(), "ready", n, n, "Ready");
-                // Opening a site that is present "installs" it (pins to Library) so
-                // it persists and re-lists after an app restart.
+                // Opening a present site "installs" it (pins to Library) so it
+                // persists and re-lists after an app restart.
                 self.add_to_library(&addr, m.title.as_deref(), now_secs());
                 return;
             }
@@ -179,45 +193,58 @@ impl Content {
             }
         }
 
-        // Not present — pull from the source, if one is installed.
-        let source = self.source.lock().unwrap().clone();
-        let Some(source) = source else {
-            self.set_status(
-                &addr,
-                "unreachable",
-                0,
-                0,
-                "Can't reach anyone who has this app yet.",
-            );
-            return;
-        };
-
-        match sync::sync_site(self.relay.as_ref(), self.blobs.as_ref(), source.as_ref(), &addr)
-            .await
-        {
-            Ok(SyncOutcome::Ready) => {
-                let title = self.lookup_title(&addr).await;
-                let n = self.manifest_file_count(&addr).await;
-                self.set_status_titled(&addr, title.as_deref(), "ready", n, n, "Ready");
-                self.add_to_library(&addr, title.as_deref(), now_secs());
+        // Ordered sources: the mesh holder first (pull from whoever shared it),
+        // then the public IP online fallback.
+        let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
+        if let Some(npub) = holder.as_deref() {
+            match crate::ip_source::mesh_source_for(npub) {
+                Ok(mesh) => sources.push(Arc::new(mesh)),
+                Err(e) => tracing::warn!(error = %e, "skipping mesh source"),
             }
-            Ok(SyncOutcome::Unreachable) => self.set_status(
-                &addr,
-                "unreachable",
-                0,
-                0,
-                "Can't reach anyone who has this app yet.",
-            ),
-            Ok(SyncOutcome::Incomplete { present, total }) => self.set_status(
+        }
+        if let Some(ip) = self.source.lock().unwrap().clone() {
+            sources.push(ip);
+        }
+        if sources.is_empty() {
+            self.set_status(&addr, "unreachable", 0, 0, "Can't reach anyone who has this app yet.");
+            return;
+        }
+
+        // Try each in order; the first that goes Ready wins. Keep the best
+        // non-ready outcome (incomplete > unreachable) to report if none succeed.
+        let mut best = SyncOutcome::Unreachable;
+        for source in &sources {
+            match sync::sync_site(self.relay.as_ref(), self.blobs.as_ref(), source.as_ref(), &addr)
+                .await
+            {
+                Ok(SyncOutcome::Ready) => {
+                    let title = self.lookup_title(&addr).await;
+                    let n = self.manifest_file_count(&addr).await;
+                    self.set_status_titled(&addr, title.as_deref(), "ready", n, n, "Ready");
+                    self.add_to_library(&addr, title.as_deref(), now_secs());
+                    return;
+                }
+                Ok(outcome @ SyncOutcome::Incomplete { .. }) => best = outcome,
+                Ok(SyncOutcome::Unreachable) => {}
+                Err(e) => tracing::warn!(error = %e, "sync source errored"),
+            }
+        }
+        match best {
+            SyncOutcome::Incomplete { present, total } => self.set_status(
                 &addr,
                 "incomplete",
                 present as u64,
                 total as u64,
                 "This app didn't download completely. Try again.",
             ),
-            Err(e) => self.set_status(&addr, "incomplete", 0, 0, &format!("error: {e}")),
+            _ => self.set_status(
+                &addr,
+                "unreachable",
+                0,
+                0,
+                "Can't reach anyone who has this app yet.",
+            ),
         }
-        let _ = host; // host_label captured inside set_status
     }
 
     /// Import an externally-authored site from a bundle dir: `manifest.json` (the
@@ -627,7 +654,7 @@ mod tests {
             author: site.author,
             d_tag: None,
         };
-        content.clone().open_site(addr).await;
+        content.clone().open_site(addr, None).await;
 
         let sites = content.sites_snapshot();
         assert_eq!(sites.len(), 1);

@@ -49,3 +49,6 @@ thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The embedded relay (WS, NIP-01) + Blossom (HTTP) servers that serve the node's
+# manifest events + blobs to mesh peers over `.fips` (P3).
+axum = { version = "0.8", features = ["ws"] }

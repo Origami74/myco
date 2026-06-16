@@ -12,6 +12,10 @@ anyhow = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
+axum = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+reqwest = { workspace = true }

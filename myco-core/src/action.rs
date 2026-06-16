@@ -22,10 +22,16 @@ pub enum NativeAppAction {
 
     // --- site entry / Library (P2) ---
     /// Resolve a pasted nsite link / `<host>` and drive its sync to readiness
-    /// (author-signed manifest + its blobs) from the pull source. Spawns the
-    /// sync; does NOT launch any UI (Kotlin opens the fullscreen NsiteActivity on
-    /// `ready`). Progress is observed via `siteStatus` on `Tick`.
-    OpenNsite { link: String },
+    /// (author-signed manifest + its blobs). Spawns the sync; does NOT launch any
+    /// UI (Kotlin opens the fullscreen NsiteActivity on `ready`). Progress is
+    /// observed via `siteStatus` on `Tick`. `holder` is the sharer's device npub
+    /// from a scanned share QR — the mesh peer to pull from first (the public IP
+    /// fallback is tried after); `None` for a plain pasted link.
+    OpenNsite {
+        link: String,
+        #[serde(default)]
+        holder: Option<String>,
+    },
     /// DEV-ONLY side-load: import an already-signed manifest + blobs from a bundle
     /// directory (`<dir>/manifest.json` + `<dir>/blobs/<sha256>`). The app never
     /// authors or signs — it only stores externally-created artifacts.

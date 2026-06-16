@@ -159,10 +159,12 @@ class MainActivity : ComponentActivity() {
      * handshake is the P3 receive side, so for now we acknowledge it.
      */
     private fun openSharedNsite(info: NsiteShare.ShareInfo) {
-        core.dispatch(NativeActions.openNsite(info.nsiteHost))
+        // Pull from the sharer's device over the mesh first (holder = their npub),
+        // falling back to the public IP source.
+        core.dispatch(NativeActions.openNsite(info.nsiteHost, holder = info.npub))
         launchNsite(info.nsiteHost, info.name)
         if (info.npub.isNotEmpty()) {
-            Toast.makeText(this, "Shared by ${info.name} — pairing coming soon", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Shared by ${info.name} — pulling over the mesh", Toast.LENGTH_SHORT).show()
         }
     }
 

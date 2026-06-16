@@ -80,6 +80,30 @@ impl AppRuntime {
         // status map does not.
         rt.spawn(content.clone().refresh_library_status());
 
+        // Serve the relay + Blossom over the mesh so paired peers can pull this
+        // device's nsites at ws://<npub>.fips:4869 / http://<npub>.fips:24242.
+        // Bound on `[::]` so the node's ULA on the app-owned TUN is reachable;
+        // Android-only (the host has no TUN, and binding fixed ports would clash
+        // across parallel host tests). See docs/reference/ports.md.
+        #[cfg(target_os = "android")]
+        {
+            use std::net::SocketAddr;
+            let relay = content.relay();
+            let blobs = content.blobs();
+            rt.spawn(async move {
+                let addr: SocketAddr = "[::]:4869".parse().expect("relay addr");
+                if let Err(e) = myco_relay::server::serve(relay, addr).await {
+                    tracing::error!(error = %e, "mesh relay server exited");
+                }
+            });
+            rt.spawn(async move {
+                let addr: SocketAddr = "[::]:24242".parse().expect("blossom addr");
+                if let Err(e) = myco_blossom::server::serve(blobs, addr).await {
+                    tracing::error!(error = %e, "mesh blossom server exited");
+                }
+            });
+        }
+
         Ok(Self {
             app_version: app_version.to_string(),
             data_dir: data_dir.to_string(),
@@ -166,8 +190,8 @@ impl AppRuntime {
                 };
                 self.rev += 1;
             }
-            NativeAppAction::OpenNsite { link } => {
-                self.open_nsite(&link);
+            NativeAppAction::OpenNsite { link, holder } => {
+                self.open_nsite(&link, holder);
                 self.rev += 1;
             }
             NativeAppAction::ImportNsite { dir } => {
@@ -201,9 +225,10 @@ impl AppRuntime {
         }
     }
 
-    /// Spawn a sync-to-readiness for a pasted link (spawn-not-block; readiness is
-    /// observed via `siteStatus` on `Tick`).
-    fn open_nsite(&mut self, link: &str) {
+    /// Spawn a sync-to-readiness for a pasted link / shared site (spawn-not-block;
+    /// readiness is observed via `siteStatus` on `Tick`). `holder` is the mesh
+    /// peer to pull from first, if this came from a share QR.
+    fn open_nsite(&mut self, link: &str, holder: Option<String>) {
         let Some(addr) = nsite_deck::parse_link(link) else {
             self.error = format!("unrecognized nsite link: {link}");
             return;
@@ -211,7 +236,7 @@ impl AppRuntime {
         let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
             return;
         };
-        rt.spawn(content.open_site(addr));
+        rt.spawn(content.open_site(addr, holder));
     }
 
     /// Spawn a dev side-load of a bundle directory.

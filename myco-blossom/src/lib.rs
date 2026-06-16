@@ -21,6 +21,8 @@ use async_trait::async_trait;
 use nsite_deck::seams::BlobStore;
 use sha2::{Digest, Sha256};
 
+pub mod server;
+
 /// A content-addressed blob store rooted at a directory.
 pub struct FsBlobStore {
     root: PathBuf,

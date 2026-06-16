@@ -71,6 +71,29 @@ impl IpPeerSource {
     pub fn with_defaults() -> Self {
         Self::new(default_relays(), default_blossom_servers())
     }
+
+    /// Override the per-relay timeout (mesh links want a longer one than IP).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
+/// A [`PeerSource`] that pulls from a specific **holder's** embedded relay +
+/// Blossom over the FIPS mesh, addressed by the holder's npub: the ULA
+/// `fd00:: = fd + node_addr[0..15]` (`PeerIdentity::from_npub`), reached at
+/// `ws://[fd00::holder]:4869` / `http://[fd00::holder]:24242`. Requires the
+/// app-owned TUN to be up so the IPv6 socket routes over the mesh. A longer
+/// timeout than the IP source absorbs BLE latency + first-contact session setup.
+pub fn mesh_source_for(holder_npub: &str) -> anyhow::Result<IpPeerSource> {
+    let peer = fips::PeerIdentity::from_npub(holder_npub)
+        .map_err(|e| anyhow::anyhow!("invalid holder npub {holder_npub}: {e}"))?;
+    let ip = peer.address().to_ipv6();
+    Ok(IpPeerSource::new(
+        vec![format!("ws://[{ip}]:4869")],
+        vec![format!("http://[{ip}]:24242")],
+    )
+    .with_timeout(Duration::from_secs(20)))
 }
 
 /// Query one relay for a single filter, collecting events until EOSE. The whole
@@ -360,7 +383,7 @@ mod tests {
             author: site.author,
             d_tag: None,
         };
-        content.clone().open_site(addr).await;
+        content.clone().open_site(addr, None).await;
 
         let sites = content.sites_snapshot();
         assert_eq!(sites[0].state, "ready", "site should sync to ready over IP");
