@@ -2,7 +2,11 @@ package app.myco.ble
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.bluetooth.le.AdvertiseCallback
@@ -42,9 +46,13 @@ class BleRadio(context: Context) {
     private val adapter: BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
 
+    private val appContext = context.applicationContext
     private var bridgeHandle: Long = 0
     private val io = Executors.newCachedThreadPool()
     private val channels = ConcurrentHashMap<Long, BluetoothSocket>()
+    // A parallel GATT per channel, used only to request a low connection interval
+    // (L2CAP CoC exposes no priority API). Bumps mesh throughput ~2-4x.
+    private val gatts = ConcurrentHashMap<Long, BluetoothGatt>()
 
     @Volatile
     private var stopped = false
@@ -154,7 +162,16 @@ class BleRadio(context: Context) {
                 val psm = if (sd != null && sd.size >= 2) {
                     (sd[0].toInt() and 0xFF) or ((sd[1].toInt() and 0xFF) shl 8) // 16-bit LE
                 } else 0
-                NativeCore.bleDeliverScan(bridgeHandle, addr, psm, result.rssi)
+                // Only report a peer once its real PSM is known (it rides the
+                // scan-response service data). A psm=0 sighting is the primary
+                // advert without the scan response yet — reporting it makes the
+                // core fall back to the legacy default PSM (0x0085) and dial the
+                // wrong L2CAP port, which the peer rejects every time.
+                if (psm > 0) {
+                    NativeCore.bleDeliverScan(bridgeHandle, addr, psm, result.rssi)
+                } else {
+                    Log.d(TAG, "scan $addr: PSM not in advert yet (awaiting scan response)")
+                }
             }
 
             override fun onScanFailed(errorCode: Int) {
@@ -177,6 +194,7 @@ class BleRadio(context: Context) {
 
     fun closeChannel(chId: Long) {
         channels.remove(chId)?.let { closeQuietly(it) }
+        dropGatt(chId)
     }
 
     /** Tear everything down (called when the service stops). */
@@ -187,6 +205,7 @@ class BleRadio(context: Context) {
         runCatching { serverSocket?.close() }
         serverSocket = null
         channels.keys.toList().forEach { closeChannel(it) }
+        gatts.keys.toList().forEach { dropGatt(it) }
         io.shutdownNow()
     }
 
@@ -208,8 +227,48 @@ class BleRadio(context: Context) {
 
     private fun startChannel(chId: Long, sock: BluetoothSocket) {
         channels[chId] = sock
+        boostPriority(chId, sock.remoteDevice)
         io.execute { readerLoop(chId, sock) }
         io.execute { writerLoop(chId, sock) }
+    }
+
+    /**
+     * Request a high-priority (low-interval) LE connection for throughput. L2CAP
+     * CoC has no connection-parameter API, so we open a parallel GATT to the same
+     * device purely to call [BluetoothGatt.requestConnectionPriority] — it shares
+     * the physical ACL link, so the faster interval applies to the CoC channel too.
+     */
+    private fun boostPriority(chId: Long, device: BluetoothDevice) {
+        runCatching {
+            Log.i(TAG, "boostPriority: GATT to ${device.address} (low interval + 2M PHY)")
+            val gatt = device.connectGatt(appContext, false, object : BluetoothGattCallback() {
+                override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+                    if (newState == BluetoothProfile.STATE_CONNECTED) {
+                        val ok = runCatching {
+                            g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                        }.getOrDefault(false)
+                        // 2M PHY ~doubles the raw rate over 1M.
+                        runCatching {
+                            g.setPreferredPhy(
+                                BluetoothDevice.PHY_LE_2M_MASK,
+                                BluetoothDevice.PHY_LE_2M_MASK,
+                                BluetoothDevice.PHY_OPTION_NO_PREFERRED,
+                            )
+                        }
+                        Log.i(TAG, "GATT up: requestConnectionPriority(HIGH)=$ok, requested 2M PHY")
+                    }
+                }
+
+                override fun onPhyUpdate(g: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+                    Log.i(TAG, "PHY now tx=$txPhy rx=$rxPhy (2=2M) status=$status")
+                }
+            })
+            if (gatt != null) gatts[chId] = gatt
+        }.onFailure { Log.w(TAG, "boostPriority failed: ${it.message}") }
+    }
+
+    private fun dropGatt(chId: Long) {
+        gatts.remove(chId)?.let { runCatching { it.disconnect(); it.close() } }
     }
 
     private fun readerLoop(chId: Long, sock: BluetoothSocket) {
@@ -233,6 +292,10 @@ class BleRadio(context: Context) {
     private fun writerLoop(chId: Long, sock: BluetoothSocket) {
         val outs = sock.outputStream
         val buf = ByteArray(MAX_PACKET)
+        // Header + payload coalesced into one buffer so each packet is a single
+        // write → a single L2CAP SDU. Writing the 2-byte prefix separately emitted
+        // extra tiny SDUs and wasted connection-event airtime.
+        val frame = ByteArray(MAX_PACKET + FRAME_HEADER)
         try {
             while (true) {
                 val n = NativeCore.bleChannelNextSend(bridgeHandle, chId, buf, SEND_TIMEOUT_MS)
@@ -240,9 +303,10 @@ class BleRadio(context: Context) {
                     n < 0 -> break // channel closed
                     n == 0 -> continue // timeout, poll again
                     else -> {
-                        outs.write((n shr 8) and 0xFF) // 2-byte BE length prefix
-                        outs.write(n and 0xFF)
-                        outs.write(buf, 0, n)
+                        frame[0] = ((n shr 8) and 0xFF).toByte() // 2-byte BE length prefix
+                        frame[1] = (n and 0xFF).toByte()
+                        System.arraycopy(buf, 0, frame, FRAME_HEADER, n)
+                        outs.write(frame, 0, n + FRAME_HEADER)
                         outs.flush()
                     }
                 }
@@ -255,14 +319,19 @@ class BleRadio(context: Context) {
 
     private fun onChannelGone(chId: Long) {
         channels.remove(chId)?.let { closeQuietly(it) }
+        dropGatt(chId)
         runCatching { NativeCore.bleChannelClosed(bridgeHandle, chId) }
     }
 
+    // Cap the MTU we report to the core: L2CAP CoC negotiates up to 64 KB, but BLE
+    // moves ~251-byte link-layer packets, so a 64 KB frame fragments into hundreds
+    // of LE packets and takes seconds (huge RTT + head-of-line blocking). A few-KB
+    // frame keeps latency low while still amortizing framing overhead.
     private fun sendMtu(sock: BluetoothSocket): Int =
-        (sock.maxTransmitPacketSize - FRAME_HEADER).coerceAtLeast(20)
+        (sock.maxTransmitPacketSize - FRAME_HEADER).coerceIn(20, MESH_MTU_CAP)
 
     private fun recvMtu(sock: BluetoothSocket): Int =
-        sock.maxReceivePacketSize.coerceAtLeast(20)
+        sock.maxReceivePacketSize.coerceIn(20, MESH_MTU_CAP)
 
     private fun closeQuietly(sock: BluetoothSocket) {
         runCatching { sock.close() }
@@ -285,6 +354,12 @@ class BleRadio(context: Context) {
         private const val FRAME_HEADER = 2
         private const val MAX_PACKET = 8192
         private const val SEND_TIMEOUT_MS = 1000
+
+        /** Cap on the MTU reported to the core: one full IPv6 packet per L2CAP SDU.
+         *  The TUN sends ≤1280-byte IPv6 packets; with FSP's ~77-byte overhead that
+         *  fits in 1357, so 1500 carries a whole packet with no fragmentation and
+         *  no head-of-line batching of multiple packets into one giant frame. */
+        private const val MESH_MTU_CAP = 1500
 
         /** FIPS service UUID — must match fips-core (ble-wire.md). */
         val FIPS_UUID: UUID = UUID.fromString("9c90b790-2cc5-42c0-9f87-c9cc40648f4c")

@@ -52,6 +52,10 @@ pub struct IpPeerSource {
     blossom_servers: Vec<String>,
     http: reqwest::Client,
     timeout: Duration,
+    /// When true, blob fetches ignore the manifest's `["server", …]` hints and
+    /// use only `blossom_servers` — so a **mesh** source never reaches out to
+    /// public Blossom over the internet (it stays on the peer's `[fd00::]:24242`).
+    ignore_manifest_servers: bool,
 }
 
 impl IpPeerSource {
@@ -65,7 +69,15 @@ impl IpPeerSource {
                 .build()
                 .unwrap_or_default(),
             timeout: Duration::from_secs(8),
+            ignore_manifest_servers: false,
         }
+    }
+
+    /// Fetch blobs only from this source's own servers, never the manifest's
+    /// public `server` hints (used by the mesh source — keep it on the mesh).
+    pub fn ignoring_manifest_servers(mut self) -> Self {
+        self.ignore_manifest_servers = true;
+        self
     }
 
     /// The defaults (public relays + Blossom).
@@ -94,7 +106,8 @@ pub fn mesh_source_for(holder_npub: &str) -> anyhow::Result<IpPeerSource> {
         vec![format!("ws://[{ip}]:4869")],
         vec![format!("http://[{ip}]:24242")],
     )
-    .with_timeout(Duration::from_secs(20)))
+    .with_timeout(Duration::from_secs(20))
+    .ignoring_manifest_servers())
 }
 
 /// Discover the nsite manifests a relay holds — kind 15128 (root) + 35128 (named)
@@ -201,8 +214,10 @@ impl PeerSource for IpPeerSource {
         sha256_hex_want: &str,
         servers: &[String],
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        // Manifest hints first, then the public defaults (deduped).
-        let mut candidates: Vec<String> = servers.to_vec();
+        // Manifest hints first, then this source's own servers (deduped). A mesh
+        // source skips the manifest's public hints entirely (stay on the mesh).
+        let mut candidates: Vec<String> =
+            if self.ignore_manifest_servers { Vec::new() } else { servers.to_vec() };
         for s in &self.blossom_servers {
             if !candidates.contains(s) {
                 candidates.push(s.clone());
