@@ -118,25 +118,31 @@ class BleRadio(context: Context) {
             .setConnectable(true)
             .setTimeout(0)
             .build()
-        // Primary advert carries the UUID; the PSM service-data rides the scan
-        // response (a 128-bit UUID + service data won't both fit one 31-byte PDU).
-        val primary = AdvertiseData.Builder()
+        // The PSM rides in the PRIMARY advert (passively received every interval),
+        // not the scan response — a scan response only arrives after a successful
+        // active-scan SCAN_REQ/RSP round-trip, which drops asymmetrically across
+        // chipsets and left peers undiscoverable. To fit one 31-byte legacy PDU we
+        // key the 2-byte PSM service-data on a 16-bit UUID (PSM_SD_UUID16) so it
+        // sits alongside the full 128-bit FIPS service UUID (used for the scan
+        // filter): ~3 (flags) + 18 (128-bit UUID) + 6 (16-bit service-data) = 27B.
+        // See docs/reference/ble-wire.md.
+        val psmLe = byteArrayOf((psm and 0xFF).toByte(), ((psm shr 8) and 0xFF).toByte())
+        val advData = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .addServiceUuid(FIPS_PARCEL_UUID)
-            .build()
-        val psmLe = byteArrayOf((psm and 0xFF).toByte(), ((psm shr 8) and 0xFF).toByte())
-        val scanResponse = AdvertiseData.Builder()
-            .addServiceData(FIPS_PARCEL_UUID, psmLe)
+            .addServiceData(PSM_SD_PARCEL_UUID, psmLe)
             .build()
         val cb = object : AdvertiseCallback() {
+            override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+                Log.i(TAG, "advertising PSM $psm (in primary advert)")
+            }
             override fun onStartFailure(errorCode: Int) {
-                Log.e(TAG, "advertise failed: $errorCode")
+                Log.e(TAG, "advertise failed: $errorCode (1=DATA_TOO_LARGE)")
             }
         }
         advertiseCallback = cb
         try {
-            adv.startAdvertising(settings, primary, scanResponse, cb)
-            Log.i(TAG, "advertising PSM $psm")
+            adv.startAdvertising(settings, advData, cb)
         } catch (e: Exception) {
             Log.e(TAG, "startAdvertising failed", e)
         }
@@ -158,7 +164,11 @@ class BleRadio(context: Context) {
         val cb = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 val addr = "$ADAPTER/${result.device.address}"
-                val sd = result.scanRecord?.getServiceData(FIPS_PARCEL_UUID)
+                // PSM rides in the primary advert under the compact 16-bit UUID;
+                // fall back to the legacy 128-bit-keyed service-data for any peer
+                // still on the old scan-response layout.
+                val sd = result.scanRecord?.getServiceData(PSM_SD_PARCEL_UUID)
+                    ?: result.scanRecord?.getServiceData(FIPS_PARCEL_UUID)
                 val psm = if (sd != null && sd.size >= 2) {
                     (sd[0].toInt() and 0xFF) or ((sd[1].toInt() and 0xFF) shl 8) // 16-bit LE
                 } else 0
@@ -364,5 +374,11 @@ class BleRadio(context: Context) {
         /** FIPS service UUID — must match fips-core (ble-wire.md). */
         val FIPS_UUID: UUID = UUID.fromString("9c90b790-2cc5-42c0-9f87-c9cc40648f4c")
         val FIPS_PARCEL_UUID = ParcelUuid(FIPS_UUID)
+
+        /** Compact 16-bit service-data UUID carrying the 2-byte LE listener PSM in
+         *  the PRIMARY advert (0x9C90 = the FIPS UUID's leading 16 bits, via the
+         *  Bluetooth base UUID). A 16-bit key keeps PSM service-data + the full
+         *  128-bit FIPS UUID inside one 31-byte legacy advert. See ble-wire.md. */
+        val PSM_SD_PARCEL_UUID = ParcelUuid.fromString("00009c90-0000-1000-8000-00805f9b34fb")
     }
 }
