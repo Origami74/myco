@@ -4,6 +4,11 @@
 
 # Local agent settings
 .claude/settings.local.json
+# Vendored agent skills (installed via `npx skills add`)
+.agents/
+.goose/
+.claude/
+skills-lock.json
 
 # macOS
 .DS_Store
@@ -33,3 +38,6 @@ captures/
 
 # --- Node (web tooling, if added later) ---
 node_modules/
+
+# Standalone nsite app, developed as its own git repo
+/myco-bitchat/

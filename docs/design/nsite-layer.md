@@ -621,7 +621,10 @@ below governs the **Blossom blob store**.
 - **JS sandbox / capability API.** v1 nsites are **pure static content**. What
   an nsite's JavaScript may call back into (e.g. query reachable peers, trigger
   a sync) is a later milestone and an explicit open design question (called out
-  on [diagram 04](diagrams/04-nsite-browse-flow.svg)). **TBD / open.**
+  on [diagram 04](diagrams/04-nsite-browse-flow.svg)). The per-application
+  capability model — gossip-kinds, TTL clamps, rate, location — is now sketched in
+  [nsite-permissions.md](./nsite-permissions.md) (v1 default-allow, enforced via
+  the WebSocket `Origin`). **TBD / open.**
 - **htdocs serving cache** — the deferred path-named cache and its Android
   atomic-swap mechanism (symlink-rename vs `current.json` pointer file)
   (§4.4). **Deferred to the roadmap — TBD / open.**
