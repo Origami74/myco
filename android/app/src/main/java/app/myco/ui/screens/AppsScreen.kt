@@ -184,7 +184,7 @@ private fun NsiteTile(
     LaunchedEffect(site.host, site.filesPulled) {
         if (icon == null) {
             icon = withContext(Dispatchers.IO) {
-                runCatching { NsiteIcons.fetch(client, "${site.host}.nsite") }.getOrNull()
+                runCatching { NsiteIcons.fetch(client, "${site.host}.localhost") }.getOrNull()
             }
         }
     }

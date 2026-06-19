@@ -45,7 +45,7 @@ class NsiteActivity : ComponentActivity() {
         }
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
         // Give the Recents card the nsite's own title + favicon, for a native feel.
-        applyTaskIcon("$hostLabel.nsite", title)
+        applyTaskIcon("$hostLabel.localhost", title)
 
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
@@ -54,7 +54,7 @@ class NsiteActivity : ComponentActivity() {
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.mediaPlaybackRequiresUserGesture = false
-            webViewClient = NsiteWebViewClient(client, "$hostLabel.nsite")
+            webViewClient = NsiteWebViewClient(client, "$hostLabel.localhost")
         }
         setContentView(webView)
 
@@ -63,7 +63,11 @@ class NsiteActivity : ComponentActivity() {
             if (webView.canGoBack()) webView.goBack() else finish()
         }
 
-        webView.loadUrl("http://$hostLabel.nsite/")
+        // Serve the WebView under `.localhost` (not `.nsite`): Chromium treats
+        // `*.localhost` as loopback + a secure context, so the nsite's
+        // `ws://localhost:4869` to the embedded relay isn't blocked by Private/
+        // Local Network Access (a `.nsite` page is classed "public" → blocked).
+        webView.loadUrl("http://$hostLabel.localhost/")
     }
 
     override fun onDestroy() {
@@ -159,8 +163,14 @@ private class NsiteWebViewClient(
         val uri = request.url
         val host = uri.host ?: return null
         // Only our nsite hosts are served locally; anything else falls through
-        // (and, offline, simply fails — v1 nsites are self-contained).
-        if (!host.endsWith(".nsite", ignoreCase = true)) return null
+        // (and, offline, simply fails — v1 nsites are self-contained). The in-app
+        // WebView serves nsites under `.localhost` (see loadUrl) so loopback WS to
+        // the relay isn't blocked; `.nsite` is still accepted for compatibility.
+        if (!host.endsWith(".localhost", ignoreCase = true) &&
+            !host.endsWith(".nsite", ignoreCase = true)
+        ) {
+            return null
+        }
 
         return try {
             val path = uri.path?.ifEmpty { "/" } ?: "/"

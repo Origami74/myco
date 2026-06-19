@@ -153,7 +153,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         Thread {
-            val bmp = NsiteIcons.fetch(MycoCore.client(this), "$hostLabel.nsite")
+            val bmp = NsiteIcons.fetch(MycoCore.client(this), "$hostLabel.localhost")
             val icon = if (bmp != null) {
                 Icon.createWithBitmap(bmp)
             } else {
@@ -185,7 +185,7 @@ class MainActivity : ComponentActivity() {
         }
         // Fall back to treating it as a pasteable nsite link.
         core.dispatch(NativeActions.openNsite(text))
-        Toast.makeText(this, "Opening nsite…", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Opening app...", Toast.LENGTH_SHORT).show()
     }
 
     private fun handleDeepLink(intent: Intent?) {

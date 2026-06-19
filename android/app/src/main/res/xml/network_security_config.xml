@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The in-app nsite WebView talks to the device's embedded relay
+  (ws://localhost:4869) and Blossom (http://localhost:24242) over **cleartext
+  loopback**. targetSdk >= 28 blocks cleartext by default, which surfaces in the
+  WebView as net::ERR_CLEARTEXT_NOT_PERMITTED on the WebSocket. Permit cleartext
+  for loopback only; every other destination stays TLS-only (the default).
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>
