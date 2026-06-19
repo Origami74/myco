@@ -16,6 +16,7 @@ axum = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true }
 socket2 = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
 nsite-deck = { path = "../nsite-deck", features = ["testing"] }

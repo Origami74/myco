@@ -125,6 +125,23 @@ pub async fn discover_manifests(relay_url: &str, timeout: Duration, limit: usize
     }
 }
 
+/// Publish one signed event to a relay (`["EVENT", …]`), best-effort: connect,
+/// send, briefly await the `OK`, close. The whole call is hard-bounded by
+/// `timeout` so an unreachable peer relay can't stall the fan-out. Returns whether
+/// the event was sent (not whether it was accepted — chat is fire-and-forget).
+pub async fn publish_event(url: &str, event: &nostr::Event, timeout: Duration) -> bool {
+    let send = async {
+        let (mut ws, _) = tokio_tungstenite::connect_async(url).await.ok()?;
+        let frame = serde_json::json!(["EVENT", event]).to_string();
+        ws.send(Message::Text(frame)).await.ok()?;
+        // Wait briefly for the OK, but don't depend on it; then close politely.
+        let _ = ws.next().await;
+        let _ = ws.send(Message::Close(None)).await;
+        Some(())
+    };
+    matches!(tokio::time::timeout(timeout, send).await, Ok(Some(())))
+}
+
 /// Query one relay for a single filter, collecting events until EOSE. The whole
 /// call (connect + REQ + read) is hard-bounded by a `timeout` at the call site,
 /// so a dead relay can't hang the sync on a slow TCP/TLS connect.
@@ -319,6 +336,26 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn publish_event_delivers_to_relay() {
+        // End-to-end against a real myco-relay: publish a chat event, then confirm
+        // it landed in the store.
+        let store = Arc::new(myco_relay::RelayStore::in_memory());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(myco_relay::server::serve_on(store.clone(), listener));
+
+        let keys = nostr::Keys::generate();
+        let ev = nostr::EventBuilder::new(nostr::Kind::from(9u16), "hi over mesh")
+            .tags([nostr::Tag::identifier("mesh".to_string())])
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        assert!(publish_event(&format!("ws://{addr}"), &ev, Duration::from_secs(5)).await);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(store.count(), 1, "published event stored by the relay");
     }
 
     #[tokio::test]

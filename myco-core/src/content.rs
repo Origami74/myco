@@ -501,8 +501,9 @@ impl Content {
     }
 
     /// Circle members that are connected mesh peers right now — the pull sources
-    /// to try (besides an explicit holder) without risking an offline timeout.
-    fn connected_circle_npubs(&self) -> Vec<String> {
+    /// to try (besides an explicit holder) without risking an offline timeout, and
+    /// the fan-out targets for outbound chat events (`docs/design/event-gossip.md`).
+    pub fn connected_circle_npubs(&self) -> Vec<String> {
         let connected = self.connected_peers.lock().unwrap();
         self.circle
             .lock()

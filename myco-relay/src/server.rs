@@ -1,26 +1,74 @@
-//! A minimal NIP-01 WebSocket relay server over [`RelayStore`], so the node can
-//! serve its manifest events to mesh peers at `ws://[fd00::self]:4869`. Also
-//! answers a NIP-11 document on a plain HTTP GET.
+//! A NIP-01 WebSocket relay over [`RelayStore`]. Serves the node's events to the
+//! in-app WebView at `ws://localhost:4869` and to mesh peers at
+//! `ws://[fd00::self]:4869`.
 //!
-//! Scope is deliberately tiny: the sync client sends a `REQ`, reads the stored
-//! matches plus `EOSE`, then closes — so there are **no live subscriptions**
-//! (steady-state live forwarding is the P3 propagator's job, not this socket).
-//! The query surface is the same `{kinds, authors, #d, limit}` the gateway uses.
+//! Unlike the original manifest-only socket, this one keeps **live subscriptions**
+//! (a `REQ` stays open; newly-stored events that match are pushed as they arrive),
+//! which is what makes nearby chat feel live. New events also drive an optional
+//! [`Gossiper`] — the mesh fan-out hook (`docs/design/event-gossip.md`) — with the
+//! connection's [`Origin`] (loopback = the local WebView, else a mesh peer) so the
+//! gossiper can apply the push/pull and `event-ttl` rules.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
+use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, PublicKey};
 use nsite_deck::seams::{ManifestFilter, RelayBackend};
+use tokio::sync::broadcast;
 
-use crate::RelayStore;
+use crate::{matches_filter, RelayStore};
 
-/// Serve the relay on `addr` until the future is dropped/aborted.
+/// Where an event reached this relay from: the local WebView (a loopback socket)
+/// or a mesh peer (a `.fips` socket). Drives the gossiper's push/pull split.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// A loopback connection — the in-app nsite client publishing.
+    Local,
+    /// A mesh peer's relay pushing over `.fips`.
+    Mesh,
+}
+
+/// The mesh fan-out hook. The relay calls this for every **newly-accepted** event
+/// with the [`Origin`] it arrived from; the implementor (`myco-core`) decides
+/// whether and how far to push it to circle peers (see `docs/design/event-gossip.md`).
+/// The default does nothing — the relay never fans out on its own.
+#[async_trait]
+pub trait Gossiper: Send + Sync {
+    async fn on_event(&self, event: Event, origin: Origin);
+}
+
+/// Shared per-relay state: the store, a broadcast bus that fans newly-stored
+/// events to all live subscriptions on this device, and the optional mesh gossiper.
+///
+/// One hub can back **several listeners** (e.g. the mesh `[::]:4869` socket and a
+/// loopback `127.0.0.1:4869` socket for the WebView) via [`serve_on_hub`], so the
+/// live bus, store, and gossiper are shared across them — a peer's event pushed on
+/// the mesh socket reaches a WebView subscription on the loopback socket.
+pub struct RelayHub {
+    store: Arc<RelayStore>,
+    live: broadcast::Sender<Event>,
+    gossip: Option<Arc<dyn Gossiper>>,
+}
+
+impl RelayHub {
+    /// Build a shared hub. Pass `None` for `gossip` to disable mesh fan-out.
+    pub fn new(store: Arc<RelayStore>, gossip: Option<Arc<dyn Gossiper>>) -> Arc<Self> {
+        // Buffer enough that a brief subscriber stall doesn't drop chat; an
+        // over-capacity lag is surfaced as `Lagged` and skipped, not blocked.
+        let (live, _) = broadcast::channel(512);
+        Arc::new(Self { store, live, gossip })
+    }
+}
+
+/// Serve the relay on `addr` until the future is dropped/aborted (no gossiper).
 pub async fn serve(store: Arc<RelayStore>, addr: SocketAddr) -> anyhow::Result<()> {
     serve_on(store, bind(addr)?).await
 }
@@ -47,40 +95,108 @@ pub fn bind(addr: SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
     Ok(tokio::net::TcpListener::from_std(socket.into())?)
 }
 
-/// Serve on an already-bound listener (lets the caller pick an ephemeral port).
+/// Serve on an already-bound listener with no mesh gossiper (the local/test path).
 pub async fn serve_on(
     store: Arc<RelayStore>,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
-    let app = Router::new().route("/", get(root)).with_state(store);
-    axum::serve(listener, app).await?;
+    serve_on_with(store, listener, None).await
+}
+
+/// Serve on an already-bound listener, fanning newly-accepted events to `gossip`
+/// (the mesh propagator). The runtime uses this so chat events reach peers.
+pub async fn serve_on_with(
+    store: Arc<RelayStore>,
+    listener: tokio::net::TcpListener,
+    gossip: Option<Arc<dyn Gossiper>>,
+) -> anyhow::Result<()> {
+    serve_on_hub(RelayHub::new(store, gossip), listener).await
+}
+
+/// Serve a pre-built (shared) [`RelayHub`] on `listener`. Spawn this once per
+/// listener that should share the same store + live bus + gossiper.
+pub async fn serve_on_hub(
+    hub: Arc<RelayHub>,
+    listener: tokio::net::TcpListener,
+) -> anyhow::Result<()> {
+    let app = Router::new().route("/", get(root)).with_state(hub);
+    // Connect-info gives each socket's peer address, so the handler can tell a
+    // loopback (WebView) connection from a mesh peer.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
-/// `/` is the WS endpoint. (A NIP-11 plain-GET document is a later nicety; the
-/// mesh sync client only ever upgrades to WebSocket.)
-async fn root(ws: WebSocketUpgrade, State(store): State<Arc<RelayStore>>) -> Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, store))
+/// `/` is the WS endpoint; the peer address classifies the [`Origin`].
+async fn root(
+    ws: WebSocketUpgrade,
+    State(hub): State<Arc<RelayHub>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Response {
+    let origin = if addr.ip().is_loopback() {
+        Origin::Local
+    } else {
+        Origin::Mesh
+    };
+    ws.on_upgrade(move |socket| handle_ws(socket, hub, origin))
 }
 
-async fn handle_ws(mut socket: WebSocket, store: Arc<RelayStore>) {
-    while let Some(Ok(msg)) = socket.recv().await {
-        match msg {
-            Message::Text(text) => {
-                for reply in handle_message(text.as_str(), &store).await {
-                    if socket.send(Message::text(reply)).await.is_err() {
-                        return;
+/// One client connection: serve `REQ` backlog + keep the subscription live, accept
+/// `EVENT`s (store → fan to local subs → drive the gossiper), honour `CLOSE`.
+async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, origin: Origin) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let mut live = hub.live.subscribe();
+    // Active subscriptions on this connection: sub_id -> its filters.
+    let mut subs: HashMap<String, Vec<ManifestFilter>> = HashMap::new();
+
+    loop {
+        tokio::select! {
+            incoming = ws_rx.next() => {
+                match incoming {
+                    Some(Ok(Message::Text(text))) => {
+                        for reply in handle_client_frame(text.as_str(), &hub, origin, &mut subs).await {
+                            if ws_tx.send(Message::text(reply)).await.is_err() {
+                                return;
+                            }
+                        }
                     }
+                    Some(Ok(Message::Close(_))) | None => return,
+                    Some(Err(_)) => return,
+                    _ => {}
                 }
             }
-            Message::Close(_) => break,
-            _ => {}
+            event = live.recv() => {
+                match event {
+                    Ok(ev) => {
+                        for (sub_id, filters) in subs.iter() {
+                            if filters.iter().any(|f| matches_filter(&ev, f)) {
+                                let frame = serde_json::json!(["EVENT", sub_id, ev]).to_string();
+                                if ws_tx.send(Message::text(frame)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    // Lagged: this slow subscriber missed some events — skip them
+                    // and carry on rather than dropping the connection.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
         }
     }
 }
 
-/// Handle one client frame, returning the relay frames to send back.
-async fn handle_message(text: &str, store: &RelayStore) -> Vec<String> {
+/// Handle one client frame, mutating `subs` and returning the frames to send back.
+async fn handle_client_frame(
+    text: &str,
+    hub: &Arc<RelayHub>,
+    origin: Origin,
+    subs: &mut HashMap<String, Vec<ManifestFilter>>,
+) -> Vec<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return Vec::new();
     };
@@ -89,19 +205,22 @@ async fn handle_message(text: &str, store: &RelayStore) -> Vec<String> {
     };
     match array.first().and_then(|v| v.as_str()) {
         Some("REQ") => {
-            let sub_id = array.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            // Merge all filters in the REQ (any-match), as NIP-01 specifies.
+            let sub_id = array.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let filters: Vec<ManifestFilter> =
+                array.iter().skip(2).filter_map(parse_filter).collect();
+
+            // Stored backlog: any-match across the REQ's filters, newest first.
             let mut events: Vec<Event> = Vec::new();
-            for filter_value in array.iter().skip(2) {
-                if let Some(filter) = parse_filter(filter_value) {
-                    if let Ok(mut matched) = store.query(&filter).await {
-                        events.append(&mut matched);
-                    }
+            for filter in &filters {
+                if let Ok(mut matched) = hub.store.query(filter).await {
+                    events.append(&mut matched);
                 }
             }
-            // De-dup by id (filters may overlap), newest first.
             events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
             events.dedup_by(|a, b| a.id == b.id);
+
+            // Keep the subscription open so matching new events stream live.
+            subs.insert(sub_id.clone(), filters);
 
             let mut out: Vec<String> = events
                 .iter()
@@ -114,24 +233,34 @@ async fn handle_message(text: &str, store: &RelayStore) -> Vec<String> {
             let Some(event_value) = array.get(1) else {
                 return Vec::new();
             };
-            match serde_json::from_value::<Event>(event_value.clone()) {
-                Ok(event) => {
-                    let id = event.id.to_hex();
-                    match event.verify() {
-                        Ok(()) => {
-                            let _ = store.store_event(event).await;
-                            vec![serde_json::json!(["OK", id, true, ""]).to_string()]
-                        }
-                        Err(_) => {
-                            vec![serde_json::json!(["OK", id, false, "invalid: bad signature"])
-                                .to_string()]
-                        }
+            let Ok(event) = serde_json::from_value::<Event>(event_value.clone()) else {
+                return Vec::new();
+            };
+            let id = event.id.to_hex();
+            if event.verify().is_err() {
+                return vec![serde_json::json!(["OK", id, false, "invalid: bad signature"]).to_string()];
+            }
+            match hub.store.store_event(event.clone()).await {
+                Ok(true) => {
+                    // Fan to this device's live subscriptions (incl. the WebView).
+                    let _ = hub.live.send(event.clone());
+                    // Drive the mesh gossiper off the socket path (non-blocking).
+                    if let Some(gossip) = hub.gossip.clone() {
+                        tokio::spawn(async move { gossip.on_event(event, origin).await });
                     }
+                    vec![serde_json::json!(["OK", id, true, ""]).to_string()]
                 }
-                Err(_) => Vec::new(),
+                // Duplicate / superseded: still an accepted outcome per NIP-01.
+                Ok(false) => vec![serde_json::json!(["OK", id, true, "duplicate:"]).to_string()],
+                Err(e) => vec![serde_json::json!(["OK", id, false, format!("error: {e}")]).to_string()],
             }
         }
-        // CLOSE is a no-op (no live subscriptions); ignore everything else.
+        Some("CLOSE") => {
+            if let Some(sub_id) = array.get(1).and_then(|v| v.as_str()) {
+                subs.remove(sub_id);
+            }
+            Vec::new()
+        }
         _ => Vec::new(),
     }
 }
@@ -164,24 +293,33 @@ fn parse_filter(value: &serde_json::Value) -> Option<ManifestFilter> {
 mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
+    use nostr::{EventBuilder, Keys, Kind, Tag};
     use nsite_deck::model::KIND_ROOT;
     use nsite_deck::testing::build_test_site_with_keys;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+    async fn spawn_relay(store: Arc<RelayStore>) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on(store, listener));
+        addr
+    }
+
+    fn chat_event(keys: &Keys, room: &str, content: &str) -> Event {
+        EventBuilder::new(Kind::from(9u16), content)
+            .tags([Tag::identifier(room.to_string())])
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn ws_relay_serves_req_then_eose() {
-        // A store with one manifest.
         let store = Arc::new(RelayStore::in_memory());
-        let keys = nostr::Keys::generate();
+        let keys = Keys::generate();
         let site = build_test_site_with_keys(&keys, &[("/index.html", b"x")], None, None);
         store.store_event(site.manifest.clone()).await.unwrap();
 
-        // Serve on an ephemeral port.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_on(store.clone(), listener));
-
-        // Connect a WS client and REQ the author's root manifest.
+        let addr = spawn_relay(store.clone()).await;
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
             .await
             .unwrap();
@@ -191,7 +329,6 @@ mod tests {
         ]);
         ws.send(WsMessage::Text(req.to_string().into())).await.unwrap();
 
-        // Expect the EVENT, then EOSE.
         let mut got_event = false;
         let mut got_eose = false;
         while let Some(Ok(WsMessage::Text(txt))) = ws.next().await {
@@ -215,18 +352,17 @@ mod tests {
     #[tokio::test]
     async fn ws_relay_accepts_event_and_rejects_bad_sig() {
         let store = Arc::new(RelayStore::in_memory());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_on(store.clone(), listener));
+        let addr = spawn_relay(store.clone()).await;
 
-        let keys = nostr::Keys::generate();
+        let keys = Keys::generate();
         let site = build_test_site_with_keys(&keys, &[("/index.html", b"y")], None, None);
 
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
             .await
             .unwrap();
-        let event = serde_json::json!(["EVENT", site.manifest]);
-        ws.send(WsMessage::Text(event.to_string().into())).await.unwrap();
+        ws.send(WsMessage::Text(serde_json::json!(["EVENT", site.manifest]).to_string().into()))
+            .await
+            .unwrap();
 
         if let Some(Ok(WsMessage::Text(txt))) = ws.next().await {
             let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
@@ -236,5 +372,91 @@ mod tests {
             panic!("expected OK frame");
         }
         assert_eq!(store.count(), 1, "event stored");
+    }
+
+    /// A live subscriber receives matching events published after its REQ/EOSE.
+    #[tokio::test]
+    async fn live_subscription_delivers_new_events() {
+        let store = Arc::new(RelayStore::in_memory());
+        let addr = spawn_relay(store).await;
+        let keys = Keys::generate();
+
+        // Subscriber: REQ kind-9 #mesh, then read past EOSE.
+        let (mut sub, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        let req = serde_json::json!(["REQ", "s1", { "kinds": [9], "#d": ["mesh"] }]);
+        sub.send(WsMessage::Text(req.to_string().into())).await.unwrap();
+        // Drain until EOSE so we know the live subscription is registered.
+        loop {
+            if let Some(Ok(WsMessage::Text(txt))) = sub.next().await {
+                let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
+                if v[0].as_str() == Some("EOSE") {
+                    break;
+                }
+            }
+        }
+
+        // Publisher: a second connection sends a new chat message.
+        let (mut pubr, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        let msg = chat_event(&keys, "mesh", "live hello");
+        pubr.send(WsMessage::Text(serde_json::json!(["EVENT", msg]).to_string().into()))
+            .await
+            .unwrap();
+
+        // The subscriber should receive it live as ["EVENT","s1",{…}].
+        let received = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(Ok(WsMessage::Text(txt))) = sub.next().await {
+                let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
+                if v[0].as_str() == Some("EVENT") && v[1].as_str() == Some("s1") {
+                    return v[2]["id"].as_str().map(str::to_string);
+                }
+            }
+            None
+        })
+        .await
+        .expect("did not receive live event in time");
+        assert_eq!(received, Some(msg.id.to_hex()), "live event delivered to subscriber");
+    }
+
+    /// The gossiper is invoked for an accepted event, tagged with its origin.
+    #[tokio::test]
+    async fn gossiper_invoked_on_local_event() {
+        use std::sync::Mutex;
+
+        struct Capture(Mutex<Vec<(String, Origin)>>);
+        #[async_trait]
+        impl Gossiper for Capture {
+            async fn on_event(&self, event: Event, origin: Origin) {
+                self.0.lock().unwrap().push((event.id.to_hex(), origin));
+            }
+        }
+
+        let store = Arc::new(RelayStore::in_memory());
+        let capture = Arc::new(Capture(Mutex::new(Vec::new())));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on_with(store, listener, Some(capture.clone())));
+
+        let keys = Keys::generate();
+        let msg = chat_event(&keys, "mesh", "gossip me");
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        ws.send(WsMessage::Text(serde_json::json!(["EVENT", msg]).to_string().into()))
+            .await
+            .unwrap();
+        // Await the OK so the store+spawn have run.
+        let _ = ws.next().await;
+
+        // Give the spawned gossip task a moment.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let seen = capture.0.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, msg.id.to_hex());
+        // 127.0.0.1 is loopback → Local origin.
+        assert_eq!(seen[0].1, Origin::Local);
     }
 }

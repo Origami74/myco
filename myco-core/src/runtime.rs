@@ -94,18 +94,49 @@ impl AppRuntime {
         {
             use std::net::SocketAddr;
             let _guard = rt.enter(); // runtime context for TcpListener::from_std
-            let relay = content.relay();
             let blobs = content.blobs();
+
+            // One shared relay hub backs both the mesh socket and a loopback socket,
+            // so a chat event a peer pushes over `.fips` reaches the in-app nsite's
+            // live subscription on localhost (shared store + live bus + gossiper).
+            // The gossiper fans this device's own nsite events out to Circle peers
+            // (docs/design/event-gossip.md).
+            let gossiper: Arc<dyn myco_relay::server::Gossiper> =
+                Arc::new(crate::gossip::MeshGossiper::new(content.clone()));
+            let hub = myco_relay::server::RelayHub::new(content.relay(), Some(gossiper));
+
+            // Mesh socket: IPV6_V6ONLY `[::]:4869` so it doesn't collide with the
+            // loopback bind and is reachable by peers at `ws://<npub>.fips:4869`.
             match myco_relay::server::bind("[::]:4869".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
+                    let hub = hub.clone();
                     rt.spawn(async move {
-                        if let Err(e) = myco_relay::server::serve_on(relay, listener).await {
+                        if let Err(e) = myco_relay::server::serve_on_hub(hub, listener).await {
                             tracing::error!(error = %e, "mesh relay server exited");
                         }
                     });
                 }
                 Err(e) => {
                     mesh_warning = format!("relay port 4869 unavailable (another app using it?): {e}");
+                }
+            }
+            // Loopback socket: the in-app nsite WebView talks to `ws://localhost:4869`
+            // / `ws://127.0.0.1:4869`; the mesh socket is v6only, so serve loopback
+            // explicitly. Connections here are classified as `Origin::Local`.
+            match myco_relay::server::bind("127.0.0.1:4869".parse::<SocketAddr>().unwrap()) {
+                Ok(listener) => {
+                    let hub = hub.clone();
+                    rt.spawn(async move {
+                        if let Err(e) = myco_relay::server::serve_on_hub(hub, listener).await {
+                            tracing::error!(error = %e, "loopback relay server exited");
+                        }
+                    });
+                }
+                Err(e) => {
+                    if !mesh_warning.is_empty() {
+                        mesh_warning.push_str("; ");
+                    }
+                    mesh_warning.push_str(&format!("loopback relay port 4869 unavailable: {e}"));
                 }
             }
             match myco_blossom::server::bind("[::]:24242".parse::<SocketAddr>().unwrap()) {

@@ -11,6 +11,10 @@
 
 mod action;
 mod content;
+// The mesh gossiper is wired only into the Android relay server (runtime.rs); on
+// the host it is exercised only by its own tests, so it reads as dead there.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod gossip;
 mod identity_store;
 mod ip_source;
 mod runtime;
