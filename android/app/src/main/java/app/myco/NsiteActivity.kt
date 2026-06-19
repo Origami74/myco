@@ -2,8 +2,11 @@ package app.myco
 
 import android.annotation.SuppressLint
 import android.app.ActivityManager
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -51,7 +54,7 @@ class NsiteActivity : ComponentActivity() {
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.mediaPlaybackRequiresUserGesture = false
-            webViewClient = NsiteWebViewClient(client)
+            webViewClient = NsiteWebViewClient(client, "$hostLabel.nsite")
         }
         setContentView(webView)
 
@@ -105,8 +108,50 @@ class NsiteActivity : ComponentActivity() {
 /**
  * Serves every `*.nsite` request from the in-process gateway. Runs on a WebView
  * worker thread, so the blocking `gatewayGet` call is fine here.
+ *
+ * @param nsiteHost the host this nsite *is* (`<host>.nsite`); navigations to it
+ *   stay inside the WebView, everything else is handed off to the system.
  */
-private class NsiteWebViewClient(private val client: AppCoreClient) : WebViewClient() {
+private class NsiteWebViewClient(
+    private val client: AppCoreClient,
+    private val nsiteHost: String,
+) : WebViewClient() {
+    /**
+     * Keep same-nsite navigation inside the WebView; send any link that leaves
+     * this nsite — the open web, another nsite, `mailto:`/`tel:`/… — to the
+     * system so it opens in the user's normal browser/app, for a native feel.
+     */
+    override fun shouldOverrideUrlLoading(
+        view: WebView,
+        request: WebResourceRequest,
+    ): Boolean {
+        val uri = request.url
+        val scheme = uri.scheme?.lowercase()
+        if (scheme == "http" || scheme == "https") {
+            // In-origin link → let the WebView (and our gateway) handle it.
+            if (uri.host?.equals(nsiteHost, ignoreCase = true) == true) return false
+            return openExternally(view, uri)
+        }
+        // No external handler for these — let the WebView deal with them in-page.
+        if (scheme == null || scheme in IN_PAGE_SCHEMES) return false
+        // mailto:, tel:, sms:, geo:, intent:, … always belong to a native app.
+        return openExternally(view, uri)
+    }
+
+    /** Hand [uri] to the system's default handler; swallow a missing handler. */
+    private fun openExternally(view: WebView, uri: Uri): Boolean {
+        val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            view.context.startActivity(intent)
+            true
+        } catch (e: ActivityNotFoundException) {
+            // Nothing on the device can open it (e.g. a bare .nsite with no TUN);
+            // stay put rather than navigating the WebView to a dead page.
+            Log.w("NsiteActivity", "No handler for $uri", e)
+            true
+        }
+    }
+
     override fun shouldInterceptRequest(
         view: WebView,
         request: WebResourceRequest,
@@ -156,5 +201,10 @@ private class NsiteWebViewClient(private val client: AppCoreClient) : WebViewCli
         500 -> "Internal Error"
         503 -> "Service Unavailable"
         else -> "OK"
+    }
+
+    private companion object {
+        /** Schemes with no external app handler — the WebView renders them itself. */
+        val IN_PAGE_SCHEMES = setOf("data", "blob", "about", "javascript", "file", "content")
     }
 }
