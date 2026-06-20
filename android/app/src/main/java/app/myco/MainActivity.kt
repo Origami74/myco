@@ -175,8 +175,10 @@ class MainActivity : ComponentActivity() {
      *  nsite, or a raw nsite link. */
     private fun handleScannedText(text: String) {
         NsiteShare.parsePairUri(text)?.let { pair ->
-            core.dispatch(NativeActions.addToCircle(pair.npub, pair.name))
-            Toast.makeText(this, "${pair.name} added to your Circle", Toast.LENGTH_SHORT).show()
+            // Mutual pairing: send a request to the scanned device; it pops up there
+            // to accept, and only then do both sides add each other.
+            core.dispatch(NativeActions.sendPairRequest(pair.npub, pair.name, pair.secret))
+            Toast.makeText(this, "Pair request sent to ${pair.name}…", Toast.LENGTH_SHORT).show()
             return
         }
         NsiteShare.parseShareUri(text)?.let { info ->
@@ -202,9 +204,9 @@ class MainActivity : ComponentActivity() {
      */
     private fun openSharedNsite(info: NsiteShare.ShareInfo) {
         if (info.npub.isNotEmpty()) {
-            // Scanning someone's share QR adds them to your Circle (the contact list
-            // of peers whose devices we pull nsites from).
-            core.dispatch(NativeActions.addToCircle(info.npub, info.name))
+            // Mutual pairing: request to pair (the sharer accepts on their device);
+            // the nsite can still download from them as a holder meanwhile.
+            core.dispatch(NativeActions.sendPairRequest(info.npub, info.name, info.secret))
         }
         core.dispatch(NativeActions.openNsite(info.nsiteHost, holder = info.npub))
         val who = info.name.ifEmpty { "a peer" }

@@ -60,6 +60,17 @@ pub enum NativeAppAction {
     /// Forget a peer (remove from the Circle).
     RemoveFromCircle { npub: String },
 
+    // --- mutual pairing ---
+    /// Scanned a peer's pairing QR: send them a signed pair request over the mesh
+    /// (to their relay). Pairs nobody yet — only a mutual accept adds both sides.
+    /// `npub`/`name` are the scanned peer's; `secret` is the QR's one-time value.
+    SendPairRequest { npub: String, name: String, secret: String },
+    /// Accept an incoming pair request: add the requester to the Circle and signal
+    /// them (a pair-accept) so they add us back.
+    AcceptPairRequest { npub: String, name: String },
+    /// Dismiss an incoming pair request without pairing.
+    DeclinePairRequest { npub: String },
+
     /// Toggle "mesh-only": when enabled, never use the public IP relay/Blossom
     /// fallback — pull only over the mesh. Lets you verify the mesh path even
     /// when this device has internet (e.g. it's acting as a hotspot).

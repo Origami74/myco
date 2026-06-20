@@ -27,6 +27,7 @@ import java.io.InputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * The Android BLE radio. Kotlin owns the radio; the Rust core (fips `AndroidIo`)
@@ -62,6 +63,13 @@ class BleRadio(context: Context) {
     private var advertiseCallback: AdvertiseCallback? = null
     private var scanner: BluetoothLeScanner? = null
     private var scanCallback: ScanCallback? = null
+
+    // Advertiser-retry state: when the OS refuses our advert because every BLE
+    // advertising slot is taken (TOO_MANY_ADVERTISERS, typically Play Services'
+    // Nearby Share/Fast Pair), we keep retrying on a backoff until a slot frees.
+    private val retryExec = Executors.newSingleThreadScheduledExecutor()
+    @Volatile private var advertisePsm = 0
+    private var advertiseRetries = 0
 
     fun bindBridge(handle: Long) {
         bridgeHandle = handle
@@ -111,6 +119,10 @@ class BleRadio(context: Context) {
 
     fun startAdvertising(psm: Int) {
         if (stopped) return
+        advertisePsm = psm
+        // Stop-before-start hygiene: never orphan a prior advertiser set on a
+        // re-advertise (retry / radio restart), which itself burns a slot.
+        stopAdvertising()
         val adv = adapter?.bluetoothLeAdvertiser ?: return
         advertiser = adv
         val settings = AdvertiseSettings.Builder()
@@ -134,10 +146,18 @@ class BleRadio(context: Context) {
             .build()
         val cb = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+                advertiseRetries = 0
+                BleHealth.advertiserExhausted = false
                 Log.i(TAG, "advertising PSM $psm (in primary advert)")
             }
             override fun onStartFailure(errorCode: Int) {
-                Log.e(TAG, "advertise failed: $errorCode (1=DATA_TOO_LARGE)")
+                Log.e(TAG, "advertise failed: $errorCode (1=DATA_TOO_LARGE, 2=TOO_MANY_ADVERTISERS)")
+                if (errorCode == ADVERTISE_FAILED_TOO_MANY_ADVERTISERS) {
+                    // Every advertising slot is taken (usually Play Services'
+                    // Nearby Share / Fast Pair). Flag it for the UI and retry.
+                    BleHealth.advertiserExhausted = true
+                    scheduleAdvertiseRetry()
+                }
             }
         }
         advertiseCallback = cb
@@ -145,6 +165,23 @@ class BleRadio(context: Context) {
             adv.startAdvertising(settings, advData, cb)
         } catch (e: Exception) {
             Log.e(TAG, "startAdvertising failed", e)
+            scheduleAdvertiseRetry()
+        }
+    }
+
+    /** Re-attempt advertising on an exponential backoff (5→10→20→40s, capped 60s)
+     *  until a BLE advertising slot frees up. Cleared on the next success. */
+    private fun scheduleAdvertiseRetry() {
+        if (stopped) return
+        val delay = minOf(60L, 5L shl minOf(advertiseRetries, 3))
+        advertiseRetries++
+        Log.i(TAG, "advertise retry in ${delay}s (slot exhausted)")
+        runCatching {
+            retryExec.schedule(
+                { if (!stopped) startAdvertising(advertisePsm) },
+                delay,
+                TimeUnit.SECONDS,
+            )
         }
     }
 
@@ -217,6 +254,7 @@ class BleRadio(context: Context) {
         channels.keys.toList().forEach { closeChannel(it) }
         gatts.keys.toList().forEach { dropGatt(it) }
         io.shutdownNow()
+        retryExec.shutdownNow()
     }
 
     // ---- internals ----
@@ -381,4 +419,15 @@ class BleRadio(context: Context) {
          *  128-bit FIPS UUID inside one 31-byte legacy advert. See ble-wire.md. */
         val PSM_SD_PARCEL_UUID = ParcelUuid.fromString("00009c90-0000-1000-8000-00805f9b34fb")
     }
+}
+
+/** Process-global BLE health flags read directly by the UI (no AppState round-trip).
+ *  Single instance — there is only ever one [BleRadio] per process. */
+object BleHealth {
+    /** True when the OS refused our advertiser with TOO_MANY_ADVERTISERS: other
+     *  apps (typically Google Play Services' Nearby Share / Quick Share / Fast
+     *  Pair) hold every BLE advertising slot, so peers can't discover this device.
+     *  Cleared automatically once advertising succeeds on a retry. */
+    @Volatile
+    var advertiserExhausted: Boolean = false
 }

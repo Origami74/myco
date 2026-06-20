@@ -18,7 +18,7 @@ use futures_util::future::join_all;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nostr::nips::nip19::{FromBech32, ToBech32};
-use nostr::PublicKey;
+use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag};
 use nsite_deck::gateway::{self, Readiness};
 use nsite_deck::seams::{BlobStore, PeerSource, RelayBackend};
 use nsite_deck::{sync, GatewayResponse, SiteAddr, SyncOutcome};
@@ -104,6 +104,24 @@ impl CacheView {
     }
 }
 
+/// An incoming pairing request awaiting the user's accept/decline (surfaced to the
+/// UI as a pop-up). The requester scanned our QR; `secret` is the one-time value
+/// from that QR, echoed back to prove they actually saw it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairRequestView {
+    pub npub: String,
+    pub name: String,
+    pub secret: String,
+}
+
+/// Mutual-pairing handshake events, delivered point-to-point over a peer's mesh
+/// relay (NOT gossiped). Both are signed by the **device** key (the pairing
+/// identity) and self-destruct (NIP-40). See `docs/design/event-gossip.md`.
+pub const KIND_PAIR_REQUEST: u16 = 9101;
+pub const KIND_PAIR_ACCEPT: u16 = 9102;
+const PAIR_TTL_SECS: u64 = 120;
+
 /// The content layer. Cheap to `Arc`-clone; the gateway path clones one out of the
 /// `AppRuntime` mutex and serves without holding it.
 pub struct Content {
@@ -130,6 +148,14 @@ pub struct Content {
     discovered: Mutex<Vec<DiscoveredNsite>>,
     /// host_label -> current sync status (drives the FFI `siteStatus`).
     sites: Mutex<HashMap<String, SiteStatusView>>,
+    /// The device's Nostr keypair (the pairing identity), used to sign pair
+    /// request/accept events. Set once at startup from the persisted nsec.
+    device_keys: Mutex<Option<Keys>>,
+    /// Incoming pair requests awaiting the user's accept/decline (UI pop-up).
+    pending_pairs: Mutex<Vec<PairRequestView>>,
+    /// Persistent WS connections to peers' relays, so chat fan-out doesn't pay a
+    /// fresh connect per message (slow over BLE).
+    peer_relays: crate::peer_relay::PeerRelayPool,
 }
 
 impl Content {
@@ -153,6 +179,9 @@ impl Content {
             connected_peers: Mutex::new(Vec::new()),
             discovered: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
+            device_keys: Mutex::new(None),
+            pending_pairs: Mutex::new(Vec::new()),
+            peer_relays: crate::peer_relay::PeerRelayPool::new(),
         })
     }
 
@@ -526,6 +555,139 @@ impl Content {
             .collect()
     }
 
+    // --- pairing (mutual handshake over the mesh) ---
+
+    /// Set the device keypair (the pairing identity) from the persisted nsec.
+    pub fn set_device_keys(&self, nsec: &str) {
+        match Keys::parse(nsec) {
+            Ok(keys) => *self.device_keys.lock().unwrap() = Some(keys),
+            Err(e) => tracing::warn!(error = %e, "pairing: bad device nsec"),
+        }
+    }
+
+    pub fn pending_pairs_snapshot(&self) -> Vec<PairRequestView> {
+        self.pending_pairs.lock().unwrap().clone()
+    }
+
+    /// Our own device label, sent to the peer so their pop-up / Circle entry has a
+    /// name.
+    fn device_name(&self) -> String {
+        let npub = self
+            .device_keys
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|k| k.public_key().to_bech32().ok())
+            .unwrap_or_default();
+        short_name(&npub)
+    }
+
+    /// Route an incoming pair event (the gossiper hands us the pair kinds; they are
+    /// point-to-point and never gossiped). A **request** surfaces a pop-up; an
+    /// **accept** means a peer accepted *our* request → add them to the Circle.
+    pub fn handle_pair_event(&self, event: &Event) {
+        let Ok(from) = event.pubkey.to_bech32() else { return };
+        let name = tag_value(event, "n").unwrap_or_else(|| short_name(&from));
+        match event.kind.as_u16() {
+            KIND_PAIR_REQUEST => {
+                let secret = tag_value(event, "secret").unwrap_or_default();
+                let mut pending = self.pending_pairs.lock().unwrap();
+                if !pending.iter().any(|p| p.npub == from) {
+                    pending.push(PairRequestView { npub: from, name, secret });
+                }
+            }
+            KIND_PAIR_ACCEPT => {
+                self.add_to_circle(&from, &name);
+                self.pending_pairs.lock().unwrap().retain(|p| p.npub != from);
+            }
+            _ => {}
+        }
+    }
+
+    /// Scanned a peer's QR: send a signed pair request to their mesh relay. We do
+    /// not add them yet — only a mutual accept pairs both sides.
+    pub async fn send_pair_request(&self, target_npub: &str, secret: &str) {
+        self.dial_pair_event(target_npub, KIND_PAIR_REQUEST, secret).await;
+    }
+
+    /// Accept an incoming request: add the requester to our Circle and send them a
+    /// signed accept so they add us too.
+    pub async fn accept_pair_request(&self, npub: &str, name: &str) {
+        self.add_to_circle(npub, name);
+        self.pending_pairs.lock().unwrap().retain(|p| p.npub != npub);
+        self.dial_pair_event(npub, KIND_PAIR_ACCEPT, "").await;
+    }
+
+    /// Decline an incoming request (drop it; no signal back).
+    pub fn decline_pair_request(&self, npub: &str) {
+        self.pending_pairs.lock().unwrap().retain(|p| p.npub != npub);
+    }
+
+    /// Build + sign a pair event and publish it to the target's mesh relay.
+    async fn dial_pair_event(&self, target_npub: &str, kind: u16, secret: &str) {
+        let Some(keys) = self.device_keys.lock().unwrap().clone() else {
+            tracing::warn!("pairing: device keys not set");
+            return;
+        };
+        let name = self.device_name();
+        let Some(event) = build_pair_event(&keys, kind, target_npub, &name, secret) else {
+            tracing::warn!(target_npub, "pairing: could not build event");
+            return;
+        };
+        let peer = match fips::PeerIdentity::from_npub(target_npub) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(target_npub, error = %e, "pairing: bad target npub");
+                return;
+            }
+        };
+        let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
+        crate::ip_source::publish_event(&url, &event, 0, std::time::Duration::from_secs(10)).await;
+    }
+
+    // --- backlog pull (the read counterpart of fan-out) ---
+
+    /// Pull recent chat (kind 9) from a peer's relay into the local store, so a
+    /// freshly-opened nsite sees history it missed while the push flood is the live
+    /// path. Best-effort, hard-bounded; stored events surface on the nsite's next
+    /// REQ. (The efficient negentropy version is future work — needs NIP-77 on the
+    /// relay.) `npub` is a connected Circle peer.
+    pub async fn pull_recent_chat(&self, npub: &str) {
+        let Ok(peer) = fips::PeerIdentity::from_npub(npub) else { return };
+        let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
+        // kind 9 is the v1 chat kind (myco-bitchat); generalize when more apps land.
+        let filter = serde_json::json!({ "kinds": [9], "limit": 100 });
+        let events = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            crate::ip_source::query_relay(&url, filter),
+        )
+        .await
+        {
+            Ok(Ok(evs)) => evs,
+            _ => return,
+        };
+        let mut stored = 0u32;
+        for ev in events {
+            if ev.verify().is_ok() && self.relay.store_event(ev).await.unwrap_or(false) {
+                stored += 1;
+            }
+        }
+        if stored > 0 {
+            tracing::debug!(npub, stored, "pulled chat backlog from peer");
+        }
+    }
+
+    // --- mesh fan-out ---
+
+    /// Queue a pre-built relay frame (`["EVENT", {…}]`) to a peer's relay over a
+    /// persistent pooled connection (no per-message connect). `npub` is the target
+    /// Circle peer. Non-blocking.
+    pub fn gossip_to_peer(&self, npub: &str, frame: String) {
+        let Ok(peer) = fips::PeerIdentity::from_npub(npub) else { return };
+        let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
+        self.peer_relays.send(npub, &url, frame);
+    }
+
     // --- discovery ("nsites around me") ---
 
     /// Discover nsites on connected Circle peers' relays: query each reachable
@@ -781,6 +943,48 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// First value of the first tag named `name` (e.g. `["n", "Alice"]` → "Alice").
+fn tag_value(event: &Event, name: &str) -> Option<String> {
+    event.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        (s.first().map(String::as_str) == Some(name))
+            .then(|| s.get(1).cloned())
+            .flatten()
+    })
+}
+
+/// A short device label from an npub (`Myco-xxxxxx`), the placeholder until a
+/// memorable name lands.
+fn short_name(npub: &str) -> String {
+    format!(
+        "Myco-{}",
+        npub.trim_start_matches("npub1").chars().take(6).collect::<String>()
+    )
+}
+
+/// Build + sign a pair-request/accept event (device key), addressed to
+/// `target_npub` via a `p` tag, carrying our `n` name, the one-time `secret`
+/// (request only), and a short NIP-40 expiration.
+fn build_pair_event(
+    keys: &Keys,
+    kind: u16,
+    target_npub: &str,
+    our_name: &str,
+    secret: &str,
+) -> Option<Event> {
+    let target = PublicKey::from_bech32(target_npub).ok()?;
+    let exp = (now_secs() + PAIR_TTL_SECS).to_string();
+    let mut tags = vec![
+        Tag::parse(["p", &target.to_hex()]).ok()?,
+        Tag::parse(["n", our_name]).ok()?,
+        Tag::parse(["expiration", &exp]).ok()?,
+    ];
+    if !secret.is_empty() {
+        tags.push(Tag::parse(["secret", secret]).ok()?);
+    }
+    EventBuilder::new(Kind::from(kind), "").tags(tags).sign_with_keys(keys).ok()
 }
 
 fn load_library(path: &Path) -> Vec<LibraryItem> {

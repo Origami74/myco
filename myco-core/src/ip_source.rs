@@ -157,7 +157,7 @@ pub async fn publish_event(
 /// Query one relay for a single filter, collecting events until EOSE. The whole
 /// call (connect + REQ + read) is hard-bounded by a `timeout` at the call site,
 /// so a dead relay can't hang the sync on a slow TCP/TLS connect.
-async fn query_relay(url: &str, filter: serde_json::Value) -> anyhow::Result<Vec<Event>> {
+pub async fn query_relay(url: &str, filter: serde_json::Value) -> anyhow::Result<Vec<Event>> {
     let (mut ws, _) = tokio_tungstenite::connect_async(url).await?;
     let req = serde_json::json!(["REQ", "myco", filter]);
     ws.send(Message::Text(req.to_string())).await?;

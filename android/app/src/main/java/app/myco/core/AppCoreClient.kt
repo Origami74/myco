@@ -65,6 +65,13 @@ data class DiscoveredNsite(
     val holderName: String,
 )
 
+/** An incoming pair request awaiting accept/decline (shown as a pop-up). */
+data class PairRequest(
+    val npub: String,
+    val name: String,
+    val secret: String,
+)
+
 /** Parsed slice of the core's state snapshot (P1 BLE surface + P2 content). */
 data class AppState(
     val rev: Long,
@@ -89,6 +96,7 @@ data class AppState(
     val cache: CacheStatus,
     val circle: List<CircleContact>,
     val discovered: List<DiscoveredNsite>,
+    val pendingPairRequests: List<PairRequest>,
     val offlineOnly: Boolean,
 ) {
     companion object {
@@ -199,6 +207,21 @@ data class AppState(
                     }
                 }
             }
+            val pairsJson = o.optJSONArray("pendingPairRequests")
+            val pendingPairRequests = buildList {
+                if (pairsJson != null) {
+                    for (i in 0 until pairsJson.length()) {
+                        val p = pairsJson.optJSONObject(i) ?: continue
+                        add(
+                            PairRequest(
+                                npub = p.optString("npub"),
+                                name = p.optString("name"),
+                                secret = p.optString("secret"),
+                            )
+                        )
+                    }
+                }
+            }
             return AppState(
                 rev = o.optLong("rev"),
                 error = o.optString("error"),
@@ -222,6 +245,7 @@ data class AppState(
                 cache = cache,
                 circle = circle,
                 discovered = discovered,
+                pendingPairRequests = pendingPairRequests,
                 offlineOnly = o.optBoolean("offlineOnly"),
             )
         }
@@ -351,6 +375,16 @@ object NativeActions {
     /** Forget a paired peer. */
     fun removeFromCircle(npub: String): JSONObject =
         JSONObject().put("type", "remove_from_circle").put("npub", npub)
+
+    // --- mutual pairing ---
+    fun sendPairRequest(npub: String, name: String, secret: String): JSONObject =
+        JSONObject().put("type", "send_pair_request").put("npub", npub).put("name", name).put("secret", secret)
+
+    fun acceptPairRequest(npub: String, name: String): JSONObject =
+        JSONObject().put("type", "accept_pair_request").put("npub", npub).put("name", name)
+
+    fun declinePairRequest(npub: String): JSONObject =
+        JSONObject().put("type", "decline_pair_request").put("npub", npub)
 
     /** Discover nsites on connected Circle peers' relays ("nsites around me"). */
     fun searchNsites(): JSONObject = JSONObject().put("type", "search_nsites")

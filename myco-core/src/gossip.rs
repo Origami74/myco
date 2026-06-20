@@ -18,7 +18,6 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use nostr::Event;
@@ -26,10 +25,6 @@ use nostr::Event;
 use myco_relay::server::{Gossiper, Inbound, Origin};
 
 use crate::content::Content;
-
-/// Per-peer fan-out timeout — generous, since a first mesh contact includes BLE
-/// session setup. An unreachable peer just fails its own send; others proceed.
-const FANOUT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Hop budget this device stamps on its **own** events (experimental default).
 const DEFAULT_EVENT_TTL: u8 = 3;
@@ -57,7 +52,16 @@ fn is_gossip_eligible(kind: u16) -> bool {
 #[async_trait]
 impl Gossiper for MeshGossiper {
     async fn on_event(&self, event: Event, inbound: Inbound) {
-        if !is_gossip_eligible(event.kind.as_u16()) {
+        let kind = event.kind.as_u16();
+        // Pairing signals are point-to-point (dialed straight to the target's
+        // relay) — handle them, never gossip. Only act on mesh-delivered ones.
+        if kind == crate::content::KIND_PAIR_REQUEST || kind == crate::content::KIND_PAIR_ACCEPT {
+            if inbound.origin == Origin::Mesh {
+                self.content.handle_pair_event(&event);
+            }
+            return;
+        }
+        if !is_gossip_eligible(kind) {
             return;
         }
         // Effective budget: originate at the default for our own publishes; for a
@@ -72,29 +76,32 @@ impl Gossiper for MeshGossiper {
         }
         let out_ttl = fwd - 1;
 
-        let peers = self.content.connected_circle_npubs();
-        let sends = peers.into_iter().filter_map(|npub| {
-            let peer = match fips::PeerIdentity::from_npub(&npub) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(npub, error = %e, "gossip: bad peer npub, skipping");
-                    return None;
-                }
-            };
-            let ip = peer.address().to_ipv6();
-            // Split-horizon: never forward back to the peer it came from.
-            if inbound.sender == Some(IpAddr::V6(ip)) {
-                return None;
+        // Build the outbound relay frame once: the canonical event plus the
+        // decremented transient `event-ttl` (a top-level field, stripped on store).
+        let mut ev_json = match serde_json::to_value(&event) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "gossip: serialize event failed");
+                return;
             }
-            let url = format!("ws://[{ip}]:4869");
-            let event = event.clone();
-            Some(async move {
-                if !crate::ip_source::publish_event(&url, &event, out_ttl, FANOUT_TIMEOUT).await {
-                    tracing::debug!(npub, "gossip: peer relay unreachable");
-                }
-            })
-        });
-        futures_util::future::join_all(sends).await;
+        };
+        if let Some(obj) = ev_json.as_object_mut() {
+            obj.insert("event-ttl".to_string(), serde_json::json!(out_ttl));
+        }
+        let frame = serde_json::json!(["EVENT", ev_json]).to_string();
+
+        // Fan out over persistent pooled connections (no per-message connect),
+        // skipping the peer it came from (split-horizon).
+        for npub in self.content.connected_circle_npubs() {
+            let ip = match fips::PeerIdentity::from_npub(&npub) {
+                Ok(p) => IpAddr::V6(p.address().to_ipv6()),
+                Err(_) => continue,
+            };
+            if inbound.sender == Some(ip) {
+                continue;
+            }
+            self.content.gossip_to_peer(&npub, frame.clone());
+        }
     }
 }
 

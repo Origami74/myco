@@ -19,14 +19,18 @@ import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.TravelExplore
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,8 +49,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import app.myco.ble.BleHealth
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
+import app.myco.core.NativeActions
 import app.myco.ui.screens.AddScreen
 import app.myco.ui.screens.AppsScreen
 import app.myco.ui.screens.CircleScreen
@@ -91,12 +97,15 @@ fun MycoApp(
     var state by remember { mutableStateOf(client.state()) }
     // Mesh toggle is hoisted here so it survives tab switches.
     var meshEnabled by remember { mutableStateOf(initialMeshEnabled) }
+    // BLE advertiser exhaustion (set by the radio, read here for the Settings badge).
+    var bleExhausted by remember { mutableStateOf(BleHealth.advertiserExhausted) }
     // Re-poll the native state each second off the main thread (it crosses JNI and
     // walks the blob dir for cache counts). Pure read — does not bump `rev`.
     androidx.compose.runtime.LaunchedEffect(Unit) {
         while (true) {
             delay(1000)
             state = withContext(Dispatchers.IO) { client.state() }
+            bleExhausted = BleHealth.advertiserExhausted
         }
     }
 
@@ -121,7 +130,15 @@ fun MycoApp(
                                     restoreState = true
                                 }
                             },
-                            icon = { Icon(tab.icon, contentDescription = tab.label) },
+                            icon = {
+                                if (tab.route == "settings" && bleExhausted) {
+                                    BadgedBox(badge = { Badge() }) {
+                                        Icon(tab.icon, contentDescription = tab.label)
+                                    }
+                                } else {
+                                    Icon(tab.icon, contentDescription = tab.label)
+                                }
+                            },
                             label = { Text(tab.label) },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = MaterialTheme.colorScheme.primary,
@@ -151,6 +168,7 @@ fun MycoApp(
                         meshEnabled = meshEnabled,
                         onMeshToggle = { on -> meshEnabled = on; onMeshToggle(on) },
                         onOfflineOnlyToggle = onOfflineOnlyToggle,
+                        bleExhausted = bleExhausted,
                     )
                 }
                 composable("dev") { DevScreen(state) }
@@ -171,6 +189,57 @@ fun MycoApp(
             }
         }
     }
+
+    // Incoming pair request → pop-up to accept/decline (mutual pairing).
+    PairRequestDialog(state, client) { newState -> state = newState }
+
+    // Loud warning if our local relay couldn't bind 4869 (another relay holds it):
+    // nsites would talk to that foreign relay and show messages that aren't yours.
+    var relayWarnDismissed by remember { mutableStateOf(false) }
+    if (state.error.contains("4869") && !relayWarnDismissed) {
+        AlertDialog(
+            onDismissRequest = { relayWarnDismissed = true },
+            title = { Text("Another relay is running") },
+            text = {
+                Text(
+                    "Port 4869 is in use by another app, so Myco's own relay couldn't " +
+                        "start. Your apps may talk to the wrong relay — including showing " +
+                        "messages that aren't yours. Close the other app and restart Myco.\n\n" +
+                        state.error,
+                )
+            },
+            confirmButton = { TextButton(onClick = { relayWarnDismissed = true }) { Text("OK") } },
+        )
+    }
+}
+
+/**
+ * Modal shown when another device has sent a pair request (it scanned our QR).
+ * Accept adds them to the Circle and signals them to add us back; Decline drops it.
+ */
+@Composable
+private fun PairRequestDialog(
+    state: AppState,
+    client: AppCoreClient,
+    onStateChange: (AppState) -> Unit,
+) {
+    val pending = state.pendingPairRequests.firstOrNull() ?: return
+    val name = pending.name.ifEmpty { "A nearby device" }
+    AlertDialog(
+        onDismissRequest = { onStateChange(client.dispatch(NativeActions.declinePairRequest(pending.npub))) },
+        title = { Text("Pair with $name?") },
+        text = { Text("They scanned your code. Accepting adds them to your Circle so apps and chats flow both ways.") },
+        confirmButton = {
+            TextButton(onClick = {
+                onStateChange(client.dispatch(NativeActions.acceptPairRequest(pending.npub, pending.name)))
+            }) { Text("Accept") }
+        },
+        dismissButton = {
+            TextButton(onClick = {
+                onStateChange(client.dispatch(NativeActions.declinePairRequest(pending.npub)))
+            }) { Text("Decline") }
+        },
+    )
 }
 
 // ----- shared UI building blocks used across screens -----

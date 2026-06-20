@@ -17,6 +17,8 @@ mod content;
 mod gossip;
 mod identity_store;
 mod ip_source;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod peer_relay;
 mod runtime;
 mod state;
 // The bridge is pumped only by the Android VpnService (via tun_bridge_jni) and

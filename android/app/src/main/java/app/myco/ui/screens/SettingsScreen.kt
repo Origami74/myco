@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -21,6 +22,7 @@ import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lan
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -60,6 +62,7 @@ fun SettingsScreen(
     meshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
     onOfflineOnlyToggle: (Boolean) -> Unit,
+    bleExhausted: Boolean = false,
 ) {
     var showIdentity by remember { mutableStateOf(false) }
     var confirmWipe by remember { mutableStateOf(false) }
@@ -115,6 +118,11 @@ fun SettingsScreen(
             )
         }
 
+        if (bleExhausted) {
+            Spacer(Modifier.height(8.dp))
+            BleExhaustedCard()
+        }
+
         Spacer(Modifier.height(8.dp))
         GroupLabel("DATA")
         SectionCard {
@@ -168,6 +176,47 @@ fun SettingsScreen(
             dismissButton = { TextButton(onClick = { confirmWipe = false }) { Text("Cancel") } },
             title = { Text("Clear all content?") },
             text = { Text("Removes every downloaded nsite (relay events + blobs). Your identity and Circle stay.") },
+        )
+    }
+}
+
+/** Warning shown when the OS denied our BLE advertiser (TOO_MANY_ADVERTISERS):
+ *  other apps hold every advertising slot, so peers can't discover this device.
+ *  The radio keeps retrying on a backoff; this tells the user how to free a slot. */
+@Composable
+private fun BleExhaustedCard() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                MaterialTheme.colorScheme.errorContainer,
+                RoundedCornerShape(14.dp),
+            )
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.size(10.dp))
+            Text(
+                "Can't advertise to nearby peers",
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleMedium,
+            )
+        }
+        Text(
+            "Another app is using up all of Android's Bluetooth advertising slots, " +
+                "so other devices can't discover this one. To fix it: restart the device, " +
+                "or turn off Nearby Share / Quick Share / Fast Pair. Myco keeps retrying " +
+                "automatically.",
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            style = MaterialTheme.typography.bodySmall,
         )
     }
 }

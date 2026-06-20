@@ -31,6 +31,8 @@ pub struct AppState {
     pub cache: crate::content::CacheView,
     /// The user's **Circle**: paired peers we pull nsites from over the mesh.
     pub circle: Vec<crate::content::CircleContact>,
+    /// Incoming pair requests awaiting accept/decline (the UI shows a pop-up).
+    pub pending_pair_requests: Vec<crate::content::PairRequestView>,
     /// nsites discovered on Circle peers' relays (`SearchNsites` — "around me").
     pub discovered: Vec<crate::content::DiscoveredNsite>,
     /// "Mesh-only": the IP online fallback is disabled (pull only over the mesh).

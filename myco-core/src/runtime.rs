@@ -43,6 +43,9 @@ pub struct AppRuntime {
     /// The content layer (embedded relay + Blossom + gateway + Library). `None`
     /// only on a startup error (no valid data dir).
     content: Option<Arc<Content>>,
+    /// Circle peers we've already pulled chat backlog from this connection, so we
+    /// pull once per (re)connect rather than every state poll.
+    pulled_chat_from: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl AppRuntime {
@@ -72,6 +75,12 @@ impl AppRuntime {
         // The content layer (relay + Blossom + gateway + Library) lives for the
         // whole process; it is independent of the node's start/stop lifecycle.
         let content = Arc::new(Content::open(Path::new(data_dir))?);
+
+        // The device keypair (same nsec the node uses) is the pairing identity —
+        // pair request/accept events are signed with it.
+        if let Ok(nsec) = identity_store::load_or_generate(Path::new(data_dir)) {
+            content.set_device_keys(&nsec);
+        }
 
         // Install the IP online-fallback pull source so a pasted nsite link can
         // be fetched over normal internet (the P2 content-entry path). Gated by
@@ -133,10 +142,18 @@ impl AppRuntime {
                     });
                 }
                 Err(e) => {
+                    // Critical: the in-app nsites connect to ws://localhost:4869, so
+                    // if another app holds it they'll silently talk to the WRONG
+                    // relay (you'd see messages that aren't yours). Flag it loudly;
+                    // the UI watches for "port 4869" to pop a warning.
                     if !mesh_warning.is_empty() {
                         mesh_warning.push_str("; ");
                     }
-                    mesh_warning.push_str(&format!("loopback relay port 4869 unavailable: {e}"));
+                    mesh_warning.push_str(&format!(
+                        "Another app is using port 4869 — Myco's relay couldn't start, \
+                         so apps will talk to the wrong relay. Close the other app and \
+                         restart Myco. ({e})"
+                    ));
                 }
             }
             match myco_blossom::server::bind("[::]:24242".parse::<SocketAddr>().unwrap()) {
@@ -170,6 +187,7 @@ impl AppRuntime {
             read_handle: None,
             loop_task: None,
             content: Some(content),
+            pulled_chat_from: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -214,6 +232,7 @@ impl AppRuntime {
             read_handle: None,
             loop_task: None,
             content: None,
+            pulled_chat_from: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -287,6 +306,24 @@ impl AppRuntime {
             NativeAppAction::RemoveFromCircle { npub } => {
                 if let Some(content) = &self.content {
                     content.remove_from_circle(&npub);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SendPairRequest { npub, secret, .. } => {
+                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
+                    rt.spawn(async move { content.send_pair_request(&npub, &secret).await });
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::AcceptPairRequest { npub, name } => {
+                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
+                    rt.spawn(async move { content.accept_pair_request(&npub, &name).await });
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::DeclinePairRequest { npub } => {
+                if let Some(content) = &self.content {
+                    content.decline_pair_request(&npub);
                 }
                 self.rev += 1;
             }
@@ -455,6 +492,22 @@ impl AppRuntime {
                 .map(|p| p.npub.clone())
                 .collect();
             content.set_connected_peers(connected);
+
+            // Pull chat backlog once per newly-connected Circle peer (the read
+            // counterpart of the push flood) so a freshly-opened nsite has history.
+            if let Some(rt) = self.rt.as_ref() {
+                let conn: std::collections::HashSet<String> =
+                    content.connected_circle_npubs().into_iter().collect();
+                let mut pulled = self.pulled_chat_from.lock().unwrap();
+                for npub in &conn {
+                    if pulled.insert(npub.clone()) {
+                        let content = content.clone();
+                        let npub = npub.clone();
+                        rt.spawn(async move { content.pull_recent_chat(&npub).await });
+                    }
+                }
+                pulled.retain(|n| conn.contains(n)); // re-pull on reconnect
+            }
         }
 
         AppState {
@@ -493,6 +546,11 @@ impl AppRuntime {
                 .content
                 .as_ref()
                 .map(|c| c.circle_snapshot())
+                .unwrap_or_default(),
+            pending_pair_requests: self
+                .content
+                .as_ref()
+                .map(|c| c.pending_pairs_snapshot())
                 .unwrap_or_default(),
             discovered: self
                 .content
