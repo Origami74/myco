@@ -10,7 +10,7 @@
 //! gossiper can apply the push/pull and `event-ttl` rules.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -36,13 +36,28 @@ pub enum Origin {
     Mesh,
 }
 
+/// Context for a newly-accepted event handed to the [`Gossiper`].
+#[derive(Clone, Copy, Debug)]
+pub struct Inbound {
+    /// Where the event arrived from (loopback WebView vs a mesh peer).
+    pub origin: Origin,
+    /// The `event-ttl` that rode on the inbound EVENT (transient, stripped on
+    /// store). `None` for a local publish — the gossiper stamps the originate
+    /// default. See `docs/design/event-gossip.md` §2.
+    pub event_ttl: Option<u8>,
+    /// The mesh peer's address the event came from, for split-horizon (never
+    /// forward back to the sender). `None` for a local publish.
+    pub sender: Option<IpAddr>,
+}
+
 /// The mesh fan-out hook. The relay calls this for every **newly-accepted** event
-/// with the [`Origin`] it arrived from; the implementor (`myco-core`) decides
-/// whether and how far to push it to circle peers (see `docs/design/event-gossip.md`).
+/// (the store's id-dedup is the loop guard: a duplicate is never re-delivered
+/// here). The implementor (`myco-core`) decides whether and how far to push it to
+/// circle peers using the [`Inbound`] context (see `docs/design/event-gossip.md`).
 /// The default does nothing — the relay never fans out on its own.
 #[async_trait]
 pub trait Gossiper: Send + Sync {
-    async fn on_event(&self, event: Event, origin: Origin);
+    async fn on_event(&self, event: Event, inbound: Inbound);
 }
 
 /// Shared per-relay state: the store, a broadcast bus that fans newly-stored
@@ -130,23 +145,21 @@ pub async fn serve_on_hub(
     Ok(())
 }
 
-/// `/` is the WS endpoint; the peer address classifies the [`Origin`].
+/// `/` is the WS endpoint; the peer address classifies the [`Origin`] and is the
+/// split-horizon sender id for mesh fan-out.
 async fn root(
     ws: WebSocketUpgrade,
     State(hub): State<Arc<RelayHub>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    let origin = if addr.ip().is_loopback() {
-        Origin::Local
-    } else {
-        Origin::Mesh
-    };
-    ws.on_upgrade(move |socket| handle_ws(socket, hub, origin))
+    let peer = addr.ip();
+    ws.on_upgrade(move |socket| handle_ws(socket, hub, peer))
 }
 
 /// One client connection: serve `REQ` backlog + keep the subscription live, accept
 /// `EVENT`s (store → fan to local subs → drive the gossiper), honour `CLOSE`.
-async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, origin: Origin) {
+async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
+    let origin = if peer_ip.is_loopback() { Origin::Local } else { Origin::Mesh };
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut live = hub.live.subscribe();
     // Active subscriptions on this connection: sub_id -> its filters.
@@ -157,7 +170,7 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, origin: Origin) {
             incoming = ws_rx.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        for reply in handle_client_frame(text.as_str(), &hub, origin, &mut subs).await {
+                        for reply in handle_client_frame(text.as_str(), &hub, origin, peer_ip, &mut subs).await {
                             if ws_tx.send(Message::text(reply)).await.is_err() {
                                 return;
                             }
@@ -195,6 +208,7 @@ async fn handle_client_frame(
     text: &str,
     hub: &Arc<RelayHub>,
     origin: Origin,
+    peer_ip: IpAddr,
     subs: &mut HashMap<String, Vec<ManifestFilter>>,
 ) -> Vec<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
@@ -233,6 +247,13 @@ async fn handle_client_frame(
             let Some(event_value) = array.get(1) else {
                 return Vec::new();
             };
+            // The transient `event-ttl` (top-level, not a tag) rides the EVENT for
+            // mesh fan-out; read it before parsing (parsing to Event drops it, so
+            // it is never stored). See docs/design/event-gossip.md §2.
+            let event_ttl = event_value
+                .get("event-ttl")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.min(u8::MAX as u64) as u8);
             let Ok(event) = serde_json::from_value::<Event>(event_value.clone()) else {
                 return Vec::new();
             };
@@ -246,7 +267,12 @@ async fn handle_client_frame(
                     let _ = hub.live.send(event.clone());
                     // Drive the mesh gossiper off the socket path (non-blocking).
                     if let Some(gossip) = hub.gossip.clone() {
-                        tokio::spawn(async move { gossip.on_event(event, origin).await });
+                        let inbound = Inbound {
+                            origin,
+                            event_ttl,
+                            sender: (origin == Origin::Mesh).then_some(peer_ip),
+                        };
+                        tokio::spawn(async move { gossip.on_event(event, inbound).await });
                     }
                     vec![serde_json::json!(["OK", id, true, ""]).to_string()]
                 }
@@ -426,11 +452,11 @@ mod tests {
     async fn gossiper_invoked_on_local_event() {
         use std::sync::Mutex;
 
-        struct Capture(Mutex<Vec<(String, Origin)>>);
+        struct Capture(Mutex<Vec<(String, Inbound)>>);
         #[async_trait]
         impl Gossiper for Capture {
-            async fn on_event(&self, event: Event, origin: Origin) {
-                self.0.lock().unwrap().push((event.id.to_hex(), origin));
+            async fn on_event(&self, event: Event, inbound: Inbound) {
+                self.0.lock().unwrap().push((event.id.to_hex(), inbound));
             }
         }
 
@@ -456,7 +482,8 @@ mod tests {
         let seen = capture.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0, msg.id.to_hex());
-        // 127.0.0.1 is loopback → Local origin.
-        assert_eq!(seen[0].1, Origin::Local);
+        // 127.0.0.1 is loopback → Local origin, no sender (originator stamps TTL).
+        assert_eq!(seen[0].1.origin, Origin::Local);
+        assert_eq!(seen[0].1.sender, None);
     }
 }

@@ -129,10 +129,22 @@ pub async fn discover_manifests(relay_url: &str, timeout: Duration, limit: usize
 /// send, briefly await the `OK`, close. The whole call is hard-bounded by
 /// `timeout` so an unreachable peer relay can't stall the fan-out. Returns whether
 /// the event was sent (not whether it was accepted — chat is fire-and-forget).
-pub async fn publish_event(url: &str, event: &nostr::Event, timeout: Duration) -> bool {
+pub async fn publish_event(
+    url: &str,
+    event: &nostr::Event,
+    event_ttl: u8,
+    timeout: Duration,
+) -> bool {
     let send = async {
         let (mut ws, _) = tokio_tungstenite::connect_async(url).await.ok()?;
-        let frame = serde_json::json!(["EVENT", event]).to_string();
+        // Carry the hop budget as a transient top-level `event-ttl` field (not a
+        // tag; doesn't touch the signature). The peer relay reads it for fan-out
+        // and strips it on store. See docs/design/event-gossip.md §2.
+        let mut ev_json = serde_json::to_value(event).ok()?;
+        if let Some(obj) = ev_json.as_object_mut() {
+            obj.insert("event-ttl".to_string(), serde_json::json!(event_ttl));
+        }
+        let frame = serde_json::json!(["EVENT", ev_json]).to_string();
         ws.send(Message::Text(frame)).await.ok()?;
         // Wait briefly for the OK, but don't depend on it; then close politely.
         let _ = ws.next().await;
@@ -353,7 +365,7 @@ mod tests {
             .sign_with_keys(&keys)
             .unwrap();
 
-        assert!(publish_event(&format!("ws://{addr}"), &ev, Duration::from_secs(5)).await);
+        assert!(publish_event(&format!("ws://{addr}"), &ev, 3, Duration::from_secs(5)).await);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(store.count(), 1, "published event stored by the relay");
     }
