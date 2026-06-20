@@ -58,7 +58,26 @@ pub struct Inbound {
 #[async_trait]
 pub trait Gossiper: Send + Sync {
     async fn on_event(&self, event: Event, inbound: Inbound);
+
+    /// The **pull plane**: forward a `REQ`'s filters to circle peers carrying a
+    /// decremented `req-ttl`, returning their matching (signature-verified) events
+    /// to fold into the backlog before `EOSE`. `exclude` is the requester's mesh
+    /// address (split-horizon — never forward straight back to it). The default
+    /// does nothing, so a relay with no gossiper stays single-hop. See
+    /// `docs/design/event-gossip.md` (req-ttl).
+    async fn on_req(
+        &self,
+        _filters: Vec<serde_json::Value>,
+        _req_ttl: u8,
+        _exclude: Option<IpAddr>,
+    ) -> Vec<Event> {
+        Vec::new()
+    }
 }
+
+/// Clamp on the `req-ttl` we'll honour, so a peer can't turn us into an
+/// unbounded query amplifier (mirrors `MAX_EVENT_TTL` on the push plane).
+const MAX_REQ_TTL: u8 = 2;
 
 /// Shared per-relay state: the store, a broadcast bus that fans newly-stored
 /// events to all live subscriptions on this device, and the optional mesh gossiper.
@@ -220,8 +239,18 @@ async fn handle_client_frame(
     match array.first().and_then(|v| v.as_str()) {
         Some("REQ") => {
             let sub_id = array.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let raw_filters: Vec<serde_json::Value> = array.iter().skip(2).cloned().collect();
+            // `req-ttl` rides *inside* a filter object (a transient extension key,
+            // like `event-ttl` rides the EVENT) — the remaining mesh forward hops.
+            // parse_filter ignores the key, so it never affects local matching.
+            let req_ttl = raw_filters
+                .iter()
+                .filter_map(|f| f.get("req-ttl").and_then(|v| v.as_u64()))
+                .max()
+                .map(|n| n.min(MAX_REQ_TTL as u64) as u8)
+                .unwrap_or(0);
             let filters: Vec<ManifestFilter> =
-                array.iter().skip(2).filter_map(parse_filter).collect();
+                raw_filters.iter().filter_map(parse_filter).collect();
 
             // Stored backlog: any-match across the REQ's filters, newest first.
             let mut events: Vec<Event> = Vec::new();
@@ -230,6 +259,19 @@ async fn handle_client_frame(
                     events.append(&mut matched);
                 }
             }
+
+            // Pull plane: fold in peers' matching events up to `req-ttl` more hops.
+            // Bounded by the gossiper's own per-peer timeouts. Only paid when a
+            // client opts in by setting req-ttl (e.g. discovery), so plain chat
+            // REQs stay single-hop and cheap.
+            if req_ttl > 0 {
+                if let Some(gossip) = hub.gossip.clone() {
+                    let exclude = (origin == Origin::Mesh).then_some(peer_ip);
+                    let remote = gossip.on_req(raw_filters.clone(), req_ttl - 1, exclude).await;
+                    events.extend(remote);
+                }
+            }
+
             events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
             events.dedup_by(|a, b| a.id == b.id);
 

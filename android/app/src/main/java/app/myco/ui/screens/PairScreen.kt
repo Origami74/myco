@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material3.Button
@@ -323,6 +324,7 @@ private fun MyCodePanel(state: AppState) {
 @Composable
 private fun UrlPanel(onSubmit: (String) -> Unit) {
     var link by remember { mutableStateOf("") }
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     Box(
         modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center,
@@ -336,6 +338,13 @@ private fun UrlPanel(onSubmit: (String) -> Unit) {
                 onValueChange = { link = it },
                 singleLine = true,
                 placeholder = { Text("npub… / <npub>.nsite.lol") },
+                trailingIcon = {
+                    IconButton(onClick = {
+                        clipboard.getText()?.text?.let { if (it.isNotBlank()) link = it.trim() }
+                    }) {
+                        Icon(Icons.Filled.ContentPaste, contentDescription = "Paste")
+                    }
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(14.dp))

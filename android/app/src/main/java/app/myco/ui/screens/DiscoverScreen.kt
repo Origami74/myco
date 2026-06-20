@@ -42,6 +42,11 @@ fun DiscoverScreen(
     client: AppCoreClient,
     onLaunchNsite: (host: String, title: String) -> Unit,
 ) {
+    // Auto-run discovery when the screen first appears, so results show without a
+    // manual tap (the button stays available as Refresh).
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        client.dispatch(NativeActions.searchNsites())
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),

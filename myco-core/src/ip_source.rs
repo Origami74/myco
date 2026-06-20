@@ -115,9 +115,13 @@ pub fn mesh_source_for(holder_npub: &str) -> anyhow::Result<IpPeerSource> {
 /// is hard-bounded by `timeout`; returns signature-verified manifest events. A
 /// dead/slow peer relay yields an empty set rather than stalling discovery.
 pub async fn discover_manifests(relay_url: &str, timeout: Duration, limit: usize) -> Vec<Event> {
+    // `req-ttl: 1` makes each directly-queried (1-hop) peer forward this REQ one
+    // more hop, so discovery also surfaces sites held by our peers' peers (2 hops).
+    // The transient key rides inside the filter object; plain relays ignore it.
     let filter = serde_json::json!({
         "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
         "limit": limit,
+        "req-ttl": 1,
     });
     match tokio::time::timeout(timeout, query_relay(relay_url, filter)).await {
         Ok(Ok(events)) => events.into_iter().filter(|e| e.verify().is_ok()).collect(),

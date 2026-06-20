@@ -91,22 +91,28 @@ fun SettingsScreen(
         }
 
         Spacer(Modifier.height(8.dp))
-        GroupLabel("MESH")
+        GroupLabel("NETWORK")
+        SectionCard {
+            // The master mesh switch (an app-owned VPN/TUN under the hood). Required
+            // for this device to reach the mesh, so it's just "Mesh" and on by default.
+            ToggleRow(
+                icon = Icons.Filled.Lan,
+                title = "Mesh",
+                subtitle = "Connect this device to the mesh",
+                checked = meshEnabled,
+                onToggle = onMeshToggle,
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+        GroupLabel("TRANSPORTS")
         SectionCard {
             ToggleRow(
                 icon = Icons.Filled.Bluetooth,
-                title = "Bluetooth mesh",
+                title = "Bluetooth",
                 subtitle = "Find & link nearby peers offline",
                 checked = state.bleEnabled,
                 onToggle = onBleToggle,
-            )
-            RowDivider()
-            ToggleRow(
-                icon = Icons.Filled.Lan,
-                title = "System-wide mesh",
-                subtitle = "Let the whole device reach the mesh (uses the VPN slot)",
-                checked = meshEnabled,
-                onToggle = onMeshToggle,
             )
             RowDivider()
             ToggleRow(

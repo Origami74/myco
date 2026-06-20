@@ -366,6 +366,8 @@ object NativeActions {
         JSONObject().put("type", "add_to_library").put("link", link)
     fun removeFromLibrary(link: String): JSONObject =
         JSONObject().put("type", "remove_from_library").put("link", link)
+    fun forgetNsite(link: String): JSONObject =
+        JSONObject().put("type", "forget_nsite").put("link", link)
     fun wipeStores(): JSONObject = JSONObject().put("type", "wipe_stores")
 
     // --- circle (paired peers) ---

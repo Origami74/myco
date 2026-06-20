@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.HomeMax
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Search
@@ -87,6 +88,7 @@ fun AppsScreen(
     var query by remember { mutableStateOf("") }
     var sheetFor by remember { mutableStateOf<SiteStatus?>(null) }
     var shareUri by remember { mutableStateOf<String?>(null) }
+    var confirmRemove by remember { mutableStateOf<SiteStatus?>(null) }
 
     val apps = state.sites.filter {
         query.isBlank() || it.title.contains(query, true) || it.host.contains(query, true)
@@ -149,11 +151,29 @@ fun AppsScreen(
                     sheetFor = null
                 },
                 onPinToHome = { sheetFor = null; onPinToHome(site.host, site.title) },
+                onRemove = { sheetFor = null; confirmRemove = site },
             )
         }
     }
 
     shareUri?.let { uri -> ShareQrDialog(uri) { shareUri = null } }
+
+    confirmRemove?.let { site ->
+        AlertDialog(
+            onDismissRequest = { confirmRemove = null },
+            confirmButton = {
+                TextButton(onClick = {
+                    client.dispatch(NativeActions.forgetNsite(site.host))
+                    confirmRemove = null
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmRemove = null }) { Text("Cancel") } },
+            title = { Text("Remove app?") },
+            text = {
+                Text("“${site.title.ifEmpty { site.host.take(12) }}” will be removed from your apps. You can add it again later.")
+            },
+        )
+    }
 }
 
 @Composable
@@ -296,6 +316,7 @@ private fun AppSheet(
     onOpen: () -> Unit,
     onShare: () -> Unit,
     onPinToHome: () -> Unit,
+    onRemove: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -324,12 +345,18 @@ private fun AppSheet(
         if (site.state == "ready") {
             SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
         }
+        SheetAction(Icons.Filled.Delete, "Remove app", tint = MaterialTheme.colorScheme.error) { onRemove() }
         SheetAction(Icons.Filled.Info, site.host) { }
     }
 }
 
 @Composable
-private fun SheetAction(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+private fun SheetAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    tint: Color = MaterialTheme.colorScheme.primary,
+    onClick: () -> Unit,
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -337,7 +364,7 @@ private fun SheetAction(icon: androidx.compose.ui.graphics.vector.ImageVector, l
             .combinedClickableSafe(onClick)
             .padding(vertical = 12.dp),
     ) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        Icon(icon, contentDescription = null, tint = tint)
         Spacer(Modifier.size(14.dp))
         Text(label, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }

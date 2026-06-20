@@ -285,6 +285,14 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
+            NativeAppAction::ForgetNsite { link } => {
+                if let (Some(content), Some(addr)) =
+                    (&self.content, nsite_deck::parse_link(&link))
+                {
+                    content.forget_site(&addr);
+                }
+                self.rev += 1;
+            }
             NativeAppAction::SearchNsites { .. } => {
                 // "nsites around me": query connected Circle peers' mesh relays for
                 // their manifests. Spawn-not-block; results land in `discovered`.

@@ -14,6 +14,18 @@ plugins {
 val repoRoot = layout.projectDirectory.dir("../..")
 val rustOutputDir = layout.projectDirectory.dir("src/main/jniLibs")
 
+/** Short git commit the APK was built from, suffixed `-dirty` when the working
+ *  tree has uncommitted edits. Surfaced in Settings via BuildConfig.GIT_REV. */
+fun gitRev(): String = runCatching {
+    fun run(vararg cmd: String) = ProcessBuilder(*cmd)
+        .directory(repoRoot.asFile)
+        .redirectErrorStream(true)
+        .start().inputStream.bufferedReader().readText().trim()
+    val hash = run("git", "rev-parse", "--short=8", "HEAD")
+    val dirty = run("git", "status", "--porcelain").isNotEmpty()
+    if (hash.isEmpty()) "unknown" else if (dirty) "$hash-dirty" else hash
+}.getOrDefault("unknown")
+
 /**
  * Wire in a LOCAL `fips` checkout via `patch.crates-io`. Set MYCO_FIPS_REPO_PATH
  * to the fips source tree (a single crate: Cargo.toml + src/lib.rs). See
@@ -58,6 +70,7 @@ android {
         versionCode = 1
         versionName = "0.0.1"
         ndk { abiFilters += "arm64-v8a" }             // arm64 only
+        buildConfigField("String", "GIT_REV", "\"${gitRev()}\"")
     }
 
     buildTypes {
@@ -66,7 +79,7 @@ android {
         }
     }
 
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

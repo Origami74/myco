@@ -103,6 +103,18 @@ impl Gossiper for MeshGossiper {
             self.content.gossip_to_peer(&npub, frame.clone());
         }
     }
+
+    /// Pull plane (`docs/design/event-gossip.md`, req-ttl): forward the REQ's
+    /// filters to connected Circle peers carrying the decremented `req_ttl`,
+    /// aggregating their matching events. `exclude` is split-horizon.
+    async fn on_req(
+        &self,
+        filters: Vec<serde_json::Value>,
+        req_ttl: u8,
+        exclude: Option<IpAddr>,
+    ) -> Vec<Event> {
+        self.content.pull_from_peers(filters, req_ttl, exclude).await
+    }
 }
 
 #[cfg(test)]

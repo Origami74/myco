@@ -445,6 +445,15 @@ impl Content {
         save_library(&self.library_path, &snapshot);
     }
 
+    /// Forget a single nsite: drop it from the Library *and* its live status entry
+    /// so it vanishes from the Apps grid immediately and does not re-list on the
+    /// next launch. Cached blobs/events are left for the global eviction pass (P5);
+    /// this is the per-app "remove" the user reaches via the app's long-press sheet.
+    pub fn forget_site(&self, addr: &SiteAddr) {
+        self.remove_from_library(addr);
+        self.sites.lock().unwrap().remove(&addr.host_label());
+    }
+
     /// Rebuild the per-site `siteStatus` from the persisted Library by checking
     /// each pinned site's readiness against the local stores. Run once at startup
     /// so "installed" sites re-list (as `ready`) after the app restarts — the
@@ -686,6 +695,65 @@ impl Content {
         let Ok(peer) = fips::PeerIdentity::from_npub(npub) else { return };
         let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
         self.peer_relays.send(npub, &url, frame);
+    }
+
+    /// Pull plane (req-ttl): forward a REQ's filters to connected Circle peers and
+    /// aggregate their matching events. `req_ttl` is the remaining forward budget
+    /// *after* this hop — it is stamped back into each filter so the next relay
+    /// decrements from here (without it the peer would re-read the original value).
+    /// `exclude` is the requester's mesh address (split-horizon). Per-peer queries
+    /// run in parallel, each hard-bounded so a dead relay can't stall discovery.
+    pub async fn pull_from_peers(
+        &self,
+        filters: Vec<serde_json::Value>,
+        req_ttl: u8,
+        exclude: Option<std::net::IpAddr>,
+    ) -> Vec<Event> {
+        // Re-stamp req-ttl (or strip it at the last hop) on each filter object.
+        let filters: Vec<serde_json::Value> = filters
+            .into_iter()
+            .map(|mut f| {
+                if let Some(obj) = f.as_object_mut() {
+                    if req_ttl > 0 {
+                        obj.insert("req-ttl".to_string(), serde_json::json!(req_ttl));
+                    } else {
+                        obj.remove("req-ttl");
+                    }
+                }
+                f
+            })
+            .collect();
+
+        let queries = self.connected_circle_npubs().into_iter().filter_map(|npub| {
+            let peer = fips::PeerIdentity::from_npub(&npub).ok()?;
+            let ip = std::net::IpAddr::V6(peer.address().to_ipv6());
+            if exclude == Some(ip) {
+                return None;
+            }
+            let url = format!("ws://[{}]:4869", ip);
+            let filters = filters.clone();
+            Some(async move {
+                let mut out = Vec::new();
+                for f in &filters {
+                    if let Ok(Ok(evs)) = tokio::time::timeout(
+                        std::time::Duration::from_secs(8),
+                        crate::ip_source::query_relay(&url, f.clone()),
+                    )
+                    .await
+                    {
+                        out.extend(evs);
+                    }
+                }
+                out
+            })
+        });
+
+        join_all(queries)
+            .await
+            .into_iter()
+            .flatten()
+            .filter(|e: &Event| e.verify().is_ok())
+            .collect()
     }
 
     // --- discovery ("nsites around me") ---

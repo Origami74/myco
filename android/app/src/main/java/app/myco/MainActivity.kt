@@ -57,10 +57,12 @@ class MainActivity : ComponentActivity() {
             if (bleCorePermsGranted()) BleService.start(this) else requestBlePermissionsIfNeeded()
         }
 
-        // The mesh adapter (app-owned TUN) is opt-in; if it was on and consent is
-        // still granted, bring it back up.
-        if (prefs.getBoolean(PREF_MESH, false) && VpnService.prepare(this) == null) {
-            startMeshNow()
+        // The mesh adapter (app-owned TUN) is ON by default — it's how this device
+        // reaches the mesh, so it's effectively required. Bring it up at launch,
+        // prompting for the one-time VPN consent the first time it's needed.
+        if (prefs.getBoolean(PREF_MESH, true)) {
+            val consent = VpnService.prepare(this)
+            if (consent == null) startMeshNow() else vpnConsentLauncher.launch(consent)
         }
 
         setContent {
@@ -71,7 +73,7 @@ class MainActivity : ComponentActivity() {
                     onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
                     onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
                     onScanned = { text -> handleScannedText(text) },
-                    initialMeshEnabled = prefs.getBoolean(PREF_MESH, false),
+                    initialMeshEnabled = prefs.getBoolean(PREF_MESH, true),
                     onMeshToggle = { enabled -> setMeshEnabled(enabled) },
                     onOfflineOnlyToggle = { enabled -> setOfflineOnly(enabled) },
                 )

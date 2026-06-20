@@ -89,6 +89,11 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Mesh network adapter routing fd00::/8 over FIPS" />
+            <!-- Disable the system "Always-on VPN" toggle for this VPN: the mesh
+                 adapter is driven by the app, not meant to be forced always-on. -->
+            <meta-data
+                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
+                android:value="false" />
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
