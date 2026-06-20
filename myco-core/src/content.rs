@@ -41,6 +41,25 @@ pub struct SiteStatusView {
     pub files_pulled: u64,
     pub files_total: u64,
     pub message: String,
+    /// A staged newer version has finished downloading but isn't active yet
+    /// (deferred — meaningful once open-instance gating lands; P-U3). In P-U1 an
+    /// update auto-applies, so this is only briefly true.
+    pub update_available: bool,
+    /// Download progress of a staging update (0/0 when none). See
+    /// `docs/design/nsite-updates.md` §3.3.
+    pub update_pulled: u64,
+    pub update_total: u64,
+}
+
+/// Status of the most recent "check for updates" run, so the UI can give the user
+/// feedback (checking → result). `generation` bumps each time a check **finishes**,
+/// letting the UI fire a one-shot toast. See `docs/design/nsite-updates.md` §3.3.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckView {
+    pub checking: bool,
+    pub message: String,
+    pub generation: u64,
 }
 
 /// A Library entry (a pinned/opened site). Persisted to `library.json`.
@@ -156,6 +175,39 @@ pub struct Content {
     /// Persistent WS connections to peers' relays, so chat fan-out doesn't pay a
     /// fresh connect per message (slow over BLE).
     peer_relays: crate::peer_relay::PeerRelayPool,
+    /// host_label -> a newer version being staged (downloaded) before activation.
+    /// See `docs/design/nsite-updates.md` §2. P-U1: staged outside the relay store;
+    /// activation stores the manifest (making it the served version).
+    pending_updates: Mutex<HashMap<String, PendingUpdate>>,
+    /// Status of the latest update check, for UI feedback (checking → result).
+    update_check: Mutex<UpdateCheckView>,
+}
+
+/// A newer manifest version being downloaded in the background. Until its blobs
+/// are all local it is **not** stored in the relay, so the gateway keeps serving
+/// the active version (`docs/design/nsite-updates.md` §2/§5).
+struct PendingUpdate {
+    manifest: Event,
+    total: u32,
+    pulled: u32,
+    /// All blobs local (download finished) — ready to activate.
+    ready: bool,
+}
+
+/// The replaceable-slot key `(kind, author, d-tag)` as a string, for the staging
+/// and active-version maps.
+fn manifest_key(kind: u16, author: &PublicKey, d_tag: Option<&str>) -> String {
+    format!("{kind}:{}:{}", author.to_hex(), d_tag.unwrap_or(""))
+}
+
+/// The `d` tag value of an event, if any.
+fn event_d_tag(ev: &Event) -> Option<String> {
+    ev.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        (s.first().map(String::as_str) == Some("d"))
+            .then(|| s.get(1).cloned())
+            .flatten()
+    })
 }
 
 impl Content {
@@ -182,6 +234,8 @@ impl Content {
             device_keys: Mutex::new(None),
             pending_pairs: Mutex::new(Vec::new()),
             peer_relays: crate::peer_relay::PeerRelayPool::new(),
+            pending_updates: Mutex::new(HashMap::new()),
+            update_check: Mutex::new(UpdateCheckView::default()),
         })
     }
 
@@ -810,6 +864,219 @@ impl Content {
         self.discovered.lock().unwrap().clone()
     }
 
+    // --- nsite updates (docs/design/nsite-updates.md) ---
+
+    /// P-U1 manual update check (online). Polls online relays for newer manifests
+    /// of every Library site in **one combined REQ per relay** (deduplicated, read
+    /// until EOSE), and for each newer-than-active candidate stages its blobs and
+    /// activates when complete. Spawn-not-block; the UI polls `siteStatus`.
+    pub async fn check_updates(self: Arc<Self>) {
+        self.set_update_check(true, "Checking for updates…");
+        // Mesh-only: the P-U1 check is online-only, so honour the toggle and do
+        // nothing rather than reaching public relays/Blossom. (Mesh-adjacent and
+        // peer-push discovery land in later phases — docs/design/nsite-updates.md.)
+        if self.is_offline_only() {
+            self.finish_update_check("Mesh-only is on — online update check skipped");
+            return;
+        }
+        // Tracked sites + the union of their authors (one filter covers all).
+        let addrs: Vec<SiteAddr> = self
+            .library_snapshot()
+            .iter()
+            .filter_map(library_addr)
+            .collect();
+        if addrs.is_empty() {
+            self.finish_update_check("No apps to check");
+            return;
+        }
+        let authors: Vec<String> = {
+            let mut s: HashSet<String> = HashSet::new();
+            for a in &addrs {
+                s.insert(a.author.to_hex());
+            }
+            s.into_iter().collect()
+        };
+
+        // One combined REQ per unique online relay, read until EOSE. (Mesh-adjacent
+        // relays + manifest-listed relays are folded in by later phases; P-U1 is
+        // online-only via the default relay set — docs/design/nsite-updates.md §3.2.)
+        let filter = serde_json::json!({
+            "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
+            "authors": authors,
+        });
+        let queries = crate::ip_source::default_relays().into_iter().map(|url| {
+            let f = filter.clone();
+            async move {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    crate::ip_source::query_relay(&url, f),
+                )
+                .await
+                {
+                    Ok(Ok(evs)) => evs,
+                    _ => Vec::new(),
+                }
+            }
+        });
+
+        // Newest verified manifest per slot across all relays.
+        let mut newest: HashMap<String, Event> = HashMap::new();
+        for batch in join_all(queries).await {
+            for ev in batch {
+                let kind = ev.kind.as_u16();
+                if kind != nsite_deck::KIND_ROOT && kind != nsite_deck::KIND_NAMED {
+                    continue;
+                }
+                if ev.verify().is_err() {
+                    continue;
+                }
+                let key = manifest_key(kind, &ev.pubkey, event_d_tag(&ev).as_deref());
+                match newest.get(&key) {
+                    Some(prev) if prev.created_at >= ev.created_at => {}
+                    _ => {
+                        newest.insert(key, ev);
+                    }
+                }
+            }
+        }
+
+        // Collect candidates strictly newer than what we currently serve.
+        let mut candidates: Vec<(SiteAddr, Event)> = Vec::new();
+        for addr in addrs {
+            let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
+            let key = manifest_key(kind, &addr.author, addr.d_tag.as_deref());
+            let Some(cand) = newest.get(&key) else { continue };
+            let active_ts = self
+                .relay
+                .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
+                .await
+                .ok()
+                .flatten()
+                .map(|e| e.created_at.as_secs())
+                .unwrap_or(0);
+            if cand.created_at.as_secs() > active_ts {
+                candidates.push((addr, cand.clone()));
+            }
+        }
+        if candidates.is_empty() {
+            self.finish_update_check("All apps are up to date");
+            return;
+        }
+
+        // Download + activate each, concurrently. Reflect progress, then report.
+        self.set_update_check(true, &format!("Updating {} app(s)…", candidates.len()));
+        let n = candidates.len();
+        let results = join_all(
+            candidates
+                .into_iter()
+                .map(|(addr, cand)| Arc::clone(&self).stage_update(addr, cand)),
+        )
+        .await;
+        let applied = results.iter().filter(|b| **b).count();
+        let msg = if applied == n {
+            format!("{applied} app(s) updated")
+        } else if applied == 0 {
+            "Update found, but the download failed".to_string()
+        } else {
+            format!("{applied} of {n} updated; some downloads failed")
+        };
+        self.finish_update_check(&msg);
+    }
+
+    fn set_update_check(&self, checking: bool, message: &str) {
+        let mut uc = self.update_check.lock().unwrap();
+        uc.checking = checking;
+        uc.message = message.to_string();
+    }
+
+    /// Mark the check complete and bump `generation` so the UI fires a one-shot
+    /// result toast.
+    fn finish_update_check(&self, message: &str) {
+        let mut uc = self.update_check.lock().unwrap();
+        uc.checking = false;
+        uc.message = message.to_string();
+        uc.generation += 1;
+    }
+
+    pub fn update_check_snapshot(&self) -> UpdateCheckView {
+        self.update_check.lock().unwrap().clone()
+    }
+
+    /// Stage one candidate version: if it's newer than the active manifest (and not
+    /// already staging), download its blobs (online), then activate by storing the
+    /// manifest so the gateway serves it. The active version is untouched until the
+    /// download completes (atomic swap). P-U1 auto-activates (open-instance gating
+    /// is P-U3).
+    async fn stage_update(self: Arc<Self>, addr: SiteAddr, candidate: Event) -> bool {
+        let host = addr.host_label();
+        let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
+        let active_ts = self
+            .relay
+            .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.created_at.as_secs())
+            .unwrap_or(0);
+        if candidate.created_at.as_secs() <= active_ts {
+            return false;
+        }
+        let Ok(manifest) = nsite_deck::Manifest::from_event(candidate.clone()) else {
+            return false;
+        };
+        let total = manifest.blob_hashes().collect::<HashSet<_>>().len() as u32;
+        {
+            let mut pend = self.pending_updates.lock().unwrap();
+            if let Some(p) = pend.get(&host) {
+                // Already staging this version or newer — leave it.
+                if p.manifest.created_at >= candidate.created_at {
+                    return false;
+                }
+            }
+            pend.insert(
+                host.clone(),
+                PendingUpdate { manifest: candidate.clone(), total, pulled: 0, ready: false },
+            );
+        }
+
+        // Download blobs from online sources (the candidate's server hints + the
+        // default Blossom set). The active version keeps serving meanwhile.
+        let source = crate::ip_source::IpPeerSource::new(
+            crate::ip_source::default_relays(),
+            crate::ip_source::default_blossom_servers(),
+        );
+        let progress = |pulled: usize, _total: usize| {
+            if let Some(p) = self.pending_updates.lock().unwrap().get_mut(&host) {
+                p.pulled = pulled as u32;
+            }
+        };
+        let outcome =
+            nsite_deck::sync::stage_blobs(self.blobs.as_ref(), &source, &manifest, &progress).await;
+
+        match outcome {
+            Ok(SyncOutcome::Ready) => {
+                if let Some(p) = self.pending_updates.lock().unwrap().get_mut(&host) {
+                    p.ready = true;
+                    p.pulled = p.total;
+                }
+                // Activate: store the manifest (atomic swap — it becomes newest and
+                // the gateway serves it). P-U3 will defer this while an instance is
+                // open; P-U1 applies immediately.
+                let _ = self.relay.store_event(candidate).await;
+                let n = manifest.paths.len() as u64;
+                self.set_status_titled(&addr, manifest.title.as_deref(), "ready", n, n, "Updated");
+                self.pending_updates.lock().unwrap().remove(&host);
+                true
+            }
+            _ => {
+                // Couldn't fully download — keep the working version; drop the
+                // pending so a later check retries cleanly.
+                self.pending_updates.lock().unwrap().remove(&host);
+                false
+            }
+        }
+    }
+
     // --- wipe ---
 
     /// Clear the local relay + Blossom + Library + status (the `WipeStores` dev
@@ -827,7 +1094,21 @@ impl Content {
     // --- snapshots for state() ---
 
     pub fn sites_snapshot(&self) -> Vec<SiteStatusView> {
-        self.sites.lock().unwrap().values().cloned().collect()
+        let pend = self.pending_updates.lock().unwrap();
+        self.sites
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .map(|mut s| {
+                if let Some(p) = pend.get(&s.host) {
+                    s.update_available = p.ready;
+                    s.update_pulled = p.pulled as u64;
+                    s.update_total = p.total as u64;
+                }
+                s
+            })
+            .collect()
     }
 
     pub fn library_snapshot(&self) -> Vec<LibraryItem> {
@@ -868,6 +1149,9 @@ impl Content {
             files_pulled: 0,
             files_total: 0,
             message: String::new(),
+            update_available: false,
+            update_pulled: 0,
+            update_total: 0,
         });
         if let Some(t) = title {
             if !t.is_empty() {

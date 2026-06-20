@@ -42,6 +42,9 @@ pub enum NativeAppAction {
     RemoveFromLibrary { link: String },
     /// Forget a single nsite: remove it from the Library and the Apps grid.
     ForgetNsite { link: String },
+    /// Check online relays for newer versions of installed nsites and stage/apply
+    /// them (`docs/design/nsite-updates.md`). Spawn-not-block.
+    CheckNsiteUpdates,
     /// Discover nsites on connected Circle peers' relays ("nsites around me"):
     /// query each reachable member's mesh relay for kind 15128/35128 manifests.
     /// Spawn-not-block; results land in `discovered`. `query` is an optional title

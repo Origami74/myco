@@ -37,6 +37,8 @@ pub struct AppState {
     pub discovered: Vec<crate::content::DiscoveredNsite>,
     /// "Mesh-only": the IP online fallback is disabled (pull only over the mesh).
     pub offline_only: bool,
+    /// Status of the latest nsite update check (feedback for "Check for updates").
+    pub update_check: crate::content::UpdateCheckView,
 }
 
 /// The device identity, in the derived forms the UI shows.

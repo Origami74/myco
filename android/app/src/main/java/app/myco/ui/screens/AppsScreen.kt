@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.HomeMax
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
@@ -89,6 +90,19 @@ fun AppsScreen(
     var sheetFor by remember { mutableStateOf<SiteStatus?>(null) }
     var shareUri by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf<SiteStatus?>(null) }
+
+    // One-shot toast with the result of a "Check for updates" run (fires when the
+    // core bumps the check generation), so the user gets explicit feedback.
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var lastCheckGen by remember { mutableStateOf(state.updateCheck.generation) }
+    LaunchedEffect(state.updateCheck.generation) {
+        if (state.updateCheck.generation != lastCheckGen) {
+            lastCheckGen = state.updateCheck.generation
+            if (state.updateCheck.message.isNotBlank()) {
+                android.widget.Toast.makeText(context, state.updateCheck.message, android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     val apps = state.sites.filter {
         query.isBlank() || it.title.contains(query, true) || it.host.contains(query, true)
@@ -273,6 +287,17 @@ private fun NsiteTile(
                         .background(MaterialTheme.colorScheme.error, RoundedCornerShape(50)),
                 )
             }
+            // An update is downloading in the background (the app keeps working
+            // on its current version meanwhile).
+            if (site.updateTotal > 0L && site.updatePulled < site.updateTotal) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp)
+                        .size(11.dp)
+                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(50)),
+                )
+            }
         }
         Spacer(Modifier.height(6.dp))
         Text(
@@ -332,9 +357,11 @@ private fun AppSheet(
             Spacer(Modifier.size(12.dp))
             Column {
                 Text(site.title.ifEmpty { site.host.take(12) }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                val updating = site.updateTotal > 0L && !site.updateAvailable
                 Text(
-                    "nsite · ${site.filesTotal} files · ${site.state}",
-                    color = Slate,
+                    if (updating) "Updating… ${site.updatePulled}/${site.updateTotal}"
+                    else "nsite · ${site.filesTotal} files · ${site.state}",
+                    color = if (updating) MaterialTheme.colorScheme.primary else Slate,
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -344,6 +371,11 @@ private fun AppSheet(
         SheetAction(Icons.Filled.Share, "Share") { onShare() }
         if (site.state == "ready") {
             SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
+        }
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        SheetAction(Icons.Filled.Refresh, "Check for updates") {
+            client.dispatch(NativeActions.checkNsiteUpdates())
+            android.widget.Toast.makeText(ctx, "Checking for updates…", android.widget.Toast.LENGTH_SHORT).show()
         }
         SheetAction(Icons.Filled.Delete, "Remove app", tint = MaterialTheme.colorScheme.error) { onRemove() }
         SheetAction(Icons.Filled.Info, site.host) { }

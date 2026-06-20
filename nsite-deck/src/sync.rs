@@ -113,6 +113,40 @@ pub async fn sync_site(
         .map_err(|e| anyhow::anyhow!("fetched manifest verification failed: {e}"))?;
     let manifest = Manifest::from_event(manifest_event.clone())?;
 
+    match fetch_blobs(blobs, source, &manifest, progress).await? {
+        // All blobs verified+stored → activate by storing the signed manifest.
+        SyncOutcome::Ready => {
+            relay.store_event(manifest_event).await?;
+            Ok(SyncOutcome::Ready)
+        }
+        other => Ok(other),
+    }
+}
+
+/// Download (fetch + verify + store) every blob a **known, already-verified**
+/// manifest references, *without* storing the manifest — the "download" half of an
+/// update stage (`docs/design/nsite-updates.md` §2). Activation (storing the
+/// manifest so the gateway serves it) is the caller's separate step, run only once
+/// this returns [`SyncOutcome::Ready`]. The active version is untouched meanwhile.
+pub async fn stage_blobs(
+    blobs: &dyn BlobStore,
+    source: &dyn PeerSource,
+    manifest: &Manifest,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> anyhow::Result<SyncOutcome> {
+    fetch_blobs(blobs, source, manifest, progress).await
+}
+
+/// Shared blob-fetch loop for [`sync_site`] and [`stage_blobs`]: priority paths
+/// (icon/landing) first, then the rest; each blob retried, verified, and stored.
+/// Returns `Ready` when all are local, `Incomplete` on the first unrecoverable
+/// miss. Never stores the manifest.
+async fn fetch_blobs(
+    blobs: &dyn BlobStore,
+    source: &dyn PeerSource,
+    manifest: &Manifest,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> anyhow::Result<SyncOutcome> {
     // Fetch the icon (and landing page) blobs first, so the UI can show the real
     // app icon while the rest of the site still downloads (iOS-install style).
     const PRIORITY_PATHS: &[&str] =
@@ -163,8 +197,5 @@ pub async fn sync_site(
         present += 1;
         progress(present, total);
     }
-
-    // All blobs verified+stored → activate by storing the signed manifest.
-    relay.store_event(manifest_event).await?;
     Ok(SyncOutcome::Ready)
 }

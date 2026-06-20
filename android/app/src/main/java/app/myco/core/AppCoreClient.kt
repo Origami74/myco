@@ -29,6 +29,11 @@ data class SiteStatus(
     val filesPulled: Long,
     val filesTotal: Long,
     val message: String,
+    /** A staged newer version finished downloading but isn't active yet. */
+    val updateAvailable: Boolean = false,
+    /** Download progress of a staging update (0/0 when none). */
+    val updatePulled: Long = 0,
+    val updateTotal: Long = 0,
 )
 
 /** A pinned/opened Library entry. */
@@ -98,6 +103,7 @@ data class AppState(
     val discovered: List<DiscoveredNsite>,
     val pendingPairRequests: List<PairRequest>,
     val offlineOnly: Boolean,
+    val updateCheck: UpdateCheck = UpdateCheck(),
 ) {
     companion object {
         fun parse(json: String): AppState {
@@ -146,6 +152,9 @@ data class AppState(
                                 filesPulled = s.optLong("filesPulled"),
                                 filesTotal = s.optLong("filesTotal"),
                                 message = s.optString("message"),
+                                updateAvailable = s.optBoolean("updateAvailable"),
+                                updatePulled = s.optLong("updatePulled"),
+                                updateTotal = s.optLong("updateTotal"),
                             )
                         )
                     }
@@ -247,10 +256,24 @@ data class AppState(
                 discovered = discovered,
                 pendingPairRequests = pendingPairRequests,
                 offlineOnly = o.optBoolean("offlineOnly"),
+                updateCheck = o.optJSONObject("updateCheck")?.let { u ->
+                    UpdateCheck(
+                        checking = u.optBoolean("checking"),
+                        message = u.optString("message"),
+                        generation = u.optLong("generation"),
+                    )
+                } ?: UpdateCheck(),
             )
         }
     }
 }
+
+/** Feedback for the "Check for updates" action: in-progress + last result. */
+data class UpdateCheck(
+    val checking: Boolean = false,
+    val message: String = "",
+    val generation: Long = 0,
+)
 
 /**
  * Thin AutoCloseable wrapper over the opaque native handle. Guards against
@@ -368,6 +391,7 @@ object NativeActions {
         JSONObject().put("type", "remove_from_library").put("link", link)
     fun forgetNsite(link: String): JSONObject =
         JSONObject().put("type", "forget_nsite").put("link", link)
+    fun checkNsiteUpdates(): JSONObject = JSONObject().put("type", "check_nsite_updates")
     fun wipeStores(): JSONObject = JSONObject().put("type", "wipe_stores")
 
     // --- circle (paired peers) ---

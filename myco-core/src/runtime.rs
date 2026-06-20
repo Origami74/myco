@@ -293,6 +293,13 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
+            NativeAppAction::CheckNsiteUpdates => {
+                // Poll online relays for newer manifests; stage + apply. Non-blocking.
+                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
+                    rt.spawn(content.check_updates());
+                }
+                self.rev += 1;
+            }
             NativeAppAction::SearchNsites { .. } => {
                 // "nsites around me": query connected Circle peers' mesh relays for
                 // their manifests. Spawn-not-block; results land in `discovered`.
@@ -566,6 +573,11 @@ impl AppRuntime {
                 .map(|c| c.discovered_snapshot())
                 .unwrap_or_default(),
             offline_only: self.content.as_ref().map(|c| c.is_offline_only()).unwrap_or(false),
+            update_check: self
+                .content
+                .as_ref()
+                .map(|c| c.update_check_snapshot())
+                .unwrap_or_default(),
         }
     }
 
