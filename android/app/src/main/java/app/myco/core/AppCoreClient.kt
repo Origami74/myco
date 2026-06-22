@@ -65,6 +65,8 @@ data class DiscoveredNsite(
     val authorNpub: String,
     val dTag: String?,
     val title: String,
+    /** Unix seconds of the manifest version seen (its `created_at`); 0 if unknown. */
+    val updatedAt: Long,
     /** The Circle peer who has it — the holder to pull from on open. */
     val holderNpub: String,
     val holderName: String,
@@ -209,6 +211,7 @@ data class AppState(
                                 authorNpub = d.optString("authorNpub"),
                                 dTag = if (d.isNull("dTag")) null else d.optString("dTag"),
                                 title = d.optString("title"),
+                                updatedAt = d.optLong("updatedAt"),
                                 holderNpub = d.optString("holderNpub"),
                                 holderName = d.optString("holderName"),
                             )

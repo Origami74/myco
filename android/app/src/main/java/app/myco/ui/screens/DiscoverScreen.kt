@@ -103,8 +103,23 @@ private fun DiscoveredCard(d: DiscoveredNsite, onOpen: () -> Unit) {
                     color = Slate,
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                if (d.updatedAt > 0L) {
+                    // Surface the version timestamp so two same-named apps from
+                    // different authors (npubs) are distinguishable.
+                    Text(
+                        "latest version: ${formatVersion(d.updatedAt)}",
+                        color = Slate,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
             Button(onClick = onOpen) { Text("Open") }
         }
     }
 }
+
+/** Format a unix-seconds manifest timestamp as a local `yyyy-MM-dd HH:mm`. */
+private fun formatVersion(epochSecs: Long): String =
+    java.time.format.DateTimeFormatter
+        .ofPattern("yyyy-MM-dd HH:mm")
+        .format(java.time.Instant.ofEpochSecond(epochSecs).atZone(java.time.ZoneId.systemDefault()))

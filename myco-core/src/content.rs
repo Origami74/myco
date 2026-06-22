@@ -11,20 +11,23 @@
 //! via `Tick`). See `docs/design/nsite-layer.md` and the FFI contract.
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use futures_util::future::join_all;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nostr::nips::nip19::{FromBech32, ToBech32};
 use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag};
 use nsite_deck::gateway::{self, Readiness};
-use nsite_deck::seams::{BlobStore, PeerSource, RelayBackend};
+use nsite_deck::seams::{BlobStore, ManifestFilter, PeerSource, RelayBackend};
 use nsite_deck::{sync, GatewayResponse, SiteAddr, SyncOutcome};
 use serde::{Deserialize, Serialize};
 
 use myco_blossom::FsBlobStore;
+use myco_relay::server::{Inbound, Origin};
 use myco_relay::RelayStore;
 
 /// Per-site sync/readiness, mirroring the FFI `SiteStatus` shape.
@@ -98,6 +101,10 @@ pub struct DiscoveredNsite {
     pub author_npub: String,
     pub d_tag: Option<String>,
     pub title: String,
+    /// Unix seconds of the manifest version we saw (its `created_at`), so the UI can
+    /// show "latest version: <datetime>" — handy to tell apart same-named sites from
+    /// different authors/versions.
+    pub updated_at: u64,
     /// The Circle peer who has it (the relay we found it on) — the pull holder.
     pub holder_npub: String,
     pub holder_name: String,
@@ -141,6 +148,43 @@ pub const KIND_PAIR_REQUEST: u16 = 9101;
 pub const KIND_PAIR_ACCEPT: u16 = 9102;
 const PAIR_TTL_SECS: u64 = 120;
 
+/// Retry budget for delivering a pair request/accept to a peer's relay. A
+/// just-paired BLE session can take tens of seconds to stabilise, so we re-dial
+/// (re-signing each time) until it acks. ~15 × 4s ≈ a 1-minute window, well under
+/// the [`PAIR_TTL_SECS`] expiration of any single (re-signed) event.
+const PAIR_DIAL_ATTEMPTS: usize = 15;
+const PAIR_DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Hop budget for manifest (update) propagation over the mesh — mirrors the chat
+/// push plane's default. See `docs/design/nsite-updates.md` §4.
+const MANIFEST_EVENT_TTL: u8 = 3;
+
+/// The mesh access gate backing the relay + Blossom servers: content (reads, chat,
+/// manifests, blobs) is restricted to **paired** (Circle) peers, but *anyone* may
+/// publish the pairing handshake so a first-time pair request can bootstrap. Holds
+/// the [`Content`] so the live Circle is consulted per request (`docs/design`).
+pub struct CircleGate {
+    content: Arc<Content>,
+}
+
+impl CircleGate {
+    pub fn new(content: Arc<Content>) -> Self {
+        Self { content }
+    }
+}
+
+impl myco_relay::server::PeerGate for CircleGate {
+    fn may_read(&self, ip: IpAddr) -> bool {
+        self.content.is_paired_ip(ip)
+    }
+
+    fn may_publish(&self, ip: IpAddr, kind: u16) -> bool {
+        // Pairing handshake is allowed from anyone (it's how a peer becomes paired);
+        // all other kinds require an established Circle membership.
+        kind == KIND_PAIR_REQUEST || kind == KIND_PAIR_ACCEPT || self.content.is_paired_ip(ip)
+    }
+}
+
 /// The content layer. Cheap to `Arc`-clone; the gateway path clones one out of the
 /// `AppRuntime` mutex and serves without holding it.
 pub struct Content {
@@ -181,6 +225,69 @@ pub struct Content {
     pending_updates: Mutex<HashMap<String, PendingUpdate>>,
     /// Status of the latest update check, for UI feedback (checking → result).
     update_check: Mutex<UpdateCheckView>,
+    /// The **active version** the gateway serves per slot — decoupled from the
+    /// relay's newest, so a newer (received/checked) manifest can sit in the relay
+    /// store (NIP-01-faithful, propagated to peers) while we keep serving the fully
+    /// downloaded version until its replacement is staged. See
+    /// `docs/design/nsite-updates.md` §1. Persisted to `active.json`.
+    active_manifests: Mutex<HashMap<String, Event>>,
+    active_path: PathBuf,
+}
+
+/// A [`RelayBackend`] view the **gateway** reads: it returns the core-chosen
+/// **active** manifest for a slot (a version whose blobs are all local), falling
+/// back to the relay's newest when we haven't pinned one. Every other call passes
+/// straight through to the relay. This is what keeps a working app serving while a
+/// newer manifest is still downloading. See `docs/design/nsite-updates.md` §1.
+struct ActiveBackend<'a> {
+    relay: &'a RelayStore,
+    active: &'a Mutex<HashMap<String, Event>>,
+}
+
+#[async_trait]
+impl RelayBackend for ActiveBackend<'_> {
+    async fn store_event(&self, event: Event) -> anyhow::Result<bool> {
+        self.relay.store_event(event).await
+    }
+    async fn get_manifest(
+        &self,
+        kind: u16,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+    ) -> anyhow::Result<Option<Event>> {
+        let key = manifest_key(kind, author, d_tag);
+        let pinned = self.active.lock().unwrap().get(&key).cloned();
+        if pinned.is_some() {
+            return Ok(pinned);
+        }
+        self.relay.get_manifest(kind, author, d_tag).await
+    }
+    async fn query(&self, filter: &ManifestFilter) -> anyhow::Result<Vec<Event>> {
+        self.relay.query(filter).await
+    }
+    async fn wipe(&self) -> anyhow::Result<()> {
+        self.relay.wipe().await
+    }
+}
+
+fn load_active(path: &Path) -> HashMap<String, Event> {
+    let mut map = HashMap::new();
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(events) = serde_json::from_slice::<Vec<Event>>(&bytes) {
+            for ev in events {
+                let key = manifest_key(ev.kind.as_u16(), &ev.pubkey, event_d_tag(&ev).as_deref());
+                map.insert(key, ev);
+            }
+        }
+    }
+    map
+}
+
+fn save_active(path: &Path, events: &[Event]) {
+    if let Ok(json) = serde_json::to_vec(events) {
+        let tmp = path.with_extension("json.tmp");
+        let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
+    }
 }
 
 /// A newer manifest version being downloaded in the background. Until its blobs
@@ -219,6 +326,8 @@ impl Content {
         let library = load_library(&library_path);
         let circle_path = data_dir.join("circle.json");
         let circle = load_circle(&circle_path);
+        let active_path = data_dir.join("active.json");
+        let active_manifests = load_active(&active_path);
         Ok(Self {
             relay,
             blobs,
@@ -236,6 +345,8 @@ impl Content {
             peer_relays: crate::peer_relay::PeerRelayPool::new(),
             pending_updates: Mutex::new(HashMap::new()),
             update_check: Mutex::new(UpdateCheckView::default()),
+            active_manifests: Mutex::new(active_manifests),
+            active_path,
         })
     }
 
@@ -263,6 +374,30 @@ impl Content {
         self.blobs.clone()
     }
 
+    // --- active version (what the gateway serves; docs/design/nsite-updates.md §1) ---
+
+    /// The backend the gateway reads: serves the active (fully-downloaded) version,
+    /// not necessarily the relay's newest.
+    fn active_backend(&self) -> ActiveBackend<'_> {
+        ActiveBackend { relay: self.relay.as_ref(), active: &self.active_manifests }
+    }
+
+    /// Pin `manifest` as the active version for its slot (atomic swap the gateway
+    /// will serve) and persist. Called only once a version's blobs are all local.
+    fn set_active(&self, manifest: &Event) {
+        let key = manifest_key(
+            manifest.kind.as_u16(),
+            &manifest.pubkey,
+            event_d_tag(manifest).as_deref(),
+        );
+        let snapshot = {
+            let mut m = self.active_manifests.lock().unwrap();
+            m.insert(key, manifest.clone());
+            m.values().cloned().collect::<Vec<_>>()
+        };
+        save_active(&self.active_path, &snapshot);
+    }
+
     // --- gateway (the in-app WebView serve path) ---
 
     /// Serve one `<host>.nsite/<path>` request direct from the local stores.
@@ -272,7 +407,7 @@ impl Content {
         path: &str,
         range: Option<&str>,
     ) -> GatewayResponse {
-        gateway::serve(self.relay.as_ref(), self.blobs.as_ref(), host, path, range).await
+        gateway::serve(&self.active_backend(), self.blobs.as_ref(), host, path, range).await
     }
 
     /// Serve and frame the response for the `gatewayGet` JNI: a 4-byte big-endian
@@ -321,22 +456,27 @@ impl Content {
     pub async fn open_site(self: Arc<Self>, addr: SiteAddr, holder: Option<String>) {
         self.set_status(&addr, "syncing", 0, 0, "Loading…");
 
-        // Already complete locally? Serve direct, no fetch.
-        match gateway::readiness(self.relay.as_ref(), self.blobs.as_ref(), &addr).await {
-            Ok(Readiness::Ready(m)) => {
-                let n = m.paths.len() as u64;
-                self.set_status_titled(&addr, m.title.as_deref(), "ready", n, n, "Ready");
-                // Opening a present site "installs" it (pins to Library) so it
-                // persists and re-lists after an app restart.
-                self.add_to_library(&addr, m.title.as_deref(), now_secs());
-                return;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                self.set_status(&addr, "incomplete", 0, 0, &format!("error: {e}"));
-                return;
-            }
-        }
+        // Already complete locally? Serve direct, no fetch. If the manifest is
+        // local but some blobs are missing, hold onto it: we'll fetch only the
+        // missing blobs and skip the redundant manifest round-trip a full sync does.
+        let known: Option<nsite_deck::Manifest> =
+            match gateway::readiness(&self.active_backend(), self.blobs.as_ref(), &addr).await {
+                Ok(Readiness::Ready(m)) => {
+                    let n = m.paths.len() as u64;
+                    self.set_active(&m.event);
+                    self.set_status_titled(&addr, m.title.as_deref(), "ready", n, n, "Ready");
+                    // Opening a present site "installs" it (pins to Library) so it
+                    // persists and re-lists after an app restart.
+                    self.add_to_library(&addr, m.title.as_deref(), now_secs());
+                    return;
+                }
+                Ok(Readiness::Incomplete { manifest, .. }) => Some(manifest),
+                Ok(Readiness::ManifestMissing) => None,
+                Err(e) => {
+                    self.set_status(&addr, "incomplete", 0, 0, &format!("error: {e}"));
+                    return;
+                }
+            };
 
         // Ordered sources: the mesh holder first (pull from whoever shared it),
         // then any currently-connected Circle member (your paired peers double as
@@ -369,6 +509,13 @@ impl Content {
             self.set_status(&addr, "unreachable", 0, 0, "Can't reach anyone who has this app yet.");
             return;
         }
+        tracing::info!(
+            host = %addr.host_label(),
+            holder = ?holder,
+            sources = sources.len(),
+            staged = known.is_some(),
+            "open_site: syncing"
+        );
 
         // Live progress so the UI shows "X/Y files" instead of sitting at 0/0.
         let progress = |present: usize, total: usize| {
@@ -379,20 +526,54 @@ impl Content {
         // non-ready outcome (incomplete > unreachable) to report if none succeed.
         let mut best = SyncOutcome::Unreachable;
         for source in &sources {
-            match sync::sync_site(
-                self.relay.as_ref(),
-                self.blobs.as_ref(),
-                source.as_ref(),
-                &addr,
-                &progress,
-            )
-            .await
-            {
+            // Manifest already local → fetch only its (missing) blobs, no manifest
+            // refetch. Otherwise do a full sync (manifest + blobs).
+            let outcome = match &known {
+                Some(manifest) => {
+                    sync::stage_blobs(self.blobs.as_ref(), source.as_ref(), manifest, &progress).await
+                }
+                None => {
+                    sync::sync_site(
+                        self.relay.as_ref(),
+                        self.blobs.as_ref(),
+                        source.as_ref(),
+                        &addr,
+                        &progress,
+                    )
+                    .await
+                }
+            };
+            match outcome {
                 Ok(SyncOutcome::Ready) => {
-                    let title = self.lookup_title(&addr).await;
-                    let n = self.manifest_file_count(&addr).await;
-                    self.set_status_titled(&addr, title.as_deref(), "ready", n, n, "Ready");
-                    self.add_to_library(&addr, title.as_deref(), now_secs());
+                    match &known {
+                        // The manifest was already local — it's complete now. Ensure
+                        // it's stored (idempotent) and pin it as the active version;
+                        // title/count come straight from the manifest we held.
+                        Some(m) => {
+                            let _ = self.relay.store_event(m.event.clone()).await;
+                            self.set_active(&m.event);
+                            let n = m.paths.len() as u64;
+                            self.set_status_titled(&addr, m.title.as_deref(), "ready", n, n, "Ready");
+                            self.add_to_library(&addr, m.title.as_deref(), now_secs());
+                        }
+                        // Full sync stored the just-fetched manifest (the relay's
+                        // newest) — pull it back to make it the active version.
+                        None => {
+                            let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
+                            if let Ok(Some(ev)) = self
+                                .relay
+                                .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
+                                .await
+                            {
+                                self.set_active(&ev);
+                            }
+                            let title = self.lookup_title(&addr).await;
+                            let n = self.manifest_file_count(&addr).await;
+                            self.set_status_titled(&addr, title.as_deref(), "ready", n, n, "Ready");
+                            self.add_to_library(&addr, title.as_deref(), now_secs());
+                        }
+                    }
+                    tracing::info!(host = %addr.host_label(), "open_site: ready");
                     return;
                 }
                 Ok(outcome @ SyncOutcome::Incomplete { .. }) => best = outcome,
@@ -400,6 +581,7 @@ impl Content {
                 Err(e) => tracing::warn!(error = %e, "sync source errored"),
             }
         }
+        tracing::info!(host = %addr.host_label(), outcome = ?best, "open_site: not ready (will retry)");
         match best {
             SyncOutcome::Incomplete { present, total } => self.set_status(
                 &addr,
@@ -446,6 +628,7 @@ impl Content {
                     d_tag: manifest.d_tag.clone(),
                 };
                 let n = manifest.paths.len() as u64;
+                self.set_active(&manifest.event);
                 self.set_status_titled(&addr, manifest.title.as_deref(), "ready", n, n, "Ready");
                 self.add_to_library(&addr, manifest.title.as_deref(), now_secs());
             }
@@ -506,6 +689,15 @@ impl Content {
     pub fn forget_site(&self, addr: &SiteAddr) {
         self.remove_from_library(addr);
         self.sites.lock().unwrap().remove(&addr.host_label());
+        // Drop the active-version pin too (next open re-evaluates from the relay).
+        let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
+        let key = manifest_key(kind, &addr.author, addr.d_tag.as_deref());
+        let snapshot = {
+            let mut m = self.active_manifests.lock().unwrap();
+            m.remove(&key);
+            m.values().cloned().collect::<Vec<_>>()
+        };
+        save_active(&self.active_path, &snapshot);
     }
 
     /// Rebuild the per-site `siteStatus` from the persisted Library by checking
@@ -515,8 +707,12 @@ impl Content {
     pub async fn refresh_library_status(self: Arc<Self>) {
         for item in self.library_snapshot() {
             let Some(addr) = library_addr(&item) else { continue };
-            match gateway::readiness(self.relay.as_ref(), self.blobs.as_ref(), &addr).await {
+            match gateway::readiness(&self.active_backend(), self.blobs.as_ref(), &addr).await {
                 Ok(Readiness::Ready(m)) => {
+                    // Bootstrap/refresh the active pointer to the served version, so
+                    // a later received candidate can't divert the gateway to a
+                    // not-yet-downloaded manifest.
+                    self.set_active(&m.event);
                     let n = m.paths.len() as u64;
                     let title = m.title.as_deref().filter(|t| !t.is_empty());
                     self.set_status_titled(
@@ -606,6 +802,41 @@ impl Content {
             .collect()
     }
 
+    /// Whether `ip` is the mesh ULA of a **current** Circle member. The relay +
+    /// Blossom access gates call this per request, so adding/removing a peer at
+    /// runtime takes effect immediately (no cached set). A peer's ULA is
+    /// `fd…+node_addr[0..15]` — `PeerIdentity::from_npub(npub).address()` — which is
+    /// exactly the source address the mesh sockets see.
+    pub fn is_paired_ip(&self, ip: IpAddr) -> bool {
+        let IpAddr::V6(v6) = ip else { return false };
+        self.circle.lock().unwrap().iter().any(|c| {
+            fips::PeerIdentity::from_npub(&c.npub)
+                .map(|p| p.address().to_ipv6() == v6)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Library sites worth (re)trying right now: not yet `ready`, and not already
+    /// `syncing` (an attempt is in flight). Skipping the in-flight ones is what lets
+    /// a caller poll this every tick without piling on duplicate syncs — it re-tries
+    /// roughly once per attempt-duration. Used to pull from a holder that just became
+    /// reachable (a sharer who paired) or any newly-connected Circle peer.
+    pub fn retriable_library_addrs(&self) -> Vec<SiteAddr> {
+        // Snapshot the library first (releasing its lock) before taking `sites`, so
+        // the two mutexes are never held nested.
+        let lib = self.library_snapshot();
+        let sites = self.sites.lock().unwrap();
+        lib.iter()
+            .filter_map(library_addr)
+            .filter(|addr| {
+                !matches!(
+                    sites.get(&addr.host_label()).map(|s| s.state.as_str()),
+                    Some("ready") | Some("syncing")
+                )
+            })
+            .collect()
+    }
+
     /// Connected Circle members as `(npub, name)` — discovery targets.
     fn connected_circle_contacts(&self) -> Vec<(String, String)> {
         let connected = self.connected_peers.lock().unwrap();
@@ -653,6 +884,7 @@ impl Content {
         let name = tag_value(event, "n").unwrap_or_else(|| short_name(&from));
         match event.kind.as_u16() {
             KIND_PAIR_REQUEST => {
+                tracing::info!(from = %from, "pair: request received (awaiting accept)");
                 let secret = tag_value(event, "secret").unwrap_or_default();
                 let mut pending = self.pending_pairs.lock().unwrap();
                 if !pending.iter().any(|p| p.npub == from) {
@@ -660,6 +892,7 @@ impl Content {
                 }
             }
             KIND_PAIR_ACCEPT => {
+                tracing::info!(from = %from, "pair: our request accepted — added to circle");
                 self.add_to_circle(&from, &name);
                 self.pending_pairs.lock().unwrap().retain(|p| p.npub != from);
             }
@@ -686,17 +919,19 @@ impl Content {
         self.pending_pairs.lock().unwrap().retain(|p| p.npub != npub);
     }
 
-    /// Build + sign a pair event and publish it to the target's mesh relay.
+    /// Build + sign a pair event and publish it to the target's mesh relay,
+    /// **retrying** until the relay acks or we give up. A freshly-paired BLE session
+    /// is flaky (handshake collisions, "connection not ready"), so a single
+    /// fire-and-forget dial often misses — leaving the Circles asymmetric, which the
+    /// access gate then turns into a hard "can't see their apps" failure. Each
+    /// attempt rebuilds (re-signs) the event so its NIP-40 expiration stays fresh
+    /// across the retry window.
     async fn dial_pair_event(&self, target_npub: &str, kind: u16, secret: &str) {
         let Some(keys) = self.device_keys.lock().unwrap().clone() else {
             tracing::warn!("pairing: device keys not set");
             return;
         };
         let name = self.device_name();
-        let Some(event) = build_pair_event(&keys, kind, target_npub, &name, secret) else {
-            tracing::warn!(target_npub, "pairing: could not build event");
-            return;
-        };
         let peer = match fips::PeerIdentity::from_npub(target_npub) {
             Ok(p) => p,
             Err(e) => {
@@ -705,7 +940,27 @@ impl Content {
             }
         };
         let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
-        crate::ip_source::publish_event(&url, &event, 0, std::time::Duration::from_secs(10)).await;
+        for attempt in 0..PAIR_DIAL_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(PAIR_DIAL_RETRY_DELAY).await;
+            }
+            let Some(event) = build_pair_event(&keys, kind, target_npub, &name, secret) else {
+                tracing::warn!(target_npub, "pairing: could not build event");
+                return;
+            };
+            if crate::ip_source::publish_event(&url, &event, 0, std::time::Duration::from_secs(10))
+                .await
+            {
+                tracing::info!(target = %target_npub, kind, attempt, "pair: dial delivered");
+                return;
+            }
+            tracing::debug!(target = %target_npub, kind, attempt, "pair: dial not delivered, retrying");
+        }
+        tracing::warn!(
+            target = %target_npub,
+            kind,
+            "pair: gave up delivering after retries (session never came up)"
+        );
     }
 
     // --- backlog pull (the read counterpart of fan-out) ---
@@ -839,6 +1094,7 @@ impl Content {
                         author_npub: m.author.to_bech32().unwrap_or_default(),
                         d_tag: m.d_tag,
                         title: m.title.unwrap_or_default(),
+                        updated_at: m.event.created_at.as_secs(),
                         holder_npub: npub.clone(),
                         holder_name: name.clone(),
                     }
@@ -872,13 +1128,6 @@ impl Content {
     /// activates when complete. Spawn-not-block; the UI polls `siteStatus`.
     pub async fn check_updates(self: Arc<Self>) {
         self.set_update_check(true, "Checking for updates…");
-        // Mesh-only: the P-U1 check is online-only, so honour the toggle and do
-        // nothing rather than reaching public relays/Blossom. (Mesh-adjacent and
-        // peer-push discovery land in later phases — docs/design/nsite-updates.md.)
-        if self.is_offline_only() {
-            self.finish_update_check("Mesh-only is on — online update check skipped");
-            return;
-        }
         // Tracked sites + the union of their authors (one filter covers all).
         let addrs: Vec<SiteAddr> = self
             .library_snapshot()
@@ -897,31 +1146,63 @@ impl Content {
             s.into_iter().collect()
         };
 
-        // One combined REQ per unique online relay, read until EOSE. (Mesh-adjacent
-        // relays + manifest-listed relays are folded in by later phases; P-U1 is
-        // online-only via the default relay set — docs/design/nsite-updates.md §3.2.)
-        let filter = serde_json::json!({
+        // Query set, one combined REQ per relay read until EOSE
+        // (docs/design/nsite-updates.md §3.2):
+        //  - connected peers' mesh relays, carrying `req-ttl: 1` so the check reaches
+        //    2 hops just like discovery (their peers' manifests come back too);
+        //  - online relays, unless mesh-only is on.
+        let mesh_filter = serde_json::json!({
+            "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
+            "authors": authors,
+            "req-ttl": 1,
+        });
+        let online_filter = serde_json::json!({
             "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
             "authors": authors,
         });
-        let queries = crate::ip_source::default_relays().into_iter().map(|url| {
-            let f = filter.clone();
-            async move {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(15),
-                    crate::ip_source::query_relay(&url, f),
-                )
-                .await
-                {
-                    Ok(Ok(evs)) => evs,
-                    _ => Vec::new(),
-                }
+        let mut targets: Vec<(String, serde_json::Value)> = Vec::new();
+        for npub in self.connected_circle_npubs() {
+            if let Ok(peer) = fips::PeerIdentity::from_npub(&npub) {
+                targets.push((
+                    format!("ws://[{}]:4869", peer.address().to_ipv6()),
+                    mesh_filter.clone(),
+                ));
+            }
+        }
+        if !self.is_offline_only() {
+            for url in crate::ip_source::default_relays() {
+                targets.push((url, online_filter.clone()));
+            }
+        }
+        if targets.is_empty() {
+            self.finish_update_check("No peers or relays to check");
+            return;
+        }
+        let mesh_count = self.connected_circle_npubs().len();
+        tracing::info!(
+            apps = addrs.len(),
+            mesh_peers = mesh_count,
+            targets = targets.len(),
+            offline_only = self.is_offline_only(),
+            "update check: querying"
+        );
+        let queries = targets.into_iter().map(|(url, f)| async move {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                crate::ip_source::query_relay(&url, f),
+            )
+            .await
+            {
+                Ok(Ok(evs)) => evs,
+                _ => Vec::new(),
             }
         });
 
         // Newest verified manifest per slot across all relays.
         let mut newest: HashMap<String, Event> = HashMap::new();
+        let mut received = 0usize;
         for batch in join_all(queries).await {
+            received += batch.len();
             for ev in batch {
                 let kind = ev.kind.as_u16();
                 if kind != nsite_deck::KIND_ROOT && kind != nsite_deck::KIND_NAMED {
@@ -946,8 +1227,10 @@ impl Content {
             let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
             let key = manifest_key(kind, &addr.author, addr.d_tag.as_deref());
             let Some(cand) = newest.get(&key) else { continue };
+            // Compare against the version we actually serve (the active pointer),
+            // not merely the relay's newest.
             let active_ts = self
-                .relay
+                .active_backend()
                 .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
                 .await
                 .ok()
@@ -958,6 +1241,12 @@ impl Content {
                 candidates.push((addr, cand.clone()));
             }
         }
+        tracing::info!(
+            received,
+            slots = newest.len(),
+            candidates = candidates.len(),
+            "update check: results"
+        );
         if candidates.is_empty() {
             self.finish_update_check("All apps are up to date");
             return;
@@ -1002,16 +1291,13 @@ impl Content {
         self.update_check.lock().unwrap().clone()
     }
 
-    /// Stage one candidate version: if it's newer than the active manifest (and not
-    /// already staging), download its blobs (online), then activate by storing the
-    /// manifest so the gateway serves it. The active version is untouched until the
-    /// download completes (atomic swap). P-U1 auto-activates (open-instance gating
-    /// is P-U3).
+    /// Online update path: if `candidate` is newer than what we serve, download its
+    /// blobs from online sources, activate, and propagate to peers (we now hold the
+    /// blobs). Returns whether it activated.
     async fn stage_update(self: Arc<Self>, addr: SiteAddr, candidate: Event) -> bool {
-        let host = addr.host_label();
         let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
         let active_ts = self
-            .relay
+            .active_backend()
             .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
             .await
             .ok()
@@ -1021,6 +1307,44 @@ impl Content {
         if candidate.created_at.as_secs() <= active_ts {
             return false;
         }
+        // Pull blobs from connected mesh peers first (closer/faster, and the only
+        // option under mesh-only), then the online fallback unless mesh-only.
+        let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
+        for npub in self.connected_circle_npubs() {
+            if let Ok(m) = crate::ip_source::mesh_source_for(&npub) {
+                sources.push(Arc::new(m));
+            }
+        }
+        if !self.is_offline_only() {
+            sources.push(Arc::new(crate::ip_source::IpPeerSource::new(
+                crate::ip_source::default_relays(),
+                crate::ip_source::default_blossom_servers(),
+            )));
+        }
+        // Activation stores the manifest in the relay (so peers REQ-ing us see it)
+        // and then propagates it over the mesh.
+        let activated = Arc::clone(&self)
+            .download_and_activate(addr, candidate.clone(), sources, true)
+            .await;
+        if activated {
+            self.forward_manifest(&candidate, MANIFEST_EVENT_TTL.saturating_sub(1), None);
+        }
+        activated
+    }
+
+    /// Download `candidate`'s blobs from `sources` (in order) into Blossom, then
+    /// **activate** it — pin it as the active version the gateway serves (atomic
+    /// swap). `store_in_relay` also stores the manifest so peers REQ-ing us see it
+    /// (the online path; the push path already has it). The active version keeps
+    /// serving until the download completes. Returns whether it activated.
+    async fn download_and_activate(
+        self: Arc<Self>,
+        addr: SiteAddr,
+        candidate: Event,
+        sources: Vec<Arc<dyn PeerSource>>,
+        store_in_relay: bool,
+    ) -> bool {
+        let host = addr.host_label();
         let Ok(manifest) = nsite_deck::Manifest::from_event(candidate.clone()) else {
             return false;
         };
@@ -1038,43 +1362,129 @@ impl Content {
                 PendingUpdate { manifest: candidate.clone(), total, pulled: 0, ready: false },
             );
         }
-
-        // Download blobs from online sources (the candidate's server hints + the
-        // default Blossom set). The active version keeps serving meanwhile.
-        let source = crate::ip_source::IpPeerSource::new(
-            crate::ip_source::default_relays(),
-            crate::ip_source::default_blossom_servers(),
-        );
         let progress = |pulled: usize, _total: usize| {
             if let Some(p) = self.pending_updates.lock().unwrap().get_mut(&host) {
                 p.pulled = pulled as u32;
             }
         };
-        let outcome =
-            nsite_deck::sync::stage_blobs(self.blobs.as_ref(), &source, &manifest, &progress).await;
-
-        match outcome {
-            Ok(SyncOutcome::Ready) => {
-                if let Some(p) = self.pending_updates.lock().unwrap().get_mut(&host) {
-                    p.ready = true;
-                    p.pulled = p.total;
-                }
-                // Activate: store the manifest (atomic swap — it becomes newest and
-                // the gateway serves it). P-U3 will defer this while an instance is
-                // open; P-U1 applies immediately.
-                let _ = self.relay.store_event(candidate).await;
-                let n = manifest.paths.len() as u64;
-                self.set_status_titled(&addr, manifest.title.as_deref(), "ready", n, n, "Updated");
-                self.pending_updates.lock().unwrap().remove(&host);
-                true
-            }
-            _ => {
-                // Couldn't fully download — keep the working version; drop the
-                // pending so a later check retries cleanly.
-                self.pending_updates.lock().unwrap().remove(&host);
-                false
+        // Try sources in order; the first that completes the download wins.
+        let mut done = false;
+        for source in &sources {
+            if matches!(
+                nsite_deck::sync::stage_blobs(self.blobs.as_ref(), source.as_ref(), &manifest, &progress).await,
+                Ok(SyncOutcome::Ready)
+            ) {
+                done = true;
+                break;
             }
         }
+        if done {
+            if let Some(p) = self.pending_updates.lock().unwrap().get_mut(&host) {
+                p.ready = true;
+                p.pulled = p.total;
+            }
+            if store_in_relay {
+                let _ = self.relay.store_event(candidate.clone()).await;
+            }
+            self.set_active(&candidate);
+            let n = manifest.paths.len() as u64;
+            self.set_status_titled(&addr, manifest.title.as_deref(), "ready", n, n, "Updated");
+            self.pending_updates.lock().unwrap().remove(&host);
+            true
+        } else {
+            self.pending_updates.lock().unwrap().remove(&host);
+            false
+        }
+    }
+
+    /// A manifest landed in our relay over the mesh (a peer's push, forwarded by
+    /// the gossiper). Propagate it like any event (`docs/design/nsite-updates.md`
+    /// §4); if it's one of our installed sites, download its blobs from the sender
+    /// and activate. Forwarding never waits on the download for sites we don't run.
+    pub async fn on_manifest_event(self: Arc<Self>, event: Event, inbound: Inbound) {
+        let d = event_d_tag(&event);
+        let addr = SiteAddr { author: event.pubkey, d_tag: d };
+
+        // Forward budget (mirrors chat): originate at the default for a local
+        // publish, else the ttl that rode in. Clamp so a peer can't over-extend us.
+        let effective = match inbound.origin {
+            Origin::Local => MANIFEST_EVENT_TTL,
+            Origin::Mesh => inbound.event_ttl.unwrap_or(0),
+        }
+        .min(MANIFEST_EVENT_TTL);
+        let out_ttl = effective.saturating_sub(1);
+
+        if !self.is_in_library(&addr) {
+            // Not our app: pure relay — pass it on at once (we won't fetch/serve it).
+            if effective > 0 {
+                self.forward_manifest(&event, out_ttl, inbound.sender);
+            }
+            return;
+        }
+
+        // Our app: best-effort download from the sender (its mesh Blossom) first,
+        // then the online fallback unless mesh-only. Activate when complete.
+        let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
+        if let Some(IpAddr::V6(ip)) = inbound.sender {
+            sources.push(Arc::new(
+                crate::ip_source::IpPeerSource::new(
+                    vec![format!("ws://[{ip}]:4869")],
+                    vec![format!("http://[{ip}]:24242")],
+                )
+                .ignoring_manifest_servers(),
+            ));
+        }
+        if !self.is_offline_only() {
+            sources.push(Arc::new(crate::ip_source::IpPeerSource::new(
+                crate::ip_source::default_relays(),
+                crate::ip_source::default_blossom_servers(),
+            )));
+        }
+        // Manifest is already in our relay (NIP-01), so don't re-store.
+        let _ = Arc::clone(&self)
+            .download_and_activate(addr, event.clone(), sources, false)
+            .await;
+        // Forward regardless of download outcome so the wave never stalls (§4).
+        if effective > 0 {
+            self.forward_manifest(&event, out_ttl, inbound.sender);
+        }
+    }
+
+    /// Fan a manifest to connected Circle peers over the push plane (carrying a
+    /// decremented `event-ttl`), split-horizon. `exclude` is the peer it came from.
+    fn forward_manifest(&self, manifest: &Event, out_ttl: u8, exclude: Option<IpAddr>) {
+        let mut ev_json = match serde_json::to_value(manifest) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "manifest gossip: serialize failed");
+                return;
+            }
+        };
+        if let Some(obj) = ev_json.as_object_mut() {
+            obj.insert("event-ttl".to_string(), serde_json::json!(out_ttl));
+        }
+        let frame = serde_json::json!(["EVENT", ev_json]).to_string();
+        for npub in self.connected_circle_npubs() {
+            let ip = match fips::PeerIdentity::from_npub(&npub) {
+                Ok(p) => IpAddr::V6(p.address().to_ipv6()),
+                Err(_) => continue,
+            };
+            if exclude == Some(ip) {
+                continue;
+            }
+            self.gossip_to_peer(&npub, frame.clone());
+        }
+    }
+
+    /// Whether a site is in our Library (we "run" it, so we're interested in its
+    /// updates — download before forwarding).
+    fn is_in_library(&self, addr: &SiteAddr) -> bool {
+        let npub = addr.author.to_bech32().unwrap_or_default();
+        self.library
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|i| i.author_npub == npub && i.d_tag == addr.d_tag)
     }
 
     // --- wipe ---
@@ -1087,7 +1497,10 @@ impl Content {
         self.library.lock().unwrap().clear();
         self.sites.lock().unwrap().clear();
         self.discovered.lock().unwrap().clear();
+        self.pending_updates.lock().unwrap().clear();
+        self.active_manifests.lock().unwrap().clear();
         let _ = std::fs::remove_file(&self.library_path);
+        let _ = std::fs::remove_file(&self.active_path);
         Ok(())
     }
 

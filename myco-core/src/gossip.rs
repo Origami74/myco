@@ -20,6 +20,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use nostr::nips::nip19::ToBech32;
 use nostr::Event;
 
 use myco_relay::server::{Gossiper, Inbound, Origin};
@@ -58,7 +59,26 @@ impl Gossiper for MeshGossiper {
         if kind == crate::content::KIND_PAIR_REQUEST || kind == crate::content::KIND_PAIR_ACCEPT {
             if inbound.origin == Origin::Mesh {
                 self.content.handle_pair_event(&event);
+                // A peer just accepted our pair request → they're a reachable source
+                // *now*. Retry any not-yet-ready downloads from them immediately,
+                // rather than waiting for the next connected-peer poll edge.
+                if kind == crate::content::KIND_PAIR_ACCEPT {
+                    if let Ok(npub) = event.pubkey.to_bech32() {
+                        for addr in self.content.retriable_library_addrs() {
+                            let content = self.content.clone();
+                            let holder = npub.clone();
+                            tokio::spawn(async move { content.open_site(addr, Some(holder)).await });
+                        }
+                    }
+                }
             }
+            return;
+        }
+        // nsite manifests propagate over this same push plane (the relay just stored
+        // a newer one), but with an interest-aware download-then-forward policy and
+        // the active-version gate. See docs/design/nsite-updates.md §4.
+        if kind == nsite_deck::KIND_ROOT || kind == nsite_deck::KIND_NAMED {
+            self.content.clone().on_manifest_event(event, inbound).await;
             return;
         }
         if !is_gossip_eligible(kind) {

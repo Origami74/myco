@@ -7,11 +7,11 @@
 //! - `HEAD /<sha256>` → 200 if present, 404 if not (the "all blobs present?" probe).
 //! - `PUT  /upload`    → store the body keyed by `sha256(body)`, return a descriptor.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
@@ -19,6 +19,27 @@ use axum::Router;
 use nsite_deck::seams::BlobStore;
 
 use crate::FsBlobStore;
+
+/// Decides whether a non-loopback (mesh) source may touch our Blossom. `myco-core`
+/// backs this with the Circle so only paired peers can pull/push blobs; loopback
+/// (the in-app gateway) always bypasses it. Behind an `Arc` so the **live** Circle
+/// is consulted per request — membership changes at runtime.
+pub type AccessFn = Arc<dyn Fn(IpAddr) -> bool + Send + Sync>;
+
+/// Shared handler state: the blob store plus an optional mesh access gate.
+#[derive(Clone)]
+struct BlossomState {
+    store: Arc<FsBlobStore>,
+    access: Option<AccessFn>,
+}
+
+impl BlossomState {
+    /// Loopback is always allowed; a mesh source must pass the gate (if one is set).
+    fn allows(&self, addr: SocketAddr) -> bool {
+        let ip = addr.ip();
+        ip.is_loopback() || self.access.as_ref().is_none_or(|a| a(ip))
+    }
+}
 
 /// Serve Blossom on `addr` until the future is dropped/aborted.
 pub async fn serve(store: Arc<FsBlobStore>, addr: SocketAddr) -> anyhow::Result<()> {
@@ -45,16 +66,41 @@ pub fn bind(addr: SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
     Ok(tokio::net::TcpListener::from_std(socket.into())?)
 }
 
-/// Serve on an already-bound listener (lets the caller pick an ephemeral port).
+/// Serve on an already-bound listener with **no** access gate — every source is
+/// served (the local/test path; an ephemeral port the caller picked).
 pub async fn serve_on(
     store: Arc<FsBlobStore>,
+    listener: tokio::net::TcpListener,
+) -> anyhow::Result<()> {
+    serve_state(BlossomState { store, access: None }, listener).await
+}
+
+/// Serve on an already-bound listener, restricting **mesh** sources to those that
+/// pass `access` (loopback is always allowed). The runtime uses this so only
+/// paired (Circle) peers can pull/push blobs.
+pub async fn serve_on_guarded(
+    store: Arc<FsBlobStore>,
+    listener: tokio::net::TcpListener,
+    access: AccessFn,
+) -> anyhow::Result<()> {
+    serve_state(BlossomState { store, access: Some(access) }, listener).await
+}
+
+async fn serve_state(
+    state: BlossomState,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/{sha256}", get(get_blob).head(head_blob))
         .route("/upload", put(upload))
-        .with_state(store);
-    axum::serve(listener, app).await?;
+        .with_state(state);
+    // Connect-info gives each request's source address, so the gate can tell a
+    // loopback (in-app gateway) request from a mesh peer's.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -63,8 +109,15 @@ fn blob_hash(raw: &str) -> String {
     raw.split('.').next().unwrap_or(raw).to_ascii_lowercase()
 }
 
-async fn get_blob(Path(sha256): Path<String>, State(store): State<Arc<FsBlobStore>>) -> Response {
-    match store.get(&blob_hash(&sha256)).await {
+async fn get_blob(
+    Path(sha256): Path<String>,
+    State(st): State<BlossomState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Response {
+    if !st.allows(addr) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match st.store.get(&blob_hash(&sha256)).await {
         Ok(Some(bytes)) => (
             [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
             bytes,
@@ -75,16 +128,30 @@ async fn get_blob(Path(sha256): Path<String>, State(store): State<Arc<FsBlobStor
     }
 }
 
-async fn head_blob(Path(sha256): Path<String>, State(store): State<Arc<FsBlobStore>>) -> StatusCode {
-    if store.has(&blob_hash(&sha256)).await {
+async fn head_blob(
+    Path(sha256): Path<String>,
+    State(st): State<BlossomState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> StatusCode {
+    if !st.allows(addr) {
+        return StatusCode::FORBIDDEN;
+    }
+    if st.store.has(&blob_hash(&sha256)).await {
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND
     }
 }
 
-async fn upload(State(store): State<Arc<FsBlobStore>>, body: Bytes) -> Response {
-    match store.put(&body).await {
+async fn upload(
+    State(st): State<BlossomState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    body: Bytes,
+) -> Response {
+    if !st.allows(addr) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match st.store.put(&body).await {
         Ok(sha256) => {
             let descriptor = serde_json::json!({ "sha256": sha256, "size": body.len() });
             (

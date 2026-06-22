@@ -112,7 +112,13 @@ impl AppRuntime {
             // (docs/design/event-gossip.md).
             let gossiper: Arc<dyn myco_relay::server::Gossiper> =
                 Arc::new(crate::gossip::MeshGossiper::new(content.clone()));
-            let hub = myco_relay::server::RelayHub::new(content.relay(), Some(gossiper));
+            // Restrict mesh access to paired (Circle) peers — only the pairing
+            // handshake is open, so strangers can request to pair but can't read or
+            // push content. Loopback (the in-app WebView) always bypasses the gate.
+            let gate: Arc<dyn myco_relay::server::PeerGate> =
+                Arc::new(crate::content::CircleGate::new(content.clone()));
+            let hub =
+                myco_relay::server::RelayHub::with_gate(content.relay(), Some(gossiper), Some(gate));
 
             // Mesh socket: IPV6_V6ONLY `[::]:4869` so it doesn't collide with the
             // loopback bind and is reachable by peers at `ws://<npub>.fips:4869`.
@@ -158,8 +164,16 @@ impl AppRuntime {
             }
             match myco_blossom::server::bind("[::]:24242".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
+                    // Same paired-only gate for blobs: a mesh source must be a
+                    // current Circle member (loopback bypasses). Pairing never
+                    // touches Blossom, so there's no handshake exception here.
+                    let content_for_blob = content.clone();
+                    let access: myco_blossom::server::AccessFn =
+                        Arc::new(move |ip| content_for_blob.is_paired_ip(ip));
                     rt.spawn(async move {
-                        if let Err(e) = myco_blossom::server::serve_on(blobs, listener).await {
+                        if let Err(e) =
+                            myco_blossom::server::serve_on_guarded(blobs, listener, access).await
+                        {
                             tracing::error!(error = %e, "mesh blossom server exited");
                         }
                     });
@@ -516,12 +530,28 @@ impl AppRuntime {
                 let mut pulled = self.pulled_chat_from.lock().unwrap();
                 for npub in &conn {
                     if pulled.insert(npub.clone()) {
+                        // First poll where this Circle peer is reachable: pull chat
+                        // backlog (the read counterpart of the push flood).
                         let content = content.clone();
                         let npub = npub.clone();
                         rt.spawn(async move { content.pull_recent_chat(&npub).await });
                     }
                 }
                 pulled.retain(|n| conn.contains(n)); // re-pull on reconnect
+                drop(pulled);
+
+                // Retry not-ready downloads while any Circle peer is reachable.
+                // open_site(_, None) tries every connected peer, and
+                // `retriable_library_addrs` skips sites already syncing — so this
+                // re-tries about once per attempt-duration (not every poll), and
+                // keeps trying as a flaky just-connected session settles, instead of
+                // firing once on the connect edge and going quiet.
+                if !conn.is_empty() {
+                    for addr in content.retriable_library_addrs() {
+                        let content = content.clone();
+                        rt.spawn(async move { content.open_site(addr, None).await });
+                    }
+                }
             }
         }
 

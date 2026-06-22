@@ -75,6 +75,21 @@ pub trait Gossiper: Send + Sync {
     }
 }
 
+/// Access policy for **mesh** connections: only paired (Circle) peers may read or
+/// publish content. Loopback (the in-app WebView) bypasses this entirely. The one
+/// exception is the pairing handshake — an as-yet-unpaired peer must be able to
+/// publish a pair request to bootstrap, so [`may_publish`](PeerGate::may_publish)
+/// is consulted per event kind. The implementor (`myco-core`) backs this with the
+/// Circle; a hub with no gate is open (the local/test default).
+pub trait PeerGate: Send + Sync {
+    /// May the mesh peer at `ip` open a `REQ` (read events from us)?
+    fn may_read(&self, ip: IpAddr) -> bool;
+    /// May the mesh peer at `ip` publish an `EVENT` of `kind`? Implementors allow
+    /// the pairing kinds from anyone (bootstrap) and everything else only when
+    /// `ip` is a paired peer.
+    fn may_publish(&self, ip: IpAddr, kind: u16) -> bool;
+}
+
 /// Clamp on the `req-ttl` we'll honour, so a peer can't turn us into an
 /// unbounded query amplifier (mirrors `MAX_EVENT_TTL` on the push plane).
 const MAX_REQ_TTL: u8 = 2;
@@ -90,15 +105,29 @@ pub struct RelayHub {
     store: Arc<RelayStore>,
     live: broadcast::Sender<Event>,
     gossip: Option<Arc<dyn Gossiper>>,
+    /// Mesh access policy. `None` = open (local/test default); `Some` restricts
+    /// mesh peers to paired (Circle) devices. Loopback always bypasses it.
+    gate: Option<Arc<dyn PeerGate>>,
 }
 
 impl RelayHub {
-    /// Build a shared hub. Pass `None` for `gossip` to disable mesh fan-out.
+    /// Build a shared hub. Pass `None` for `gossip` to disable mesh fan-out. No
+    /// access gate — every connection is served (the local/test default).
     pub fn new(store: Arc<RelayStore>, gossip: Option<Arc<dyn Gossiper>>) -> Arc<Self> {
+        Self::with_gate(store, gossip, None)
+    }
+
+    /// Build a hub that restricts **mesh** access to paired peers via `gate`
+    /// (loopback is always allowed). Pass `None` for `gate` to stay open.
+    pub fn with_gate(
+        store: Arc<RelayStore>,
+        gossip: Option<Arc<dyn Gossiper>>,
+        gate: Option<Arc<dyn PeerGate>>,
+    ) -> Arc<Self> {
         // Buffer enough that a brief subscriber stall doesn't drop chat; an
         // over-capacity lag is surfaced as `Lagged` and skipped, not blocked.
         let (live, _) = broadcast::channel(512);
-        Arc::new(Self { store, live, gossip })
+        Arc::new(Self { store, live, gossip, gate })
     }
 }
 
@@ -239,6 +268,15 @@ async fn handle_client_frame(
     match array.first().and_then(|v| v.as_str()) {
         Some("REQ") => {
             let sub_id = array.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            // Mesh access gate: only paired peers may read from us. Unpaired peers
+            // get a CLOSED (no backlog, no live subscription registered).
+            if origin == Origin::Mesh {
+                if let Some(gate) = &hub.gate {
+                    if !gate.may_read(peer_ip) {
+                        return vec![serde_json::json!(["CLOSED", sub_id, "restricted: pair to access"]).to_string()];
+                    }
+                }
+            }
             let raw_filters: Vec<serde_json::Value> = array.iter().skip(2).cloned().collect();
             // `req-ttl` rides *inside* a filter object (a transient extension key,
             // like `event-ttl` rides the EVENT) — the remaining mesh forward hops.
@@ -300,6 +338,16 @@ async fn handle_client_frame(
                 return Vec::new();
             };
             let id = event.id.to_hex();
+            // Mesh access gate: an unpaired peer may publish only the pairing
+            // handshake (so pairing can bootstrap); everything else is rejected
+            // until they're in our Circle.
+            if origin == Origin::Mesh {
+                if let Some(gate) = &hub.gate {
+                    if !gate.may_publish(peer_ip, event.kind.as_u16()) {
+                        return vec![serde_json::json!(["OK", id, false, "restricted: pair to access"]).to_string()];
+                    }
+                }
+            }
             if event.verify().is_err() {
                 return vec![serde_json::json!(["OK", id, false, "invalid: bad signature"]).to_string()];
             }
