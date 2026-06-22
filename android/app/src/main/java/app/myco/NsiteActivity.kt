@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -13,6 +14,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.addCallback
+import androidx.activity.enableEdgeToEdge
+import androidx.core.view.WindowCompat
 import app.myco.core.AppCoreClient
 import app.myco.core.MycoCore
 import java.io.ByteArrayInputStream
@@ -36,6 +39,14 @@ class NsiteActivity : ComponentActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Fill the whole device height with transparent system bars (pre-15 devices
+        // otherwise keep opaque bars that frame the nsite with borders). The page
+        // gets the bar regions via `env(safe-area-inset-*)` when it sets
+        // `viewport-fit=cover`; chrome-less nsites without it simply draw full-bleed.
+        // Bar-icon contrast can't be fixed at a constant here (unlike the always-white
+        // Myco shell) — an nsite's background is arbitrary, so we sniff the page's
+        // theme-color/background after load and flip the icons to match (see [syncBarContrast]).
+        enableEdgeToEdge()
         client = MycoCore.client(this)
 
         val hostLabel = intent.getStringExtra(EXTRA_HOST).orEmpty()
@@ -54,7 +65,11 @@ class NsiteActivity : ComponentActivity() {
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.mediaPlaybackRequiresUserGesture = false
-            webViewClient = NsiteWebViewClient(client, "$hostLabel.localhost")
+            webViewClient = NsiteWebViewClient(
+                client,
+                "$hostLabel.localhost",
+                onContentVisible = { syncBarContrast() },
+            )
         }
         setContentView(webView)
 
@@ -76,6 +91,26 @@ class NsiteActivity : ComponentActivity() {
             webView.destroy()
         }
         super.onDestroy()
+    }
+
+    /**
+     * Match the system-bar icon contrast to the nsite's own background. We can't
+     * predict an nsite's palette, so we read its `<meta name="theme-color">` (or, if
+     * absent, the computed page background) and pick light icons over a dark page,
+     * dark icons over a light one. Runs on the WebView's JS callback (UI thread).
+     * A missing/transparent/unparseable value leaves the current appearance as-is.
+     */
+    private fun syncBarContrast() {
+        webView.evaluateJavascript(BG_PROBE_JS) { raw ->
+            val color = parseCssColor(unquoteJs(raw)) ?: return@evaluateJavascript
+            // "Light appearance" = dark icons (for a light bar background). So a light
+            // page → light appearance (dark icons); a dark page → dark icons off (white).
+            val lightBg = isLightColor(color)
+            WindowCompat.getInsetsController(window, webView).apply {
+                isAppearanceLightStatusBars = lightBg
+                isAppearanceLightNavigationBars = lightBg
+            }
+        }
     }
 
     /**
@@ -106,6 +141,51 @@ class NsiteActivity : ComponentActivity() {
 
         /** A per-host document URI so re-opening the same nsite re-surfaces its task. */
         fun documentUri(hostLabel: String): Uri = Uri.parse("myco://app/$hostLabel")
+
+        /** Read the page's declared theme-color, else the computed body/html background. */
+        private const val BG_PROBE_JS = """
+            (function () {
+              try {
+                var m = document.querySelector('meta[name="theme-color"]');
+                if (m && m.content) return m.content;
+                var b = document.body ? getComputedStyle(document.body).backgroundColor : '';
+                if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') return b;
+                return getComputedStyle(document.documentElement).backgroundColor || '';
+              } catch (e) { return ''; }
+            })()
+        """
+
+        /** Strip the JSON quoting `evaluateJavascript` wraps a returned string in. */
+        private fun unquoteJs(raw: String?): String {
+            val s = raw?.trim().orEmpty()
+            if (s.length < 2 || s == "null" || !s.startsWith("\"")) return s
+            return s.substring(1, s.length - 1).replace("\\\"", "\"").replace("\\\\", "\\")
+        }
+
+        /** Parse a CSS color — `#rgb`/`#rrggbb`, a name, or `rgb()/rgba()`. Null if
+         *  unparseable or fully transparent (no usable background to contrast against). */
+        private fun parseCssColor(value: String): Int? {
+            val v = value.trim()
+            if (v.isEmpty()) return null
+            val rgb = Regex("rgba?\\(([^)]+)\\)").find(v)
+            if (rgb != null) {
+                val p = rgb.groupValues[1].split(",").map { it.trim() }
+                if (p.size < 3) return null
+                val r = p[0].toFloatOrNull()?.toInt() ?: return null
+                val g = p[1].toFloatOrNull()?.toInt() ?: return null
+                val b = p[2].toFloatOrNull()?.toInt() ?: return null
+                if ((p.getOrNull(3)?.toFloatOrNull() ?: 1f) == 0f) return null
+                return Color.rgb(r, g, b)
+            }
+            return runCatching { Color.parseColor(v) }.getOrNull()
+        }
+
+        /** Perceptual luminance test: true if [color] reads as a light background. */
+        private fun isLightColor(color: Int): Boolean {
+            val luminance =
+                0.299 * Color.red(color) + 0.587 * Color.green(color) + 0.114 * Color.blue(color)
+            return luminance > 140  // 0..255; midline biased slightly toward "dark icons".
+        }
     }
 }
 
@@ -119,7 +199,18 @@ class NsiteActivity : ComponentActivity() {
 private class NsiteWebViewClient(
     private val client: AppCoreClient,
     private val nsiteHost: String,
+    private val onContentVisible: () -> Unit,
 ) : WebViewClient() {
+    // First paint (early) and full load (catches late theme-color/background) both
+    // re-sync the system-bar icon contrast to whatever the page is showing.
+    override fun onPageCommitVisible(view: WebView, url: String) {
+        onContentVisible()
+    }
+
+    override fun onPageFinished(view: WebView, url: String) {
+        onContentVisible()
+    }
+
     /**
      * Keep same-nsite navigation inside the WebView; send any link that leaves
      * this nsite — the open web, another nsite, `mailto:`/`tel:`/… — to the

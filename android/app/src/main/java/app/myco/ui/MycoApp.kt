@@ -244,10 +244,14 @@ private fun PairRequestDialog(
 
 // ----- shared UI building blocks used across screens -----
 
-/** The green "N peers" pill shown top-right on every screen. */
+/**
+ * The green pill shown top-right on every screen: live BLE peers ("N peers") plus
+ * the total size of your Circle (paired contacts, online or not) after a divider.
+ */
 @Composable
 fun PeersPill(state: AppState) {
     val connected = state.blePeers.count { it.connected }
+    val circle = state.circle.size
     Surface(
         shape = CircleShape,
         color = MaterialTheme.colorScheme.primaryContainer,
@@ -261,6 +265,22 @@ fun PeersPill(state: AppState) {
             StatusDot(if (connected > 0) StatusConnected else Slate)
             Text(
                 "$connected ${if (connected == 1) "peer" else "peers"}",
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.labelLarge,
+            )
+            Box(
+                Modifier
+                    .padding(start = 2.dp)
+                    .size(width = 1.dp, height = 14.dp)
+                    .background(MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.25f)),
+            )
+            Icon(
+                Icons.Filled.People,
+                contentDescription = "in Circle",
+                modifier = Modifier.size(16.dp),
+            )
+            Text(
+                "$circle",
                 fontWeight = FontWeight.SemiBold,
                 style = MaterialTheme.typography.labelLarge,
             )

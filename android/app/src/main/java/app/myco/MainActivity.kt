@@ -11,7 +11,9 @@ import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions
 import androidx.core.content.ContextCompat
@@ -48,6 +50,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Draw edge-to-edge with transparent system bars on every API level. The
+        // platform forces this on Android 15+, but pre-15 devices (e.g. Samsung on
+        // One UI 6 / Android 14) otherwise keep opaque bars whose default color
+        // differs from our white background — showing up as big top/bottom borders.
+        // The Compose Scaffold applies the system-bar insets, so content stays clear.
+        //
+        // Force the *light* bar style (dark icons) on both bars: the shell is always
+        // a white background, so the default `auto` style would draw white icons in
+        // system dark mode — invisible white-on-white (seen on Pixel).
+        val barStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+        enableEdgeToEdge(statusBarStyle = barStyle, navigationBarStyle = barStyle)
         core = MycoCore.client(this)
         // Restore the mesh-only (no IP fallback) preference into the core.
         core.dispatch(NativeActions.setOfflineOnly(prefs.getBoolean(PREF_OFFLINE_ONLY, false)))
