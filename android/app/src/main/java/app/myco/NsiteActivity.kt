@@ -15,6 +15,7 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.addCallback
 import androidx.activity.enableEdgeToEdge
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import app.myco.core.AppCoreClient
 import app.myco.core.MycoCore
@@ -38,6 +39,9 @@ class NsiteActivity : ComponentActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Black splash (Myco mark) while the nsite loads — same as MainActivity;
+        // must be installed before super.onCreate.
+        installSplashScreen()
         super.onCreate(savedInstanceState)
         // Fill the whole device height with transparent system bars (pre-15 devices
         // otherwise keep opaque bars that frame the nsite with borders). The page
@@ -59,6 +63,9 @@ class NsiteActivity : ComponentActivity() {
         applyTaskIcon("$hostLabel.localhost", title)
 
         webView = WebView(this).apply {
+            // Paint black until the page renders, so there's no white flash
+            // between the black splash and the nsite's first frame.
+            setBackgroundColor(Color.BLACK)
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             // No file/content access — an nsite is pure web content served by us.

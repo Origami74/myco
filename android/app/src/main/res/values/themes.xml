@@ -3,4 +3,12 @@
     <!-- Compose owns the visual theme (Material3); the activity just needs a
          no-action-bar base so the splash/window chrome is minimal. -->
     <style name="Theme.Myco" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!-- Launch/splash theme: black window with the Myco mark (matches the
+         launcher icon), then hands off to Theme.Myco once Compose is up. -->
+    <style name="Theme.Myco.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@android:color/black</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/myco_mark</item>
+        <item name="postSplashScreenTheme">@style/Theme.Myco</item>
+    </style>
 </resources>

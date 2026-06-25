@@ -5,6 +5,11 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.drawable.Icon
 import android.net.VpnService
 import android.os.Build
@@ -17,6 +22,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions
 import androidx.core.content.ContextCompat
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import app.myco.ble.BleService
 import app.myco.core.AppCoreClient
 import app.myco.core.MycoCore
@@ -49,6 +55,9 @@ class MainActivity : ComponentActivity() {
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Black splash (Myco mark) until Compose draws its first frame; must be
+        // installed before super.onCreate so the system hands the window over.
+        installSplashScreen()
         super.onCreate(savedInstanceState)
         // Draw edge-to-edge with transparent system bars on every API level. The
         // platform forces this on Android 15+, but pre-15 devices (e.g. Samsung on
@@ -170,7 +179,11 @@ class MainActivity : ComponentActivity() {
         Thread {
             val bmp = NsiteIcons.fetch(MycoCore.client(this), "$hostLabel.localhost")
             val icon = if (bmp != null) {
-                Icon.createWithBitmap(bmp)
+                // An *adaptive* bitmap fills the launcher's icon shape; a plain
+                // bitmap is treated as legacy and shrunk onto a padded white
+                // circle (the "tiny icon" look). Pre-compose the favicon onto a
+                // full-bleed canvas so it renders big.
+                Icon.createWithAdaptiveBitmap(adaptiveShortcutIcon(bmp))
             } else {
                 Icon.createWithResource(this, R.mipmap.ic_launcher)
             }
@@ -182,6 +195,31 @@ class MainActivity : ComponentActivity() {
                 .build()
             runOnUiThread { sm.requestPinShortcut(shortcut, null) }
         }.start()
+    }
+
+    /**
+     * Compose a favicon into a full-bleed adaptive-icon bitmap so the home-screen
+     * shortcut renders large instead of a tiny image floating in a white circle.
+     * The favicon is scaled to *cover* the whole 108dp layer (edge-to-edge); the
+     * launcher then masks it to its shape, trimming only the corners — the same
+     * full-bleed look as a normal app icon. White only shows through where the
+     * source itself is transparent.
+     */
+    private fun adaptiveShortcutIcon(src: Bitmap): Bitmap {
+        val size = 432 // 108dp @ xxhdpi
+        val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(Color.WHITE)
+        // Cover: scale by the *smaller* dimension so the image fills the canvas
+        // with no bars; any overflow on the long axis is centered and clipped.
+        val scale = size / minOf(src.width, src.height).toFloat()
+        val w = src.width * scale
+        val h = src.height * scale
+        val left = (size - w) / 2f
+        val top = (size - h) / 2f
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+        canvas.drawBitmap(src, null, RectF(left, top, left + w, top + h), paint)
+        return out
     }
 
     // --- share QR: scan (in-app PairScreen) + deep-link ---
