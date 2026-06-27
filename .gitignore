@@ -44,3 +44,5 @@ node_modules/
 
 # Standalone nsite app, developed as its own git repo
 /myco-bitchat/
+
+.env
