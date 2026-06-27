@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.widget.FrameLayout
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -16,7 +17,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.addCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import app.myco.core.AppCoreClient
 import app.myco.core.MycoCore
 import java.io.ByteArrayInputStream
@@ -78,7 +81,30 @@ class NsiteActivity : ComponentActivity() {
                 onContentVisible = { syncBarContrast() },
             )
         }
-        setContentView(webView)
+        // Host the WebView in a container we can inset. We draw edge-to-edge and
+        // expect pages to pad via `env(safe-area-inset-bottom)`, but older Android
+        // WebViews map only display cutouts into that env() — not the nav bar — so a
+        // chrome-less nsite's bottom content (e.g. a chat composer) hides behind the
+        // 3-button bar. Padding the WebView *view* doesn't reliably shrink its CSS
+        // viewport (the page still lays out at full `100dvh` and the content is just
+        // clipped), so pad the *parent*: that shrinks the WebView's layout height,
+        // and thus the page's viewport, lifting the composer above the bar. Works on
+        // every WebView version. Top stays full-bleed; the IME is handled by the
+        // page's own visual-viewport logic.
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        root.addView(
+            webView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        setContentView(root)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val navBottom = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+            v.setPadding(0, 0, 0, navBottom)
+            insets
+        }
 
         // Android Back navigates the WebView history, then leaves the nsite task.
         onBackPressedDispatcher.addCallback(this) {
