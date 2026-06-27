@@ -289,6 +289,11 @@ class BleRadio(context: Context) {
     private fun boostPriority(chId: Long, device: BluetoothDevice) {
         runCatching {
             Log.i(TAG, "boostPriority: GATT to ${device.address} (low interval + 2M PHY)")
+            // TRANSPORT_LE is mandatory here: the 3-arg connectGatt defaults to
+            // TRANSPORT_AUTO, which on a dual-mode peer can bring up a classic
+            // BR/EDR link. BR/EDR between two phones makes Android auto-negotiate
+            // MAP/PBAP and pop the "<device> wants to access your messages" system
+            // dialog. The mesh is LE-only (L2CAP CoC), so pin GATT to LE too.
             val gatt = device.connectGatt(appContext, false, object : BluetoothGattCallback() {
                 override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
                     if (newState == BluetoothProfile.STATE_CONNECTED) {
@@ -310,7 +315,7 @@ class BleRadio(context: Context) {
                 override fun onPhyUpdate(g: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
                     Log.i(TAG, "PHY now tx=$txPhy rx=$rxPhy (2=2M) status=$status")
                 }
-            })
+            }, BluetoothDevice.TRANSPORT_LE)
             if (gatt != null) gatts[chId] = gatt
         }.onFailure { Log.w(TAG, "boostPriority failed: ${it.message}") }
     }
