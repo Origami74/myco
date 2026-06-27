@@ -25,6 +25,9 @@ local.properties
 *.apk
 *.aab
 *.keystore
+*.jks
+# Release signing credentials — never commit
+keystore.properties
 captures/
 .externalNativeBuild/
 .cxx/

@@ -1,4 +1,5 @@
 import org.gradle.api.tasks.Exec
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -59,6 +60,19 @@ tasks.register<Exec>("buildRustArm64") {
 tasks.matching { it.name in listOf("mergeDebugNativeLibs", "mergeReleaseNativeLibs") }
     .configureEach { dependsOn("buildRustArm64") }
 
+// Release signing. Credentials live OUTSIDE git: an `android/keystore.properties`
+// file (gitignored) or environment variables (CI / an externally-managed or
+// remote keystore). When neither is present the release build is left unsigned
+// so dev/debug builds keep working — the keystore is supplied only at publish
+// time. See docs/how-to/publish.md.
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
+}
+fun signingProp(key: String, env: String): String? =
+    keystoreProps.getProperty(key) ?: System.getenv(env)
+val hasReleaseKeystore = signingProp("storeFile", "MYCO_RELEASE_STORE_FILE") != null
+
 android {
     namespace = "app.myco"
     compileSdk = 36
@@ -67,15 +81,33 @@ android {
         applicationId = "app.myco"
         minSdk = 29                                   // L2CAP CoC requirement
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.0.1"
+        // CI overrides these from the release tag (see .github/workflows/release.yml)
+        // so each store release gets a unique, increasing versionCode; local
+        // builds fall back to the committed defaults.
+        versionCode = System.getenv("MYCO_VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("MYCO_VERSION_NAME") ?: "0.0.1"
         ndk { abiFilters += "arm64-v8a" }             // arm64 only
         buildConfigField("String", "GIT_REV", "\"${gitRev()}\"")
+    }
+
+    signingConfigs {
+        create("release") {
+            if (hasReleaseKeystore) {
+                storeFile = file(signingProp("storeFile", "MYCO_RELEASE_STORE_FILE")!!)
+                storePassword = signingProp("storePassword", "MYCO_RELEASE_STORE_PASSWORD")
+                keyAlias = signingProp("keyAlias", "MYCO_RELEASE_KEY_ALIAS")
+                keyPassword = signingProp("keyPassword", "MYCO_RELEASE_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Signed only when a keystore is configured; otherwise an unsigned
+            // release APK is produced (zsp / CI signs at publish time).
+            signingConfig = if (hasReleaseKeystore)
+                signingConfigs.getByName("release") else null
         }
     }
 
