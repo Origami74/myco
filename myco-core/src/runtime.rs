@@ -92,6 +92,11 @@ impl AppRuntime {
         // status map does not.
         rt.spawn(content.clone().refresh_library_status());
 
+        // First-run default apps: install the bundled myco-bitchat nsite so a
+        // fresh device shows it in Apps without pasting a link. A one-shot marker
+        // file makes this idempotent and lets a user who removes it stay removed.
+        seed_default_sites(&content, &rt, Path::new(data_dir));
+
         // Serve the relay + Blossom over the mesh so paired peers can pull this
         // device's nsites at ws://<npub>.fips:4869 / http://<npub>.fips:24242.
         // Bound IPV6_V6ONLY (the mesh is IPv6-only) so `[::]:port` doesn't collide
@@ -633,6 +638,33 @@ impl AppRuntime {
     pub fn state_json(&self) -> String {
         serde_json::to_string(&self.state())
             .unwrap_or_else(|e| format!(r#"{{"error":"serialize failed: {e}"}}"#))
+    }
+}
+
+/// nsites installed by default on first run (the bundled myco-bitchat app).
+const DEFAULT_SITES: &[&str] =
+    &["4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivbitchat.nsite.lol"];
+
+/// Pin + start a download for the default apps, once per install. The marker
+/// file in `data_dir` keeps this idempotent and lets a user who removes a seeded
+/// app stay rid of it (we never re-seed). Pinning happens immediately so the app
+/// lists in Apps even before its blobs land (offline first run); the spawned
+/// `open_site` fetches them, and re-attempts when the user taps the app.
+fn seed_default_sites(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) {
+    let marker = data_dir.join("seeded-defaults");
+    if marker.exists() {
+        return;
+    }
+    for link in DEFAULT_SITES {
+        let Some(addr) = nsite_deck::parse_link(link) else {
+            tracing::warn!(link, "default site link did not parse; skipping seed");
+            continue;
+        };
+        content.add_to_library(&addr, None, now_secs());
+        rt.spawn(content.clone().open_site(addr, None));
+    }
+    if let Err(e) = std::fs::write(&marker, b"1\n") {
+        tracing::warn!(error = %e, "could not write default-seed marker");
     }
 }
 
