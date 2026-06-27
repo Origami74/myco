@@ -1,37 +1,16 @@
-# Zapstore publishing config — https://zapstore.dev/docs/publish
-#
-# Publish a signed release APK to Zapstore. The APK is fetched from GitHub
-# Releases; metadata (name, description, topics, screenshots) is enriched from
-# the GitHub repo, with the fields below taking precedence.
-#
-# Sign the Zapstore release event with a *remote* signer (no nsec on disk/CI):
-#
-#   SIGN_WITH='bunker://<pubkey>?relay=wss://relay.example&secret=...' \
-#     zsp publish
-#
-# First publish also links the APK signing certificate (your release keystore)
-# to this nostr identity — see docs/how-to/publish.md.
-
 repository: https://github.com/Origami74/myco
-
-# Your nostr identity. Must match the pubkey behind SIGN_WITH (the remote
-# signer's bunker pubkey). Fill this in before the first publish, or let
-# `zsp publish --wizard` populate it.
-pubkey: npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr
-
-# Pull the signed release APK from GitHub Releases (latest release asset).
-release_source: github.com/Origami74/myco
-
-# Auto-enrich listing metadata from the GitHub repository.
-metadata_sources:
-  - github
-
-# Local overrides for the store listing (win over metadata_sources):
-name: Myco
-summary: Offline-first mesh for nsites — share apps peer-to-peer over Bluetooth.
+release_source: https://github.com/Origami74/myco
 description: |
-  Myco is an offline-first, peer-to-peer client for nsites — self-contained web
-  apps served straight from a local relay and Blossom store. Pair with people
-  nearby over Bluetooth LE to form a mesh, then discover, install, and share
-  nsites with no servers and no internet required. Includes built-in chat
-  (myco-bitchat) and home-screen install for any nsite.
+    Myco is an offline-first, peer-to-peer client for nsites — self-contained web
+    apps served straight from a local relay and Blossom store. Pair with people
+    nearby over Bluetooth LE to form a mesh, then discover, install, and share
+    nsites with no servers and no internet required. Includes built-in chat
+    (myco-bitchat) and home-screen install for any nsite.
+summary: Offline-first mesh for nsites — share apps peer-to-peer over Bluetooth.
+tags:
+    - mesh
+    - fips
+license: MIT
+metadata_sources:
+    - github
+pubkey: npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr
