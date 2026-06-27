@@ -33,15 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A chrome-less nsite's bottom content (e.g. the myco-bitchat chat
   composer) no longer hides behind the system navigation bar on devices
-  with a 3-button bar. The fullscreen WebView is drawn edge-to-edge and
-  pages are expected to pad via `env(safe-area-inset-bottom)`, but older
-  Android WebViews map only display cutouts into that env() — not the nav
-  bar. The WebView is now hosted in a container padded by the
-  navigation-bar inset, which shrinks the WebView's layout (and the
-  page's CSS viewport) so bottom content clears the bar on every WebView
-  version. The reserved strip matches the nsite background; the status bar
-  stays full-bleed and the soft keyboard is still handled by the page's
-  own visual-viewport logic.
+  with a 3-button bar, nor behind the soft keyboard when it opens. The
+  fullscreen WebView is drawn edge-to-edge and pages are expected to pad
+  via `env(safe-area-inset-bottom)` / `interactive-widget`, but older
+  Android WebViews map only display cutouts into env() and ignore
+  `interactive-widget`/`visualViewport`. The WebView is now hosted in a
+  container padded by the larger of the navigation-bar and IME insets,
+  which shrinks the WebView's layout (and the page's CSS viewport) so
+  bottom content clears the bar and rides above the keyboard on every
+  WebView version (`adjustResize` makes the IME inset available on
+  Android 10). The reserved strip matches the nsite background; the status
+  bar stays full-bleed. Newer WebViews then see no occlusion, so their own
+  inset/keyboard handling is a no-op.
 
 ## [0.0.1] - 2026-06-27
 

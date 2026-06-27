@@ -67,6 +67,7 @@
             android:documentLaunchMode="intoExisting"
             android:autoRemoveFromRecents="false"
             android:theme="@style/Theme.Myco.Splash"
+            android:windowSoftInputMode="adjustResize"
             android:label="@string/app_name" />
 
         <!-- Portrait-locked QR scanner (the zxing default opens sideways). -->

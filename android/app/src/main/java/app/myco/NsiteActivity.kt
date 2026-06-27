@@ -101,8 +101,14 @@ class NsiteActivity : ComponentActivity() {
         )
         setContentView(root)
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
-            val navBottom = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
-            v.setPadding(0, 0, 0, navBottom)
+            val nav = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            // Reserve whichever is taller: the nav bar (idle) or the soft keyboard
+            // (open). Shrinking the WebView above the IME keeps the composer visible
+            // on WebViews too old for `interactive-widget`/visualViewport keyboard
+            // handling (e.g. the DC-1). Newer WebViews then see no occlusion, so
+            // their own keyboard logic becomes a no-op — no double lift.
+            v.setPadding(0, 0, 0, maxOf(nav, ime))
             insets
         }
 
