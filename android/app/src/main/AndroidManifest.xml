@@ -24,6 +24,11 @@
     <!-- In-app QR scanner (reads a share QR). -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <!-- NFC tap-to-pair: HCE presents this device's pair code; reader mode reads a
+         peer's. Both optional — the app falls back to QR/paste without NFC. -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
+    <uses-feature android:name="android.hardware.nfc.hce" android:required="false" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
@@ -54,6 +59,13 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="myco" />
             </intent-filter>
+            <!-- Tap-to-pair: the OS reads the presenter's NDEF URI tag and delivers
+                 the myco://pair link here (no reader mode needed on this side). -->
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="myco" />
+            </intent-filter>
         </activity>
 
         <!-- Each opened nsite runs as a fullscreen, chrome-less WebView in its own
@@ -81,6 +93,20 @@
             android:name=".ble.BleService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- HCE for NFC tap-to-pair: emulates a tag serving this device's
+             myco://pair code while the QR/present screen is open. -->
+        <service
+            android:name=".nfc.PairHostApduService"
+            android:exported="true"
+            android:permission="android.permission.BIND_NFC_SERVICE">
+            <intent-filter>
+                <action android:name="android.nfc.cardemulation.action.HOST_APDU_SERVICE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.cardemulation.host_apdu_service"
+                android:resource="@xml/apduservice" />
+        </service>
 
         <!-- The app-owned TUN. BIND_VPN_SERVICE + the android.net.VpnService
              intent-filter mark it as a VpnService; specialUse FGS keeps it alive. -->

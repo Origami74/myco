@@ -341,6 +341,10 @@ impl AppRuntime {
                 if let Some(content) = &self.content {
                     content.remove_from_circle(&npub);
                 }
+                // Best-effort: tell the peer so they drop us too (if reachable).
+                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
+                    rt.spawn(async move { content.send_unpair(&npub).await });
+                }
                 self.rev += 1;
             }
             NativeAppAction::SendPairRequest { npub, secret, .. } => {
@@ -364,6 +368,12 @@ impl AppRuntime {
             NativeAppAction::SetOfflineOnly { enabled } => {
                 if let Some(content) = &self.content {
                     content.set_offline_only(enabled);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SetDeviceName { name } => {
+                if let Some(content) = &self.content {
+                    content.set_device_name(&name);
                 }
                 self.rev += 1;
             }

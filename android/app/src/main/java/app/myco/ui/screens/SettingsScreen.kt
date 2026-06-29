@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.DeveloperMode
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lan
 import androidx.compose.material.icons.filled.Warning
@@ -62,6 +63,8 @@ fun SettingsScreen(
     meshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
     onOfflineOnlyToggle: (Boolean) -> Unit,
+    developerMode: Boolean,
+    onDeveloperModeToggle: (Boolean) -> Unit,
     bleExhausted: Boolean = false,
 ) {
     var showIdentity by remember { mutableStateOf(false) }
@@ -138,6 +141,18 @@ fun SettingsScreen(
                 subtitle = "Wipe local relay + Blossom (keeps identity & Circle)",
                 titleColor = MaterialTheme.colorScheme.error,
                 onClick = { confirmWipe = true },
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+        GroupLabel("ADVANCED")
+        SectionCard {
+            ToggleRow(
+                icon = Icons.Filled.DeveloperMode,
+                title = "Developer mode",
+                subtitle = "Show the Dev diagnostics tab",
+                checked = developerMode,
+                onToggle = onDeveloperModeToggle,
             )
         }
 

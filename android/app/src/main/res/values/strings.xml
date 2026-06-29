@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Myco</string>
+    <string name="nfc_pair_service">Myco tap-to-pair</string>
+    <string name="nfc_pair_aid_group">Myco device pairing</string>
 </resources>

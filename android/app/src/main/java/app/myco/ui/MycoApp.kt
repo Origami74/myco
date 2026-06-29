@@ -50,15 +50,21 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import app.myco.ble.BleHealth
+import androidx.compose.ui.platform.LocalContext
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
+import app.myco.nfc.PairPresent
+import app.myco.share.DeviceName
+import app.myco.share.PairSecrets
 import app.myco.ui.screens.AddScreen
+import app.myco.ui.screens.PairConnectedDialog
 import app.myco.ui.screens.AppsScreen
 import app.myco.ui.screens.CircleScreen
 import app.myco.ui.screens.DevScreen
 import app.myco.ui.screens.DiscoverScreen
-import app.myco.ui.screens.PairScreen
+import app.myco.ui.screens.QrScreen
+import app.myco.ui.screens.RequestsScreen
 import app.myco.ui.screens.SettingsScreen
 import app.myco.ui.theme.EmeraldSoft
 import app.myco.ui.theme.Slate
@@ -93,12 +99,21 @@ fun MycoApp(
     initialMeshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
     onOfflineOnlyToggle: (Boolean) -> Unit,
+    initialDeveloperMode: Boolean,
+    onDeveloperModeToggle: (Boolean) -> Unit,
 ) {
     var state by remember { mutableStateOf(client.state()) }
     // Mesh toggle is hoisted here so it survives tab switches.
     var meshEnabled by remember { mutableStateOf(initialMeshEnabled) }
+    // Developer mode gates the Dev tab; hoisted so toggling it rebuilds the nav bar.
+    var developerMode by remember { mutableStateOf(initialDeveloperMode) }
     // BLE advertiser exhaustion (set by the radio, read here for the Settings badge).
     var bleExhausted by remember { mutableStateOf(BleHealth.advertiserExhausted) }
+    // Name of a peer we just connected to (drives the "connected" celebration).
+    var justConnected by remember { mutableStateOf<String?>(null) }
+    // Circle members we already knew about — anything new means a fresh pairing.
+    val knownCircle = remember { mutableStateOf(state.circle.map { it.npub }.toSet()) }
+    val context = LocalContext.current
     // Re-poll the native state each second off the main thread (it crosses JNI and
     // walks the blob dir for cache counts). Pure read — does not bump `rev`.
     androidx.compose.runtime.LaunchedEffect(Unit) {
@@ -109,17 +124,41 @@ fun MycoApp(
         }
     }
 
+    // Auto-accept while presenting (QR/NFC): a request whose secret is one we just
+    // issued is proof the peer read our live code. Consuming it is single-use, so a
+    // replayed code can't pair again; those fall through to the manual inbox.
+    androidx.compose.runtime.LaunchedEffect(state.pendingPairRequests) {
+        if (!PairPresent.presenting) return@LaunchedEffect
+        for (req in state.pendingPairRequests) {
+            if (PairSecrets.consume(context, req.secret)) {
+                state = client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name))
+                PairPresent.rotate(context, state.ownNpub, DeviceName.current(context, state.ownNpub))
+            }
+        }
+    }
+
+    // Celebrate any new Circle member — fires on BOTH sides of a pairing (the one
+    // who accepted and the one whose request was accepted), so both see "connected".
+    androidx.compose.runtime.LaunchedEffect(state.circle) {
+        val current = state.circle.map { it.npub }.toSet()
+        val added = current - knownCircle.value
+        if (added.isNotEmpty()) {
+            state.circle.firstOrNull { it.npub in added }?.let { justConnected = it.name.ifEmpty { "a device" } }
+        }
+        knownCircle.value = current
+    }
+
     val nav = rememberNavController()
-    val onPair = { nav.navigate("pair") }
     val onAddApp = { nav.navigate("add") }
     Scaffold(
         bottomBar = {
             val current by nav.currentBackStackEntryAsState()
-            // The full-screen Pair / Add surfaces hide the bottom bar.
+            // The full-screen pairing / Add surfaces hide the bottom bar.
             val route = current?.destination?.route
-            if (route != "pair" && route != "add") {
+            if (route !in setOf("add", "qr", "requests")) {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                    TABS.forEach { tab ->
+                    val tabs = if (developerMode) TABS else TABS.filterNot { it.route == "dev" }
+                    tabs.forEach { tab ->
                         val selected = current?.destination?.hierarchy?.any { it.route == tab.route } == true
                         NavigationBarItem(
                             selected = selected,
@@ -131,7 +170,9 @@ fun MycoApp(
                                 }
                             },
                             icon = {
-                                if (tab.route == "settings" && bleExhausted) {
+                                val badged = (tab.route == "settings" && bleExhausted) ||
+                                    (tab.route == "circle" && state.pendingPairRequests.isNotEmpty())
+                                if (badged) {
                                     BadgedBox(badge = { Badge() }) {
                                         Icon(tab.icon, contentDescription = tab.label)
                                     }
@@ -158,7 +199,9 @@ fun MycoApp(
                 composable("apps") {
                     AppsScreen(state, client, onLaunchNsite = onLaunchNsite, onPinToHome = onPinToHome, onAddApp = onAddApp)
                 }
-                composable("circle") { CircleScreen(state, client, onPair = onPair) }
+                composable("circle") {
+                    CircleScreen(state, client, onOpenQr = { nav.navigate("qr") }, onOpenRequests = { nav.navigate("requests") })
+                }
                 composable("discover") { DiscoverScreen(state, client, onLaunchNsite = onLaunchNsite) }
                 composable("settings") {
                     SettingsScreen(
@@ -168,16 +211,21 @@ fun MycoApp(
                         meshEnabled = meshEnabled,
                         onMeshToggle = { on -> meshEnabled = on; onMeshToggle(on) },
                         onOfflineOnlyToggle = onOfflineOnlyToggle,
+                        developerMode = developerMode,
+                        onDeveloperModeToggle = { on -> developerMode = on; onDeveloperModeToggle(on) },
                         bleExhausted = bleExhausted,
                     )
                 }
                 composable("dev") { DevScreen(state) }
-                composable("pair") {
-                    PairScreen(
+                composable("qr") {
+                    QrScreen(
                         state = state,
                         onScanned = { text -> nav.popBackStack(); onScanned(text) },
                         onBack = { nav.popBackStack() },
                     )
+                }
+                composable("requests") {
+                    RequestsScreen(state = state, client = client, onBack = { nav.popBackStack() })
                 }
                 composable("add") {
                     AddScreen(
@@ -190,8 +238,24 @@ fun MycoApp(
         }
     }
 
-    // Incoming pair request → pop-up to accept/decline (mutual pairing).
-    PairRequestDialog(state, client) { newState -> state = newState }
+    // Incoming pair requests now live in the persistent Requests inbox (badged on
+    // the Circle tab + surfaced on the pairing home), not a transient pop-up.
+    justConnected?.let { name ->
+        PairConnectedDialog(theirName = name, onDone = { justConnected = null })
+    }
+
+    // A request only auto-accepts while you're on the Circle tab (presenting). If
+    // it arrives while you're elsewhere — another tab, or Myco was launched by the
+    // tap — prompt to accept/ignore instead of silently pairing.
+    if (!PairPresent.presenting) {
+        state.pendingPairRequests.firstOrNull()?.let { req ->
+            IncomingRequestDialog(
+                name = req.name.ifEmpty { "A nearby device" },
+                onAccept = { state = client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name)) },
+                onIgnore = { state = client.dispatch(NativeActions.declinePairRequest(req.npub)) },
+            )
+        }
+    }
 
     // Loud warning if our local relay couldn't bind 4869 (another relay holds it):
     // nsites would talk to that foreign relay and show messages that aren't yours.
@@ -213,32 +277,15 @@ fun MycoApp(
     }
 }
 
-/**
- * Modal shown when another device has sent a pair request (it scanned our QR).
- * Accept adds them to the Circle and signals them to add us back; Decline drops it.
- */
+/** Accept/ignore prompt for an incoming pair request that didn't auto-accept. */
 @Composable
-private fun PairRequestDialog(
-    state: AppState,
-    client: AppCoreClient,
-    onStateChange: (AppState) -> Unit,
-) {
-    val pending = state.pendingPairRequests.firstOrNull() ?: return
-    val name = pending.name.ifEmpty { "A nearby device" }
+private fun IncomingRequestDialog(name: String, onAccept: () -> Unit, onIgnore: () -> Unit) {
     AlertDialog(
-        onDismissRequest = { onStateChange(client.dispatch(NativeActions.declinePairRequest(pending.npub))) },
-        title = { Text("Pair with $name?") },
-        text = { Text("They scanned your code. Accepting adds them to your Circle so apps and chats flow both ways.") },
-        confirmButton = {
-            TextButton(onClick = {
-                onStateChange(client.dispatch(NativeActions.acceptPairRequest(pending.npub, pending.name)))
-            }) { Text("Accept") }
-        },
-        dismissButton = {
-            TextButton(onClick = {
-                onStateChange(client.dispatch(NativeActions.declinePairRequest(pending.npub)))
-            }) { Text("Decline") }
-        },
+        onDismissRequest = onIgnore,
+        title = { Text("Connect with $name?") },
+        text = { Text("They want to join your circle. Check the name matches what they tell you, then accept to pair (it's mutual).") },
+        confirmButton = { TextButton(onClick = onAccept) { Text("Accept") } },
+        dismissButton = { TextButton(onClick = onIgnore) { Text("Ignore") } },
     )
 }
 

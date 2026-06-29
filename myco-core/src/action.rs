@@ -80,4 +80,9 @@ pub enum NativeAppAction {
     /// fallback — pull only over the mesh. Lets you verify the mesh path even
     /// when this device has internet (e.g. it's acting as a hotspot).
     SetOfflineOnly { enabled: bool },
+
+    /// Set this device's human label (memorable name). Stamped on outgoing pair
+    /// request/accept events so peers show the name the user chose. The Android
+    /// app owns the value (persisted there) and re-applies it on launch.
+    SetDeviceName { name: String },
 }

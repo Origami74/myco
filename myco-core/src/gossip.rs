@@ -56,7 +56,10 @@ impl Gossiper for MeshGossiper {
         let kind = event.kind.as_u16();
         // Pairing signals are point-to-point (dialed straight to the target's
         // relay) — handle them, never gossip. Only act on mesh-delivered ones.
-        if kind == crate::content::KIND_PAIR_REQUEST || kind == crate::content::KIND_PAIR_ACCEPT {
+        if kind == crate::content::KIND_PAIR_REQUEST
+            || kind == crate::content::KIND_PAIR_ACCEPT
+            || kind == crate::content::KIND_PAIR_REMOVE
+        {
             if inbound.origin == Origin::Mesh {
                 self.content.handle_pair_event(&event);
                 // A peer just accepted our pair request → they're a reachable source

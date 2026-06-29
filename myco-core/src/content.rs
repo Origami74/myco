@@ -146,6 +146,8 @@ pub struct PairRequestView {
 /// identity) and self-destruct (NIP-40). See `docs/design/event-gossip.md`.
 pub const KIND_PAIR_REQUEST: u16 = 9101;
 pub const KIND_PAIR_ACCEPT: u16 = 9102;
+/// Sent when a peer forgets you, so both sides drop the pairing symmetrically.
+pub const KIND_PAIR_REMOVE: u16 = 9103;
 const PAIR_TTL_SECS: u64 = 120;
 
 /// Retry budget for delivering a pair request/accept to a peer's relay. A
@@ -181,7 +183,10 @@ impl myco_relay::server::PeerGate for CircleGate {
     fn may_publish(&self, ip: IpAddr, kind: u16) -> bool {
         // Pairing handshake is allowed from anyone (it's how a peer becomes paired);
         // all other kinds require an established Circle membership.
-        kind == KIND_PAIR_REQUEST || kind == KIND_PAIR_ACCEPT || self.content.is_paired_ip(ip)
+        kind == KIND_PAIR_REQUEST
+            || kind == KIND_PAIR_ACCEPT
+            || kind == KIND_PAIR_REMOVE
+            || self.content.is_paired_ip(ip)
     }
 }
 
@@ -214,6 +219,10 @@ pub struct Content {
     /// The device's Nostr keypair (the pairing identity), used to sign pair
     /// request/accept events. Set once at startup from the persisted nsec.
     device_keys: Mutex<Option<Keys>>,
+    /// User-chosen device label (memorable name). Set by the app on launch and on
+    /// rename; stamped on outgoing pair events so peers show the chosen name.
+    /// Falls back to a name derived from the npub when unset.
+    device_name_override: Mutex<Option<String>>,
     /// Incoming pair requests awaiting the user's accept/decline (UI pop-up).
     pending_pairs: Mutex<Vec<PairRequestView>>,
     /// Persistent WS connections to peers' relays, so chat fan-out doesn't pay a
@@ -341,6 +350,7 @@ impl Content {
             discovered: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
             device_keys: Mutex::new(None),
+            device_name_override: Mutex::new(None),
             pending_pairs: Mutex::new(Vec::new()),
             peer_relays: crate::peer_relay::PeerRelayPool::new(),
             pending_updates: Mutex::new(HashMap::new()),
@@ -863,9 +873,22 @@ impl Content {
         self.pending_pairs.lock().unwrap().clone()
     }
 
+    /// Override the device label shown to peers (the app's memorable name). Empty
+    /// clears the override (falls back to the npub-derived name).
+    pub fn set_device_name(&self, name: &str) {
+        let trimmed = name.trim();
+        *self.device_name_override.lock().unwrap() =
+            if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+    }
+
     /// Our own device label, sent to the peer so their pop-up / Circle entry has a
-    /// name.
+    /// name. Prefers the user-chosen override, else a name derived from the npub.
     fn device_name(&self) -> String {
+        if let Some(name) = self.device_name_override.lock().unwrap().clone() {
+            if !name.trim().is_empty() {
+                return name;
+            }
+        }
         let npub = self
             .device_keys
             .lock()
@@ -896,6 +919,11 @@ impl Content {
                 self.add_to_circle(&from, &name);
                 self.pending_pairs.lock().unwrap().retain(|p| p.npub != from);
             }
+            KIND_PAIR_REMOVE => {
+                tracing::info!(from = %from, "pair: peer unpaired — removing from circle");
+                self.remove_from_circle(&from);
+                self.pending_pairs.lock().unwrap().retain(|p| p.npub != from);
+            }
             _ => {}
         }
     }
@@ -917,6 +945,13 @@ impl Content {
     /// Decline an incoming request (drop it; no signal back).
     pub fn decline_pair_request(&self, npub: &str) {
         self.pending_pairs.lock().unwrap().retain(|p| p.npub != npub);
+    }
+
+    /// Tell a peer we've forgotten them, so they drop us from their Circle too.
+    /// Best-effort: only lands if they're reachable (the local removal already
+    /// happened synchronously in `remove_from_circle`).
+    pub async fn send_unpair(&self, npub: &str) {
+        self.dial_pair_event(npub, KIND_PAIR_REMOVE, "").await;
     }
 
     /// Build + sign a pair event and publish it to the target's mesh relay,

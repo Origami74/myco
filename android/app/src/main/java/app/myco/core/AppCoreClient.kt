@@ -421,4 +421,9 @@ object NativeActions {
     /** Toggle mesh-only: when enabled, don't use the public IP relay/Blossom fallback. */
     fun setOfflineOnly(enabled: Boolean): JSONObject =
         JSONObject().put("type", "set_offline_only").put("enabled", enabled)
+
+    /** Set this device's memorable name; stamped on outgoing pair events so peers
+     *  see the chosen name. The app owns the value and re-applies it on launch. */
+    fun setDeviceName(name: String): JSONObject =
+        JSONObject().put("type", "set_device_name").put("name", name)
 }

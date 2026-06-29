@@ -1,6 +1,7 @@
 package app.myco
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
@@ -12,6 +13,8 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.drawable.Icon
 import android.net.VpnService
+import android.nfc.NfcAdapter
+import android.nfc.cardemulation.CardEmulation
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
@@ -24,9 +27,12 @@ import androidx.activity.result.contract.ActivityResultContracts.RequestMultiple
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import app.myco.ble.BleService
+import app.myco.BuildConfig
 import app.myco.core.AppCoreClient
 import app.myco.core.MycoCore
 import app.myco.core.NativeActions
+import app.myco.nfc.PairPresent
+import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
 import app.myco.ui.MycoApp
 import app.myco.ui.theme.MycoTheme
@@ -41,6 +47,7 @@ import app.myco.vpn.MycoVpnService
 class MainActivity : ComponentActivity() {
     private lateinit var core: AppCoreClient
     private val prefs by lazy { getSharedPreferences("myco_prefs", MODE_PRIVATE) }
+    private val nfcAdapter by lazy { NfcAdapter.getDefaultAdapter(this) }
 
     private val permLauncher = registerForActivityResult(RequestMultiplePermissions()) {
         // BLE is enabled by default / remembered; (re)start it once perms land.
@@ -73,6 +80,10 @@ class MainActivity : ComponentActivity() {
         core = MycoCore.client(this)
         // Restore the mesh-only (no IP fallback) preference into the core.
         core.dispatch(NativeActions.setOfflineOnly(prefs.getBoolean(PREF_OFFLINE_ONLY, false)))
+        // Push our memorable name into the core so outgoing pair events carry it.
+        core.state().ownNpub.takeIf { it.isNotEmpty() }?.let {
+            core.dispatch(NativeActions.setDeviceName(DeviceName.current(this, it)))
+        }
 
         // BLE on by default, and remembered thereafter.
         if (prefs.getBoolean(PREF_BLE, true)) {
@@ -98,6 +109,8 @@ class MainActivity : ComponentActivity() {
                     initialMeshEnabled = prefs.getBoolean(PREF_MESH, true),
                     onMeshToggle = { enabled -> setMeshEnabled(enabled) },
                     onOfflineOnlyToggle = { enabled -> setOfflineOnly(enabled) },
+                    initialDeveloperMode = prefs.getBoolean(PREF_DEV, BuildConfig.DEBUG),
+                    onDeveloperModeToggle = { enabled -> prefs.edit().putBoolean(PREF_DEV, enabled).apply() },
                 )
             }
         }
@@ -140,6 +153,44 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleDeepLink(intent)
+    }
+
+    // --- NFC tap-to-pair (numo-style: we are the card; the other phone reads) ---
+    //
+    // While the QR/present screen is open we claim foreground HCE for the standard
+    // NDEF AID and emulate a URI tag (myco://pair/…). The *other* phone needs no
+    // special mode: its OS tag dispatch reads the URI and delivers it to us as an
+    // NDEF_DISCOVERED intent (see the manifest filter) → handleScannedText.
+
+    override fun onResume() {
+        super.onResume()
+        // Presenting is owned by the Circle screen (it's the only place we emulate a
+        // card). Here we just (re)apply the current presenting state — re-claiming
+        // the foreground HCE service after a background→foreground while on Circle.
+        PairPresent.onChanged = { runOnUiThread { updateNfcPresent() } }
+        updateNfcPresent()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        nfcAdapter?.let { adapter ->
+            runCatching { CardEmulation.getInstance(adapter).unsetPreferredService(this) }
+        }
+    }
+
+    /** Claim (or release) foreground HCE for our NDEF service while presenting.
+     *  We deliberately do NOT suppress polling: leaving the default poll+listen
+     *  loop on means a presenting phone also *reads* the other phone's tag, so two
+     *  phones in the pairing flow pair symmetrically on a single bump. */
+    private fun updateNfcPresent() {
+        val adapter = nfcAdapter ?: return
+        val cardEmu = runCatching { CardEmulation.getInstance(adapter) }.getOrNull() ?: return
+        val svc = ComponentName(this, "app.myco.nfc.PairHostApduService")
+        runCatching {
+            if (PairPresent.presenting) cardEmu.setPreferredService(this, svc)
+            else cardEmu.unsetPreferredService(this)
+        }.onFailure { android.util.Log.w("MycoNfc", "nfc present setup failed", it) }
+        android.util.Log.i("MycoNfc", "present=${PairPresent.presenting}")
     }
 
     // --- BLE toggle (remembered) ---
@@ -302,5 +353,6 @@ class MainActivity : ComponentActivity() {
         const val PREF_BLE = "ble_enabled"
         const val PREF_MESH = "mesh_enabled"
         const val PREF_OFFLINE_ONLY = "offline_only"
+        const val PREF_DEV = "developer_mode"
     }
 }
