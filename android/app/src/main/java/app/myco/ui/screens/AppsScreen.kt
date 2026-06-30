@@ -176,7 +176,13 @@ fun AppsScreen(
         }
     }
 
-    shareFor?.let { target -> ShareQrSheet(target = target, onDismiss = { shareFor = null }) }
+    shareFor?.let { target ->
+        ShareQrSheet(
+            target = target,
+            pendingRequestCount = state.pendingPairRequests.size,
+            onDismiss = { shareFor = null },
+        )
+    }
 
     confirmRemove?.let { site ->
         AlertDialog(
@@ -396,12 +402,19 @@ private class ShareTarget(val uri: String, val title: String)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ShareQrSheet(target: ShareTarget, onDismiss: () -> Unit) {
+private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismiss: () -> Unit) {
     // Emulate an NDEF tag carrying the share URI for as long as the sheet is up.
     // The reader phone's OS reads it → MainActivity.openSharedNsite (pair + pull).
     DisposableEffect(target.uri) {
         PairPresent.beginRaw(target.uri)
         onDispose { PairPresent.stop() }
+    }
+    // The recipient tapping/scanning sends a pair request back to us. Once one
+    // lands, the share has gone through — drop the sheet and let the normal
+    // accept prompt take over (it's suppressed while we're presenting).
+    val baselineRequests = remember { pendingRequestCount }
+    LaunchedEffect(pendingRequestCount) {
+        if (pendingRequestCount > baselineRequests) onDismiss()
     }
     val qr = remember(target.uri) { NsiteShare.qrBitmap(target.uri) }
     // Open fully expanded (not the half-height detent) so the whole thing — QR plus
