@@ -1,0 +1,96 @@
+name: CI
+
+# Build + test on every push and pull request. The Rust job runs the workspace
+# unit tests (myco-core etc.); the Android job confirms the app and its native
+# library still build. All actions are pinned to current major versions (Node 20).
+
+on:
+  push:
+  pull_request:
+
+env:
+  # `fips` is a gitignored local path dep (reference/fips). A fresh checkout has no
+  # reference/ at all, so clone the fork branch carrying the mobile features.
+  FIPS_REPO: https://github.com/jmcorgan/fips.git
+  FIPS_REF: ble-v2
+  NDK_VERSION: 26.1.10909125
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust — fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch fips core
+        run: git clone --depth 1 --branch "$FIPS_REF" "$FIPS_REPO" reference/fips
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libclang-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # Non-gating: surfaces clippy findings without failing on the workspace's
+      # pre-existing warnings. (`cargo fmt --check` is intentionally not a gate
+      # yet — the tree has pre-existing formatting drift to clean up first.)
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+  android:
+    name: Android — assembleDebug
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch fips core
+        run: git clone --depth 1 --branch "$FIPS_REF" "$FIPS_REPO" reference/fips
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK ${{ env.NDK_VERSION }}
+        run: sdkmanager "ndk;${NDK_VERSION}"
+
+      - name: Set up Rust (aarch64-linux-android)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Build debug APK
+        working-directory: android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
