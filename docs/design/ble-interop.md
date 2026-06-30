@@ -5,9 +5,9 @@ phones in a pocket, no Wi-Fi, no cell — one browses the other's nsite. This
 doc explains *how* the app will speak BLE, why it speaks L2CAP (not GATT),
 and the one hard problem (the PSM problem) that the strategy has to solve.
 
-The on-wire details — exact UUID, byte layouts, MTU rules — live in the
-companion reference, [../reference/ble-wire.md](../reference/ble-wire.md).
-This doc is the *why*; that doc is the *what-on-the-wire*.
+The on-wire details — exact UUID, byte layouts, MTU rules — now live in the
+implementation itself (the `BleRadio` Android backend and the `reference/fips`
+transport). This doc is the *why*.
 
 The offline propagation picture this transport feeds is sketched in
 [diagrams/03-offline-propagation.svg](./diagrams/03-offline-propagation.svg):
@@ -168,8 +168,8 @@ discovery **symmetric across all backends**. Every node:
 1. **Advertises its own OS-assigned listener PSM** — alongside the UUID-only
    FIPS service advert, in a separate app-private carrier: a 16-bit
    service-data value under the FIPS UUID and/or a readable GATT
-   characteristic (the exact carrier is settled in
-   [../reference/ble-wire.md](../reference/ble-wire.md#per-peer-psm-advertisement-scheme)).
+   characteristic (the exact carrier is settled in the `BleRadio`
+   implementation).
 2. **Reads a peer's advertised PSM before it dials** — the scanner builds a
    `BleAddr → PSM` map from adverts, and the dial uses the *learned* PSM, not
    the hard-coded `0x0085`.
@@ -182,9 +182,8 @@ PSM has been learned yet.
 
 This is a real fips-core change — advertising-own-PSM and reading-peer-PSM —
 applied to **all backends** (Linux/Android/macOS), not an Android-only shim
-below the trait. The wire-level carrier and framing are specified in
-[../reference/ble-wire.md](../reference/ble-wire.md). Because we build against
-the **local** `reference/fips` checkout, the patch is ours to make.
+below the trait. Because we build against the **local** `reference/fips`
+checkout, the patch is ours to make.
 
 ### Fixed-0x0085 Linux wire compat is intentionally dropped
 
@@ -262,8 +261,7 @@ and Tor transports rely on. So Android privacy defaults cost us nothing here.
 
 The one wrinkle: the `BleAddr → PSM` discovery map is keyed on `BleAddr`,
 which *does* rotate. The map must therefore be short-lived (re-learned each
-scan cycle) rather than a durable cache — see
-[../reference/ble-wire.md](../reference/ble-wire.md#per-peer-psm-advertisement-scheme).
+scan cycle) rather than a durable cache.
 
 ## Device and ROM variance
 

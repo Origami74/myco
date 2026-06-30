@@ -134,7 +134,6 @@ look-it-up surface.
 | --- | --- |
 | [ports.md](./reference/ports.md) | The localhost ports (relay 4869, Blossom 24242, gateway) and exactly how each is — or is deliberately not — exposed over FIPS; the WebView/localhost vs sync-engine/`.fips` split. |
 | [nostr-kinds.md](./reference/nostr-kinds.md) | The Nostr event kinds Myco reads, stores, and replicates: nsite manifests (15128 root / 35128 named) and FIPS discovery kinds. The app authors none of them. |
-| [ble-wire.md](./reference/ble-wire.md) | On-wire BLE facts: link type (L2CAP CoC SeqPacket), the FIPS service UUID, advert format (incl. the per-peer PSM carrier), the 33-byte pubkey pre-handshake, MTU handling, and universal per-peer PSM discovery (no fixed PSM). |
 | [config.md](./reference/config.md) | The proposed `config.toml` model (identity, node, cache, peers, BLE, propagation, DNS), the field reference, and what is explicitly stripped relative to nostr-vpn. |
 | [ffi-surface.md](./reference/ffi-surface.md) | The Kotlin↔Rust JNI/JSON reducer contract: opaque-handle lifecycle, the `dispatch(actionJson)→stateJson` reducer with a `rev` counter, the action/state shapes, and the BLE byte-bridge. |
 

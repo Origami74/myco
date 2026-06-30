@@ -23,7 +23,6 @@ import android.os.ParcelUuid
 import android.util.Log
 import app.myco.core.NativeCore
 import java.io.IOException
-import java.io.InputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -38,9 +37,16 @@ import java.util.concurrent.TimeUnit
  * - This class pushes inbound bytes/events to the core and pulls outbound bytes
  *   via the `NativeCore.ble*` exports.
  *
- * L2CAP CoC over Android's [BluetoothSocket] is a byte **stream**, so each FIPS
- * packet is framed with a 2-byte big-endian length prefix and reassembled on
- * read — the bytes handed to/from the core are clean per-packet boundaries.
+ * L2CAP CoC over Android's [BluetoothSocket] is a byte **stream** with no relation
+ * to FIPS packet boundaries. This radio is a transparent byte pipe: it forwards the
+ * exact socket bytes to/from the core, in order and losslessly. The core recovers
+ * packet boundaries itself from the 4-byte FMP length-prefixed header (the same
+ * framer TCP uses) — see fips `BleStreamRead` / `read_fmp_packet`.
+ *
+ * The contract: the ordered concatenation of every chunk passed to `deliver_recv`
+ * must exactly equal the byte stream the peer sent. Chunking is free; losslessness
+ * and order are mandatory. A dropped inbound chunk desyncs the core's reframer for
+ * the rest of the connection, so it is **fatal** — see [readerLoop].
  */
 @SuppressLint("MissingPermission")
 class BleRadio(context: Context) {
@@ -137,7 +143,6 @@ class BleRadio(context: Context) {
         // key the 2-byte PSM service-data on a 16-bit UUID (PSM_SD_UUID16) so it
         // sits alongside the full 128-bit FIPS service UUID (used for the scan
         // filter): ~3 (flags) + 18 (128-bit UUID) + 6 (16-bit service-data) = 27B.
-        // See docs/reference/ble-wire.md.
         val psmLe = byteArrayOf((psm and 0xFF).toByte(), ((psm shr 8) and 0xFF).toByte())
         val advData = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
@@ -326,15 +331,28 @@ class BleRadio(context: Context) {
 
     private fun readerLoop(chId: Long, sock: BluetoothSocket) {
         val ins = sock.inputStream
-        val header = ByteArray(2)
+        // A single reusable scratch buffer is safe: bleChannelDeliverRecv copies
+        // buf[0 until n] into the core synchronously before it returns, so the next
+        // read() never races a chunk still in flight to JNI.
+        val buf = ByteArray(MAX_PACKET)
         try {
             while (true) {
-                if (!readFully(ins, header, 2)) break
-                val len = ((header[0].toInt() and 0xFF) shl 8) or (header[1].toInt() and 0xFF)
-                if (len <= 0 || len > MAX_PACKET) break
-                val payload = ByteArray(len)
-                if (!readFully(ins, payload, len)) break
-                if (!NativeCore.bleChannelDeliverRecv(bridgeHandle, chId, payload, len)) break
+                // Forward exactly the bytes read — never assume read() filled buf,
+                // and never pass stale bytes past n. The core reframes the stream.
+                val n = ins.read(buf)
+                if (n < 0) break // EOF → channel closed (handled in finally)
+                if (n == 0) continue
+                if (!NativeCore.bleChannelDeliverRecv(bridgeHandle, chId, buf, n)) {
+                    // deliver_recv == false: the core's bounded inbound queue is
+                    // saturated, or the channel is gone. Under FMP reframing a single
+                    // dropped chunk desyncs the reframer for the rest of the
+                    // connection (it reads a bogus length, then errors). So this is
+                    // fatal — reset the channel rather than read on into a corrupted
+                    // stream. Falling out of the loop tears down the socket + channel
+                    // via onChannelGone; we never silently swallow the drop.
+                    Log.w(TAG, "ch $chId: deliver_recv refused (inbound queue full) — resetting channel")
+                    break
+                }
             }
         } catch (_: IOException) {
         } finally {
@@ -344,11 +362,11 @@ class BleRadio(context: Context) {
 
     private fun writerLoop(chId: Long, sock: BluetoothSocket) {
         val outs = sock.outputStream
+        // Each next_send returns one full FMP-framed FIPS packet (self-delimiting via
+        // its 4-byte header) — the core owns framing now, so we write the bytes
+        // verbatim. One write = one L2CAP SDU. A single writer thread per channel
+        // (started in startChannel) preserves order across packets.
         val buf = ByteArray(MAX_PACKET)
-        // Header + payload coalesced into one buffer so each packet is a single
-        // write → a single L2CAP SDU. Writing the 2-byte prefix separately emitted
-        // extra tiny SDUs and wasted connection-event airtime.
-        val frame = ByteArray(MAX_PACKET + FRAME_HEADER)
         try {
             while (true) {
                 val n = NativeCore.bleChannelNextSend(bridgeHandle, chId, buf, SEND_TIMEOUT_MS)
@@ -356,10 +374,9 @@ class BleRadio(context: Context) {
                     n < 0 -> break // channel closed
                     n == 0 -> continue // timeout, poll again
                     else -> {
-                        frame[0] = ((n shr 8) and 0xFF).toByte() // 2-byte BE length prefix
-                        frame[1] = (n and 0xFF).toByte()
-                        System.arraycopy(buf, 0, frame, FRAME_HEADER, n)
-                        outs.write(frame, 0, n + FRAME_HEADER)
+                        // OutputStream.write on a blocking socket writes all n bytes
+                        // (looping internally) or throws — no manual partial-write loop.
+                        outs.write(buf, 0, n)
                         outs.flush()
                     }
                 }
@@ -381,8 +398,11 @@ class BleRadio(context: Context) {
     // of LE packets and takes seconds (huge RTT + head-of-line blocking). A few-KB
     // frame keeps latency low while still amortizing framing overhead.
     private fun sendMtu(sock: BluetoothSocket): Int =
-        (sock.maxTransmitPacketSize - FRAME_HEADER).coerceIn(20, MESH_MTU_CAP)
+        sock.maxTransmitPacketSize.coerceIn(20, MESH_MTU_CAP)
 
+    // Report the real negotiated L2CAP receive MTU (capped): the core's FMP framer
+    // uses it as the max allowed packet size, so under-reporting would reject valid
+    // large packets. Never 0 here — that would force the core's 2048 default.
     private fun recvMtu(sock: BluetoothSocket): Int =
         sock.maxReceivePacketSize.coerceIn(20, MESH_MTU_CAP)
 
@@ -390,21 +410,12 @@ class BleRadio(context: Context) {
         runCatching { sock.close() }
     }
 
-    /** Read exactly [n] bytes into [buf]; false on EOF/close. */
-    private fun readFully(ins: InputStream, buf: ByteArray, n: Int): Boolean {
-        var off = 0
-        while (off < n) {
-            val r = ins.read(buf, off, n - off)
-            if (r < 0) return false
-            off += r
-        }
-        return true
-    }
-
     companion object {
         private const val TAG = "MycoBleRadio"
         private const val ADAPTER = "ble0" // matches fips AndroidIo's adapter tag
-        private const val FRAME_HEADER = 2
+        // Scratch-buffer size for the per-channel reader/writer. Comfortably larger
+        // than any single L2CAP SDU (recv/send MTU is capped at MESH_MTU_CAP), so a
+        // read() fits one SDU and next_send never truncates an outbound packet.
         private const val MAX_PACKET = 8192
         private const val SEND_TIMEOUT_MS = 1000
 
@@ -414,14 +425,14 @@ class BleRadio(context: Context) {
          *  no head-of-line batching of multiple packets into one giant frame. */
         private const val MESH_MTU_CAP = 1500
 
-        /** FIPS service UUID — must match fips-core (ble-wire.md). */
+        /** FIPS service UUID — must match fips-core. */
         val FIPS_UUID: UUID = UUID.fromString("9c90b790-2cc5-42c0-9f87-c9cc40648f4c")
         val FIPS_PARCEL_UUID = ParcelUuid(FIPS_UUID)
 
         /** Compact 16-bit service-data UUID carrying the 2-byte LE listener PSM in
          *  the PRIMARY advert (0x9C90 = the FIPS UUID's leading 16 bits, via the
          *  Bluetooth base UUID). A 16-bit key keeps PSM service-data + the full
-         *  128-bit FIPS UUID inside one 31-byte legacy advert. See ble-wire.md. */
+         *  128-bit FIPS UUID inside one 31-byte legacy advert. */
         val PSM_SD_PARCEL_UUID = ParcelUuid.fromString("00009c90-0000-1000-8000-00805f9b34fb")
     }
 }

@@ -237,5 +237,4 @@ path. Add a host-side unit test for the `UsbStream` framing/Io contract if feasi
 ## See also
 - `docs/roadmap.md` — the "WiFi-Direct transport" Later item is the wireless
   sibling of this; consider adding a "USB transport" bullet there.
-- `docs/design/ble-interop.md` / `docs/reference/ble-wire.md` — the BLE transport
-  this mirrors.
+- `docs/design/ble-interop.md` — the BLE transport this mirrors.
