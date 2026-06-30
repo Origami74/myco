@@ -43,7 +43,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,8 +67,11 @@ import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
 import app.myco.core.SiteStatus
+import app.myco.nfc.PairPresent
 import app.myco.share.NsiteShare
 import app.myco.ui.ScreenHeader
+import app.myco.ui.theme.EmeraldInk
+import app.myco.ui.theme.EmeraldSoft
 import app.myco.ui.theme.Slate
 import app.myco.ui.theme.tileColorFor
 import kotlinx.coroutines.Dispatchers
@@ -88,7 +93,7 @@ fun AppsScreen(
 ) {
     var query by remember { mutableStateOf("") }
     var sheetFor by remember { mutableStateOf<SiteStatus?>(null) }
-    var shareUri by remember { mutableStateOf<String?>(null) }
+    var shareFor by remember { mutableStateOf<ShareTarget?>(null) }
     var confirmRemove by remember { mutableStateOf<SiteStatus?>(null) }
 
     // One-shot toast with the result of a "Check for updates" run (fires when the
@@ -156,12 +161,13 @@ fun AppsScreen(
                 site = site,
                 onOpen = { sheetFor = null; onLaunchNsite(site.host, site.title) },
                 onShare = {
-                    shareUri = NsiteShare.buildShareUri(
+                    val uri = NsiteShare.buildShareUri(
                         nsiteHost = site.host,
                         deviceNpub = state.ownNpub,
                         deviceName = NsiteShare.deviceName(state.ownNpub),
                         pairSecret = NsiteShare.newPairSecret(),
                     )
+                    shareFor = ShareTarget(uri = uri, title = site.title.ifEmpty { site.host.take(12) })
                     sheetFor = null
                 },
                 onPinToHome = { sheetFor = null; onPinToHome(site.host, site.title) },
@@ -170,7 +176,7 @@ fun AppsScreen(
         }
     }
 
-    shareUri?.let { uri -> ShareQrDialog(uri) { shareUri = null } }
+    shareFor?.let { target -> ShareQrSheet(target = target, onDismiss = { shareFor = null }) }
 
     confirmRemove?.let { site ->
         AlertDialog(
@@ -329,10 +335,6 @@ private fun AddTile(onClick: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
-private fun Modifier.combinedClickableSafe(onClick: () -> Unit): Modifier =
-    this.combinedClickable(onClick = onClick)
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AppSheet(
@@ -382,45 +384,80 @@ private fun AppSheet(
     }
 }
 
-@Composable
-private fun SheetAction(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    tint: Color = MaterialTheme.colorScheme.primary,
-    onClick: () -> Unit,
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickableSafe(onClick)
-            .padding(vertical = 12.dp),
-    ) {
-        Icon(icon, contentDescription = null, tint = tint)
-        Spacer(Modifier.size(14.dp))
-        Text(label, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
+/** What a [ShareQrSheet] presents: the prebuilt `myco://share/…` URI (stable, so
+ *  its QR and the NFC payload carry the same one-time secret) plus a label. */
+private class ShareTarget(val uri: String, val title: String)
 
+/**
+ * The **Share an app** surface — a bottom sheet styled like the pair "My code"
+ * panel: the share QR plus a prominent tap-phones-together prompt. While it's
+ * visible the device presents the share URI over NFC ([PairPresent.beginRaw]),
+ * so a phone tap shares the app exactly like a scan would.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ShareQrDialog(uri: String, onDismiss: () -> Unit) {
-    val qr = remember(uri) { NsiteShare.qrBitmap(uri) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
-        title = { Text("Share this app") },
-        text = {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Image(qr.asImageBitmap(), contentDescription = "share QR", modifier = Modifier.size(260.dp))
-                Text(
-                    "Scan with another Myco to open this app — and pair with this device.",
-                    color = Slate,
-                    style = MaterialTheme.typography.bodySmall,
-                    textAlign = TextAlign.Center,
-                )
+private fun ShareQrSheet(target: ShareTarget, onDismiss: () -> Unit) {
+    // Emulate an NDEF tag carrying the share URI for as long as the sheet is up.
+    // The reader phone's OS reads it → MainActivity.openSharedNsite (pair + pull).
+    DisposableEffect(target.uri) {
+        PairPresent.beginRaw(target.uri)
+        onDispose { PairPresent.stop() }
+    }
+    val qr = remember(target.uri) { NsiteShare.qrBitmap(target.uri) }
+    // Open fully expanded (not the half-height detent) so the whole thing — QR plus
+    // the tap-to-share prompt — is on screen without a drag.
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("Share this app", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(12.dp))
+            Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    QrCodeCard(qr, contentDescription = "Share code for ${target.title}", size = 210.dp)
+                    Spacer(Modifier.height(10.dp))
+                    Text(target.title, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "Scan to open this app — and pair with this device",
+                        color = Slate,
+                        style = MaterialTheme.typography.bodySmall,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
-        },
-    )
+            Spacer(Modifier.height(12.dp))
+            // The headline action: just bump phones (no scanning needed). The
+            // breathing NFC bubble mirrors the Circle tab's tap-to-connect hint.
+            Surface(shape = RoundedCornerShape(16.dp), color = EmeraldSoft, modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    NfcPulseBubble(size = 44.dp)
+                    Column {
+                        Text(
+                            "Tap phones together to share",
+                            fontWeight = FontWeight.ExtraBold,
+                            color = EmeraldInk,
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            "Hold the backs together — no scan needed",
+                            color = Color(0xFF047857),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 private fun initialOf(site: SiteStatus): String =
