@@ -60,6 +60,10 @@ pub enum NativeAppAction {
     /// Clear the local relay + Blossom + Library + site status (dev/test reset).
     /// Content only — the device identity (and the Circle) are untouched.
     WipeStores,
+    /// Clear cached relay events + Blossom blobs **except** those backing pinned
+    /// nsites (Settings → Storage → "Delete cache"). Pinned apps keep working
+    /// offline; unpinned opened sites, discovered listings and staged updates go.
+    WipeCache,
 
     // --- circle (paired peers) ---
     /// Add a paired peer to the **Circle**: the contact list of devices we pull

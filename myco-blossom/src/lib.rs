@@ -47,6 +47,23 @@ impl FsBlobStore {
             .unwrap_or(0)
     }
 
+    /// Delete every blob whose hash is **not** in `keep`. Used by the selective
+    /// cache wipe to retain the blobs backing pinned nsites while clearing the rest.
+    /// `keep` holds lowercase-hex sha256 names (the manifest's `path -> hash` values).
+    pub fn retain_blobs(&self, keep: &std::collections::HashSet<String>) {
+        if let Ok(rd) = std::fs::read_dir(&self.root) {
+            for entry in rd.filter_map(Result::ok).filter(is_blob_name) {
+                let kept = entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| keep.contains(name));
+                if !kept {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
     /// Total bytes on disk (for the LRU cap accounting; eviction itself is P5).
     pub fn total_bytes(&self) -> u64 {
         std::fs::read_dir(&self.root)

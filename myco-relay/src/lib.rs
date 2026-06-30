@@ -19,7 +19,7 @@
 //!
 //! [`RelayBackend`]: nsite_deck::seams::RelayBackend
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -83,6 +83,21 @@ impl RelayStore {
             .values()
             .filter(|e| !is_expired(e, now))
             .count()
+    }
+
+    /// Drop every stored event whose id is **not** in `keep`, then re-persist the
+    /// surviving manifest set. Used by the selective cache wipe to retain the events
+    /// backing pinned nsites while clearing everything else (chat included).
+    pub fn retain_events(&self, keep: &HashSet<[u8; 32]>) {
+        let snapshot = {
+            let mut map = self.events.lock().unwrap();
+            map.retain(|id, _| keep.contains(id));
+            map.values()
+                .filter(|e| expiration(e).is_none())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        self.persist(&snapshot);
     }
 
     /// Persist the current **persistable** (non-expiring) event set — a full

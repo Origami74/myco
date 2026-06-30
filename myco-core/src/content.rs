@@ -1624,6 +1624,72 @@ impl Content {
         Ok(())
     }
 
+    /// Clear cached relay events + Blossom blobs **except** those backing pinned
+    /// nsites (Settings → Storage → "Delete cache"). The served manifest version of
+    /// each pinned site and every blob it references survive, so installed apps keep
+    /// working offline; everything else — unpinned opened sites, discovered
+    /// listings, staged updates — is dropped. Identity and Circle are untouched.
+    pub async fn wipe_cache(&self) -> anyhow::Result<()> {
+        // Pinned Library entries are the apps we must keep working.
+        let pinned: Vec<LibraryItem> = self
+            .library
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| i.pinned)
+            .cloned()
+            .collect();
+
+        // Build the keep-sets: the served manifest event id of each pinned site,
+        // plus every blob hash that manifest references.
+        let mut keep_events: HashSet<[u8; 32]> = HashSet::new();
+        let mut keep_blobs: HashSet<String> = HashSet::new();
+        let mut keep_active: HashSet<String> = HashSet::new();
+        let backend = self.active_backend();
+        for item in &pinned {
+            let Some(addr) = library_addr(item) else {
+                continue;
+            };
+            let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
+            if let Ok(Some(ev)) = backend
+                .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
+                .await
+            {
+                keep_events.insert(ev.id.to_bytes());
+                if let Ok(m) = nsite_deck::Manifest::from_event(ev) {
+                    keep_blobs.extend(m.paths.into_values());
+                }
+                keep_active.insert(manifest_key(kind, &addr.author, addr.d_tag.as_deref()));
+            }
+        }
+
+        self.relay.retain_events(&keep_events);
+        self.blobs.retain_blobs(&keep_blobs);
+
+        // Drop unpinned Library entries and the live status of anything unpinned.
+        let pinned_hosts: HashSet<String> = pinned.iter().map(|i| i.url_host.clone()).collect();
+        {
+            let mut lib = self.library.lock().unwrap();
+            lib.retain(|i| i.pinned);
+            let snapshot = lib.clone();
+            drop(lib);
+            save_library(&self.library_path, &snapshot);
+        }
+        self.sites
+            .lock()
+            .unwrap()
+            .retain(|host, _| pinned_hosts.contains(host));
+        self.discovered.lock().unwrap().clear();
+        self.pending_updates.lock().unwrap().clear();
+        let active_snapshot = {
+            let mut m = self.active_manifests.lock().unwrap();
+            m.retain(|k, _| keep_active.contains(k));
+            m.values().cloned().collect::<Vec<_>>()
+        };
+        save_active(&self.active_path, &active_snapshot);
+        Ok(())
+    }
+
     // --- snapshots for state() ---
 
     pub fn sites_snapshot(&self) -> Vec<SiteStatusView> {
@@ -1985,6 +2051,46 @@ mod tests {
         assert_eq!(content.cache_view().blob_count, 0);
         let after = content.gateway_get(&host, "/", None).await;
         assert_eq!(after.status, 503, "wiped site must not serve content");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn wipe_cache_keeps_pinned_drops_the_rest() {
+        let dir = tmp("wipe-cache");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+
+        // Two distinct sites; both land in the Library as pinned on import.
+        let keep = build_test_site(&[("/index.html", b"<h1>keep</h1>")], None, Some("Keep"));
+        let drop = build_test_site(&[("/index.html", b"<h1>drop</h1>")], None, Some("Drop"));
+        let keep_host = format!("{}.nsite", keep.author.to_bech32().unwrap());
+        let drop_host = format!("{}.nsite", drop.author.to_bech32().unwrap());
+
+        for (tag, site) in [("keep", &keep), ("drop", &drop)] {
+            let bundle = dir.join(tag);
+            write_bundle(&bundle, site);
+            assert_eq!(
+                content.import_dir(&bundle).await.unwrap(),
+                SyncOutcome::Ready
+            );
+        }
+        assert_eq!(content.cache_view().relay_events, 2);
+        assert_eq!(content.cache_view().blob_count, 2);
+
+        // Unpin the second site (no longer a kept app), then drop the cache.
+        content.remove_from_library(&SiteAddr {
+            author: drop.author,
+            d_tag: None,
+        });
+        content.wipe_cache().await.unwrap();
+
+        // The pinned site still serves from local stores; the unpinned one is gone.
+        assert_eq!(content.cache_view().relay_events, 1);
+        assert_eq!(content.cache_view().blob_count, 1);
+        assert_eq!(content.gateway_get(&keep_host, "/", None).await.status, 200);
+        assert_eq!(content.gateway_get(&drop_host, "/", None).await.status, 503);
+        assert_eq!(content.library_snapshot().len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

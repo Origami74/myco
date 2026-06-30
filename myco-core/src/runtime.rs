@@ -333,6 +333,10 @@ impl AppRuntime {
                 self.wipe_stores();
                 self.rev += 1;
             }
+            NativeAppAction::WipeCache => {
+                self.wipe_cache();
+                self.rev += 1;
+            }
             NativeAppAction::AddToCircle { npub, name } => {
                 if let Some(content) = &self.content {
                     content.add_to_circle(&npub, &name);
@@ -418,6 +422,18 @@ impl AppRuntime {
         };
         if let Err(e) = rt.block_on(content.wipe()) {
             self.error = format!("wipe failed: {e}");
+        }
+    }
+
+    /// Clear cached content but preserve pinned nsites (the "delete cache" half of
+    /// Settings → Storage). Blocks like `wipe_stores` so the next `state()` reflects
+    /// the reclaimed space immediately.
+    fn wipe_cache(&mut self) {
+        let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
+            return;
+        };
+        if let Err(e) = rt.block_on(content.wipe_cache()) {
+            self.error = format!("cache wipe failed: {e}");
         }
     }
 
