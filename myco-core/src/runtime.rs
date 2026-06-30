@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fips::control::read_handle::ControlReadHandle;
 use tokio::runtime::Runtime;
@@ -46,6 +46,9 @@ pub struct AppRuntime {
     /// Circle peers we've already pulled chat backlog from this connection, so we
     /// pull once per (re)connect rather than every state poll.
     pulled_chat_from: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Latest dev-menu peer speedtest result; written by the spawned run task and
+    /// read back into `state()`. Shared so the async task can update it in place.
+    speedtest: Arc<std::sync::Mutex<crate::state::SpeedtestView>>,
 }
 
 impl AppRuntime {
@@ -211,6 +214,7 @@ impl AppRuntime {
             loop_task: None,
             content: Some(content),
             pulled_chat_from: std::sync::Mutex::new(std::collections::HashSet::new()),
+            speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
         })
     }
 
@@ -257,6 +261,7 @@ impl AppRuntime {
             loop_task: None,
             content: None,
             pulled_chat_from: std::sync::Mutex::new(std::collections::HashSet::new()),
+            speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
         }
     }
 
@@ -383,7 +388,56 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
+            NativeAppAction::SpeedtestPeer { npub } => {
+                self.start_speedtest(npub);
+                self.rev += 1;
+            }
         }
+    }
+
+    /// Spawn a peer speedtest (spawn-not-block; the result is observed via the
+    /// `speedtest` field on the next `state()`). A ~1 MiB Blossom round-trip — big
+    /// enough to dominate connection setup, small enough not to bloat the peer's
+    /// store. Ignored if a run is already in flight.
+    fn start_speedtest(&mut self, npub: String) {
+        // 256 KiB: big enough to measure past connection setup, small enough to
+        // complete each way within the timeout over a slow (~tens of KB/s) BLE link.
+        const PAYLOAD_BYTES: usize = 262_144;
+        let Some(rt) = self.rt.as_ref() else { return };
+        {
+            let mut s = self.speedtest.lock().unwrap();
+            if s.running {
+                return;
+            }
+            s.running = true;
+            s.peer_npub = npub.clone();
+            s.error.clear();
+        }
+        let slot = self.speedtest.clone();
+        rt.spawn(async move {
+            tracing::info!(peer = %npub, "speedtest: starting");
+            let result =
+                crate::ip_source::speedtest_peer(&npub, PAYLOAD_BYTES, Duration::from_secs(60))
+                    .await;
+            let mut s = slot.lock().unwrap();
+            s.running = false;
+            s.bytes = PAYLOAD_BYTES as u64;
+            s.generation += 1;
+            match result {
+                Ok((up, down)) => {
+                    tracing::info!(peer = %npub, up_mbps = up, down_mbps = down, "speedtest: ok");
+                    s.up_mbps = up;
+                    s.down_mbps = down;
+                    s.error.clear();
+                }
+                Err(e) => {
+                    tracing::warn!(peer = %npub, error = format!("{e:#}"), "speedtest: failed");
+                    s.up_mbps = 0.0;
+                    s.down_mbps = 0.0;
+                    s.error = e.to_string();
+                }
+            }
+        });
     }
 
     /// Spawn a sync-to-readiness for a pasted link / shared site (spawn-not-block;
@@ -649,6 +703,7 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.update_check_snapshot())
                 .unwrap_or_default(),
+            speedtest: self.speedtest.lock().unwrap().clone(),
         }
     }
 

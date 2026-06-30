@@ -97,4 +97,9 @@ pub enum NativeAppAction {
     /// request/accept events so peers show the name the user chose. The Android
     /// app owns the value (persisted there) and re-applies it on launch.
     SetDeviceName { name: String },
+
+    /// Dev-menu speedtest against a mesh peer: PUT a fresh payload to the peer's
+    /// Blossom and GET it back, timing each leg. Spawn-not-block; the result lands
+    /// in `speedtest`. `npub` is the target peer's device identity.
+    SpeedtestPeer { npub: String },
 }

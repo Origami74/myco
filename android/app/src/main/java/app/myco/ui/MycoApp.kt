@@ -214,7 +214,7 @@ fun MycoApp(
                         bleExhausted = bleExhausted,
                     )
                 }
-                composable("dev") { DevScreen(state) }
+                composable("dev") { DevScreen(state, client) }
                 composable("qr") {
                     QrScreen(
                         state = state,

@@ -106,6 +106,7 @@ data class AppState(
     val pendingPairRequests: List<PairRequest>,
     val offlineOnly: Boolean,
     val updateCheck: UpdateCheck = UpdateCheck(),
+    val speedtest: SpeedtestStatus = SpeedtestStatus(),
 ) {
     companion object {
         fun parse(json: String): AppState {
@@ -259,6 +260,17 @@ data class AppState(
                 discovered = discovered,
                 pendingPairRequests = pendingPairRequests,
                 offlineOnly = o.optBoolean("offlineOnly"),
+                speedtest = o.optJSONObject("speedtest")?.let { s ->
+                    SpeedtestStatus(
+                        running = s.optBoolean("running"),
+                        peerNpub = s.optString("peerNpub"),
+                        bytes = s.optLong("bytes"),
+                        upMbps = s.optDouble("upMbps", 0.0),
+                        downMbps = s.optDouble("downMbps", 0.0),
+                        error = s.optString("error"),
+                        generation = s.optLong("generation"),
+                    )
+                } ?: SpeedtestStatus(),
                 updateCheck = o.optJSONObject("updateCheck")?.let { u ->
                     UpdateCheck(
                         checking = u.optBoolean("checking"),
@@ -270,6 +282,17 @@ data class AppState(
         }
     }
 }
+
+/** Result of the dev-menu peer speedtest (a Blossom upload+download round-trip). */
+data class SpeedtestStatus(
+    val running: Boolean = false,
+    val peerNpub: String = "",
+    val bytes: Long = 0,
+    val upMbps: Double = 0.0,
+    val downMbps: Double = 0.0,
+    val error: String = "",
+    val generation: Long = 0,
+)
 
 /** Feedback for the "Check for updates" action: in-progress + last result. */
 data class UpdateCheck(
@@ -428,4 +451,8 @@ object NativeActions {
      *  see the chosen name. The app owns the value and re-applies it on launch. */
     fun setDeviceName(name: String): JSONObject =
         JSONObject().put("type", "set_device_name").put("name", name)
+
+    /** Dev-menu speedtest: round-trip a payload through `npub`'s mesh Blossom. */
+    fun speedtestPeer(npub: String): JSONObject =
+        JSONObject().put("type", "speedtest_peer").put("npub", npub)
 }

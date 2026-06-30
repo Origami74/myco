@@ -13,14 +13,18 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.BleAdvert
 import app.myco.core.BlePeer
+import app.myco.core.NativeActions
+import app.myco.share.DeviceName
 import app.myco.ui.KeyVal
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
@@ -35,12 +39,14 @@ import kotlin.math.pow
  * the BLE radio, connected peers, scan adverts, and cache counts. Read-only.
  */
 @Composable
-fun DevScreen(state: AppState) {
+fun DevScreen(state: AppState, client: AppCoreClient) {
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         ScreenHeader("Dev", state, subtitle = "Technical details — myco-core state.")
+
+        SpeedtestCard(state, client)
 
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -78,6 +84,61 @@ fun DevScreen(state: AppState) {
             }
         }
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+/**
+ * A peer throughput test: pick a connected, handshaken peer and round-trip a
+ * ~1 MiB payload through its mesh Blossom (PUT then GET), showing up/down Mbps.
+ * Only works against a paired peer (their Blossom gates non-loopback by Circle).
+ */
+@Composable
+private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
+    val peers = state.blePeers.filter { it.connected && it.npub.isNotEmpty() }
+    val st = state.speedtest
+    DevCard("SPEEDTEST") {
+        if (peers.isEmpty()) {
+            EmptyLine("no connected peer to test")
+        } else {
+            peers.forEach { peer ->
+                val name = DeviceName.generated(peer.npub)
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                ) {
+                    Text(name, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.bodyMedium)
+                    // "Retry" once a finished run for this peer failed; "Run" otherwise.
+                    val lastForPeer = st.peerNpub == peer.npub && st.generation > 0L
+                    val label = when {
+                        st.running && st.peerNpub == peer.npub -> "running…"
+                        lastForPeer && st.error.isNotEmpty() -> "Retry"
+                        else -> "Run"
+                    }
+                    TextButton(
+                        enabled = !st.running,
+                        onClick = { client.dispatch(NativeActions.speedtestPeer(peer.npub)) },
+                    ) { Text(label) }
+                }
+            }
+        }
+
+        val resultLine = when {
+            st.running -> "Testing ${DeviceName.generated(st.peerNpub)}…"
+            st.generation == 0L -> null
+            st.error.isNotEmpty() -> "✗ ${st.error}"
+            else -> "↑ %.1f Mbps   ↓ %.1f Mbps   (%s, %d KB)".format(
+                st.upMbps, st.downMbps, DeviceName.generated(st.peerNpub), st.bytes / 1000,
+            )
+        }
+        if (resultLine != null) {
+            Text(
+                resultLine,
+                color = if (st.error.isNotEmpty() && !st.running) MaterialTheme.colorScheme.error else Slate,
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            )
+        }
     }
 }
 
