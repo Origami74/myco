@@ -195,7 +195,31 @@ serves.** Neither owns the other's concern.
 
 ---
 
-## 8. Open questions
+## 8. Storage: clearing the cache vs. wiping everything
+
+**Settings → Storage** shows local usage (against the ~2 GB cache target) and
+offers two destructive actions, neither of which touches the device identity or
+the Circle:
+
+- **Delete cache** (`wipe_cache`) — reclaim space *without* breaking installed
+  apps. It keeps every **pinned** Library entry working offline by computing a
+  keep-set from the pinned sites — each one's *served* manifest event plus the
+  blob hashes that manifest references — and retaining only those, then dropping
+  everything else: unpinned opened sites, discovered listings, and staged
+  updates. A pinned site whose manifest isn't local stays pinned and simply
+  re-downloads on next open.
+- **Delete all data, including apps** (`wipe_stores`) — clear the local relay +
+  Blossom + Library + status wholesale, pinned apps included.
+
+The keep-set is derived through the same **active-manifest** pointer the gateway
+serves from (see [nsite-updates.md §1](./nsite-updates.md)), so a cache wipe
+preserves exactly the version currently served, not whatever newest manifest the
+relay happens to hold. A general size-based eviction pass (P5) is still open;
+until then these two explicit actions are the only reclamation path.
+
+---
+
+## 9. Open questions
 
 - **Impersonation without chrome (§3).** No trusted, always-visible signal of
   which verified author npub a fullscreen nsite belongs to; `TaskDescription`

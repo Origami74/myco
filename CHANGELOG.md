@@ -13,8 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `myco://share` code over NFC, so a bump opens the app and pairs with the
   sharer — the same result as scanning its QR. Receiving a tapped share also
   works from the new *Add an app* sheet.
+- A **Storage** settings page with a usage gauge and two deletes: *Delete
+  cache* reclaims space while keeping your pinned apps working offline, and
+  *Delete all data, including apps* wipes the local relay + Blossom entirely.
+  Your identity and Circle survive both.
 
 ### Changed
+
+- Settings is reorganised into focused pages. Everyday controls stay up front
+  (your device-name identity, storage, and the mesh with Bluetooth as a
+  sub-toggle); the mesh-only switch and the raw identity fields (npub /
+  node_addr / .fips / mesh ULA) move behind a developer-only page.
+- The Circle *Nearby* list is always shown — with a hint when no one's around —
+  and is sorted by name, so bubbles no longer reshuffle as Bluetooth signal
+  strength fluctuates.
 
 - The "Share this app" surface is now a bottom sheet styled like the pairing
   QR — a larger code and a prominent "tap phones together" prompt — and it
@@ -27,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dialog; removal stays the last, destructive, confirmed action.
 
 ### Fixed
+
+- The main app no longer flips to landscape on a slight tilt — it's locked to
+  portrait, matching the QR scanner.
 
 ## [0.0.3] - 2026-06-29
 

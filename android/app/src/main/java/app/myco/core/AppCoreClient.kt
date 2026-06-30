@@ -396,6 +396,8 @@ object NativeActions {
         JSONObject().put("type", "forget_nsite").put("link", link)
     fun checkNsiteUpdates(): JSONObject = JSONObject().put("type", "check_nsite_updates")
     fun wipeStores(): JSONObject = JSONObject().put("type", "wipe_stores")
+    /** Clear cached relay/Blossom data but keep pinned nsites (Storage → "Delete cache"). */
+    fun wipeCache(): JSONObject = JSONObject().put("type", "wipe_cache")
 
     // --- circle (paired peers) ---
     /** Add a paired peer (from a scanned share QR) to the Circle. */
