@@ -80,10 +80,8 @@ class MainActivity : ComponentActivity() {
         core = MycoCore.client(this)
         // Restore the mesh-only (no IP fallback) preference into the core.
         core.dispatch(NativeActions.setOfflineOnly(prefs.getBoolean(PREF_OFFLINE_ONLY, false)))
-        // Push our memorable name into the core so outgoing pair events carry it.
-        core.state().ownNpub.takeIf { it.isNotEmpty() }?.let {
-            core.dispatch(NativeActions.setDeviceName(DeviceName.current(this, it)))
-        }
+        // (Device name is asserted in onResume, which also covers identity not yet
+        // being ready at this point.)
 
         // BLE on by default, and remembered thereafter.
         if (prefs.getBoolean(PREF_BLE, true)) {
@@ -169,10 +167,19 @@ class MainActivity : ComponentActivity() {
         // the foreground HCE service after a background→foreground while on Circle.
         PairPresent.onChanged = { runOnUiThread { updateNfcPresent() } }
         updateNfcPresent()
+        // (Re)assert our memorable name into the core so pair events carry it. Done
+        // here (not just onCreate) in case the device identity wasn't ready yet at
+        // first launch; set_device_name is idempotent.
+        core.state().ownNpub.takeIf { it.isNotEmpty() }?.let {
+            core.dispatch(NativeActions.setDeviceName(DeviceName.current(this, it)))
+        }
     }
 
     override fun onPause() {
         super.onPause()
+        // Drop the callback so the process-global PairPresent doesn't pin this
+        // Activity while backgrounded (it's re-set on the next onResume).
+        PairPresent.onChanged = null
         nfcAdapter?.let { adapter ->
             runCatching { CardEmulation.getInstance(adapter).unsetPreferredService(this) }
         }

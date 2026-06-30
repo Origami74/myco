@@ -948,8 +948,11 @@ impl Content {
     }
 
     /// Tell a peer we've forgotten them, so they drop us from their Circle too.
-    /// Best-effort: only lands if they're reachable (the local removal already
-    /// happened synchronously in `remove_from_circle`).
+    /// Best-effort and **fire-once**: it only lands if they're reachable within the
+    /// dial window (the local removal already happened synchronously in
+    /// `remove_from_circle`). If they're offline it is not re-sent later, so their
+    /// Circle keeps a stale entry for us until they forget us or we re-pair. A
+    /// durable handshake (queue + ack) is a possible later improvement.
     pub async fn send_unpair(&self, npub: &str) {
         self.dial_pair_event(npub, KIND_PAIR_REMOVE, "").await;
     }
@@ -1945,6 +1948,44 @@ mod tests {
         let snap = content.circle_snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].npub, "npub1alice");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_name_uses_override_then_falls_back() {
+        let dir = tmp("devname");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+
+        // The npub-derived fallback before any override is set.
+        let fallback = content.device_name();
+        content.set_device_name("green sammy");
+        assert_eq!(content.device_name(), "green sammy", "override wins");
+        // Clearing the override (blank) restores the fallback.
+        content.set_device_name("   ");
+        assert_eq!(content.device_name(), fallback, "blank clears the override");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pair_remove_event_drops_peer_from_circle() {
+        use nostr::Keys;
+        let dir = tmp("unpair");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+
+        let peer = Keys::generate();
+        let peer_npub = peer.public_key().to_bech32().unwrap();
+        content.add_to_circle(&peer_npub, "Peer");
+        assert_eq!(content.circle_snapshot().len(), 1);
+
+        // The peer signs a PAIR_REMOVE; handling it drops them from our Circle.
+        let event = build_pair_event(&peer, KIND_PAIR_REMOVE, &peer_npub, "Peer", "")
+            .expect("build pair-remove event");
+        content.handle_pair_event(&event);
+        assert!(content.circle_snapshot().is_empty(), "peer removed on unpair");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

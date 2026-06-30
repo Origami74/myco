@@ -331,3 +331,44 @@ pull-only (fetched only when a site is opened).
   from the npub, and should flag collisions (two peers who chose `green sammy`).
   Whether to derive the colour deterministically from the npub (so it's harder to
   spoof) is **TBD / open**.
+
+## 7. Implemented in v0.0.3 — NFC tap-to-pair, single-use ledger, unpairing
+
+How the app actually ships the §5–6 model, including a path the design above did
+not anticipate (NFC) and where the wire detail landed.
+
+**NFC tap-to-pair.** Alongside the QR path (§4), a device can present its invite
+over NFC. While the user is on the Circle tab the app emulates a standard NDEF
+Type-4 tag (Android host card emulation, AID `D2760000850101`) whose single URI
+record is the same `myco://pair/<base64>` payload as the QR. The counterpart's OS
+reads it through normal NDEF tag dispatch — no "reader mode" on either side — and
+delivers the `myco://` link to the app via an intent filter, reaching the same
+add-peer code path as a scan. Both phones present-and-poll at once, so a single
+bump can pair symmetrically.
+
+**Where the secret lives.** §6.1 framed the `pairSecret` as echoed back inside the
+Noise-encrypted channel to `<npub_A>.fips`. The implementation keeps that property:
+the scanner/tapper sends a signed pair **request** (kind 9101) to
+`<npub_A>.fips:4869` — already Noise-XK encrypted and authenticated to A — carrying
+the secret. What differs from the doc is *who matches it*: A enforces single-use
+locally, via a small persisted ledger of the secrets it has issued. Each presented
+code mints a fresh secret; it is consumed on first accept and the presented payload
+rotates, so a captured QR/tag can't pair twice.
+
+**Auto-accept scope.** A request auto-accepts only while A is actively presenting
+(on the Circle tab) and the secret matches a live issued one. A request that
+arrives otherwise — A on another screen, or Myco launched by the tap — surfaces an
+accept/ignore prompt instead, keeping the §6.1 human-in-the-loop confirmation.
+
+**Unpairing (partially answers the open question above).** Forgetting a peer now
+sends a signed **pair-remove** event (kind 9103) to their relay; on receipt they
+drop the sender from their Circle, so the two sides stay symmetric. It is
+best-effort and fire-once — an offline peer is not retried, so their Circle keeps a
+stale entry until they forget us or we re-pair. A durable (queue + ack) handshake
+is left open.
+
+**NFC exposure.** While presenting, the emulated tag answers *any* NFC reader, not
+just another Myco device, with `{npub, name, pairSecret}`. This is acceptable: the
+npub is already public, the name is sender-chosen and low-sensitivity, and the
+secret is single-use (a captured tag can't be replayed). It is deliberately limited
+to the moments the user is on the Circle tab, not the whole time the app is open.
