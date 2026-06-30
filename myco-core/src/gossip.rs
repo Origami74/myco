@@ -70,7 +70,9 @@ impl Gossiper for MeshGossiper {
                         for addr in self.content.retriable_library_addrs() {
                             let content = self.content.clone();
                             let holder = npub.clone();
-                            tokio::spawn(async move { content.open_site(addr, Some(holder)).await });
+                            tokio::spawn(
+                                async move { content.open_site(addr, Some(holder)).await },
+                            );
                         }
                     }
                 }
@@ -136,7 +138,9 @@ impl Gossiper for MeshGossiper {
         req_ttl: u8,
         exclude: Option<IpAddr>,
     ) -> Vec<Event> {
-        self.content.pull_from_peers(filters, req_ttl, exclude).await
+        self.content
+            .pull_from_peers(filters, req_ttl, exclude)
+            .await
     }
 }
 
@@ -145,7 +149,11 @@ mod tests {
     use super::*;
 
     fn local() -> Inbound {
-        Inbound { origin: Origin::Local, event_ttl: None, sender: None }
+        Inbound {
+            origin: Origin::Local,
+            event_ttl: None,
+            sender: None,
+        }
     }
 
     #[test]
@@ -171,7 +179,14 @@ mod tests {
             .unwrap();
         // A mesh-origin event whose TTL is already spent must not be re-forwarded.
         gossiper
-            .on_event(ev.clone(), Inbound { origin: Origin::Mesh, event_ttl: Some(0), sender: None })
+            .on_event(
+                ev.clone(),
+                Inbound {
+                    origin: Origin::Mesh,
+                    event_ttl: Some(0),
+                    sender: None,
+                },
+            )
             .await;
         // A local origin with no peers is also a clean no-op.
         gossiper.on_event(ev, local()).await;

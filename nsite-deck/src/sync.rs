@@ -149,8 +149,12 @@ async fn fetch_blobs(
 ) -> anyhow::Result<SyncOutcome> {
     // Fetch the icon (and landing page) blobs first, so the UI can show the real
     // app icon while the rest of the site still downloads (iOS-install style).
-    const PRIORITY_PATHS: &[&str] =
-        &["/favicon.ico", "/favicon.png", "/apple-touch-icon.png", "/index.html"];
+    const PRIORITY_PATHS: &[&str] = &[
+        "/favicon.ico",
+        "/favicon.png",
+        "/apple-touch-icon.png",
+        "/index.html",
+    ];
     let mut needed: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for p in PRIORITY_PATHS {
@@ -186,7 +190,7 @@ async fn fetch_blobs(
                     fetched = Some(bytes);
                     break;
                 }
-                Ok(_) => {} // missing or mismatch — retry
+                Ok(_) => {}  // missing or mismatch — retry
                 Err(_) => {} // transport error — retry
             }
         }

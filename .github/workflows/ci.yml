@@ -33,14 +33,17 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
 
+      # Gate: fail the build on any formatting drift.
+      - name: Format
+        run: cargo fmt --all --check
+
       # Non-gating: surfaces clippy findings without failing on the workspace's
-      # pre-existing warnings. (`cargo fmt --check` is intentionally not a gate
-      # yet — the tree has pre-existing formatting drift to clean up first.)
+      # pre-existing warnings.
       - name: Clippy
         run: cargo clippy --workspace --all-targets
 

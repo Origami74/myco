@@ -98,7 +98,9 @@ impl BlobStore for FsBlobStore {
             return Ok(hash); // immutable + content-addressed → already stored
         }
         // Atomic write: a unique temp file (pid + hash) then rename into place.
-        let tmp = self.root.join(format!(".tmp-{}-{}", std::process::id(), &hash));
+        let tmp = self
+            .root
+            .join(format!(".tmp-{}-{}", std::process::id(), &hash));
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, &dest)?;
         Ok(hash)

@@ -72,7 +72,14 @@ pub async fn serve_on(
     store: Arc<FsBlobStore>,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
-    serve_state(BlossomState { store, access: None }, listener).await
+    serve_state(
+        BlossomState {
+            store,
+            access: None,
+        },
+        listener,
+    )
+    .await
 }
 
 /// Serve on an already-bound listener, restricting **mesh** sources to those that
@@ -83,13 +90,17 @@ pub async fn serve_on_guarded(
     listener: tokio::net::TcpListener,
     access: AccessFn,
 ) -> anyhow::Result<()> {
-    serve_state(BlossomState { store, access: Some(access) }, listener).await
+    serve_state(
+        BlossomState {
+            store,
+            access: Some(access),
+        },
+        listener,
+    )
+    .await
 }
 
-async fn serve_state(
-    state: BlossomState,
-    listener: tokio::net::TcpListener,
-) -> anyhow::Result<()> {
+async fn serve_state(state: BlossomState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/{sha256}", get(get_blob).head(head_blob))
         .route("/upload", put(upload))
@@ -170,8 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_blossom_get_head_upload() {
-        let dir =
-            std::env::temp_dir().join(format!("myco-blossom-srv-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("myco-blossom-srv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Arc::new(FsBlobStore::open(&dir).unwrap());
 

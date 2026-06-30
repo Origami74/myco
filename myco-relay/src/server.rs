@@ -127,7 +127,12 @@ impl RelayHub {
         // Buffer enough that a brief subscriber stall doesn't drop chat; an
         // over-capacity lag is surfaced as `Lagged` and skipped, not blocked.
         let (live, _) = broadcast::channel(512);
-        Arc::new(Self { store, live, gossip, gate })
+        Arc::new(Self {
+            store,
+            live,
+            gossip,
+            gate,
+        })
     }
 }
 
@@ -207,7 +212,11 @@ async fn root(
 /// One client connection: serve `REQ` backlog + keep the subscription live, accept
 /// `EVENT`s (store → fan to local subs → drive the gossiper), honour `CLOSE`.
 async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
-    let origin = if peer_ip.is_loopback() { Origin::Local } else { Origin::Mesh };
+    let origin = if peer_ip.is_loopback() {
+        Origin::Local
+    } else {
+        Origin::Mesh
+    };
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut live = hub.live.subscribe();
     // Active subscriptions on this connection: sub_id -> its filters.
@@ -267,13 +276,22 @@ async fn handle_client_frame(
     };
     match array.first().and_then(|v| v.as_str()) {
         Some("REQ") => {
-            let sub_id = array.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let sub_id = array
+                .get(1)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             // Mesh access gate: only paired peers may read from us. Unpaired peers
             // get a CLOSED (no backlog, no live subscription registered).
             if origin == Origin::Mesh {
                 if let Some(gate) = &hub.gate {
                     if !gate.may_read(peer_ip) {
-                        return vec![serde_json::json!(["CLOSED", sub_id, "restricted: pair to access"]).to_string()];
+                        return vec![serde_json::json!([
+                            "CLOSED",
+                            sub_id,
+                            "restricted: pair to access"
+                        ])
+                        .to_string()];
                     }
                 }
             }
@@ -305,7 +323,9 @@ async fn handle_client_frame(
             if req_ttl > 0 {
                 if let Some(gossip) = hub.gossip.clone() {
                     let exclude = (origin == Origin::Mesh).then_some(peer_ip);
-                    let remote = gossip.on_req(raw_filters.clone(), req_ttl - 1, exclude).await;
+                    let remote = gossip
+                        .on_req(raw_filters.clone(), req_ttl - 1, exclude)
+                        .await;
                     events.extend(remote);
                 }
             }
@@ -344,12 +364,20 @@ async fn handle_client_frame(
             if origin == Origin::Mesh {
                 if let Some(gate) = &hub.gate {
                     if !gate.may_publish(peer_ip, event.kind.as_u16()) {
-                        return vec![serde_json::json!(["OK", id, false, "restricted: pair to access"]).to_string()];
+                        return vec![serde_json::json!([
+                            "OK",
+                            id,
+                            false,
+                            "restricted: pair to access"
+                        ])
+                        .to_string()];
                     }
                 }
             }
             if event.verify().is_err() {
-                return vec![serde_json::json!(["OK", id, false, "invalid: bad signature"]).to_string()];
+                return vec![
+                    serde_json::json!(["OK", id, false, "invalid: bad signature"]).to_string(),
+                ];
             }
             match hub.store.store_event(event.clone()).await {
                 Ok(true) => {
@@ -368,7 +396,9 @@ async fn handle_client_frame(
                 }
                 // Duplicate / superseded: still an accepted outcome per NIP-01.
                 Ok(false) => vec![serde_json::json!(["OK", id, true, "duplicate:"]).to_string()],
-                Err(e) => vec![serde_json::json!(["OK", id, false, format!("error: {e}")]).to_string()],
+                Err(e) => {
+                    vec![serde_json::json!(["OK", id, false, format!("error: {e}")]).to_string()]
+                }
             }
         }
         Some("CLOSE") => {
@@ -386,7 +416,10 @@ fn parse_filter(value: &serde_json::Value) -> Option<ManifestFilter> {
     let obj = value.as_object()?;
     let mut filter = ManifestFilter::default();
     if let Some(kinds) = obj.get("kinds").and_then(|v| v.as_array()) {
-        filter.kinds = kinds.iter().filter_map(|k| k.as_u64().map(|k| k as u16)).collect();
+        filter.kinds = kinds
+            .iter()
+            .filter_map(|k| k.as_u64().map(|k| k as u16))
+            .collect();
     }
     if let Some(authors) = obj.get("authors").and_then(|v| v.as_array()) {
         filter.authors = authors
@@ -401,7 +434,10 @@ fn parse_filter(value: &serde_json::Value) -> Option<ManifestFilter> {
             .filter_map(|d| d.as_str().map(str::to_string))
             .collect();
     }
-    filter.limit = obj.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
+    filter.limit = obj
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
     Some(filter)
 }
 
@@ -443,7 +479,9 @@ mod tests {
             "REQ", "s1",
             { "kinds": [KIND_ROOT], "authors": [hex::encode(keys.public_key().to_bytes())] }
         ]);
-        ws.send(WsMessage::Text(req.to_string().into())).await.unwrap();
+        ws.send(WsMessage::Text(req.to_string().into()))
+            .await
+            .unwrap();
 
         let mut got_event = false;
         let mut got_eose = false;
@@ -451,7 +489,10 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
             match v[0].as_str() {
                 Some("EVENT") => {
-                    assert_eq!(v[2]["id"].as_str(), Some(site.manifest.id.to_hex().as_str()));
+                    assert_eq!(
+                        v[2]["id"].as_str(),
+                        Some(site.manifest.id.to_hex().as_str())
+                    );
                     got_event = true;
                 }
                 Some("EOSE") => {
@@ -476,9 +517,13 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
             .await
             .unwrap();
-        ws.send(WsMessage::Text(serde_json::json!(["EVENT", site.manifest]).to_string().into()))
-            .await
-            .unwrap();
+        ws.send(WsMessage::Text(
+            serde_json::json!(["EVENT", site.manifest])
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
 
         if let Some(Ok(WsMessage::Text(txt))) = ws.next().await {
             let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
@@ -502,7 +547,9 @@ mod tests {
             .await
             .unwrap();
         let req = serde_json::json!(["REQ", "s1", { "kinds": [9], "#d": ["mesh"] }]);
-        sub.send(WsMessage::Text(req.to_string().into())).await.unwrap();
+        sub.send(WsMessage::Text(req.to_string().into()))
+            .await
+            .unwrap();
         // Drain until EOSE so we know the live subscription is registered.
         loop {
             if let Some(Ok(WsMessage::Text(txt))) = sub.next().await {
@@ -518,9 +565,11 @@ mod tests {
             .await
             .unwrap();
         let msg = chat_event(&keys, "mesh", "live hello");
-        pubr.send(WsMessage::Text(serde_json::json!(["EVENT", msg]).to_string().into()))
-            .await
-            .unwrap();
+        pubr.send(WsMessage::Text(
+            serde_json::json!(["EVENT", msg]).to_string().into(),
+        ))
+        .await
+        .unwrap();
 
         // The subscriber should receive it live as ["EVENT","s1",{…}].
         let received = tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -534,7 +583,11 @@ mod tests {
         })
         .await
         .expect("did not receive live event in time");
-        assert_eq!(received, Some(msg.id.to_hex()), "live event delivered to subscriber");
+        assert_eq!(
+            received,
+            Some(msg.id.to_hex()),
+            "live event delivered to subscriber"
+        );
     }
 
     /// The gossiper is invoked for an accepted event, tagged with its origin.
@@ -561,9 +614,11 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
             .await
             .unwrap();
-        ws.send(WsMessage::Text(serde_json::json!(["EVENT", msg]).to_string().into()))
-            .await
-            .unwrap();
+        ws.send(WsMessage::Text(
+            serde_json::json!(["EVENT", msg]).to_string().into(),
+        ))
+        .await
+        .unwrap();
         // Await the OK so the store+spawn have run.
         let _ = ws.next().await;
 

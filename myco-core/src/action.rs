@@ -5,7 +5,11 @@ use serde::Deserialize;
 /// `docs/reference/ffi-surface.md`. P1 adds the node lifecycle and the BLE
 /// master switch; site, peer, and settings actions arrive in later phases.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum NativeAppAction {
     /// Pure read; does not bump `rev`.
     GetState,
@@ -69,7 +73,11 @@ pub enum NativeAppAction {
     /// Scanned a peer's pairing QR: send them a signed pair request over the mesh
     /// (to their relay). Pairs nobody yet — only a mutual accept adds both sides.
     /// `npub`/`name` are the scanned peer's; `secret` is the QR's one-time value.
-    SendPairRequest { npub: String, name: String, secret: String },
+    SendPairRequest {
+        npub: String,
+        name: String,
+        secret: String,
+    },
     /// Accept an incoming pair request: add the requester to the Circle and signal
     /// them (a pair-accept) so they add us back.
     AcceptPairRequest { npub: String, name: String },

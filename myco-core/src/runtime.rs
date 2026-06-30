@@ -122,8 +122,11 @@ impl AppRuntime {
             // push content. Loopback (the in-app WebView) always bypasses the gate.
             let gate: Arc<dyn myco_relay::server::PeerGate> =
                 Arc::new(crate::content::CircleGate::new(content.clone()));
-            let hub =
-                myco_relay::server::RelayHub::with_gate(content.relay(), Some(gossiper), Some(gate));
+            let hub = myco_relay::server::RelayHub::with_gate(
+                content.relay(),
+                Some(gossiper),
+                Some(gate),
+            );
 
             // Mesh socket: IPV6_V6ONLY `[::]:4869` so it doesn't collide with the
             // loopback bind and is reachable by peers at `ws://<npub>.fips:4869`.
@@ -137,7 +140,8 @@ impl AppRuntime {
                     });
                 }
                 Err(e) => {
-                    mesh_warning = format!("relay port 4869 unavailable (another app using it?): {e}");
+                    mesh_warning =
+                        format!("relay port 4869 unavailable (another app using it?): {e}");
                 }
             }
             // Loopback socket: the in-app nsite WebView talks to `ws://localhost:4869`
@@ -228,10 +232,11 @@ impl AppRuntime {
         // bridge). Host builds have no BLE backend, so this is Android-only.
         #[cfg(target_os = "android")]
         {
-            config.transports.ble = fips::config::TransportInstances::Single(fips::config::BleConfig {
-                auto_connect: Some(true),
-                ..Default::default()
-            });
+            config.transports.ble =
+                fips::config::TransportInstances::Single(fips::config::BleConfig {
+                    auto_connect: Some(true),
+                    ..Default::default()
+                });
         }
         fips::Node::new(config).map_err(|e| anyhow::anyhow!("fips Node::new failed: {e}"))
     }
@@ -289,24 +294,21 @@ impl AppRuntime {
                 self.rev += 1;
             }
             NativeAppAction::AddToLibrary { link } => {
-                if let (Some(content), Some(addr)) =
-                    (&self.content, nsite_deck::parse_link(&link))
+                if let (Some(content), Some(addr)) = (&self.content, nsite_deck::parse_link(&link))
                 {
                     content.add_to_library(&addr, None, now_secs());
                 }
                 self.rev += 1;
             }
             NativeAppAction::RemoveFromLibrary { link } => {
-                if let (Some(content), Some(addr)) =
-                    (&self.content, nsite_deck::parse_link(&link))
+                if let (Some(content), Some(addr)) = (&self.content, nsite_deck::parse_link(&link))
                 {
                     content.remove_from_library(&addr);
                 }
                 self.rev += 1;
             }
             NativeAppAction::ForgetNsite { link } => {
-                if let (Some(content), Some(addr)) =
-                    (&self.content, nsite_deck::parse_link(&link))
+                if let (Some(content), Some(addr)) = (&self.content, nsite_deck::parse_link(&link))
                 {
                     content.forget_site(&addr);
                 }
@@ -520,7 +522,7 @@ impl AppRuntime {
                         node_addr_hex: p.node_addr_hex,
                         npub: p.npub,
                         connected: p.connected,
-                        psm: 0,    // not surfaced in the snapshot yet
+                        psm: 0, // not surfaced in the snapshot yet
                         rssi: None,
                     })
                     .collect()
@@ -583,7 +585,11 @@ impl AppRuntime {
                 enabled: self.ble_enabled,
                 role: "peripheral+central".to_string(),
                 scanning: self.ble_enabled && self.node_running,
-                adapter_name: if self.node_running { "ble0".to_string() } else { "—".to_string() },
+                adapter_name: if self.node_running {
+                    "ble0".to_string()
+                } else {
+                    "—".to_string()
+                },
             },
             ble_peers,
             ble_adverts: self.ble_adverts(),
@@ -617,7 +623,11 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.discovered_snapshot())
                 .unwrap_or_default(),
-            offline_only: self.content.as_ref().map(|c| c.is_offline_only()).unwrap_or(false),
+            offline_only: self
+                .content
+                .as_ref()
+                .map(|c| c.is_offline_only())
+                .unwrap_or(false),
             update_check: self
                 .content
                 .as_ref()
@@ -634,7 +644,11 @@ impl AppRuntime {
             .map(|b| {
                 b.advert_views()
                     .into_iter()
-                    .map(|a| BleAdvert { addr: a.addr, psm: a.psm, rssi: a.rssi })
+                    .map(|a| BleAdvert {
+                        addr: a.addr,
+                        psm: a.psm,
+                        rssi: a.rssi,
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -710,7 +724,11 @@ mod tests {
         let first = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
         let s1 = first.state();
         assert!(s1.error.is_empty(), "startup error: {}", s1.error);
-        assert!(s1.identity.own_npub.starts_with("npub1"), "npub: {}", s1.identity.own_npub);
+        assert!(
+            s1.identity.own_npub.starts_with("npub1"),
+            "npub: {}",
+            s1.identity.own_npub
+        );
         assert_eq!(s1.identity.own_pubkey_hex.len(), 64);
         assert!(s1.identity.fips_addr.ends_with(".fips"));
         assert!(!s1.ble.enabled, "BLE off until SetBleEnabled");
@@ -749,7 +767,10 @@ mod tests {
 
         assert!(!rt.state().ble.enabled);
         rt.dispatch(NativeAppAction::SetBleEnabled { enabled: true });
-        assert!(rt.state().ble.enabled, "SetBleEnabled true should flip the switch");
+        assert!(
+            rt.state().ble.enabled,
+            "SetBleEnabled true should flip the switch"
+        );
         rt.dispatch(NativeAppAction::SetBleEnabled { enabled: false });
         assert!(!rt.state().ble.enabled);
 
@@ -770,7 +791,10 @@ mod tests {
         assert!(s.node.running, "node should be running after StartNode");
 
         rt.dispatch(NativeAppAction::StopNode);
-        assert!(!rt.state().node.running, "node should be stopped after StopNode");
+        assert!(
+            !rt.state().node.running,
+            "node should be stopped after StopNode"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

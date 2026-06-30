@@ -48,7 +48,10 @@ mod tests {
         let blobs = MemBlobs::new();
 
         let site = build_test_site(
-            &[("/index.html", b"<h1>hello</h1>"), ("/style.css", b"body{}")],
+            &[
+                ("/index.html", b"<h1>hello</h1>"),
+                ("/style.css", b"body{}"),
+            ],
             None,
             Some("Test Site"),
         );

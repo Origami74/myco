@@ -249,8 +249,11 @@ impl PeerSource for IpPeerSource {
     ) -> anyhow::Result<Option<Vec<u8>>> {
         // Manifest hints first, then this source's own servers (deduped). A mesh
         // source skips the manifest's public hints entirely (stay on the mesh).
-        let mut candidates: Vec<String> =
-            if self.ignore_manifest_servers { Vec::new() } else { servers.to_vec() };
+        let mut candidates: Vec<String> = if self.ignore_manifest_servers {
+            Vec::new()
+        } else {
+            servers.to_vec()
+        };
         for s in &self.blossom_servers {
             if !candidates.contains(s) {
                 candidates.push(s.clone());
@@ -301,11 +304,17 @@ mod tests {
                 let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
                 // Read the REQ (ignore contents; the test filter always matches).
                 if let Some(Ok(Message::Text(_req))) = ws.next().await {
-                    let event = serde_json::json!(["EVENT", "myco", serde_json::from_str::<serde_json::Value>(&event_json).unwrap()]);
+                    let event = serde_json::json!([
+                        "EVENT",
+                        "myco",
+                        serde_json::from_str::<serde_json::Value>(&event_json).unwrap()
+                    ]);
                     ws.send(Message::Text(event.to_string())).await.unwrap();
-                    ws.send(Message::Text(serde_json::json!(["EOSE", "myco"]).to_string()))
-                        .await
-                        .unwrap();
+                    ws.send(Message::Text(
+                        serde_json::json!(["EOSE", "myco"]).to_string(),
+                    ))
+                    .await
+                    .unwrap();
                 }
             }
         });
@@ -399,7 +408,10 @@ mod tests {
 
         // A wrong hash yields nothing.
         let miss = source
-            .fetch_blob("00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff", &[])
+            .fetch_blob(
+                "00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff",
+                &[],
+            )
             .await
             .unwrap();
         assert_eq!(miss, None);
@@ -428,7 +440,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits the public internet"]
     async fn fetch_real_nsite_over_ip() {
-        let link = "https://npub1apgedl4jczacut0dasn0mszyyhhxzlvjcshjkczms47nt2d4eymsku78ws.nsite.lol/";
+        let link =
+            "https://npub1apgedl4jczacut0dasn0mszyyhhxzlvjcshjkczms47nt2d4eymsku78ws.nsite.lol/";
         let addr = nsite_deck::parse_link(link).expect("parse link");
 
         let source = IpPeerSource::with_defaults();
@@ -438,11 +451,7 @@ mod tests {
             .expect("fetch ok")
             .expect("manifest found on public relays");
         let m = nsite_deck::Manifest::from_event(manifest).expect("parse manifest");
-        println!(
-            "manifest: title={:?}, {} paths",
-            m.title,
-            m.paths.len()
-        );
+        println!("manifest: title={:?}, {} paths", m.title, m.paths.len());
         assert!(!m.paths.is_empty(), "manifest should map at least one path");
 
         // Pull + verify the index blob (or the first path).
@@ -478,7 +487,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("myco-ip-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(Content::open(&dir).unwrap());
-        content.set_source(Arc::new(IpPeerSource::new(vec![relay_url], vec![blossom_url])));
+        content.set_source(Arc::new(IpPeerSource::new(
+            vec![relay_url],
+            vec![blossom_url],
+        )));
 
         let addr = nsite_deck::SiteAddr {
             author: site.author,
