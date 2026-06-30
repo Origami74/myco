@@ -13,6 +13,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+## [0.0.3] - 2026-06-29
+
+### Added
+
+#### Pairing & Circle
+
+- NFC tap-to-pair. While the Circle tab is open the device emulates a
+  standard NDEF Type-4 tag (host card emulation) whose URI record is a
+  `myco://pair` link; the other phone's OS reads it via tag dispatch and
+  hands the link back to the app — no NFC reader mode on either side.
+  Both phones present and poll at once, so a single bump pairs
+  symmetrically and both show "You're connected". Falls back to QR/paste,
+  and warns (with a shortcut to system NFC settings) when NFC is off.
+- Single-use pair secrets. Each shown/emulated code carries a fresh
+  high-entropy secret that is consumed on first accept and rotated after
+  every tap, so a captured or replayed code can't pair twice.
+- Persistent Requests inbox (badged on the Circle tab). A tap auto-accepts
+  only while you're on the Circle tab; a request that arrives while you're
+  elsewhere prompts accept/ignore instead of pairing silently.
+- Editable device name — a memorable colour + name (e.g. "green sammy"),
+  shown to peers when pairing and editable from the Circle tab.
+- Unpair on forget: forgetting a peer who is online now signals them
+  (`kind 9103`) to drop you from their Circle too, keeping both sides
+  symmetric.
+
+#### App shell
+
+- Developer-mode setting that gates the Dev diagnostics tab — on by
+  default for debug builds, off for release.
+
+### Changed
+
+#### Pairing & Circle
+
+- The separate "Add to circle" screen is merged into the Circle tab as a
+  single view: a tap-to-connect (NFC) item with a subtle animated icon,
+  **Nearby** people and your **Circle** shown as avatar bubbles (a green
+  ring marks who's online), and a QR bubble (bottom-right) that opens
+  scan / show / paste.
+
+### Fixed
+
+#### Pairing
+
+- Outgoing pair requests and accepts now carry the user's chosen device
+  name; previously the core always sent an npub-derived placeholder, so a
+  renamed device still showed up under its old generated name.
+
 ## [0.0.2] - 2026-06-27
 
 ### Fixed
