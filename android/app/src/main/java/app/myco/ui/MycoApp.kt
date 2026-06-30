@@ -57,7 +57,6 @@ import app.myco.core.NativeActions
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.PairSecrets
-import app.myco.ui.screens.AddScreen
 import app.myco.ui.screens.PairConnectedDialog
 import app.myco.ui.screens.AppsScreen
 import app.myco.ui.screens.CircleScreen
@@ -149,13 +148,12 @@ fun MycoApp(
     }
 
     val nav = rememberNavController()
-    val onAddApp = { nav.navigate("add") }
     Scaffold(
         bottomBar = {
             val current by nav.currentBackStackEntryAsState()
             // The full-screen pairing / Add surfaces hide the bottom bar.
             val route = current?.destination?.route
-            if (route !in setOf("add", "qr", "requests")) {
+            if (route !in setOf("qr", "requests")) {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                     val tabs = if (developerMode) TABS else TABS.filterNot { it.route == "dev" }
                     tabs.forEach { tab ->
@@ -197,7 +195,7 @@ fun MycoApp(
         Surface(modifier = Modifier.padding(padding), color = MaterialTheme.colorScheme.background) {
             NavHost(navController = nav, startDestination = "apps") {
                 composable("apps") {
-                    AppsScreen(state, client, onLaunchNsite = onLaunchNsite, onPinToHome = onPinToHome, onAddApp = onAddApp)
+                    AppsScreen(state, client, onLaunchNsite = onLaunchNsite, onPinToHome = onPinToHome, onScanned = onScanned)
                 }
                 composable("circle") {
                     CircleScreen(state, client, onOpenQr = { nav.navigate("qr") }, onOpenRequests = { nav.navigate("requests") })
@@ -226,13 +224,6 @@ fun MycoApp(
                 }
                 composable("requests") {
                     RequestsScreen(state = state, client = client, onBack = { nav.popBackStack() })
-                }
-                composable("add") {
-                    AddScreen(
-                        state = state,
-                        onScanned = { text -> nav.popBackStack(); onScanned(text) },
-                        onBack = { nav.popBackStack() },
-                    )
                 }
             }
         }

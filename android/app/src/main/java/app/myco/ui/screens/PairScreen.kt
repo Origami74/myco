@@ -2,7 +2,6 @@ package app.myco.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -27,17 +26,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Contactless
-import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -51,7 +47,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -64,7 +59,6 @@ import app.myco.core.AppState
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
-import app.myco.ui.PeersPill
 import app.myco.ui.theme.Emerald
 import app.myco.ui.theme.EmeraldSoft
 import app.myco.ui.theme.Slate
@@ -106,106 +100,12 @@ fun QrScreen(
         MyCodePanel(state = state, deviceName = name)
 
         Spacer(Modifier.height(16.dp))
-        val clipboard = LocalClipboardManager.current
-        Surface(
-            shape = RoundedCornerShape(14.dp),
-            color = Color.White,
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCBD5E1)),
-            modifier = Modifier.fillMaxWidth().height(48.dp).clickable {
-                val text = clipboard.getText()?.text?.trim().orEmpty()
-                if (text.isNotEmpty()) onScanned(text)
-                else Toast.makeText(context, "Clipboard is empty", Toast.LENGTH_SHORT).show()
-            },
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Filled.ContentPaste, contentDescription = null, tint = Color(0xFF334155), modifier = Modifier.size(18.dp))
-                Spacer(Modifier.size(8.dp))
-                Text("Paste a code", color = Color(0xFF334155), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
-            }
-        }
-    }
-}
-
-/**
- * **Add an app**: the same scanner, but the alternate tab is "Enter URL" (paste an
- * nsite link). Default tab is Scan.
- */
-@Composable
-fun AddScreen(state: AppState, onScanned: (String) -> Unit, onBack: () -> Unit) {
-    var showAlt by remember { mutableStateOf(false) }
-
-    Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-                Text("Add an app", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold)
-            }
-            PeersPill(state)
-        }
-
-        Spacer(Modifier.height(16.dp))
-        SegmentedToggle(showAlt = showAlt, altLabel = "Enter URL", onSelect = { showAlt = it })
-        Spacer(Modifier.height(20.dp))
-
-        Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            if (showAlt) UrlPanel(onSubmit = onScanned) else ScanPanel(onScanned = onScanned)
-        }
-
-        Spacer(Modifier.height(16.dp))
-        Text(
-            if (showAlt) "Paste a public nsite link to fetch it." else "Scan a friend's share code to add their app.",
-            color = MaterialTheme.colorScheme.onSurface,
-            style = MaterialTheme.typography.bodyLarge,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        PasteCodeButton(label = "Paste a code", onPaste = onScanned)
     }
 }
 
 @Composable
-private fun SegmentedToggle(showAlt: Boolean, altLabel: String, onSelect: (Boolean) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(50))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Segment("Scan", selected = !showAlt, modifier = Modifier.weight(1f)) { onSelect(false) }
-        Segment(altLabel, selected = showAlt, modifier = Modifier.weight(1f)) { onSelect(true) }
-    }
-}
-
-@Composable
-private fun Segment(label: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(50))
-            .background(if (selected) MaterialTheme.colorScheme.primary else Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(vertical = 12.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            label,
-            color = if (selected) MaterialTheme.colorScheme.onPrimary else Slate,
-            fontWeight = FontWeight.Bold,
-            style = MaterialTheme.typography.titleMedium,
-        )
-    }
-}
-
-@Composable
-private fun ScanPanel(onScanned: (String) -> Unit) {
+internal fun ScanPanel(onScanned: (String) -> Unit) {
     val context = LocalContext.current
     var granted by remember {
         mutableStateOf(
@@ -342,42 +242,6 @@ private fun MyCodePanel(state: AppState, deviceName: String) {
                     Text("also tap-to-pair ready", color = Color(0xFF047857), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun UrlPanel(onSubmit: (String) -> Unit) {
-    var link by remember { mutableStateOf("") }
-    val clipboard = LocalClipboardManager.current
-    Box(
-        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            OutlinedTextField(
-                value = link,
-                onValueChange = { link = it },
-                singleLine = true,
-                placeholder = { Text("npub… / <npub>.nsite.lol") },
-                trailingIcon = {
-                    IconButton(onClick = {
-                        clipboard.getText()?.text?.let { if (it.isNotBlank()) link = it.trim() }
-                    }) {
-                        Icon(Icons.Filled.ContentPaste, contentDescription = "Paste")
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(14.dp))
-            Button(
-                onClick = { if (link.isNotBlank()) onSubmit(link.trim()) },
-                enabled = link.isNotBlank(),
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("Fetch") }
         }
     }
 }

@@ -14,7 +14,9 @@ import android.graphics.RectF
 import android.graphics.drawable.Icon
 import android.net.VpnService
 import android.nfc.NfcAdapter
+import android.nfc.Tag
 import android.nfc.cardemulation.CardEmulation
+import android.nfc.tech.Ndef
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
@@ -31,6 +33,7 @@ import app.myco.BuildConfig
 import app.myco.core.AppCoreClient
 import app.myco.core.MycoCore
 import app.myco.core.NativeActions
+import app.myco.nfc.NfcReader
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
@@ -167,6 +170,10 @@ class MainActivity : ComponentActivity() {
         // the foreground HCE service after a background→foreground while on Circle.
         PairPresent.onChanged = { runOnUiThread { updateNfcPresent() } }
         updateNfcPresent()
+        // Foreground reader mode is owned by the add-app sheet (a modal window where
+        // passive NDEF dispatch can't reach us). Re-apply its current state here.
+        NfcReader.onChanged = { runOnUiThread { updateNfcReader() } }
+        updateNfcReader()
         // (Re)assert our memorable name into the core so pair events carry it. Done
         // here (not just onCreate) in case the device identity wasn't ready yet at
         // first launch; set_device_name is idempotent.
@@ -177,11 +184,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        // Drop the callback so the process-global PairPresent doesn't pin this
-        // Activity while backgrounded (it's re-set on the next onResume).
+        // Drop the callbacks so the process-global NFC state doesn't pin this
+        // Activity while backgrounded (they're re-set on the next onResume).
         PairPresent.onChanged = null
+        NfcReader.onChanged = null
         nfcAdapter?.let { adapter ->
             runCatching { CardEmulation.getInstance(adapter).unsetPreferredService(this) }
+            runCatching { adapter.disableReaderMode(this) }
         }
     }
 
@@ -198,6 +207,39 @@ class MainActivity : ComponentActivity() {
             else cardEmu.unsetPreferredService(this)
         }.onFailure { android.util.Log.w("MycoNfc", "nfc present setup failed", it) }
         android.util.Log.i("MycoNfc", "present=${PairPresent.presenting}")
+    }
+
+    /** Claim (or release) foreground NFC reader mode while the add-app sheet is up.
+     *  Reader mode reads a tapped peer's emulated tag in-foreground, which a modal
+     *  sheet's separate window otherwise misses (passive dispatch skips it). */
+    private fun updateNfcReader() {
+        val adapter = nfcAdapter ?: return
+        runCatching {
+            if (NfcReader.active) {
+                val flags = NfcAdapter.FLAG_READER_NFC_A or
+                    NfcAdapter.FLAG_READER_NFC_B or
+                    NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS
+                adapter.enableReaderMode(this, { tag -> handleNfcTag(tag) }, flags, null)
+            } else {
+                adapter.disableReaderMode(this)
+            }
+        }.onFailure { android.util.Log.w("MycoNfc", "nfc reader setup failed", it) }
+        android.util.Log.i("MycoNfc", "reading=${NfcReader.active}")
+    }
+
+    /** Read the NDEF URI record off a tapped tag (the peer's emulated share/pair
+     *  tag) and route it through the same handler as a scan. Runs on a binder
+     *  thread — hop to the main thread to touch the core / show toasts. */
+    private fun handleNfcTag(tag: Tag) {
+        val ndef = Ndef.get(tag) ?: return
+        val uri = runCatching {
+            val msg = ndef.cachedNdefMessage ?: run {
+                ndef.connect()
+                try { ndef.ndefMessage } finally { runCatching { ndef.close() } }
+            }
+            msg?.records?.firstNotNullOfOrNull { it.toUri()?.toString() }
+        }.getOrNull() ?: return
+        runOnUiThread { handleScannedText(uri) }
     }
 
     // --- BLE toggle (remembered) ---
