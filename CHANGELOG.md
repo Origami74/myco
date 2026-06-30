@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cache* reclaims space while keeping your pinned apps working offline, and
   *Delete all data, including apps* wipes the local relay + Blossom entirely.
   Your identity and Circle survive both.
+- A peer **speedtest** in the Dev diagnostics tab: round-trips a small payload
+  through a connected, paired peer's mesh Blossom and reports up/down
+  throughput, so you can sanity-check a BLE link's speed.
 
 ### Changed
 

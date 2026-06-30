@@ -9,7 +9,7 @@
 //! Gated by `sync.offline_only`: when set, no IP source is installed and Myco
 //! never reaches the internet (`docs/reference/config.md`).
 
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
@@ -108,6 +108,107 @@ pub fn mesh_source_for(holder_npub: &str) -> anyhow::Result<IpPeerSource> {
     )
     .with_timeout(Duration::from_secs(20))
     .ignoring_manifest_servers())
+}
+
+/// Dev-menu **speedtest** against a mesh peer: PUT a fresh `bytes`-sized payload to
+/// the peer's Blossom (`http://[fd00::peer]:24242/upload`), then GET it back, timing
+/// each leg. Returns `(up_mbps, down_mbps)` — upload (this device → peer) and
+/// download (peer → this device) throughput in megabits per second. The whole call
+/// is bounded by `timeout`. The peer's Blossom gates non-loopback sources by Circle
+/// membership, so this only succeeds against a paired, reachable peer.
+///
+/// Note: the payload is content-addressed and there is no Blossom DELETE, so a run
+/// leaves a `bytes`-sized blob on the peer until its next cache wipe — fine for the
+/// occasional dev measurement, but keep `bytes` modest.
+pub async fn speedtest_peer(
+    npub: &str,
+    bytes: usize,
+    timeout: Duration,
+) -> anyhow::Result<(f64, f64)> {
+    // Address the peer by its `<npub>.fips` hostname, but resolve it ourselves: the
+    // Android system resolver has no `.fips` entries (that resolver is the FIPS
+    // gateway's, not wired into reqwest), so a plain request fails DNS. Map the
+    // hostname to the peer's deterministic mesh ULA (`fd00:: = fd + node_addr`) and
+    // hand it to reqwest via `.resolve` — it then connects over the app-owned TUN
+    // while keeping the `<npub>.fips` Host the peer expects.
+    let peer = fips::PeerIdentity::from_npub(npub)
+        .map_err(|e| anyhow::anyhow!("invalid peer npub {npub}: {e}"))?;
+    let host = format!("{npub}.fips");
+    let socket = std::net::SocketAddr::new(std::net::IpAddr::V6(peer.address().to_ipv6()), 24242);
+    let client = reqwest::Client::builder()
+        .resolve(&host, socket)
+        // A short connect timeout so an unroutable/unreachable peer fails fast
+        // instead of burning the whole `timeout` budget; the total still bounds the
+        // (potentially slow over BLE) transfer.
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(timeout)
+        .build()?;
+    speedtest_blossom(&client, &format!("http://{host}:24242"), bytes).await
+}
+
+/// The Blossom round-trip itself, against an already-built `client` + `base` URL —
+/// split out so it can be exercised against a local server in tests.
+async fn speedtest_blossom(
+    client: &reqwest::Client,
+    base: &str,
+    bytes: usize,
+) -> anyhow::Result<(f64, f64)> {
+    // A fresh, incompressible payload each run so the peer can't already hold it
+    // (which would make the GET a local hit and the hash collide across runs).
+    let payload = random_bytes(bytes);
+
+    let t_up = Instant::now();
+    let resp = client
+        .put(format!("{base}/upload"))
+        .body(payload)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("upload rejected ({})", resp.status());
+    }
+    let up_mbps = throughput_mbps(bytes, t_up.elapsed());
+    let descriptor: serde_json::Value = serde_json::from_str(&resp.text().await?)?;
+    let hash = descriptor["sha256"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("upload descriptor missing sha256"))?
+        .to_string();
+
+    let t_down = Instant::now();
+    let got = client.get(format!("{base}/{hash}")).send().await?;
+    if !got.status().is_success() {
+        anyhow::bail!("download rejected ({})", got.status());
+    }
+    let body = got.bytes().await?;
+    let down_mbps = throughput_mbps(body.len(), t_down.elapsed());
+
+    Ok((up_mbps, down_mbps))
+}
+
+fn throughput_mbps(bytes: usize, elapsed: Duration) -> f64 {
+    let secs = elapsed.as_secs_f64();
+    if secs <= 0.0 {
+        return 0.0;
+    }
+    (bytes as f64 * 8.0) / secs / 1_000_000.0
+}
+
+/// `n` pseudo-random bytes from a time-seeded xorshift64 — cheap and dependency-
+/// free; we only need the bytes to be fresh per run, not cryptographically random.
+fn random_bytes(n: usize) -> Vec<u8> {
+    let mut state = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9e37_79b9_7f4a_7c15)
+        | 1;
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.extend_from_slice(&state.to_le_bytes());
+    }
+    out.truncate(n);
+    out
 }
 
 /// Discover the nsite manifests a relay holds — kind 15128 (root) + 35128 (named)
@@ -293,6 +394,26 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn speedtest_round_trips_through_blossom() {
+        // A real embedded Blossom (PUT /upload + GET /<hash>) on loopback.
+        let dir = std::env::temp_dir().join(format!("myco-speedtest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Arc::new(myco_blossom::FsBlobStore::open(&dir).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(myco_blossom::server::serve_on(store, listener));
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+        let (up, down) = speedtest_blossom(&client, &base, 64 * 1024).await.unwrap();
+        // Loopback: both legs move bytes and yield a finite, positive rate.
+        assert!(up > 0.0 && up.is_finite(), "up_mbps = {up}");
+        assert!(down > 0.0 && down.is_finite(), "down_mbps = {down}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A mock relay: accept one WS connection, read the REQ, reply with the given
     /// event then EOSE. Returns the `ws://` URL.

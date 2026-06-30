@@ -39,6 +39,30 @@ pub struct AppState {
     pub offline_only: bool,
     /// Status of the latest nsite update check (feedback for "Check for updates").
     pub update_check: crate::content::UpdateCheckView,
+    /// Result of the dev-menu peer speedtest (a Blossom upload+download round-trip).
+    pub speedtest: SpeedtestView,
+}
+
+/// Outcome of a peer speedtest: upload + download throughput measured by PUTting
+/// a fresh payload to the peer's mesh Blossom and GETting it back. `generation`
+/// bumps on each completion so the UI can tell a fresh result from a stale one.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeedtestView {
+    /// A run is in flight (the UI shows a spinner / disables the button).
+    pub running: bool,
+    /// The peer the latest run targeted (npub), for the result label.
+    pub peer_npub: String,
+    /// Payload size moved each way, in bytes.
+    pub bytes: u64,
+    /// Upload (this device → peer) throughput, megabits per second.
+    pub up_mbps: f64,
+    /// Download (peer → this device) throughput, megabits per second.
+    pub down_mbps: f64,
+    /// Non-empty if the last run failed (e.g. peer unreachable / not paired).
+    pub error: String,
+    /// Bumped on each completed run (success or failure).
+    pub generation: u64,
 }
 
 /// The device identity, in the derived forms the UI shows.
