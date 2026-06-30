@@ -346,6 +346,19 @@ delivers the `myco://` link to the app via an intent filter, reaching the same
 add-peer code path as a scan. Both phones present-and-poll at once, so a single
 bump can pair symmetrically.
 
+**Sharing an app over NFC, and the reader-mode exception.** The same emulation also
+serves the app-share payload: the share sheet presents a `myco://share/<base64>`
+URI (`{nsite, npub, name, secret}`), so a tap opens the shared app *and* pairs,
+exactly like scanning its QR. This needed one carve-out from the "no reader mode"
+rule above. The share and *Add an app* surfaces are modal bottom sheets, each shown
+in its **own focused window**, where the OS's passive `NDEF_DISCOVERED` dispatch
+(which reaches the Activity fine from the full-screen Circle tab) no longer arrives.
+So while the *Add an app* sheet is open the app claims foreground NFC **reader
+mode** and reads the tapped peer's tag itself. It is scoped strictly to that sheet
+(the Circle bump path is unchanged and still uses passive dispatch), and it forwards
+**only `myco://`-scheme URIs** to the same handler as a scan — an unrelated URL tag
+held to the phone is read but ignored, never opened.
+
 **Where the secret lives.** §6.1 framed the `pairSecret` as echoed back inside the
 Noise-encrypted channel to `<npub_A>.fips`. The implementation keeps that property:
 the scanner/tapper sends a signed pair **request** (kind 9101) to

@@ -237,9 +237,13 @@ class MainActivity : ComponentActivity() {
                 ndef.connect()
                 try { ndef.ndefMessage } finally { runCatching { ndef.close() } }
             }
-            msg?.records?.firstNotNullOfOrNull { it.toUri()?.toString() }
+            msg?.records?.firstNotNullOfOrNull { it.toUri() }
         }.getOrNull() ?: return
-        runOnUiThread { handleScannedText(uri) }
+        // Only act on our own scheme. Reader mode reads *any* tapped NDEF tag, so
+        // without this an unrelated URL tag would fall through to openNsite(). Raw
+        // nsite links are entered via QR/paste, never NFC.
+        if (uri.scheme != NsiteShare.SCHEME) return
+        runOnUiThread { handleScannedText(uri.toString()) }
     }
 
     // --- BLE toggle (remembered) ---
