@@ -131,9 +131,11 @@ fun CircleScreen(
 
     val connected = state.blePeers.filter { it.connected }.map { it.npub }.toSet()
     val circleNpubs = remember(state.circle) { state.circle.map { it.npub }.toSet() }
+    // Sorted by display name (stable per npub) rather than the radio's signal-
+    // strength/discovery order, so bubbles don't reshuffle as RSSI fluctuates.
     val nearby = state.blePeers.filter {
         it.connected && it.npub.isNotEmpty() && it.npub != state.ownNpub && it.npub !in circleNpubs
-    }
+    }.sortedWith(compareBy({ DeviceName.generated(it.npub).lowercase() }, { it.npub }))
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -161,8 +163,22 @@ fun CircleScreen(
                 item { TapToConnect(nfc = nfc, onEnableNfc = { NfcStatus.openSettings(context) }) }
             }
 
-            if (nearby.isNotEmpty()) {
-                item { SectionLabel("NEARBY", trailing = "· tap to add", scanning = state.bleScanning) }
+            item {
+                SectionLabel(
+                    "NEARBY",
+                    trailing = if (nearby.isNotEmpty()) "· tap to add" else null,
+                    scanning = state.bleScanning,
+                )
+            }
+            if (nearby.isEmpty()) {
+                item {
+                    Text(
+                        "Nobody nearby yet. Keep this screen open near another phone.",
+                        color = Slate,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            } else {
                 item {
                     FlowRow(
                         modifier = Modifier.fillMaxWidth(),
