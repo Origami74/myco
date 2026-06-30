@@ -9,7 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Share an app by tapping phones. The share sheet now presents its
+  `myco://share` code over NFC, so a bump opens the app and pairs with the
+  sharer — the same result as scanning its QR. Receiving a tapped share also
+  works from the new *Add an app* sheet.
+
 ### Changed
+
+- The "Share this app" surface is now a bottom sheet styled like the pairing
+  QR — a larger code and a prominent "tap phones together" prompt — and it
+  closes itself once the recipient pairs.
+- *Add an app* is now a bottom sheet: a live camera scanner, a paste-a-link
+  button, and a tap-a-friend's-phone option, replacing the full-screen add
+  view.
+- Tapping or long-pressing someone in your Circle opens an action sheet
+  (avatar, short npub, "Remove from circle") instead of a bare "Forget?"
+  dialog; removal stays the last, destructive, confirmed action.
 
 ### Fixed
 

@@ -1,11 +1,5 @@
 package app.myco.ui.screens
 
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -34,11 +28,15 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Contactless
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MarkEmailUnread
+import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -54,11 +52,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -101,7 +96,7 @@ private enum class Badge { NONE, PLUS, SENT }
  * scan / show / paste. While this screen is open the device presents over NFC, so
  * two phones both here pair on a single bump.
  */
-@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun CircleScreen(
     state: AppState,
@@ -112,7 +107,9 @@ fun CircleScreen(
     val context = LocalContext.current
     var name by remember(state.ownNpub) { mutableStateOf(DeviceName.current(context, state.ownNpub)) }
     var editing by remember { mutableStateOf(false) }
-    var forget by remember { mutableStateOf<CircleContact?>(null) }
+    // Tap/long-press a circle member → a menu sheet; "Remove" opens a confirm.
+    var sheetFor by remember { mutableStateOf<CircleContact?>(null) }
+    var confirmRemove by remember { mutableStateOf<CircleContact?>(null) }
     val sent = remember { mutableStateListOf<String>() }
 
     // NFC availability, re-checked on resume (e.g. back from NFC settings).
@@ -220,7 +217,9 @@ fun CircleScreen(
                                 ring = if (online) Ring.ONLINE else Ring.NONE,
                                 badge = Badge.NONE,
                                 dim = !online,
-                                onLongClick = { forget = c },
+                                // "Holding or tapping" both open the menu sheet.
+                                onClick = { sheetFor = c },
+                                onLongClick = { sheetFor = c },
                             )
                         }
                     }
@@ -262,18 +261,64 @@ fun CircleScreen(
         )
     }
 
-    forget?.let { c ->
+    sheetFor?.let { c ->
+        ModalBottomSheet(onDismissRequest = { sheetFor = null }) {
+            PersonSheet(
+                contact = c,
+                onRemove = { sheetFor = null; confirmRemove = c },
+            )
+        }
+    }
+
+    confirmRemove?.let { c ->
         AlertDialog(
-            onDismissRequest = { forget = null },
+            onDismissRequest = { confirmRemove = null },
             confirmButton = {
-                TextButton(onClick = { client.dispatch(NativeActions.removeFromCircle(c.npub)); forget = null }) { Text("Forget") }
+                TextButton(onClick = { client.dispatch(NativeActions.removeFromCircle(c.npub)); confirmRemove = null }) {
+                    Text("Remove", color = MaterialTheme.colorScheme.error)
+                }
             },
-            dismissButton = { TextButton(onClick = { forget = null }) { Text("Cancel") } },
-            title = { Text("Forget ${c.name.ifEmpty { "this peer" }}?") },
+            dismissButton = { TextButton(onClick = { confirmRemove = null }) { Text("Cancel") } },
+            title = { Text("Remove ${c.name.ifEmpty { "this peer" }}?") },
             text = { Text("They'll be removed from your Circle. You can re-pair anytime.") },
         )
     }
 }
+
+/**
+ * The menu sheet for a person in your Circle — mirrors the app long-press sheet
+ * ([AppSheet]). Remove-from-circle is the **last**, destructive action (red); the
+ * useful, non-destructive actions come first.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PersonSheet(
+    contact: CircleContact,
+    onRemove: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier.size(44.dp).clip(CircleShape).background(avatarColorFor(contact.npub)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(contact.name.firstOrNull()?.uppercase() ?: "?", color = Color.White, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(contact.name.ifEmpty { "unknown" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("in your circle", color = Slate, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        SheetAction(Icons.Filled.Info, shortNpub(contact.npub)) { }
+        SheetAction(Icons.Filled.PersonRemove, "Remove from circle", tint = MaterialTheme.colorScheme.error) { onRemove() }
+    }
+}
+
+/** A compact, recognizable npub: `npub1abcd…wxyz`. */
+private fun shortNpub(npub: String): String =
+    if (npub.length <= 20) npub else npub.take(12) + "…" + npub.takeLast(6)
 
 @Composable
 private fun IdentityChip(name: String, onEdit: () -> Unit) {
@@ -322,51 +367,19 @@ private fun TapToConnect(nfc: NfcState, onEnableNfc: () -> Unit) {
     }
 }
 
-/** The tap-to-connect bubble with a subtle, looping "signal" animation — the two
- *  outer contactless arcs breathe to draw a little attention without distracting. */
+/** The tap-to-connect bubble: a static warning glyph when NFC is off, otherwise
+ *  the shared breathing-arcs [NfcPulseBubble]. */
 @Composable
 private fun NfcBubble(warn: Boolean) {
-    Box(
-        modifier = Modifier.size(48.dp).background(if (warn) Color(0xFFB45309) else Emerald, CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (warn) {
-            Icon(
-                Icons.Filled.Contactless,
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(26.dp),
-            )
-        } else {
-            val transition = rememberInfiniteTransition(label = "nfc")
-            val wave by transition.animateFloat(
-                initialValue = 0.25f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(tween(950, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-                label = "wave",
-            )
-            Canvas(modifier = Modifier.size(28.dp)) {
-                val cx = size.width * 0.30f
-                val cy = size.height / 2f
-                val white = Color.White
-                drawCircle(white, radius = 1.8.dp.toPx(), center = Offset(cx, cy))
-                fun arc(rDp: Float, alpha: Float) {
-                    val r = rDp.dp.toPx()
-                    drawArc(
-                        color = white.copy(alpha = alpha),
-                        startAngle = -52f,
-                        sweepAngle = 104f,
-                        useCenter = false,
-                        topLeft = Offset(cx - r, cy - r),
-                        size = Size(2 * r, 2 * r),
-                        style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round),
-                    )
-                }
-                arc(4.5f, 1f)
-                arc(8f, wave)
-                arc(11.5f, wave * 0.7f)
-            }
+    if (warn) {
+        Box(
+            modifier = Modifier.size(48.dp).background(Color(0xFFB45309), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Filled.Contactless, contentDescription = null, tint = Color.White, modifier = Modifier.size(26.dp))
         }
+    } else {
+        NfcPulseBubble()
     }
 }
 

@@ -42,6 +42,15 @@ object PairPresent {
         onChanged?.invoke()
     }
 
+    /** Begin presenting a prebuilt payload verbatim (e.g. a `myco://share/…` URI
+     *  carrying an nsite). Unlike [begin], the caller owns the secret — used by the
+     *  share-an-app surface, which mints its own one-time secret in the share URI. */
+    fun beginRaw(uri: String) {
+        payload.value = uri
+        presentingState.value = true
+        onChanged?.invoke()
+    }
+
     /** Mint a new single-use secret and rebuild the presented payload (called after
      *  a tap is consumed, so the same code can't pair twice). */
     fun rotate(context: Context, ownNpub: String, deviceName: String) {
