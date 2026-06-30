@@ -43,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bluetooth links are far more reliable. The L2CAP reader and writer assumed
+  each socket read returned exactly one whole mesh packet (and added their own
+  length framing on top), but `BluetoothSocket` is a byte stream with no packet
+  boundaries — so fragmented reads were shipped up as runt packets and coalesced
+  reads were truncated, dropping data and thrashing the link. The radio is now a
+  transparent, in-order byte pipe; the embedded core recovers packet boundaries
+  from the mesh framing header (the same length-prefixed framer the IP transport
+  uses), and a dropped inbound chunk now resets the link instead of silently
+  corrupting the rest of the connection.
 - The main app no longer flips to landscape on a slight tilt — it's locked to
   portrait, matching the QR scanner.
 
