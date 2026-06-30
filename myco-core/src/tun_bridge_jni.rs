@@ -17,7 +17,7 @@ use jni::JNIEnv;
 /// Returns `true` if accepted (a TUN is installed and the queue had room).
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_tunSendPacket(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     packet: JByteArray,
     len: jint,
@@ -36,7 +36,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_tunSendPacket(
 /// (the writer loops again).
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_tunNextPacket(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     out: JByteArray,
     timeout_ms: jint,

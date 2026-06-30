@@ -60,9 +60,4 @@ impl PeerRelayPool {
             let _ = ws.send(Message::Close(None)).await;
         });
     }
-
-    /// Drop the connection to a peer (e.g. it left the Circle / disconnected).
-    pub fn drop_peer(&self, npub: &str) {
-        self.conns.lock().unwrap().remove(npub);
-    }
 }

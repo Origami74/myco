@@ -66,14 +66,11 @@ impl Gossiper for MeshGossiper {
                 // *now*. Retry any not-yet-ready downloads from them immediately,
                 // rather than waiting for the next connected-peer poll edge.
                 if kind == crate::content::KIND_PAIR_ACCEPT {
-                    if let Ok(npub) = event.pubkey.to_bech32() {
-                        for addr in self.content.retriable_library_addrs() {
-                            let content = self.content.clone();
-                            let holder = npub.clone();
-                            tokio::spawn(
-                                async move { content.open_site(addr, Some(holder)).await },
-                            );
-                        }
+                    let Ok(npub) = event.pubkey.to_bech32();
+                    for addr in self.content.retriable_library_addrs() {
+                        let content = self.content.clone();
+                        let holder = npub.clone();
+                        tokio::spawn(async move { content.open_site(addr, Some(holder)).await });
                     }
                 }
             }

@@ -147,7 +147,7 @@ fn jstring_to_addr(env: &mut JNIEnv, s: &JString) -> Option<BleAddr> {
 /// called before dispatching StartNode.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_bleBridgeNew(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     _app_handle: jlong,
     radio: JObject,
@@ -244,7 +244,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverScan(
 /// Kotlin read one L2CAP packet. Returns 1 if delivered, 0 if the channel is gone.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_bleChannelDeliverRecv(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     handle: jlong,
     ch_id: jlong,
@@ -281,7 +281,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleChannelClosed(
 /// again); -1 = channel closed (stop the writer).
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_bleChannelNextSend(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     handle: jlong,
     ch_id: jlong,

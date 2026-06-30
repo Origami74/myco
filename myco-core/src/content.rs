@@ -942,9 +942,7 @@ impl Content {
     /// point-to-point and never gossiped). A **request** surfaces a pop-up; an
     /// **accept** means a peer accepted *our* request → add them to the Circle.
     pub fn handle_pair_event(&self, event: &Event) {
-        let Ok(from) = event.pubkey.to_bech32() else {
-            return;
-        };
+        let Ok(from) = event.pubkey.to_bech32();
         let name = tag_value(event, "n").unwrap_or_else(|| short_name(&from));
         match event.kind.as_u16() {
             KIND_PAIR_REQUEST => {
