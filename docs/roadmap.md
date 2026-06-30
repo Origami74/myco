@@ -119,8 +119,7 @@ shows the other connected in the developer UI (the peer's `node_addr`, then its
 `npub` once Noise completes).
 
 **Design docs.** [ble-interop.md](./design/ble-interop.md) (the BLE backends, the
-PSM problem, per-peer PSM discovery) · [ble-wire.md](./reference/ble-wire.md)
-(on-wire constants, PSM advertise/read scheme) ·
+PSM problem, per-peer PSM discovery) ·
 [ffi-surface.md](./reference/ffi-surface.md) (the BLE byte-bridge, `ble` /
 `blePeers` state, the developer UI) ·
 [build.md § 4c](./how-to/build.md) (custom `BleIo` injection, per-peer PSM patch,
@@ -310,8 +309,7 @@ per-peer PSM advertising form a FIPS BLE link (each reads the other's advertised
 PSM), and the Android browses an nsite hosted on the Linux peer (or vice-versa).
 
 **Design docs.** [ble-interop.md](./design/ble-interop.md) (Android↔Linux via
-per-peer PSM discovery) · [ble-wire.md](./reference/ble-wire.md) (the constants
-the backend must match; PSM advertise/read scheme) ·
+per-peer PSM discovery) ·
 [build.md § 4c](./how-to/build.md) (the per-peer PSM patch, all backends).
 
 ---

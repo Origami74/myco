@@ -291,8 +291,7 @@ cargo ndk -t arm64-v8a --platform 29 build -p myco-core --release \
 >    learned PSM** — symmetric per-peer discovery that **intentionally drops fixed-`0x0085`
 >    wire compat**. `BleIo::connect(addr, psm)` already takes a per-call PSM and config
 >    `psm()` is `self.psm.unwrap_or(DEFAULT_BLE_PSM)`, so the change is the advert carrier
->    plus discovery capture. See [ble-interop.md](../design/ble-interop.md) and
->    [ble-wire.md](../reference/ble-wire.md).
+>    plus discovery capture. See [ble-interop.md](../design/ble-interop.md).
 > 4. **Reused/fixed macOS `BleIo` (test-only).** A CoreBluetooth backend (`BluestIo`, the
 >    `bluest` crate) already exists on the fips branch **`macos-ble-rebased`** (commit
 >    `0ae9e01`, `ble-macos` cargo feature, 2-byte length-prefix L2CAP framing). It was

@@ -143,7 +143,6 @@ class BleRadio(context: Context) {
         // key the 2-byte PSM service-data on a 16-bit UUID (PSM_SD_UUID16) so it
         // sits alongside the full 128-bit FIPS service UUID (used for the scan
         // filter): ~3 (flags) + 18 (128-bit UUID) + 6 (16-bit service-data) = 27B.
-        // See docs/reference/ble-wire.md.
         val psmLe = byteArrayOf((psm and 0xFF).toByte(), ((psm shr 8) and 0xFF).toByte())
         val advData = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
@@ -426,14 +425,14 @@ class BleRadio(context: Context) {
          *  no head-of-line batching of multiple packets into one giant frame. */
         private const val MESH_MTU_CAP = 1500
 
-        /** FIPS service UUID — must match fips-core (ble-wire.md). */
+        /** FIPS service UUID — must match fips-core. */
         val FIPS_UUID: UUID = UUID.fromString("9c90b790-2cc5-42c0-9f87-c9cc40648f4c")
         val FIPS_PARCEL_UUID = ParcelUuid(FIPS_UUID)
 
         /** Compact 16-bit service-data UUID carrying the 2-byte LE listener PSM in
          *  the PRIMARY advert (0x9C90 = the FIPS UUID's leading 16 bits, via the
          *  Bluetooth base UUID). A 16-bit key keeps PSM service-data + the full
-         *  128-bit FIPS UUID inside one 31-byte legacy advert. See ble-wire.md. */
+         *  128-bit FIPS UUID inside one 31-byte legacy advert. */
         val PSM_SD_PARCEL_UUID = ParcelUuid.fromString("00009c90-0000-1000-8000-00805f9b34fb")
     }
 }
