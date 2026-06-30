@@ -389,7 +389,10 @@ impl Content {
     /// The backend the gateway reads: serves the active (fully-downloaded) version,
     /// not necessarily the relay's newest.
     fn active_backend(&self) -> ActiveBackend<'_> {
-        ActiveBackend { relay: self.relay.as_ref(), active: &self.active_manifests }
+        ActiveBackend {
+            relay: self.relay.as_ref(),
+            active: &self.active_manifests,
+        }
     }
 
     /// Pin `manifest` as the active version for its slot (atomic swap the gateway
@@ -417,7 +420,14 @@ impl Content {
         path: &str,
         range: Option<&str>,
     ) -> GatewayResponse {
-        gateway::serve(&self.active_backend(), self.blobs.as_ref(), host, path, range).await
+        gateway::serve(
+            &self.active_backend(),
+            self.blobs.as_ref(),
+            host,
+            path,
+            range,
+        )
+        .await
     }
 
     /// Serve and frame the response for the `gatewayGet` JNI: a 4-byte big-endian
@@ -516,7 +526,13 @@ impl Content {
             }
         }
         if sources.is_empty() {
-            self.set_status(&addr, "unreachable", 0, 0, "Can't reach anyone who has this app yet.");
+            self.set_status(
+                &addr,
+                "unreachable",
+                0,
+                0,
+                "Can't reach anyone who has this app yet.",
+            );
             return;
         }
         tracing::info!(
@@ -529,7 +545,13 @@ impl Content {
 
         // Live progress so the UI shows "X/Y files" instead of sitting at 0/0.
         let progress = |present: usize, total: usize| {
-            self.set_status(&addr, "syncing", present as u64, total as u64, "Downloading…");
+            self.set_status(
+                &addr,
+                "syncing",
+                present as u64,
+                total as u64,
+                "Downloading…",
+            );
         };
 
         // Try each in order; the first that goes Ready wins. Keep the best
@@ -540,7 +562,8 @@ impl Content {
             // refetch. Otherwise do a full sync (manifest + blobs).
             let outcome = match &known {
                 Some(manifest) => {
-                    sync::stage_blobs(self.blobs.as_ref(), source.as_ref(), manifest, &progress).await
+                    sync::stage_blobs(self.blobs.as_ref(), source.as_ref(), manifest, &progress)
+                        .await
                 }
                 None => {
                     sync::sync_site(
@@ -563,7 +586,14 @@ impl Content {
                             let _ = self.relay.store_event(m.event.clone()).await;
                             self.set_active(&m.event);
                             let n = m.paths.len() as u64;
-                            self.set_status_titled(&addr, m.title.as_deref(), "ready", n, n, "Ready");
+                            self.set_status_titled(
+                                &addr,
+                                m.title.as_deref(),
+                                "ready",
+                                n,
+                                n,
+                                "Ready",
+                            );
                             self.add_to_library(&addr, m.title.as_deref(), now_secs());
                         }
                         // Full sync stored the just-fetched manifest (the relay's
@@ -626,9 +656,13 @@ impl Content {
                 }
             }
         }
-        let outcome =
-            sync::import_site(self.relay.as_ref(), self.blobs.as_ref(), event.clone(), &blobs)
-                .await?;
+        let outcome = sync::import_site(
+            self.relay.as_ref(),
+            self.blobs.as_ref(),
+            event.clone(),
+            &blobs,
+        )
+        .await?;
         // Surface the imported site as `ready` (and pin it) so the UI can open it
         // with one tap and it persists across restarts.
         if outcome == SyncOutcome::Ready {
@@ -716,7 +750,9 @@ impl Content {
     /// relay + Blossom persist, but the in-memory status map does not.
     pub async fn refresh_library_status(self: Arc<Self>) {
         for item in self.library_snapshot() {
-            let Some(addr) = library_addr(&item) else { continue };
+            let Some(addr) = library_addr(&item) else {
+                continue;
+            };
             match gateway::readiness(&self.active_backend(), self.blobs.as_ref(), &addr).await {
                 Ok(Readiness::Ready(m)) => {
                     // Bootstrap/refresh the active pointer to the served version, so
@@ -877,8 +913,11 @@ impl Content {
     /// clears the override (falls back to the npub-derived name).
     pub fn set_device_name(&self, name: &str) {
         let trimmed = name.trim();
-        *self.device_name_override.lock().unwrap() =
-            if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+        *self.device_name_override.lock().unwrap() = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
     }
 
     /// Our own device label, sent to the peer so their pop-up / Circle entry has a
@@ -903,7 +942,9 @@ impl Content {
     /// point-to-point and never gossiped). A **request** surfaces a pop-up; an
     /// **accept** means a peer accepted *our* request → add them to the Circle.
     pub fn handle_pair_event(&self, event: &Event) {
-        let Ok(from) = event.pubkey.to_bech32() else { return };
+        let Ok(from) = event.pubkey.to_bech32() else {
+            return;
+        };
         let name = tag_value(event, "n").unwrap_or_else(|| short_name(&from));
         match event.kind.as_u16() {
             KIND_PAIR_REQUEST => {
@@ -911,18 +952,28 @@ impl Content {
                 let secret = tag_value(event, "secret").unwrap_or_default();
                 let mut pending = self.pending_pairs.lock().unwrap();
                 if !pending.iter().any(|p| p.npub == from) {
-                    pending.push(PairRequestView { npub: from, name, secret });
+                    pending.push(PairRequestView {
+                        npub: from,
+                        name,
+                        secret,
+                    });
                 }
             }
             KIND_PAIR_ACCEPT => {
                 tracing::info!(from = %from, "pair: our request accepted — added to circle");
                 self.add_to_circle(&from, &name);
-                self.pending_pairs.lock().unwrap().retain(|p| p.npub != from);
+                self.pending_pairs
+                    .lock()
+                    .unwrap()
+                    .retain(|p| p.npub != from);
             }
             KIND_PAIR_REMOVE => {
                 tracing::info!(from = %from, "pair: peer unpaired — removing from circle");
                 self.remove_from_circle(&from);
-                self.pending_pairs.lock().unwrap().retain(|p| p.npub != from);
+                self.pending_pairs
+                    .lock()
+                    .unwrap()
+                    .retain(|p| p.npub != from);
             }
             _ => {}
         }
@@ -931,20 +982,27 @@ impl Content {
     /// Scanned a peer's QR: send a signed pair request to their mesh relay. We do
     /// not add them yet — only a mutual accept pairs both sides.
     pub async fn send_pair_request(&self, target_npub: &str, secret: &str) {
-        self.dial_pair_event(target_npub, KIND_PAIR_REQUEST, secret).await;
+        self.dial_pair_event(target_npub, KIND_PAIR_REQUEST, secret)
+            .await;
     }
 
     /// Accept an incoming request: add the requester to our Circle and send them a
     /// signed accept so they add us too.
     pub async fn accept_pair_request(&self, npub: &str, name: &str) {
         self.add_to_circle(npub, name);
-        self.pending_pairs.lock().unwrap().retain(|p| p.npub != npub);
+        self.pending_pairs
+            .lock()
+            .unwrap()
+            .retain(|p| p.npub != npub);
         self.dial_pair_event(npub, KIND_PAIR_ACCEPT, "").await;
     }
 
     /// Decline an incoming request (drop it; no signal back).
     pub fn decline_pair_request(&self, npub: &str) {
-        self.pending_pairs.lock().unwrap().retain(|p| p.npub != npub);
+        self.pending_pairs
+            .lock()
+            .unwrap()
+            .retain(|p| p.npub != npub);
     }
 
     /// Tell a peer we've forgotten them, so they drop us from their Circle too.
@@ -1009,7 +1067,9 @@ impl Content {
     /// REQ. (The efficient negentropy version is future work — needs NIP-77 on the
     /// relay.) `npub` is a connected Circle peer.
     pub async fn pull_recent_chat(&self, npub: &str) {
-        let Ok(peer) = fips::PeerIdentity::from_npub(npub) else { return };
+        let Ok(peer) = fips::PeerIdentity::from_npub(npub) else {
+            return;
+        };
         let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
         // kind 9 is the v1 chat kind (myco-bitchat); generalize when more apps land.
         let filter = serde_json::json!({ "kinds": [9], "limit": 100 });
@@ -1039,7 +1099,9 @@ impl Content {
     /// persistent pooled connection (no per-message connect). `npub` is the target
     /// Circle peer. Non-blocking.
     pub fn gossip_to_peer(&self, npub: &str, frame: String) {
-        let Ok(peer) = fips::PeerIdentity::from_npub(npub) else { return };
+        let Ok(peer) = fips::PeerIdentity::from_npub(npub) else {
+            return;
+        };
         let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
         self.peer_relays.send(npub, &url, frame);
     }
@@ -1071,29 +1133,32 @@ impl Content {
             })
             .collect();
 
-        let queries = self.connected_circle_npubs().into_iter().filter_map(|npub| {
-            let peer = fips::PeerIdentity::from_npub(&npub).ok()?;
-            let ip = std::net::IpAddr::V6(peer.address().to_ipv6());
-            if exclude == Some(ip) {
-                return None;
-            }
-            let url = format!("ws://[{}]:4869", ip);
-            let filters = filters.clone();
-            Some(async move {
-                let mut out = Vec::new();
-                for f in &filters {
-                    if let Ok(Ok(evs)) = tokio::time::timeout(
-                        std::time::Duration::from_secs(8),
-                        crate::ip_source::query_relay(&url, f.clone()),
-                    )
-                    .await
-                    {
-                        out.extend(evs);
-                    }
+        let queries = self
+            .connected_circle_npubs()
+            .into_iter()
+            .filter_map(|npub| {
+                let peer = fips::PeerIdentity::from_npub(&npub).ok()?;
+                let ip = std::net::IpAddr::V6(peer.address().to_ipv6());
+                if exclude == Some(ip) {
+                    return None;
                 }
-                out
-            })
-        });
+                let url = format!("ws://[{}]:4869", ip);
+                let filters = filters.clone();
+                Some(async move {
+                    let mut out = Vec::new();
+                    for f in &filters {
+                        if let Ok(Ok(evs)) = tokio::time::timeout(
+                            std::time::Duration::from_secs(8),
+                            crate::ip_source::query_relay(&url, f.clone()),
+                        )
+                        .await
+                        {
+                            out.extend(evs);
+                        }
+                    }
+                    out
+                })
+            });
 
         join_all(queries)
             .await
@@ -1126,7 +1191,10 @@ impl Content {
                 .into_iter()
                 .filter_map(|ev| nsite_deck::Manifest::from_event(ev).ok())
                 .map(|m| {
-                    let addr = SiteAddr { author: m.author, d_tag: m.d_tag.clone() };
+                    let addr = SiteAddr {
+                        author: m.author,
+                        d_tag: m.d_tag.clone(),
+                    };
                     DiscoveredNsite {
                         host: addr.host_label(),
                         author_npub: m.author.to_bech32().unwrap_or_default(),
@@ -1264,7 +1332,9 @@ impl Content {
         for addr in addrs {
             let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
             let key = manifest_key(kind, &addr.author, addr.d_tag.as_deref());
-            let Some(cand) = newest.get(&key) else { continue };
+            let Some(cand) = newest.get(&key) else {
+                continue;
+            };
             // Compare against the version we actually serve (the active pointer),
             // not merely the relay's newest.
             let active_ts = self
@@ -1397,7 +1467,12 @@ impl Content {
             }
             pend.insert(
                 host.clone(),
-                PendingUpdate { manifest: candidate.clone(), total, pulled: 0, ready: false },
+                PendingUpdate {
+                    manifest: candidate.clone(),
+                    total,
+                    pulled: 0,
+                    ready: false,
+                },
             );
         }
         let progress = |pulled: usize, _total: usize| {
@@ -1409,7 +1484,13 @@ impl Content {
         let mut done = false;
         for source in &sources {
             if matches!(
-                nsite_deck::sync::stage_blobs(self.blobs.as_ref(), source.as_ref(), &manifest, &progress).await,
+                nsite_deck::sync::stage_blobs(
+                    self.blobs.as_ref(),
+                    source.as_ref(),
+                    &manifest,
+                    &progress
+                )
+                .await,
                 Ok(SyncOutcome::Ready)
             ) {
                 done = true;
@@ -1441,7 +1522,10 @@ impl Content {
     /// and activate. Forwarding never waits on the download for sites we don't run.
     pub async fn on_manifest_event(self: Arc<Self>, event: Event, inbound: Inbound) {
         let d = event_d_tag(&event);
-        let addr = SiteAddr { author: event.pubkey, d_tag: d };
+        let addr = SiteAddr {
+            author: event.pubkey,
+            d_tag: d,
+        };
 
         // Forward budget (mirrors chat): originate at the default for a local
         // publish, else the ttl that rode in. Clamp so a peer can't over-extend us.
@@ -1647,15 +1731,19 @@ impl Content {
 /// count. Self-refreshes each second; the favicon (fetched first) appears early.
 fn loading_html(status: Option<&SiteStatusView>) -> String {
     const CIRC: f64 = 427.3; // 2π·68, the ring circumference
-    // Poll the favicon every 300ms (cycling the common paths) so the icon fades in
-    // the instant its blob lands — the sync fetches it first, ahead of the 1s reload.
+                             // Poll the favicon every 300ms (cycling the common paths) so the icon fades in
+                             // the instant its blob lands — the sync fetches it first, ahead of the 1s reload.
     const ICON_JS: &str = "<script>(function(){var i=document.getElementById('ic'),\
 s=['/favicon.ico','/favicon.png','/apple-touch-icon.png'],n=0,d=false;\
 i.onload=function(){if(i.naturalWidth>0){d=true;i.style.opacity=1}};\
 i.onerror=function(){if(d)return;n=(n+1)%s.length;setTimeout(function(){i.src=s[n]},300)};})();</script>";
     let (title, state, present, total) = match status {
         Some(s) => (
-            if s.title.is_empty() { "This app".to_string() } else { s.title.clone() },
+            if s.title.is_empty() {
+                "This app".to_string()
+            } else {
+                s.title.clone()
+            },
             s.state.as_str(),
             s.files_pulled,
             s.files_total,
@@ -1674,8 +1762,14 @@ i.onerror=function(){if(d)return;n=(n+1)%s.length;setTimeout(function(){i.src=s[
             "Can't reach anyone with this app yet — Myco keeps trying.".to_string(),
             "#64748b",
         ),
-        "incomplete" => ("Didn't finish downloading — retrying…".to_string(), "#d97706"),
-        "syncing" if total > 0 => (format!("Downloading · {present} of {total} files"), "#059669"),
+        "incomplete" => (
+            "Didn't finish downloading — retrying…".to_string(),
+            "#d97706",
+        ),
+        "syncing" if total > 0 => (
+            format!("Downloading · {present} of {total} files"),
+            "#059669",
+        ),
         _ => ("Getting this app…".to_string(), "#059669"),
     };
     format!(
@@ -1712,7 +1806,9 @@ font-family:-apple-system,system-ui,'Segoe UI',Roboto,sans-serif;background:#fff
 }
 
 fn html_escape_min(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// The framing the `gatewayGet` JNI returns: `[u32 BE header-len][header JSON][body]`.
@@ -1763,7 +1859,10 @@ fn tag_value(event: &Event, name: &str) -> Option<String> {
 fn short_name(npub: &str) -> String {
     format!(
         "Myco-{}",
-        npub.trim_start_matches("npub1").chars().take(6).collect::<String>()
+        npub.trim_start_matches("npub1")
+            .chars()
+            .take(6)
+            .collect::<String>()
     )
 }
 
@@ -1787,7 +1886,10 @@ fn build_pair_event(
     if !secret.is_empty() {
         tags.push(Tag::parse(["secret", secret]).ok()?);
     }
-    EventBuilder::new(Kind::from(kind), "").tags(tags).sign_with_keys(keys).ok()
+    EventBuilder::new(Kind::from(kind), "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .ok()
 }
 
 fn load_library(path: &Path) -> Vec<LibraryItem> {
@@ -1848,7 +1950,10 @@ mod tests {
         let content = Arc::new(Content::open(&dir).unwrap());
 
         let site = build_test_site(
-            &[("/index.html", b"<h1>hi</h1>"), ("/app.js", b"console.log(1)")],
+            &[
+                ("/index.html", b"<h1>hi</h1>"),
+                ("/app.js", b"console.log(1)"),
+            ],
             None,
             Some("E2E"),
         );
@@ -1900,14 +2005,25 @@ mod tests {
         {
             let content = Content::open(&dir).unwrap();
             content.import_dir(&bundle).await.unwrap();
-            assert_eq!(content.library_snapshot().len(), 1, "import should pin to Library");
+            assert_eq!(
+                content.library_snapshot().len(),
+                1,
+                "import should pin to Library"
+            );
         }
 
         // Restart: a fresh Content over the same dir. The status map starts empty;
         // refresh_library_status re-lists the pinned site as ready.
         let content = Arc::new(Content::open(&dir).unwrap());
-        assert_eq!(content.library_snapshot().len(), 1, "Library persists on disk");
-        assert!(content.sites_snapshot().is_empty(), "status map is empty before refresh");
+        assert_eq!(
+            content.library_snapshot().len(),
+            1,
+            "Library persists on disk"
+        );
+        assert!(
+            content.sites_snapshot().is_empty(),
+            "status map is empty before refresh"
+        );
 
         content.clone().refresh_library_status().await;
         let sites = content.sites_snapshot();
@@ -1938,7 +2054,10 @@ mod tests {
 
             // Only connected members are offered as pull sources.
             content.set_connected_peers(vec!["npub1bob".to_string()]);
-            assert_eq!(content.connected_circle_npubs(), vec!["npub1bob".to_string()]);
+            assert_eq!(
+                content.connected_circle_npubs(),
+                vec!["npub1bob".to_string()]
+            );
 
             content.remove_from_circle("npub1bob");
             assert_eq!(content.circle_snapshot().len(), 1);
@@ -1985,7 +2104,10 @@ mod tests {
         let event = build_pair_event(&peer, KIND_PAIR_REMOVE, &peer_npub, "Peer", "")
             .expect("build pair-remove event");
         content.handle_pair_event(&event);
-        assert!(content.circle_snapshot().is_empty(), "peer removed on unpair");
+        assert!(
+            content.circle_snapshot().is_empty(),
+            "peer removed on unpair"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

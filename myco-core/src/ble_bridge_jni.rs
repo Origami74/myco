@@ -38,7 +38,9 @@ pub(crate) fn capture_java_vm(env: &JNIEnv) {
 /// Run `f` with a JNIEnv attached to the current (tokio worker) thread. Returns
 /// `default` if the VM is unavailable or attaching fails.
 fn with_env<R>(default: R, f: impl FnOnce(&mut JNIEnv) -> R) -> R {
-    let Some(vm) = JAVA_VM.get() else { return default };
+    let Some(vm) = JAVA_VM.get() else {
+        return default;
+    };
     match vm.attach_current_thread() {
         Ok(mut guard) => f(&mut guard),
         Err(_) => default,
@@ -184,8 +186,12 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverInbound(
     send_mtu: jint,
     recv_mtu: jint,
 ) -> jlong {
-    let Some(bridge) = (unsafe { bridge_ref(handle) }) else { return 0 };
-    let Some(ble_addr) = jstring_to_addr(&mut env, &addr) else { return 0 };
+    let Some(bridge) = (unsafe { bridge_ref(handle) }) else {
+        return 0;
+    };
+    let Some(ble_addr) = jstring_to_addr(&mut env, &addr) else {
+        return 0;
+    };
     bridge.deliver_inbound(ble_addr, send_mtu.max(0) as u16, recv_mtu.max(0) as u16)
 }
 
@@ -201,7 +207,9 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverConnectResult(
     send_mtu: jint,
     recv_mtu: jint,
 ) -> jlong {
-    let Some(bridge) = (unsafe { bridge_ref(handle) }) else { return 0 };
+    let Some(bridge) = (unsafe { bridge_ref(handle) }) else {
+        return 0;
+    };
     let ble_addr = jstring_to_addr(&mut env, &addr).unwrap_or(BleAddr {
         adapter: "ble0".to_string(),
         device: [0; 6],
@@ -225,7 +233,9 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverScan(
     psm: jint,
     rssi: jint,
 ) {
-    let Some(bridge) = (unsafe { bridge_ref(handle) }) else { return };
+    let Some(bridge) = (unsafe { bridge_ref(handle) }) else {
+        return;
+    };
     if let Some(ble_addr) = jstring_to_addr(&mut env, &addr) {
         bridge.deliver_scan(ble_addr, psm.max(0) as u16, rssi);
     }
@@ -241,7 +251,9 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleChannelDeliverRecv(
     data: JByteArray,
     len: jint,
 ) -> jboolean {
-    let Some(bridge) = (unsafe { bridge_ref(handle) }) else { return 0 };
+    let Some(bridge) = (unsafe { bridge_ref(handle) }) else {
+        return 0;
+    };
     let n = len.max(0) as usize;
     let mut buf = vec![0i8; n];
     if env.get_byte_array_region(&data, 0, &mut buf).is_err() {
@@ -276,7 +288,9 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleChannelNextSend(
     out: JByteArray,
     timeout_ms: jint,
 ) -> jint {
-    let Some(bridge) = (unsafe { bridge_ref(handle) }) else { return -1 };
+    let Some(bridge) = (unsafe { bridge_ref(handle) }) else {
+        return -1;
+    };
     match bridge.next_send(ch_id, Duration::from_millis(timeout_ms.max(0) as u64)) {
         Some(bytes) => {
             let i8buf: Vec<i8> = bytes.iter().map(|&b| b as i8).collect();

@@ -54,7 +54,11 @@ pub fn build_test_site_with_keys(
         tags.push(Tag::parse(["title", t]).expect("title tag"));
     }
 
-    let kind = if d_tag.is_some() { KIND_NAMED } else { KIND_ROOT };
+    let kind = if d_tag.is_some() {
+        KIND_NAMED
+    } else {
+        KIND_ROOT
+    };
     let manifest = EventBuilder::new(Kind::from(kind), "")
         .tags(tags)
         .sign_with_keys(keys)
@@ -200,7 +204,10 @@ impl BlobStore for MemBlobs {
 
     async fn put(&self, bytes: &[u8]) -> anyhow::Result<String> {
         let hash = sha256_hex(bytes);
-        self.blobs.lock().unwrap().insert(hash.clone(), bytes.to_vec());
+        self.blobs
+            .lock()
+            .unwrap()
+            .insert(hash.clone(), bytes.to_vec());
         Ok(hash)
     }
 

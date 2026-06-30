@@ -362,7 +362,10 @@ mod tests {
             "an already-expired event is not stored"
         );
 
-        let filter = ManifestFilter { kinds: vec![9], ..Default::default() };
+        let filter = ManifestFilter {
+            kinds: vec![9],
+            ..Default::default()
+        };
         let got = store.query(&filter).await.unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, live.id);
