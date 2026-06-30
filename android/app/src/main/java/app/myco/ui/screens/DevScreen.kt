@@ -89,7 +89,8 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
 
 /**
  * A peer throughput test: pick a connected, handshaken peer and round-trip a
- * ~1 MiB payload through its mesh Blossom (PUT then GET), showing up/down Mbps.
+ * ~1 MiB payload through its mesh Blossom (PUT then GET), showing up/down
+ * throughput (kbps under 1 Mbps, Mbps above).
  * Only works against a paired peer (their Blossom gates non-loopback by Circle).
  */
 @Composable
@@ -127,8 +128,8 @@ private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
             st.running -> "Testing ${DeviceName.generated(st.peerNpub)}…"
             st.generation == 0L -> null
             st.error.isNotEmpty() -> "✗ ${st.error}"
-            else -> "↑ %.1f Mbps   ↓ %.1f Mbps   (%s, %d KB)".format(
-                st.upMbps, st.downMbps, DeviceName.generated(st.peerNpub), st.bytes / 1000,
+            else -> "↑ %s   ↓ %s   (%s, %d KB)".format(
+                rate(st.upMbps), rate(st.downMbps), DeviceName.generated(st.peerNpub), st.bytes / 1000,
             )
         }
         if (resultLine != null) {
@@ -141,6 +142,11 @@ private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
         }
     }
 }
+
+/** Format a throughput in Mbps, dropping to kbps under 1 Mbps where most BLE
+ *  runs land (0.5 Mbps reads as "500 kbps", not "0.5 Mbps"). */
+private fun rate(mbps: Double): String =
+    if (mbps < 1.0) "%.0f kbps".format(mbps * 1000) else "%.1f Mbps".format(mbps)
 
 @Composable
 private fun DevCard(title: String, content: @Composable () -> Unit) {
