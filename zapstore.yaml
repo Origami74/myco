@@ -11,6 +11,12 @@ tags:
     - mesh
     - fips
 license: MIT
+images:
+    - docs/images/01-nfc-pairing.png
+    - docs/images/02-circle.png
+    - docs/images/03-app-sharing.png
+    - docs/images/04-home.png
+    - docs/images/05-bitchat.png
 metadata_sources:
     - github
 pubkey: npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr
