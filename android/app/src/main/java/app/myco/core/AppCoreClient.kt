@@ -98,6 +98,8 @@ data class AppState(
     val bleAdapterName: String,
     val blePeers: List<BlePeer>,
     val bleAdverts: List<BleAdvert>,
+    val wifiAwareEnabled: Boolean,
+    val wifiAwarePort: Int,
     val sites: List<SiteStatus>,
     val library: List<LibraryItem>,
     val cache: CacheStatus,
@@ -114,6 +116,7 @@ data class AppState(
             val id = o.optJSONObject("identity") ?: JSONObject()
             val node = o.optJSONObject("node") ?: JSONObject()
             val ble = o.optJSONObject("ble") ?: JSONObject()
+            val wifiAware = o.optJSONObject("wifiAware") ?: JSONObject()
             val peersJson = o.optJSONArray("blePeers")
             val peers = buildList {
                 if (peersJson != null) {
@@ -253,6 +256,8 @@ data class AppState(
                 bleAdapterName = ble.optString("adapterName"),
                 blePeers = peers,
                 bleAdverts = adverts,
+                wifiAwareEnabled = wifiAware.optBoolean("enabled"),
+                wifiAwarePort = wifiAware.optInt("port"),
                 sites = sites,
                 library = library,
                 cache = cache,
@@ -402,6 +407,8 @@ object NativeActions {
     fun stopNode(): JSONObject = JSONObject().put("type", "stop_node")
     fun setBleEnabled(enabled: Boolean): JSONObject =
         JSONObject().put("type", "set_ble_enabled").put("enabled", enabled)
+    fun setWifiAwareEnabled(enabled: Boolean): JSONObject =
+        JSONObject().put("type", "set_wifi_aware_enabled").put("enabled", enabled)
 
     // --- content (P2) ---
     /** `holder` is a sharer's device npub (from a share QR) to pull from over the

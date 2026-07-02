@@ -50,6 +50,18 @@ internal object NativeCore {
     /** Rust → Kotlin pull (blocks up to timeoutMs): >0 len, 0 timeout, -1 closed. */
     external fun bleChannelNextSend(bridgeHandle: Long, chId: Long, out: ByteArray, timeoutMs: Int): Int
 
+    // --- Wi-Fi Aware control bridge (see docs/design/wifi-aware-interop.md) ---
+    // Control-plane only: no byte bridge. The AwareRadio drives discovery
+    // itself and pushes peer reachability into the core's platform peer queue;
+    // the bytes ride the ordinary UDP transport over the Aware data-path
+    // interface.
+
+    /** Aware data path up: peer `npub` reachable at `addr` ("[fe80::x%ifindex]:port"). */
+    external fun awarePeerFound(npub: String, addr: String)
+
+    /** Aware data path to `npub` lost: close the pooled UDP session. */
+    external fun awarePeerLost(npub: String)
+
     // --- TUN packet bridge (the app-owned TUN; the VpnService pumps these) ---
     /** Kotlin → Rust: route an IPv6 packet read from the TUN fd into the mesh. */
     external fun tunSendPacket(packet: ByteArray, len: Int): Boolean

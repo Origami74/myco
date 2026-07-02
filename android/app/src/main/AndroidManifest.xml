@@ -4,13 +4,23 @@
     <!-- BLE: legacy permissions for API <= 30 -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <!-- Location gates BLE (<=30) and Wi-Fi Aware (<=32); NEARBY_WIFI_DEVICES
+         replaces it for Aware on 33+. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
     <!-- BLE: runtime permissions for API 31+ (scan declares it never derives location) -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Wi-Fi Aware bulk lane (docs/design/wifi-aware-interop.md). Runtime
+         permission on API 33+; declares it never derives location. -->
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <!-- Foreground service hosting the BLE radio -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
@@ -31,6 +41,8 @@
     <uses-feature android:name="android.hardware.nfc.hce" android:required="false" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <!-- Wi-Fi Aware is the bulk lane, not the baseline: optional, degrades to BLE. -->
+    <uses-feature android:name="android.hardware.wifi.aware" android:required="false" />
 
     <application
         android:allowBackup="false"
@@ -92,6 +104,11 @@
 
         <service
             android:name=".ble.BleService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <service
+            android:name=".aware.AwareService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 

@@ -1,7 +1,14 @@
 # Wi-Fi Aware Interop Strategy
 
-> Status: DESIGN / proposal — not yet built. Open questions are marked
-> **TBD / open**.
+> Status: IMPLEMENTED — this began as a proposal and is now built. One thing
+> changed between design and code: the lane rides fips's native **UDP**
+> transport, not a bound TCP transport as this doc's first draft proposed. The
+> UDP transport is connectionless and unreliable on its own; FMP/FSP/Noise
+> supply framing, ordering, retransmit, and the per-peer encrypted session above
+> it — exactly as they already do for the mesh's LAN/mDNS UDP peering, which is
+> why reusing that transport (rather than introducing a TCP one) was the simpler
+> landing. The prose below has been updated to UDP; items still marked
+> **TBD / open** are genuinely unsettled (mostly hardware testing).
 
 Myco's offline story shipped on one transport: Bluetooth Low Energy. BLE does
 its job well — always on, cheap, in every phone — but it cannot move a
@@ -23,11 +30,11 @@ native byte-pipe backend (`AndroidBleIo` in the docs; the shipped fips-core
 struct is `AndroidIo`) because L2CAP terminates in app-owned socket objects
 that only Kotlin can touch; a Wi-Fi Aware data path terminates in a **kernel
 network interface**. So Aware is not a new radio backend below a trait — it is
-**fips-core's existing TCP transport pointed at a link-local address**. Kotlin
-does discovery and brings the interface up; from the first SYN onward, every
-byte moves through the kernel, and FMP/FSP/Noise ride the TCP stream exactly
-as they do on any LAN. The hard problem is not addressing — the PSM problem
-has no analog here, because we bind our own listener port — but **policy**:
+**fips-core's existing UDP transport pointed at a link-local address**. Kotlin
+does discovery and brings the interface up; from the first packet onward, every
+byte moves through the kernel, and FMP/FSP/Noise ride the UDP flow exactly
+as they do on any LAN mesh peering. The hard problem is not addressing — the PSM
+problem has no analog here, because we bind our own port — but **policy**:
 when to raise the Wi-Fi lane, and how a peer moves between BLE and Aware
 without flapping.
 
@@ -43,23 +50,22 @@ phones have the hardware, used for blob sync, released when idle. (Google's
 Nearby Connections is precedent for exactly this split: BLE for control,
 Wi-Fi radios for bulk — we borrow the architecture, not the stack.)
 
-## Option A: the TCP transport over the Aware data path
+## Option A: the UDP transport over the Aware data path
 
-FIPS already has a connection-oriented, reliable transport with a connection
-pool, connect-on-demand, and per-connection receive loops:
-[../../reference/fips/src/transport/tcp/mod.rs](../../reference/fips/src/transport/tcp/mod.rs).
-It adds no framing of its own — the core's shared reframer recovers packet
-boundaries from the 4-byte FMP common prefix
-(`[ver+phase][flags][payload_len:2 LE]`,
-[../../reference/fips/src/transport/tcp/stream.rs](../../reference/fips/src/transport/tcp/stream.rs))
-— the same transparent-byte-pipe model the BLE radio was converged onto. An
-Aware NDP is, to the kernel, just another IPv6 link — so the TCP transport
-works over it **unchanged**.
+FIPS already carries all its mesh traffic over a native UDP transport with a
+per-peer session model, connect-on-demand dialing, and per-peer receive loops:
+[../../reference/fips/src/transport/udp/mod.rs](../../reference/fips/src/transport/udp/mod.rs).
+It is connectionless and unreliable on its own — FMP/FSP/Noise above it supply
+framing, ordering, retransmit, and the encrypted session (the 4-byte FMP common
+prefix `[ver+phase][flags][payload_len:2 LE]` frames each packet). Because UDP
+preserves datagram boundaries, the core reads whole FMP packets directly — none
+of the stream-reframing the BLE and TCP byte-pipes need. An Aware NDP is, to the
+kernel, just another IPv6 link — so the UDP transport works over it **unchanged**.
 
 **Option A**: Kotlin owns the Aware radio — attach, publish/subscribe, the
 data-path request — and, when the NDP comes up, pushes *"peer `npub` is
 reachable at `[fe80::…%ifindex]:port`"* into the core. fips-core dials with
-the TCP transport it already has. No new transport type, no byte bridge, no
+the UDP transport it already has. No new transport type, no byte bridge, no
 new framing. Two small fips-core patches (a discovery-injection seam and a
 link-preference rule — both below) are ours to make, exactly as the PSM patch
 was, plus one Myco-side posture change spelled out just after the
@@ -70,11 +76,11 @@ The alternatives were rejected:
 - **A BLE-style `AwareIo` byte bridge.** Mirror the BLE backend: Kotlin opens
   sockets via the Android `Network` API and pumps bytes across JNI. It works,
   but it hand-copies every byte through the JNI boundary that the kernel
-  would otherwise move for free, and it reimplements what TCP already gives
-  us (streams, backpressure, teardown). The BLE bridge exists because BLE
-  sockets are Java objects; Aware sockets are not.
+  would otherwise move for free, and it reimplements what the UDP transport and
+  the FMP/FSP layer already give us (framing, retransmit, teardown). The BLE
+  bridge exists because BLE sockets are Java objects; Aware sockets are not.
 - **A dedicated `AwareTransport` type in fips-core.** A new
-  `TransportHandle` variant that wraps… tokio TCP internals. All duplication,
+  `TransportHandle` variant that wraps… tokio UDP-socket internals. All duplication,
   no new capability. If per-lane stats or config ever justify it, it can be
   split out later; the wire is identical either way.
 - **Google Nearby Connections.** It abstracts the same radios (BLE control,
@@ -87,17 +93,16 @@ The alternatives were rejected:
 So: one Kotlin radio class, two small fips-core patches, zero new transport
 code on the data plane.
 
-One prerequisite the word "reuse" hides: **Myco's Android node runs no TCP
+One prerequisite the word "reuse" hides: **Myco's Android node runs no UDP
 transport today.** `build_node` configures only the BLE instance
-(`myco-core/src/runtime.rs`), and fips-core's `TcpConfig.bind_addr` defaults
-to `None` — outbound-only. The Aware lane therefore *introduces* a TCP
-transport instance on the phone, with a bound listener — a deliberate posture
+(`myco-core/src/runtime.rs`). The Aware lane therefore *introduces* a UDP
+transport instance on the phone, with a bound socket — a deliberate posture
 change, not a free reuse (its exposure is examined under
-[Listener exposure](#listener-exposure) below). Lifecycle-wise it follows the
+[Socket exposure](#socket-exposure) below). Lifecycle-wise it follows the
 BLE pattern exactly: `set_wifi_aware_enabled` maps onto the same
 rebuild-node-on-toggle flow as `set_ble_enabled`. And to keep `offline_only`
 semantics honest, the transport is raised for the Aware lane's sake but is a
-general-purpose TCP transport once up — v1 keeps it fed **only** by
+general-purpose UDP transport once up — v1 keeps it fed **only** by
 platform-pushed peers (patch #1 below dials nothing on its own), so enabling
 Aware does not quietly turn on internet peering.
 
@@ -110,7 +115,7 @@ byte**. The whole Kotlin surface is control-plane:
 | Step | Android API | Kotlin (`AwareRadio`) responsibility |
 | --- | --- | --- |
 | Attach | `WifiAwareManager.attach()` | Hold the session; rebuild everything on `ACTION_WIFI_AWARE_STATE_CHANGED`. |
-| Announce | `publish(PublishConfig)` | Publish the Myco service name; service-specific info carries the TCP listener port (no identity). |
+| Announce | `publish(PublishConfig)` | Publish the Myco service name; service-specific info carries the UDP port (no identity). |
 | Find | `subscribe(SubscribeConfig)` | `onServiceDiscovered` → a candidate peer; `onServiceLost` (API 31+) → candidate gone. |
 | Identify | `sendMessage()` follow-ups | Exchange device pubkeys post-match (the Aware analog of BLE's in-band `[0x00][pubkey:32]`). |
 | Link | `ConnectivityManager.requestNetwork` + `WifiAwareNetworkSpecifier` | Bring up the NDP; read the peer's IPv6 from `WifiAwareNetworkInfo` and the interface from `LinkProperties`. |
@@ -119,8 +124,8 @@ byte**. The whole Kotlin surface is control-plane:
 What fips-core does *above* that hand-over, and what Kotlin must therefore
 **not** re-implement:
 
-- **Dial, pool, reconnect.** The TCP transport's connect-on-demand and
-  connection pool.
+- **Dial, pool, reconnect.** The UDP transport's connect-on-demand dialing and
+  per-peer session pool.
 - **Identity & crypto.** The Noise IK link handshake authenticates the peer;
   the pubkey learned over `sendMessage` is only a *hint* (it routes the dial
   and pre-fills the tiebreaker) — nothing trusts it until Noise proves it.
@@ -134,8 +139,8 @@ a `wifiAwarePeers` list beside `blePeers`
 whole `ble*` byte-bridge extern family, Aware needs only the control pushes —
 there is no `awareChannelNextSend`, because there are no channels to pump.
 Config mirrors the `[ble]` precedent: a `[wifi_aware]` table whose only field
-is `enabled` ([config.md](../reference/config.md)), with the listener port
-living where it already belongs — the fips TCP transport's `bind_addr` —
+is `enabled` ([config.md](../reference/config.md)), with the port
+living where it already belongs — the fips UDP transport's `bind_addr` —
 surfaced as a Myco config knob (proposed default port, vetoable, settled at
 implementation). Both reference docs gain their matching `wifi_aware` entries
 when this lands.
@@ -150,7 +155,7 @@ carries:
 
 1. **The Myco service name** (fixed constant — the Aware analog of the FIPS
    service UUID).
-2. **The TCP listener port** in the service-specific info, as a small
+2. **The UDP port** in the service-specific info, as a small
    little-endian value — the analog of the PSM service-data field. A port
    names a socket, not a person.
 
@@ -182,13 +187,13 @@ analog, and it is worth being precise about why.
 
 BLE's listener PSM is **assigned by the OS**; the app cannot choose it, so
 every node must advertise its PSM and every dialer must learn it before
-dialing — universal per-peer PSM discovery, a real fips-core patch. A TCP
-listener is the opposite: **we pick the port** when the transport binds
-(`bind_addr` in the TCP transport config). The port rides in the service
+dialing — universal per-peer PSM discovery, a real fips-core patch. A bound UDP
+socket is the opposite: **we pick the port** when the transport binds
+(`bind_addr` in the UDP transport config). The port rides in the service
 announcement as a courtesy (it makes the port a config knob rather than a
-protocol constant), but there is nothing to *discover* — the listener is
+protocol constant), but there is nothing to *discover* — the socket is bound
 wherever we put it, on every device, and a wildcard `[::]` bind means the
-same listener serves LAN peers and every `aware_dataN` interface alike.
+same socket serves LAN peers and every `aware_dataN` interface alike.
 Google's own documented Aware socket pattern binds the same way
 (`ServerSocket(0)` — the wildcard address, any interface; Google then ships
 its OS-assigned ephemeral port via `setPort()`, the in-band carrier we reject
@@ -206,20 +211,20 @@ with WPA3, precisely as the BLE strategy chose *insecure* L2CAP over
 Bluetooth bonding. Same trust model, new radio:
 [security.md](./security.md).
 
-### Listener exposure
+### Socket exposure
 
 The wildcard bind deserves its own paragraph, because it is a genuinely new
-posture: today the phone has **zero** IP listeners reachable off-device (the
+posture: today the phone has **zero** IP sockets reachable off-device (the
 relay and Blossom are localhost-bound; BLE is the only transport). A `[::]`
-TCP listener is reachable from every network the phone joins — the Aware
+UDP socket is reachable from every network the phone joins — the Aware
 interfaces, but also home Wi-Fi, the hotel LAN — and the port is broadcast in
 the Aware announcement. What holds the line is the same thing that holds it
 on the open NDP: **an unauthenticated dialer gets nothing.** The Noise IK
-responder handshake gates every inbound connection; failing it yields no
+responder handshake gates every inbound peer; failing it yields no
 identity, no data, no relay access ([security.md](./security.md)). The
-residual surface is honest but small: connection-slot and battery burn from
-junk dials (bounded by the transport's `max_inbound_connections`, default
-256 — worth lowering for the phone), and the port doubling as a "this device
+residual surface is honest but small: session-slot and battery burn from
+junk dials (bounded by the transport's inbound limits — worth keeping
+conservative on a phone), and the port doubling as a "this device
 runs Myco" beacon on any shared LAN — the same fingerprint the BLE advert
 already broadcasts to anyone scanning. The alternative — binding per
 `aware_dataN` interface as data paths come up and down — closes the LAN
@@ -234,16 +239,16 @@ with a scope — *which* interface to send from. Two facts make this workable:
 
 - Rust's std parses **numeric**-scope text: `"[fe80::x%3]:4869"` round-trips
   through `SocketAddr` parsing with `scope_id = 3`, so it survives
-  fips-core's `resolve_socket_addr` fast path, the TCP pool's
-  string-keyed map, and the accept loop, with the kernel receiving the scope
-  on connect. Interface-*name* scopes (`%aware_data0`) parse nowhere —
+  fips-core's `resolve_socket_addr` fast path, the UDP transport's
+  peer map, and the receive loop, with the kernel receiving the scope
+  on send. Interface-*name* scopes (`%aware_data0`) parse nowhere —
   **Kotlin resolves the interface name from `LinkProperties` to its ifindex
   and pushes numeric-scope text only.**
 - fips-core already does exactly this for LAN mDNS discovery: the discovery
   path builds a `SocketAddrV6` with an explicit `scope_id` and refuses
   scope-less link-locals
   ([../../reference/fips/src/discovery/lan/mod.rs](../../reference/fips/src/discovery/lan/mod.rs))
-  — the pattern is proven in-tree, just never yet applied to TCP.
+  — the pattern is proven in-tree on the very same UDP transport.
 
 One honest caveat: Google's documented dial pattern goes through the Android
 `Network` object (`network.getSocketFactory()`), and no official doc blesses
@@ -251,9 +256,9 @@ a plain socket to the scoped link-local address — though AOSP itself hands
 apps the peer address already scoped to the local Aware interface, so the
 plain dial should route correctly in principle. If real hardware disagrees,
 the fallback is documented-API-clean: Kotlin dials via the socket factory,
-detaches the file descriptor, and the core adopts it into the TCP pool — the
-same adopt-a-live-socket move `UdpTransport::adopt_socket_async` already does
-for Nostr traversal; TCP lacks only the small public entry point. Scoped
+detaches the file descriptor, and the core adopts it into the UDP transport —
+the same adopt-a-live-socket move `UdpTransport::adopt_socket_async` already
+exposes for Nostr traversal, so the entry point is already there. Scoped
 dial first, FD adoption as the fallback — **TBD / open** until tested on
 hardware.
 
@@ -275,29 +280,28 @@ proves, and the FIPS peer (keyed on npub) survives any number of address
 changes. The practical consequences land entirely in `AwareRadio` and the
 injection seam: every Kotlin map keyed on a `PeerHandle` or an NDP address is
 session-scoped and rebuilt on the attach cascade, and the peer-lost push is
-load-bearing — it is what retracts a dead address before the core's TCP pool
+load-bearing — it is what retracts a dead address before the core's UDP transport
 tries to dial it (the Aware twin of BLE's rule that the `BleAddr → PSM` map
 must be short-lived, never a durable cache).
 
 ## Injecting the discovered peer (fips-core patch #1)
 
 fips-core has no generic "the platform found a peer" entry today. Discovery
-is transport-owned buffers drained per tick (`poll_transport_discovery`), the
-TCP transport's `discover()` is hardcoded empty, and the closest architectural
-twin — the LAN mDNS drain, which delivers exactly our shape, `(npub, scoped
-SocketAddr)` — is hardwired to UDP transports. The control-API `connect`
-command could dial an arbitrary address at runtime, but as an ephemeral
-one-shot with no reconnect policy.
+is transport-owned buffers drained per tick (`poll_transport_discovery`), and
+the closest architectural twin — the LAN mDNS drain, which delivers exactly our
+shape, `(npub, scoped SocketAddr)`, into the UDP transport — is hardwired to
+mDNS as its source. The control-API `connect` command could dial an arbitrary
+address at runtime, but as an ephemeral one-shot with no reconnect policy.
 
 The patch: **generalize the LAN-discovery seam** into a platform peer queue —
 `(pubkey_hint, TransportAddr, transport type)` events, drained per tick, fed
-to `initiate_connection` against the TCP transport, with the same budgets and
+to `initiate_connection` against the UDP transport, with the same budgets and
 dedup the BLE drain gets. The Kotlin push lands in that queue over JNI;
 peer-lost events retract. This is deliberately *not* a new discovery
-mechanism — it is the existing one with the transport parameter unhardcoded.
-It is also what keeps the new TCP transport passive: with `discover()` empty
-and no peer config pointing at it, the queue is the *only* source of TCP
-dials, which is how the `offline_only` promise survives the lane.
+mechanism — it is the existing one with the source unhardcoded. It is also
+what keeps the phone's UDP transport passive: nothing on the phone points mDNS
+or a peer config at it, so the platform queue is the *only* source of dials on
+it, which is how the `offline_only` promise survives the lane.
 
 ## Link policy: one peer, two radios (fips-core patch #2)
 
@@ -322,7 +326,7 @@ because nothing chooses them today. The proposed policy, parameters vetoable:
 
 1. **Raise on discovery, cut over deliberately.** When the Aware link comes
    up for an already-BLE-connected peer, the core runs the alternate-path
-   handshake toward the TCP address and the peer moves wholesale. BLE stays
+   handshake toward the Aware/UDP address and the peer moves wholesale. BLE stays
    connected below (the L2CAP channel and adverts persist) but carries no
    FIPS traffic while Aware holds the session — it is the warm standby, not
    a parallel path.
@@ -418,7 +422,7 @@ absent). Exercising the real radio takes **two physical Aware-capable
 phones**.
 
 The strategy's shape is what softens this. Because the data plane is plain
-TCP, everything above the Kotlin radio — the discovery-injection seam, the
+UDP/IP, everything above the Kotlin radio — the discovery-injection seam, the
 scoped link-local dial, the cutover policy, sync throughput — is exercisable
 with **no Aware hardware at all**: two devices on the same Wi-Fi LAN (or two
 emulators on the virtual network) present the identical interface to
@@ -463,8 +467,8 @@ reasons:
 So Wi-Fi Direct's role mirrors bitchat's in the BLE strategy: **a fallback
 candidate, never the design center** — worth revisiting only if Aware's
 hardware coverage proves too thin in the field, and even then as a second
-implementation of the same "Kotlin raises an IP link, TCP does the rest"
-seam. The transport's job still ends at "FIPS bytes crossed the link";
+implementation of the same "Kotlin raises an IP link, the UDP transport does the
+rest" seam. The transport's job still ends at "FIPS bytes crossed the link";
 which radio raised the link is a detail the bytes never learn.
 
 ## Open questions

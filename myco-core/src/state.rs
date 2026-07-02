@@ -20,6 +20,8 @@ pub struct AppState {
     /// Raw scan adverts (address / PSM / RSSI) — the radio-level "discovered
     /// devices" view, distinct from the mesh-level `ble_peers`.
     pub ble_adverts: Vec<BleAdvert>,
+    /// Wi-Fi Aware bulk-lane status (the control plane beside `ble`).
+    pub wifi_aware: WifiAwareStatus,
 
     // --- content layer (P2) ---
     /// Per-site sync/readiness, keyed by `<host>` label. Kotlin polls this after
@@ -119,6 +121,20 @@ pub struct BleStatus {
     pub scanning: bool,
     /// Adapter label (a fixed tag on Android; "—" until the backend reports).
     pub adapter_name: String,
+}
+
+/// Wi-Fi Aware bulk-lane status — the control/observation plane. The radio
+/// (attach/publish/subscribe/NDP) lives in the Android foreground service;
+/// the byte plane is the ordinary UDP transport over the NDP interface. See
+/// `docs/design/wifi-aware-interop.md`.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiAwareStatus {
+    /// Master switch (the `SetWifiAwareEnabled` action).
+    pub enabled: bool,
+    /// The UDP port the Aware radio advertises in its
+    /// service-specific info (0 while the lane is off).
+    pub port: u16,
 }
 
 /// One peer seen or connected over BLE. Keyed by `node_addr` from the in-band

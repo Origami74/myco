@@ -3,6 +3,7 @@ package app.myco
 import android.Manifest
 import android.content.ComponentName
 import android.content.Intent
+import android.provider.Settings
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
@@ -28,6 +29,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import app.myco.aware.AwareRadio
+import app.myco.aware.AwareService
 import app.myco.ble.BleService
 import app.myco.BuildConfig
 import app.myco.core.AppCoreClient
@@ -56,6 +59,11 @@ class MainActivity : ComponentActivity() {
         // BLE is enabled by default / remembered; (re)start it once perms land.
         if (prefs.getBoolean(PREF_BLE, true) && bleCorePermsGranted()) {
             BleService.start(this)
+        }
+        // The Wi-Fi Aware lane is opt-in (default off); (re)start it too if the
+        // user had it on and its perms just landed.
+        if (prefs.getBoolean(PREF_AWARE, false) && AwareRadio.isSupported(this) && awarePermsGranted()) {
+            AwareService.start(this)
         }
     }
 
@@ -91,6 +99,12 @@ class MainActivity : ComponentActivity() {
             if (bleCorePermsGranted()) BleService.start(this) else requestBlePermissionsIfNeeded()
         }
 
+        // Wi-Fi Aware is opt-in (default off); resume it if the user left it on
+        // and the hardware supports it.
+        if (prefs.getBoolean(PREF_AWARE, false) && AwareRadio.isSupported(this)) {
+            if (awarePermsGranted()) AwareService.start(this) else requestAwarePermissionsIfNeeded()
+        }
+
         // The mesh adapter (app-owned TUN) is ON by default — it's how this device
         // reaches the mesh, so it's effectively required. Bring it up at launch,
         // prompting for the one-time VPN consent the first time it's needed.
@@ -104,6 +118,8 @@ class MainActivity : ComponentActivity() {
                 MycoApp(
                     client = core,
                     onBleToggle = { enabled -> setBleEnabled(enabled) },
+                    wifiAwareSupported = AwareRadio.isSupported(this),
+                    onWifiAwareToggle = { enabled -> setWifiAwareEnabled(enabled) },
                     onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
                     onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
                     onScanned = { text -> handleScannedText(text) },
@@ -257,6 +273,51 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // --- Wi-Fi Aware toggle (remembered) ---
+
+    private fun setWifiAwareEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(PREF_AWARE, enabled).apply()
+        if (enabled) {
+            if (!awarePermsGranted()) {
+                requestAwarePermissionsIfNeeded()
+                return
+            }
+            AwareService.start(this)
+            // Wi-Fi Aware needs Wi-Fi on, and an app cannot toggle Wi-Fi since
+            // API 29 — so if it isn't available right now (Wi-Fi off), pop the
+            // system Wi-Fi panel. The armed radio attaches once Wi-Fi comes on.
+            if (!AwareRadio.isAvailable(this)) openWifiPanel()
+        } else {
+            AwareService.stop(this)
+        }
+    }
+
+    /** Slide-up system Wi-Fi panel (API 29+) so the user can turn Wi-Fi on
+     *  without leaving Myco. */
+    private fun openWifiPanel() {
+        runCatching { startActivity(Intent(Settings.Panel.ACTION_WIFI)) }
+            .onFailure { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
+    }
+
+    private fun requestAwarePermissionsIfNeeded() {
+        val needed = awarePermissions().filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (needed.isNotEmpty()) permLauncher.launch(needed.toTypedArray())
+    }
+
+    private fun awarePermsGranted(): Boolean = awarePermissions().all {
+        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+    }
+
+    /** NEARBY_WIFI_DEVICES on API 33+; ACCESS_FINE_LOCATION gates Aware on 29–32. */
+    private fun awarePermissions(): List<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            listOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+        } else {
+            listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+
     // --- nsite launching ---
 
     /** The intent that opens an nsite as its own fullscreen task (one per host). */
@@ -404,6 +465,7 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val PREF_BLE = "ble_enabled"
+        const val PREF_AWARE = "wifi_aware_enabled"
         const val PREF_MESH = "mesh_enabled"
         const val PREF_OFFLINE_ONLY = "offline_only"
         const val PREF_DEV = "developer_mode"

@@ -138,6 +138,9 @@ pub enum NativeAppAction {
     // --- BLE radio ---
     SetBleEnabled { enabled: bool },        // master switch for the L2CAP transport
 
+    // --- Wi-Fi Aware bulk lane (docs/design/wifi-aware-interop.md) ---
+    SetWifiAwareEnabled { enabled: bool },  // master switch; adds/removes the UDP lane
+
     // --- settings (single patch action, cf. UpdateSettings) ---
     UpdateSettings { patch: SettingsPatch },
 }
@@ -246,6 +249,7 @@ pub struct AppState {
     pub paired_peers: Vec<PairedPeer>, // npub + memorable name + reachability
     pub ble_peers:    Vec<BlePeer>,    // peers seen/connected over the radio
     pub ble: BleStatus,                // enabled, role, scanning, adapterName
+    pub wifi_aware: WifiAwareStatus,   // enabled, port (the bulk-lane control plane)
     pub cache: CacheStatus,            // capBytes, usedBytes, itemCount, pinnedCount
 }
 
@@ -358,6 +362,27 @@ detail (exact JNI signatures for accept/connect/send/recv, advert callbacks, the
 cross-probe tiebreaker, Noise, and reconnect; Kotlin only moves bytes and
 surfaces adverts. The reducer's `SetBleEnabled` and the `ble`/`blePeers` state
 are the **control/observation** plane over that byte plane.
+
+---
+
+## The Wi-Fi Aware bridge (no byte bridge)
+
+The Wi-Fi Aware bulk lane needs no byte bridge at all — a Wi-Fi Aware data path
+terminates in a kernel network interface, so the bytes ride the ordinary fips
+**UDP** transport and never cross the FFI. The Kotlin `AwareRadio` drives
+discovery itself and pushes only *control* events into the core's process-global
+platform peer queue (`fips::discovery::platform`):
+
+```
+NativeCore.awarePeerFound(npub, addr)   // data path up: "[fe80::x%ifindex]:port"
+NativeCore.awarePeerLost(npub)          // data path gone: close the pooled UDP session
+```
+
+The node drains that queue each tick (`poll_platform_discovery`) and dials over
+the UDP transport; Noise IK authenticates, so the pushed npub is only a hint.
+`SetWifiAwareEnabled` and the `wifiAware` state are the control/observation
+plane; there is no `awareChannel*` extern family, because there are no channels
+to pump. See [../design/wifi-aware-interop.md](../design/wifi-aware-interop.md).
 
 ---
 

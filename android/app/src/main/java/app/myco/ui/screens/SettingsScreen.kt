@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -78,6 +79,8 @@ fun SettingsScreen(
     state: AppState,
     client: AppCoreClient,
     onBleToggle: (Boolean) -> Unit,
+    wifiAwareSupported: Boolean,
+    onWifiAwareToggle: (Boolean) -> Unit,
     meshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
     onOfflineOnlyToggle: (Boolean) -> Unit,
@@ -96,6 +99,8 @@ fun SettingsScreen(
         SettingsPage.Root -> RootSettings(
             state = state,
             onBleToggle = onBleToggle,
+            wifiAwareSupported = wifiAwareSupported,
+            onWifiAwareToggle = onWifiAwareToggle,
             meshEnabled = meshEnabled,
             onMeshToggle = onMeshToggle,
             developerMode = developerMode,
@@ -123,6 +128,8 @@ fun SettingsScreen(
 private fun RootSettings(
     state: AppState,
     onBleToggle: (Boolean) -> Unit,
+    wifiAwareSupported: Boolean,
+    onWifiAwareToggle: (Boolean) -> Unit,
     meshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
     developerMode: Boolean,
@@ -180,6 +187,19 @@ private fun RootSettings(
                 checked = state.bleEnabled,
                 onToggle = onBleToggle,
                 enabled = meshEnabled,
+            )
+            RowDivider()
+            ToggleRow(
+                icon = Icons.Filled.Wifi,
+                title = "Wi-Fi Aware",
+                subtitle = if (wifiAwareSupported) {
+                    "Faster transfers to nearby peers"
+                } else {
+                    "Not supported on your device"
+                },
+                checked = state.wifiAwareEnabled,
+                onToggle = onWifiAwareToggle,
+                enabled = meshEnabled && wifiAwareSupported,
             )
             RowDivider()
             SoonRow(

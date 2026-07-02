@@ -33,6 +33,9 @@ mod jni_abi;
 mod ble_bridge_jni;
 
 #[cfg(target_os = "android")]
+mod aware_bridge_jni;
+
+#[cfg(target_os = "android")]
 mod tun_bridge_jni;
 
 pub use action::NativeAppAction;
