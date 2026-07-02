@@ -11,7 +11,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
@@ -101,9 +101,16 @@ pub async fn serve_on_guarded(
 }
 
 async fn serve_state(state: BlossomState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
+    // Raise the request-body cap from axum's 2 MB default: nsite assets and the
+    // adaptive dev speedtest (up to 16 MiB) exceed it. 64 MiB is a generous cap
+    // that still bounds a single upload.
+    const MAX_UPLOAD: usize = 64 * 1024 * 1024;
     let app = Router::new()
         .route("/{sha256}", get(get_blob).head(head_blob))
-        .route("/upload", put(upload))
+        .route(
+            "/upload",
+            put(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD)),
+        )
         .with_state(state);
     // Connect-info gives each request's source address, so the gate can tell a
     // loopback (in-app gateway) request from a mesh peer's.
