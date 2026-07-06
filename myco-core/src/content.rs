@@ -1071,15 +1071,10 @@ impl Content {
         let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
         // kind 9 is the v1 chat kind (myco-bitchat); generalize when more apps land.
         let filter = serde_json::json!({ "kinds": [9], "limit": 100 });
-        let events = match tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            crate::ip_source::query_relay(&url, filter),
-        )
-        .await
-        {
-            Ok(Ok(evs)) => evs,
-            _ => return,
-        };
+        let events = self
+            .peer_relays
+            .request(npub, &url, vec![filter], std::time::Duration::from_secs(15))
+            .await;
         let mut stored = 0u32;
         for ev in events {
             if ev.verify().is_ok() && self.relay.store_event(ev).await.unwrap_or(false) {
@@ -1131,6 +1126,10 @@ impl Content {
             })
             .collect();
 
+        // All filters ride in one REQ per peer over the shared connection (the relay
+        // any-matches across them), so a pull is a single round-trip, not one socket
+        // per filter.
+        let pool = &self.peer_relays;
         let queries = self
             .connected_circle_npubs()
             .into_iter()
@@ -1143,18 +1142,8 @@ impl Content {
                 let url = format!("ws://[{}]:4869", ip);
                 let filters = filters.clone();
                 Some(async move {
-                    let mut out = Vec::new();
-                    for f in &filters {
-                        if let Ok(Ok(evs)) = tokio::time::timeout(
-                            std::time::Duration::from_secs(8),
-                            crate::ip_source::query_relay(&url, f.clone()),
-                        )
+                    pool.request(&npub, &url, filters, std::time::Duration::from_secs(8))
                         .await
-                        {
-                            out.extend(evs);
-                        }
-                    }
-                    out
                 })
             });
 
@@ -1174,19 +1163,25 @@ impl Content {
     /// `discovered`. Opening a result pulls from that peer (its npub is the holder).
     pub async fn discover_from_circle(self: Arc<Self>) {
         let members = self.connected_circle_contacts();
-        let queries = members.into_iter().map(|(npub, name)| async move {
+        let pool = &self.peer_relays;
+        let queries = members.into_iter().map(move |(npub, name)| async move {
             let Ok(peer) = fips::PeerIdentity::from_npub(&npub) else {
                 return Vec::new();
             };
             let relay_url = format!("ws://[{}]:4869", peer.address().to_ipv6());
-            let events = crate::ip_source::discover_manifests(
-                &relay_url,
-                std::time::Duration::from_secs(15),
-                200,
-            )
-            .await;
+            // Manifest kinds only; `req-ttl: 1` reaches our peers' peers (2 hops),
+            // matching the old `discover_manifests` helper.
+            let filter = serde_json::json!({
+                "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
+                "limit": 200,
+                "req-ttl": 1,
+            });
+            let events = pool
+                .request(&npub, &relay_url, vec![filter], std::time::Duration::from_secs(15))
+                .await;
             events
                 .into_iter()
+                .filter(|e| e.verify().is_ok())
                 .filter_map(|ev| nsite_deck::Manifest::from_event(ev).ok())
                 .map(|m| {
                     let addr = SiteAddr {
@@ -1264,48 +1259,63 @@ impl Content {
             "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
             "authors": authors,
         });
-        let mut targets: Vec<(String, serde_json::Value)> = Vec::new();
-        for npub in self.connected_circle_npubs() {
-            if let Ok(peer) = fips::PeerIdentity::from_npub(&npub) {
-                targets.push((
-                    format!("ws://[{}]:4869", peer.address().to_ipv6()),
-                    mesh_filter.clone(),
-                ));
-            }
-        }
-        if !self.is_offline_only() {
-            for url in crate::ip_source::default_relays() {
-                targets.push((url, online_filter.clone()));
-            }
-        }
-        if targets.is_empty() {
+        let mesh_peers: Vec<(String, String)> = self
+            .connected_circle_npubs()
+            .into_iter()
+            .filter_map(|npub| {
+                let peer = fips::PeerIdentity::from_npub(&npub).ok()?;
+                Some((npub, format!("ws://[{}]:4869", peer.address().to_ipv6())))
+            })
+            .collect();
+        let online: Vec<String> = if self.is_offline_only() {
+            Vec::new()
+        } else {
+            crate::ip_source::default_relays()
+        };
+        if mesh_peers.is_empty() && online.is_empty() {
             self.finish_update_check("No peers or relays to check");
             return;
         }
-        let mesh_count = self.connected_circle_npubs().len();
+        let mesh_count = mesh_peers.len();
         tracing::info!(
             apps = addrs.len(),
             mesh_peers = mesh_count,
-            targets = targets.len(),
+            targets = mesh_count + online.len(),
             offline_only = self.is_offline_only(),
             "update check: querying"
         );
-        let queries = targets.into_iter().map(|(url, f)| async move {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                crate::ip_source::query_relay(&url, f),
-            )
-            .await
-            {
-                Ok(Ok(evs)) => evs,
-                _ => Vec::new(),
+
+        // Mesh peers pull over the shared persistent connection; public relays stay
+        // one-shot (we don't hold long-lived sockets — or leak presence — to them).
+        let pool = &self.peer_relays;
+        let mesh_q = mesh_peers.into_iter().map(|(npub, url)| {
+            let f = mesh_filter.clone();
+            async move {
+                pool.request(&npub, &url, vec![f], std::time::Duration::from_secs(15))
+                    .await
             }
         });
+        let online_q = online.into_iter().map(|url| {
+            let f = online_filter.clone();
+            async move {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    crate::ip_source::query_relay(&url, f),
+                )
+                .await
+                {
+                    Ok(Ok(evs)) => evs,
+                    _ => Vec::new(),
+                }
+            }
+        });
+        let (mesh_res, online_res) =
+            futures_util::future::join(join_all(mesh_q), join_all(online_q)).await;
 
         // Newest verified manifest per slot across all relays.
         let mut newest: HashMap<String, Event> = HashMap::new();
         let mut received = 0usize;
-        for batch in join_all(queries).await {
+        for batch in mesh_res.into_iter().chain(online_res) {
             received += batch.len();
             for ev in batch {
                 let kind = ev.kind.as_u16();

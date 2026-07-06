@@ -233,6 +233,17 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
                             }
                         }
                     }
+                    Some(Ok(Message::Ping(payload))) => {
+                        // Answer the peer-relay pool's keepalive so it can tell a
+                        // live connection from a silent half-open one (its liveness
+                        // check is a ping that must draw a frame back within its
+                        // interval). tungstenite may also auto-pong, but replying
+                        // explicitly guarantees the pong is flushed on an otherwise
+                        // idle subscription.
+                        if ws_tx.send(Message::Pong(payload)).await.is_err() {
+                            return;
+                        }
+                    }
                     Some(Ok(Message::Close(_))) | None => return,
                     Some(Err(_)) => return,
                     _ => {}
