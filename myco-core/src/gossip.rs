@@ -1,8 +1,10 @@
 //! `MeshGossiper` — the [`Gossiper`] hook that fans an nsite's events out to the
 //! mesh, implementing the **push** plane of `docs/design/event-gossip.md`.
 //!
-//! **P2 — multi-hop flood.** An event is pushed to connected Circle peers'
-//! relays (`ws://[fd00::peer]:4869`) carrying a decrementing `event-ttl`:
+//! **P2 — multi-hop flood.** An event is pushed to the whole Circle's relays
+//! (`ws://[fd00::peer]:4869`) — every member, not just direct neighbours, so a
+//! peer reachable only multi-hop over the mesh still receives it — carrying a
+//! decrementing `event-ttl`:
 //!
 //! - **Local origin** (a loopback publish from the in-app nsite) originates at
 //!   `DEFAULT_EVENT_TTL`.
@@ -112,9 +114,12 @@ impl Gossiper for MeshGossiper {
         }
         let frame = serde_json::json!(["EVENT", ev_json]).to_string();
 
-        // Fan out over persistent pooled connections (no per-message connect),
-        // skipping the peer it came from (split-horizon).
-        for npub in self.content.connected_circle_npubs() {
+        // Fan out to the *whole* Circle over persistent pooled connections (no
+        // per-message connect), skipping the peer it came from (split-horizon). Not
+        // just direct neighbours: a Circle peer reachable only multi-hop (you've
+        // moved apart) must still get the message — the routed dial handles it, an
+        // offline member's connect fails fast. See `docs/design/event-gossip.md`.
+        for npub in self.content.circle_npubs() {
             let ip = match fips::PeerIdentity::from_npub(&npub) {
                 Ok(p) => IpAddr::V6(p.address().to_ipv6()),
                 Err(_) => continue,
