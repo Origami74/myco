@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Chat and other mesh events could silently stop reaching a paired peer after a
+  Bluetooth link dropped and came back. The reused relay connection went stale —
+  a half-open socket the app never noticed — and quietly swallowed every message
+  while the mesh still looked healthy. Each peer now holds a single persistent,
+  two-way relay connection that detects a dead link (read side + keepalive) and
+  reconnects, and manifest fetches share that one connection instead of opening a
+  second socket per peer.
+
 ## [0.1.0] - 2026-06-30
 
 ### Added

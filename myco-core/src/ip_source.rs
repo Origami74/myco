@@ -56,6 +56,10 @@ pub struct IpPeerSource {
     /// use only `blossom_servers` — so a **mesh** source never reaches out to
     /// public Blossom over the internet (it stays on the peer's `[fd00::]:24242`).
     ignore_manifest_servers: bool,
+    /// For a **mesh** source: the shared peer-relay pool + the holder's npub, so a
+    /// manifest REQ reuses the one persistent WS connection to the peer instead of
+    /// opening a fresh `query_relay` socket. `None` for a public-relay source.
+    peer_relay: Option<(std::sync::Arc<crate::peer_relay::PeerRelayPool>, String)>,
 }
 
 impl IpPeerSource {
@@ -70,7 +74,19 @@ impl IpPeerSource {
                 .unwrap_or_default(),
             timeout: Duration::from_secs(8),
             ignore_manifest_servers: false,
+            peer_relay: None,
         }
+    }
+
+    /// Route this (mesh) source's manifest REQs through the shared peer-relay pool,
+    /// reusing the persistent WS connection to `npub` instead of a one-shot socket.
+    pub fn over_peer_relay(
+        mut self,
+        pool: std::sync::Arc<crate::peer_relay::PeerRelayPool>,
+        npub: &str,
+    ) -> Self {
+        self.peer_relay = Some((pool, npub.to_string()));
+        self
     }
 
     /// Fetch blobs only from this source's own servers, never the manifest's
@@ -98,7 +114,10 @@ impl IpPeerSource {
 /// `ws://[fd00::holder]:4869` / `http://[fd00::holder]:24242`. Requires the
 /// app-owned TUN to be up so the IPv6 socket routes over the mesh. A longer
 /// timeout than the IP source absorbs BLE latency + first-contact session setup.
-pub fn mesh_source_for(holder_npub: &str) -> anyhow::Result<IpPeerSource> {
+pub fn mesh_source_for(
+    pool: std::sync::Arc<crate::peer_relay::PeerRelayPool>,
+    holder_npub: &str,
+) -> anyhow::Result<IpPeerSource> {
     let peer = fips::PeerIdentity::from_npub(holder_npub)
         .map_err(|e| anyhow::anyhow!("invalid holder npub {holder_npub}: {e}"))?;
     let ip = peer.address().to_ipv6();
@@ -107,7 +126,8 @@ pub fn mesh_source_for(holder_npub: &str) -> anyhow::Result<IpPeerSource> {
         vec![format!("http://[{ip}]:24242")],
     )
     .with_timeout(Duration::from_secs(20))
-    .ignoring_manifest_servers())
+    .ignoring_manifest_servers()
+    .over_peer_relay(pool, holder_npub))
 }
 
 /// Dev-menu **speedtest** against a mesh peer: PUT a fresh `bytes`-sized payload to
@@ -211,25 +231,6 @@ fn random_bytes(n: usize) -> Vec<u8> {
     out
 }
 
-/// Discover the nsite manifests a relay holds — kind 15128 (root) + 35128 (named)
-/// — for "nsites around me" (querying a Circle peer's mesh relay). The whole call
-/// is hard-bounded by `timeout`; returns signature-verified manifest events. A
-/// dead/slow peer relay yields an empty set rather than stalling discovery.
-pub async fn discover_manifests(relay_url: &str, timeout: Duration, limit: usize) -> Vec<Event> {
-    // `req-ttl: 1` makes each directly-queried (1-hop) peer forward this REQ one
-    // more hop, so discovery also surfaces sites held by our peers' peers (2 hops).
-    // The transient key rides inside the filter object; plain relays ignore it.
-    let filter = serde_json::json!({
-        "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
-        "limit": limit,
-        "req-ttl": 1,
-    });
-    match tokio::time::timeout(timeout, query_relay(relay_url, filter)).await {
-        Ok(Ok(events)) => events.into_iter().filter(|e| e.verify().is_ok()).collect(),
-        _ => Vec::new(),
-    }
-}
-
 /// Publish one signed event to a relay (`["EVENT", …]`), best-effort: connect,
 /// send, briefly await the `OK`, close. The whole call is hard-bounded by
 /// `timeout` so an unreachable peer relay can't stall the fan-out. Returns whether
@@ -311,16 +312,23 @@ impl PeerSource for IpPeerSource {
             filter["#d"] = serde_json::json!([d]);
         }
 
-        // Each relay is hard-bounded by `self.timeout` (connect + read), so a dead
-        // relay can't stall the whole sync on a slow TCP/TLS connect; the rest
-        // still answer. A timeout/error yields an empty set for that relay.
-        let queries = self.relays.iter().map(|url| async {
-            match tokio::time::timeout(self.timeout, query_relay(url, filter.clone())).await {
-                Ok(Ok(events)) => events,
-                _ => Vec::new(),
-            }
-        });
-        let results = join_all(queries).await;
+        // Mesh source: reuse the persistent pooled WS to the peer (one socket per
+        // peer, shared with chat fan-out) rather than a fresh per-fetch connect.
+        let results: Vec<Vec<Event>> = if let Some((pool, npub)) = &self.peer_relay {
+            let url = self.relays.first().cloned().unwrap_or_default();
+            vec![pool.request(npub, &url, vec![filter], self.timeout).await]
+        } else {
+            // Public relays: each hard-bounded by `self.timeout` (connect + read), so
+            // a dead relay can't stall the whole sync on a slow TCP/TLS connect; the
+            // rest still answer. A timeout/error yields an empty set for that relay.
+            let queries = self.relays.iter().map(|url| async {
+                match tokio::time::timeout(self.timeout, query_relay(url, filter.clone())).await {
+                    Ok(Ok(events)) => events,
+                    _ => Vec::new(),
+                }
+            });
+            join_all(queries).await
+        };
 
         // Pick the newest event that verifies and matches the requested slot.
         let mut newest: Option<Event> = None;
@@ -536,23 +544,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(miss, None);
-    }
-
-    #[tokio::test]
-    async fn discover_manifests_reads_kind_filtered_sites() {
-        // A signed manifest advertised on a peer's (mock) mesh relay.
-        let site = nsite_deck::testing::build_test_site(
-            &[("/index.html", b"<h1>around me</h1>")],
-            None,
-            Some("Nearby Site"),
-        );
-        let relay_url = mock_relay(serde_json::to_string(&site.manifest).unwrap()).await;
-
-        let events = discover_manifests(&relay_url, Duration::from_secs(5), 50).await;
-        assert_eq!(events.len(), 1, "discovery returns the verified manifest");
-        let m = nsite_deck::Manifest::from_event(events.into_iter().next().unwrap()).unwrap();
-        assert_eq!(m.title.as_deref(), Some("Nearby Site"));
-        assert_eq!(m.author, site.author);
     }
 
     /// Live network check against a real public nsite (the link the user gave).
