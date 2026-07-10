@@ -25,8 +25,8 @@
 //! interval catches the silent half-open; either drops the task, and the next
 //! command lazily reopens a fresh connection.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -36,10 +36,11 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// Keepalive cadence: send a WS ping this often on an otherwise-idle connection.
 /// If a whole interval passes with **no inbound frame at all** (not even the pong),
-/// the connection is treated as dead and the task exits so the next command
-/// reconnects. Short enough to catch a silent half-open in seconds, not the TCP
-/// retransmit horizon; long enough not to chatter over BLE.
-const PING_INTERVAL: Duration = Duration::from_secs(20);
+/// the connection is treated as dead and the task exits so it can reconnect. Short
+/// enough to catch a silent half-open in seconds (a middle-node flap blackholes the
+/// route with no RST), not the TCP retransmit horizon; long enough not to chatter
+/// over BLE. The runtime's keepwarm loop respawns the dropped task promptly.
+const PING_INTERVAL: Duration = Duration::from_secs(10);
 
 /// A command sent to a peer's connection actor over its channel.
 enum Command {
@@ -66,6 +67,12 @@ pub struct PeerRelayPool {
     /// Per-peer command channel to its live actor task. A closed sender means the
     /// task exited (connection died / connect failed); the next use respawns it.
     peers: Mutex<HashMap<String, mpsc::UnboundedSender<Command>>>,
+    /// npubs whose actor currently holds a **live, connected** socket — set once
+    /// `connect_async` succeeds, cleared when the task exits. The runtime diffs this
+    /// each keepwarm tick: a peer transitioning absent→present is the "reappeared"
+    /// edge that drives a resubscribe. Distinct from `peers` (which has an entry
+    /// during the connecting window too).
+    connected: Arc<Mutex<HashSet<String>>>,
 }
 
 impl PeerRelayPool {
@@ -73,10 +80,25 @@ impl PeerRelayPool {
         Self::default()
     }
 
+    /// npubs that currently hold a live connected socket (see [`Self::connected`]).
+    pub fn connected_npubs(&self) -> HashSet<String> {
+        self.connected.lock().unwrap().clone()
+    }
+
+    /// Ensure `npub` has a running actor (which lazily connects) at `url`, without
+    /// sending anything. The runtime's keepwarm loop calls this for every Circle
+    /// member so a dropped connection is respawned promptly — not lazily on the next
+    /// outbound frame — restoring both directions fast after a mesh flap.
+    pub fn ensure(&self, npub: &str, url: &str) {
+        let mut peers = self.peers.lock().unwrap();
+        let _ = self.spawn_or_get(&mut peers, npub, url);
+    }
+
     /// Get a live command channel for `npub`'s connection at `url`, spawning the
     /// actor (which lazily connects) if there isn't a running one. Caller holds the
     /// map lock.
-    fn actor(
+    fn spawn_or_get(
+        &self,
         peers: &mut HashMap<String, mpsc::UnboundedSender<Command>>,
         npub: &str,
         url: &str,
@@ -89,8 +111,12 @@ impl PeerRelayPool {
         }
         let (tx, rx) = mpsc::unbounded_channel::<Command>();
         peers.insert(npub.to_string(), tx.clone());
-        let url = url.to_string();
-        tokio::spawn(run(url, rx));
+        tokio::spawn(run(
+            url.to_string(),
+            npub.to_string(),
+            rx,
+            self.connected.clone(),
+        ));
         tx
     }
 
@@ -100,7 +126,7 @@ impl PeerRelayPool {
     /// buffered in the channel and flushed on connect.
     pub fn send(&self, npub: &str, url: &str, frame: String) {
         let mut peers = self.peers.lock().unwrap();
-        let tx = Self::actor(&mut peers, npub, url);
+        let tx = self.spawn_or_get(&mut peers, npub, url);
         // Lost the race with a task that just exited: drop the entry so the next
         // publish respawns. Rare, and the push plane is best-effort (the pull plane
         // recovers backlog on reconnect).
@@ -123,7 +149,7 @@ impl PeerRelayPool {
         let (reply_tx, reply_rx) = oneshot::channel();
         {
             let mut peers = self.peers.lock().unwrap();
-            let tx = Self::actor(&mut peers, npub, url);
+            let tx = self.spawn_or_get(&mut peers, npub, url);
             if tx
                 .send(Command::Request {
                     filters,
@@ -145,10 +171,17 @@ impl PeerRelayPool {
 
 /// The per-peer connection actor: connect once, then multiplex push + pull + ping
 /// over the one socket until it dies or the pool drops the command channel.
-async fn run(url: String, mut cmd_rx: mpsc::UnboundedReceiver<Command>) {
+async fn run(
+    url: String,
+    npub: String,
+    mut cmd_rx: mpsc::UnboundedReceiver<Command>,
+    connected: Arc<Mutex<HashSet<String>>>,
+) {
     let Ok((ws, _)) = tokio_tungstenite::connect_async(&url).await else {
         return; // connect failed → channel drops with this task → next command respawns
     };
+    // Live now — mark reachable so the keepwarm loop sees the (re)connect edge.
+    connected.lock().unwrap().insert(npub.clone());
     let (mut sink, mut stream) = ws.split();
     let mut pending: HashMap<String, Pending> = HashMap::new();
     let mut next_sub: u64 = 0;
@@ -227,6 +260,9 @@ async fn run(url: String, mut cmd_rx: mpsc::UnboundedReceiver<Command>) {
             }
         }
     }
+    // No longer reachable — clear the flag so the keepwarm loop respawns us and
+    // sees a fresh (re)connect edge when the peer comes back.
+    connected.lock().unwrap().remove(&npub);
     // Pending replies drop here → their `request` callers get an empty batch.
     let _ = sink.send(Message::Close(None)).await;
 }
@@ -329,5 +365,36 @@ mod tests {
             )
             .await;
         assert!(got.is_empty());
+    }
+
+    /// `ensure` connects without a frame to send, and marks the peer connected —
+    /// this is the keepwarm reconnect-edge signal the runtime diffs.
+    #[tokio::test]
+    async fn ensure_connects_and_reports_connected() {
+        let (_store, url) = spawn_relay().await;
+        let pool = PeerRelayPool::new();
+        assert!(!pool.connected_npubs().contains("peerZ"));
+        pool.ensure("peerZ", &url);
+        let up = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if pool.connected_npubs().contains("peerZ") {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(up, "ensure should connect and mark the peer connected");
+    }
+
+    /// `ensure` to an unreachable peer never reports it connected (connect fails, the
+    /// actor exits without inserting into the connected set).
+    #[tokio::test]
+    async fn ensure_dead_peer_stays_absent() {
+        let pool = PeerRelayPool::new();
+        pool.ensure("peerNope", "ws://127.0.0.1:1");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!pool.connected_npubs().contains("peerNope"));
     }
 }
