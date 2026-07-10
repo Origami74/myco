@@ -6,6 +6,10 @@
 > **Install apps from the people around you** — over Bluetooth, with no internet
 > and no app store.
 
+|  |  |  |  |  |
+| :--: | :--: | :--: | :--: | :--: |
+| ![Tap to pair over NFC](docs/images/01-nfc-pairing.png)<br>**Bump phones to pair** | ![Your Circle of paired people](docs/images/02-circle.png)<br>**Your Circle** | ![Share an app with someone](docs/images/03-app-sharing.png)<br>**Share an app** | ![Installed apps on the home screen](docs/images/04-home.png)<br>**Your apps** | ![An installed app running full-screen](docs/images/05-bitchat.png)<br>**Apps run full-screen** |
+
 ![Install apps from the people around you](docs/design/diagrams/intro-01-what-it-is.svg)
 
 Myco is a peer-to-peer app-sharing network. Meet someone, **pair** with a quick
