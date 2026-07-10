@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   off and on. Android throttles BLE scanning (~5 scan starts per 30s); a
   throttled scan was logged and then abandoned. The scanner now re-arms itself on
   a backoff — waiting out the throttle window — and recovers discovery on its own.
+- Chat only reached Circle members you were *directly* connected to. Once two
+  paired people moved apart and became several hops apart over the mesh, their
+  messages stopped flowing — even though the mesh could still route between them.
+  Chat now fans out to your whole Circle, so a paired peer keeps receiving your
+  messages wherever they are on the mesh, not just when they're a direct neighbour.
 
 ## [0.1.0] - 2026-06-30
 

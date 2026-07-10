@@ -835,9 +835,9 @@ impl Content {
         *self.connected_peers.lock().unwrap() = npubs;
     }
 
-    /// Circle members that are connected mesh peers right now — the pull sources
-    /// to try (besides an explicit holder) without risking an offline timeout, and
-    /// the fan-out targets for outbound chat events (`docs/design/event-gossip.md`).
+    /// Circle members that are **direct** mesh neighbours right now — the pull
+    /// sources to try (besides an explicit holder) without risking an offline
+    /// timeout, e.g. `open_site` content pulls.
     pub fn connected_circle_npubs(&self) -> Vec<String> {
         let connected = self.connected_peers.lock().unwrap();
         self.circle
@@ -845,6 +845,23 @@ impl Content {
             .unwrap()
             .iter()
             .filter(|c| connected.iter().any(|n| n == &c.npub))
+            .map(|c| c.npub.clone())
+            .collect()
+    }
+
+    /// **Every** Circle member's npub, regardless of whether they're a *direct*
+    /// mesh neighbour right now. Chat fan-out targets this: a Circle peer you've
+    /// walked away from is still reachable multi-hop over the mesh, and messages
+    /// must keep flowing to them — the routed `ws://[fd00::peer]:4869` dial reaches
+    /// them, and a truly-offline member's connect just fails fast and is dropped.
+    /// (Contrast [`connected_circle_npubs`](Self::connected_circle_npubs), the
+    /// direct-neighbour subset used where an offline dial's timeout must be
+    /// avoided.) See `docs/design/event-gossip.md`.
+    pub fn circle_npubs(&self) -> Vec<String> {
+        self.circle
+            .lock()
+            .unwrap()
+            .iter()
             .map(|c| c.npub.clone())
             .collect()
     }
@@ -2172,12 +2189,18 @@ mod tests {
                 "re-adding renames in place"
             );
 
-            // Only connected members are offered as pull sources.
+            // Only connected members are offered as offline-sensitive pull sources.
             content.set_connected_peers(vec!["npub1bob".to_string()]);
             assert_eq!(
                 content.connected_circle_npubs(),
                 vec!["npub1bob".to_string()]
             );
+            // But chat fans to the *whole* Circle — Alice isn't a direct neighbour
+            // right now, yet must still receive messages (reachable multi-hop).
+            let all = content.circle_npubs();
+            assert_eq!(all.len(), 2);
+            assert!(all.contains(&"npub1alice".to_string()));
+            assert!(all.contains(&"npub1bob".to_string()));
 
             content.remove_from_circle("npub1bob");
             assert_eq!(content.circle_snapshot().len(), 1);
