@@ -76,6 +76,10 @@ class BleRadio(context: Context) {
     private val retryExec = Executors.newSingleThreadScheduledExecutor()
     @Volatile private var advertisePsm = 0
     private var advertiseRetries = 0
+    // Scanner-retry state: a failed scan (Android throttles ~5 startScan/30s →
+    // SCAN_FAILED_SCANNING_TOO_FREQUENTLY) used to be logged and abandoned, which
+    // permanently killed peer discovery until the mesh was toggled. We re-arm it.
+    private var scanRetries = 0
 
     fun bindBridge(handle: Long) {
         bridgeHandle = handle
@@ -197,6 +201,9 @@ class BleRadio(context: Context) {
 
     fun startScanning() {
         if (stopped) return
+        // Stop-before-start hygiene: a re-arm (retry / radio restart) must not
+        // orphan a prior scan callback.
+        stopScanning()
         val sc = adapter?.bluetoothLeScanner ?: return
         scanner = sc
         val filters = listOf(ScanFilter.Builder().setServiceUuid(FIPS_PARCEL_UUID).build())
@@ -205,6 +212,7 @@ class BleRadio(context: Context) {
             .build()
         val cb = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
+                scanRetries = 0 // a result proves scanning is live; reset backoff
                 val addr = "$ADAPTER/${result.device.address}"
                 // PSM rides in the primary advert under the compact 16-bit UUID;
                 // fall back to the legacy 128-bit-keyed service-data for any peer
@@ -227,7 +235,8 @@ class BleRadio(context: Context) {
             }
 
             override fun onScanFailed(errorCode: Int) {
-                Log.e(TAG, "scan failed: $errorCode")
+                Log.e(TAG, "scan failed: $errorCode (2=APP_REGISTRATION_FAILED, 6=TOO_FREQUENT)")
+                scheduleScanRetry(errorCode)
             }
         }
         scanCallback = cb
@@ -236,6 +245,33 @@ class BleRadio(context: Context) {
             Log.i(TAG, "scanning for FIPS peers")
         } catch (e: Exception) {
             Log.e(TAG, "startScanning failed", e)
+            scheduleScanRetry(-1)
+        }
+    }
+
+    /** Re-arm scanning after a failure, so a transient throttle/error doesn't
+     *  permanently stop peer discovery. Android caps ~5 `startScan` calls per 30s
+     *  (SCAN_FAILED_SCANNING_TOO_FREQUENTLY) — restarting inside that window just
+     *  re-trips it, so the throttle case gets a 30s floor; other errors use the
+     *  same exponential backoff (5→10→20→40s, capped 60s) as the advertiser. The
+     *  backoff resets once a scan result comes in. */
+    private fun scheduleScanRetry(errorCode: Int) {
+        if (stopped) return
+        val backoff = minOf(60L, 5L shl minOf(scanRetries, 3))
+        val delay =
+            if (errorCode == ScanCallback.SCAN_FAILED_SCANNING_TOO_FREQUENTLY) {
+                maxOf(30L, backoff)
+            } else {
+                backoff
+            }
+        scanRetries++
+        Log.i(TAG, "scan retry in ${delay}s (error $errorCode)")
+        runCatching {
+            retryExec.schedule(
+                { if (!stopped) startScanning() },
+                delay,
+                TimeUnit.SECONDS,
+            )
         }
     }
 
