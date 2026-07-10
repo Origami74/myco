@@ -56,6 +56,10 @@ pub struct IpPeerSource {
     /// use only `blossom_servers` — so a **mesh** source never reaches out to
     /// public Blossom over the internet (it stays on the peer's `[fd00::]:24242`).
     ignore_manifest_servers: bool,
+    /// For a **mesh** source: the shared peer-relay pool + the holder's npub, so a
+    /// manifest REQ reuses the one persistent WS connection to the peer instead of
+    /// opening a fresh `query_relay` socket. `None` for a public-relay source.
+    peer_relay: Option<(std::sync::Arc<crate::peer_relay::PeerRelayPool>, String)>,
 }
 
 impl IpPeerSource {
@@ -70,7 +74,19 @@ impl IpPeerSource {
                 .unwrap_or_default(),
             timeout: Duration::from_secs(8),
             ignore_manifest_servers: false,
+            peer_relay: None,
         }
+    }
+
+    /// Route this (mesh) source's manifest REQs through the shared peer-relay pool,
+    /// reusing the persistent WS connection to `npub` instead of a one-shot socket.
+    pub fn over_peer_relay(
+        mut self,
+        pool: std::sync::Arc<crate::peer_relay::PeerRelayPool>,
+        npub: &str,
+    ) -> Self {
+        self.peer_relay = Some((pool, npub.to_string()));
+        self
     }
 
     /// Fetch blobs only from this source's own servers, never the manifest's
@@ -98,7 +114,10 @@ impl IpPeerSource {
 /// `ws://[fd00::holder]:4869` / `http://[fd00::holder]:24242`. Requires the
 /// app-owned TUN to be up so the IPv6 socket routes over the mesh. A longer
 /// timeout than the IP source absorbs BLE latency + first-contact session setup.
-pub fn mesh_source_for(holder_npub: &str) -> anyhow::Result<IpPeerSource> {
+pub fn mesh_source_for(
+    pool: std::sync::Arc<crate::peer_relay::PeerRelayPool>,
+    holder_npub: &str,
+) -> anyhow::Result<IpPeerSource> {
     let peer = fips::PeerIdentity::from_npub(holder_npub)
         .map_err(|e| anyhow::anyhow!("invalid holder npub {holder_npub}: {e}"))?;
     let ip = peer.address().to_ipv6();
@@ -107,7 +126,8 @@ pub fn mesh_source_for(holder_npub: &str) -> anyhow::Result<IpPeerSource> {
         vec![format!("http://[{ip}]:24242")],
     )
     .with_timeout(Duration::from_secs(20))
-    .ignoring_manifest_servers())
+    .ignoring_manifest_servers()
+    .over_peer_relay(pool, holder_npub))
 }
 
 /// Dev-menu **speedtest** against a mesh peer: PUT a fresh `bytes`-sized payload to
@@ -292,16 +312,23 @@ impl PeerSource for IpPeerSource {
             filter["#d"] = serde_json::json!([d]);
         }
 
-        // Each relay is hard-bounded by `self.timeout` (connect + read), so a dead
-        // relay can't stall the whole sync on a slow TCP/TLS connect; the rest
-        // still answer. A timeout/error yields an empty set for that relay.
-        let queries = self.relays.iter().map(|url| async {
-            match tokio::time::timeout(self.timeout, query_relay(url, filter.clone())).await {
-                Ok(Ok(events)) => events,
-                _ => Vec::new(),
-            }
-        });
-        let results = join_all(queries).await;
+        // Mesh source: reuse the persistent pooled WS to the peer (one socket per
+        // peer, shared with chat fan-out) rather than a fresh per-fetch connect.
+        let results: Vec<Vec<Event>> = if let Some((pool, npub)) = &self.peer_relay {
+            let url = self.relays.first().cloned().unwrap_or_default();
+            vec![pool.request(npub, &url, vec![filter], self.timeout).await]
+        } else {
+            // Public relays: each hard-bounded by `self.timeout` (connect + read), so
+            // a dead relay can't stall the whole sync on a slow TCP/TLS connect; the
+            // rest still answer. A timeout/error yields an empty set for that relay.
+            let queries = self.relays.iter().map(|url| async {
+                match tokio::time::timeout(self.timeout, query_relay(url, filter.clone())).await {
+                    Ok(Ok(events)) => events,
+                    _ => Vec::new(),
+                }
+            });
+            join_all(queries).await
+        };
 
         // Pick the newest event that verifies and matches the requested slot.
         let mut newest: Option<Event> = None;

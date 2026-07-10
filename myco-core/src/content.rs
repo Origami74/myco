@@ -225,9 +225,10 @@ pub struct Content {
     device_name_override: Mutex<Option<String>>,
     /// Incoming pair requests awaiting the user's accept/decline (UI pop-up).
     pending_pairs: Mutex<Vec<PairRequestView>>,
-    /// Persistent WS connections to peers' relays, so chat fan-out doesn't pay a
-    /// fresh connect per message (slow over BLE).
-    peer_relays: crate::peer_relay::PeerRelayPool,
+    /// Persistent WS connections to peers' relays, so chat fan-out and manifest
+    /// fetches don't pay a fresh connect per message (slow over BLE). `Arc` so a
+    /// mesh `PeerSource` can borrow the same pool for its manifest REQs.
+    peer_relays: Arc<crate::peer_relay::PeerRelayPool>,
     /// host_label -> a newer version being staged (downloaded) before activation.
     /// See `docs/design/nsite-updates.md` §2. P-U1: staged outside the relay store;
     /// activation stores the manifest (making it the served version).
@@ -352,7 +353,7 @@ impl Content {
             device_keys: Mutex::new(None),
             device_name_override: Mutex::new(None),
             pending_pairs: Mutex::new(Vec::new()),
-            peer_relays: crate::peer_relay::PeerRelayPool::new(),
+            peer_relays: Arc::new(crate::peer_relay::PeerRelayPool::new()),
             pending_updates: Mutex::new(HashMap::new()),
             update_check: Mutex::new(UpdateCheckView::default()),
             active_manifests: Mutex::new(active_manifests),
@@ -505,7 +506,7 @@ impl Content {
         let mut tried: HashSet<String> = HashSet::new();
         if let Some(npub) = holder.as_deref() {
             if tried.insert(npub.to_string()) {
-                match crate::ip_source::mesh_source_for(npub) {
+                match crate::ip_source::mesh_source_for(self.peer_relays.clone(), npub) {
                     Ok(mesh) => sources.push(Arc::new(mesh)),
                     Err(e) => tracing::warn!(error = %e, "skipping mesh source"),
                 }
@@ -513,7 +514,7 @@ impl Content {
         }
         for npub in self.connected_circle_npubs() {
             if tried.insert(npub.clone()) {
-                match crate::ip_source::mesh_source_for(&npub) {
+                match crate::ip_source::mesh_source_for(self.peer_relays.clone(), &npub) {
                     Ok(mesh) => sources.push(Arc::new(mesh)),
                     Err(e) => tracing::warn!(error = %e, npub, "skipping circle mesh source"),
                 }
@@ -1177,7 +1178,12 @@ impl Content {
                 "req-ttl": 1,
             });
             let events = pool
-                .request(&npub, &relay_url, vec![filter], std::time::Duration::from_secs(15))
+                .request(
+                    &npub,
+                    &relay_url,
+                    vec![filter],
+                    std::time::Duration::from_secs(15),
+                )
                 .await;
             events
                 .into_iter()
@@ -1427,7 +1433,7 @@ impl Content {
         // option under mesh-only), then the online fallback unless mesh-only.
         let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
         for npub in self.connected_circle_npubs() {
-            if let Ok(m) = crate::ip_source::mesh_source_for(&npub) {
+            if let Ok(m) = crate::ip_source::mesh_source_for(self.peer_relays.clone(), &npub) {
                 sources.push(Arc::new(m));
             }
         }
