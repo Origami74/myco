@@ -43,9 +43,6 @@ pub struct AppRuntime {
     /// The content layer (embedded relay + Blossom + gateway + Library). `None`
     /// only on a startup error (no valid data dir).
     content: Option<Arc<Content>>,
-    /// Circle peers we've already pulled chat backlog from this connection, so we
-    /// pull once per (re)connect rather than every state poll.
-    pulled_chat_from: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Latest dev-menu peer speedtest result; written by the spawned run task and
     /// read back into `state()`. Shared so the async task can update it in place.
     speedtest: Arc<std::sync::Mutex<crate::state::SpeedtestView>>,
@@ -197,6 +194,23 @@ impl AppRuntime {
                     mesh_warning.push_str(&format!("blossom port 24242 unavailable: {e}"));
                 }
             }
+
+            // Keepwarm: proactively hold a live relay connection to every Circle
+            // member (respawn a dropped one promptly, not lazily on the next send)
+            // and resubscribe on each peer's reconnect edge. This is what restores a
+            // Circle relay link *mutually and fast* after a mid-chain node flaps —
+            // independent of chat traffic and of where the peer sits in the mesh.
+            {
+                let content = content.clone();
+                rt.spawn(async move {
+                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(8));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        tick.tick().await;
+                        content.keepwarm_tick();
+                    }
+                });
+            }
         }
 
         Ok(Self {
@@ -213,7 +227,6 @@ impl AppRuntime {
             read_handle: None,
             loop_task: None,
             content: Some(content),
-            pulled_chat_from: std::sync::Mutex::new(std::collections::HashSet::new()),
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
         })
     }
@@ -260,7 +273,6 @@ impl AppRuntime {
             read_handle: None,
             loop_task: None,
             content: None,
-            pulled_chat_from: std::sync::Mutex::new(std::collections::HashSet::new()),
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
         }
     }
@@ -609,30 +621,17 @@ impl AppRuntime {
                 .collect();
             content.set_connected_peers(connected);
 
-            // Pull chat backlog once per newly-connected Circle peer (the read
-            // counterpart of the push flood) so a freshly-opened nsite has history.
+            // Backlog resync is driven by the keepwarm loop's reconnect edge
+            // (`Content::keepwarm_tick`), which recreates each in-app subscription
+            // against a Circle peer as it (re)appears — direct *or* multi-hop.
             if let Some(rt) = self.rt.as_ref() {
-                let conn: std::collections::HashSet<String> =
-                    content.connected_circle_npubs().into_iter().collect();
-                let mut pulled = self.pulled_chat_from.lock().unwrap();
-                for npub in &conn {
-                    if pulled.insert(npub.clone()) {
-                        // First poll where this Circle peer is reachable: pull chat
-                        // backlog (the read counterpart of the push flood).
-                        let content = content.clone();
-                        let npub = npub.clone();
-                        rt.spawn(async move { content.pull_recent_chat(&npub).await });
-                    }
-                }
-                pulled.retain(|n| conn.contains(n)); // re-pull on reconnect
-                drop(pulled);
-
-                // Retry not-ready downloads while any Circle peer is reachable.
+                // Retry not-ready downloads while any direct Circle peer is reachable.
                 // open_site(_, None) tries every connected peer, and
                 // `retriable_library_addrs` skips sites already syncing — so this
                 // re-tries about once per attempt-duration (not every poll), and
                 // keeps trying as a flaky just-connected session settles, instead of
                 // firing once on the connect edge and going quiet.
+                let conn = content.connected_circle_npubs();
                 if !conn.is_empty() {
                     for addr in content.retriable_library_addrs() {
                         let content = content.clone();

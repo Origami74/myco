@@ -229,6 +229,15 @@ pub struct Content {
     /// fetches don't pay a fresh connect per message (slow over BLE). `Arc` so a
     /// mesh `PeerSource` can borrow the same pool for its manifest REQs.
     peer_relays: Arc<crate::peer_relay::PeerRelayPool>,
+    /// Raw filters of the subscriptions in-app clients currently have open on our
+    /// loopback relay, keyed by the relay's per-connection sub key. Fed by the relay
+    /// via the gossiper hooks; the core stores them **verbatim** (it never interprets
+    /// kinds). On a Circle peer reappearing, these are replayed to it to pull the
+    /// backlog the client missed — see [`Content::resync_from_peer`].
+    active_local_subs: Mutex<HashMap<String, Vec<serde_json::Value>>>,
+    /// The set of Circle peers the pool last reported as connected — diffed each
+    /// keepwarm tick to spot the absent→present (reappeared) edge.
+    prev_pool_connected: Mutex<HashSet<String>>,
     /// host_label -> a newer version being staged (downloaded) before activation.
     /// See `docs/design/nsite-updates.md` §2. P-U1: staged outside the relay store;
     /// activation stores the manifest (making it the served version).
@@ -354,6 +363,8 @@ impl Content {
             device_name_override: Mutex::new(None),
             pending_pairs: Mutex::new(Vec::new()),
             peer_relays: Arc::new(crate::peer_relay::PeerRelayPool::new()),
+            active_local_subs: Mutex::new(HashMap::new()),
+            prev_pool_connected: Mutex::new(HashSet::new()),
             pending_updates: Mutex::new(HashMap::new()),
             update_check: Mutex::new(UpdateCheckView::default()),
             active_manifests: Mutex::new(active_manifests),
@@ -1075,33 +1086,85 @@ impl Content {
         );
     }
 
-    // --- backlog pull (the read counterpart of fan-out) ---
+    // --- local subscription registry (recreated against reappearing peers) ---
 
-    /// Pull recent chat (kind 9) from a peer's relay into the local store, so a
-    /// freshly-opened nsite sees history it missed while the push flood is the live
-    /// path. Best-effort, hard-bounded; stored events surface on the nsite's next
-    /// REQ. (The efficient negentropy version is future work — needs NIP-77 on the
-    /// relay.) `npub` is a connected Circle peer.
-    pub async fn pull_recent_chat(&self, npub: &str) {
+    /// The relay reports a local (in-app) client opening a `REQ`. We keep its raw
+    /// filters — **without interpreting them** — so we can recreate the subscription
+    /// against Circle peers as they (re)appear. Called from the gossiper hook.
+    pub fn record_local_sub(&self, key: String, filters: Vec<serde_json::Value>) {
+        self.active_local_subs.lock().unwrap().insert(key, filters);
+    }
+
+    /// The relay reports a local client's subscription closing (`CLOSE` or the
+    /// connection dropping).
+    pub fn drop_local_sub(&self, key: &str) {
+        self.active_local_subs.lock().unwrap().remove(key);
+    }
+
+    // --- backlog resync (the read counterpart of fan-out) ---
+
+    /// Recreate every open local subscription against `npub`'s relay: replay each
+    /// client's filters to the peer and fold its matching events into our store, so
+    /// a freshly-reachable Circle peer delivers the backlog our clients missed while
+    /// it was away. myco is filter-agnostic here — it just re-runs whatever the
+    /// in-app clients are subscribed to; it has no notion of chat vs anything else.
+    /// Best-effort and hard-bounded. Runs on the pool's (re)connect edge — so it
+    /// covers a Circle peer reachable only multi-hop, which the direct-neighbour
+    /// snapshot never surfaced.
+    pub async fn resync_from_peer(&self, npub: &str) {
+        let subs = {
+            let guard = self.active_local_subs.lock().unwrap();
+            if guard.is_empty() {
+                return;
+            }
+            guard.values().cloned().collect::<Vec<_>>()
+        };
         let Ok(peer) = fips::PeerIdentity::from_npub(npub) else {
             return;
         };
         let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
-        // kind 9 is the v1 chat kind (myco-bitchat); generalize when more apps land.
-        let filter = serde_json::json!({ "kinds": [9], "limit": 100 });
-        let events = self
-            .peer_relays
-            .request(npub, &url, vec![filter], std::time::Duration::from_secs(15))
-            .await;
         let mut stored = 0u32;
-        for ev in events {
-            if ev.verify().is_ok() && self.relay.store_event(ev).await.unwrap_or(false) {
-                stored += 1;
+        for filters in subs {
+            let events = self
+                .peer_relays
+                .request(npub, &url, filters, std::time::Duration::from_secs(15))
+                .await;
+            for ev in events {
+                if ev.verify().is_ok() && self.relay.store_event(ev).await.unwrap_or(false) {
+                    stored += 1;
+                }
             }
         }
         if stored > 0 {
-            tracing::debug!(npub, stored, "pulled chat backlog from peer");
+            tracing::debug!(npub, stored, "resynced backlog from reappeared peer");
         }
+    }
+
+    /// One keepwarm pass (driven by a runtime tick): ensure a live pooled connection
+    /// to every Circle member — so a dropped connection is respawned promptly, not
+    /// lazily on the next outbound frame — and, for each member the pool has just
+    /// (re)connected (absent→present since last pass), spawn a backlog resync. This
+    /// is what restores a Circle relay link **mutually and fast** after a mesh flap,
+    /// regardless of where the peer sits in the mesh.
+    pub fn keepwarm_tick(self: &Arc<Self>) {
+        let circle: HashSet<String> = self.circle_npubs().into_iter().collect();
+        for npub in &circle {
+            if let Ok(peer) = fips::PeerIdentity::from_npub(npub) {
+                let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
+                self.peer_relays.ensure(npub, &url);
+            }
+        }
+        let now = self.peer_relays.connected_npubs();
+        let mut prev = self.prev_pool_connected.lock().unwrap();
+        // Newly-connected Circle members → recreate their subscriptions.
+        for npub in now.difference(&prev) {
+            if circle.contains(npub) {
+                let me = self.clone();
+                let npub = npub.clone();
+                tokio::spawn(async move { me.resync_from_peer(&npub).await });
+            }
+        }
+        *prev = now;
     }
 
     // --- mesh fan-out ---

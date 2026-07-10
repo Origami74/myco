@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages stopped flowing — even though the mesh could still route between them.
   Chat now fans out to your whole Circle, so a paired peer keeps receiving your
   messages wherever they are on the mesh, not just when they're a direct neighbour.
+- When a device in the middle of a mesh chain dropped and reconnected, the relay
+  links between Circle members restored slowly and often only one-way, so messages
+  stalled or flowed in a single direction for up to a minute. Each device now
+  proactively keeps a live relay connection to every Circle member and re-establishes
+  it within seconds of a flap — both directions — and on reconnect it recreates the
+  app's open subscriptions against the returned peer to pull back anything missed,
+  wherever that peer sits in the mesh.
 
 ## [0.1.0] - 2026-06-30
 

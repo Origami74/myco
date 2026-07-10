@@ -73,6 +73,20 @@ pub trait Gossiper: Send + Sync {
     ) -> Vec<Event> {
         Vec::new()
     }
+
+    /// A **local** (loopback / in-app) client opened a `REQ`. The implementor
+    /// records the raw `filters` so it can *recreate* this subscription against a
+    /// Circle peer that (re)appears on the mesh — pulling that peer's matching
+    /// backlog into the store so the client sees what it missed. The relay passes
+    /// the filters verbatim; the core never interprets them (it has no notion of
+    /// which kinds a given nsite cares about). `key` is unique per open
+    /// subscription for the lifetime of the connection. Mesh-origin `REQ`s are
+    /// never reported here — only local clients' own interests. Default: no-op.
+    fn on_local_subscribe(&self, _key: &str, _filters: Vec<serde_json::Value>) {}
+
+    /// A local client's subscription `key` closed (explicit `CLOSE`, or the
+    /// connection dropped). Default: no-op.
+    fn on_local_unsubscribe(&self, _key: &str) {}
 }
 
 /// Access policy for **mesh** connections: only paired (Circle) peers may read or
@@ -217,19 +231,22 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
     } else {
         Origin::Mesh
     };
+    // A per-connection id so a local client's `REQ` sub_ids are globally unique in
+    // the core's active-subscription registry (two connections can both use "s1").
+    let conn_id = NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut live = hub.live.subscribe();
     // Active subscriptions on this connection: sub_id -> its filters.
     let mut subs: HashMap<String, Vec<ManifestFilter>> = HashMap::new();
 
-    loop {
+    'conn: loop {
         tokio::select! {
             incoming = ws_rx.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        for reply in handle_client_frame(text.as_str(), &hub, origin, peer_ip, &mut subs).await {
+                        for reply in handle_client_frame(text.as_str(), &hub, origin, peer_ip, conn_id, &mut subs).await {
                             if ws_tx.send(Message::text(reply)).await.is_err() {
-                                return;
+                                break 'conn;
                             }
                         }
                     }
@@ -241,11 +258,11 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
                         // explicitly guarantees the pong is flushed on an otherwise
                         // idle subscription.
                         if ws_tx.send(Message::Pong(payload)).await.is_err() {
-                            return;
+                            break 'conn;
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => return,
-                    Some(Err(_)) => return,
+                    Some(Ok(Message::Close(_))) | None => break 'conn,
+                    Some(Err(_)) => break 'conn,
                     _ => {}
                 }
             }
@@ -256,7 +273,7 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
                             if filters.iter().any(|f| matches_filter(&ev, f)) {
                                 let frame = serde_json::json!(["EVENT", sub_id, ev]).to_string();
                                 if ws_tx.send(Message::text(frame)).await.is_err() {
-                                    return;
+                                    break 'conn;
                                 }
                             }
                         }
@@ -264,12 +281,39 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
                     // Lagged: this slow subscriber missed some events — skip them
                     // and carry on rather than dropping the connection.
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => return,
+                    Err(broadcast::error::RecvError::Closed) => break 'conn,
                 }
             }
         }
     }
+    finish_conn(&hub, origin, conn_id, &subs);
 }
+
+/// Tear down a connection's local subscriptions in the core's registry (so a
+/// dropped in-app client stops being replayed to reappearing peers).
+fn finish_conn(
+    hub: &Arc<RelayHub>,
+    origin: Origin,
+    conn_id: u64,
+    subs: &HashMap<String, Vec<ManifestFilter>>,
+) {
+    if origin != Origin::Local {
+        return;
+    }
+    if let Some(gossip) = &hub.gossip {
+        for sub_id in subs.keys() {
+            gossip.on_local_unsubscribe(&sub_key(conn_id, sub_id));
+        }
+    }
+}
+
+/// The registry key for one local subscription: unique across connections.
+fn sub_key(conn_id: u64, sub_id: &str) -> String {
+    format!("{conn_id}:{sub_id}")
+}
+
+/// Monotonic per-connection id source (see [`handle_ws`]).
+static NEXT_CONN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Handle one client frame, mutating `subs` and returning the frames to send back.
 async fn handle_client_frame(
@@ -277,6 +321,7 @@ async fn handle_client_frame(
     hub: &Arc<RelayHub>,
     origin: Origin,
     peer_ip: IpAddr,
+    conn_id: u64,
     subs: &mut HashMap<String, Vec<ManifestFilter>>,
 ) -> Vec<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
@@ -347,6 +392,17 @@ async fn handle_client_frame(
             // Keep the subscription open so matching new events stream live.
             subs.insert(sub_id.clone(), filters);
 
+            // Record a *local* client's interest so the core can recreate this
+            // subscription against Circle peers that reappear on the mesh (pulling
+            // their missed backlog). Mesh REQs are peers' interests, not ours, and
+            // are never recorded. The filters are passed verbatim — the core does
+            // not interpret them.
+            if origin == Origin::Local {
+                if let Some(gossip) = &hub.gossip {
+                    gossip.on_local_subscribe(&sub_key(conn_id, &sub_id), raw_filters.clone());
+                }
+            }
+
             let mut out: Vec<String> = events
                 .iter()
                 .map(|e| serde_json::json!(["EVENT", sub_id, e]).to_string())
@@ -415,6 +471,11 @@ async fn handle_client_frame(
         Some("CLOSE") => {
             if let Some(sub_id) = array.get(1).and_then(|v| v.as_str()) {
                 subs.remove(sub_id);
+                if origin == Origin::Local {
+                    if let Some(gossip) = &hub.gossip {
+                        gossip.on_local_unsubscribe(&sub_key(conn_id, sub_id));
+                    }
+                }
             }
             Vec::new()
         }
@@ -641,5 +702,79 @@ mod tests {
         // 127.0.0.1 is loopback → Local origin, no sender (originator stamps TTL).
         assert_eq!(seen[0].1.origin, Origin::Local);
         assert_eq!(seen[0].1.sender, None);
+    }
+
+    /// A loopback client's REQ is reported to the gossiper as a local subscription
+    /// (raw filters passed verbatim), and its CLOSE as an unsubscribe — the seam the
+    /// core uses to recreate subscriptions against reappearing peers, filter-blind.
+    #[tokio::test]
+    async fn local_req_reports_subscription_to_gossiper() {
+        use std::sync::Mutex;
+
+        struct SubCap {
+            subs: Mutex<Vec<(String, Vec<serde_json::Value>)>>,
+            unsubs: Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl Gossiper for SubCap {
+            async fn on_event(&self, _event: Event, _inbound: Inbound) {}
+            fn on_local_subscribe(&self, key: &str, filters: Vec<serde_json::Value>) {
+                self.subs.lock().unwrap().push((key.to_string(), filters));
+            }
+            fn on_local_unsubscribe(&self, key: &str) {
+                self.unsubs.lock().unwrap().push(key.to_string());
+            }
+        }
+
+        let store = Arc::new(RelayStore::in_memory());
+        let cap = Arc::new(SubCap {
+            subs: Mutex::new(Vec::new()),
+            unsubs: Mutex::new(Vec::new()),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on_with(store, listener, Some(cap.clone())));
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        let filter = serde_json::json!({ "kinds": [9], "#d": ["mesh"] });
+        ws.send(WsMessage::Text(
+            serde_json::json!(["REQ", "s1", filter]).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        // Drain to EOSE so the REQ has been handled.
+        while let Some(Ok(WsMessage::Text(t))) = ws.next().await {
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+            if v[0] == "EOSE" {
+                break;
+            }
+        }
+
+        let subs = cap.subs.lock().unwrap().clone();
+        assert_eq!(
+            subs.len(),
+            1,
+            "loopback REQ reported as a local subscription"
+        );
+        assert_eq!(
+            subs[0].1,
+            vec![serde_json::json!({ "kinds": [9], "#d": ["mesh"] })],
+            "raw filters passed through verbatim (core never interprets them)"
+        );
+
+        ws.send(WsMessage::Text(
+            serde_json::json!(["CLOSE", "s1"]).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let unsubs = cap.unsubs.lock().unwrap().clone();
+        assert_eq!(
+            unsubs,
+            vec![subs[0].0.clone()],
+            "CLOSE reports the same key"
+        );
     }
 }

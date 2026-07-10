@@ -144,6 +144,14 @@ impl Gossiper for MeshGossiper {
             .pull_from_peers(filters, req_ttl, exclude)
             .await
     }
+
+    fn on_local_subscribe(&self, key: &str, filters: Vec<serde_json::Value>) {
+        self.content.record_local_sub(key.to_string(), filters);
+    }
+
+    fn on_local_unsubscribe(&self, key: &str) {
+        self.content.drop_local_sub(key);
+    }
 }
 
 #[cfg(test)]
