@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two-way relay connection that detects a dead link (read side + keepalive) and
   reconnects, and manifest fetches share that one connection instead of opening a
   second socket per peer.
+- Bluetooth peer discovery could stop for good after a burst of
+  connects/disconnects and stay stuck at zero peers until you toggled the mesh
+  off and on. Android throttles BLE scanning (~5 scan starts per 30s); a
+  throttled scan was logged and then abandoned. The scanner now re-arms itself on
+  a backoff — waiting out the throttle window — and recovers discovery on its own.
 
 ## [0.1.0] - 2026-06-30
 
