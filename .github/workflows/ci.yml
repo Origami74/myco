@@ -10,9 +10,10 @@ on:
 
 env:
   # `fips` is a gitignored local path dep (reference/fips). A fresh checkout has no
-  # reference/ at all, so clone the fork branch carrying the mobile features.
+  # reference/ at all, so clone the fork branch carrying the mobile features
+  # (platform-pushed peer queue + Wi-Fi Aware transport-preference roaming).
   FIPS_REPO: https://github.com/jmcorgan/fips.git
-  FIPS_REF: ble-v2
+  FIPS_REF: feat/platform-peer-queue
   NDK_VERSION: 26.1.10909125
   CARGO_TERM_COLOR: always
 
