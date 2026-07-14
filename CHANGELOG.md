@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The in-app Blossom store now accepts uploads up to 64 MiB, so larger nsite
   blobs and the new speedtest payload transfer in a single request.
+- The embedded Nostr relay and Blossom server now listen on **4870** and
+  **24243** — one above the previous `4869` / `24242`. This stops Myco from
+  squatting on the ports a developer's own localhost relay or Blossom may
+  already use. The localhost and mesh binds share the same port number, so both
+  moved together and peer sync is unaffected. Temporary until the ports become
+  configurable. The experimental Wi-Fi Aware lane moves to **4871** so it no
+  longer shares 4870 with the relay.
 
 ### Fixed
 

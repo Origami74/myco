@@ -18,16 +18,22 @@ sync-over-FIPS), [../design/nsite-layer.md §3.2](../design/nsite-layer.md)
 
 | Service | Listen address | Default port | Reached by | Exposed over FIPS? |
 | --- | --- | --- | --- | --- |
-| Embedded Nostr relay | `127.0.0.1` (localhost) | **4869** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:4869` |
-| Embedded Blossom server | `127.0.0.1` (localhost) | **24242** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:24242` |
+| Embedded Nostr relay | `127.0.0.1` (localhost) | **4870** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:4870` |
+| Embedded Blossom server | `127.0.0.1` (localhost) | **24243** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:24243` |
 | Local HTTP gateway | `127.0.0.1` (localhost) | **80** | any browser on the device (system-wide `*.nsite` interception) | **No** — localhost-only, never over the mesh |
 | DNS interceptor | inside the VpnService/TUN reader (not a bound socket) | n/a | the whole device's resolver | n/a — it *produces* the addresses below |
 | FIPS IPv6 adapter | FSP port **256** (internal mesh port, not a localhost socket) | 256 | FIPS session layer | n/a — this is the mesh transport that *carries* IPv6 to `fd00::` |
 
-Ports 4869 (relay) and 24242 (Blossom) and the content-addressing of Blossom
-blobs by sha256 are **established defaults**
+Myco's relay listens on **4870** and Blossom on **24243** — each **one above**
+the site-deck reference defaults of `4869` / `24242`
 ([../../reference/site-deck/internal/relay/embedded.go](../../reference/site-deck/internal/relay/embedded.go),
 [../../reference/site-deck/internal/blossom/embedded.go](../../reference/site-deck/internal/blossom/embedded.go)).
+The `+1` offset is a **temporary** measure so Myco doesn't squat on the ports a
+developer's own localhost relay/Blossom already uses; it will be replaced by a
+configurable-port solution. The mesh and localhost binds use the *same* number
+(§5), so both move together — a peer dials `<npub>.fips:4870` and it lands on the
+peer's `127.0.0.1:4870`. The content-addressing of Blossom blobs by sha256 is
+unchanged.
 
 > **Note on bind address.** The site-deck reference binds the relay and Blossom
 > on `[::]` (all interfaces) "for development" and warns against it in
@@ -37,16 +43,16 @@ blobs by sha256 are **established defaults**
 
 ---
 
-## 1. Embedded Nostr relay — `4869`
+## 1. Embedded Nostr relay — `4870`
 
-- **Listen:** `ws://127.0.0.1:4869` (NIP-01 relay; also answers a NIP-11 doc on
+- **Listen:** `ws://127.0.0.1:4870` (NIP-01 relay; also answers a NIP-11 doc on
   HTTP GET).
 - **Local consumers:** the gateway queries it for manifests on the fast path;
   the loading page subscribes to it for title/description; the sync engine
   *stores* pulled manifests into it (replicating already-signed author events —
   ordinary relay behaviour, not authoring).
 - **Over FIPS:** **yes.** A peer's relay is reachable at
-  `ws://<npub_holder>.fips:4869`, where `<npub_holder>` is the device key of the
+  `ws://<npub_holder>.fips:4870`, where `<npub_holder>` is the device key of the
   peer that *holds* a copy — not the site's author. The sync engine queries that
   holder's relay for an author's site with
   `{ kinds: [15128, 35128], authors: [<author_pubkey>] }`. The site you want is
@@ -55,14 +61,14 @@ blobs by sha256 are **established defaults**
   See
   [../design/nsite-layer.md §5.2](../design/nsite-layer.md).
 
-## 2. Embedded Blossom server — `24242`
+## 2. Embedded Blossom server — `24243`
 
-- **Listen:** `http://127.0.0.1:24242` (BUD-01 content-addressed blob store).
+- **Listen:** `http://127.0.0.1:24243` (BUD-01 content-addressed blob store).
 - **Local consumers:** the gateway and sync engine `GET <sha256>` for blobs; the
   sync engine `PUT`s pulled blobs in to mirror them (so this device becomes a
   source). Localhost Blossom runs **without auth** (reference behaviour).
 - **Over FIPS:** **yes.** A peer's Blossom is reachable at
-  `http://<npub>.fips:24242`; the sync engine pulls each manifest blob by sha256
+  `http://<npub>.fips:24243`; the sync engine pulls each manifest blob by sha256
   from there and verifies it.
 
 ## 3. Local HTTP gateway — localhost-only
@@ -76,12 +82,12 @@ blobs by sha256 are **established defaults**
   localhost host works in **any** browser, including Chromium (whose AAAA/ULA
   suppression only ever affected IPv6-only `.fips`).
 - **Over FIPS:** **no — deliberately.** The gateway is never exposed on the mesh.
-  Peers do not talk to your gateway; they talk to your relay (4869) and Blossom
-  (24242) directly. There is no separate "gateway port" on a reachable path —
+  Peers do not talk to your gateway; they talk to your relay (4870) and Blossom
+  (24243) directly. There is no separate "gateway port" on a reachable path —
   the localhost relay/Blossom *are* the mesh endpoints. The gateway is a purely
   local convenience that **serves direct from the local relay + Blossom**: for a
   request `<host>.nsite/<path>` it looks up the manifest event on the relay
-  (4869), maps `<path> → sha256`, fetches that blob from Blossom (24242), and
+  (4870), maps `<path> → sha256`, fetches that blob from Blossom (24243), and
   serves it with a content-type inferred from the path extension. There is no
   derived htdocs cache in v0 (a path-named serving cache is a deferred roadmap
   optimization); the content-addressed Blossom store is the only retained store.
@@ -128,15 +134,15 @@ which the IPv6 adapter registers inside the mesh. It is the mechanism that makes
 
 1. The WebView/app stays on localhost; the sync engine resolves
    `<npub>.fips → fd00::<peer>` (AAAA, via §4).
-2. It opens a normal IPv6 socket to `[fd00::<peer>]:4869` (or `:24242`).
+2. It opens a normal IPv6 socket to `[fd00::<peer>]:4870` (or `:24243`).
 3. The OS routes `fd00::/8` to the TUN; the TUN reader compresses the IPv6
    header and prepends an FSP port header `(src=256, dst=256)`, encrypts, and
    routes the datagram through the mesh toward the destination node.
 4. On the peer, FSP delivers inbound port-256 traffic to its IPv6 adapter, which
    reconstructs the IPv6 packet and hands it to *its* TUN — landing on the peer's
-   `127.0.0.1:4869` / `:24242` localhost service.
+   `127.0.0.1:4870` / `:24243` localhost service.
 
-So the destination service port (4869 / 24242) rides **inside** the
+So the destination service port (4870 / 24243) rides **inside** the
 mesh-tunneled IPv6/TCP packet; FSP port **256** is only the outer mesh
 multiplexing port shared by all IPv6 traffic. Sources:
 [../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md)
@@ -157,12 +163,12 @@ delivering `curl http://<npub>.fips:port/` end to end
                                                    cache hit → serve
                                                    cache miss → sync engine ↓
 
- sync engine ──IPv6─► <npub>.fips → [fd00::peer]:4869  ─┐
- sync engine ──IPv6─► <npub>.fips → [fd00::peer]:24242 ─┤  routed via TUN
+ sync engine ──IPv6─► <npub>.fips → [fd00::peer]:4870  ─┐
+ sync engine ──IPv6─► <npub>.fips → [fd00::peer]:24243 ─┤  routed via TUN
                                                          ▼
                                             FSP port 256 (mesh) ──► peer node
                                                          │
-                                            peer TUN ──► peer 127.0.0.1:4869 / :24242
+                                            peer TUN ──► peer 127.0.0.1:4870 / :24243
 ```
 
 - The **WebView** never resolves `.fips`, never touches the mesh.
@@ -176,7 +182,7 @@ delivering `curl http://<npub>.fips:port/` end to end
 
 - [../design/nsite-layer.md](../design/nsite-layer.md) — the relay/Blossom/
   gateway design and the sync-over-FIPS flow.
-- [./nostr-kinds.md](./nostr-kinds.md) — the manifest kinds queried on port 4869.
+- [./nostr-kinds.md](./nostr-kinds.md) — the manifest kinds queried on port 4870.
 - [../design/propagation.md](../design/propagation.md) — propagation policy over
   these channels.
 - [../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md),

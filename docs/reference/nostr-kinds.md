@@ -124,7 +124,7 @@ not-found page is the blob mapped at `/404.html`.
 ```
 
 These run against the **local** relay first (fast path) and, on a miss, against
-the source peer's relay over `.fips` (`ws://<npub>.fips:4869`). See
+the source peer's relay over `.fips` (`ws://<npub>.fips:4870`). See
 [../design/nsite-layer.md §5](../design/nsite-layer.md).
 
 > **Set reconciliation.** Between two connected relays, Myco reconciles the

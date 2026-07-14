@@ -44,7 +44,7 @@
   <path d="M730,256 C560,266 430,266 272,256" fill="none" stroke="#475569" stroke-width="2.2" marker-end="url(#aSlate)"/>
   <text x="500" y="284" font-size="12" fill="#334155" text-anchor="middle">Ben matches the secret + taps OK  →  returns ack (now mutual)</text>
 
-  <text x="500" y="318" font-size="12.5" font-weight="600" fill="#0d9488" text-anchor="middle">npub = FIPS address  ⇒  reach that peer's relay (:4869) + Blossom (:24242) over the mesh</text>
+  <text x="500" y="318" font-size="12.5" font-weight="600" fill="#0d9488" text-anchor="middle">npub = FIPS address  ⇒  reach that peer's relay (:4870) + Blossom (:24243) over the mesh</text>
 
   <!-- ===================== BOTTOM PANEL: transitive reach ===================== -->
   <rect x="40" y="362" width="920" height="332" rx="12" fill="#f8fafc" stroke="#cbd5e1"/>

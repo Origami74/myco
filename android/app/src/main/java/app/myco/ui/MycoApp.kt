@@ -252,16 +252,16 @@ fun MycoApp(
         }
     }
 
-    // Loud warning if our local relay couldn't bind 4869 (another relay holds it):
+    // Loud warning if our local relay couldn't bind 4870 (another relay holds it):
     // nsites would talk to that foreign relay and show messages that aren't yours.
     var relayWarnDismissed by remember { mutableStateOf(false) }
-    if (state.error.contains("4869") && !relayWarnDismissed) {
+    if (state.error.contains("4870") && !relayWarnDismissed) {
         AlertDialog(
             onDismissRequest = { relayWarnDismissed = true },
             title = { Text("Another relay is running") },
             text = {
                 Text(
-                    "Port 4869 is in use by another app, so Myco's own relay couldn't " +
+                    "Port 4870 is in use by another app, so Myco's own relay couldn't " +
                         "start. Your apps may talk to the wrong relay — including showing " +
                         "messages that aren't yours. Close the other app and restart Myco.\n\n" +
                         state.error,

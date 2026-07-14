@@ -132,7 +132,7 @@ one combined filter per relay covering every site we care about. The relay set i
 the union of:
 
 - **Relays around us** — the embedded relays of connected mesh peers
-  (`ws://[fd00::peer]:4869`), always reachable offline. (Reuse the existing
+  (`ws://[fd00::peer]:4870`), always reachable offline. (Reuse the existing
   peer-relay pool's live connections where possible rather than dialing afresh.)
 - **The manifests' listed relays** — each active manifest's own relay hints, used
   **only when online**. The author publishes updates there, so they are the

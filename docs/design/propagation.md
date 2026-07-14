@@ -102,7 +102,7 @@ out on its own. The fanout is the job of a separate **propagator** process
 inside `nsite-deck`. The propagator holds an internal **subscription** to the
 relevant relays (the local `myco-relay` plus the relays of connected peers) and,
 when it sees a manifest, **publishes** it — an `["EVENT", …]` to each
-`<peer>.fips:4869` relay, source excluded — so a manifest ripples outward one
+`<peer>.fips:4870` relay, source excluded — so a manifest ripples outward one
 relay-hop at a time. "Connected peers" are your live FIPS links (directly paired
 peers and, transitively, their peers — §3). This is push-based: a node need not
 ask for a site to learn it exists; the propagator at a connected neighbour
@@ -130,7 +130,7 @@ reconcile on a new link** — fire a one-shot reconcile the moment a peer connec
 When a user opens a site — or when the **propagator eagerly pre-fetches a pinned
 one** — the app *pulls* the actual content from a holder whose manifest it has:
 it already has (or queries for) the manifest event, then fetches each referenced
-blob by sha256 from that holder's Blossom server (`<npub_holder>.fips:24242`),
+blob by sha256 from that holder's Blossom server (`<npub_holder>.fips:24243`),
 verifies, and caches. The pre-fetch is owned by the propagator's **pinned-site
 subscription** (an internal subscription for kinds `15128`/`35128`): when a
 *newer* manifest arrives for a Library-pinned `(author, dTag)`, the propagator
@@ -163,7 +163,7 @@ transitive discovery, authorized by a **mutual pairing**. See
   Noise-encrypted channel and the inviter confirms — and completion makes **both**
   devices a source for the other. The one-time `pairSecret` (a long random string)
   authenticates the handshake but grants no membership or admin authority. A device's npub *is* its FIPS address, so once
-  paired Alice can reach Ben's relay (`:4869`) and Blossom (`:24242`) over the
+  paired Alice can reach Ben's relay (`:4870`) and Blossom (`:24243`) over the
   mesh. This invite-pairing handshake ([identity-pairing.md § 6.1](./identity-pairing.md))
   is the **only** pairing path. (The device key is only ever a mesh/relay address;
   never an nsite author key.)

@@ -45,7 +45,7 @@ The stack, top to bottom:
   1  Android UI            (Jetpack Compose) — Myco manager: Library, Pair, Discover, Settings
   2  NsiteActivity         (fullscreen WebView, one task per nsite) — loads http://<host>.nsite, no chrome
   3  Local gateway + DNS   — *.nsite → 127.0.0.1; resolve manifest; serve files
-  4  Embedded relay+Blossom (Rust) — myco-relay :4869 / myco-blossom :24242 + S&F cache
+  4  Embedded relay+Blossom (Rust) — myco-relay :4870 / myco-blossom :24243 + S&F cache
   5  myco-core / FFI      (Rust) — wires nsite-deck + relay + Blossom; binds into FIPS
   6  FIPS core + transports (upstream fips crate)  — mesh, crypto, BLE/UDP/TCP/Tor
      ── plus ── Android VpnService/TUN: routes fd00::/8, intercepts .fips/.nsite
@@ -67,8 +67,8 @@ any particular relay, blob store, or transport:
 | --- | --- | --- |
 | `myco-core` | app crate: FIPS endpoint, `AndroidBleIo`, JNI/JSON FFI, and the wiring that picks which backends to plug in | no — Myco-specific |
 | `nsite-deck` | the nsite host: gateway (manifest → path → sha256 → serve) + sync engine + the **propagator** (a process that subscribes to local + peer relays and publishes accepted events onward, and eager-refreshes pinned sites); impl-agnostic | **yes** — the reusable core |
-| `myco-relay` | a generic embedded Nostr relay (event store + `ws://…:4869` server) | yes — any Nostr app |
-| `myco-blossom` | a generic embedded Blossom blob store (content-addressed store + `http://…:24242` server) | yes — any Blossom need |
+| `myco-relay` | a generic embedded Nostr relay (event store + `ws://…:4870` server) | yes — any Nostr app |
+| `myco-blossom` | a generic embedded Blossom blob store (content-addressed store + `http://…:24243` server) | yes — any Blossom need |
 
 `nsite-deck` never names a concrete relay, blob store, or radio. It reaches
 everything outside itself through **four trait seams**, which `myco-core` wires up:
@@ -175,12 +175,12 @@ resolution logic ports from site-deck.
 and to peers. **Both are embedded from day one** — they are simple, and there is
 no good Android app to forward to:
 
-- the **relay** (`ws://localhost:4869`) stores/serves signed manifest events
+- the **relay** (`ws://localhost:4870`) stores/serves signed manifest events
   (kinds 15128/35128). The relay *backend* is a **pluggable seam**: the default
   is the embedded relay; optionally it can **forward to a local relay app (e.g.
   Citrine)** for devs who already run one. Embedding is the default and earliest
   path,
-- **Blossom** (`http://localhost:24242`) is **always embedded** — a small
+- **Blossom** (`http://localhost:24243`) is **always embedded** — a small
   content-addressed HTTP store (`GET /<sha256>`, `PUT /upload`, `HEAD`). There is
   no good Android Blossom app to forward to, so embedding is the only sensible
   path.
@@ -216,13 +216,13 @@ impls it plugs into `nsite-deck`'s storage seams). `myco-core`:
 - holds the device **identity** (the `nsec`) in `filesDir`,
 - instantiates `myco-relay` + `myco-blossom` (or a Citrine-forward `RelayBackend`),
   wires them into `nsite-deck` as the `RelayBackend` / `BlobStore`, and **binds
-  them into FIPS** so peers reach them at `<npub>.fips:4869` / `:24242` via FSP
+  them into FIPS** so peers reach them at `<npub>.fips:4870` / `:24243` via FSP
   port multiplexing,
 - drives the FIPS endpoint (layer 6) and implements `AndroidBleIo`,
 - implements the **transport seams** the content + relay crates consume over FIPS:
   the **`PeerSource`** (fetch a manifest + blobs from a holder at `<npub>.fips`,
   verify each against its sha256, retain in the local relay + Blossom) and the
-  **`FanoutSink`** (`EVENT` to each connected `<peer>.fips:4869`).
+  **`FanoutSink`** (`EVENT` to each connected `<peer>.fips:4870`).
 
 `myco-core`, `nsite-deck`, `myco-relay`, and `myco-blossom` cross-compile into one
 `libmyco_core.so`.
@@ -268,7 +268,7 @@ byte/­radio paths Kotlin must own:
 (npub → node_addr → `fd00::/8`), `.fips` DNS, spanning-tree formation,
 coordinate-based greedy routing, and two-layer Noise crypto (XK end-to-end +
 IK hop-by-hop). FSP **port multiplexing** delivers mesh datagrams to the
-localhost relay/Blossom ports, which is what exposes `<npub>.fips:4869`/`:24242`.
+localhost relay/Blossom ports, which is what exposes `<npub>.fips:4870`/`:24243`.
 
 **Transports.** UDP / TCP / Tor are reused from fips-core unchanged. **BLE** is
 the v1 transport and the one net-new transport piece:
@@ -355,8 +355,8 @@ Provenance for each band, matching the legend in
 | QR pairing (CameraX + ML Kit, deep-link intent) | **reuse (nostr-vpn)** | re-pointed at `myco://pair/<base64>` (npub + memorable name) |
 | `NsiteActivity` (fullscreen WebView per nsite, no chrome) | **net-new (thin)** | own task/instance; standard WebView; nsite-deck "loads localhost" pattern |
 | Local gateway + `*.nsite` resolution | **port (site-deck)** | Go → **Rust** in `nsite-deck`; HTTP-listener placement TBD/open |
-| Embedded Nostr relay (`:4869`) | **port (site-deck) → Rust** | was Khatru/Go; now the **`myco-relay`** crate (impl `RelayBackend`); embedded default, optional Citrine-forward backend |
-| Embedded Blossom (`:24242`) | **port (site-deck) → Rust** | now the **`myco-blossom`** crate (impl `BlobStore`); always embedded; content-addressed blobs, BUD-01 |
+| Embedded Nostr relay (`:4870`) | **port (site-deck) → Rust** | was Khatru/Go; now the **`myco-relay`** crate (impl `RelayBackend`); embedded default, optional Citrine-forward backend |
+| Embedded Blossom (`:24243`) | **port (site-deck) → Rust** | now the **`myco-blossom`** crate (impl `BlobStore`); always embedded; content-addressed blobs, BUD-01 |
 | Store-and-forward cache (re-serve peers' events/blobs) | **net-new** | the offline-propagation mechanism; Blossom blob store, LRU 2 GB, Library = pinned |
 | nsite sync (fetch + verify + retain over `.fips`) | **net-new** | runs in **`nsite-deck`**; v0 serves direct from relay + Blossom |
 | htdocs serving cache (path-named files under `current/`) | **deferred** | nsite-deck speed optimization; not needed for v0 |

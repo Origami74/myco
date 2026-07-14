@@ -44,14 +44,14 @@
   <!-- Embedded relay -->
   <rect x="320" y="282" width="210" height="96" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
   <text x="425" y="309" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Embedded relay</text>
-  <text x="425" y="330" font-size="10.5" fill="#475569" text-anchor="middle">ws://localhost:4869</text>
+  <text x="425" y="330" font-size="10.5" fill="#475569" text-anchor="middle">ws://localhost:4870</text>
   <text x="425" y="346" font-size="10.5" fill="#475569" text-anchor="middle">stores + serves</text>
   <text x="425" y="362" font-size="10.5" fill="#475569" text-anchor="middle">manifest events 15128 / 35128</text>
 
   <!-- Embedded Blossom -->
   <rect x="576" y="282" width="200" height="96" rx="12" fill="#fff7ed" stroke="#d97706" stroke-width="2"/>
   <text x="676" y="309" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">Embedded Blossom</text>
-  <text x="676" y="330" font-size="10.5" fill="#475569" text-anchor="middle">http://localhost:24242</text>
+  <text x="676" y="330" font-size="10.5" fill="#475569" text-anchor="middle">http://localhost:24243</text>
   <text x="676" y="346" font-size="10.5" fill="#475569" text-anchor="middle">blobs by sha256</text>
 
   <!-- Sync engine -->
@@ -64,7 +64,7 @@
   <!-- FIPS endpoint -->
   <rect x="320" y="442" width="456" height="100" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
   <text x="548" y="469" font-size="14" font-weight="700" fill="#0f172a" text-anchor="middle">FIPS endpoint — the mesh</text>
-  <text x="548" y="490" font-size="10.5" fill="#475569" text-anchor="middle">FSP port-mux exposes localhost ports (4869 / 24242) to peers</text>
+  <text x="548" y="490" font-size="10.5" fill="#475569" text-anchor="middle">FSP port-mux exposes localhost ports (4870 / 24243) to peers</text>
   <text x="548" y="506" font-size="10.5" fill="#475569" text-anchor="middle">reachable as &lt;npub&gt;.fips · Noise XK end-to-end</text>
   <text x="548" y="522" font-size="10.5" fill="#475569" text-anchor="middle">spanning-tree routing over UDP / TCP / BLE</text>
 
@@ -89,8 +89,8 @@
   <rect x="836" y="424" width="160" height="100" rx="12" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
   <text x="916" y="451" font-size="13" font-weight="700" fill="#0f172a" text-anchor="middle">Peer</text>
   <text x="916" y="470" font-size="10.5" fill="#475569" text-anchor="middle">relay + Blossom</text>
-  <text x="916" y="490" font-size="10" fill="#15803d" text-anchor="middle">&lt;peer&gt;.fips:4869</text>
-  <text x="916" y="505" font-size="10" fill="#15803d" text-anchor="middle">&lt;peer&gt;.fips:24242</text>
+  <text x="916" y="490" font-size="10" fill="#15803d" text-anchor="middle">&lt;peer&gt;.fips:4870</text>
+  <text x="916" y="505" font-size="10" fill="#15803d" text-anchor="middle">&lt;peer&gt;.fips:24243</text>
 
   <!-- FIPS endpoint -> peer (pull over FIPS) -->
   <path d="M776,486 L832,478" fill="none" stroke="#0d9488" stroke-width="2.6" marker-end="url(#cTeal)"/>

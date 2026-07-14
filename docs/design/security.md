@@ -156,7 +156,7 @@ control is a candidate later feature (TBD / open).
 
 **Inbound surface on the mesh.** FIPS FSP port-multiplexing delivers mesh
 datagrams to localhost ports, so a paired peer can reach your services at
-`<npub>.fips:4869` (relay) and `<npub>.fips:24242` (Blossom)
+`<npub>.fips:4870` (relay) and `<npub>.fips:24243` (Blossom)
 ([../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md)).
 On Linux, FIPS recommends a default-deny nftables baseline to bound this
 surface; **on Android there is no nftables equivalent the app controls.** The

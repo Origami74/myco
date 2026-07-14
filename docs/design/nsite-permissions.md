@@ -28,8 +28,8 @@ site, `npub:dTag` for a named one — [nsite-layer.md §3.2](./nsite-layer.md)).
 Permissions are a record stored **per-siteKey** on the device.
 
 The enforcement hook is the **WebSocket / HTTP `Origin`**. The nsite loads at
-`http://<host>.nsite` and talks to the localhost relay (`ws://localhost:4869`) and
-Blossom (`http://localhost:24242`); every request carries
+`http://<host>.nsite` and talks to the localhost relay (`ws://localhost:4870`) and
+Blossom (`http://localhost:24243`); every request carries
 `Origin: http://<host>.nsite`. The native side maps **`Origin → siteKey →
 permission record`** and applies it. (The relay does no `Origin` check today —
 this is where it is added.)

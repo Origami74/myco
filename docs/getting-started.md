@@ -24,7 +24,7 @@ of Propagation": small relays and Blossom blobs hopping over crappy links in all
 directions, surviving outages via local propagation.
 
 Under the hood, every device runs its **own** embedded Nostr relay
-(`ws://localhost:4869`) and Blossom blob server (`http://localhost:24242`),
+(`ws://localhost:4870`) and Blossom blob server (`http://localhost:24243`),
 unified with the FIPS endpoint into one Rust `myco-core` library. The app never
 authors nsites — it only stores, serves, and replicates ones authored elsewhere.
 When you browse a peer's site, your relay retains the author's signed events and
@@ -73,8 +73,8 @@ The v1 target is a **two-device Android demo over BLE, fully offline**: phone A
 **seeds** a known public nsite once (by syncing it while online, or side-loading
 it — A never authors it), the two phones QR-pair (the code carries only an npub),
 and then both go into airplane mode with Bluetooth on. Over a native L2CAP BLE
-link, phone B reaches A's embedded relay and Blossom at `<npubA>.fips:4869` /
-`:24242` (A's device/holder address), pulls the author's signed manifest event
+link, phone B reaches A's embedded relay and Blossom at `<npubA>.fips:4870` /
+`:24243` (A's device/holder address), pulls the author's signed manifest event
 and its blobs on demand, caches them locally, and serves the site to its in-app
 WebView from `127.0.0.1` — with no internet, Wi-Fi, or cell anywhere in the path.
 Afterward B has become a new holder for that site and could re-serve it to a third

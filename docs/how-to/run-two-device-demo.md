@@ -134,8 +134,8 @@ The intended procedure:
    and [../design/concepts.md](../design/concepts.md).)
 2. The site is now reachable on A locally at its nsite host —
    `<npub_author>.nsite` for a root site (resolving to `127.0.0.1`, an A record),
-   served by the embedded gateway from the relay (`ws://localhost:4869`) + Blossom
-   (`http://localhost:24242`). Note the host is the **author's** npub, not A's
+   served by the embedded gateway from the relay (`ws://localhost:4870`) + Blossom
+   (`http://localhost:24243`). Note the host is the **author's** npub, not A's
    device npub.
 3. **Pin** the site so it is exempt from LRU eviction (sites added to the Library
    are pinned by default; cache cap defaults to 2 GB).
@@ -218,8 +218,8 @@ peering) then P2–P4 (content + offline browse).)**
    [../../reference/fips/src/transport/ble/io.rs](../../reference/fips/src/transport/ble/io.rs),
    [discovery.rs](../../reference/fips/src/transport/ble/discovery.rs).)
 3. Once the link is up, B and A form a one-hop spanning tree. B can now reach A's
-   embedded services over the mesh at `<npubA>.fips:4869` (relay) and
-   `<npubA>.fips:24242` (Blossom), via FIPS FSP port-multiplexing — no separate
+   embedded services over the mesh at `<npubA>.fips:4870` (relay) and
+   `<npubA>.fips:24243` (Blossom), via FIPS FSP port-multiplexing — no separate
    gateway needed. (See
    [../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md).)
 4. On **B**, open the Library and **Search nsites around me** (query the holder A's

@@ -129,10 +129,10 @@ reused macOS `BleIo`) ·
 ## P2 — Relay + Blossom + gateway (serve-direct)
 
 **Goal.** Embed, in Rust inside `myco-core`, both the relay and Blossom from day
-one — they are simple. **Blossom is always embedded** (`http://localhost:24242`,
+one — they are simple. **Blossom is always embedded** (`http://localhost:24243`,
 a small content-addressed HTTP store: `GET /<sha256>`, `PUT /upload`, `HEAD`);
 there is no good Android Blossom app to forward to. **The relay (`myco-relay`) is
-embedded too** (`ws://localhost:4869`) — a plain NIP-01 store + socket, with no
+embedded too** (`ws://localhost:4870`) — a plain NIP-01 store + socket, with no
 forwarding behavior of its own — but the relay *backend* is a pluggable seam:
 default = embedded; optional = forward to a local relay app (e.g. Citrine) for
 devs who already run one. Add the localhost HTTP gateway on `127.0.0.1:80`,
@@ -191,7 +191,7 @@ already Noise-encrypted channel, the inviter matches it and the user taps OK.
 invite (but grants no membership/admin authority); completion makes each device a
 mutual source. There
 is no one-way fetch-only scan. Wire the sync engine to pull a peer's manifest +
-blobs from `<npub>.fips:4869` / `:24242`, verify, and mirror into the local
+blobs from `<npub>.fips:4870` / `:24243`, verify, and mirror into the local
 stores — running **over the BLE link from P1, or over IP**. **Stand up the
 nsite-deck propagator:** a separate **propagator** process inside `nsite-deck`
 (not the relay — `myco-relay` stays a plain store + socket) does all forwarding

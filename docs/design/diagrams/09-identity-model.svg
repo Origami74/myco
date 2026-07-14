@@ -46,8 +46,8 @@
   <!-- footer note -->
   <rect x="66" y="424" width="398" height="92" rx="10" fill="#ecfdf5" stroke="#16a34a"/>
   <text x="80" y="448" font-size="11.5" font-weight="700" fill="#15803d">Reaches your services:</text>
-  <text x="80" y="467" font-size="11" fill="#166534">&lt;npub_device&gt;.fips:4869  (relay)</text>
-  <text x="80" y="483" font-size="11" fill="#166534">&lt;npub_device&gt;.fips:24242  (Blossom)</text>
+  <text x="80" y="467" font-size="11" fill="#166534">&lt;npub_device&gt;.fips:4870  (relay)</text>
+  <text x="80" y="483" font-size="11" fill="#166534">&lt;npub_device&gt;.fips:24243  (Blossom)</text>
   <text x="80" y="505" font-size="11.5" font-weight="700" fill="#b91c1c">NEVER authors nsites.</text>
 
   <!-- ===================== RIGHT COLUMN: NSITE AUTHOR KEY ===================== -->

@@ -10,7 +10,7 @@
 //! Reads return the named file directly: the only way bytes enter is a verified
 //! write, so re-hashing on every gateway request would be wasted work.
 //!
-//! The `http://localhost:24242` BUD-01 HTTP server (GET/PUT/HEAD) is bound by
+//! The `http://localhost:24243` BUD-01 HTTP server (GET/PUT/HEAD) is bound by
 //! `myco-core` over the shared Tokio runtime (P2 M2); this crate is the store.
 //!
 //! [`BlobStore`]: nsite_deck::seams::BlobStore

@@ -47,7 +47,7 @@
     <rect x="40" y="314" width="900" height="98" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
     <rect x="40" y="314" width="8" height="98" rx="4" fill="#d97706"/>
     <text x="66" y="344" font-size="16" font-weight="700" fill="#0f172a">Embedded Nostr relay  +  Blossom server</text>
-    <text x="66" y="370" font-size="13" fill="#475569">relay ws://localhost:4869   ·   Blossom http://localhost:24242   ·   kind 15128/35128 manifests + sha256 blobs</text>
+    <text x="66" y="370" font-size="13" fill="#475569">relay ws://localhost:4870   ·   Blossom http://localhost:24243   ·   kind 15128/35128 manifests + sha256 blobs</text>
     <text x="66" y="391" font-size="13" fill="#475569">store-and-forward cache: holds peers' signed events/blobs and re-serves them (relay-of-relays)</text>
     <text x="930" y="336" font-size="11" font-weight="700" fill="#d97706" text-anchor="end">PORT · lang TBD</text>
   </g>
@@ -59,7 +59,7 @@
     <rect x="40" y="426" width="8" height="98" rx="4" fill="#2563eb"/>
     <text x="66" y="456" font-size="16" font-weight="700" fill="#0f172a">fips-mobile  (Rust)  —  FFI to Kotlin</text>
     <text x="66" y="482" font-size="13" fill="#475569">JNI/JSON FFI, cdylib via cargo-ndk   ·   dispatch→state(rev) reducer   ·   identity (nsec) in filesDir</text>
-    <text x="66" y="503" font-size="13" fill="#475569">binds relay+blossom into FIPS (peers reach &lt;npub&gt;.fips:4869 / :24242)   ·   KEEP TUN: routes fd00::/8 + .fips/.nsite DNS, system-wide   ·   drop exit-node / tunnel-all / roster</text>
+    <text x="66" y="503" font-size="13" fill="#475569">binds relay+blossom into FIPS (peers reach &lt;npub&gt;.fips:4870 / :24243)   ·   KEEP TUN: routes fd00::/8 + .fips/.nsite DNS, system-wide   ·   drop exit-node / tunnel-all / roster</text>
     <text x="930" y="448" font-size="11" font-weight="700" fill="#2563eb" text-anchor="end">REUSE</text>
   </g>
   <line x1="120" y1="524" x2="120" y2="538" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>

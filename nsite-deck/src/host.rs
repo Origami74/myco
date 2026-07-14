@@ -118,7 +118,7 @@ fn strip_suffix(host: &str) -> Option<&str> {
     }
     // The in-app WebView serves nsites under `<label>.localhost` (not `.nsite`):
     // Chromium classifies `*.localhost` as loopback + a secure context, so the
-    // page can open `ws://localhost:4869` to the embedded relay without tripping
+    // page can open `ws://localhost:4870` to the embedded relay without tripping
     // Private/Local Network Access (see docs/design/nsite-layer.md host suffix).
     if let Some(idx) = lower.rfind(".localhost") {
         if idx + ".localhost".len() == lower.len() {

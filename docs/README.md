@@ -86,8 +86,8 @@ tooling, and an nsite's **author** is a separate, external key that appears only
 as the `<npub_author>.nsite` URL host and the `authors` filter in relay queries.
 The app holds and serves authors' already-signed events but never holds their
 secret key and never signs on their behalf. The backend is **Rust** — the
-embedded relay (`ws://localhost:4869`), Blossom server
-(`http://localhost:24242`), and FIPS endpoint are unified into one `myco-core`
+embedded relay (`ws://localhost:4870`), Blossom server
+(`http://localhost:24243`), and FIPS endpoint are unified into one `myco-core`
 crate behind a single JNI/JSON FFI surface. Kotlin owns the UI, the WebView, the
 BLE radio, and the kept Android `VpnService`/TUN; the TUN routes only `fd00::/8`
 and DNS-intercepts `*.fips` (→ `fd00::`, IPv6 mesh sync) and `*.nsite`
@@ -133,7 +133,7 @@ look-it-up surface.
 
 | Doc | Description |
 | --- | --- |
-| [ports.md](./reference/ports.md) | The localhost ports (relay 4869, Blossom 24242, gateway) and exactly how each is — or is deliberately not — exposed over FIPS; the WebView/localhost vs sync-engine/`.fips` split. |
+| [ports.md](./reference/ports.md) | The localhost ports (relay 4870, Blossom 24243, gateway) and exactly how each is — or is deliberately not — exposed over FIPS; the WebView/localhost vs sync-engine/`.fips` split. |
 | [nostr-kinds.md](./reference/nostr-kinds.md) | The Nostr event kinds Myco reads, stores, and replicates: nsite manifests (15128 root / 35128 named) and FIPS discovery kinds. The app authors none of them. |
 | [config.md](./reference/config.md) | The proposed `config.toml` model (identity, node, cache, peers, BLE, propagation, DNS), the field reference, and what is explicitly stripped relative to nostr-vpn. |
 | [ffi-surface.md](./reference/ffi-surface.md) | The Kotlin↔Rust JNI/JSON reducer contract: opaque-handle lifecycle, the `dispatch(actionJson)→stateJson` reducer with a `rev` counter, the action/state shapes, and the BLE byte-bridge. |

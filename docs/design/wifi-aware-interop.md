@@ -237,7 +237,7 @@ The one genuinely new piece of plumbing is the address itself. The peer's
 address is IPv6 **link-local** (`fe80::…`), which is only meaningful together
 with a scope — *which* interface to send from. Two facts make this workable:
 
-- Rust's std parses **numeric**-scope text: `"[fe80::x%3]:4869"` round-trips
+- Rust's std parses **numeric**-scope text: `"[fe80::x%3]:4871"` round-trips
   through `SocketAddr` parsing with `scope_id = 3`, so it survives
   fips-core's `resolve_socket_addr` fast path, the UDP transport's
   peer map, and the receive loop, with the kernel receiving the scope
