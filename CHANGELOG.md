@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in Settings.
 - A peer speedtest in the Developer menu that measures upload and download
   throughput to a paired peer over the mesh, for diagnosing slow transfers.
+- The Discover tab now shows apps as an icon grid, with a **Suggested** row of
+  starter apps (bitchat and ICS, an Incident Command System app for disaster
+  response) above the nsites your Circle is hosting. Tapping any app opens it
+  just like opening a shared one — it starts syncing and shows its live page.
 
 ### Changed
 
