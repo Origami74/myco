@@ -1,6 +1,6 @@
 //! A NIP-01 WebSocket relay over [`RelayStore`]. Serves the node's events to the
-//! in-app WebView at `ws://localhost:4869` and to mesh peers at
-//! `ws://[fd00::self]:4869`.
+//! in-app WebView at `ws://localhost:4870` and to mesh peers at
+//! `ws://[fd00::self]:4870`.
 //!
 //! Unlike the original manifest-only socket, this one keeps **live subscriptions**
 //! (a `REQ` stays open; newly-stored events that match are pushed as they arrive),
@@ -111,8 +111,8 @@ const MAX_REQ_TTL: u8 = 2;
 /// Shared per-relay state: the store, a broadcast bus that fans newly-stored
 /// events to all live subscriptions on this device, and the optional mesh gossiper.
 ///
-/// One hub can back **several listeners** (e.g. the mesh `[::]:4869` socket and a
-/// loopback `127.0.0.1:4869` socket for the WebView) via [`serve_on_hub`], so the
+/// One hub can back **several listeners** (e.g. the mesh `[::]:4870` socket and a
+/// loopback `127.0.0.1:4870` socket for the WebView) via [`serve_on_hub`], so the
 /// live bus, store, and gossiper are shared across them — a peer's event pushed on
 /// the mesh socket reaches a WebView subscription on the loopback socket.
 pub struct RelayHub {

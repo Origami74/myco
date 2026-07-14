@@ -37,14 +37,14 @@ Local gateway (HTTP)  ───────────────────�
    │  serve blob direct from local Blossom        │
    │  blobs missing? ↓ (still syncing)           │
    ▼                                             │
-Embedded relay (ws://localhost:4869)             │  all in-process,
+Embedded relay (ws://localhost:4870)             │  all in-process,
    │  manifest event: kind 15128 / 35128         │  across the
    ▼                                             │  myco-* crates
-Embedded Blossom (http://localhost:24242)        │  (one .so)
+Embedded Blossom (http://localhost:24243)        │  (one .so)
    │  blobs by sha256                            │
    ▼                                             │
 Sync engine ── over FIPS ──► reachable holder ───┘
-   <npub_holder>.fips:4869 (relay)  ·  <npub_holder>.fips:24242 (blossom)
+   <npub_holder>.fips:4870 (relay)  ·  <npub_holder>.fips:24243 (blossom)
 ```
 
 ### The crate workspace
@@ -60,9 +60,9 @@ blob store, or radio:
   **nothing** about FIPS, BLE, Android, *or* any concrete relay/Blossom: it is
   "an embedded nsite host" and no more.
 - **`myco-relay`** *(reusable primitive)* — a generic embedded Nostr relay: the
-  event store + the `ws://localhost:4869` server. Useful to any Nostr app.
+  event store + the `ws://localhost:4870` server. Useful to any Nostr app.
 - **`myco-blossom`** *(reusable primitive)* — a generic embedded Blossom blob
-  store: the content-addressed store + the `http://localhost:24242` server.
+  store: the content-addressed store + the `http://localhost:24243` server.
   Useful to anything that needs Blossom (notably: there is **no good Android
   Blossom app**, which is exactly why this is worth having standalone).
 - **`myco-core`** *(app crate)* — the thin Myco-specific glue: the FIPS
@@ -91,7 +91,7 @@ mirroring how `fips-core` abstracts its radio behind `BleIo`:
 So `myco-core` is the only crate that names FIPS *or* a concrete relay/Blossom: it
 instantiates `myco-relay` + `myco-blossom`, hands them to `nsite-deck` as the
 `RelayBackend` / `BlobStore`, implements `PeerSource` / `FanoutSink` over FIPS, and
-binds the relay/Blossom ports into the mesh (`<npub>.fips:4869` / `:24242`). All
+binds the relay/Blossom ports into the mesh (`<npub>.fips:4870` / `:24243`). All
 four crates cross-compile into the single `libmyco_core.so`. Kotlin owns the radio
 and the TUN; Rust owns the content layer and the mesh. See
 [diagrams/01-system-layering.svg](diagrams/01-system-layering.svg) and
@@ -126,7 +126,7 @@ and the TUN; Rust owns the content layer and the mesh. See
 
 ### 2.1 Embedded relay
 
-A NIP-01 relay with a local event store, listening on `ws://localhost:4869` — the
+A NIP-01 relay with a local event store, listening on `ws://localhost:4870` — the
 **`myco-relay`** crate, which implements `nsite-deck`'s `RelayBackend` seam.
 The Go reference uses [Khatru](https://github.com/fiatjaf/khatru) over a BoltDB
 event store and advertises NIPs 1, 9, 11, 12, 15, 16, 20, 33
@@ -172,7 +172,7 @@ sync does by `(kind, d-tag)`
 relays (the local relay plus every connected peer's relay) and, when a new Nostr
 manifest arrives — whether pushed in by a peer or pulled in by the sync engine —
 it **publishes that event to every other connected peer** (an `["EVENT", …]` to
-each `<peer>.fips:4869`), excluding the peer it came from. This is what makes the
+each `<peer>.fips:4870`), excluding the peer it came from. This is what makes the
 "announce widely" half of propagation push-based and automatic instead of a
 flood the app has to orchestrate (see [./propagation.md §2](./propagation.md)).
 Constraints:
@@ -196,7 +196,7 @@ machinery layered on later (P5). See [diagrams/07-relay-mesh-fanout.svg](diagram
 
 ### 2.2 Embedded Blossom
 
-A content-addressed blob server on `http://localhost:24242` — the **`myco-blossom`**
+A content-addressed blob server on `http://localhost:24243` — the **`myco-blossom`**
 crate, implementing the `BlobStore` seam — **always embedded**
 — unlike the relay, Blossom has **no pluggable forward-to-an-app backend**,
 because there is no good Android Blossom app to forward to, so embedding is the
@@ -465,8 +465,8 @@ localhost ports (the IPv6 adapter runs on FSP port 256, and `curl
 http://<npub>.fips:port/` already works in the FIPS Android reference), the
 holder's own relay and Blossom are reachable at:
 
-- `ws://<npub_holder>.fips:4869` — the holder's embedded relay
-- `http://<npub_holder>.fips:24242` — the holder's embedded Blossom
+- `ws://<npub_holder>.fips:4870` — the holder's embedded relay
+- `http://<npub_holder>.fips:24243` — the holder's embedded Blossom
 
 You then query that holder's relay *for the author's events*:
 `{ kinds:[15128 or 35128], authors:[<author_pubkey>] }`. The holder serves the
@@ -489,14 +489,14 @@ For a `siteKey` authored by `npub_author`, fetched from a reachable holder
 is detailed in [./propagation.md](./propagation.md)):
 
 1. **Fetch the manifest.** Query the holder's relay
-   `ws://<npub_holder>.fips:4869` for the author's manifest event:
+   `ws://<npub_holder>.fips:4870` for the author's manifest event:
    - root: `{ "kinds":[15128], "authors":[<author_pubkey>] }`
    - named: `{ "kinds":[35128], "authors":[<author_pubkey>], "#d":[<identifier>] }`
    Keep the newest per slot.
 2. **Build the file list.** Extract every `["path", <path>, <sha256>]` tag →
    `path → hash` map.
 3. **Pull blobs by hash.** For each hash, `GET <sha256>` from the holder's Blossom
-   `http://<npub_holder>.fips:24242`. Fetch concurrently (the reference caps at 8).
+   `http://<npub_holder>.fips:24243`. Fetch concurrently (the reference caps at 8).
    Because blobs are content-addressed, Myco can prefer the **local**
    Blossom first (a blob already cached for another site is the same blob) and
    only go to the peer on a miss.
@@ -583,7 +583,7 @@ Beyond loading a known `<host>.nsite`, the Library can surface sites that reacha
 holders have. The set of discoverable sites is **the author-signed manifests this
 device has** — those received via the flood (small, self-authenticating manifest
 events re-emitted unmodified by relays) plus those **queried from every reachable
-relay** (your own, plus each paired peer's relay at `<npub_holder>.fips:4869`,
+relay** (your own, plus each paired peer's relay at `<npub_holder>.fips:4870`,
 plus their collected peers — see [./propagation.md](./propagation.md) for
 transitive reach) for kinds **15128 / 35128**. Present them **newest-first,
 de-duplicated by `(author, dTag)`**. Selecting one runs the normal §4 sync/serve

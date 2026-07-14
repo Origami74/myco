@@ -8,7 +8,7 @@
 document covers the sibling problem: how an **in-app Nostr client** (e.g.
 [`myco-bitchat`](../../myco-bitchat/README.md)) gets *arbitrary* app events — a
 chat message, a reaction — to the people physically around it, when the only
-relay it can reach is the device's own embedded relay (`ws://localhost:4869`).
+relay it can reach is the device's own embedded relay (`ws://localhost:4870`).
 
 The enabling idea is the same one the whole project rests on: **the embedded
 relay is fed by the FIPS mesh, so physical proximity *is* the transport.** A

@@ -9,7 +9,7 @@
 //! queue (`fips::discovery::platform`), which the node drains each tick.
 //!
 //! Kotlin passes the peer's link-local address already formatted with a
-//! *numeric* scope (`"[fe80::x%3]:4870"`, ifindex resolved from
+//! *numeric* scope (`"[fe80::x%3]:4871"`, ifindex resolved from
 //! `LinkProperties`) — interface-name scopes do not parse (see
 //! docs/design/wifi-aware-interop.md § "Dialing a link-local peer").
 //!

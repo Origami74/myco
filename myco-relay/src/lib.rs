@@ -1,5 +1,5 @@
 //! `myco-relay` — a generic embedded **Nostr relay**: a NIP-01 event store
-//! implementing `nsite-deck`'s [`RelayBackend`] seam, plus a `ws://…:4869` socket
+//! implementing `nsite-deck`'s [`RelayBackend`] seam, plus a `ws://…:4870` socket
 //! ([`server`]). See `docs/design/nsite-layer.md` §2.1 and
 //! `docs/design/event-gossip.md`.
 //!

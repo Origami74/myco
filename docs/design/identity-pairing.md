@@ -41,8 +41,8 @@ This chain is established in
 The load-bearing consequence for pairing: **once you have a peer's device npub,
 you can compute where they live on the mesh with no further exchange.** No
 directory, no lookup, no signed announcement. Scanning a QR that carries a device
-npub is sufficient to address that peer's services at `<npub>.fips:4869` (relay)
-and `<npub>.fips:24242` (Blossom), via the local DNS interceptor
+npub is sufficient to address that peer's services at `<npub>.fips:4870` (relay)
+and `<npub>.fips:24243` (Blossom), via the local DNS interceptor
 ([fips-ipv6-adapter.md](../../reference/fips/docs/design/fips-ipv6-adapter.md)).
 
 ### 1.1 Device identity vs. nsite author identity (do not conflate)
@@ -204,8 +204,8 @@ When you scan a peer's `myco://pair/<base64>` (or open the deep link), the app:
    Noise-encrypted channel, the inviter matches it and confirms.
 4. On a completed handshake, adds two sources to your source set, addressed
    deterministically:
-   - relay at `<npub>.fips:4869`
-   - Blossom at `<npub>.fips:24242`
+   - relay at `<npub>.fips:4870`
+   - Blossom at `<npub>.fips:24243`
 5. Stores the npub (and memorable name) in your **circle** (the local peer list).
 
 Pairing is **handshake-mandatory and always mutual**: scanning is not a purely
@@ -362,7 +362,7 @@ held to the phone is read but ignored, never opened.
 **Where the secret lives.** §6.1 framed the `pairSecret` as echoed back inside the
 Noise-encrypted channel to `<npub_A>.fips`. The implementation keeps that property:
 the scanner/tapper sends a signed pair **request** (kind 9101) to
-`<npub_A>.fips:4869` — already Noise-XK encrypted and authenticated to A — carrying
+`<npub_A>.fips:4870` — already Noise-XK encrypted and authenticated to A — carrying
 the secret. What differs from the doc is *who matches it*: A enforces single-use
 locally, via a small persisted ledger of the secrets it has issued. Each presented
 code mints a fresh secret; it is consumed on first accept and the presented payload

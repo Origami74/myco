@@ -1,5 +1,5 @@
 //! The BUD-01 Blossom HTTP server over [`FsBlobStore`], so the node can serve its
-//! blobs to mesh peers at `http://[fd00::self]:24242`. No auth on the mesh-local
+//! blobs to mesh peers at `http://[fd00::self]:24243`. No auth on the mesh-local
 //! server (the blob hash is self-authenticating). Routes:
 //!
 //! - `GET  /<sha256>` → blob bytes (`application/octet-stream`; the gateway infers

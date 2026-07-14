@@ -67,8 +67,8 @@ alias = ""                 # optional human label for this device's <alias>.fips
 # (no NIP-42 AUTH or read ACL) — aligned with propagation; see security.md §3.
 # ---------------------------------------------------------------------------
 [node]
-relay_port   = 4869        # ws://localhost:4869  (embedded Nostr relay)
-blossom_port = 24242       # http://localhost:24242 (embedded Blossom server, ALWAYS embedded)
+relay_port   = 4870        # ws://localhost:4870  (embedded Nostr relay)
+blossom_port = 24243       # http://localhost:24243 (embedded Blossom server, ALWAYS embedded)
 autostart    = true        # start relay+blossom+FIPS endpoint on app launch
 
 # ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ enabled = true             # master switch for the L2CAP CoC transport
 # ---------------------------------------------------------------------------
 [wifi_aware]
 enabled = false            # master switch for the bulk lane (adds a UDP transport)
-# The port is a fixed app constant (4870), carried where it already
+# The port is a fixed app constant (4871), carried where it already
 # belongs — the fips UDP transport's bind_addr. There is no role and no PSK.
 
 # ---------------------------------------------------------------------------
@@ -203,8 +203,8 @@ One identity per device in v1; multi-persona is a later milestone.
 
 | Key | Type | Proposed default | Notes |
 | --- | --- | --- | --- |
-| `relay_port` | u16 | `4869` | embedded Nostr relay, `ws://localhost:4869`. |
-| `blossom_port` | u16 | `24242` | embedded Blossom server, `http://localhost:24242`. **Always embedded** — not pluggable. |
+| `relay_port` | u16 | `4870` | embedded Nostr relay, `ws://localhost:4870`. |
+| `blossom_port` | u16 | `24243` | embedded Blossom server, `http://localhost:24243`. **Always embedded** — not pluggable. |
 | `autostart` | bool | `true` | start the node (relay + blossom + FIPS endpoint) on launch. |
 
 ### `[sync]`
@@ -231,7 +231,7 @@ Embedding is the default and earliest path. **Blossom is not pluggable** — it 
 | `forward_addr` | string | absent | only when `backend = "local-forward"` — the local relay's address (e.g. `ws://127.0.0.1:7777`). **TBD/open:** exact handshake/sync with the external relay. |
 
 These services are exposed to mesh peers over FIPS FSP port-multiplexing at
-`<npub>.fips:4869` and `<npub>.fips:24242` — no separate gateway on a reachable
+`<npub>.fips:4870` and `<npub>.fips:24243` — no separate gateway on a reachable
 path (see [concepts.md](../design/concepts.md) and upstream
 [fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md)).
 The WebView never resolves `.fips`; it loads `npub.nsite` via the localhost

@@ -19,7 +19,7 @@ use crate::state::{
 /// discovery problem. UDP is fips's native transport and the LAN-discovery
 /// path (which this reuses) is already UDP + scoped link-local IPv6.
 /// See docs/design/wifi-aware-interop.md.
-const WIFI_AWARE_PORT: u16 = 4870;
+const WIFI_AWARE_PORT: u16 = 4871;
 
 /// The app runtime behind the FFI. Owns the device identity, a multi-thread
 /// Tokio runtime, and the embedded fips node. A `Mutex<AppRuntime>` is what the
@@ -109,7 +109,7 @@ impl AppRuntime {
         seed_default_sites(&content, &rt, Path::new(data_dir));
 
         // Serve the relay + Blossom over the mesh so paired peers can pull this
-        // device's nsites at ws://<npub>.fips:4869 / http://<npub>.fips:24242.
+        // device's nsites at ws://<npub>.fips:4870 / http://<npub>.fips:24243.
         // Bound IPV6_V6ONLY (the mesh is IPv6-only) so `[::]:port` doesn't collide
         // with another app squatting on `127.0.0.1:port`; a port already in use
         // surfaces as a warning. Android-only (the host has no TUN). ports.md.
@@ -139,9 +139,9 @@ impl AppRuntime {
                 Some(gate),
             );
 
-            // Mesh socket: IPV6_V6ONLY `[::]:4869` so it doesn't collide with the
-            // loopback bind and is reachable by peers at `ws://<npub>.fips:4869`.
-            match myco_relay::server::bind("[::]:4869".parse::<SocketAddr>().unwrap()) {
+            // Mesh socket: IPV6_V6ONLY `[::]:4870` so it doesn't collide with the
+            // loopback bind and is reachable by peers at `ws://<npub>.fips:4870`.
+            match myco_relay::server::bind("[::]:4870".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
                     let hub = hub.clone();
                     rt.spawn(async move {
@@ -152,13 +152,13 @@ impl AppRuntime {
                 }
                 Err(e) => {
                     mesh_warning =
-                        format!("relay port 4869 unavailable (another app using it?): {e}");
+                        format!("relay port 4870 unavailable (another app using it?): {e}");
                 }
             }
-            // Loopback socket: the in-app nsite WebView talks to `ws://localhost:4869`
-            // / `ws://127.0.0.1:4869`; the mesh socket is v6only, so serve loopback
+            // Loopback socket: the in-app nsite WebView talks to `ws://localhost:4870`
+            // / `ws://127.0.0.1:4870`; the mesh socket is v6only, so serve loopback
             // explicitly. Connections here are classified as `Origin::Local`.
-            match myco_relay::server::bind("127.0.0.1:4869".parse::<SocketAddr>().unwrap()) {
+            match myco_relay::server::bind("127.0.0.1:4870".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
                     let hub = hub.clone();
                     rt.spawn(async move {
@@ -168,21 +168,21 @@ impl AppRuntime {
                     });
                 }
                 Err(e) => {
-                    // Critical: the in-app nsites connect to ws://localhost:4869, so
+                    // Critical: the in-app nsites connect to ws://localhost:4870, so
                     // if another app holds it they'll silently talk to the WRONG
                     // relay (you'd see messages that aren't yours). Flag it loudly;
-                    // the UI watches for "port 4869" to pop a warning.
+                    // the UI watches for "port 4870" to pop a warning.
                     if !mesh_warning.is_empty() {
                         mesh_warning.push_str("; ");
                     }
                     mesh_warning.push_str(&format!(
-                        "Another app is using port 4869 — Myco's relay couldn't start, \
+                        "Another app is using port 4870 — Myco's relay couldn't start, \
                          so apps will talk to the wrong relay. Close the other app and \
                          restart Myco. ({e})"
                     ));
                 }
             }
-            match myco_blossom::server::bind("[::]:24242".parse::<SocketAddr>().unwrap()) {
+            match myco_blossom::server::bind("[::]:24243".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
                     // Same paired-only gate for blobs: a mesh source must be a
                     // current Circle member (loopback bypasses). Pairing never
@@ -202,7 +202,7 @@ impl AppRuntime {
                     if !mesh_warning.is_empty() {
                         mesh_warning.push_str("; ");
                     }
-                    mesh_warning.push_str(&format!("blossom port 24242 unavailable: {e}"));
+                    mesh_warning.push_str(&format!("blossom port 24243 unavailable: {e}"));
                 }
             }
 
@@ -272,7 +272,7 @@ impl AppRuntime {
                     ..Default::default()
                 });
         }
-        // The Wi-Fi Aware bulk lane: a UDP transport bound `[::]:4870`. UDP is
+        // The Wi-Fi Aware bulk lane: a UDP transport bound `[::]:4871`. UDP is
         // symmetric (no listener/dialer), fips-native, and reuses the proven
         // scoped-link-local path. Peers are supplied only by the platform peer
         // queue (`fips::discovery::platform`) — UDP is not advertised on Nostr

@@ -2,7 +2,7 @@
 //! mesh, implementing the **push** plane of `docs/design/event-gossip.md`.
 //!
 //! **P2 — multi-hop flood.** An event is pushed to the whole Circle's relays
-//! (`ws://[fd00::peer]:4869`) — every member, not just direct neighbours, so a
+//! (`ws://[fd00::peer]:4870`) — every member, not just direct neighbours, so a
 //! peer reachable only multi-hop over the mesh still receives it — carrying a
 //! decrementing `event-ttl`:
 //!

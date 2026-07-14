@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * normal internet traffic is untouched — this is not a full-tunnel VPN.
  *
  * The node installs the bridge channels when it starts (BLE on); this service just
- * moves bytes. With it up, a native socket to `[fd00::peer]:4869/:24242` routes
+ * moves bytes. With it up, a native socket to `[fd00::peer]:4870/:24243` routes
  * over the mesh, so the sync engine can pull a shared nsite from a peer's device.
  */
 class MycoVpnService : VpnService() {

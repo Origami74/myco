@@ -24,7 +24,7 @@ keypair**, the **device key**:
 - your **mesh network identity** (who you are on the FIPS network),
 - your **BLE link authentication** (who the radio link is talking to), and
 - your **app/device identity** in Myco — the address of *this* device's
-  embedded relay + Blossom (`<npub_device>.fips:4869` / `:24242`).
+  embedded relay + Blossom (`<npub_device>.fips:4870` / `:24243`).
 
 The device key is **never** used to author nsites. nsites are authored
 elsewhere, by external tooling, under separate keys (see *nsite author identity*
@@ -169,13 +169,13 @@ home-screen pinning, per-nsite origin isolation — is in
 Every Myco device runs **its own** Nostr relay and Blossom server in-process.
 No external services are required.
 
-- **Embedded Nostr relay** — default `ws://localhost:4869`. A plain NIP-01 store +
+- **Embedded Nostr relay** — default `ws://localhost:4870`. A plain NIP-01 store +
   socket: it **stores and serves** the signed manifest events (kinds 15128/35128).
   It does **not** fan out on its own — a separate **nsite-deck propagator** does the
   forwarding, by subscribing to the relevant relays (local + connected peers) and
   publishing those events on to peer relays (events only, source-excluded; see
   [propagation.md](./propagation.md)).
-- **Embedded Blossom server** — default `http://localhost:24242`. Stores and
+- **Embedded Blossom server** — default `http://localhost:24243`. Stores and
   serves the sha256-addressed blobs (Blossom BUD-01).
 
 Both are implemented in **Rust**, unified with the FIPS endpoint into a single
@@ -188,8 +188,8 @@ propagation (below).
 
 These services are exposed to peers over the mesh by FIPS **FSP port
 multiplexing**, which delivers mesh datagrams to localhost ports. A reachable
-peer reaches your relay at `<npub_device>.fips:4869` and your Blossom at
-`<npub_device>.fips:24242` — no separate gateway is needed on a reachable path.
+peer reaches your relay at `<npub_device>.fips:4870` and your Blossom at
+`<npub_device>.fips:24243` — no separate gateway is needed on a reachable path.
 That address is *this device's* (the holder's) address; the nsites it serves are
 filtered by their own author keys, which are unrelated to it.
 
@@ -311,11 +311,11 @@ nsite layer for survival across partition — is drawn in
 | **manifest** | the Nostr event whose `path` tags map paths → blob hashes (kind 15128 root / 35128 named) |
 | **blob** | a content-addressed file, retrieved by sha256 (Blossom BUD-01) |
 | **the Library** | the Myco home grid of nsites-as-apps |
-| **embedded relay** | in-process Nostr relay, `ws://localhost:4869` |
-| **embedded Blossom** | in-process blob server, `http://localhost:24242` |
+| **embedded relay** | in-process Nostr relay, `ws://localhost:4870` |
+| **embedded Blossom** | in-process blob server, `http://localhost:24243` |
 | **FIPS mesh** | self-organizing, transport-agnostic mesh; live-path-only routing |
 | **FMP / FSP** | FIPS Mesh Protocol (hop-by-hop, Noise IK) / FIPS Session Protocol (end-to-end, Noise XK) |
-| **FSP port-mux** | delivery of mesh datagrams to localhost ports, exposing `<npub>.fips:4869`/`:24242` |
+| **FSP port-mux** | delivery of mesh datagrams to localhost ports, exposing `<npub>.fips:4870`/`:24243` |
 | **TUN** | the kept `VpnService`; routes `fd00::/8`, intercepts `.fips`/`.nsite`; not tunnel-all |
 | **store-and-forward** | net-new nsite-layer caching that lets a device re-serve a site offline |
 | **myco-core** | the app crate that wires `nsite-deck` + `myco-relay` + `myco-blossom` behind one FFI `.so`; the only crate that names FIPS or a concrete relay/Blossom |

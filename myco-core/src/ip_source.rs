@@ -54,7 +54,7 @@ pub struct IpPeerSource {
     timeout: Duration,
     /// When true, blob fetches ignore the manifest's `["server", …]` hints and
     /// use only `blossom_servers` — so a **mesh** source never reaches out to
-    /// public Blossom over the internet (it stays on the peer's `[fd00::]:24242`).
+    /// public Blossom over the internet (it stays on the peer's `[fd00::]:24243`).
     ignore_manifest_servers: bool,
     /// For a **mesh** source: the shared peer-relay pool + the holder's npub, so a
     /// manifest REQ reuses the one persistent WS connection to the peer instead of
@@ -111,7 +111,7 @@ impl IpPeerSource {
 /// A [`PeerSource`] that pulls from a specific **holder's** embedded relay +
 /// Blossom over the FIPS mesh, addressed by the holder's npub: the ULA
 /// `fd00:: = fd + node_addr[0..15]` (`PeerIdentity::from_npub`), reached at
-/// `ws://[fd00::holder]:4869` / `http://[fd00::holder]:24242`. Requires the
+/// `ws://[fd00::holder]:4870` / `http://[fd00::holder]:24243`. Requires the
 /// app-owned TUN to be up so the IPv6 socket routes over the mesh. A longer
 /// timeout than the IP source absorbs BLE latency + first-contact session setup.
 pub fn mesh_source_for(
@@ -122,8 +122,8 @@ pub fn mesh_source_for(
         .map_err(|e| anyhow::anyhow!("invalid holder npub {holder_npub}: {e}"))?;
     let ip = peer.address().to_ipv6();
     Ok(IpPeerSource::new(
-        vec![format!("ws://[{ip}]:4869")],
-        vec![format!("http://[{ip}]:24242")],
+        vec![format!("ws://[{ip}]:4870")],
+        vec![format!("http://[{ip}]:24243")],
     )
     .with_timeout(Duration::from_secs(20))
     .ignoring_manifest_servers()
@@ -131,7 +131,7 @@ pub fn mesh_source_for(
 }
 
 /// Dev-menu **speedtest** against a mesh peer: PUT a fresh `bytes`-sized payload to
-/// the peer's Blossom (`http://[fd00::peer]:24242/upload`), then GET it back, timing
+/// the peer's Blossom (`http://[fd00::peer]:24243/upload`), then GET it back, timing
 /// each leg. Returns `(up_mbps, down_mbps)` — upload (this device → peer) and
 /// download (peer → this device) throughput in megabits per second. The whole call
 /// is bounded by `timeout`. The peer's Blossom gates non-loopback sources by Circle
@@ -154,7 +154,7 @@ pub async fn speedtest_peer(
     let peer = fips::PeerIdentity::from_npub(npub)
         .map_err(|e| anyhow::anyhow!("invalid peer npub {npub}: {e}"))?;
     let host = format!("{npub}.fips");
-    let socket = std::net::SocketAddr::new(std::net::IpAddr::V6(peer.address().to_ipv6()), 24242);
+    let socket = std::net::SocketAddr::new(std::net::IpAddr::V6(peer.address().to_ipv6()), 24243);
     let client = reqwest::Client::builder()
         .resolve(&host, socket)
         // A short connect timeout so an unroutable/unreachable peer fails fast
@@ -163,7 +163,7 @@ pub async fn speedtest_peer(
         .connect_timeout(Duration::from_secs(15))
         .timeout(timeout)
         .build()?;
-    speedtest_blossom(&client, &format!("http://{host}:24242"), bytes).await
+    speedtest_blossom(&client, &format!("http://{host}:24243"), bytes).await
 }
 
 /// The Blossom round-trip itself, against an already-built `client` + `base` URL —

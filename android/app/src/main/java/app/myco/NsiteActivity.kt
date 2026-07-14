@@ -119,7 +119,7 @@ class NsiteActivity : ComponentActivity() {
 
         // Serve the WebView under `.localhost` (not `.nsite`): Chromium treats
         // `*.localhost` as loopback + a secure context, so the nsite's
-        // `ws://localhost:4869` to the embedded relay isn't blocked by Private/
+        // `ws://localhost:4870` to the embedded relay isn't blocked by Private/
         // Local Network Access (a `.nsite` page is classed "public" → blocked).
         webView.loadUrl("http://$hostLabel.localhost/")
     }

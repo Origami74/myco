@@ -1,7 +1,7 @@
 //! The Myco content layer: the embedded relay + Blossom stores wired to the
 //! `nsite-deck` gateway engine, plus the Library and per-site sync status the FFI
 //! surfaces. This is the in-process glue (`myco-core` is the only crate that names
-//! a concrete relay/Blossom). The localhost `:4869` / `:24242` sockets and the
+//! a concrete relay/Blossom). The localhost `:4870` / `:24243` sockets and the
 //! `:80` external door are **not** bound in P2 — the in-app WebView reaches the
 //! gateway in-process via `gateway_get` (the `gatewayGet` JNI). Peer sync over
 //! those sockets is P3.
@@ -863,7 +863,7 @@ impl Content {
     /// **Every** Circle member's npub, regardless of whether they're a *direct*
     /// mesh neighbour right now. Chat fan-out targets this: a Circle peer you've
     /// walked away from is still reachable multi-hop over the mesh, and messages
-    /// must keep flowing to them — the routed `ws://[fd00::peer]:4869` dial reaches
+    /// must keep flowing to them — the routed `ws://[fd00::peer]:4870` dial reaches
     /// them, and a truly-offline member's connect just fails fast and is dropped.
     /// (Contrast [`connected_circle_npubs`](Self::connected_circle_npubs), the
     /// direct-neighbour subset used where an offline dial's timeout must be
@@ -1062,7 +1062,7 @@ impl Content {
                 return;
             }
         };
-        let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
+        let url = format!("ws://[{}]:4870", peer.address().to_ipv6());
         for attempt in 0..PAIR_DIAL_ATTEMPTS {
             if attempt > 0 {
                 tokio::time::sleep(PAIR_DIAL_RETRY_DELAY).await;
@@ -1122,7 +1122,7 @@ impl Content {
         let Ok(peer) = fips::PeerIdentity::from_npub(npub) else {
             return;
         };
-        let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
+        let url = format!("ws://[{}]:4870", peer.address().to_ipv6());
         let mut stored = 0u32;
         for filters in subs {
             let events = self
@@ -1150,7 +1150,7 @@ impl Content {
         let circle: HashSet<String> = self.circle_npubs().into_iter().collect();
         for npub in &circle {
             if let Ok(peer) = fips::PeerIdentity::from_npub(npub) {
-                let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
+                let url = format!("ws://[{}]:4870", peer.address().to_ipv6());
                 self.peer_relays.ensure(npub, &url);
             }
         }
@@ -1176,7 +1176,7 @@ impl Content {
         let Ok(peer) = fips::PeerIdentity::from_npub(npub) else {
             return;
         };
-        let url = format!("ws://[{}]:4869", peer.address().to_ipv6());
+        let url = format!("ws://[{}]:4870", peer.address().to_ipv6());
         self.peer_relays.send(npub, &url, frame);
     }
 
@@ -1220,7 +1220,7 @@ impl Content {
                 if exclude == Some(ip) {
                     return None;
                 }
-                let url = format!("ws://[{}]:4869", ip);
+                let url = format!("ws://[{}]:4870", ip);
                 let filters = filters.clone();
                 Some(async move {
                     pool.request(&npub, &url, filters, std::time::Duration::from_secs(8))
@@ -1239,7 +1239,7 @@ impl Content {
     // --- discovery ("nsites around me") ---
 
     /// Discover nsites on connected Circle peers' relays: query each reachable
-    /// member's mesh relay (`ws://[fd00::peer]:4869`) for manifest events in
+    /// member's mesh relay (`ws://[fd00::peer]:4870`) for manifest events in
     /// parallel, then rebuild the discovered list. Spawn-not-block; the UI polls
     /// `discovered`. Opening a result pulls from that peer (its npub is the holder).
     pub async fn discover_from_circle(self: Arc<Self>) {
@@ -1249,7 +1249,7 @@ impl Content {
             let Ok(peer) = fips::PeerIdentity::from_npub(&npub) else {
                 return Vec::new();
             };
-            let relay_url = format!("ws://[{}]:4869", peer.address().to_ipv6());
+            let relay_url = format!("ws://[{}]:4870", peer.address().to_ipv6());
             // Manifest kinds only; `req-ttl: 1` reaches our peers' peers (2 hops),
             // matching the old `discover_manifests` helper.
             let filter = serde_json::json!({
@@ -1350,7 +1350,7 @@ impl Content {
             .into_iter()
             .filter_map(|npub| {
                 let peer = fips::PeerIdentity::from_npub(&npub).ok()?;
-                Some((npub, format!("ws://[{}]:4869", peer.address().to_ipv6())))
+                Some((npub, format!("ws://[{}]:4870", peer.address().to_ipv6())))
             })
             .collect();
         let online: Vec<String> = if self.is_offline_only() {
@@ -1644,8 +1644,8 @@ impl Content {
         if let Some(IpAddr::V6(ip)) = inbound.sender {
             sources.push(Arc::new(
                 crate::ip_source::IpPeerSource::new(
-                    vec![format!("ws://[{ip}]:4869")],
-                    vec![format!("http://[{ip}]:24242")],
+                    vec![format!("ws://[{ip}]:4870")],
+                    vec![format!("http://[{ip}]:24243")],
                 )
                 .ignoring_manifest_servers(),
             ));
