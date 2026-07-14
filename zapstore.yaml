@@ -1,17 +1,36 @@
 repository: https://github.com/Origami74/myco
 release_source: https://github.com/Origami74/myco
 description: |
-    Myco is an offline-first, peer-to-peer client for nsites — self-contained web
-    apps served straight from a local relay and Blossom store. Pair with people
-    nearby over Bluetooth LE to form a mesh, then discover, install, and share
-    nsites with no servers and no internet required. Includes built-in chat
-    (myco-bitchat) and home-screen install for any nsite.
-summary: Offline-first mesh for nsites — share apps peer-to-peer over Bluetooth.
+    Share small apps with the people around you by tapping your phones together —
+    like handing someone a card. It works completely offline: no internet, no app
+    store, no sign-up.
+
+    Tap to share, and the app lands on their phone, ready to open. Everything
+    travels straight from phone to phone over Bluetooth, so it keeps working with
+    no signal at all — on a plane, at a festival, off in the mountains, or when the
+    network goes down.
+
+    Once you've connected with someone you're in each other's circle: pass apps
+    back and forth, chat, and see what others nearby are sharing — all without a
+    connection. Apps open instantly and live on your phone; pin your favourites to
+    the home screen like any other app.
+
+    Comes with a built-in chat to get started, plus a growing set of community
+    apps — from group messaging to tools for coordinating in an emergency.
+
+    Your identity is a key that stays on your device, not an account in someone's
+    database. Nothing needs a server. Nothing phones home.
+
+    Built for anywhere the internet isn't.
+summary: Tap phones to share apps and communicate through them — all offline, no app store, no accounts.
 tags:
     - mesh
     - fips
 license: MIT
 images:
+    - docs/images/zapstore-01-mesh.png
+    - docs/images/zapstore-03-share-app.png
+    - docs/images/zapstore-02-connect-circle.png
     - docs/images/01-nfc-pairing.png
     - docs/images/02-circle.png
     - docs/images/03-app-sharing.png
