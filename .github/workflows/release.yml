@@ -19,7 +19,7 @@ on:
 
 env:
   FIPS_REPO: https://github.com/jmcorgan/fips.git
-  FIPS_REF: ble-v2          # fips fork branch carrying the mobile features
+  FIPS_REF: feat/platform-peer-queue   # fips fork branch carrying the mobile + Wi-Fi Aware features
   NDK_VERSION: 26.1.10909125
 
 jobs:

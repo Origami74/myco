@@ -122,6 +122,7 @@ decision.
 | [nsite-layer.md](./design/nsite-layer.md) | The content layer: the embedded relay, Blossom, and localhost gateway; the manifest/URL scheme; the resolve→cache→serve flow; and sync-over-FIPS that pulls a peer's manifest + blobs. |
 | [propagation.md](./design/propagation.md) | Offline propagation: the live-path (FIPS) vs store-and-forward (nsite) split, the hybrid model (flood the author-signed manifest events, pull blobs on demand), transitive discovery, dedup/anti-loop, and cache retention. |
 | [ble-interop.md](./design/ble-interop.md) | BLE transport strategy: native `AndroidBleIo` (and a macOS `BluestIo` test backend) over fips-core's `BleIo` trait, why L2CAP not GATT, the PSM problem and universal per-peer PSM discovery, MAC randomization, and the foreground-service requirement. |
+| [wifi-aware-interop.md](./design/wifi-aware-interop.md) | Wi-Fi Aware (NAN) bulk-lane strategy: Kotlin raises the data path, fips-core's existing UDP transport dials the link-local address; the two fips-core patches (discovery injection, BLE↔Aware link policy), socket exposure, and why not Wi-Fi Direct. |
 | [security.md](./design/security.md) | Trust model: self-authenticating data, inherited FIPS Noise crypto, dropping the membership roster, scan-and-confirm (handshake-mandatory) pairing, the nsite sandbox, and a threats/mitigations table. |
 | [diagrams/](./design/diagrams/README.md) | The four design diagrams (system layering, pairing & transitive discovery, offline propagation, nsite browse flow) and the established facts baked into them. |
 

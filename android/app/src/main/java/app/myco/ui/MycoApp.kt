@@ -92,6 +92,8 @@ private val TABS = listOf(
 fun MycoApp(
     client: AppCoreClient,
     onBleToggle: (Boolean) -> Unit,
+    wifiAwareSupported: Boolean,
+    onWifiAwareToggle: (Boolean) -> Unit,
     onLaunchNsite: (host: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,
@@ -206,6 +208,8 @@ fun MycoApp(
                         state = state,
                         client = client,
                         onBleToggle = onBleToggle,
+                        wifiAwareSupported = wifiAwareSupported,
+                        onWifiAwareToggle = onWifiAwareToggle,
                         meshEnabled = meshEnabled,
                         onMeshToggle = { on -> meshEnabled = on; onMeshToggle(on) },
                         onOfflineOnlyToggle = onOfflineOnlyToggle,

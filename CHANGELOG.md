@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An experimental **Wi-Fi Aware** transfer lane that runs alongside the Bluetooth
+  mesh. When two nearby devices both support it, larger transfers (such as nsite
+  blobs) can ride a faster Wi-Fi data path instead of BLE, while pairing and
+  discovery stay on the existing mesh. Experimental — see the Wi-Fi Aware section
+  in Settings.
+- A peer speedtest in the Developer menu that measures upload and download
+  throughput to a paired peer over the mesh, for diagnosing slow transfers.
+
+### Changed
+
+- The in-app Blossom store now accepts uploads up to 64 MiB, so larger nsite
+  blobs and the new speedtest payload transfer in a single request.
+
 ### Fixed
 
 - Chat and other mesh events could silently stop reaching a paired peer after a

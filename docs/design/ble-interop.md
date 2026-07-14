@@ -1,9 +1,11 @@
 # BLE Interop Strategy
 
-Myco's offline story rests on one transport: Bluetooth Low Energy. Two
-phones in a pocket, no Wi-Fi, no cell — one browses the other's nsite. This
-doc explains *how* the app will speak BLE, why it speaks L2CAP (not GATT),
-and the one hard problem (the PSM problem) that the strategy has to solve.
+Myco's offline story rests on one always-on transport: Bluetooth Low Energy.
+Two phones in a pocket, no Wi-Fi, no cell — one browses the other's nsite.
+This doc explains *how* the app will speak BLE, why it speaks L2CAP (not
+GATT), and the one hard problem (the PSM problem) that the strategy has to
+solve. (The higher-throughput Wi-Fi Aware bulk lane designed to sit beside
+BLE is [wifi-aware-interop.md](./wifi-aware-interop.md).)
 
 The on-wire details — exact UUID, byte layouts, MTU rules — now live in the
 implementation itself (the `BleRadio` Android backend and the `reference/fips`

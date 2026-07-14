@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fips::control::read_handle::ControlReadHandle;
 use tokio::runtime::Runtime;
@@ -9,7 +9,17 @@ use tokio::task::JoinHandle;
 use crate::action::NativeAppAction;
 use crate::content::{CacheView, Content};
 use crate::identity_store;
-use crate::state::{AppState, BleAdvert, BlePeer, BleStatus, IdentityView, NodeStatus};
+use crate::state::{
+    AppState, BleAdvert, BlePeer, BleStatus, IdentityView, NodeStatus, WifiAwareStatus,
+};
+
+/// UDP port for the Wi-Fi Aware bulk lane. Both peers bind it on the NDP
+/// interface and exchange over it — symmetric, no listener/dialer roles. A
+/// fixed app constant (we bind our own port), so there is no PSM-style
+/// discovery problem. UDP is fips's native transport and the LAN-discovery
+/// path (which this reuses) is already UDP + scoped link-local IPv6.
+/// See docs/design/wifi-aware-interop.md.
+const WIFI_AWARE_PORT: u16 = 4870;
 
 /// The app runtime behind the FFI. Owns the device identity, a multi-thread
 /// Tokio runtime, and the embedded fips node. A `Mutex<AppRuntime>` is what the
@@ -28,6 +38,7 @@ pub struct AppRuntime {
     error: String,
     identity: IdentityView,
     ble_enabled: bool,
+    wifi_aware_enabled: bool,
     node_running: bool,
     node_status: String,
     /// Tokio runtime hosting the node's tasks. `None` only if it failed to build.
@@ -66,7 +77,7 @@ impl AppRuntime {
         // FFI polls (see the struct doc).
         let rt = Runtime::new().map_err(|e| anyhow::anyhow!("tokio runtime: {e}"))?;
 
-        let node = Self::build_node(data_dir)?;
+        let node = Self::build_node(data_dir, false)?;
         let mut identity = IdentityView::from_identity(node.identity());
         // FIPS's effective IPv6 MTU (transport_mtu - 77). The VpnService sets this
         // on the TUN and the MSS clamp derives from it, so packets fit the mesh.
@@ -220,6 +231,7 @@ impl AppRuntime {
             error: mesh_warning,
             identity,
             ble_enabled: false,
+            wifi_aware_enabled: false,
             node_running: false,
             node_status: "fips node constructed (not started)".to_string(),
             rt: Some(rt),
@@ -234,7 +246,12 @@ impl AppRuntime {
     /// Build a fresh embedded fips node from the persisted identity. Called at
     /// construction and again on a BLE off→on cycle (run_rx_loop consumes the
     /// node, so re-enabling needs a new one).
-    fn build_node(data_dir: &str) -> anyhow::Result<fips::Node> {
+    ///
+    /// `wifi_aware` adds a UDP transport instance bound on the NDP interface —
+    /// the Wi-Fi Aware bulk lane's data plane (docs/design/wifi-aware-interop.md).
+    /// Deliberately not Android-gated: the identical UDP path is the lane's
+    /// dev/test stand-in on a plain LAN.
+    fn build_node(data_dir: &str, wifi_aware: bool) -> anyhow::Result<fips::Node> {
         let nsec = identity_store::load_or_generate(Path::new(data_dir))?;
         let mut config = fips::Config::new();
         config.node.identity.nsec = Some(nsec);
@@ -255,6 +272,25 @@ impl AppRuntime {
                     ..Default::default()
                 });
         }
+        // The Wi-Fi Aware bulk lane: a UDP transport bound `[::]:4870`. UDP is
+        // symmetric (no listener/dialer), fips-native, and reuses the proven
+        // scoped-link-local path. Peers are supplied only by the platform peer
+        // queue (`fips::discovery::platform`) — UDP is not advertised on Nostr
+        // and no peer config points here — so `offline_only` semantics survive.
+        //
+        // It is configured UNCONDITIONALLY on Android (like the BLE transport
+        // above), not gated on the Aware toggle: the toggle then controls only
+        // the Kotlin radio (whether peers get pushed), never the node's
+        // transport set — so flipping Wi-Fi Aware never restarts the node and
+        // never disrupts an active BLE link. `wifi_aware` still adds it on the
+        // host for the LAN-based dev/test stand-in.
+        if wifi_aware || cfg!(target_os = "android") {
+            config.transports.udp =
+                fips::config::TransportInstances::Single(fips::config::UdpConfig {
+                    bind_addr: Some(format!("[::]:{WIFI_AWARE_PORT}")),
+                    ..Default::default()
+                });
+        }
         fips::Node::new(config).map_err(|e| anyhow::anyhow!("fips Node::new failed: {e}"))
     }
 
@@ -266,6 +302,7 @@ impl AppRuntime {
             error: msg.to_string(),
             identity: IdentityView::default(),
             ble_enabled: false,
+            wifi_aware_enabled: false,
             node_running: false,
             node_status: "error".to_string(),
             rt: None,
@@ -300,6 +337,16 @@ impl AppRuntime {
                 } else {
                     "ble disabled".to_string()
                 };
+                self.rev += 1;
+            }
+            NativeAppAction::SetWifiAwareEnabled { enabled } => {
+                // Pure flag, like SetBleEnabled: the UDP transport is always
+                // present on Android (see build_node), so the toggle only
+                // records intent and gates the Kotlin radio (whether peers are
+                // pushed). It never touches the node lifecycle — so enabling or
+                // disabling Wi-Fi Aware cannot restart the node or drop an
+                // active BLE link.
+                self.wifi_aware_enabled = enabled;
                 self.rev += 1;
             }
             NativeAppAction::OpenNsite { link, holder } => {
@@ -412,9 +459,15 @@ impl AppRuntime {
     /// enough to dominate connection setup, small enough not to bloat the peer's
     /// store. Ignored if a run is already in flight.
     fn start_speedtest(&mut self, npub: String) {
-        // 256 KiB: big enough to measure past connection setup, small enough to
-        // complete each way within the timeout over a slow (~tens of KB/s) BLE link.
-        const PAYLOAD_BYTES: usize = 262_144;
+        // Adaptive payload: start small and DOUBLE each run until one takes long
+        // enough (>= TARGET) to be a meaningful measurement past connection
+        // setup — the last run's result is the reported one. A slow link (BLE,
+        // ~tens of KB/s) exceeds TARGET on the first 256 KiB run and stops
+        // there; a fast link (Wi-Fi Aware) climbs to a few/tens of MiB. Capped
+        // at MAX_BYTES (the Blossom upload limit).
+        const START_BYTES: usize = 262_144; // 256 KiB
+        const MAX_BYTES: usize = 64 * 1024 * 1024; // 64 MiB (Blossom body cap)
+        const TARGET: Duration = Duration::from_secs(5);
         let Some(rt) = self.rt.as_ref() else { return };
         {
             let mut s = self.speedtest.lock().unwrap();
@@ -428,26 +481,56 @@ impl AppRuntime {
         let slot = self.speedtest.clone();
         rt.spawn(async move {
             tracing::info!(peer = %npub, "speedtest: starting");
-            let result =
-                crate::ip_source::speedtest_peer(&npub, PAYLOAD_BYTES, Duration::from_secs(60))
-                    .await;
+            let mut any_ok = false;
+            let mut last_err: Option<String> = None;
+            let mut size = START_BYTES;
+            loop {
+                let started = Instant::now();
+                let result =
+                    crate::ip_source::speedtest_peer(&npub, size, Duration::from_secs(120)).await;
+                let elapsed = started.elapsed();
+                match result {
+                    Ok((up, down)) => {
+                        any_ok = true;
+                        last_err = None;
+                        tracing::info!(
+                            peer = %npub, size, up_mbps = up, down_mbps = down,
+                            elapsed_ms = elapsed.as_millis() as u64, "speedtest: run ok"
+                        );
+                        {
+                            let mut s = slot.lock().unwrap();
+                            s.up_mbps = up;
+                            s.down_mbps = down;
+                            s.bytes = size as u64;
+                            // Bump per run so the UI shows the size climbing.
+                            s.generation += 1;
+                        }
+                        // Long enough to be meaningful, or hit the cap → done.
+                        // Else the link is fast; double and measure again.
+                        if elapsed >= TARGET || size >= MAX_BYTES {
+                            break;
+                        }
+                        size = (size * 2).min(MAX_BYTES);
+                    }
+                    Err(e) => {
+                        tracing::warn!(peer = %npub, size, error = format!("{e:#}"), "speedtest: run failed");
+                        last_err = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
             let mut s = slot.lock().unwrap();
             s.running = false;
-            s.bytes = PAYLOAD_BYTES as u64;
             s.generation += 1;
-            match result {
-                Ok((up, down)) => {
-                    tracing::info!(peer = %npub, up_mbps = up, down_mbps = down, "speedtest: ok");
-                    s.up_mbps = up;
-                    s.down_mbps = down;
-                    s.error.clear();
-                }
-                Err(e) => {
-                    tracing::warn!(peer = %npub, error = format!("{e:#}"), "speedtest: failed");
+            match last_err {
+                // A failed larger run after a smaller success keeps the good
+                // result; only surface an error if nothing succeeded.
+                Some(err) if !any_ok => {
                     s.up_mbps = 0.0;
                     s.down_mbps = 0.0;
-                    s.error = e.to_string();
+                    s.error = err;
                 }
+                _ => s.error.clear(),
             }
         });
     }
@@ -517,7 +600,7 @@ impl AppRuntime {
         }
         // Rebuild the node if a prior stop consumed it (BLE toggled off then on).
         if self.node.is_none() {
-            match Self::build_node(&self.data_dir) {
+            match Self::build_node(&self.data_dir, self.wifi_aware_enabled) {
                 Ok(n) => self.node = Some(n),
                 Err(e) => {
                     self.error = format!("rebuild node: {e}");
@@ -662,6 +745,14 @@ impl AppRuntime {
             },
             ble_peers,
             ble_adverts: self.ble_adverts(),
+            wifi_aware: WifiAwareStatus {
+                enabled: self.wifi_aware_enabled,
+                port: if self.wifi_aware_enabled {
+                    WIFI_AWARE_PORT
+                } else {
+                    0
+                },
+            },
             sites: self
                 .content
                 .as_ref()

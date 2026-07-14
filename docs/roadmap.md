@@ -61,7 +61,7 @@ consumer UI before widening capability further.
 | **P4** | Full offline browse demo (the v1 headline) | Two Androids in airplane mode + BLE: B browses A's nsite offline. |
 | **P5** | Propagation at scale (set-recon + transitive + eviction) | A cached site survives the origin going offline; reach goes transitive. |
 | **P6** | Linux interop | An Android and a Linux peer form a FIPS BLE link via per-peer PSM discovery and sync an nsite. |
-| **Later** | htdocs serving cache, home-screen pinning + app-shortcuts, WiFi-Direct, public-node peering, nsite capability API, open nsite links, relay read-auth, NAT46 | (see below — each is its own milestone) |
+| **Later** | htdocs serving cache, home-screen pinning + app-shortcuts, Wi-Fi Aware, public-node peering, nsite capability API, open nsite links, relay read-auth, NAT46 | (see below — each is its own milestone) |
 
 ---
 
@@ -333,9 +333,10 @@ Out of scope for v1; each is its own milestone with its own design pass.
   callback), so the Library stays the source of truth for "installed" —
   [nsite-layer.md](./design/nsite-layer.md),
   [identity-pairing.md](./design/identity-pairing.md).
-- **WiFi-Direct transport.** A higher-throughput offline transport alongside BLE,
-  for larger nsites where L2CAP MTU is the bottleneck. (BLE throughput is an open
-  question in [run-two-device-demo.md](./how-to/run-two-device-demo.md).)
+- **Wi-Fi Aware bulk-lane transport.** A higher-throughput offline lane raised
+  beside BLE for larger nsites (measured BLE ceiling ~22 KB/s). Design in
+  [wifi-aware-interop.md](./design/wifi-aware-interop.md) — Wi-Fi Direct, this
+  bullet's original name, is demoted to fallback there.
 - **Public-node peering via Nostr discovery.** The online path: find and
   rendezvous with peers over the internet using FIPS discovery kinds (37195
   overlay advert, 21059 traversal signaling, 10050 inbox relays) and NAT

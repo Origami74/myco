@@ -23,6 +23,12 @@ pub enum NativeAppAction {
     /// the node brings up its BLE backend; the actual radio lives in the
     /// foreground service (P1 M4).
     SetBleEnabled { enabled: bool },
+    /// Master switch for the Wi-Fi Aware bulk lane. Gates whether the node
+    /// carries a UDP transport instance (bound socket) for platform-pushed
+    /// peers; the Aware radio itself lives in the Android foreground service.
+    /// Flipping it while the node runs restarts the node so the transport set
+    /// matches the switch. See docs/design/wifi-aware-interop.md.
+    SetWifiAwareEnabled { enabled: bool },
 
     // --- site entry / Library (P2) ---
     /// Resolve a pasted nsite link / `<host>` and drive its sync to readiness

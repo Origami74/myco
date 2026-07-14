@@ -16,9 +16,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import app.myco.aware.AwareRadio
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.BleAdvert
@@ -40,6 +42,9 @@ import kotlin.math.pow
  */
 @Composable
 fun DevScreen(state: AppState, client: AppCoreClient) {
+    val context = LocalContext.current
+    val awareSupported = AwareRadio.isSupported(context)
+    val awareAvailable = AwareRadio.isAvailable(context)
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -60,6 +65,16 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
                     KeyVal("adapter", state.bleAdapterName)
                     KeyValDot("scanning", if (state.bleScanning) "active" else "idle", state.bleScanning)
                     KeyVal("role", state.bleRole)
+                }
+                DevCard("WI-FI AWARE") {
+                    KeyValDot("supported", if (awareSupported) "yes" else "no", awareSupported)
+                    KeyValDot(
+                        "available",
+                        if (awareAvailable) "yes" else "no — is Wi-Fi on?",
+                        awareAvailable,
+                    )
+                    KeyValDot("lane", if (state.wifiAwareEnabled) "enabled" else "off", state.wifiAwareEnabled)
+                    KeyVal("udp port", if (state.wifiAwarePort > 0) state.wifiAwarePort.toString() else "—")
                 }
                 DevCard("PEERS (${state.blePeers.size})") {
                     if (state.blePeers.isEmpty()) {
@@ -128,8 +143,8 @@ private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
             st.running -> "Testing ${DeviceName.generated(st.peerNpub)}…"
             st.generation == 0L -> null
             st.error.isNotEmpty() -> "✗ ${st.error}"
-            else -> "↑ %s   ↓ %s   (%s, %d KB)".format(
-                rate(st.upMbps), rate(st.downMbps), DeviceName.generated(st.peerNpub), st.bytes / 1000,
+            else -> "↑ %s   ↓ %s   (%s, %s)".format(
+                rate(st.upMbps), rate(st.downMbps), DeviceName.generated(st.peerNpub), size(st.bytes),
             )
         }
         if (resultLine != null) {
@@ -147,6 +162,10 @@ private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
  *  runs land (0.5 Mbps reads as "500 kbps", not "0.5 Mbps"). */
 private fun rate(mbps: Double): String =
     if (mbps < 1.0) "%.0f kbps".format(mbps * 1000) else "%.1f Mbps".format(mbps)
+
+/** Payload size as KB or MB (the adaptive speedtest climbs from 256 KB to 16 MB). */
+private fun size(bytes: Long): String =
+    if (bytes >= 1024 * 1024) "%.0f MB".format(bytes / (1024.0 * 1024.0)) else "%d KB".format(bytes / 1024)
 
 @Composable
 private fun DevCard(title: String, content: @Composable () -> Unit) {

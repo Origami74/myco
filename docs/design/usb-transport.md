@@ -104,7 +104,8 @@ Minimal standalone Kotlin spike (can be a throwaway Activity, not wired to FIPS)
 **Exit criterion:** a stable bidirectional pipe at **tens of MB/s** in *both*
 directions (note any asymmetry). If AOA is flaky or one phone refuses host mode,
 record it here and we reconsider (raw USB-host w/ a custom gadget needs
-configfs/root — avoid; or fall back to WiFi-Direct).
+configfs/root — avoid; or fall back to the Wi-Fi Aware lane,
+[wifi-aware-interop.md](./wifi-aware-interop.md)).
 
 **Manufacturer/model strings must match** between the host's `SEND_STRING` and the
 accessory's `accessory_filter.xml` — pick fixed constants (e.g. manufacturer
@@ -235,6 +236,7 @@ path. Add a host-side unit test for the `UsbStream` framing/Io contract if feasi
 - Multi-peer over a USB hub.
 
 ## See also
-- `docs/roadmap.md` — the "WiFi-Direct transport" Later item is the wireless
-  sibling of this; consider adding a "USB transport" bullet there.
+- `docs/design/wifi-aware-interop.md` — the wireless sibling of this plan
+  (it supersedes the roadmap's old WiFi-Direct bullet); consider adding a
+  "USB transport" bullet to the roadmap's Later list.
 - `docs/design/ble-interop.md` — the BLE transport this mirrors.

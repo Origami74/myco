@@ -129,6 +129,19 @@ enabled = true             # master switch for the L2CAP CoC transport
 # 0x0085 survives only as a legacy default, not a wire requirement.
 
 # ---------------------------------------------------------------------------
+# [wifi_aware] — offline BULK lane, raised beside BLE when both phones have the
+# hardware (docs/design/wifi-aware-interop.md). No new transport type: Kotlin
+# raises the Wi-Fi Aware data path and pushes the peer's link-local address,
+# and the ordinary UDP transport dials it. We bind our own port (no
+# PSM-style discovery problem) and leave the data path OPEN (Noise IK is the
+# trust layer). The address<->peer map is learned at runtime, never persisted.
+# ---------------------------------------------------------------------------
+[wifi_aware]
+enabled = false            # master switch for the bulk lane (adds a UDP transport)
+# The port is a fixed app constant (4870), carried where it already
+# belongs — the fips UDP transport's bind_addr. There is no role and no PSK.
+
+# ---------------------------------------------------------------------------
 # [propagation] — HYBRID default: announce widely, pull content on demand. The
 # unit that floods is the author-signed MANIFEST event (kind 15128/35128), small
 # and self-authenticating, re-emitted UNMODIFIED by relays (signatures stay
