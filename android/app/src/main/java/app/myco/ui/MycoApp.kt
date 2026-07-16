@@ -68,6 +68,7 @@ import app.myco.ui.screens.SettingsScreen
 import app.myco.ui.theme.EmeraldSoft
 import app.myco.ui.theme.Slate
 import app.myco.ui.theme.StatusConnected
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -115,13 +116,19 @@ fun MycoApp(
     // Circle members we already knew about — anything new means a fresh pairing.
     val knownCircle = remember { mutableStateOf(state.circle.map { it.npub }.toSet()) }
     val context = LocalContext.current
-    // Re-poll the native state each second off the main thread (it crosses JNI and
-    // walks the blob dir for cache counts). Pure read — does not bump `rev`.
+    // Re-poll the native state each second off the main thread (it crosses JNI
+    // into the Rust core). Pure read — does not bump `rev`. Gated on STARTED:
+    // with the app backgrounded the UI can't show the result anyway, and the
+    // 1Hz JNI wakeup was a measurable battery cost. repeatOnLifecycle cancels
+    // the loop on onStop and restarts it (immediate first poll) on onStart.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.LaunchedEffect(Unit) {
-        while (true) {
-            delay(1000)
-            state = withContext(Dispatchers.IO) { client.state() }
-            bleExhausted = BleHealth.advertiserExhausted
+        lifecycleOwner.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                state = withContext(Dispatchers.IO) { client.state() }
+                bleExhausted = BleHealth.advertiserExhausted
+                delay(1000)
+            }
         }
     }
 

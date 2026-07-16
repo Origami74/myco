@@ -16,6 +16,7 @@
 //! [`BlobStore`]: nsite_deck::seams::BlobStore
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use nsite_deck::seams::BlobStore;
@@ -26,6 +27,17 @@ pub mod server;
 /// A content-addressed blob store rooted at a directory.
 pub struct FsBlobStore {
     root: PathBuf,
+    /// Cached `(count, bytes)` so the app's once-a-second state poll doesn't walk
+    /// the blob dir (plus a `stat` per blob) on every read. Computed lazily on
+    /// first read, invalidated on any mutation (`put`/`retain_blobs`/`wipe`) —
+    /// the only ways blobs enter or leave while the store is open.
+    stats: Mutex<Option<BlobStats>>,
+}
+
+#[derive(Clone, Copy)]
+struct BlobStats {
+    count: usize,
+    bytes: u64,
 }
 
 impl FsBlobStore {
@@ -33,18 +45,53 @@ impl FsBlobStore {
     pub fn open(root: impl AsRef<Path>) -> anyhow::Result<Self> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            stats: Mutex::new(None),
+        })
     }
 
     fn blob_path(&self, sha256_hex: &str) -> PathBuf {
         self.root.join(sha256_hex)
     }
 
-    /// Number of stored blobs (for diagnostics / cache status).
+    /// Number of stored blobs (for diagnostics / cache status). Cached.
     pub fn count(&self) -> usize {
+        self.stats().count
+    }
+
+    /// Total bytes on disk (for the LRU cap accounting; eviction itself is P5).
+    /// Cached.
+    pub fn total_bytes(&self) -> u64 {
+        self.stats().bytes
+    }
+
+    fn stats(&self) -> BlobStats {
+        let mut cached = self.stats.lock().unwrap();
+        if let Some(s) = *cached {
+            return s;
+        }
+        let s = self.scan_stats();
+        *cached = Some(s);
+        s
+    }
+
+    fn invalidate_stats(&self) {
+        *self.stats.lock().unwrap() = None;
+    }
+
+    /// One walk over the blob dir computing count + bytes together.
+    fn scan_stats(&self) -> BlobStats {
         std::fs::read_dir(&self.root)
-            .map(|rd| rd.filter_map(Result::ok).filter(is_blob_name).count())
-            .unwrap_or(0)
+            .map(|rd| {
+                let mut s = BlobStats { count: 0, bytes: 0 };
+                for entry in rd.filter_map(Result::ok).filter(is_blob_name) {
+                    s.count += 1;
+                    s.bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+                s
+            })
+            .unwrap_or(BlobStats { count: 0, bytes: 0 })
     }
 
     /// Delete every blob whose hash is **not** in `keep`. Used by the selective
@@ -62,19 +109,7 @@ impl FsBlobStore {
                 }
             }
         }
-    }
-
-    /// Total bytes on disk (for the LRU cap accounting; eviction itself is P5).
-    pub fn total_bytes(&self) -> u64 {
-        std::fs::read_dir(&self.root)
-            .map(|rd| {
-                rd.filter_map(Result::ok)
-                    .filter(is_blob_name)
-                    .filter_map(|e| e.metadata().ok())
-                    .map(|m| m.len())
-                    .sum()
-            })
-            .unwrap_or(0)
+        self.invalidate_stats();
     }
 }
 
@@ -120,6 +155,7 @@ impl BlobStore for FsBlobStore {
             .join(format!(".tmp-{}-{}", std::process::id(), &hash));
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, &dest)?;
+        self.invalidate_stats();
         Ok(hash)
     }
 
@@ -127,6 +163,7 @@ impl BlobStore for FsBlobStore {
         for entry in std::fs::read_dir(&self.root)?.filter_map(Result::ok) {
             let _ = std::fs::remove_file(entry.path());
         }
+        self.invalidate_stats();
         Ok(())
     }
 }
