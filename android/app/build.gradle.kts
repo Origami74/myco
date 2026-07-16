@@ -132,6 +132,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    // ProcessLifecycleOwner: app-visibility signal driving background BLE duty cycle.
+    implementation("androidx.lifecycle:lifecycle-process:2.8.7")
     // Bottom-nav shell (Apps · Circle · Discover · Settings · Dev). minSdk-29 safe.
     implementation("androidx.navigation:navigation-compose:2.8.4")
     // QR generation for share-an-nsite (encodes the nsite id + pairing info)…
