@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A **Wi-Fi AP lane** (developer preview): when the phone joins a Wi-Fi network
+  that carries a FIPS node — such as a router broadcasting the open `!FIPS`
+  access SSID — Myco discovers the node via its mDNS advert (`_fips._udp`) and
+  connects to it over UDP automatically. Requires LAN discovery/rendezvous to
+  be enabled on the router's fips node. The Developer screen gains a
+  **Wi-Fi AP** panel (Wi-Fi/SSID state, mDNS browse state, discovered nodes),
+  and the Wi-Fi Aware panel now lists live data paths. See
+  [docs/design/ap-lane.md](docs/design/ap-lane.md).
+
 ## [0.2.0] - 2026-07-14
 
 ### Added
