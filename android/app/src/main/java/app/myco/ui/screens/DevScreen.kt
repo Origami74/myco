@@ -15,11 +15,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import app.myco.ap.ApRadio
+import app.myco.ap.LanFipsNode
+import app.myco.aware.AwareLink
 import app.myco.aware.AwareRadio
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
@@ -45,6 +50,9 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
     val context = LocalContext.current
     val awareSupported = AwareRadio.isSupported(context)
     val awareAvailable = AwareRadio.isAvailable(context)
+    val awareLinks by AwareRadio.links.collectAsState()
+    val apWifi by ApRadio.wifi.collectAsState()
+    val apNodes by ApRadio.nodes.collectAsState()
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -75,6 +83,24 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
                     )
                     KeyValDot("lane", if (state.wifiAwareEnabled) "enabled" else "off", state.wifiAwareEnabled)
                     KeyVal("udp port", if (state.wifiAwarePort > 0) state.wifiAwarePort.toString() else "—")
+                    if (awareLinks.isEmpty()) {
+                        EmptyLine("no data paths")
+                    } else {
+                        awareLinks.forEach { AwareLinkRow(it) }
+                    }
+                }
+                DevCard("WI-FI AP (!FIPS)") {
+                    KeyValDot(
+                        "wi-fi",
+                        apWifi.ssid ?: if (apWifi.connected) "connected" else "off",
+                        apWifi.connected,
+                    )
+                    KeyValDot("mdns browse", if (apWifi.browsing) "active" else "idle", apWifi.browsing)
+                    if (apNodes.isEmpty()) {
+                        EmptyLine("no fips node on this lan")
+                    } else {
+                        apNodes.forEach { ApNodeRow(it) }
+                    }
                 }
                 DevCard("PEERS (${state.blePeers.size})") {
                     if (state.blePeers.isEmpty()) {
@@ -213,6 +239,36 @@ private fun PeerRow(peer: BlePeer) {
         )
         Text(
             "${short(peer.nodeAddrHex)}  ${peer.npub.ifEmpty { "(handshake pending)" }.let { if (it.length > 18) it.take(14) + "…" else it }}",
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        )
+    }
+}
+
+@Composable
+private fun AwareLinkRow(l: AwareLink) {
+    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Text(
+            if (l.up) "● ndp up" else "○ ndp requested",
+            color = if (l.up) StatusConnected else Slate,
+            style = MaterialTheme.typography.labelMedium,
+        )
+        Text(
+            "${short(l.npub)}  ${l.addr ?: ""}",
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        )
+    }
+}
+
+@Composable
+private fun ApNodeRow(n: LanFipsNode) {
+    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Text(
+            if (n.pushed) "● pushed to node" else "○ resolved",
+            color = if (n.pushed) StatusConnected else Slate,
+            style = MaterialTheme.typography.labelMedium,
+        )
+        Text(
+            "${short(n.npub)}  ${n.addr}",
             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
         )
     }

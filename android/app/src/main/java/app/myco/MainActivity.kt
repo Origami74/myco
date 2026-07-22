@@ -29,6 +29,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import app.myco.ap.ApRadio
 import app.myco.aware.AwareRadio
 import app.myco.aware.AwareService
 import app.myco.ble.BleService
@@ -93,6 +94,12 @@ class MainActivity : ComponentActivity() {
         core.dispatch(NativeActions.setOfflineOnly(prefs.getBoolean(PREF_OFFLINE_ONLY, false)))
         // (Device name is asserted in onResume, which also covers identity not yet
         // being ready at this point.)
+
+        // The `!FIPS` AP lane: watch Wi-Fi and browse the LAN for fips-node
+        // mDNS adverts, feeding them to the node (Dev panel shows results).
+        // Passive and permissionless; process-wide, so idempotent across
+        // Activity recreation.
+        ApRadio.ensureStarted(this)
 
         // BLE on by default, and remembered thereafter.
         if (prefs.getBoolean(PREF_BLE, true)) {

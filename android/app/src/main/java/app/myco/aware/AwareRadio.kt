@@ -25,6 +25,9 @@ import android.util.Log
 import app.myco.core.NativeCore
 import java.net.Inet6Address
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * The Wi-Fi Aware (NAN) bulk-lane radio. Control-plane only: it discovers
@@ -146,6 +149,7 @@ class AwareRadio(
         for ((_, cb) in ndpCallbacks) runCatching { connectivity.unregisterNetworkCallback(cb) }
         ndpCallbacks.clear()
         peerNpubs.clear()
+        _links.value = emptyList()
         runCatching { publishSession?.close() }
         runCatching { subscribeSession?.close() }
         runCatching { session?.close() }
@@ -253,6 +257,7 @@ class AwareRadio(
                 val info = caps.transportInfo as? WifiAwareNetworkInfo ?: return
                 val addr = formatPeerAddr(info.peerIpv6Addr) ?: return
                 Log.i(TAG, "Aware NDP up to ${short(peerNpub)} at $addr")
+                setLink(peerNpub, addr, up = true)
                 NativeCore.awarePeerFound(peerNpub, addr)
             }
 
@@ -273,6 +278,7 @@ class AwareRadio(
             }
         }
         ndpCallbacks[peerNpub] = callback
+        setLink(peerNpub, addr = null, up = false)
         // Timed request: on failure to provision within NDP_TIMEOUT_MS the
         // framework calls onUnavailable and releases it, so a stuck negotiation
         // never leaks a data-path slot (the root cause of "works fresh, dies
@@ -285,6 +291,7 @@ class AwareRadio(
         ndpCallbacks.remove(peerNpub)?.let {
             runCatching { connectivity.unregisterNetworkCallback(it) }
         }
+        removeLink(peerNpub)
     }
 
     /** Best-effort snapshot of free Aware data-path/session slots (API 31+),
@@ -321,6 +328,21 @@ class AwareRadio(
     companion object {
         private const val TAG = "MycoAwareRadio"
 
+        private val _links = MutableStateFlow<List<AwareLink>>(emptyList())
+
+        /** Live NDP links (requested + up), for the Dev screen. There is one
+         *  radio per process (owned by [AwareService]), so a companion flow is
+         *  safe; [closeSessions]/[stop] clear it. */
+        val links: StateFlow<List<AwareLink>> = _links.asStateFlow()
+
+        private fun setLink(npub: String, addr: String?, up: Boolean) {
+            _links.value = _links.value.filter { it.npub != npub } + AwareLink(npub, addr, up)
+        }
+
+        private fun removeLink(npub: String) {
+            _links.value = _links.value.filter { it.npub != npub }
+        }
+
         /**
          * Whether this device has Wi-Fi Aware hardware at all — a static
          * capability the UI can read to gray out the toggle and show
@@ -353,3 +375,11 @@ class AwareRadio(
         private const val NDP_TIMEOUT_MS = 20_000
     }
 }
+
+/** One Wi-Fi Aware NDP as the radio sees it: requested (no addr yet) or up
+ *  (peer's scoped link-local + port). For the Dev screen. */
+data class AwareLink(
+    val npub: String,
+    val addr: String?,
+    val up: Boolean,
+)
