@@ -57,6 +57,11 @@ pub struct AppRuntime {
     /// Latest dev-menu peer speedtest result; written by the spawned run task and
     /// read back into `state()`. Shared so the async task can update it in place.
     speedtest: Arc<std::sync::Mutex<crate::state::SpeedtestView>>,
+    /// Read-handle slot shared with the keepwarm loop (populated on StartNode,
+    /// cleared on StopNode). The keepwarm tick feeds mesh connectivity to the
+    /// content layer from here, so peer-driven relay sync keeps working while
+    /// the app is backgrounded and the UI's `state()` poll is paused.
+    shared_read: Arc<std::sync::Mutex<Option<ControlReadHandle>>>,
 }
 
 impl AppRuntime {
@@ -107,6 +112,10 @@ impl AppRuntime {
         // fresh device shows it in Apps without pasting a link. A one-shot marker
         // file makes this idempotent and lets a user who removes it stay removed.
         seed_default_sites(&content, &rt, Path::new(data_dir));
+
+        // Read-handle slot for the keepwarm loop; populated once the node starts.
+        let shared_read: Arc<std::sync::Mutex<Option<ControlReadHandle>>> =
+            Arc::new(std::sync::Mutex::new(None));
 
         // Serve the relay + Blossom over the mesh so paired peers can pull this
         // device's nsites at ws://<npub>.fips:4870 / http://<npub>.fips:24243.
@@ -211,13 +220,38 @@ impl AppRuntime {
             // and resubscribe on each peer's reconnect edge. This is what restores a
             // Circle relay link *mutually and fast* after a mid-chain node flaps —
             // independent of chat traffic and of where the peer sits in the mesh.
+            //
+            // The tick also feeds the node's connected-peer view into the content
+            // layer and drives not-ready-site retries. state() does the same at
+            // 1Hz for foreground snappiness, but its poll pauses when the app is
+            // backgrounded — this loop is what keeps peer-driven relay sync alive
+            // then.
             {
                 let content = content.clone();
+                let shared_read = shared_read.clone();
                 rt.spawn(async move {
                     let mut tick = tokio::time::interval(std::time::Duration::from_secs(8));
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     loop {
                         tick.tick().await;
+                        let handle = shared_read.lock().unwrap().clone();
+                        if let Some(h) = handle {
+                            let connected: Vec<String> = h
+                                .peer_views()
+                                .into_iter()
+                                .filter(|p| p.connected && !p.npub.is_empty())
+                                .map(|p| p.npub)
+                                .collect();
+                            content.set_connected_peers(connected);
+                            if !content.connected_circle_npubs().is_empty() {
+                                for addr in content.retriable_library_addrs() {
+                                    let content = content.clone();
+                                    tokio::spawn(
+                                        async move { content.open_site(addr, None).await },
+                                    );
+                                }
+                            }
+                        }
                         content.keepwarm_tick();
                     }
                 });
@@ -240,6 +274,7 @@ impl AppRuntime {
             loop_task: None,
             content: Some(content),
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
+            shared_read,
         })
     }
 
@@ -311,6 +346,7 @@ impl AppRuntime {
             loop_task: None,
             content: None,
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
+            shared_read: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -644,6 +680,7 @@ impl AppRuntime {
                 tracing::warn!("fips rx loop ended: {e}");
             }
         });
+        *self.shared_read.lock().unwrap() = Some(handle.clone());
         self.read_handle = Some(handle);
         self.loop_task = Some(task);
         self.node_running = true;
@@ -655,6 +692,7 @@ impl AppRuntime {
         if let Some(task) = self.loop_task.take() {
             task.abort();
         }
+        *self.shared_read.lock().unwrap() = None;
         self.read_handle = None;
         self.node_running = false;
         self.node_status = "stopped".to_string();
