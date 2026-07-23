@@ -373,6 +373,14 @@ Manifest deltas, mirroring the BLE set:
   background lifecycle; the foreground service is field practice, not
   documented mandate — same as BLE.)
 
+Node-lifecycle coordination between the two radio services: the embedded
+fips node's lifecycle follows the mesh **Enable** master switch
+(`PREF_MESH`), not either radio toggle. Each service's toggle only gates
+its own radio and lane flag; `BleService` additionally bounces the node
+once on enable when it is already running, because a byte-bridge is only
+bound at node start. Neither service stops the node — only Enable-off
+does.
+
 Power is the reason the lane is a lane: an active NDP costs materially more
 than BLE idle, so Aware should be **released when idle** (tear down the
 network request after a sync quiesces; the discovery sessions are cheap and

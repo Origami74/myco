@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Background battery drain cut substantially: BLE discovery now duty-cycles
+  down (low-power scan with batched delivery) while the app is not visible,
+  the per-link GATT connection priority drops to balanced after 30s without
+  bulk traffic, and the once-a-second state poll no longer runs backgrounded
+  (and no longer walks the blob cache directory on every read).
+- Circle relay links no longer die permanently after a mesh session gets
+  stuck mid-rekey: peer relay dials now time out at 10s and back off per
+  peer (8s up to 3min) after consecutive failures, letting the node reclaim
+  the stale session and rebuild a fresh one on the next dial.
+- Turning the Bluetooth toggle off no longer stops the embedded mesh node
+  out from under the Wi-Fi Aware lane — the node's lifecycle now follows
+  the mesh "Enable" switch; radio toggles only gate their radios.
+- Developer panel peer/advert rows keep a stable alphabetical order instead
+  of reshuffling every refresh.
+
 ### Added
 
 - A **Wi-Fi AP lane** (developer preview): when the phone joins a Wi-Fi network

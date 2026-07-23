@@ -102,18 +102,22 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
                         apNodes.forEach { ApNodeRow(it) }
                     }
                 }
+                // Stable alphabetical order — the state arrays arrive in snapshot
+                // order, which reshuffles between polls and makes the rows flap.
+                val peersSorted = state.blePeers.sortedBy { it.npub.ifEmpty { it.nodeAddrHex } }
+                val advertsSorted = state.bleAdverts.sortedBy { it.addr }
                 DevCard("PEERS (${state.blePeers.size})") {
                     if (state.blePeers.isEmpty()) {
                         EmptyLine("none connected")
                     } else {
-                        state.blePeers.forEach { PeerRow(it) }
+                        peersSorted.forEach { PeerRow(it) }
                     }
                 }
                 DevCard("RADIO ADVERTS (${state.bleAdverts.size})") {
                     if (state.bleAdverts.isEmpty()) {
                         EmptyLine("none")
                     } else {
-                        state.bleAdverts.forEach { AdvertRow(it) }
+                        advertsSorted.forEach { AdvertRow(it) }
                     }
                 }
                 DevCard("CACHE") {

@@ -11,6 +11,9 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import app.myco.R
 import app.myco.core.MycoCore
 import app.myco.core.NativeActions
@@ -30,6 +33,21 @@ import app.myco.core.NativeCore
 class BleService : Service() {
     private var radio: BleRadio? = null
     private var bridgeHandle: Long = 0
+
+    // App-visibility observer: while no activity is visible (home button, screen
+    // off), drop BLE discovery from LOW_LATENCY to a duty-cycled LOW_POWER scan —
+    // the dominant background battery cost. ProcessLifecycleOwner's onStop fires
+    // for both cases; onStart restores full intensity. Established connections
+    // are untouched either way.
+    private val visibilityObserver = object : DefaultLifecycleObserver {
+        override fun onStart(owner: LifecycleOwner) {
+            radio?.setBackgroundMode(false)
+        }
+
+        override fun onStop(owner: LifecycleOwner) {
+            radio?.setBackgroundMode(true)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -64,18 +82,31 @@ class BleService : Service() {
         // Inject-then-start: the node's BLE transport picks up the bridge and
         // begins driving the radio (listen → advertise → scan).
         client.dispatch(NativeActions.setBleEnabled(true))
-        client.dispatch(NativeActions.startNode())
+        // Node lifecycle follows the mesh "Enable" master switch, not this
+        // toggle. When it's on, (re)start the node: a byte-bridge is only bound
+        // at node start, so a node that was already running must bounce to pick
+        // up the fresh bridge injected above.
+        val meshOn = getSharedPreferences("myco_prefs", MODE_PRIVATE)
+            .getBoolean(app.myco.MainActivity.PREF_MESH, true)
+        if (meshOn) {
+            if (client.state().nodeRunning) client.dispatch(NativeActions.stopNode())
+            client.dispatch(NativeActions.startNode())
+        }
+        // Registration replays the current state (onStart fires immediately if the
+        // app is already visible), so the radio starts in the right mode.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(visibilityObserver)
         Log.i(TAG, "BLE service started")
     }
 
     private fun stopBle() {
-        // Order matters: stop the node loop FIRST so it drops the BLE transport
-        // (and its streams). That makes the radio's writer threads see their
-        // channels close and exit, and stops the node from calling the radio.
+        ProcessLifecycleOwner.get().lifecycle.removeObserver(visibilityObserver)
+        // Node lifecycle belongs to the mesh "Enable" master switch — never stop
+        // the node here. Clearing the BLE flag tells the node's BLE backend to
+        // stop driving the radio; shutting the radio down closes its channels,
+        // which the core observes as channel closures.
         runCatching {
             val client = MycoCore.client(this)
             client.dispatch(NativeActions.setBleEnabled(false))
-            client.dispatch(NativeActions.stopNode())
         }
         radio?.shutdown()
         radio = null

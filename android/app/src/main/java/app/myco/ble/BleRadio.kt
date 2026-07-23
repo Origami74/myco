@@ -59,7 +59,23 @@ class BleRadio(context: Context) {
     private val channels = ConcurrentHashMap<Long, BluetoothSocket>()
     // A parallel GATT per channel, used only to request a low connection interval
     // (L2CAP CoC exposes no priority API). Bumps mesh throughput ~2-4x.
-    private val gatts = ConcurrentHashMap<Long, BluetoothGatt>()
+    private val gatts = ConcurrentHashMap<Long, GattPrio>()
+
+    /**
+     * Per-channel GATT + connection-priority state. HIGH priority pins the LE
+     * connection interval at ~11-15ms, which is great for throughput but costs
+     * real battery if held for the life of the link — so it is granted on
+     * connect (the noise handshake is many small round-trips) and on bulk
+     * traffic, then demoted to BALANCED after [IDLE_DEMOTE_MS] without a
+     * bulk-sized packet. Heartbeats/pings ride the BALANCED interval fine.
+     */
+    private class GattPrio {
+        @Volatile var gatt: BluetoothGatt? = null // set right after connectGatt returns
+        @Volatile var connected = false
+        @Volatile var high = false
+        @Volatile var lastBulkMs = 0L
+        @Volatile var demotePending = false
+    }
 
     @Volatile
     private var stopped = false
@@ -80,6 +96,25 @@ class BleRadio(context: Context) {
     // SCAN_FAILED_SCANNING_TOO_FREQUENTLY) used to be logged and abandoned, which
     // permanently killed peer discovery until the mesh was toggled. We re-arm it.
     private var scanRetries = 0
+
+    // Background mode (set from the service via ProcessLifecycleOwner): while the
+    // app is not visible, discovery drops from LOW_LATENCY (~100% RX duty) to
+    // LOW_POWER (~10% duty, 512ms/5120ms) with batched delivery — the single
+    // biggest background battery saving. Established connections are unaffected;
+    // only how fast we *find* new peers degrades (seconds, not minutes).
+    @Volatile
+    private var backgroundMode = false
+
+    /** Flip fore/background discovery intensity; restarts the scan if one is live. */
+    fun setBackgroundMode(bg: Boolean) {
+        if (backgroundMode == bg) return
+        backgroundMode = bg
+        Log.i(TAG, "background mode: $bg")
+        // Re-arm the scan with the new duty cycle. Mode flips are user-driven
+        // (screen off / app switch), far below the ~5 startScan/30s throttle;
+        // if we do trip it, scheduleScanRetry re-arms with the 30s floor.
+        if (scanCallback != null) startScanning()
+    }
 
     fun bindBridge(handle: Long) {
         bridgeHandle = handle
@@ -208,30 +243,29 @@ class BleRadio(context: Context) {
         scanner = sc
         val filters = listOf(ScanFilter.Builder().setServiceUuid(FIPS_PARCEL_UUID).build())
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .apply {
+                if (backgroundMode) {
+                    setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
+                    // Batch results in the controller and deliver every few seconds
+                    // so the host CPU stays asleep between batches. Only when the
+                    // chipset can actually offload — otherwise a report delay just
+                    // adds latency without saving a wakeup.
+                    if (adapter?.isOffloadedScanBatchingSupported == true) {
+                        setReportDelay(BACKGROUND_BATCH_MS)
+                    }
+                } else {
+                    setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                }
+            }
             .build()
         val cb = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-                scanRetries = 0 // a result proves scanning is live; reset backoff
-                val addr = "$ADAPTER/${result.device.address}"
-                // PSM rides in the primary advert under the compact 16-bit UUID;
-                // fall back to the legacy 128-bit-keyed service-data for any peer
-                // still on the old scan-response layout.
-                val sd = result.scanRecord?.getServiceData(PSM_SD_PARCEL_UUID)
-                    ?: result.scanRecord?.getServiceData(FIPS_PARCEL_UUID)
-                val psm = if (sd != null && sd.size >= 2) {
-                    (sd[0].toInt() and 0xFF) or ((sd[1].toInt() and 0xFF) shl 8) // 16-bit LE
-                } else 0
-                // Only report a peer once its real PSM is known (it rides the
-                // scan-response service data). A psm=0 sighting is the primary
-                // advert without the scan response yet — reporting it makes the
-                // core fall back to the legacy default PSM (0x0085) and dial the
-                // wrong L2CAP port, which the peer rejects every time.
-                if (psm > 0) {
-                    NativeCore.bleDeliverScan(bridgeHandle, addr, psm, result.rssi)
-                } else {
-                    Log.d(TAG, "scan $addr: PSM not in advert yet (awaiting scan response)")
-                }
+                handleScanResult(result)
+            }
+
+            // Batched delivery path (background mode with setReportDelay > 0).
+            override fun onBatchScanResults(results: List<ScanResult>) {
+                results.forEach { handleScanResult(it) }
             }
 
             override fun onScanFailed(errorCode: Int) {
@@ -242,10 +276,33 @@ class BleRadio(context: Context) {
         scanCallback = cb
         try {
             sc.startScan(filters, settings, cb)
-            Log.i(TAG, "scanning for FIPS peers")
+            Log.i(TAG, "scanning for FIPS peers (${if (backgroundMode) "low-power" else "low-latency"})")
         } catch (e: Exception) {
             Log.e(TAG, "startScanning failed", e)
             scheduleScanRetry(-1)
+        }
+    }
+
+    private fun handleScanResult(result: ScanResult) {
+        scanRetries = 0 // a result proves scanning is live; reset backoff
+        val addr = "$ADAPTER/${result.device.address}"
+        // PSM rides in the primary advert under the compact 16-bit UUID;
+        // fall back to the legacy 128-bit-keyed service-data for any peer
+        // still on the old scan-response layout.
+        val sd = result.scanRecord?.getServiceData(PSM_SD_PARCEL_UUID)
+            ?: result.scanRecord?.getServiceData(FIPS_PARCEL_UUID)
+        val psm = if (sd != null && sd.size >= 2) {
+            (sd[0].toInt() and 0xFF) or ((sd[1].toInt() and 0xFF) shl 8) // 16-bit LE
+        } else 0
+        // Only report a peer once its real PSM is known (it rides the
+        // scan-response service data). A psm=0 sighting is the primary
+        // advert without the scan response yet — reporting it makes the
+        // core fall back to the legacy default PSM (0x0085) and dial the
+        // wrong L2CAP port, which the peer rejects every time.
+        if (psm > 0) {
+            NativeCore.bleDeliverScan(bridgeHandle, addr, psm, result.rssi)
+        } else {
+            Log.d(TAG, "scan $addr: PSM not in advert yet (awaiting scan response)")
         }
     }
 
@@ -330,6 +387,7 @@ class BleRadio(context: Context) {
     private fun boostPriority(chId: Long, device: BluetoothDevice) {
         runCatching {
             Log.i(TAG, "boostPriority: GATT to ${device.address} (low interval + 2M PHY)")
+            val prio = GattPrio()
             // TRANSPORT_LE is mandatory here: the 3-arg connectGatt defaults to
             // TRANSPORT_AUTO, which on a dual-mode peer can bring up a classic
             // BR/EDR link. BR/EDR between two phones makes Android auto-negotiate
@@ -338,10 +396,13 @@ class BleRadio(context: Context) {
             val gatt = device.connectGatt(appContext, false, object : BluetoothGattCallback() {
                 override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
                     if (newState == BluetoothProfile.STATE_CONNECTED) {
-                        val ok = runCatching {
-                            g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-                        }.getOrDefault(false)
-                        // 2M PHY ~doubles the raw rate over 1M.
+                        prio.connected = true
+                        // HIGH from the start: the noise handshake right after
+                        // connect is many small round-trips and wants the low
+                        // interval. Demoted to BALANCED once the link idles.
+                        boostNow(prio, g)
+                        // 2M PHY ~doubles the raw rate over 1M (and halves radio
+                        // on-time per byte — keep it regardless of priority).
                         runCatching {
                             g.setPreferredPhy(
                                 BluetoothDevice.PHY_LE_2M_MASK,
@@ -349,7 +410,7 @@ class BleRadio(context: Context) {
                                 BluetoothDevice.PHY_OPTION_NO_PREFERRED,
                             )
                         }
-                        Log.i(TAG, "GATT up: requestConnectionPriority(HIGH)=$ok, requested 2M PHY")
+                        Log.i(TAG, "GATT up: requested HIGH priority + 2M PHY")
                     }
                 }
 
@@ -357,12 +418,73 @@ class BleRadio(context: Context) {
                     Log.i(TAG, "PHY now tx=$txPhy rx=$rxPhy (2=2M) status=$status")
                 }
             }, BluetoothDevice.TRANSPORT_LE)
-            if (gatt != null) gatts[chId] = gatt
+            if (gatt != null) {
+                prio.gatt = gatt
+                gatts[chId] = prio
+            }
         }.onFailure { Log.w(TAG, "boostPriority failed: ${it.message}") }
     }
 
+    /** Grant HIGH priority and arm the idle-demotion check. */
+    private fun boostNow(prio: GattPrio, gatt: BluetoothGatt) {
+        prio.lastBulkMs = android.os.SystemClock.elapsedRealtime()
+        synchronized(prio) {
+            if (!prio.high) {
+                prio.high = true
+                runCatching { gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) }
+            }
+            if (!prio.demotePending) {
+                prio.demotePending = true
+                scheduleDemoteCheck(prio, gatt, IDLE_DEMOTE_MS)
+            }
+        }
+    }
+
+    /** After [delayMs], demote to BALANCED if no bulk packet moved in the window;
+     *  otherwise re-check when the current window would expire. */
+    private fun scheduleDemoteCheck(prio: GattPrio, gatt: BluetoothGatt, delayMs: Long) {
+        runCatching {
+            retryExec.schedule({
+                val idle = android.os.SystemClock.elapsedRealtime() - prio.lastBulkMs
+                synchronized(prio) {
+                    when {
+                        !prio.connected || stopped -> prio.demotePending = false
+                        idle >= IDLE_DEMOTE_MS -> {
+                            prio.demotePending = false
+                            prio.high = false
+                            runCatching {
+                                gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
+                            }
+                            Log.i(TAG, "GATT idle ${idle}ms: demoted to BALANCED priority")
+                        }
+                        else -> scheduleDemoteCheck(prio, gatt, IDLE_DEMOTE_MS - idle)
+                    }
+                }
+            }, delayMs, TimeUnit.MILLISECONDS)
+        }
+    }
+
+    /**
+     * Called by the reader/writer loops with each packet's size. Bulk-sized
+     * packets (sync/site transfers, ~MTU-sized) re-grant HIGH priority and keep
+     * it while the burst lasts; control chatter (link heartbeats, WS pings, TCP
+     * ACKs — all well under [BULK_BOOST_BYTES]) never re-boosts, so an
+     * otherwise-idle link stays on the cheap BALANCED interval.
+     */
+    private fun noteBulk(chId: Long, n: Int) {
+        if (n < BULK_BOOST_BYTES) return
+        val prio = gatts[chId] ?: return
+        prio.lastBulkMs = android.os.SystemClock.elapsedRealtime()
+        if (prio.connected && !prio.high) {
+            prio.gatt?.let { boostNow(prio, it) }
+        }
+    }
+
     private fun dropGatt(chId: Long) {
-        gatts.remove(chId)?.let { runCatching { it.disconnect(); it.close() } }
+        gatts.remove(chId)?.let { prio ->
+            prio.connected = false
+            prio.gatt?.let { runCatching { it.disconnect(); it.close() } }
+        }
     }
 
     private fun readerLoop(chId: Long, sock: BluetoothSocket) {
@@ -378,6 +500,7 @@ class BleRadio(context: Context) {
                 val n = ins.read(buf)
                 if (n < 0) break // EOF → channel closed (handled in finally)
                 if (n == 0) continue
+                noteBulk(chId, n) // bulk inbound re-grants the low connection interval
                 if (!NativeCore.bleChannelDeliverRecv(bridgeHandle, chId, buf, n)) {
                     // deliver_recv == false: the core's bounded inbound queue is
                     // saturated, or the channel is gone. Under FMP reframing a single
@@ -410,6 +533,7 @@ class BleRadio(context: Context) {
                     n < 0 -> break // channel closed
                     n == 0 -> continue // timeout, poll again
                     else -> {
+                        noteBulk(chId, n) // bulk outbound re-grants the low interval
                         // OutputStream.write on a blocking socket writes all n bytes
                         // (looping internally) or throws — no manual partial-write loop.
                         outs.write(buf, 0, n)
@@ -454,6 +578,22 @@ class BleRadio(context: Context) {
         // read() fits one SDU and next_send never truncates an outbound packet.
         private const val MAX_PACKET = 8192
         private const val SEND_TIMEOUT_MS = 1000
+
+        /** Background scan: batched delivery window (controller-offloaded). */
+        private const val BACKGROUND_BATCH_MS = 5000L
+
+        /** A packet at least this big is "bulk" (site/sync transfer, ~MTU-sized
+         *  1357B frames) and re-grants HIGH connection priority. Control chatter —
+         *  1B link heartbeats, WS pings and TCP ACKs (~250B on the wire with
+         *  FSP+IPv6 overhead) — stays under it and rides BALANCED. */
+        private const val BULK_BOOST_BYTES = 512
+
+        /** Demote HIGH → BALANCED after this long without a bulk packet. 30s, not
+         *  lower: relay sync traffic arrives in bursts ~10-20s apart, and a 5s
+         *  window made every burst renegotiate connection parameters (boost ↔
+         *  demote flip-flop every ~15s in the field logs) — churn that risks link
+         *  stability on some chipsets for marginal battery gain. */
+        private const val IDLE_DEMOTE_MS = 30_000L
 
         /** Cap on the MTU reported to the core: one full IPv6 packet per L2CAP SDU.
          *  The TUN sends ≤1280-byte IPv6 packets; with FSP's ~77-byte overhead that

@@ -843,7 +843,15 @@ impl Content {
     /// Record which mesh peers are connected right now (called by the runtime from
     /// the node's peer snapshot), so `open_site` only tries reachable Circle members.
     pub fn set_connected_peers(&self, npubs: Vec<String>) {
-        *self.connected_peers.lock().unwrap() = npubs;
+        let mut cur = self.connected_peers.lock().unwrap();
+        // A peer newly present in the mesh view is a reconnect edge: forget its
+        // dial backoff so the next keepwarm tick dials it immediately.
+        for npub in &npubs {
+            if !cur.contains(npub) {
+                self.peer_relays.reset_backoff(npub);
+            }
+        }
+        *cur = npubs;
     }
 
     /// Circle members that are **direct** mesh neighbours right now — the pull
