@@ -588,8 +588,12 @@ class BleRadio(context: Context) {
          *  FSP+IPv6 overhead) — stays under it and rides BALANCED. */
         private const val BULK_BOOST_BYTES = 512
 
-        /** Demote HIGH → BALANCED after this long without a bulk packet. */
-        private const val IDLE_DEMOTE_MS = 5000L
+        /** Demote HIGH → BALANCED after this long without a bulk packet. 30s, not
+         *  lower: relay sync traffic arrives in bursts ~10-20s apart, and a 5s
+         *  window made every burst renegotiate connection parameters (boost ↔
+         *  demote flip-flop every ~15s in the field logs) — churn that risks link
+         *  stability on some chipsets for marginal battery gain. */
+        private const val IDLE_DEMOTE_MS = 30_000L
 
         /** Cap on the MTU reported to the core: one full IPv6 packet per L2CAP SDU.
          *  The TUN sends ≤1280-byte IPv6 packets; with FSP's ~77-byte overhead that

@@ -42,6 +42,43 @@ use tokio_tungstenite::tungstenite::Message;
 /// over BLE. The runtime's keepwarm loop respawns the dropped task promptly.
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Cap on the WS connect itself. Without this, a TCP connect into a wedged FSP
+/// session hangs on SYN retransmits for the OS horizon (~2min) — and every
+/// retransmit rides the session, refreshing its activity clock so the node's
+/// 90s idle purge can never reclaim it.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Dial backoff: after consecutive connect failures to a peer, hold off dialing
+/// 8s → 16 → 32 → 64 → 128 → capped 180s. Two jobs: stop burning radio on an
+/// unreachable Circle member every keepwarm tick, and **starve a wedged FSP
+/// session** — once our dials pause for longer than the node's 90s idle purge,
+/// the stale session (e.g. one stuck mid-rekey) is reclaimed and the next dial
+/// establishes a fresh one. Cleared on connect success or a mesh reconnect edge
+/// ([`PeerRelayPool::reset_backoff`]).
+const BACKOFF_BASE: Duration = Duration::from_secs(8);
+const BACKOFF_CAP: Duration = Duration::from_secs(180);
+
+/// Per-peer dial-failure state (see [`BACKOFF_BASE`]).
+struct DialBackoff {
+    failures: u32,
+    next_allowed: std::time::Instant,
+}
+
+type BackoffMap = Arc<Mutex<HashMap<String, DialBackoff>>>;
+
+fn record_dial_failure(map: &BackoffMap, npub: &str) {
+    let mut map = map.lock().unwrap();
+    let entry = map.entry(npub.to_string()).or_insert(DialBackoff {
+        failures: 0,
+        next_allowed: std::time::Instant::now(),
+    });
+    entry.failures = entry.failures.saturating_add(1);
+    let delay = BACKOFF_BASE
+        .saturating_mul(1u32 << (entry.failures - 1).min(5))
+        .min(BACKOFF_CAP);
+    entry.next_allowed = std::time::Instant::now() + delay;
+}
+
 /// A command sent to a peer's connection actor over its channel.
 enum Command {
     /// Fire-and-forget: write a pre-built `["EVENT", …]` frame (the push plane).
@@ -73,6 +110,11 @@ pub struct PeerRelayPool {
     /// edge that drives a resubscribe. Distinct from `peers` (which has an entry
     /// during the connecting window too).
     connected: Arc<Mutex<HashSet<String>>>,
+    /// Per-peer dial backoff after consecutive connect failures (see
+    /// [`BACKOFF_BASE`]). While a peer is backing off, `spawn_or_get` refuses to
+    /// spawn its actor — sends drop (push is best-effort) and requests return
+    /// empty, exactly as they already do for a dead peer.
+    dial_backoff: BackoffMap,
 }
 
 impl PeerRelayPool {
@@ -85,6 +127,13 @@ impl PeerRelayPool {
         self.connected.lock().unwrap().clone()
     }
 
+    /// Forget a peer's dial backoff — called on its mesh reconnect edge (the
+    /// node just saw the peer come back), so the next keepwarm tick dials
+    /// immediately instead of waiting out a stale backoff window.
+    pub fn reset_backoff(&self, npub: &str) {
+        self.dial_backoff.lock().unwrap().remove(npub);
+    }
+
     /// Ensure `npub` has a running actor (which lazily connects) at `url`, without
     /// sending anything. The runtime's keepwarm loop calls this for every Circle
     /// member so a dropped connection is respawned promptly — not lazily on the next
@@ -95,19 +144,24 @@ impl PeerRelayPool {
     }
 
     /// Get a live command channel for `npub`'s connection at `url`, spawning the
-    /// actor (which lazily connects) if there isn't a running one. Caller holds the
-    /// map lock.
+    /// actor (which lazily connects) if there isn't a running one. Returns `None`
+    /// while the peer is in dial backoff. Caller holds the map lock.
     fn spawn_or_get(
         &self,
         peers: &mut HashMap<String, mpsc::UnboundedSender<Command>>,
         npub: &str,
         url: &str,
-    ) -> mpsc::UnboundedSender<Command> {
+    ) -> Option<mpsc::UnboundedSender<Command>> {
         if let Some(tx) = peers.get(npub) {
             if !tx.is_closed() {
-                return tx.clone();
+                return Some(tx.clone());
             }
             peers.remove(npub);
+        }
+        if let Some(b) = self.dial_backoff.lock().unwrap().get(npub) {
+            if std::time::Instant::now() < b.next_allowed {
+                return None;
+            }
         }
         let (tx, rx) = mpsc::unbounded_channel::<Command>();
         peers.insert(npub.to_string(), tx.clone());
@@ -116,8 +170,9 @@ impl PeerRelayPool {
             npub.to_string(),
             rx,
             self.connected.clone(),
+            self.dial_backoff.clone(),
         ));
-        tx
+        Some(tx)
     }
 
     /// Queue a pre-built relay frame (`["EVENT", {…}]`) to a peer's relay over the
@@ -126,7 +181,11 @@ impl PeerRelayPool {
     /// buffered in the channel and flushed on connect.
     pub fn send(&self, npub: &str, url: &str, frame: String) {
         let mut peers = self.peers.lock().unwrap();
-        let tx = self.spawn_or_get(&mut peers, npub, url);
+        // In dial backoff → drop the frame (push is best-effort; the pull plane
+        // recovers backlog once the peer reconnects).
+        let Some(tx) = self.spawn_or_get(&mut peers, npub, url) else {
+            return;
+        };
         // Lost the race with a task that just exited: drop the entry so the next
         // publish respawns. Rare, and the push plane is best-effort (the pull plane
         // recovers backlog on reconnect).
@@ -149,7 +208,10 @@ impl PeerRelayPool {
         let (reply_tx, reply_rx) = oneshot::channel();
         {
             let mut peers = self.peers.lock().unwrap();
-            let tx = self.spawn_or_get(&mut peers, npub, url);
+            // In dial backoff → empty batch, same contract as a dead peer.
+            let Some(tx) = self.spawn_or_get(&mut peers, npub, url) else {
+                return Vec::new();
+            };
             if tx
                 .send(Command::Request {
                     filters,
@@ -176,11 +238,24 @@ async fn run(
     npub: String,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     connected: Arc<Mutex<HashSet<String>>>,
+    dial_backoff: BackoffMap,
 ) {
-    let Ok((ws, _)) = tokio_tungstenite::connect_async(&url).await else {
-        return; // connect failed → channel drops with this task → next command respawns
+    // Bounded connect: a hang here (SYN black hole into a wedged session) must
+    // fail fast, both to arm the backoff and to stop touching the stale session.
+    let ws = match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url))
+        .await
+    {
+        Ok(Ok((ws, _))) => ws,
+        _ => {
+            // Connect failed or timed out → back off this peer; the channel drops
+            // with this task and a post-backoff command respawns it.
+            record_dial_failure(&dial_backoff, &npub);
+            return;
+        }
     };
-    // Live now — mark reachable so the keepwarm loop sees the (re)connect edge.
+    // Live now — clear any backoff and mark reachable so the keepwarm loop sees
+    // the (re)connect edge.
+    dial_backoff.lock().unwrap().remove(&npub);
     connected.lock().unwrap().insert(npub.clone());
     let (mut sink, mut stream) = ws.split();
     let mut pending: HashMap<String, Pending> = HashMap::new();
@@ -349,6 +424,33 @@ mod tests {
             .await;
         assert_eq!(got.len(), 1, "request reads the event back");
         assert_eq!(got[0].id, ev.id);
+    }
+
+    /// Consecutive dial failures escalate the backoff toward the cap; a reset
+    /// (connect success / mesh reconnect edge) clears it entirely.
+    #[test]
+    fn dial_backoff_escalates_and_resets() {
+        let pool = PeerRelayPool::new();
+        record_dial_failure(&pool.dial_backoff, "peerB");
+        {
+            let map = pool.dial_backoff.lock().unwrap();
+            let b = map.get("peerB").unwrap();
+            let delay = b.next_allowed - std::time::Instant::now();
+            assert!(delay <= BACKOFF_BASE, "first failure waits one base interval");
+        }
+        for _ in 0..10 {
+            record_dial_failure(&pool.dial_backoff, "peerB");
+        }
+        {
+            let map = pool.dial_backoff.lock().unwrap();
+            let b = map.get("peerB").unwrap();
+            let delay = b.next_allowed - std::time::Instant::now();
+            assert!(delay <= BACKOFF_CAP, "backoff never exceeds the cap");
+            // Must exceed the node's 90s idle purge so a wedged session starves.
+            assert!(delay > Duration::from_secs(90), "capped backoff outlasts idle purge");
+        }
+        pool.reset_backoff("peerB");
+        assert!(pool.dial_backoff.lock().unwrap().is_empty());
     }
 
     /// A request to an unreachable peer returns empty within the timeout (no hang).
