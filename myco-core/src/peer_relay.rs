@@ -242,17 +242,16 @@ async fn run(
 ) {
     // Bounded connect: a hang here (SYN black hole into a wedged session) must
     // fail fast, both to arm the backoff and to stop touching the stale session.
-    let ws = match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url))
-        .await
-    {
-        Ok(Ok((ws, _))) => ws,
-        _ => {
-            // Connect failed or timed out → back off this peer; the channel drops
-            // with this task and a post-backoff command respawns it.
-            record_dial_failure(&dial_backoff, &npub);
-            return;
-        }
-    };
+    let ws =
+        match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url)).await {
+            Ok(Ok((ws, _))) => ws,
+            _ => {
+                // Connect failed or timed out → back off this peer; the channel drops
+                // with this task and a post-backoff command respawns it.
+                record_dial_failure(&dial_backoff, &npub);
+                return;
+            }
+        };
     // Live now — clear any backoff and mark reachable so the keepwarm loop sees
     // the (re)connect edge.
     dial_backoff.lock().unwrap().remove(&npub);
@@ -436,7 +435,10 @@ mod tests {
             let map = pool.dial_backoff.lock().unwrap();
             let b = map.get("peerB").unwrap();
             let delay = b.next_allowed - std::time::Instant::now();
-            assert!(delay <= BACKOFF_BASE, "first failure waits one base interval");
+            assert!(
+                delay <= BACKOFF_BASE,
+                "first failure waits one base interval"
+            );
         }
         for _ in 0..10 {
             record_dial_failure(&pool.dial_backoff, "peerB");
@@ -447,7 +449,10 @@ mod tests {
             let delay = b.next_allowed - std::time::Instant::now();
             assert!(delay <= BACKOFF_CAP, "backoff never exceeds the cap");
             // Must exceed the node's 90s idle purge so a wedged session starves.
-            assert!(delay > Duration::from_secs(90), "capped backoff outlasts idle purge");
+            assert!(
+                delay > Duration::from_secs(90),
+                "capped backoff outlasts idle purge"
+            );
         }
         pool.reset_backoff("peerB");
         assert!(pool.dial_backoff.lock().unwrap().is_empty());
