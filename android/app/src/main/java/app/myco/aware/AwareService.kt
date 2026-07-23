@@ -59,10 +59,14 @@ class AwareService : Service() {
             return
         }
 
-        // Enable the lane (adds the UDP transport, restarting a running node),
-        // then ensure the node is up so the lane works even without BLE.
+        // Enable the lane. Node lifecycle follows the mesh "Enable" master
+        // switch; when it's on, ensure the node is up so the lane works even
+        // without BLE (idempotent — the UDP transport is always in the node's
+        // config on Android, so no restart is needed to pick the lane up).
         client.dispatch(NativeActions.setWifiAwareEnabled(true))
-        client.dispatch(NativeActions.startNode())
+        val meshOn = getSharedPreferences("myco_prefs", MODE_PRIVATE)
+            .getBoolean(app.myco.MainActivity.PREF_MESH, true)
+        if (meshOn) client.dispatch(NativeActions.startNode())
 
         if (!AwareRadio.isSupported(this)) {
             Log.w(TAG, "Wi-Fi Aware not supported on this device")
@@ -83,7 +87,8 @@ class AwareService : Service() {
     private fun stopAware() {
         runCatching {
             val client = MycoCore.client(this)
-            // Drop the UDP transport; leave the node running for other users.
+            // Drop the lane flag only — node lifecycle belongs to the mesh
+            // "Enable" master switch.
             client.dispatch(NativeActions.setWifiAwareEnabled(false))
         }
         radio?.shutdown()

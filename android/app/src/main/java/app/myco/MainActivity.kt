@@ -115,7 +115,11 @@ class MainActivity : ComponentActivity() {
         // The mesh adapter (app-owned TUN) is ON by default — it's how this device
         // reaches the mesh, so it's effectively required. Bring it up at launch,
         // prompting for the one-time VPN consent the first time it's needed.
+        // The fips node's lifecycle follows this master "Enable" switch (the
+        // radio toggles only gate their radios), so start it here too — the
+        // dispatch is idempotent with the radio services' own startNode calls.
         if (prefs.getBoolean(PREF_MESH, true)) {
+            core.dispatch(NativeActions.startNode())
             val consent = VpnService.prepare(this)
             if (consent == null) startMeshNow() else vpnConsentLauncher.launch(consent)
         }
@@ -147,12 +151,15 @@ class MainActivity : ComponentActivity() {
     private fun setMeshEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(PREF_MESH, enabled).apply()
         if (enabled) {
+            // Node follows the master switch (radio toggles only gate radios).
+            core.dispatch(NativeActions.startNode())
             // Android requires user consent before any app can run a VPN.
             val consent = VpnService.prepare(this)
             android.util.Log.i("MycoVpn", "setMeshEnabled(true): consent needed=${consent != null}")
             if (consent != null) vpnConsentLauncher.launch(consent) else startMeshNow()
         } else {
             MycoVpnService.stop(this)
+            core.dispatch(NativeActions.stopNode())
         }
     }
 
@@ -470,7 +477,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private companion object {
+    // Non-private: the radio services read PREF_MESH to gate node startup.
+    companion object {
         const val PREF_BLE = "ble_enabled"
         const val PREF_AWARE = "wifi_aware_enabled"
         const val PREF_MESH = "mesh_enabled"
