@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Settings now warns — with a red dot on the Settings tab — when a transport
+  is enabled but can't actually run: mesh on without the VPN slot (another
+  VPN app took it), Bluetooth transport on while the phone's Bluetooth is
+  off, or Wi-Fi Aware on while Wi-Fi is off. Each warning is tappable and
+  jumps to the fix.
+- The top-right status pill now carries a mesh on/off slider, shows how many
+  Circle members are reachable right now (`reachable/total`), and the live
+  peer count.
+
 ### Fixed
+
+- Crash on GrapheneOS / secondary (non-admin) users: the system can refuse
+  Wi-Fi Aware calls for lack of the nearby-devices permission even after the
+  app's own permission check passed, and the resulting `SecurityException`
+  on the Aware callback thread killed the whole app. The lane now shuts down
+  gracefully and surfaces a warning instead.
+- Enabling the mesh right after granting VPN access (e.g. when Myco reclaims
+  the VPN slot from another app) no longer silently fails when the mesh
+  address isn't ready yet — the VPN start now retries until the node has
+  published its address. Declining the VPN consent dialog now turns the mesh
+  preference off instead of pretending the mesh is up.
 
 - Background battery drain cut substantially: BLE discovery now duty-cycles
   down (low-power scan with batched delivery) while the app is not visible,
