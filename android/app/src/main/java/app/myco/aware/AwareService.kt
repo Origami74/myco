@@ -49,6 +49,7 @@ class AwareService : Service() {
 
     private fun startAware() {
         if (radio != null) return
+        AwareHealth.permissionDenied = false // fresh start clears the stale flag
         startForegroundCompat()
 
         val client = MycoCore.client(this)
