@@ -58,8 +58,11 @@ import app.myco.core.AppState
 import app.myco.core.NativeActions
 import app.myco.share.DeviceName
 import app.myco.ui.GroupLabel
+import app.myco.ui.RadioAction
+import app.myco.ui.RadioWarning
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
+import app.myco.ui.radioWarnings
 import app.myco.ui.theme.Slate
 
 /** The Settings surfaces: the root list and its three drill-in sub-pages. */
@@ -207,6 +210,37 @@ private fun RootSettings(
                 title = "Internet",
                 subtitle = "Mesh over the internet",
             )
+        }
+
+        // Radio/VPN misconfigurations that silently break peering — recomputed
+        // on every state poll (the `state` param changes each second).
+        radioWarnings(context, state, meshEnabled).forEach { warning ->
+            Spacer(Modifier.height(8.dp))
+            RadioWarningCard(warning) {
+                when (warning.action) {
+                    RadioAction.FIX_VPN -> onMeshToggle(true) // re-runs the VPN consent flow
+                    RadioAction.ENABLE_BLUETOOTH -> runCatching {
+                        context.startActivity(
+                            android.content.Intent(
+                                android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE,
+                            ),
+                        )
+                    }
+                    RadioAction.ENABLE_WIFI -> runCatching {
+                        context.startActivity(
+                            android.content.Intent(android.provider.Settings.Panel.ACTION_WIFI),
+                        )
+                    }
+                    RadioAction.GRANT_AWARE_PERMISSION -> runCatching {
+                        context.startActivity(
+                            android.content.Intent(
+                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.parse("package:${context.packageName}"),
+                            ),
+                        )
+                    }
+                }
+            }
         }
 
         if (bleExhausted) {
@@ -467,6 +501,44 @@ private fun ConfirmDialog(
         title = { Text(title) },
         text = { Text(body) },
     )
+}
+
+/** An actionable radio/VPN misconfiguration (see [radioWarnings]): same visual
+ *  language as [BleExhaustedCard], but tappable to jump to the fix. */
+@Composable
+private fun RadioWarningCard(warning: RadioWarning, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                MaterialTheme.colorScheme.errorContainer,
+                RoundedCornerShape(14.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.size(10.dp))
+            Text(
+                warning.title,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleMedium,
+            )
+        }
+        Text(
+            warning.detail,
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
 }
 
 /** Warning shown when the OS denied our BLE advertiser (TOO_MANY_ADVERTISERS):
