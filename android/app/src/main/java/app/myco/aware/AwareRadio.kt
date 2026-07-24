@@ -105,19 +105,37 @@ class AwareRadio(
 
     private fun attach(mgr: WifiAwareManager) {
         if (session != null) return
-        mgr.attach(object : AttachCallback() {
-            override fun onAttached(s: WifiAwareSession) {
-                if (!running) { s.close(); return }
-                session = s
-                startPublish(s)
-                startSubscribe(s)
-                Log.i(TAG, "Aware attached")
-            }
+        try {
+            mgr.attach(object : AttachCallback() {
+                override fun onAttached(s: WifiAwareSession) {
+                    if (!running) { s.close(); return }
+                    session = s
+                    startPublish(s)
+                    startSubscribe(s)
+                    Log.i(TAG, "Aware attached")
+                }
 
-            override fun onAttachFailed() {
-                Log.e(TAG, "Aware attach failed")
-            }
-        }, handler)
+                override fun onAttachFailed() {
+                    Log.e(TAG, "Aware attach failed")
+                }
+            }, handler)
+        } catch (e: SecurityException) {
+            onPermissionDenied("attach", e)
+        }
+    }
+
+    /**
+     * The platform refused an Aware call for lack of NEARBY_WIFI_DEVICES /
+     * fine-location permission. This can happen even after our own permission
+     * check passed — GrapheneOS and secondary (non-admin) users enforce
+     * differently — and the calls run on the Aware handler thread, where an
+     * uncaught SecurityException kills the whole process. Flag it for the UI
+     * and shut the lane down instead of crashing.
+     */
+    private fun onPermissionDenied(where: String, e: SecurityException) {
+        Log.e(TAG, "Aware $where denied by platform (missing nearby/location permission)", e)
+        AwareHealth.permissionDenied = true
+        stop()
     }
 
     private fun registerAvailability(mgr: WifiAwareManager) {
@@ -174,6 +192,14 @@ class AwareRadio(
         // No service-specific info: the advert carries no identity, exactly
         // like the UUID-only BLE advert. Identity is exchanged post-match.
         val config = PublishConfig.Builder().setServiceName(SERVICE_NAME).build()
+        try {
+            publish(s, config)
+        } catch (e: SecurityException) {
+            onPermissionDenied("publish", e)
+        }
+    }
+
+    private fun publish(s: WifiAwareSession, config: PublishConfig) {
         s.publish(config, object : DiscoverySessionCallback() {
             override fun onPublishStarted(session: PublishDiscoverySession) {
                 Log.i(TAG, "publish started")
@@ -198,6 +224,14 @@ class AwareRadio(
 
     private fun startSubscribe(s: WifiAwareSession) {
         val config = SubscribeConfig.Builder().setServiceName(SERVICE_NAME).build()
+        try {
+            subscribe(s, config)
+        } catch (e: SecurityException) {
+            onPermissionDenied("subscribe", e)
+        }
+    }
+
+    private fun subscribe(s: WifiAwareSession, config: SubscribeConfig) {
         s.subscribe(config, object : DiscoverySessionCallback() {
             override fun onSubscribeStarted(session: SubscribeDiscoverySession) {
                 Log.i(TAG, "subscribe started")
@@ -383,3 +417,14 @@ data class AwareLink(
     val addr: String?,
     val up: Boolean,
 )
+
+/** Process-global Wi-Fi Aware health flags read directly by the UI (no
+ *  AppState round-trip) — the mirror of [app.myco.ble.BleHealth]. */
+object AwareHealth {
+    /** True when the platform refused an Aware call for lack of nearby-devices
+     *  / fine-location permission (seen on GrapheneOS and secondary users even
+     *  when our own permission check passed). The lane is stopped; the user
+     *  must grant the permission and re-toggle Wi-Fi Aware. */
+    @Volatile
+    var permissionDenied: Boolean = false
+}

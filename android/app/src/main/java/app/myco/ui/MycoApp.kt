@@ -39,6 +39,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -51,6 +52,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import app.myco.ble.BleHealth
 import androidx.compose.ui.platform.LocalContext
+import app.myco.ui.radioWarnings
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
@@ -121,12 +123,18 @@ fun MycoApp(
     // with the app backgrounded the UI can't show the result anyway, and the
     // 1Hz JNI wakeup was a measurable battery cost. repeatOnLifecycle cancels
     // the loop on onStop and restarts it (immediate first poll) on onStart.
+    // Radio/VPN misconfigurations (VPN slot lost, Bluetooth/Wi-Fi off under an
+    // enabled transport) — drives the red dot on the Settings tab.
+    var radioAlert by remember { mutableStateOf(false) }
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.LaunchedEffect(Unit) {
         lifecycleOwner.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
                 state = withContext(Dispatchers.IO) { client.state() }
                 bleExhausted = BleHealth.advertiserExhausted
+                radioAlert = withContext(Dispatchers.IO) {
+                    radioWarnings(context, state, meshEnabled).isNotEmpty()
+                }
                 delay(1000)
             }
         }
@@ -157,6 +165,12 @@ fun MycoApp(
     }
 
     val nav = rememberNavController()
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalMeshControl provides MeshControl(meshEnabled) { on ->
+            meshEnabled = on
+            onMeshToggle(on)
+        },
+    ) {
     Scaffold(
         bottomBar = {
             val current by nav.currentBackStackEntryAsState()
@@ -177,7 +191,7 @@ fun MycoApp(
                                 }
                             },
                             icon = {
-                                val badged = (tab.route == "settings" && bleExhausted) ||
+                                val badged = (tab.route == "settings" && (bleExhausted || radioAlert)) ||
                                     (tab.route == "circle" && state.pendingPairRequests.isNotEmpty())
                                 if (badged) {
                                     BadgedBox(badge = { Badge() }) {
@@ -239,6 +253,7 @@ fun MycoApp(
             }
         }
     }
+    } // CompositionLocalProvider(LocalMeshControl)
 
     // Incoming pair requests now live in the persistent Requests inbox (badged on
     // the Circle tab + surfaced on the pairing home), not a transient pop-up.
@@ -293,13 +308,26 @@ private fun IncomingRequestDialog(name: String, onAccept: () -> Unit, onIgnore: 
 
 // ----- shared UI building blocks used across screens -----
 
+/** Mesh master-switch state + toggle, provided by [MycoApp] so the status pill
+ *  (rendered inside every screen's header) can flip the mesh without threading
+ *  a callback through each screen's signature. */
+data class MeshControl(val enabled: Boolean, val toggle: (Boolean) -> Unit)
+
+val LocalMeshControl = androidx.compose.runtime.compositionLocalOf { MeshControl(true) {} }
+
 /**
- * The green pill shown top-right on every screen: live BLE peers ("N peers") plus
- * the total size of your Circle (paired contacts, online or not) after a divider.
+ * The status pill shown top-right on every screen. Three segments:
+ * mesh on/off toggle · Circle reachable/total · live peer count.
  */
 @Composable
 fun PeersPill(state: AppState) {
+    val mesh = LocalMeshControl.current
+    val connectedNpubs = state.blePeers
+        .filter { it.connected && it.npub.isNotEmpty() }
+        .map { it.npub }
+        .toSet()
     val connected = state.blePeers.count { it.connected }
+    val reachable = state.circle.count { it.npub in connectedNpubs }
     val circle = state.circle.size
     Surface(
         shape = CircleShape,
@@ -309,32 +337,53 @@ fun PeersPill(state: AppState) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
-            StatusDot(if (connected > 0) StatusConnected else Slate)
-            Text(
-                "$connected ${if (connected == 1) "peer" else "peers"}",
-                fontWeight = FontWeight.SemiBold,
-                style = MaterialTheme.typography.labelLarge,
-            )
+            // 1 — mesh master switch: the same slider as the Settings rows,
+            // scaled down to pill height (the Box bounds its layout footprint;
+            // the scale is a draw transform).
             Box(
-                Modifier
-                    .padding(start = 2.dp)
-                    .size(width = 1.dp, height = 14.dp)
-                    .background(MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.25f)),
-            )
+                modifier = Modifier.size(width = 36.dp, height = 20.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                androidx.compose.material3.Switch(
+                    checked = mesh.enabled,
+                    onCheckedChange = { mesh.toggle(it) },
+                    modifier = Modifier.scale(0.6f),
+                )
+            }
+            PillDivider()
+            // 2 — Circle: reachable now / total paired.
             Icon(
                 Icons.Filled.People,
-                contentDescription = "in Circle",
+                contentDescription = "Circle reachable / total",
                 modifier = Modifier.size(16.dp),
             )
             Text(
-                "$circle",
+                "$reachable/$circle",
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.labelLarge,
+            )
+            PillDivider()
+            // 3 — live mesh peers.
+            StatusDot(if (connected > 0) StatusConnected else Slate)
+            Text(
+                "$connected",
                 fontWeight = FontWeight.SemiBold,
                 style = MaterialTheme.typography.labelLarge,
             )
         }
     }
+}
+
+@Composable
+private fun PillDivider() {
+    Box(
+        Modifier
+            .padding(start = 2.dp)
+            .size(width = 1.dp, height = 14.dp)
+            .background(MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.25f)),
+    )
 }
 
 /** A screen's big title + the peers pill, with an optional subtitle underneath. */

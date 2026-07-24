@@ -70,7 +70,19 @@ class MainActivity : ComponentActivity() {
 
     private val vpnConsentLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == RESULT_OK) startMeshNow()
+            if (result.resultCode == RESULT_OK) {
+                startMeshNow()
+            } else {
+                // Consent declined: without the VPN slot no mesh traffic can
+                // flow, so don't pretend — persist the mesh off. (The Settings
+                // warning card explains and offers to retry.)
+                prefs.edit().putBoolean(PREF_MESH, false).apply()
+                Toast.makeText(
+                    this,
+                    "VPN permission declined — mesh disabled",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -169,14 +181,20 @@ class MainActivity : ComponentActivity() {
         core.dispatch(NativeActions.setOfflineOnly(enabled))
     }
 
-    private fun startMeshNow() {
+    private fun startMeshNow(attempt: Int = 0) {
         val state = core.state()
         val ula = state.fipsIpv6
-        android.util.Log.i("MycoVpn", "startMeshNow: ula=$ula mtu=${state.fipsMtu}")
+        android.util.Log.i("MycoVpn", "startMeshNow: ula=$ula mtu=${state.fipsMtu} attempt=$attempt")
         if (ula.isNotEmpty()) {
             MycoVpnService.start(this, ula, state.fipsMtu)
+        } else if (attempt < MESH_START_RETRIES) {
+            // The node is still coming up (common right after the VPN consent
+            // dialog — e.g. when Myco just reclaimed the slot from another VPN
+            // app). Bailing here used to leave the mesh silently down; retry
+            // until the node has published its address.
+            window.decorView.postDelayed({ startMeshNow(attempt + 1) }, MESH_START_RETRY_MS)
         } else {
-            Toast.makeText(this, "Mesh address not ready yet", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Mesh address not ready — try toggling the mesh off and on", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -479,6 +497,10 @@ class MainActivity : ComponentActivity() {
 
     // Non-private: the radio services read PREF_MESH to gate node startup.
     companion object {
+        /** startMeshNow: how many 500ms retries to wait for the node's mesh address. */
+        private const val MESH_START_RETRIES = 20
+        private const val MESH_START_RETRY_MS = 500L
+
         const val PREF_BLE = "ble_enabled"
         const val PREF_AWARE = "wifi_aware_enabled"
         const val PREF_MESH = "mesh_enabled"
