@@ -1,117 +1,108 @@
-# Myco v0.2.0
+# Myco v0.3.0
 
-**Released**: 2026-07-14
+**Released**: 2026-07-25
 
-v0.2.0 is about **reach and reliability**: chat and content now flow across your
-whole Circle — including peers several hops away over the mesh — and survive the
-link drops, reconnects, and Bluetooth flaps that used to silently stall them. On
-top of that it ships an **experimental Wi-Fi Aware bulk lane** for fast transfers
-between capable phones, and a redesigned Discover tab.
+v0.3.0 is about **staying up and staying honest**: the mesh survives the crashes,
+stalls, and silent failures that used to bite in the field, and the app now tells
+you plainly when a transport is enabled but can't actually run. It also brings the
+mesh on/off control and live reachability into the top status pill, and adds an
+experimental **Wi-Fi AP lane** for connecting to LAN fips nodes over Wi-Fi.
 
-> **Update every device together.** v0.2.0 moves the embedded relay and Blossom
-> ports (see below), so a v0.2.0 phone and a v0.1.0 phone **won't exchange chat
-> or content over the mesh**. Pairing and discovery still work across versions —
-> but sync won't — so update all the devices in a Circle.
-
-It upgrades from v0.1.0 in place with no data loss; your identity (nsec), Circle,
-and installed apps are preserved.
+It upgrades from v0.2.0 in place with no data loss; your identity (nsec), Circle,
+and installed apps are preserved. Unlike v0.2.0, this release changes no ports or
+wire formats — a v0.3.0 phone and a v0.2.0 phone still sync over the mesh — but
+update every device in a Circle to get the reliability fixes on both ends.
 
 ## At a glance
 
-- **Whole-Circle, multi-hop chat** — messages reach every Circle member wherever
-  they are on the mesh, not just direct neighbours.
-- **Resilient relay links** — each device keeps a persistent, two-way relay
-  connection to every Circle member, detects a dead link, and re-establishes it
-  within seconds of a flap — both directions — pulling back anything missed.
-- **BLE scanning recovers itself** — discovery no longer gets stuck at zero peers
-  after a burst of connects/disconnects.
-- **Wi-Fi Aware bulk lane (experimental)** — a second, much faster transport
-  raised beside BLE when both phones support it. Off by default.
-- **Redesigned Discover** — an app-icon grid with a **Suggested** row of starter
-  apps; tapping one opens it just like opening a shared app.
-- **Bigger uploads** — the in-app Blossom store now accepts up to 64 MiB.
-- **Relay/Blossom ports moved** to 4870 / 24243 (see Behavior changes).
+- **No more GrapheneOS / secondary-user crash** — a Wi-Fi Aware permission refusal
+  no longer kills the whole app; the lane shuts down gracefully and warns instead.
+- **Transport warnings** — Settings shows a red dot and a tappable warning when
+  mesh, Bluetooth, or Wi-Fi Aware is switched on but can't run (VPN slot taken,
+  Bluetooth off, Wi-Fi off).
+- **Mesh control in the status pill** — a mesh on/off slider, a live
+  `reachable/total` Circle count, and the current peer count, all top-right.
+- **Battery drain cut** — background BLE duty-cycles down, GATT priority relaxes
+  when idle, and the once-a-second poll stops when the app isn't visible.
+- **Relay links self-heal after a stuck rekey** — a wedged mesh session no longer
+  kills a Circle link permanently; dials time out and back off, then rebuild.
+- **Wi-Fi AP lane (developer preview)** — auto-discover and connect to fips nodes
+  on a joined Wi-Fi network over mDNS + UDP. Off unless the network carries a node.
 
 ## What's new
 
-### Wi-Fi Aware bulk lane (experimental)
+### The app stops lying about transports
 
-BLE is reliable but slow — a real handset L2CAP link tops out around ~22 KB/s,
-which makes a large nsite a long transfer. v0.2.0 adds an **experimental Wi-Fi
-Aware (NAN) lane**: when two nearby phones both have the hardware, they form a
-pairwise Wi-Fi data path and larger transfers ride it at Wi-Fi speed, while
-pairing and discovery stay on the always-on BLE mesh. It runs as fips's native
-UDP transport over the Aware interface — no new wire format — and is **off by
-default**; enable it under the Wi-Fi Aware section in Settings. Aware-less phones
-simply stay on BLE. A dev-menu **adaptive speedtest** measures the lane
-end-to-end (up/down throughput to a paired peer), with sub-1-Mbps results shown
-in kbps.
+When a transport was enabled but physically couldn't run, Myco used to look fine
+while quietly doing nothing. v0.3.0 surfaces it: a **red dot on the Settings tab**
+and a tappable warning row for each broken transport — mesh enabled without the
+VPN slot (another VPN app took it), Bluetooth transport on while the phone's
+Bluetooth is off, or Wi-Fi Aware on while Wi-Fi is off. Each warning jumps to the
+fix. Declining the VPN consent dialog now turns the mesh preference **off** instead
+of pretending the mesh is up.
 
-Wi-Fi Aware is experimental: hardware coverage is uneven, throughput is
-unmeasured across the device matrix, and the BLE↔Aware cutover policy is still
-being tuned. Treat it as a preview.
+### Mesh control in the status pill
 
-### Redesigned Discover
+The top-right status pill grows a **mesh on/off slider** and now shows, at a
+glance, how many Circle members are reachable right now (`reachable/total`)
+alongside the live peer count — so you can see and toggle mesh state without
+diving into Settings.
 
-Discover is now an app-drawer icon grid (favicon or lettered tile), matching the
-Apps screen. A curated **Suggested** row sits above the mesh-discovered results:
-**bitchat** (also the bundled first-run default, so a user who wiped it can get
-it back) and **ICS**, an Incident Command System app for disaster response.
-Tapping any tile — Suggested or discovered — opens the app exactly like opening a
-shared one: it starts syncing and shows its live page, pulling from a Circle peer
-that has it or, for the public suggestions, from public relays/Blossom.
+### Wi-Fi AP lane (developer preview)
 
-## Reliability: the mesh now holds
+When the phone joins a Wi-Fi network that carries a FIPS node — such as a router
+broadcasting the open `!FIPS` access SSID — Myco discovers the node via its mDNS
+advert (`_fips._udp`) and connects to it over UDP automatically. It requires LAN
+discovery/rendezvous enabled on the router's fips node. The Developer screen gains
+a **Wi-Fi AP** panel (Wi-Fi/SSID state, mDNS browse state, discovered nodes), and
+the Wi-Fi Aware panel now lists live data paths. See
+[docs/design/ap-lane.md](docs/design/ap-lane.md). Developer preview — treat it as
+experimental.
 
-The bulk of v0.2.0 is a wave of mesh-comms fixes so chat and content keep flowing
-as people move around and links come and go.
+## Reliability: the mesh holds under stress
 
-- **Chat reaches your whole Circle.** Messages used to fan out only to Circle
-  members you were *directly* connected to; once two paired people drifted several
-  hops apart, their messages stopped even though the mesh could still route
-  between them. Chat now fans out to the whole Circle, so a paired peer keeps
-  receiving your messages wherever they sit on the mesh.
-- **Relay links restore fast and both ways.** When a device in the middle of a
-  chain dropped and reconnected, the relay links between Circle members came back
-  slowly and often one-way, stalling messages for up to a minute. Each device now
-  proactively keeps a live relay connection to every Circle member, re-establishes
-  it within seconds of a flap in **both** directions, and on reconnect recreates
-  its open subscriptions against the returned peer to pull back anything missed.
-- **No more silent stalls after a Bluetooth flap.** The reused write-only relay
-  connection could go stale — a half-open socket the app never noticed — and
-  quietly swallow every message while the mesh still looked healthy. Each peer now
-  holds a single persistent, two-way connection that detects a dead link (read
-  side + keepalive) and reconnects; manifest fetches share that one socket.
-- **BLE discovery recovers on its own.** After a burst of connects/disconnects,
-  Android's scan throttle (~5 starts per 30s) could leave discovery stuck at zero
-  peers until you toggled the mesh off and on. The scanner now re-arms itself on a
-  backoff, waits out the throttle window, and recovers on its own.
+- **No crash on GrapheneOS / secondary users.** The system can refuse Wi-Fi Aware
+  calls for lack of the nearby-devices permission *even after* the app's own check
+  passed; the resulting `SecurityException` on the Aware callback thread used to
+  kill the whole app. The lane now shuts down gracefully and surfaces a warning.
+- **Mesh starts even right after granting VPN access.** Enabling the mesh
+  immediately after granting VPN (e.g. reclaiming the slot from another app) no
+  longer silently fails when the mesh address isn't ready yet — the VPN start
+  retries until the node has published its address.
+- **Relay links self-heal after a stuck rekey.** A mesh session wedged mid-rekey
+  used to kill a Circle relay link permanently. Peer relay dials now time out at
+  10s and back off per peer (8s up to 3min) after consecutive failures, reclaim the
+  stale session, and rebuild a fresh one on the next dial.
+- **Bluetooth toggle no longer knocks out Wi-Fi Aware.** Turning the Bluetooth
+  toggle off used to stop the embedded mesh node out from under the Aware lane. The
+  node's lifecycle now follows the mesh **Enable** switch; radio toggles only gate
+  their own radios.
 
-## Behavior changes worth flagging
+## Battery
 
-- **Relay/Blossom ports moved.** The embedded Nostr relay is now on **4870** and
-  Blossom on **24243** (up one from 4869 / 24242), so Myco stops squatting on the
-  ports a developer's own localhost relay or Blossom may use. Because the mesh and
-  localhost binds share a port number, both moved together. **Consequence:** a
-  v0.2.0 device and a v0.1.0 device won't sync chat or content over the mesh —
-  update all devices together. (Temporary until the ports become configurable.)
-- **Wi-Fi Aware is off until you enable it.** No behavior change unless you turn
-  the lane on in Settings.
+Background drain is cut substantially: BLE discovery duty-cycles down (low-power
+scan with batched delivery) while the app isn't visible, the per-link GATT
+connection priority drops to balanced after 30s without bulk traffic, and the
+once-a-second state poll no longer runs backgrounded (and no longer walks the blob
+cache directory on every read).
 
 ## Notable bug fixes
 
-- **Chat stalled across the mesh** — one-way and lost messages after a mid-chain
-  peer flapped; see Reliability above.
-- **Discovery stuck at zero peers** — BLE scan-throttle recovery.
-- **Silent event-propagation stall** — stale half-open peer-relay socket.
+- **App crash on GrapheneOS / non-admin users** — Wi-Fi Aware `SecurityException`;
+  see Reliability above.
+- **Mesh silently down after VPN grant** — start now retries until the address is
+  ready; declining consent turns the preference off.
+- **Permanent relay stall after a stuck rekey** — dials now time out and back off.
+- **Developer panel reshuffle** — peer/advert rows keep a stable alphabetical
+  order instead of reordering on every refresh.
 
 ## Getting it
 
-- **Android**: install the v0.2.0 APK from the
-  [release page](https://github.com/Origami74/myco/releases/tag/v0.2.0),
+- **Android**: install the v0.3.0 APK from the
+  [release page](https://github.com/Origami74/myco/releases/tag/v0.3.0),
   or via [zapstore](https://zapstore.dev/apps/app.myco).
 - **From source**: `cd android && ./gradlew assembleDebug` from a checkout of
-  the v0.2.0 tag. See [CONTRIBUTING.md](CONTRIBUTING.md) for build prerequisites.
+  the v0.3.0 tag. See [CONTRIBUTING.md](CONTRIBUTING.md) for build prerequisites.
 
 The full per-release change history lives in [CHANGELOG.md](CHANGELOG.md).
 Issues and discussion at [github.com/Origami74/myco](https://github.com/Origami74/myco).
