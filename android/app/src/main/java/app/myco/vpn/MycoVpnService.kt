@@ -25,6 +25,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * The node installs the bridge channels when it starts (BLE on); this service just
  * moves bytes. With it up, a native socket to `[fd00::peer]:4870/:24243` routes
  * over the mesh, so the sync engine can pull a shared nsite from a peer's device.
+ *
+ * It also advertises the in-mesh sentinel resolver `fd00::53` as the VPN's DNS
+ * server and leaves every app on the tunnel (no [Builder.addAllowedApplication]
+ * restriction), so **any app** — not just Myco — can resolve `<npub>.fips` names
+ * and reach mesh addresses directly. The native TUN pump answers those DNS
+ * queries by pure computation (see `myco-core`'s `dns_intercept`); everything
+ * else stays off this route, so normal internet is untouched.
  */
 class MycoVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
@@ -66,15 +73,27 @@ class MycoVpnService : VpnService() {
             // "configured" so Myco's own IPv4 (the online fallback) bypasses the
             // VPN instead of being blacked out by an IPv6-only tunnel.
             .addAddress("10.255.255.254", 32)
-            .addRoute("fd00::", 8) // route ONLY the mesh ULA range
+            .addRoute("fd00::", 8) // the mesh ULA range — the only traffic we carry
+            // An IPv6 default route as well, purely so the OS reports this network
+            // as IPv6-capable. Chromium (and others) gate AAAA queries on an IPv6
+            // reachability probe, and a tunnel offering only a unique-local address
+            // fails it — so `<npub>.fips` was never even *asked* for as AAAA, and
+            // resolving it in a browser failed while `ping6` worked. Non-mesh
+            // packets that arrive because of this route are dropped in the pump
+            // (see myco-core's `tun_bridge`), never forwarded into the mesh.
+            .addRoute("::", 0)
             .setConfigureIntent(configIntent())
-        // Restrict the VPN to Myco itself: only our sync engine uses the mesh, so
-        // every OTHER app bypasses the tunnel entirely and keeps its normal
-        // internet untouched.
+        // Advertise the in-mesh sentinel resolver so every app on the VPN can
+        // resolve `<npub>.fips` names system-wide. The native TUN pump answers
+        // queries to this address (see dns_intercept); it never leaves the
+        // device. No addAllowedApplication restriction — leaving every app on
+        // the VPN is what lets e.g. a browser reach a resolved fd00:: address,
+        // not just Myco's own sync engine. Only the fd00::/8 route above is
+        // captured, so normal internet is unaffected for all apps.
         try {
-            builder.addAllowedApplication(packageName)
+            builder.addDnsServer(DNS_SENTINEL)
         } catch (e: Exception) {
-            Log.w(TAG, "addAllowedApplication($packageName) failed", e)
+            Log.w(TAG, "addDnsServer($DNS_SENTINEL) failed", e)
         }
         val pfd = try {
             builder.establish()
@@ -97,7 +116,7 @@ class MycoVpnService : VpnService() {
         running.set(true)
         readerThread = Thread({ readLoop(pfd) }, "myco-tun-read").apply { start() }
         writerThread = Thread({ writeLoop(pfd) }, "myco-tun-write").apply { start() }
-        Log.i(TAG, "mesh TUN up at $ula (route fd00::/8)")
+        Log.i(TAG, "mesh TUN up at $ula (route fd00::/8, dns $DNS_SENTINEL)")
     }
 
     /** TUN fd → mesh: read IPv6 packets and hand them to FIPS. */
@@ -184,6 +203,10 @@ class MycoVpnService : VpnService() {
     companion object {
         const val EXTRA_ULA = "app.myco.extra.ULA"
         const val EXTRA_MTU = "app.myco.extra.MTU"
+        // In-mesh sentinel DNS resolver (matches myco-core's dns_intercept). Inside
+        // the routed fd00::/8 range but never a node's own address, so query
+        // packets reach the app-owned-TUN pump instead of being delivered locally.
+        private const val DNS_SENTINEL = "fd00::53"
         private const val ACTION_STOP = "app.myco.vpn.STOP"
         private const val CHANNEL = "myco_mesh"
         private const val NOTIF_ID = 42

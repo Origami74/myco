@@ -665,6 +665,11 @@ impl AppRuntime {
             let max_mss = node.effective_ipv6_mtu().saturating_sub(60);
             let (tun_outbound_tx, tun_inbound_rx) = node.enable_app_owned_tun();
             crate::tun_bridge::install(tun_outbound_tx, tun_inbound_rx, max_mss);
+            // Wire the app-owned DNS interceptor's identity channel into the node
+            // so resolving `<npub>.fips` warms the route (caches the pubkey), the
+            // same side effect fips's own DNS responder has. Without this the
+            // first packet to a resolved address has no session and is dropped.
+            crate::dns_intercept::set_identity_tx(node.enable_app_owned_dns());
             // Let Android learn the UDP transport's raw fd once it opens, so it
             // can pin the socket to whichever local-only network (Wi-Fi Aware
             // NDP, the `!FIPS` AP) carries a platform-pushed peer — otherwise
