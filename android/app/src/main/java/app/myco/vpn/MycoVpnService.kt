@@ -146,8 +146,15 @@ class MycoVpnService : VpnService() {
             // 127.0.0.1 — loopback, reachable regardless of routes — so this
             // needs no default route of its own, and Myco's own transports (the
             // AP UDP lane, mDNS, BLE) stay on the real network.
-            builder.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", relayPort))
-            Log.i(TAG, "exit mode: proxy 127.0.0.1:$relayPort -> mesh $exitProxy")
+            // `.fips` names are mesh-local and already reachable directly (the
+            // sentinel resolver answers them and fd00::/8 is routed), so they
+            // must NOT go to the exit — it has no reason to resolve a mesh name
+            // and the request would die there. Excluding them keeps mesh
+            // browsing working while exit mode is on.
+            builder.setHttpProxy(
+                ProxyInfo.buildDirectProxy("127.0.0.1", relayPort, listOf("*.fips")),
+            )
+            Log.i(TAG, "exit mode: proxy 127.0.0.1:$relayPort -> mesh $exitProxy (except *.fips)")
         }
         val pfd = try {
             builder.establish()
