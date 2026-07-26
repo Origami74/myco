@@ -665,6 +665,12 @@ impl AppRuntime {
             let max_mss = node.effective_ipv6_mtu().saturating_sub(60);
             let (tun_outbound_tx, tun_inbound_rx) = node.enable_app_owned_tun();
             crate::tun_bridge::install(tun_outbound_tx, tun_inbound_rx, max_mss);
+            // Let Android learn the UDP transport's raw fd once it opens, so it
+            // can pin the socket to whichever local-only network (Wi-Fi Aware
+            // NDP, the `!FIPS` AP) carries a platform-pushed peer — otherwise
+            // handshake replies can be lost to a competing validated default
+            // network (e.g. cellular).
+            crate::udp_fd_bridge::install(node.enable_app_owned_udp_fd());
         }
         // Clone the lock-free read handle out before the node moves into the loop
         // task — peer state is then readable while run_rx_loop owns the node.

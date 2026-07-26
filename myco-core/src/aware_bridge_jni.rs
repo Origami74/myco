@@ -17,6 +17,7 @@
 //! through `fips::discovery::platform`.
 
 use jni::objects::{JClass, JString};
+use jni::sys::jint;
 use jni::JNIEnv;
 
 const TRANSPORT_TYPE: &str = "udp";
@@ -55,4 +56,22 @@ pub extern "system" fn Java_app_myco_core_NativeCore_awarePeerLost(
         return;
     };
     fips::discovery::platform::platform_peer_lost(&npub, TRANSPORT_TYPE);
+}
+
+/// Rust → Kotlin: the UDP transport's raw socket fd, once it has opened.
+/// Blocks up to `timeout_ms`; returns `-1` on timeout (no transport, or it
+/// hasn't started yet). The fd is sent once per node lifetime (see
+/// [`crate::udp_fd_bridge`]) — callers poll this once at startup, not in a
+/// loop, then use the fd with `android.net.Network.bindSocket` to pin the
+/// socket to whichever local-only network (Wi-Fi Aware NDP, the `!FIPS` AP)
+/// currently carries the platform-pushed peer, so replies aren't lost to a
+/// competing validated default network (e.g. cellular).
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nextUdpTransportFd(
+    _env: JNIEnv,
+    _class: JClass,
+    timeout_ms: jint,
+) -> jint {
+    crate::udp_fd_bridge::next_fd(std::time::Duration::from_millis(timeout_ms.max(0) as u64))
+        as jint
 }
