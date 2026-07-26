@@ -151,6 +151,8 @@ class MainActivity : ComponentActivity() {
                     onOfflineOnlyToggle = { enabled -> setOfflineOnly(enabled) },
                     initialDeveloperMode = prefs.getBoolean(PREF_DEV, BuildConfig.DEBUG),
                     onDeveloperModeToggle = { enabled -> prefs.edit().putBoolean(PREF_DEV, enabled).apply() },
+                    initialExitProxy = prefs.getString(PREF_EXIT_PROXY, "").orEmpty(),
+                    onExitProxyChange = { spec -> setExitProxy(spec) },
                 )
             }
         }
@@ -175,6 +177,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Set (or clear) the mesh **exit proxy** — a `[fd00::exit]:port` HTTP proxy on
+     * a mesh node. Persisted, then applied by re-establishing the VPN so the new
+     * proxy takes effect (the service re-configures in place when the config
+     * changes). Empty string turns exit mode off (back to mesh-only routing).
+     */
+    private fun setExitProxy(spec: String) {
+        prefs.edit().putString(PREF_EXIT_PROXY, spec.trim()).apply()
+        // Only re-establish if the mesh is currently up; otherwise the new value is
+        // picked up the next time the mesh starts.
+        if (prefs.getBoolean(PREF_MESH, true)) startMeshNow()
+    }
+
     /** Toggle mesh-only (no IP fallback); persisted + applied to the core. */
     private fun setOfflineOnly(enabled: Boolean) {
         prefs.edit().putBoolean(PREF_OFFLINE_ONLY, enabled).apply()
@@ -186,7 +201,7 @@ class MainActivity : ComponentActivity() {
         val ula = state.fipsIpv6
         android.util.Log.i("MycoVpn", "startMeshNow: ula=$ula mtu=${state.fipsMtu} attempt=$attempt")
         if (ula.isNotEmpty()) {
-            MycoVpnService.start(this, ula, state.fipsMtu)
+            MycoVpnService.start(this, ula, state.fipsMtu, prefs.getString(PREF_EXIT_PROXY, "").orEmpty())
         } else if (attempt < MESH_START_RETRIES) {
             // The node is still coming up (common right after the VPN consent
             // dialog — e.g. when Myco just reclaimed the slot from another VPN
@@ -506,5 +521,6 @@ class MainActivity : ComponentActivity() {
         const val PREF_MESH = "mesh_enabled"
         const val PREF_OFFLINE_ONLY = "offline_only"
         const val PREF_DEV = "developer_mode"
+        const val PREF_EXIT_PROXY = "exit_proxy"
     }
 }

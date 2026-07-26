@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -45,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -90,6 +92,8 @@ fun SettingsScreen(
     developerMode: Boolean,
     onDeveloperModeToggle: (Boolean) -> Unit,
     bleExhausted: Boolean = false,
+    initialExitProxy: String = "",
+    onExitProxyChange: (String) -> Unit = {},
 ) {
     var page by remember { mutableStateOf(SettingsPage.Root) }
 
@@ -118,6 +122,8 @@ fun SettingsScreen(
         SettingsPage.Developer -> DeveloperSettings(
             state = state,
             onOfflineOnlyToggle = onOfflineOnlyToggle,
+            initialExitProxy = initialExitProxy,
+            onExitProxyChange = onExitProxyChange,
             onBack = { page = SettingsPage.Root },
         )
     }
@@ -426,7 +432,13 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
 // ----------------------------------------------------------------------------
 
 @Composable
-private fun DeveloperSettings(state: AppState, onOfflineOnlyToggle: (Boolean) -> Unit, onBack: () -> Unit) {
+private fun DeveloperSettings(
+    state: AppState,
+    onOfflineOnlyToggle: (Boolean) -> Unit,
+    initialExitProxy: String,
+    onExitProxyChange: (String) -> Unit,
+    onBack: () -> Unit,
+) {
     SettingsColumn {
         SubHeader("Developer settings", onBack)
         Spacer(Modifier.height(4.dp))
@@ -440,6 +452,38 @@ private fun DeveloperSettings(state: AppState, onOfflineOnlyToggle: (Boolean) ->
                 checked = state.offlineOnly,
                 onToggle = onOfflineOnlyToggle,
             )
+        }
+
+        Spacer(Modifier.height(8.dp))
+        GroupLabel("EXIT NODE")
+        SectionCard {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "Route web traffic through an HTTP proxy on a mesh exit node. " +
+                        "Enter the exit as <npub>.fips:8080 (or [fd00::…]:8080). Blank = off.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                // Init once — NOT keyed on initialExitProxy, which MainActivity
+                // re-reads from prefs on every recomposition; keying on it would
+                // wipe the user's typing mid-edit (and before Apply persists).
+                var field by rememberSaveable { mutableStateOf(initialExitProxy) }
+                OutlinedTextField(
+                    value = field,
+                    onValueChange = { field = it },
+                    singleLine = true,
+                    label = { Text("Exit proxy") },
+                    placeholder = { Text("<npub>.fips:8080") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { onExitProxyChange(field.trim()) }) { Text("Apply") }
+                    TextButton(onClick = { field = ""; onExitProxyChange("") }) { Text("Turn off") }
+                }
+            }
         }
 
         Spacer(Modifier.height(8.dp))

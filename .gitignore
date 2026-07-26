@@ -47,3 +47,5 @@ node_modules/
 /myco-ics/
 
 .env
+# Standalone mesh exit-node daemon (developed in-tree, not shipped)
+/fips-exitnode/
