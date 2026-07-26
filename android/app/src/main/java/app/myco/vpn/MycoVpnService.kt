@@ -310,9 +310,13 @@ class MycoVpnService : VpnService() {
 
         private fun handle(client: Socket) {
             val upstream = try {
-                Socket().apply {
-                    connect(InetSocketAddress(InetAddress.getByName(host), port), 10_000)
-                }
+                // NO_PROXY is essential: a bare Socket() picks up the process's
+                // proxy settings, which Android populates from the very proxy
+                // this service advertises — so the relay's own upstream socket
+                // would be routed back into the relay.
+                val target = InetSocketAddress(InetAddress.getByName(host), port)
+                Log.d(TAG, "exit upstream -> $target")
+                Socket(java.net.Proxy.NO_PROXY).apply { connect(target, 10_000) }
             } catch (t: Throwable) {
                 Log.w(TAG, "exit upstream connect [$host]:$port failed", t)
                 try { client.close() } catch (_: Exception) {}
