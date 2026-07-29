@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -176,6 +177,94 @@ fun PairConnectedDialog(theirName: String, onDone: () -> Unit) {
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Text("Done", color = Color.White, fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The counterpart to [PairConnectedDialog]: the invite went out but nobody has
+ * accepted it yet.
+ *
+ * Worth its own moment because the failure it covers is invisible otherwise. A
+ * pair request travels over the mesh, so bumping two phones that have not met
+ * there yet cannot deliver one — and without saying so, the bump looks like it
+ * did nothing and people bump again. The dashed link and "waiting" read as
+ * in-progress rather than failed, which is what this is.
+ */
+@Composable
+fun PairPendingDialog(theirName: String, onDone: () -> Unit) {
+    Dialog(onDismissRequest = onDone) {
+        Surface(shape = RoundedCornerShape(24.dp), color = Color.White) {
+            Column(
+                modifier = Modifier.padding(24.dp).fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(36.dp)) {
+                        Avatar("Y", Color(0xFF4F46E5))
+                        Avatar(theirName.firstOrNull()?.uppercase() ?: "?", Color(0xFFCBD5E1))
+                    }
+                    Surface(
+                        shape = CircleShape,
+                        color = Color(0xFFF59E0B),
+                        border = androidx.compose.foundation.BorderStroke(3.dp, Color.White),
+                    ) {
+                        Box(modifier = Modifier.size(34.dp), contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Filled.HourglassTop,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(18.dp))
+                Text(
+                    "Invite sent",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.ExtraBold,
+                )
+                Spacer(Modifier.height(10.dp))
+                Surface(shape = RoundedCornerShape(50), color = Color(0xFFFEF3C7)) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.HourglassTop,
+                            contentDescription = null,
+                            tint = Color(0xFFB45309),
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Text(
+                            "waiting",
+                            color = Color(0xFF92400E),
+                            fontWeight = FontWeight.ExtraBold,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "$theirName needs to accept. If their phone isn't reachable yet, " +
+                        "this keeps waiting — no need to bump again.",
+                    color = Slate,
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(20.dp))
+                Surface(
+                    shape = RoundedCornerShape(24.dp),
+                    color = Emerald,
+                    modifier = Modifier.fillMaxWidth().height(48.dp).clickable(onClick = onDone),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text("Got it", color = Color.White, fontWeight = FontWeight.ExtraBold)
                     }
                 }
             }

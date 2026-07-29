@@ -66,6 +66,7 @@ import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.PairSecrets
 import app.myco.ui.screens.PairConnectedDialog
+import app.myco.ui.screens.PairPendingDialog
 import app.myco.ui.screens.AppsScreen
 import app.myco.ui.screens.CircleScreen
 import app.myco.ui.screens.DevScreen
@@ -124,6 +125,10 @@ fun MycoApp(
     var bleExhausted by remember { mutableStateOf(BleHealth.advertiserExhausted) }
     // Name of a peer we just connected to (drives the "connected" celebration).
     var justConnected by remember { mutableStateOf<String?>(null) }
+    // Name of a peer we just invited who hasn't accepted yet — drives the
+    // "waiting" dialog, so a bump that can't be delivered says so.
+    var justInvited by remember { mutableStateOf<String?>(null) }
+    val knownInvites = remember { mutableStateOf(state.outboundPairs.map { it.npub }.toSet()) }
     // Circle members we already knew about — anything new means a fresh pairing.
     val knownCircle = remember { mutableStateOf(state.circle.map { it.npub }.toSet()) }
     val context = LocalContext.current
@@ -171,6 +176,20 @@ fun MycoApp(
             state.circle.firstOrNull { it.npub in added }?.let { justConnected = it.name.ifEmpty { "a device" } }
         }
         knownCircle.value = current
+    }
+
+    // An invite that just started waiting. Only *new* ones raise the dialog:
+    // the list persists until they accept, so keying on its contents alone
+    // would re-open it on every poll.
+    androidx.compose.runtime.LaunchedEffect(state.outboundPairs) {
+        val current = state.outboundPairs.map { it.npub }.toSet()
+        val added = current - knownInvites.value
+        if (added.isNotEmpty()) {
+            state.outboundPairs.firstOrNull { it.npub in added }?.let {
+                justInvited = it.name.ifEmpty { "them" }
+            }
+        }
+        knownInvites.value = current
     }
 
     val nav = rememberNavController()
@@ -265,6 +284,13 @@ fun MycoApp(
 
     // Incoming pair requests now live in the persistent Requests inbox (badged on
     // the Circle tab + surfaced on the pairing home), not a transient pop-up.
+    justInvited?.let { name ->
+        // Suppressed once they are actually in the Circle — an invite accepted
+        // before this was dismissed should show the celebration, not the wait.
+        if (state.circle.none { it.name == name }) {
+            PairPendingDialog(theirName = name, onDone = { justInvited = null })
+        }
+    }
     justConnected?.let { name ->
         PairConnectedDialog(theirName = name, onDone = { justConnected = null })
     }

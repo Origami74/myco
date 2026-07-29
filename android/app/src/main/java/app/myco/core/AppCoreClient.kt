@@ -72,6 +72,13 @@ data class DiscoveredNsite(
     val holderName: String,
 )
 
+/** An invite we sent that nobody has accepted yet. */
+data class OutboundPair(
+    val npub: String,
+    val name: String,
+    val since: Long,
+)
+
 /** An incoming pair request awaiting accept/decline (shown as a pop-up). */
 data class PairRequest(
     val npub: String,
@@ -109,6 +116,8 @@ data class AppState(
     val reachableNpubs: Set<String> = emptySet(),
     val discovered: List<DiscoveredNsite>,
     val pendingPairRequests: List<PairRequest>,
+    /** Invites we sent that are still waiting to be accepted. */
+    val outboundPairs: List<OutboundPair> = emptyList(),
     val offlineOnly: Boolean,
     val updateCheck: UpdateCheck = UpdateCheck(),
     val speedtest: SpeedtestStatus = SpeedtestStatus(),
@@ -241,6 +250,21 @@ data class AppState(
                     }
                 }
             }
+            val outboundJson = o.optJSONArray("outboundPairs")
+            val outboundPairs = buildList {
+                if (outboundJson != null) {
+                    for (i in 0 until outboundJson.length()) {
+                        val p = outboundJson.optJSONObject(i) ?: continue
+                        add(
+                            OutboundPair(
+                                npub = p.optString("npub"),
+                                name = p.optString("name"),
+                                since = p.optLong("since"),
+                            )
+                        )
+                    }
+                }
+            }
             return AppState(
                 rev = o.optLong("rev"),
                 error = o.optString("error"),
@@ -272,6 +296,7 @@ data class AppState(
                 },
                 discovered = discovered,
                 pendingPairRequests = pendingPairRequests,
+                outboundPairs = outboundPairs,
                 offlineOnly = o.optBoolean("offlineOnly"),
                 speedtest = o.optJSONObject("speedtest")?.let { s ->
                     SpeedtestStatus(

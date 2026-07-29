@@ -453,9 +453,9 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
-            NativeAppAction::SendPairRequest { npub, secret, .. } => {
+            NativeAppAction::SendPairRequest { npub, name, secret } => {
                 if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    rt.spawn(async move { content.send_pair_request(&npub, &secret).await });
+                    rt.spawn(async move { content.send_pair_request(&npub, &name, &secret).await });
                 }
                 self.rev += 1;
             }
@@ -826,6 +826,11 @@ impl AppRuntime {
                 .content
                 .as_ref()
                 .map(|c| c.reachable_npubs())
+                .unwrap_or_default(),
+            outbound_pairs: self
+                .content
+                .as_ref()
+                .map(|c| c.outbound_pairs_snapshot())
                 .unwrap_or_default(),
             pending_pair_requests: self
                 .content
