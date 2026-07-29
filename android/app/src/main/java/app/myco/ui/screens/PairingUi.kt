@@ -51,88 +51,8 @@ import app.myco.ui.theme.avatarColorFor
 
 private val CardBg = Color(0xFFF4F5F7)
 
-/**
- * The **Requests** inbox (per reference/mockups/pair-02-requests.svg): incoming
- * pair requests wait here — accept whenever, no timing pressure. Accepting is
- * always mutual (it adds you to their circle too). NFC taps connect on their own
- * and never land here.
- */
 @Composable
-fun RequestsScreen(
-    state: AppState,
-    client: AppCoreClient,
-    onBack: () -> Unit,
-) {
-    val pending = state.pendingPairRequests
-
-    Column(modifier = Modifier.fillMaxSize().padding(20.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-            Text("Requests", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
-            if (pending.isNotEmpty()) {
-                Spacer(Modifier.size(10.dp))
-                Surface(shape = CircleShape, color = Emerald) {
-                    Text(
-                        "${pending.size}",
-                        color = Color.White,
-                        fontWeight = FontWeight.ExtraBold,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                    )
-                }
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "People who scanned your code or opened your link. They wait here — accept whenever you like, no rush.",
-            color = Slate,
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Spacer(Modifier.height(16.dp))
-
-        if (pending.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-                Text(
-                    "No requests right now.\nWhen someone scans your code, they'll show up here.",
-                    color = Slate,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(top = 40.dp),
-                )
-            }
-            return@Column
-        }
-
-        LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(pending, key = { it.npub }) { req ->
-                RequestCard(
-                    req = req,
-                    onAccept = {
-                        // Adds them to the Circle; the "connected" celebration fires
-                        // from MycoApp when the Circle grows (covers both sides).
-                        client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name))
-                    },
-                    onIgnore = { client.dispatch(NativeActions.declinePairRequest(req.npub)) },
-                )
-            }
-            item { VerifyHint() }
-            item {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Accepting is mutual — it adds you to their circle too. NFC taps skip this list; the tap is the confirmation.",
-                    color = Color(0xFF94A3B8),
-                    style = MaterialTheme.typography.bodySmall,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        }
-    }
-
-}
-
-@Composable
-private fun RequestCard(req: PairRequest, onAccept: () -> Unit, onIgnore: () -> Unit) {
+fun RequestCard(req: PairRequest, onAccept: () -> Unit, onIgnore: () -> Unit) {
     val name = req.name.ifEmpty { "Unknown device" }
     Surface(shape = RoundedCornerShape(18.dp), color = CardBg, modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp)) {
@@ -186,7 +106,7 @@ private fun RequestCard(req: PairRequest, onAccept: () -> Unit, onIgnore: () -> 
 }
 
 @Composable
-private fun VerifyHint() {
+fun VerifyHint() {
     Surface(
         shape = RoundedCornerShape(14.dp),
         color = Color(0xFFFFF7ED),

@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -102,7 +103,6 @@ fun CircleScreen(
     state: AppState,
     client: AppCoreClient,
     onOpenQr: () -> Unit,
-    onOpenRequests: () -> Unit,
 ) {
     val context = LocalContext.current
     var name by remember(state.ownNpub) { mutableStateOf(DeviceName.current(context, state.ownNpub)) }
@@ -154,10 +154,6 @@ fun CircleScreen(
                 }
             }
             item { IdentityChip(name = name, onEdit = { editing = true }) }
-
-            if (state.pendingPairRequests.isNotEmpty()) {
-                item { RequestsBar(count = state.pendingPairRequests.size, onClick = onOpenRequests) }
-            }
 
             if (nfc != NfcState.UNAVAILABLE) {
                 item { TapToConnect(nfc = nfc, onEnableNfc = { NfcStatus.openSettings(context) }) }
@@ -240,6 +236,32 @@ fun CircleScreen(
                         }
                     }
                 }
+            }
+
+            // Requests sit here rather than behind their own screen: they are
+            // people asking to join this exact list, so showing them next to it
+            // makes the relationship obvious and saves a navigation step to act
+            // on what is usually one tap of work.
+            if (state.pendingPairRequests.isNotEmpty()) {
+                item {
+                    SectionLabel(
+                        "WAITING TO JOIN",
+                        trailing = "· ${state.pendingPairRequests.size}",
+                        scanning = false,
+                    )
+                }
+                items(state.pendingPairRequests, key = { it.npub }) { req ->
+                    RequestCard(
+                        req = req,
+                        onAccept = {
+                            // Adds them to the Circle; the "connected" celebration
+                            // fires from MycoApp when the Circle grows.
+                            client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name))
+                        },
+                        onIgnore = { client.dispatch(NativeActions.declinePairRequest(req.npub)) },
+                    )
+                }
+                item { VerifyHint() }
             }
 
             item { Spacer(Modifier.height(72.dp)) } // room for the FAB
@@ -485,24 +507,6 @@ private fun PersonBubble(
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth(),
         )
-    }
-}
-
-@Composable
-private fun RequestsBar(count: Int, onClick: () -> Unit) {
-    Surface(shape = RoundedCornerShape(16.dp), color = EmeraldSoft, modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)) {
-        Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.MarkEmailUnread, contentDescription = null, tint = Emerald, modifier = Modifier.size(22.dp))
-            Spacer(Modifier.size(12.dp))
-            Text(
-                "$count ${if (count == 1) "request" else "requests"} waiting",
-                fontWeight = FontWeight.ExtraBold,
-                color = EmeraldInk,
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.weight(1f),
-            )
-            Icon(Icons.Filled.ChevronRight, contentDescription = null, tint = Emerald)
-        }
     }
 }
 

@@ -71,7 +71,6 @@ import app.myco.ui.screens.CircleScreen
 import app.myco.ui.screens.DevScreen
 import app.myco.ui.screens.DiscoverScreen
 import app.myco.ui.screens.QrScreen
-import app.myco.ui.screens.RequestsScreen
 import app.myco.ui.screens.SettingsScreen
 import app.myco.ui.theme.EmeraldSoft
 import app.myco.ui.theme.Slate
@@ -186,7 +185,7 @@ fun MycoApp(
             val current by nav.currentBackStackEntryAsState()
             // The full-screen pairing / Add surfaces hide the bottom bar.
             val route = current?.destination?.route
-            if (route !in setOf("qr", "requests")) {
+            if (route != "qr") {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                     val tabs = if (developerMode) TABS else TABS.filterNot { it.route == "dev" }
                     tabs.forEach { tab ->
@@ -231,7 +230,7 @@ fun MycoApp(
                     AppsScreen(state, client, onLaunchNsite = onLaunchNsite, onPinToHome = onPinToHome, onScanned = onScanned)
                 }
                 composable("circle") {
-                    CircleScreen(state, client, onOpenQr = { nav.navigate("qr") }, onOpenRequests = { nav.navigate("requests") })
+                    CircleScreen(state, client, onOpenQr = { nav.navigate("qr") })
                 }
                 composable("discover") { DiscoverScreen(state, client, onLaunchNsite = onLaunchNsite) }
                 composable("settings") {
@@ -258,9 +257,6 @@ fun MycoApp(
                         onScanned = { text -> nav.popBackStack(); onScanned(text) },
                         onBack = { nav.popBackStack() },
                     )
-                }
-                composable("requests") {
-                    RequestsScreen(state = state, client = client, onBack = { nav.popBackStack() })
                 }
             }
         }
