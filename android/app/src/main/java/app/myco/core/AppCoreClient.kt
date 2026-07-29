@@ -480,6 +480,10 @@ object NativeActions {
     fun declinePairRequest(npub: String): JSONObject =
         JSONObject().put("type", "decline_pair_request").put("npub", npub)
 
+    /** Withdraw an invite still waiting to be accepted. */
+    fun cancelPairInvite(npub: String): JSONObject =
+        JSONObject().put("type", "cancel_pair_invite").put("npub", npub)
+
     /** Discover nsites on connected Circle peers' relays ("nsites around me"). */
     fun searchNsites(): JSONObject = JSONObject().put("type", "search_nsites")
 

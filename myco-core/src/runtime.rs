@@ -459,6 +459,12 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
+            NativeAppAction::CancelPairInvite { npub } => {
+                if let Some(content) = self.content.as_ref() {
+                    content.forget_outbound_pair(&npub);
+                }
+                self.rev += 1;
+            }
             NativeAppAction::AcceptPairRequest { npub, name } => {
                 if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
                     rt.spawn(async move { content.accept_pair_request(&npub, &name).await });

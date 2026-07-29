@@ -45,7 +45,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -110,7 +109,7 @@ fun CircleScreen(
     // Tap/long-press a circle member → a menu sheet; "Remove" opens a confirm.
     var sheetFor by remember { mutableStateOf<CircleContact?>(null) }
     var confirmRemove by remember { mutableStateOf<CircleContact?>(null) }
-    val sent = remember { mutableStateListOf<String>() }
+    var cancelInvite by remember { mutableStateOf<String?>(null) }
 
     // NFC availability, re-checked on resume (e.g. back from NFC settings).
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -130,6 +129,10 @@ fun CircleScreen(
     }
 
     val connected = state.blePeers.filter { it.connected }.map { it.npub }.toSet()
+    // Who we have already invited, from the core rather than a list local to this
+    // screen: an invite outlives leaving the tab, and the core is what refuses to
+    // send a second one — the badge should agree with it.
+    val invited = state.outboundPairs.map { it.npub }.toSet()
     val circleNpubs = remember(state.circle) { state.circle.map { it.npub }.toSet() }
     // Sorted by display name (stable per npub) rather than the radio's signal-
     // strength/discovery order, so bubbles don't reshuffle as RSSI fluctuates.
@@ -183,7 +186,7 @@ fun CircleScreen(
                         maxItemsInEachRow = 4,
                     ) {
                         nearby.forEach { peer ->
-                            val isSent = peer.npub in sent
+                            val isSent = peer.npub in invited
                             PersonBubble(
                                 label = DeviceName.generated(peer.npub),
                                 npub = peer.npub,
@@ -195,7 +198,6 @@ fun CircleScreen(
                                         client.dispatch(
                                             NativeActions.sendPairRequest(peer.npub, name, NsiteShare.newPairSecret())
                                         )
-                                        sent.add(peer.npub)
                                     }
                                 },
                             )
@@ -232,6 +234,37 @@ fun CircleScreen(
                                 // "Holding or tapping" both open the menu sheet.
                                 onClick = { sheetFor = c },
                                 onLongClick = { sheetFor = c },
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Invites we sent and are waiting on. Without this the invite is
+            // invisible the moment its dialog is dismissed, which reads as
+            // nothing having happened.
+            if (state.outboundPairs.isNotEmpty()) {
+                item {
+                    SectionLabel("INVITED", trailing = "· tap to cancel", scanning = false)
+                }
+                item {
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        maxItemsInEachRow = 4,
+                    ) {
+                        state.outboundPairs.forEach { inv ->
+                            PersonBubble(
+                                label = inv.name.ifEmpty { DeviceName.generated(inv.npub) },
+                                npub = inv.npub,
+                                ring = Ring.DASHED,
+                                badge = Badge.SENT,
+                                dim = true,
+                                // Cancelling frees the peer to be invited again —
+                                // otherwise a request that is never accepted is a
+                                // dead end, since the core refuses duplicates.
+                                onClick = { cancelInvite = inv.npub },
                             )
                         }
                     }
@@ -319,6 +352,29 @@ fun CircleScreen(
             dismissButton = { TextButton(onClick = { confirmRemove = null }) { Text("Cancel") } },
             title = { Text("Remove ${c.name.ifEmpty { "this peer" }}?") },
             text = { Text("They'll be removed from your Circle. You can re-pair anytime.") },
+        )
+    }
+
+    cancelInvite?.let { npub ->
+        val who = state.outboundPairs.firstOrNull { it.npub == npub }?.name.orEmpty()
+        AlertDialog(
+            onDismissRequest = { cancelInvite = null },
+            confirmButton = {
+                TextButton(onClick = {
+                    client.dispatch(NativeActions.cancelPairInvite(npub))
+                    cancelInvite = null
+                }) {
+                    Text("Cancel invite", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { cancelInvite = null }) { Text("Keep waiting") } },
+            title = { Text("Cancel the invite to ${who.ifEmpty { "this device" }}?") },
+            text = {
+                Text(
+                    "They can't accept it after this. Cancelling also lets you invite " +
+                        "them again — while an invite is waiting, a second one isn't sent.",
+                )
+            },
         )
     }
 }

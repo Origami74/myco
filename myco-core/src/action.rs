@@ -93,6 +93,8 @@ pub enum NativeAppAction {
     AcceptPairRequest { npub: String, name: String },
     /// Dismiss an incoming pair request without pairing.
     DeclinePairRequest { npub: String },
+    /// Withdraw an invite we sent that is still waiting, so it can be sent again.
+    CancelPairInvite { npub: String },
 
     /// Toggle "mesh-only": when enabled, never use the public IP relay/Blossom
     /// fallback — pull only over the mesh. Lets you verify the mesh path even
