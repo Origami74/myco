@@ -62,6 +62,12 @@ internal object NativeCore {
     /** Aware data path to `npub` lost: close the pooled UDP session. */
     external fun awarePeerLost(npub: String)
 
+    /** The underlying network's real DNS servers, comma-separated. The mesh
+     *  tunnel advertises only its own sentinel resolver, so these are where the
+     *  core relays every non-`.fips` query — without them the device resolves
+     *  nothing but mesh names. */
+    external fun setUpstreamDns(servers: String)
+
     /** Raw fd of the node's UDP transport socket, once it has opened. Blocks
      *  up to `timeoutMs`; returns -1 on timeout. Sent once per node lifetime —
      *  poll this once at startup, then bind it to whichever local-only

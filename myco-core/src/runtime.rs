@@ -243,7 +243,7 @@ impl AppRuntime {
                                 .map(|p| p.npub)
                                 .collect();
                             content.set_connected_peers(connected);
-                            if !content.connected_circle_npubs().is_empty() {
+                            if !content.circle_npubs().is_empty() {
                                 for addr in content.retriable_library_addrs() {
                                     let content = content.clone();
                                     tokio::spawn(
@@ -757,14 +757,14 @@ impl AppRuntime {
             // (`Content::keepwarm_tick`), which recreates each in-app subscription
             // against a Circle peer as it (re)appears — direct *or* multi-hop.
             if let Some(rt) = self.rt.as_ref() {
-                // Retry not-ready downloads while any direct Circle peer is reachable.
-                // open_site(_, None) tries every connected peer, and
-                // `retriable_library_addrs` skips sites already syncing — so this
-                // re-tries about once per attempt-duration (not every poll), and
-                // keeps trying as a flaky just-connected session settles, instead of
+                // Retry not-ready downloads whenever the Circle is non-empty.
+                // open_site(_, None) tries every member — hop count is FIPS's
+                // problem, and an unreachable one costs a bounded dial then backs
+                // off — and `retriable_library_addrs` skips sites already syncing,
+                // so this re-tries about once per attempt-duration (not every
+                // poll), and keeps trying as a flaky session settles instead of
                 // firing once on the connect edge and going quiet.
-                let conn = content.connected_circle_npubs();
-                if !conn.is_empty() {
+                if !content.circle_npubs().is_empty() {
                     for addr in content.retriable_library_addrs() {
                         let content = content.clone();
                         rt.spawn(async move { content.open_site(addr, None).await });
@@ -821,6 +821,11 @@ impl AppRuntime {
                 .content
                 .as_ref()
                 .map(|c| c.circle_snapshot())
+                .unwrap_or_default(),
+            reachable_npubs: self
+                .content
+                .as_ref()
+                .map(|c| c.reachable_npubs())
                 .unwrap_or_default(),
             pending_pair_requests: self
                 .content

@@ -167,18 +167,15 @@ class MycoVpnService : VpnService() {
         } catch (e: Exception) {
             Log.w(TAG, "addDnsServer($DNS_SENTINEL) failed", e)
         }
-        // …then the real resolvers, as fallbacks. The sentinel only owns
-        // `.fips` and answers everything else SERVFAIL (see dns_intercept), so
-        // without these the tunnel would deny all normal DNS on the device.
-        // Order matters: the sentinel must come first, or a `.fips` name would
-        // be sent to a real resolver and authoritatively denied.
-        for (server in underlyingDnsServers(claimIpv6)) {
-            try {
-                builder.addDnsServer(server)
-            } catch (e: Exception) {
-                Log.w(TAG, "addDnsServer($server) failed", e)
-            }
-        }
+        // The sentinel is the *only* resolver we advertise. Listing the real
+        // ones alongside it does not work: the OS is free to send a `.fips`
+        // query to any server in the list, and a real resolver denies it
+        // authoritatively — so mesh names resolve or not depending on which
+        // server was picked. Instead the core relays every non-`.fips` query to
+        // these itself (see dns_intercept), keeping one answer for one question.
+        NativeCore.setUpstreamDns(
+            underlyingDnsServers(claimIpv6).joinToString(",") { it.hostAddress ?: "" },
+        )
         if (relayPort > 0) {
             // Point every app's web traffic at the loopback relay, which carries
             // it to the exit's proxy over the mesh. Proxied requests go to

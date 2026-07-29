@@ -58,6 +58,35 @@ pub extern "system" fn Java_app_myco_core_NativeCore_awarePeerLost(
     fips::discovery::platform::platform_peer_lost(&npub, TRANSPORT_TYPE);
 }
 
+/// Kotlin → Rust: the underlying network's real DNS servers, comma-separated
+/// (`"8.8.8.8,1.1.1.1"`; a port may be appended as `addr:53`). The sentinel is
+/// the tunnel's only advertised resolver, so these are where non-`.fips`
+/// queries get relayed — without them nothing but `.fips` resolves.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_setUpstreamDns(
+    mut env: JNIEnv,
+    _class: JClass,
+    servers: JString,
+) {
+    let Some(list) = jstring(&mut env, &servers) else {
+        return;
+    };
+    let parsed = list
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                return None;
+            }
+            // Accept a bare address (default :53) or an explicit socket address.
+            s.parse::<std::net::SocketAddr>()
+                .ok()
+                .or_else(|| s.parse::<std::net::IpAddr>().ok().map(|ip| (ip, 53).into()))
+        })
+        .collect();
+    crate::dns_intercept::set_upstream(parsed);
+}
+
 /// Rust → Kotlin: the UDP transport's raw socket fd, once it has opened.
 /// Blocks up to `timeout_ms`; returns `-1` on timeout (no transport, or it
 /// hasn't started yet). The fd is sent once per node lifetime (see

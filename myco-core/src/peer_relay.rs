@@ -58,6 +58,36 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKOFF_BASE: Duration = Duration::from_secs(8);
 const BACKOFF_CAP: Duration = Duration::from_secs(180);
 
+/// Pause before re-dialling through a cold route. A first send to a peer whose
+/// coordinates the node hasn't learned yet fails immediately *and triggers the
+/// lookup that fixes it*, so the retry usually lands. Short enough that a peer
+/// becomes reachable in about a second rather than at the next keepwarm tick.
+const WARMUP_RETRY: Duration = Duration::from_millis(1500);
+
+/// Why a dial failed, which decides whether it counts against the peer.
+enum DialFault {
+    /// No resolver yet — the mesh TUN is still coming up, so `<npub>.fips`
+    /// cannot resolve. Says nothing about the peer; must not arm its backoff,
+    /// or a peer can be held off for minutes because we dialled too early.
+    NoResolver,
+    /// The node has no route to the peer *yet*. Usually a cold route: the send
+    /// itself starts the lookup, so an immediate retry tends to succeed.
+    NoRoute,
+    /// Anything else — refused, timed out, protocol error. A real failure.
+    Hard,
+}
+
+fn classify(err: &tokio_tungstenite::tungstenite::Error) -> DialFault {
+    let text = err.to_string();
+    if text.contains("failed to lookup address information") {
+        DialFault::NoResolver
+    } else if text.contains("Network is unreachable") || text.contains("No route to host") {
+        DialFault::NoRoute
+    } else {
+        DialFault::Hard
+    }
+}
+
 /// Per-peer dial-failure state (see [`BACKOFF_BASE`]).
 struct DialBackoff {
     failures: u32,
@@ -231,6 +261,53 @@ impl PeerRelayPool {
     }
 }
 
+/// Dial the peer's relay, retrying once through a cold route.
+///
+/// Distinguishes *why* a dial failed, because the three cases deserve different
+/// treatment and lumping them together is what made this subsystem hard to
+/// reason about: a dial we sent before the tunnel existed used to arm the same
+/// exponential backoff as a genuinely absent peer, holding a perfectly good peer
+/// off for minutes over a startup race.
+async fn dial(
+    url: &str,
+    npub: &str,
+    dial_backoff: &BackoffMap,
+) -> Option<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+> {
+    for attempt in 0..2 {
+        match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url)).await {
+            Ok(Ok((ws, _))) => return Some(ws),
+            Ok(Err(e)) => match classify(&e) {
+                // The tunnel isn't up yet. Not the peer's fault — leave its
+                // backoff untouched so the next keepwarm tick dials again.
+                DialFault::NoResolver => {
+                    tracing::debug!(npub, url, "peer relay dial before the mesh TUN was up");
+                    return None;
+                }
+                // Cold route: this send starts the lookup that warms it, so give
+                // that a moment and try once more before counting a failure.
+                DialFault::NoRoute if attempt == 0 => {
+                    tracing::debug!(npub, url, "no route yet, warming");
+                    tokio::time::sleep(WARMUP_RETRY).await;
+                    continue;
+                }
+                _ => {
+                    tracing::warn!(npub, url, error = %e, "peer relay dial failed");
+                    record_dial_failure(dial_backoff, npub);
+                    return None;
+                }
+            },
+            Err(_) => {
+                tracing::warn!(npub, url, "peer relay dial timed out");
+                record_dial_failure(dial_backoff, npub);
+                return None;
+            }
+        }
+    }
+    None
+}
+
 /// The per-peer connection actor: connect once, then multiplex push + pull + ping
 /// over the one socket until it dies or the pool drops the command channel.
 async fn run(
@@ -242,20 +319,15 @@ async fn run(
 ) {
     // Bounded connect: a hang here (SYN black hole into a wedged session) must
     // fail fast, both to arm the backoff and to stop touching the stale session.
-    let ws =
-        match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url)).await {
-            Ok(Ok((ws, _))) => ws,
-            _ => {
-                // Connect failed or timed out → back off this peer; the channel drops
-                // with this task and a post-backoff command respawns it.
-                record_dial_failure(&dial_backoff, &npub);
-                return;
-            }
-        };
+    let ws = match dial(&url, &npub, &dial_backoff).await {
+        Some(ws) => ws,
+        None => return,
+    };
     // Live now — clear any backoff and mark reachable so the keepwarm loop sees
     // the (re)connect edge.
     dial_backoff.lock().unwrap().remove(&npub);
     connected.lock().unwrap().insert(npub.clone());
+    tracing::info!(npub, "peer relay connected");
     let (mut sink, mut stream) = ws.split();
     let mut pending: HashMap<String, Pending> = HashMap::new();
     let mut next_sub: u64 = 0;
@@ -264,13 +336,19 @@ async fn run(
     let mut ping =
         tokio::time::interval_at(tokio::time::Instant::now() + PING_INTERVAL, PING_INTERVAL);
     let mut awaiting_pong = false;
+    // Why the actor exited, logged on the way out: a relay that connects and
+    // then dies is indistinguishable from one that never connected unless the
+    // exit says so.
+    #[allow(unused_assignments)] // each loop exit overwrites this before the log
+    let mut reason = "unknown";
 
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
-                None => break, // pool dropped the sender: shut the socket down
+                None => { reason = "pool dropped the command channel"; break }
                 Some(Command::Publish(frame)) => {
                     if sink.send(Message::Text(frame)).await.is_err() {
+                        reason = "write failed (publish)";
                         break;
                     }
                 }
@@ -284,6 +362,7 @@ async fn run(
                     let frame = serde_json::Value::Array(req).to_string();
                     if sink.send(Message::Text(frame)).await.is_err() {
                         let _ = reply.send(Vec::new());
+                        reason = "write failed (request)";
                         break;
                     }
                     pending.insert(sub_id, Pending { events: Vec::new(), reply });
@@ -303,19 +382,21 @@ async fn run(
                                 let _ = sink.send(Message::Text(close)).await;
                             }
                         }
-                        Message::Close(_) => break,
+                        Message::Close(_) => { reason = "peer closed the socket"; break }
                         _ => {} // pong / ping / binary — liveness already noted
                     }
                 }
-                Some(Err(_)) | None => break, // socket error or clean EOF → reconnect on next command
+                Some(Err(_)) | None => { reason = "socket error or EOF"; break }
             },
             _ = ping.tick() => {
                 // The previous ping went a whole interval unanswered by any frame →
                 // treat the connection as dead (this is the half-open catch).
                 if awaiting_pong {
+                    reason = "no frame within a ping interval (half-open)";
                     break;
                 }
                 if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                    reason = "write failed (ping)";
                     break;
                 }
                 awaiting_pong = true;
@@ -336,6 +417,7 @@ async fn run(
     }
     // No longer reachable — clear the flag so the keepwarm loop respawns us and
     // sees a fresh (re)connect edge when the peer comes back.
+    tracing::info!(npub, reason, "peer relay disconnected");
     connected.lock().unwrap().remove(&npub);
     // Pending replies drop here → their `request` callers get an empty batch.
     let _ = sink.send(Message::Close(None)).await;
@@ -368,6 +450,30 @@ fn handle_inbound(txt: &str, pending: &mut HashMap<String, Pending>) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The classifier reads OS error text, so pin the three cases: mistaking a
+    /// startup race for a peer failure holds a good peer off for minutes.
+    #[test]
+    fn dial_faults_are_classified() {
+        use std::io::Error;
+        let io =
+            |msg: &str| tokio_tungstenite::tungstenite::Error::Io(Error::other(msg.to_string()));
+        assert!(matches!(
+            classify(&io(
+                "failed to lookup address information: No address associated with hostname"
+            )),
+            DialFault::NoResolver
+        ));
+        assert!(matches!(
+            classify(&io("Network is unreachable (os error 101)")),
+            DialFault::NoRoute
+        ));
+        assert!(matches!(
+            classify(&io("Connection refused (os error 111)")),
+            DialFault::Hard
+        ));
+    }
+
     use myco_relay::server::serve_on;
     use myco_relay::RelayStore;
     use nostr::{EventBuilder, Keys, Kind, Tag};

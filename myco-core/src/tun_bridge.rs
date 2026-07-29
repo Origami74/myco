@@ -43,6 +43,13 @@ fn local() -> &'static Mutex<VecDeque<Vec<u8>>> {
     LOCAL.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
+/// Queue a locally-synthesised packet for the TUN fd. Used by
+/// [`crate::dns_intercept`] to deliver a DNS reply that arrived after
+/// `send_packet` already returned (an upstream-forwarded query).
+pub fn push_local(packet: Vec<u8>) {
+    local().lock().unwrap().push_back(packet);
+}
+
 /// Install the node's app-owned-TUN channel ends and the MSS ceiling
 /// (`effective_ipv6_mtu - 60`). Replaces any prior install (the node is rebuilt on
 /// a BLE off→on cycle, yielding fresh channels).
@@ -59,11 +66,16 @@ pub fn install(
 /// app → mesh: clamp the TCP MSS, then route an IPv6 packet read from the TUN fd
 /// into the mesh. Returns `false` if no TUN is installed or the queue is full.
 pub fn send_packet(mut packet: Vec<u8>) -> bool {
-    // System-wide `.fips` DNS: if this is a query to the sentinel resolver,
-    // answer it locally, queue the reply for the TUN, and don't forward it.
-    if let Some(reply) = crate::dns_intercept::try_answer(&packet) {
-        local().lock().unwrap().push_back(reply);
-        return true;
+    // System-wide `.fips` DNS: a query to the sentinel resolver is ours —
+    // answered here for `.fips`, or forwarded upstream (the reply arrives
+    // later via `push_local`). Either way it must not go to the mesh.
+    match crate::dns_intercept::handle_query(&packet) {
+        crate::dns_intercept::Dns::Answered(reply) => {
+            local().lock().unwrap().push_back(reply);
+            return true;
+        }
+        crate::dns_intercept::Dns::Forwarded => return true,
+        crate::dns_intercept::Dns::NotOurs => {}
     }
     // Only mesh (fd00::/8) traffic belongs on the app-owned TUN. The VpnService
     // also routes ::/0 so the OS reports the tunnel as IPv6-capable (without

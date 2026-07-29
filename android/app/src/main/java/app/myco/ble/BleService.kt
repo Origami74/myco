@@ -83,13 +83,14 @@ class BleService : Service() {
         // begins driving the radio (listen → advertise → scan).
         client.dispatch(NativeActions.setBleEnabled(true))
         // Node lifecycle follows the mesh "Enable" master switch, not this
-        // toggle. When it's on, (re)start the node: a byte-bridge is only bound
-        // at node start, so a node that was already running must bounce to pick
-        // up the fresh bridge injected above.
+        // toggle — and a running node is never bounced to adopt this radio.
+        // The core resolves the injected bridge per operation, so the fresh one
+        // above is picked up in place. Restarting to rebind it (which is what
+        // this did) tore down every peer and session, so turning Bluetooth on
+        // knocked the whole mesh out for as long as re-handshaking took.
         val meshOn = getSharedPreferences("myco_prefs", MODE_PRIVATE)
             .getBoolean(app.myco.MainActivity.PREF_MESH, true)
-        if (meshOn) {
-            if (client.state().nodeRunning) client.dispatch(NativeActions.stopNode())
+        if (meshOn && !client.state().nodeRunning) {
             client.dispatch(NativeActions.startNode())
         }
         // Registration replays the current state (onStart fires immediately if the

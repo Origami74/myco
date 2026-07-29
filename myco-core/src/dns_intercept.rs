@@ -4,19 +4,27 @@
 //! server for every app on the tunnel. Because that address is inside the routed
 //! `fd00::/8` range but is **not** the node's own TUN address, the OS resolver's
 //! query packets are handed to the app-owned-TUN pump instead of being delivered
-//! locally. [`try_answer`] recognises those packets in the app→mesh path and
+//! locally. [`handle_query`] recognises those packets in the app→mesh path and
 //! synthesises a reply, so any app can resolve `<npub>.fips` (and, via a host map
 //! later, aliases) to a mesh `fd00::` address — without a real DNS server socket.
 //!
 //! Resolution itself is pure computation: `<npub>.fips` → `fd00::` is derived from
 //! the public key alone (see [`fips::upper::dns::handle_dns_packet`]), so this
-//! works with no network and no upstream resolver. Non-`.fips` names get NXDOMAIN
-//! — the exit-node demo routes web traffic through an HTTP proxy, which does its
-//! own DNS on the far side, so the phone never needs to resolve public names.
+//! works with no network and no upstream resolver.
+//!
+//! Because the sentinel is the *only* resolver the tunnel advertises, this
+//! module owns every name the device looks up, not just mesh ones: non-`.fips`
+//! queries are relayed to a real resolver and their replies injected back into
+//! the TUN. Advertising the real resolvers alongside the sentinel instead does
+//! not work — the OS may send a `.fips` query to any server in the list, and a
+//! real one denies it authoritatively, so mesh names would resolve or not
+//! depending on which server happened to be picked.
 
+use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
-use fips::upper::dns::{handle_dns_packet, DnsIdentityTx};
+use fips::upper::dns::{handle_dns_packet, DnsIdentityTx, DnsResolvedIdentity};
 use fips::upper::hosts::HostMap;
 use fips::upper::tcp_mss::recalculate_l4_checksum;
 
@@ -38,6 +46,28 @@ pub fn set_identity_tx(tx: DnsIdentityTx) {
     *identity_tx().lock().unwrap() = Some(tx);
 }
 
+/// Teach the node an npub's address→pubkey mapping without going through a DNS
+/// lookup, so a packet sent to that mesh address can open a session.
+///
+/// Dialling a peer by raw `fd00::` literal skips resolution, so nothing
+/// registers the identity and the node has no pubkey to open a session with —
+/// the send is dropped and the address looks unroutable. That is invisible for
+/// a *direct* neighbour, whose identity the node already holds from the
+/// handshake, which is why only adjacent peers used to be reachable. Every
+/// address is derived from the public key alone, so this needs no network.
+pub fn warm_route(npub: &str) {
+    let Ok(peer) = fips::PeerIdentity::from_npub(npub) else {
+        return;
+    };
+    let id = DnsResolvedIdentity {
+        node_addr: *peer.node_addr(),
+        pubkey: peer.pubkey_full(),
+    };
+    if let Some(tx) = identity_tx().lock().unwrap().as_ref() {
+        let _ = tx.try_send(id);
+    }
+}
+
 /// The sentinel DNS-server address, `fd00::53`. Chosen inside the routed
 /// `fd00::/8` prefix but astronomically unlikely to collide with an
 /// npub-derived node address (those fill the whole 128 bits from a hash).
@@ -55,11 +85,44 @@ const UDP_HEADER_LEN: usize = 8;
 const NEXT_HEADER_UDP: u8 = 17;
 const DNS_PORT: u16 = 53;
 
-/// If `packet` is a UDP DNS query to `[fd00::53]:53`, resolve it and return the
-/// reply packet (IPv6+UDP+DNS) to write back to the TUN. Returns `None` for any
-/// packet that is not such a query, so the caller forwards it into the mesh
-/// unchanged.
-pub fn try_answer(packet: &[u8]) -> Option<Vec<u8>> {
+/// What [`handle_query`] did with a packet.
+pub enum Dns {
+    /// A `.fips` query, answered here — write this reply to the TUN.
+    Answered(Vec<u8>),
+    /// Not ours to answer, sent to a real resolver instead; the reply will be
+    /// delivered later through [`crate::tun_bridge::push_local`]. The caller
+    /// must consume the packet either way.
+    Forwarded,
+    /// Not a DNS query to the sentinel — forward it into the mesh unchanged.
+    NotOurs,
+}
+
+/// Handle a packet the TUN pump read, if it is a UDP DNS query to
+/// `[fd00::53]:53`. `.fips` names are answered from the public key alone;
+/// everything else is relayed to a real resolver (see [`set_upstream`]),
+/// because the sentinel is the tunnel's *only* advertised server — anything we
+/// decline here would simply fail to resolve on the device.
+pub fn handle_query(packet: &[u8]) -> Dns {
+    match parse_query(packet) {
+        Some((src_addr, src_port, dns_query)) => {
+            if is_fips_name(dns_query) {
+                match answer_fips(src_addr, src_port, dns_query) {
+                    Some(reply) => Dns::Answered(reply),
+                    // Malformed enough that even SERVFAIL can't be built.
+                    None => Dns::Forwarded,
+                }
+            } else {
+                forward_upstream(src_addr, src_port, dns_query);
+                Dns::Forwarded
+            }
+        }
+        None => Dns::NotOurs,
+    }
+}
+
+/// Split a TUN packet into `(querier addr, querier port, DNS payload)` if it is
+/// a UDP DNS query addressed to `[fd00::53]:53`. `None` for anything else.
+fn parse_query(packet: &[u8]) -> Option<(&[u8], u16, &[u8])> {
     // IPv6 only, single UDP header (no extension headers — mesh DNS has none).
     if packet.len() < IPV6_HEADER_LEN + UDP_HEADER_LEN {
         return None;
@@ -74,24 +137,16 @@ pub fn try_answer(packet: &[u8]) -> Option<Vec<u8>> {
     if payload_len < UDP_HEADER_LEN || IPV6_HEADER_LEN + payload_len > packet.len() {
         return None;
     }
-
-    let src_addr = &packet[8..24];
-    let src_port = u16::from_be_bytes([packet[40], packet[41]]);
-    let dst_port = u16::from_be_bytes([packet[42], packet[43]]);
-    if dst_port != DNS_PORT {
+    if u16::from_be_bytes([packet[42], packet[43]]) != DNS_PORT {
         return None;
     }
-
+    let src_port = u16::from_be_bytes([packet[40], packet[41]]);
     let dns_query = &packet[IPV6_HEADER_LEN + UDP_HEADER_LEN..IPV6_HEADER_LEN + payload_len];
+    Some((&packet[8..24], src_port, dns_query))
+}
 
-    // Only `.fips` is ours. Everything else gets SERVFAIL, which makes the OS
-    // resolver fail over to the next server it was given (the real one, see the
-    // VpnService) — where NXDOMAIN would be an authoritative "does not exist"
-    // and would end the lookup, breaking all normal DNS on the device.
-    if !is_fips_name(dns_query) {
-        return Some(build_reply(src_addr, src_port, &servfail(dns_query)?));
-    }
-
+/// Answer a `.fips` query from the public key alone, and warm the route.
+fn answer_fips(src_addr: &[u8], src_port: u16, dns_query: &[u8]) -> Option<Vec<u8>> {
     // Empty host map: `<npub>.fips` resolves by pure computation without it.
     let (dns_reply, identity) = handle_dns_packet(dns_query, ANSWER_TTL, &HostMap::new())?;
 
@@ -104,6 +159,69 @@ pub fn try_answer(packet: &[u8]) -> Option<Vec<u8>> {
     }
 
     Some(build_reply(src_addr, src_port, &dns_reply))
+}
+
+/// Real resolvers to relay non-`.fips` queries to, set by the platform from the
+/// underlying network's DNS servers (see the Android `MycoVpnService`).
+static UPSTREAM: OnceLock<Mutex<Vec<SocketAddr>>> = OnceLock::new();
+
+fn upstream() -> &'static Mutex<Vec<SocketAddr>> {
+    UPSTREAM.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Install the upstream resolvers. Replaces any previous set — the platform
+/// re-supplies these whenever the underlying network changes.
+pub fn set_upstream(servers: Vec<SocketAddr>) {
+    *upstream().lock().unwrap() = servers;
+}
+
+/// How long to wait for an upstream resolver before giving up on a query. The
+/// OS resolver has its own, longer timeout, so a lost query costs a retry
+/// rather than a hang.
+const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Relay a non-`.fips` query to a real resolver and inject the reply into the
+/// TUN when it comes back.
+///
+/// Runs on its own thread: the caller is the TUN read loop, and blocking it
+/// would stall every other packet on the device. DNS volume is low enough that
+/// a thread per outstanding query is cheaper than the machinery to avoid it.
+///
+/// The socket is deliberately plain: the tunnel routes no IPv4 and claims IPv6
+/// only when the network underneath has none, so a query to an IPv4 resolver
+/// leaves via the real network without needing to be `protect()`ed.
+fn forward_upstream(src_addr: &[u8], src_port: u16, dns_query: &[u8]) {
+    let servers = upstream().lock().unwrap().clone();
+    if servers.is_empty() {
+        return; // nothing to relay to; the querier will time out and retry
+    }
+    let mut querier = [0u8; 16];
+    querier.copy_from_slice(src_addr);
+    let query = dns_query.to_vec();
+
+    std::thread::spawn(move || {
+        let Ok(sock) = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) else {
+            return;
+        };
+        if sock.set_read_timeout(Some(UPSTREAM_TIMEOUT)).is_err() {
+            return;
+        }
+        for server in servers {
+            if sock.send_to(&query, server).is_err() {
+                continue;
+            }
+            let mut buf = [0u8; 1500];
+            match sock.recv_from(&mut buf) {
+                // Only accept a reply from the server we just asked, and only
+                // if the transaction id matches the query we sent.
+                Ok((n, from)) if from.ip() == server.ip() && n >= 2 && buf[..2] == query[..2] => {
+                    crate::tun_bridge::push_local(build_reply(&querier, src_port, &buf[..n]));
+                    return;
+                }
+                _ => continue,
+            }
+        }
+    });
 }
 
 /// Walk the QNAME in `dns_query` (wire format, labels after the 12-byte
@@ -131,23 +249,6 @@ fn is_fips_name(dns_query: &[u8]) -> bool {
     scan_qname(dns_query)
         .map(|(_, is_fips)| is_fips)
         .unwrap_or(false)
-}
-
-/// A SERVFAIL response to `dns_query`: the header and question echoed back,
-/// answer/authority/additional emptied, QR set and RCODE = 2.
-fn servfail(dns_query: &[u8]) -> Option<Vec<u8>> {
-    let (qname_end, _) = scan_qname(dns_query)?;
-    let question_end = qname_end + 4; // QTYPE + QCLASS
-    if dns_query.len() < question_end {
-        return None;
-    }
-    let mut reply = dns_query[..question_end].to_vec();
-    reply[2] |= 0x80; // QR = response
-    reply[3] = (reply[3] & 0xf0) | 2; // RCODE = SERVFAIL
-    reply[6..8].copy_from_slice(&0u16.to_be_bytes()); // ANCOUNT
-    reply[8..10].copy_from_slice(&0u16.to_be_bytes()); // NSCOUNT
-    reply[10..12].copy_from_slice(&0u16.to_be_bytes()); // ARCOUNT
-    Some(reply)
 }
 
 /// Assemble the response IPv6/UDP packet: swap the query's src/dst and ports,
@@ -211,7 +312,9 @@ mod tests {
         // A valid npub (from fips test vectors would be ideal; use a well-formed one).
         let npub = "npub1mqelkzqp4659fws35h2wvr7z9caka5ml8qddj3ssnwaulwpxdd9sdc3esw";
         let pkt = make_query(&format!("{npub}.fips"), SENTINEL);
-        let reply = try_answer(&pkt).expect("should answer .fips query");
+        let Dns::Answered(reply) = handle_query(&pkt) else {
+            panic!("a .fips query must be answered here, not forwarded");
+        };
 
         // Reply is IPv6/UDP, from :53, back to the querier, addressed to the client.
         assert_eq!(reply[0] >> 4, 6);
@@ -228,19 +331,15 @@ mod tests {
     }
 
     #[test]
-    fn non_fips_name_gets_servfail_not_nxdomain() {
-        // NXDOMAIN here would be authoritative and would end the lookup, so the
-        // device could resolve nothing but `.fips`. SERVFAIL makes the OS
-        // resolver fail over to the real server listed after our sentinel.
+    fn non_fips_name_is_relayed_not_answered() {
+        // We are the tunnel's only resolver, so a non-`.fips` name must be
+        // relayed to a real one rather than answered (or denied) here —
+        // denying it would leave the device able to resolve nothing else.
         let pkt = make_query("google.com", SENTINEL);
-        let reply = try_answer(&pkt).expect("should answer non-.fips queries too");
-
-        let dns = &reply[IPV6_HEADER_LEN + UDP_HEADER_LEN..];
-        assert_eq!(dns[2] & 0x80, 0x80, "QR must be set");
-        assert_eq!(dns[3] & 0x0f, 2, "RCODE must be SERVFAIL");
-        let parsed = simple_dns::Packet::parse(dns).unwrap();
-        assert_eq!(parsed.questions.len(), 1, "question is echoed back");
-        assert_eq!(parsed.answers.len(), 0);
+        assert!(
+            matches!(handle_query(&pkt), Dns::Forwarded),
+            "non-.fips must be relayed upstream"
+        );
     }
 
     #[test]
@@ -249,7 +348,7 @@ mod tests {
         // Same query but to a non-sentinel address → not ours, forward to mesh.
         let other = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9];
         let pkt = make_query(&format!("{npub}.fips"), other);
-        assert!(try_answer(&pkt).is_none());
+        assert!(matches!(handle_query(&pkt), Dns::NotOurs));
     }
 
     #[test]
@@ -257,6 +356,6 @@ mod tests {
         let mut pkt = make_query("whatever.fips", SENTINEL);
         // Change dst port away from 53.
         pkt[42..44].copy_from_slice(&4870u16.to_be_bytes());
-        assert!(try_answer(&pkt).is_none());
+        assert!(matches!(handle_query(&pkt), Dns::NotOurs));
     }
 }

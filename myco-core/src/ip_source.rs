@@ -109,21 +109,35 @@ impl IpPeerSource {
 }
 
 /// A [`PeerSource`] that pulls from a specific **holder's** embedded relay +
-/// Blossom over the FIPS mesh, addressed by the holder's npub: the ULA
-/// `fd00:: = fd + node_addr[0..15]` (`PeerIdentity::from_npub`), reached at
-/// `ws://[fd00::holder]:4870` / `http://[fd00::holder]:24243`. Requires the
-/// app-owned TUN to be up so the IPv6 socket routes over the mesh. A longer
-/// timeout than the IP source absorbs BLE latency + first-contact session setup.
+/// A peer's mesh relay, addressed by **name**: `ws://<npub>.fips:4870`.
+///
+/// Always name, never the `fd00::` literal the name resolves to. Resolving it
+/// is what teaches the node the address→pubkey mapping, and without that the
+/// node has no pubkey to open a session with and the dial fails as unroutable
+/// for anyone who is not already a direct neighbour. The literal happens to
+/// work for adjacent peers, which is exactly what made this hard to spot.
+pub(crate) fn mesh_relay_url(npub: &str) -> String {
+    format!("ws://{npub}.fips:4870")
+}
+
+/// A peer's mesh Blossom endpoint, by name. See [`mesh_relay_url`].
+pub(crate) fn mesh_blossom_url(npub: &str) -> String {
+    format!("http://{npub}.fips:24243")
+}
+
+/// Blossom over the FIPS mesh, addressed by the holder's npub — see
+/// [`mesh_relay_url`]. Requires the app-owned TUN to be up so the socket routes
+/// over the mesh. A longer timeout than the IP source absorbs BLE latency +
+/// first-contact session setup.
 pub fn mesh_source_for(
     pool: std::sync::Arc<crate::peer_relay::PeerRelayPool>,
     holder_npub: &str,
 ) -> anyhow::Result<IpPeerSource> {
-    let peer = fips::PeerIdentity::from_npub(holder_npub)
+    fips::PeerIdentity::from_npub(holder_npub)
         .map_err(|e| anyhow::anyhow!("invalid holder npub {holder_npub}: {e}"))?;
-    let ip = peer.address().to_ipv6();
     Ok(IpPeerSource::new(
-        vec![format!("ws://[{ip}]:4870")],
-        vec![format!("http://[{ip}]:24243")],
+        vec![mesh_relay_url(holder_npub)],
+        vec![mesh_blossom_url(holder_npub)],
     )
     .with_timeout(Duration::from_secs(20))
     .ignoring_manifest_servers()
@@ -145,18 +159,17 @@ pub async fn speedtest_peer(
     bytes: usize,
     timeout: Duration,
 ) -> anyhow::Result<(f64, f64)> {
-    // Address the peer by its `<npub>.fips` hostname, but resolve it ourselves: the
-    // Android system resolver has no `.fips` entries (that resolver is the FIPS
-    // gateway's, not wired into reqwest), so a plain request fails DNS. Map the
-    // hostname to the peer's deterministic mesh ULA (`fd00:: = fd + node_addr`) and
-    // hand it to reqwest via `.resolve` — it then connects over the app-owned TUN
-    // while keeping the `<npub>.fips` Host the peer expects.
-    let peer = fips::PeerIdentity::from_npub(npub)
+    // Addressed by name, resolved by the system resolver like any other host: the
+    // tunnel advertises the in-mesh sentinel as its DNS server, so `<npub>.fips`
+    // resolves for every process on the device, this one included. (It used to be
+    // mapped to the peer's `fd00::` literal by hand via `.resolve`, from before
+    // that resolver existed. Doing so skipped resolution, which is also what
+    // registers the peer's identity with the node — so the literal only ever
+    // worked for a peer the node already knew: a direct neighbour.)
+    fips::PeerIdentity::from_npub(npub)
         .map_err(|e| anyhow::anyhow!("invalid peer npub {npub}: {e}"))?;
     let host = format!("{npub}.fips");
-    let socket = std::net::SocketAddr::new(std::net::IpAddr::V6(peer.address().to_ipv6()), 24243);
     let client = reqwest::Client::builder()
-        .resolve(&host, socket)
         // A short connect timeout so an unroutable/unreachable peer fails fast
         // instead of burning the whole `timeout` budget; the total still bounds the
         // (potentially slow over BLE) transfer.
