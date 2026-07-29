@@ -1,108 +1,104 @@
-# Myco v0.3.0
+# Myco v0.4.0
 
-**Released**: 2026-07-25
+**Released**: 2026-07-29
 
-v0.3.0 is about **staying up and staying honest**: the mesh survives the crashes,
-stalls, and silent failures that used to bite in the field, and the app now tells
-you plainly when a transport is enabled but can't actually run. It also brings the
-mesh on/off control and live reachability into the top status pill, and adds an
-experimental **Wi-Fi AP lane** for connecting to LAN fips nodes over Wi-Fi.
+v0.4.0 is about **reaching the mesh by name**. A node's npub is now an address any
+app on the phone can use: type `http://<npub>.fips/` into an ordinary browser and
+it loads, over Bluetooth or Wi-Fi, with no internet involved. Building on that,
+an experimental **exit-node mode** lets a phone with no connection of its own
+browse the public web through a mesh node that egresses for it.
 
-It upgrades from v0.2.0 in place with no data loss; your identity (nsec), Circle,
-and installed apps are preserved. Unlike v0.2.0, this release changes no ports or
-wire formats — a v0.3.0 phone and a v0.2.0 phone still sync over the mesh — but
-update every device in a Circle to get the reliability fixes on both ends.
+It also fixes the Wi-Fi AP lane, which could fail to connect on any phone that
+also had mobile data — the node saw every handshake arrive while the phone saw
+nothing come back.
+
+It upgrades from v0.3.0 in place with no data loss; your identity (nsec), Circle,
+and installed apps are preserved. No ports or wire formats changed, so a v0.4.0
+phone and a v0.3.0 phone still sync over the mesh.
 
 ## At a glance
 
-- **No more GrapheneOS / secondary-user crash** — a Wi-Fi Aware permission refusal
-  no longer kills the whole app; the lane shuts down gracefully and warns instead.
-- **Transport warnings** — Settings shows a red dot and a tappable warning when
-  mesh, Bluetooth, or Wi-Fi Aware is switched on but can't run (VPN slot taken,
-  Bluetooth off, Wi-Fi off).
-- **Mesh control in the status pill** — a mesh on/off slider, a live
-  `reachable/total` Circle count, and the current peer count, all top-right.
-- **Battery drain cut** — background BLE duty-cycles down, GATT priority relaxes
-  when idle, and the once-a-second poll stops when the app isn't visible.
-- **Relay links self-heal after a stuck rekey** — a wedged mesh session no longer
-  kills a Circle link permanently; dials time out and back off, then rebuild.
-- **Wi-Fi AP lane (developer preview)** — auto-discover and connect to fips nodes
-  on a joined Wi-Fi network over mDNS + UDP. Off unless the network carries a node.
+- **`<npub>.fips` works everywhere on the device** — any browser or app can open
+  a mesh node by name, not just Myco's own gateway.
+- **Exit-node mode (developer preview)** — browse the public internet through a
+  mesh peer, addressed by its npub. For a phone with no internet at all.
+- **Wi-Fi AP lane actually connects** — no longer defeated by having mobile data
+  on at the same time, and no longer stuck dialling an unreachable address.
 
 ## What's new
 
-### The app stops lying about transports
+### Mesh nodes have names now
 
-When a transport was enabled but physically couldn't run, Myco used to look fine
-while quietly doing nothing. v0.3.0 surfaces it: a **red dot on the Settings tab**
-and a tappable warning row for each broken transport — mesh enabled without the
-VPN slot (another VPN app took it), Bluetooth transport on while the phone's
-Bluetooth is off, or Wi-Fi Aware on while Wi-Fi is off. Each warning jumps to the
-fix. Declining the VPN consent dialog now turns the mesh preference **off** instead
-of pretending the mesh is up.
+Every node's npub doubles as a hostname: `<npub>.fips`. Myco's tunnel advertises
+an in-mesh resolver, and answers those names by deriving the address from the
+public key — pure computation, no lookup, no upstream server, works fully offline.
+Because the answer comes from the tunnel rather than from Myco, **every app on the
+phone** gets it. Open `http://<npub>.fips/` in your browser and you are talking to
+that node over the mesh.
 
-### Mesh control in the status pill
+Names that are not `.fips` are passed to your normal resolvers untouched, so this
+does not take over DNS on the device.
 
-The top-right status pill grows a **mesh on/off slider** and now shows, at a
-glance, how many Circle members are reachable right now (`reachable/total`)
-alongside the live peer count — so you can see and toggle mesh state without
-diving into Settings.
+### Exit-node mode (developer preview)
 
-### Wi-Fi AP lane (developer preview)
+A phone with no internet — only a Bluetooth or Wi-Fi link to the mesh — can now
+browse the web, by routing through an HTTP proxy on a mesh node that does have a
+connection. Set the exit under **Settings → Developer → Exit node**, addressed by
+npub:
 
-When the phone joins a Wi-Fi network that carries a FIPS node — such as a router
-broadcasting the open `!FIPS` access SSID — Myco discovers the node via its mDNS
-advert (`_fips._udp`) and connects to it over UDP automatically. It requires LAN
-discovery/rendezvous enabled on the router's fips node. The Developer screen gains
-a **Wi-Fi AP** panel (Wi-Fi/SSID state, mDNS browse state, discovered nodes), and
-the Wi-Fi Aware panel now lists live data paths. See
-[docs/design/ap-lane.md](docs/design/ap-lane.md). Developer preview — treat it as
-experimental.
+```
+<npub>.fips:8080
+```
 
-## Reliability: the mesh holds under stress
+The exit does the DNS and the egress, so the phone never needs to resolve a public
+name or hold a route to one. It also need not be a direct peer — FIPS forwards
+multi-hop to it. `.fips` addresses bypass the exit and stay on the mesh.
 
-- **No crash on GrapheneOS / secondary users.** The system can refuse Wi-Fi Aware
-  calls for lack of the nearby-devices permission *even after* the app's own check
-  passed; the resulting `SecurityException` on the Aware callback thread used to
-  kill the whole app. The lane now shuts down gracefully and surfaces a warning.
-- **Mesh starts even right after granting VPN access.** Enabling the mesh
-  immediately after granting VPN (e.g. reclaiming the slot from another app) no
-  longer silently fails when the mesh address isn't ready yet — the VPN start
-  retries until the node has published its address.
-- **Relay links self-heal after a stuck rekey.** A mesh session wedged mid-rekey
-  used to kill a Circle relay link permanently. Peer relay dials now time out at
-  10s and back off per peer (8s up to 3min) after consecutive failures, reclaim the
-  stale session, and rebuild a fresh one on the next dial.
-- **Bluetooth toggle no longer knocks out Wi-Fi Aware.** Turning the Bluetooth
-  toggle off used to stop the embedded mesh node out from under the Aware lane. The
-  node's lifecycle now follows the mesh **Enable** switch; radio toggles only gate
-  their own radios.
+This covers **proxy-aware apps** — browsers. Other apps and QUIC/UDP traffic keep
+using the phone's normal connection. The runbook, including how to run the exit
+daemon, is in [docs/how-to/exit-node-demo.md](docs/how-to/exit-node-demo.md).
 
-## Battery
+## Reliability: the Wi-Fi AP lane connects
 
-Background drain is cut substantially: BLE discovery duty-cycles down (low-power
-scan with batched delivery) while the app isn't visible, the per-link GATT
-connection priority drops to balanced after 30s without bulk traffic, and the
-once-a-second state poll no longer runs backgrounded (and no longer walks the blob
-cache directory on every read).
+Two separate faults, either of which was enough to stop it:
 
-## Notable bug fixes
+The mesh socket **was not bound to the Wi-Fi network**. A local-only access point
+never passes the system's internet-validation check, so with mobile data also up
+the OS steered the socket to the validated network and quietly discarded the AP's
+replies. The symptom was maddening from either end: the node's counters showed
+every handshake arriving, while the phone re-sent them forever. The socket is now
+pinned to the network the peer is actually on.
 
-- **App crash on GrapheneOS / non-admin users** — Wi-Fi Aware `SecurityException`;
-  see Reliability above.
-- **Mesh silently down after VPN grant** — start now retries until the address is
-  ready; declining consent turns the preference off.
-- **Permanent relay stall after a stuck rekey** — dials now time out and back off.
-- **Developer panel reshuffle** — peer/advert rows keep a stable alphabetical
-  order instead of reordering on every refresh.
+Myco also **dialled the wrong address**. A fips node advertises one address per
+interface, and only the interface facing you answers — nothing in the advert says
+which that is. Myco took the first and could sit retrying an unreachable one
+indefinitely. It now keeps every advertised address and works through them until
+the peer connects, then stays on the one that worked.
+
+## Known issues
+
+- **Peering can stall after a Wi-Fi reconnect** until the node's previous peer
+  entry expires, about a minute. Phones that rotate their Wi-Fi MAC on every
+  connection — GrapheneOS does by default — hit this most, because the phone's
+  mesh-facing address changes each time and the node keeps answering the old one.
+  Turning the mesh off, waiting for the peer to disappear on the node, and turning
+  it back on clears it. Tracked upstream as
+  [fips#130](https://github.com/jmcorgan/fips/issues/130).
+- **Exit mode is browsers-only.** `setHttpProxy` is the only system-wide proxy
+  hook available to a VPN app, so non-proxy-aware apps and UDP/QUIC traffic are
+  unaffected by it. Capturing everything needs a userspace network stack, which
+  is the next step.
+- On macOS, an exit node's proxy will not accept mesh connections until the
+  binary is allowed through the Application Firewall — inbound TCP is dropped
+  silently while ICMP still works, which makes it look like a routing problem.
 
 ## Getting it
 
-- **Android**: install the v0.3.0 APK from the
-  [release page](https://github.com/Origami74/myco/releases/tag/v0.3.0),
+- **Android**: install the v0.4.0 APK from the
+  [release page](https://github.com/Origami74/myco/releases/tag/v0.4.0),
   or via [zapstore](https://zapstore.dev/apps/app.myco).
 - **From source**: `cd android && ./gradlew assembleDebug` from a checkout of
-  the v0.3.0 tag. See [CONTRIBUTING.md](CONTRIBUTING.md) for build prerequisites.
+  the v0.4.0 tag. See [CONTRIBUTING.md](CONTRIBUTING.md) for build prerequisites.
 
 The full per-release change history lives in [CHANGELOG.md](CHANGELOG.md).
 Issues and discussion at [github.com/Origami74/myco](https://github.com/Origami74/myco).
