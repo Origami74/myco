@@ -25,6 +25,13 @@ mod state;
 // installed only on Android, so its fns read as dead on the host build.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod tun_bridge;
+// System-wide `.fips` DNS interception; driven by the TUN pump on Android.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod dns_intercept;
+// Surfaces the UDP transport's raw fd so Android can pin it to a specific
+// `Network` (Wi-Fi Aware / the AP lane). Android-only consumer.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod udp_fd_bridge;
 
 #[cfg(target_os = "android")]
 mod jni_abi;

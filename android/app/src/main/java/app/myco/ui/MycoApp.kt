@@ -105,6 +105,8 @@ fun MycoApp(
     onOfflineOnlyToggle: (Boolean) -> Unit,
     initialDeveloperMode: Boolean,
     onDeveloperModeToggle: (Boolean) -> Unit,
+    initialExitProxy: String = "",
+    onExitProxyChange: (String) -> Unit = {},
 ) {
     var state by remember { mutableStateOf(client.state()) }
     // Mesh toggle is hoisted here so it survives tab switches.
@@ -237,6 +239,8 @@ fun MycoApp(
                         developerMode = developerMode,
                         onDeveloperModeToggle = { on -> developerMode = on; onDeveloperModeToggle(on) },
                         bleExhausted = bleExhausted,
+                        initialExitProxy = initialExitProxy,
+                        onExitProxyChange = onExitProxyChange,
                     )
                 }
                 composable("dev") { DevScreen(state, client) }

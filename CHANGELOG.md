@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-29
+
+### Added
+
+- **`<npub>.fips` addresses now resolve for every app on the device**, not just
+  inside Myco. The mesh tunnel advertises an in-mesh resolver that answers
+  `<npub>.fips` from the public key alone — no network, no lookup — so any
+  browser or app can open `http://<npub>.fips/` and reach that node over the
+  mesh. Previously only Myco's own gateway could address mesh content by name.
+- An **exit-node mode** (developer preview): point Myco at an HTTP proxy running
+  on a mesh node and every proxy-aware app's web traffic egresses through it, so
+  a phone with no internet of its own can browse the web over the mesh. The exit
+  is named by npub (`<npub>.fips:8080`), so it does not have to be a direct peer
+  — FIPS forwards multi-hop. Set it under Settings → Developer → Exit node; see
+  [docs/how-to/exit-node-demo.md](docs/how-to/exit-node-demo.md). `.fips` names
+  bypass the proxy and stay on the mesh.
+
+### Fixed
+
+- The **Wi-Fi AP lane now connects reliably** on a phone that also has mobile
+  data. A local-only AP never passes internet validation, so the OS steered the
+  mesh socket to the validated network and the peer's replies were discarded
+  before reaching us — the node received every handshake while the phone saw
+  nothing. The socket is now bound to the Wi-Fi network explicitly.
+- The AP lane also **dials the right address**. A fips node advertises one
+  address per interface and only the one facing us answers; Myco took the first
+  and could sit retrying an unreachable one. It now keeps every advertised
+  address and rotates through them until the peer connects.
+
+### Known issues
+
+- Peering over the AP lane can stall after the phone's Wi-Fi reconnects, until
+  the node's old peer entry expires (roughly a minute). Phones that rotate their
+  Wi-Fi MAC per connection — GrapheneOS by default — hit this most often, since
+  the phone's mesh-facing address changes each time. Tracked upstream at
+  [fips#130](https://github.com/jmcorgan/fips/issues/130).
+- Exit-node mode only covers proxy-aware apps (browsers). Other apps, and
+  QUIC/UDP traffic, continue to use the phone's normal connection.
+
 ## [0.3.0] - 2026-07-25
 
 ### Added

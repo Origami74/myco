@@ -62,6 +62,14 @@ internal object NativeCore {
     /** Aware data path to `npub` lost: close the pooled UDP session. */
     external fun awarePeerLost(npub: String)
 
+    /** Raw fd of the node's UDP transport socket, once it has opened. Blocks
+     *  up to `timeoutMs`; returns -1 on timeout. Sent once per node lifetime —
+     *  poll this once at startup, then bind it to whichever local-only
+     *  network (Wi-Fi Aware NDP, the `!FIPS` AP) is carrying a
+     *  platform-pushed peer via `Network.bindSocket`, so handshake replies
+     *  aren't lost to a competing validated default network (e.g. cellular). */
+    external fun nextUdpTransportFd(timeoutMs: Int): Int
+
     // --- TUN packet bridge (the app-owned TUN; the VpnService pumps these) ---
     /** Kotlin → Rust: route an IPv6 packet read from the TUN fd into the mesh. */
     external fun tunSendPacket(packet: ByteArray, len: Int): Boolean

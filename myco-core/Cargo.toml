@@ -30,6 +30,8 @@ futures-util = { workspace = true }
 [dev-dependencies]
 nsite-deck = { path = "../nsite-deck", features = ["testing"] }
 tokio-tungstenite = { workspace = true }
+# Only for dns_intercept tests, to craft/parse DNS packets (matches fips's pin).
+simple-dns = "0.11.2"
 
 # The JNI surface only exists on Android. Host (macOS/Linux) builds skip it and
 # drive `AppRuntime` directly (see tests).

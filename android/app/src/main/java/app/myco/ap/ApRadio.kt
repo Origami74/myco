@@ -12,10 +12,12 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.annotation.RequiresApi
 import app.myco.core.MycoCore
 import app.myco.core.NativeCore
+import java.io.FileDescriptor
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -51,6 +53,14 @@ import kotlinx.coroutines.flow.asStateFlow
  * address would find no compatible socket). `fd00::/8` addresses are skipped:
  * the VpnService routes that prefix into the mesh TUN, so dialing one would
  * blackhole the handshake.
+ *
+ * The `!FIPS` AP never passes internet validation (it's local-only), so on a
+ * phone with active mobile data the OS can route the handshake's replies to
+ * a competing validated default network instead of back over this Wi-Fi —
+ * the send succeeds locally but nothing ever comes back. [`bindUdpSocket`]
+ * pins the core's UDP transport socket (fd surfaced via
+ * [NativeCore.nextUdpTransportFd]) to this specific [Network] with
+ * `Network.bindSocket` so replies aren't lost that way.
  */
 class ApRadio private constructor(private val context: Context) {
     private val connectivity =
@@ -71,11 +81,25 @@ class ApRadio private constructor(private val context: Context) {
     /** npub → last pushed addr. */
     private val pushed = HashMap<String, String>()
 
+    /** npub → every dialable address the advert carried, in preference order,
+     *  and which one we are currently trying. A fips node advertises one
+     *  address per interface, and only the interface facing us is actually
+     *  on-link — the others fail neighbour discovery — so the right one can
+     *  only be found by trying them ([rotate]). */
+    private val candidates = HashMap<String, List<String>>()
+    private val candidateIdx = HashMap<String, Int>()
+
     private val resolveQueue = ArrayDeque<NsdServiceInfo>()
     private var resolving = false
     private var browsing = false
     private var browseListener: NsdManager.DiscoveryListener? = null
     private var ssid: String? = null
+
+    /** The core's UDP transport socket fd, once learned (see [bindUdpSocket]).
+     *  Confined to [handler]; re-learned each time the node (re)starts.
+     *  [udpPfd] owns the dup and is kept alive so [udpFd] stays valid. */
+    private var udpPfd: ParcelFileDescriptor? = null
+    private var udpFd: FileDescriptor? = null
 
     /** Own npub, to skip a self-advert (defensive — the app never publishes
      *  mDNS, only browses). Resolved lazily; the core is up by first resolve. */
@@ -91,6 +115,7 @@ class ApRadio private constructor(private val context: Context) {
 
         override fun onAvailable(network: Network) {
             if (wifiNets.add(network) && wifiNets.size == 1) startBrowse()
+            bindUdpSocket(network)
             publishWifi()
         }
 
@@ -122,6 +147,44 @@ class ApRadio private constructor(private val context: Context) {
         }
         connectivity.registerNetworkCallback(request, callback, handler)
         Log.i(TAG, "AP lane armed (browsing $SERVICE_TYPE while Wi-Fi is up)")
+
+        // Learn the core's UDP transport fd as soon as the node opens it (only
+        // once mesh is toggled on — see runtime.rs's start_node). A dedicated
+        // thread since the native call blocks; loops forever so a later
+        // mesh off→on cycle (a fresh transport, fresh fd) is picked up too.
+        Thread({
+            while (true) {
+                val fd = NativeCore.nextUdpTransportFd(FD_POLL_TIMEOUT_MS)
+                if (fd >= 0) handler.post { onUdpFd(fd) }
+            }
+        }, "myco-ap-udpfd").apply { isDaemon = true; start() }
+    }
+
+    /** A fresh UDP transport fd arrived (node just started, or restarted).
+     *  `fromFd` dups it, so fips keeps full ownership of the original — the
+     *  dup refers to the same socket, and `bindSocket`'s mark applies to the
+     *  socket, not the fd. The [ParcelFileDescriptor] is held (not closed) for
+     *  as long as we may need to re-bind on a network change. */
+    private fun onUdpFd(fd: Int) {
+        val pfd = runCatching { ParcelFileDescriptor.fromFd(fd) }.getOrElse {
+            Log.w(TAG, "could not dup UDP transport fd $fd", it)
+            return
+        }
+        udpPfd?.let { old -> runCatching { old.close() } }
+        udpPfd = pfd
+        udpFd = pfd.fileDescriptor
+        wifiNets.firstOrNull()?.let { bindUdpSocket(it) }
+    }
+
+    /** Pin the core's UDP transport socket to `network` via `Network.bindSocket`
+     *  — see the class doc's "why" — so replies to a peer on this ap-lane
+     *  network aren't lost to a competing validated default network. A no-op
+     *  until [onUdpFd] has learned the fd (mesh not started yet). */
+    private fun bindUdpSocket(network: Network) {
+        val fd = udpFd ?: return // node not started yet; onUdpFd binds when it is
+        runCatching { network.bindSocket(fd) }
+            .onSuccess { Log.i(TAG, "bound core UDP socket to $network") }
+            .onFailure { Log.w(TAG, "bindSocket to Wi-Fi network failed", it) }
     }
 
     // --- mDNS browse ---
@@ -181,19 +244,28 @@ class ApRadio private constructor(private val context: Context) {
         // UDP sessions instead of re-using dead sockets.
         for (npub in pushed.keys) NativeCore.awarePeerLost(npub)
         pushed.clear()
+        candidates.clear()
+        candidateIdx.clear()
         npubByService.clear()
         publishNodes()
         publishWifi()
     }
 
-    /** Periodic re-push of every resolved node while the browse is live: NSD
-     *  fires onServiceFound only once per appearance, so a dropped UDP session
-     *  would otherwise never get a fresh dial hint. The core's alternate-path
-     *  gates make a redundant push a no-op for a healthy peer. */
+    /** Periodic tick while the browse is live. For a connected peer it re-pushes
+     *  the working address: NSD fires onServiceFound only once per appearance,
+     *  so a dropped UDP session would otherwise never get a fresh dial hint (the
+     *  core's alternate-path gates make a redundant push a no-op for a healthy
+     *  peer). For an unconnected one it advances to the next candidate address. */
     private val repush = object : Runnable {
         override fun run() {
             if (browseListener == null) return
-            for ((npub, addr) in pushed) NativeCore.awarePeerFound(npub, addr)
+            for (npub in candidates.keys.toList()) {
+                if (connected(npub)) {
+                    pushed[npub]?.let { NativeCore.awarePeerFound(npub, it) }
+                } else {
+                    rotate(npub)
+                }
+            }
             handler.postDelayed(this, REPUSH_MS)
         }
     }
@@ -235,21 +307,47 @@ class ApRadio private constructor(private val context: Context) {
             ?.takeIf { it.startsWith("npub1") }
             ?: run { Log.w(TAG, "advert ${info.serviceName} has no npub TXT"); return }
         if (npub == ownNpub) return
-        val addr = pickAddr(info) ?: run {
+        val addrs = pickAddrs(info)
+        if (addrs.isEmpty()) {
             Log.w(TAG, "no dialable address for ${short(npub)} (${info.serviceName})")
             return
         }
         npubByService[info.serviceName] = npub
-        if (pushed[npub] != addr) {
-            Log.i(TAG, "fips node ${short(npub)} at $addr — pushing to core")
-            NativeCore.awarePeerFound(npub, addr)
-            pushed[npub] = addr
-        }
+        candidates[npub] = addrs
+        candidateIdx.putIfAbsent(npub, 0)
+        push(npub)
         publishNodes()
+    }
+
+    /** Push this peer's current candidate address to the core. */
+    private fun push(npub: String) {
+        val addrs = candidates[npub] ?: return
+        val addr = addrs[(candidateIdx[npub] ?: 0) % addrs.size]
+        if (pushed[npub] == addr) return
+        Log.i(TAG, "fips node ${short(npub)} at $addr — pushing to core")
+        NativeCore.awarePeerFound(npub, addr)
+        pushed[npub] = addr
+    }
+
+    /** True once the core reports an authenticated session with `npub`. */
+    private fun connected(npub: String): Boolean = runCatching {
+        MycoCore.client(context).state().blePeers.any { it.npub == npub && it.connected }
+    }.getOrDefault(false)
+
+    /** Advance an unconnected peer to its next candidate address. Only the
+     *  interface facing us answers neighbour discovery, and the advert doesn't
+     *  say which that is, so this cycles until one handshakes. */
+    private fun rotate(npub: String) {
+        val addrs = candidates[npub] ?: return
+        if (addrs.size < 2) return
+        candidateIdx[npub] = ((candidateIdx[npub] ?: 0) + 1) % addrs.size
+        push(npub)
     }
 
     private fun serviceLost(serviceName: String) {
         val npub = npubByService.remove(serviceName) ?: return
+        candidates.remove(npub)
+        candidateIdx.remove(npub)
         if (pushed.remove(npub) != null) {
             Log.i(TAG, "fips node ${short(npub)} gone from LAN")
             NativeCore.awarePeerLost(npub)
@@ -258,11 +356,12 @@ class ApRadio private constructor(private val context: Context) {
     }
 
     /**
-     * Pick the address to dial, per the preference order in the class doc.
-     * Formats match what the core's address parser accepts: numeric-scope
-     * link-local (`[fe80::x%3]:4871`), plain `[v6]:port`, v4-mapped v6.
+     * Every dialable address the advert carries, in the preference order given
+     * in the class doc. Formats match what the core's address parser accepts:
+     * numeric-scope link-local (`[fe80::x%3]:4871`), plain `[v6]:port`,
+     * v4-mapped v6.
      */
-    private fun pickAddr(info: NsdServiceInfo): String? {
+    private fun pickAddrs(info: NsdServiceInfo): List<String> {
         val hosts: List<InetAddress> =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 info.hostAddresses
@@ -270,16 +369,17 @@ class ApRadio private constructor(private val context: Context) {
                 @Suppress("DEPRECATION")
                 listOfNotNull(info.host)
             }
-        val port = info.port.takeIf { it > 0 } ?: return null
+        val port = info.port.takeIf { it > 0 } ?: return emptyList()
         val v6 = hosts.filterIsInstance<Inet6Address>()
-        v6.firstOrNull { it.isLinkLocalAddress && it.scopeId != 0 }
-            ?.let { return "[${bare(it)}%${it.scopeId}]:$port" }
-        // fd00::/8 is routed into the mesh TUN — dialing it would blackhole.
-        v6.firstOrNull { !it.isLinkLocalAddress && it.address[0] != 0xfd.toByte() }
-            ?.let { return "[${bare(it)}]:$port" }
-        hosts.filterIsInstance<Inet4Address>().firstOrNull()
-            ?.let { return "[::ffff:${it.hostAddress}]:$port" }
-        return null
+        return buildList {
+            v6.filter { it.isLinkLocalAddress && it.scopeId != 0 }
+                .forEach { add("[${bare(it)}%${it.scopeId}]:$port") }
+            // fd00::/8 is routed into the mesh TUN — dialing it would blackhole.
+            v6.filter { !it.isLinkLocalAddress && it.address[0] != 0xfd.toByte() }
+                .forEach { add("[${bare(it)}]:$port") }
+            hosts.filterIsInstance<Inet4Address>()
+                .forEach { add("[::ffff:${it.hostAddress}]:$port") }
+        }
     }
 
     private fun bare(a: InetAddress): String = a.hostAddress?.substringBefore('%') ?: ""
@@ -328,7 +428,14 @@ class ApRadio private constructor(private val context: Context) {
         /** TXT key carrying the advertising node's npub. */
         private const val TXT_NPUB = "npub"
 
-        private const val REPUSH_MS = 60_000L
+        /** Also the candidate-rotation interval, so an unconnected peer works
+         *  through its addresses in reasonable time (see [rotate]). */
+        private const val REPUSH_MS = 10_000L
+
+        /** Blocking wait per poll for the core's UDP transport fd. Short so a
+         *  mesh off→on cycle's fresh fd is picked up promptly, and so the
+         *  native side's install path never stalls long behind this call. */
+        private const val FD_POLL_TIMEOUT_MS = 1_000
 
         private val _wifi = MutableStateFlow(WifiApView())
         private val _nodes = MutableStateFlow<List<LanFipsNode>>(emptyList())
