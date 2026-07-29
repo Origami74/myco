@@ -523,7 +523,7 @@ impl Content {
                 }
             }
         }
-        for npub in self.connected_circle_npubs() {
+        for npub in self.circle_npubs() {
             if tried.insert(npub.clone()) {
                 match crate::ip_source::mesh_source_for(self.peer_relays.clone(), &npub) {
                     Ok(mesh) => sources.push(Arc::new(mesh)),
@@ -840,8 +840,10 @@ impl Content {
         self.circle.lock().unwrap().clone()
     }
 
-    /// Record which mesh peers are connected right now (called by the runtime from
-    /// the node's peer snapshot), so `open_site` only tries reachable Circle members.
+    /// Record which mesh peers are *directly* connected right now (called by the
+    /// runtime from the node's peer snapshot). This is only an edge detector for
+    /// dial backoff — nothing gates on it, because whether a Circle member is a
+    /// direct neighbour or twenty hops away is FIPS's business, not ours.
     pub fn set_connected_peers(&self, npubs: Vec<String>) {
         let mut cur = self.connected_peers.lock().unwrap();
         // A peer newly present in the mesh view is a reconnect edge: forget its
@@ -854,28 +856,12 @@ impl Content {
         *cur = npubs;
     }
 
-    /// Circle members that are **direct** mesh neighbours right now — the pull
-    /// sources to try (besides an explicit holder) without risking an offline
-    /// timeout, e.g. `open_site` content pulls.
-    pub fn connected_circle_npubs(&self) -> Vec<String> {
-        let connected = self.connected_peers.lock().unwrap();
-        self.circle
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| connected.iter().any(|n| n == &c.npub))
-            .map(|c| c.npub.clone())
-            .collect()
-    }
-
-    /// **Every** Circle member's npub, regardless of whether they're a *direct*
-    /// mesh neighbour right now. Chat fan-out targets this: a Circle peer you've
-    /// walked away from is still reachable multi-hop over the mesh, and messages
-    /// must keep flowing to them — the routed `ws://[fd00::peer]:4870` dial reaches
-    /// them, and a truly-offline member's connect just fails fast and is dropped.
-    /// (Contrast [`connected_circle_npubs`](Self::connected_circle_npubs), the
-    /// direct-neighbour subset used where an offline dial's timeout must be
-    /// avoided.) See `docs/design/event-gossip.md`.
+    /// Every Circle member's npub. Hop count is deliberately not a factor: FIPS
+    /// routes to a mesh address whether the peer is adjacent or many hops away,
+    /// so a routed `ws://[fd00::peer]:4870` dial reaches any of them. A member
+    /// who is genuinely offline costs one bounded dial (the callers time out)
+    /// and is then held off by the per-peer backoff in [`crate::peer_relay`].
+    /// See `docs/design/event-gossip.md`.
     pub fn circle_npubs(&self) -> Vec<String> {
         self.circle
             .lock()
@@ -920,14 +906,13 @@ impl Content {
             .collect()
     }
 
-    /// Connected Circle members as `(npub, name)` — discovery targets.
-    fn connected_circle_contacts(&self) -> Vec<(String, String)> {
-        let connected = self.connected_peers.lock().unwrap();
+    /// Circle members as `(npub, name)` — discovery targets. Like
+    /// [`circle_npubs`](Self::circle_npubs), every member regardless of hop count.
+    fn circle_contacts(&self) -> Vec<(String, String)> {
         self.circle
             .lock()
             .unwrap()
             .iter()
-            .filter(|c| connected.iter().any(|n| n == &c.npub))
             .map(|c| (c.npub.clone(), c.name.clone()))
             .collect()
     }
@@ -1219,22 +1204,19 @@ impl Content {
         // any-matches across them), so a pull is a single round-trip, not one socket
         // per filter.
         let pool = &self.peer_relays;
-        let queries = self
-            .connected_circle_npubs()
-            .into_iter()
-            .filter_map(|npub| {
-                let peer = fips::PeerIdentity::from_npub(&npub).ok()?;
-                let ip = std::net::IpAddr::V6(peer.address().to_ipv6());
-                if exclude == Some(ip) {
-                    return None;
-                }
-                let url = format!("ws://[{}]:4870", ip);
-                let filters = filters.clone();
-                Some(async move {
-                    pool.request(&npub, &url, filters, std::time::Duration::from_secs(8))
-                        .await
-                })
-            });
+        let queries = self.circle_npubs().into_iter().filter_map(|npub| {
+            let peer = fips::PeerIdentity::from_npub(&npub).ok()?;
+            let ip = std::net::IpAddr::V6(peer.address().to_ipv6());
+            if exclude == Some(ip) {
+                return None;
+            }
+            let url = format!("ws://[{}]:4870", ip);
+            let filters = filters.clone();
+            Some(async move {
+                pool.request(&npub, &url, filters, std::time::Duration::from_secs(8))
+                    .await
+            })
+        });
 
         join_all(queries)
             .await
@@ -1251,7 +1233,7 @@ impl Content {
     /// parallel, then rebuild the discovered list. Spawn-not-block; the UI polls
     /// `discovered`. Opening a result pulls from that peer (its npub is the holder).
     pub async fn discover_from_circle(self: Arc<Self>) {
-        let members = self.connected_circle_contacts();
+        let members = self.circle_contacts();
         let pool = &self.peer_relays;
         let queries = members.into_iter().map(move |(npub, name)| async move {
             let Ok(peer) = fips::PeerIdentity::from_npub(&npub) else {
@@ -1354,7 +1336,7 @@ impl Content {
             "authors": authors,
         });
         let mesh_peers: Vec<(String, String)> = self
-            .connected_circle_npubs()
+            .circle_npubs()
             .into_iter()
             .filter_map(|npub| {
                 let peer = fips::PeerIdentity::from_npub(&npub).ok()?;
@@ -1520,7 +1502,7 @@ impl Content {
         // Pull blobs from connected mesh peers first (closer/faster, and the only
         // option under mesh-only), then the online fallback unless mesh-only.
         let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
-        for npub in self.connected_circle_npubs() {
+        for npub in self.circle_npubs() {
             if let Ok(m) = crate::ip_source::mesh_source_for(self.peer_relays.clone(), &npub) {
                 sources.push(Arc::new(m));
             }
@@ -1688,7 +1670,7 @@ impl Content {
             obj.insert("event-ttl".to_string(), serde_json::json!(out_ttl));
         }
         let frame = serde_json::json!(["EVENT", ev_json]).to_string();
-        for npub in self.connected_circle_npubs() {
+        for npub in self.circle_npubs() {
             let ip = match fips::PeerIdentity::from_npub(&npub) {
                 Ok(p) => IpAddr::V6(p.address().to_ipv6()),
                 Err(_) => continue,
@@ -2260,14 +2242,10 @@ mod tests {
                 "re-adding renames in place"
             );
 
-            // Only connected members are offered as offline-sensitive pull sources.
+            // Every Circle member is a target regardless of hop count: only Bob is
+            // a direct neighbour, but Alice is still reachable multi-hop and must
+            // remain a pull/discovery/chat target. FIPS decides how to get there.
             content.set_connected_peers(vec!["npub1bob".to_string()]);
-            assert_eq!(
-                content.connected_circle_npubs(),
-                vec!["npub1bob".to_string()]
-            );
-            // But chat fans to the *whole* Circle — Alice isn't a direct neighbour
-            // right now, yet must still receive messages (reachable multi-hop).
             let all = content.circle_npubs();
             assert_eq!(all.len(), 2);
             assert!(all.contains(&"npub1alice".to_string()));
