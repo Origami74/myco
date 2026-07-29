@@ -242,7 +242,16 @@ class MycoVpnService : VpnService() {
         val cb = object : ConnectivityManager.NetworkCallback() {
             private fun recheck() {
                 if (!running.get()) return
-                startTun(curUla, curMtu, curExit)
+                // A reconfig clears the live config while it re-establishes; a
+                // callback landing in that window must not drive startTun with
+                // an empty ULA, which would take the "nothing to serve" branch
+                // and stopSelf() the whole tunnel.
+                val ula = curUla
+                if (ula.isEmpty()) return
+                // Only the `::/0` decision depends on the networks underneath,
+                // so leave the tunnel alone unless that answer changed.
+                if (!underlyingHasGlobalIpv6() == curClaimIpv6) return
+                startTun(ula, curMtu, curExit)
             }
             override fun onAvailable(network: android.net.Network) = recheck()
             override fun onLost(network: android.net.Network) = recheck()
