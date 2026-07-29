@@ -104,8 +104,16 @@ fun DiscoverScreen(
             }
         }
 
+        // "Around you" is for apps you could add. Two things are therefore not
+        // news here: one already offered under Suggested (the tile above opens
+        // it), and one you have already pinned — that lives on your Apps tab, and
+        // finding it again on a peer's relay does not make it a discovery.
+        val alreadyOffered = SUGGESTED_APPS.map { it.host }.toSet() +
+            state.library.filter { it.pinned }.map { it.urlHost }
+        val around = state.discovered.filter { it.host !in alreadyOffered }
+
         item(span = { GridItemSpan(maxLineSpan) }) { SectionLabel("Around you") }
-        if (state.discovered.isEmpty()) {
+        if (around.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Text(
                     "Nothing found yet. Make sure a Circle peer is connected, then tap Discover.",
@@ -115,7 +123,7 @@ fun DiscoverScreen(
                 )
             }
         } else {
-            items(state.discovered, key = { it.host + it.holderNpub }) { d ->
+            items(around, key = { it.host }) { d ->
                 DiscoverTile(
                     client = client,
                     iconHost = d.host,

@@ -110,6 +110,30 @@ pub struct DiscoveredNsite {
     pub holder_name: String,
 }
 
+/// One entry per site, keeping the freshest copy seen.
+///
+/// The same nsite legitimately turns up on several Circle peers' relays — the
+/// query runs per holder — but to someone browsing "around you" that is one
+/// app, not one per person who happens to have it. Ties on `updated_at` keep
+/// the first seen, so the result is stable when nobody has a newer version.
+///
+/// Keeping the newest also picks the right holder to pull from: whoever
+/// answered with the most recent manifest has the version we would want.
+fn dedup_by_host(found: Vec<DiscoveredNsite>) -> Vec<DiscoveredNsite> {
+    let mut best: Vec<DiscoveredNsite> = Vec::new();
+    for d in found {
+        match best.iter_mut().find(|b| b.host == d.host) {
+            Some(existing) => {
+                if d.updated_at > existing.updated_at {
+                    *existing = d;
+                }
+            }
+            None => best.push(d),
+        }
+    }
+    best
+}
+
 /// Cache/store counts for the UI.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,6 +163,22 @@ pub struct PairRequestView {
     pub npub: String,
     pub name: String,
     pub secret: String,
+}
+
+/// An invite we sent that hasn't been accepted yet.
+///
+/// A pair request is delivered over the mesh, so it can fail simply because
+/// there is no route to that peer *yet* — a bump between two phones that have
+/// not met on the mesh is the normal case. Recording it means we can say
+/// "waiting" instead of silently dropping it, and refuse to send a second one
+/// for the same peer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundPairView {
+    pub npub: String,
+    pub name: String,
+    /// Unix seconds when we first tried, so the UI can age it.
+    pub since: u64,
 }
 
 /// Mutual-pairing handshake events, delivered point-to-point over a peer's mesh
@@ -225,6 +265,8 @@ pub struct Content {
     device_name_override: Mutex<Option<String>>,
     /// Incoming pair requests awaiting the user's accept/decline (UI pop-up).
     pending_pairs: Mutex<Vec<PairRequestView>>,
+    /// Invites we sent that are still unanswered (see [`OutboundPairView`]).
+    outbound_pairs: Mutex<Vec<OutboundPairView>>,
     /// Persistent WS connections to peers' relays, so chat fan-out and manifest
     /// fetches don't pay a fresh connect per message (slow over BLE). `Arc` so a
     /// mesh `PeerSource` can borrow the same pool for its manifest REQs.
@@ -362,6 +404,7 @@ impl Content {
             device_keys: Mutex::new(None),
             device_name_override: Mutex::new(None),
             pending_pairs: Mutex::new(Vec::new()),
+            outbound_pairs: Mutex::new(Vec::new()),
             peer_relays: Arc::new(crate::peer_relay::PeerRelayPool::new()),
             active_local_subs: Mutex::new(HashMap::new()),
             prev_pool_connected: Mutex::new(HashSet::new()),
@@ -810,6 +853,12 @@ impl Content {
         if npub.is_empty() {
             return;
         }
+        // Whether they accepted ours or we accepted theirs, any invite we were
+        // holding for this peer is answered.
+        self.outbound_pairs
+            .lock()
+            .unwrap()
+            .retain(|p| p.npub != npub);
         let mut circle = self.circle.lock().unwrap();
         if let Some(c) = circle.iter_mut().find(|c| c.npub == npub) {
             if !name.is_empty() {
@@ -1016,9 +1065,54 @@ impl Content {
 
     /// Scanned a peer's QR: send a signed pair request to their mesh relay. We do
     /// not add them yet — only a mutual accept pairs both sides.
-    pub async fn send_pair_request(&self, target_npub: &str, secret: &str) {
+    /// Invite a peer to pair, at most once.
+    ///
+    /// Two things are deliberately *not* done again. Someone already in the
+    /// Circle needs no invite — sharing an app with them used to send one every
+    /// time, which they then had to accept for a relationship they already had.
+    /// And an invite still waiting for an answer is not re-sent: delivery rides
+    /// the mesh, so a bump between two phones that have not met yet fails until
+    /// a route exists, and bumping again should not queue a second request.
+    ///
+    /// The record outlives the send, so the invite reads as *waiting* rather
+    /// than disappearing when it could not be delivered. It clears when they
+    /// accept (either direction — see [`Self::add_to_circle`]).
+    pub async fn send_pair_request(&self, target_npub: &str, name: &str, secret: &str) {
+        if self.is_in_circle(target_npub) {
+            tracing::debug!(target_npub, "pair: already in the Circle, no invite sent");
+            return;
+        }
+        {
+            let mut outbound = self.outbound_pairs.lock().unwrap();
+            if outbound.iter().any(|p| p.npub == target_npub) {
+                tracing::debug!(target_npub, "pair: invite already waiting, not re-sending");
+                return;
+            }
+            outbound.push(OutboundPairView {
+                npub: target_npub.to_string(),
+                name: name.to_string(),
+                since: now_secs(),
+            });
+        }
         self.dial_pair_event(target_npub, KIND_PAIR_REQUEST, secret)
             .await;
+    }
+
+    /// Invites we sent that are still unanswered.
+    pub fn outbound_pairs_snapshot(&self) -> Vec<OutboundPairView> {
+        self.outbound_pairs.lock().unwrap().clone()
+    }
+
+    /// Drop a waiting invite — the user withdrew it, or it is being retried.
+    pub fn forget_outbound_pair(&self, npub: &str) {
+        self.outbound_pairs
+            .lock()
+            .unwrap()
+            .retain(|p| p.npub != npub);
+    }
+
+    fn is_in_circle(&self, npub: &str) -> bool {
+        self.circle.lock().unwrap().iter().any(|c| c.npub == npub)
     }
 
     /// Accept an incoming request: add the requester to our Circle and send them a
@@ -1300,17 +1394,7 @@ impl Content {
         });
 
         let results = join_all(queries).await;
-        // Dedup by (host, holder): the same site may appear once per holder.
-        let mut seen: HashSet<(String, String)> = HashSet::new();
-        let mut found = Vec::new();
-        for batch in results {
-            for d in batch {
-                if seen.insert((d.host.clone(), d.holder_npub.clone())) {
-                    found.push(d);
-                }
-            }
-        }
-        *self.discovered.lock().unwrap() = found;
+        *self.discovered.lock().unwrap() = dedup_by_host(results.into_iter().flatten().collect());
     }
 
     pub fn discovered_snapshot(&self) -> Vec<DiscoveredNsite> {
@@ -2308,6 +2392,73 @@ mod tests {
         assert_eq!(content.device_name(), fallback, "blank clears the override");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_invite_is_sent_once_and_never_to_an_existing_member() {
+        let dir = tmp("invite-once");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        let peer = "npub1mqelkzqp4659fws35h2wvr7z9caka5ml8qddj3ssnwaulwpxdd9sdc3esw";
+
+        // No route exists in a unit test, so the dial fails — the point is that
+        // the invite is *remembered* rather than lost with it.
+        content.send_pair_request(peer, "them", "s1").await;
+        assert_eq!(
+            content.outbound_pairs_snapshot().len(),
+            1,
+            "invite is recorded"
+        );
+
+        // Bumping again must not queue a second one.
+        content.send_pair_request(peer, "them", "s2").await;
+        assert_eq!(
+            content.outbound_pairs_snapshot().len(),
+            1,
+            "a waiting invite is not re-sent"
+        );
+
+        // Accepting clears it, and they are then in the Circle...
+        content.add_to_circle(peer, "them");
+        assert!(
+            content.outbound_pairs_snapshot().is_empty(),
+            "accepting clears it"
+        );
+
+        // ...so sharing an app with them sends nothing.
+        content.send_pair_request(peer, "them", "s3").await;
+        assert!(
+            content.outbound_pairs_snapshot().is_empty(),
+            "no invite to someone already in the Circle"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovery_keeps_one_entry_per_site_preferring_the_newest() {
+        let mk = |host: &str, holder: &str, updated: u64| DiscoveredNsite {
+            host: host.to_string(),
+            author_npub: "npub1author".to_string(),
+            d_tag: None,
+            title: "T".to_string(),
+            updated_at: updated,
+            holder_npub: holder.to_string(),
+            holder_name: holder.to_string(),
+        };
+        // Two peers carry the same site at different versions, plus an unrelated one.
+        let out = dedup_by_host(vec![
+            mk("site-a", "npub1alice", 100),
+            mk("site-b", "npub1alice", 50),
+            mk("site-a", "npub1bob", 300),
+        ]);
+
+        assert_eq!(out.len(), 2, "one entry per site, not one per holder");
+        let a = out.iter().find(|d| d.host == "site-a").unwrap();
+        assert_eq!(a.updated_at, 300, "keeps the freshest copy");
+        assert_eq!(
+            a.holder_npub, "npub1bob",
+            "and therefore the holder worth pulling from"
+        );
     }
 
     #[test]

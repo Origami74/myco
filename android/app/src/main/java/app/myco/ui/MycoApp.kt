@@ -1,5 +1,11 @@
 package app.myco.ui
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -60,16 +66,18 @@ import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.PairSecrets
 import app.myco.ui.screens.PairConnectedDialog
+import app.myco.ui.screens.PairPendingDialog
 import app.myco.ui.screens.AppsScreen
 import app.myco.ui.screens.CircleScreen
 import app.myco.ui.screens.DevScreen
 import app.myco.ui.screens.DiscoverScreen
 import app.myco.ui.screens.QrScreen
-import app.myco.ui.screens.RequestsScreen
 import app.myco.ui.screens.SettingsScreen
 import app.myco.ui.theme.EmeraldSoft
 import app.myco.ui.theme.Slate
+import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
+import app.myco.ui.theme.StatusThin
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -117,6 +125,10 @@ fun MycoApp(
     var bleExhausted by remember { mutableStateOf(BleHealth.advertiserExhausted) }
     // Name of a peer we just connected to (drives the "connected" celebration).
     var justConnected by remember { mutableStateOf<String?>(null) }
+    // Name of a peer we just invited who hasn't accepted yet — drives the
+    // "waiting" dialog, so a bump that can't be delivered says so.
+    var justInvited by remember { mutableStateOf<String?>(null) }
+    val knownInvites = remember { mutableStateOf(state.outboundPairs.map { it.npub }.toSet()) }
     // Circle members we already knew about — anything new means a fresh pairing.
     val knownCircle = remember { mutableStateOf(state.circle.map { it.npub }.toSet()) }
     val context = LocalContext.current
@@ -166,6 +178,20 @@ fun MycoApp(
         knownCircle.value = current
     }
 
+    // An invite that just started waiting. Only *new* ones raise the dialog:
+    // the list persists until they accept, so keying on its contents alone
+    // would re-open it on every poll.
+    androidx.compose.runtime.LaunchedEffect(state.outboundPairs) {
+        val current = state.outboundPairs.map { it.npub }.toSet()
+        val added = current - knownInvites.value
+        if (added.isNotEmpty()) {
+            state.outboundPairs.firstOrNull { it.npub in added }?.let {
+                justInvited = it.name.ifEmpty { "them" }
+            }
+        }
+        knownInvites.value = current
+    }
+
     val nav = rememberNavController()
     androidx.compose.runtime.CompositionLocalProvider(
         LocalMeshControl provides MeshControl(meshEnabled) { on ->
@@ -178,7 +204,7 @@ fun MycoApp(
             val current by nav.currentBackStackEntryAsState()
             // The full-screen pairing / Add surfaces hide the bottom bar.
             val route = current?.destination?.route
-            if (route !in setOf("qr", "requests")) {
+            if (route != "qr") {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                     val tabs = if (developerMode) TABS else TABS.filterNot { it.route == "dev" }
                     tabs.forEach { tab ->
@@ -223,7 +249,7 @@ fun MycoApp(
                     AppsScreen(state, client, onLaunchNsite = onLaunchNsite, onPinToHome = onPinToHome, onScanned = onScanned)
                 }
                 composable("circle") {
-                    CircleScreen(state, client, onOpenQr = { nav.navigate("qr") }, onOpenRequests = { nav.navigate("requests") })
+                    CircleScreen(state, client, onOpenQr = { nav.navigate("qr") })
                 }
                 composable("discover") { DiscoverScreen(state, client, onLaunchNsite = onLaunchNsite) }
                 composable("settings") {
@@ -251,9 +277,6 @@ fun MycoApp(
                         onBack = { nav.popBackStack() },
                     )
                 }
-                composable("requests") {
-                    RequestsScreen(state = state, client = client, onBack = { nav.popBackStack() })
-                }
             }
         }
     }
@@ -261,6 +284,13 @@ fun MycoApp(
 
     // Incoming pair requests now live in the persistent Requests inbox (badged on
     // the Circle tab + surfaced on the pairing home), not a transient pop-up.
+    justInvited?.let { name ->
+        // Suppressed once they are actually in the Circle — an invite accepted
+        // before this was dismissed should show the celebration, not the wait.
+        if (state.circle.none { it.name == name }) {
+            PairPendingDialog(theirName = name, onDone = { justInvited = null })
+        }
+    }
     justConnected?.let { name ->
         PairConnectedDialog(theirName = name, onDone = { justConnected = null })
     }
@@ -368,8 +398,11 @@ fun PeersPill(state: AppState) {
                 style = MaterialTheme.typography.labelLarge,
             )
             PillDivider()
-            // 3 — live mesh peers.
-            StatusDot(if (connected > 0) StatusConnected else Slate)
+            // 3 — live mesh peers, coloured by how much mesh you actually have:
+            // none is a fault (and pulses, since it is the one state you want
+            // noticed from across the room), one works but has no redundancy,
+            // two or more is healthy.
+            PeerCountDot(connected)
             Text(
                 "$connected",
                 fontWeight = FontWeight.SemiBold,
@@ -436,6 +469,38 @@ fun GroupLabel(text: String) {
 @Composable
 fun StatusDot(color: Color, size: Int = 9) {
     Box(modifier = Modifier.size(size.dp).background(color, CircleShape))
+}
+
+/**
+ * The mesh-peer dot: red and pulsing with no peers, amber with one, green with
+ * two or more.
+ *
+ * Only the zero case animates. A pulse is an attention-getter, so spending it
+ * on the states you can't act on would train people to ignore it — one peer is
+ * a working mesh, just a fragile one, and it says that in colour alone.
+ */
+@Composable
+fun PeerCountDot(peers: Int) {
+    val color = when {
+        peers == 0 -> StatusAlone
+        peers == 1 -> StatusThin
+        else -> StatusConnected
+    }
+    if (peers > 0) {
+        StatusDot(color)
+        return
+    }
+    val pulse = rememberInfiniteTransition(label = "no-peers")
+    val alpha by pulse.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "alpha",
+    )
+    StatusDot(color.copy(alpha = alpha))
 }
 
 /** A monospace label: value row (dev diagnostics). */

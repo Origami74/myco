@@ -1,104 +1,101 @@
-# Myco v0.4.0
+# Myco v0.4.1
 
 **Released**: 2026-07-29
 
-v0.4.0 is about **reaching the mesh by name**. A node's npub is now an address any
-app on the phone can use: type `http://<npub>.fips/` into an ordinary browser and
-it loads, over Bluetooth or Wi-Fi, with no internet involved. Building on that,
-an experimental **exit-node mode** lets a phone with no connection of its own
-browse the public web through a mesh node that egresses for it.
+v0.4.1 is a follow-up to v0.4.0 that makes the mesh **stay** connected and the
+app honest about who it can reach. v0.4.0 gave nodes names; this release fixes
+the things that stopped those names being useful in practice — Circle members
+being treated as offline unless they were a direct neighbour, `.fips` names
+resolving only sometimes, and peering over a Wi-Fi access point dropping every
+couple of minutes.
 
-It also fixes the Wi-Fi AP lane, which could fail to connect on any phone that
-also had mobile data — the node saw every handshake arrive while the phone saw
-nothing come back.
-
-It upgrades from v0.3.0 in place with no data loss; your identity (nsec), Circle,
-and installed apps are preserved. No ports or wire formats changed, so a v0.4.0
-phone and a v0.3.0 phone still sync over the mesh.
+It upgrades from v0.4.0 in place with no data loss, and changes no ports or
+wire formats.
 
 ## At a glance
 
-- **`<npub>.fips` works everywhere on the device** — any browser or app can open
-  a mesh node by name, not just Myco's own gateway.
-- **Exit-node mode (developer preview)** — browse the public internet through a
-  mesh peer, addressed by its npub. For a phone with no internet at all.
-- **Wi-Fi AP lane actually connects** — no longer defeated by having mobile data
-  on at the same time, and no longer stuck dialling an unreachable address.
+- **Circle members are reachable at any distance** — not only when they happen
+  to be a direct neighbour.
+- **`.fips` names resolve reliably**, and normal browsing keeps working.
+- **Wi-Fi AP peering is stable** — under a second to connect, instead of a
+  minute and a half followed by a drop every two minutes.
+- **Turning Bluetooth on no longer takes the mesh down.**
+- **The peer dot tells you how much mesh you have** — red and pulsing at none,
+  amber at one, green at two or more.
+- **Pairing says what is happening**: invites you are waiting on are visible
+  and cancellable, and requests to join appear on the Circle screen itself.
 
-## What's new
+## Reaching people
 
-### Mesh nodes have names now
+Myco used to decide for itself who was reachable by intersecting your Circle
+with the mesh node's *directly connected* peers. Anyone further away was
+treated as offline: their nsites never showed up under "around you", and pulls
+skipped them. Chat was the exception — it already targeted the whole Circle,
+on the grounds that a peer you have walked away from is still reachable over
+the mesh. Everything else now agrees with it.
 
-Every node's npub doubles as a hostname: `<npub>.fips`. Myco's tunnel advertises
-an in-mesh resolver, and answers those names by deriving the address from the
-public key — pure computation, no lookup, no upstream server, works fully offline.
-Because the answer comes from the tunnel rather than from Myco, **every app on the
-phone** gets it. Open `http://<npub>.fips/` in your browser and you are talking to
-that node over the mesh.
+Peers are also addressed by name (`<npub>.fips`) everywhere instead of by their
+raw mesh address. Resolving the name is what tells the node who it is talking
+to, so dialling the address directly only ever worked for someone the node had
+already met — which is exactly why this looked like a distance problem.
 
-Names that are not `.fips` are passed to your normal resolvers untouched, so this
-does not take over DNS on the device.
+The reachable count in the status pill now means "we hold a live connection to
+them", at any hop count.
 
-### Exit-node mode (developer preview)
+## Names
 
-A phone with no internet — only a Bluetooth or Wi-Fi link to the mesh — can now
-browse the web, by routing through an HTTP proxy on a mesh node that does have a
-connection. Set the exit under **Settings → Developer → Exit node**, addressed by
-npub:
+v0.4.0 advertised Myco's resolver alongside your network's real ones so that
+non-mesh names would still resolve. That cannot work: any ordinary resolver
+denies a `.fips` name outright, so whether a mesh name resolved came down to
+which resolver the system happened to pick. Myco's resolver now answers every
+lookup and passes non-mesh names upstream itself.
 
-```
-<npub>.fips:8080
-```
+## Staying connected
 
-The exit does the DNS and the egress, so the phone never needs to resolve a public
-name or hold a route to one. It also need not be a direct peer — FIPS forwards
-multi-hop to it. `.fips` addresses bypass the exit and stay on the mesh.
+Peering over a Wi-Fi access point re-formed every couple of minutes. Myco was
+cycling through a node's advertised addresses faster than a failed attempt
+takes to expire, so several attempts were live at once — and whichever finished
+last replaced the connection that had already succeeded. It was also trying
+them in the wrong order: a node advertises one address per network interface,
+and the one on the network you actually joined is the only one certain to reach
+it. That one was tried last. Connecting now takes **under a second**.
 
-This covers **proxy-aware apps** — browsers. Other apps and QUIC/UDP traffic keep
-using the phone's normal connection. The runbook, including how to run the exit
-daemon, is in [docs/how-to/exit-node-demo.md](docs/how-to/exit-node-demo.md).
+Turning Bluetooth on used to rebuild the whole mesh node to pick up the radio,
+dropping every peer and connection with it — so enabling one transport
+interrupted the others. The node's lifecycle is now exactly the mesh switch.
 
-## Reliability: the Wi-Fi AP lane connects
+## Discover and pairing
 
-Two separate faults, either of which was enough to stop it:
+Discover showed the same app once per Circle member hosting it; it now shows
+each app once, and leaves out anything you have already pinned or that is
+already offered under Suggested.
 
-The mesh socket **was not bound to the Wi-Fi network**. A local-only access point
-never passes the system's internet-validation check, so with mobile data also up
-the OS steered the socket to the validated network and quietly discarded the AP's
-replies. The symptom was maddening from either end: the node's counters showed
-every handshake arriving, while the phone re-sent them forever. The socket is now
-pinned to the network the peer is actually on.
-
-Myco also **dialled the wrong address**. A fips node advertises one address per
-interface, and only the interface facing you answers — nothing in the advert says
-which that is. Myco took the first and could sit retrying an unreachable one
-indefinitely. It now keeps every advertised address and works through them until
-the peer connects, then stays on the one that worked.
+Pairing gained the state it was missing. An invite that could not be delivered
+— bumping two phones that have not met on the mesh yet — used to vanish
+silently, so the natural response was to bump again and queue another request.
+Invites are now remembered, shown under **Invited** on the Circle screen, and
+can be cancelled. Sharing an app with someone already in your Circle no longer
+invites them again, and requests waiting on *you* appear on the Circle screen
+rather than behind a banner.
 
 ## Known issues
 
-- **Peering can stall after a Wi-Fi reconnect** until the node's previous peer
-  entry expires, about a minute. Phones that rotate their Wi-Fi MAC on every
-  connection — GrapheneOS does by default — hit this most, because the phone's
-  mesh-facing address changes each time and the node keeps answering the old one.
-  Turning the mesh off, waiting for the peer to disappear on the node, and turning
-  it back on clears it. Tracked upstream as
-  [fips#130](https://github.com/jmcorgan/fips/issues/130).
-- **Exit mode is browsers-only.** `setHttpProxy` is the only system-wide proxy
-  hook available to a VPN app, so non-proxy-aware apps and UDP/QUIC traffic are
-  unaffected by it. Capturing everything needs a userspace network stack, which
-  is the next step.
-- On macOS, an exit node's proxy will not accept mesh connections until the
-  binary is allowed through the Application Firewall — inbound TCP is dropped
-  silently while ICMP still works, which makes it look like a routing problem.
+- **Peering can stall after a phone's Wi-Fi or Bluetooth address rotates**,
+  until the other node's previous entry expires — about a minute. Phones that
+  rotate their address per connection (GrapheneOS by default) hit this most.
+  Tracked upstream as [fips#130](https://github.com/jmcorgan/fips/issues/130).
+- Exit-node mode still covers proxy-aware apps only; other apps and QUIC/UDP
+  traffic keep using the phone's normal connection.
+- On macOS, an exit node's proxy needs allowing through the Application
+  Firewall before it accepts mesh connections.
 
 ## Getting it
 
-- **Android**: install the v0.4.0 APK from the
-  [release page](https://github.com/Origami74/myco/releases/tag/v0.4.0),
+- **Android**: install the v0.4.1 APK from the
+  [release page](https://github.com/Origami74/myco/releases/tag/v0.4.1),
   or via [zapstore](https://zapstore.dev/apps/app.myco).
 - **From source**: `cd android && ./gradlew assembleDebug` from a checkout of
-  the v0.4.0 tag. See [CONTRIBUTING.md](CONTRIBUTING.md) for build prerequisites.
+  the v0.4.1 tag. See [CONTRIBUTING.md](CONTRIBUTING.md) for build prerequisites.
 
 The full per-release change history lives in [CHANGELOG.md](CHANGELOG.md).
 Issues and discussion at [github.com/Origami74/myco](https://github.com/Origami74/myco).

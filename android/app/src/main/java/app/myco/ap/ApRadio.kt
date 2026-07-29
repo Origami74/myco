@@ -89,6 +89,13 @@ class ApRadio private constructor(private val context: Context) {
     private val candidates = HashMap<String, List<String>>()
     private val candidateIdx = HashMap<String, Int>()
 
+    /** npub → the address that last produced a session, and whether it currently
+     *  has one. A peer that drops is almost always reachable at the same address
+     *  it just used, so retrying that before cycling turns a reconnect into one
+     *  dial instead of a walk through every candidate at [REPUSH_MS] apart. */
+    private val lastGood = HashMap<String, String>()
+    private val wasConnected = HashSet<String>()
+
     private val resolveQueue = ArrayDeque<NsdServiceInfo>()
     private var resolving = false
     private var browsing = false
@@ -265,7 +272,15 @@ class ApRadio private constructor(private val context: Context) {
         override fun run() {
             if (browseListener == null) return
             for (npub in candidates.keys.toList()) {
-                if (!connected(npub)) rotate(npub)
+                if (connected(npub)) {
+                    pushed[npub]?.let { lastGood[npub] = it }
+                    wasConnected.add(npub)
+                    continue
+                }
+                // First tick after a drop: go back to the address that worked
+                // rather than resuming the cycle wherever it left off.
+                if (wasConnected.remove(npub) && retryLastGood(npub)) continue
+                rotate(npub)
             }
             handler.postDelayed(this, REPUSH_MS)
         }
@@ -338,6 +353,20 @@ class ApRadio private constructor(private val context: Context) {
     /** Advance an unconnected peer to its next candidate address. Only the
      *  interface facing us answers neighbour discovery, and the advert doesn't
      *  say which that is, so this cycles until one handshakes. */
+    /** Re-push the address that last held a session, if we still have it as a
+     *  candidate. Returns false when there is nothing to fall back to. */
+    private fun retryLastGood(npub: String): Boolean {
+        val good = lastGood[npub] ?: return false
+        val i = candidates[npub]?.indexOf(good) ?: -1
+        if (i < 0) return false
+        candidateIdx[npub] = i
+        // `push` skips a no-op re-push, so clear the record to force this one:
+        // the core dropped the peer and needs the address again.
+        pushed.remove(npub)
+        push(npub)
+        return true
+    }
+
     private fun rotate(npub: String) {
         val addrs = candidates[npub] ?: return
         if (addrs.size < 2) return
@@ -381,13 +410,24 @@ class ApRadio private constructor(private val context: Context) {
         val port = info.port.takeIf { it > 0 } ?: return emptyList()
         val v6 = hosts.filterIsInstance<Inet6Address>()
         return buildList {
+            // IPv4 first, as a v4-mapped address. On a LAN this is the node's
+            // address *on the network we joined* — the one interface certain to
+            // face us. The link-locals below are one per interface the node has,
+            // and nothing in the advert says which is which, so trying them
+            // first means dialling addresses that are not on our link at all:
+            // measured here, three dead link-locals ahead of an IPv4 address
+            // that handshook in half a second. Safe to prefer because the mesh
+            // tunnel routes no IPv4, so this cannot be swallowed by it, and the
+            // core's UDP socket is a dual-stack `[::]` bind.
+            hosts.filterIsInstance<Inet4Address>()
+                .forEach { add("[::ffff:${it.hostAddress}]:$port") }
+            // Then link-local — the only option on a link with no IPv4 (a Wi-Fi
+            // Aware data path), and still correct here, just slower to find.
             v6.filter { it.isLinkLocalAddress && it.scopeId != 0 }
                 .forEach { add("[${bare(it)}%${it.scopeId}]:$port") }
             // fd00::/8 is routed into the mesh TUN — dialing it would blackhole.
             v6.filter { !it.isLinkLocalAddress && it.address[0] != 0xfd.toByte() }
                 .forEach { add("[${bare(it)}]:$port") }
-            hosts.filterIsInstance<Inet4Address>()
-                .forEach { add("[::ffff:${it.hostAddress}]:$port") }
         }
     }
 
@@ -437,9 +477,21 @@ class ApRadio private constructor(private val context: Context) {
         /** TXT key carrying the advertising node's npub. */
         private const val TXT_NPUB = "npub"
 
-        /** Also the candidate-rotation interval, so an unconnected peer works
-         *  through its addresses in reasonable time (see [rotate]). */
-        private const val REPUSH_MS = 10_000L
+        /** Candidate-rotation interval (see [rotate]).
+         *
+         *  Must stay **longer than the core's handshake timeout** (30s), so only
+         *  one dial is ever in flight. At 10s we pushed a new address every time
+         *  while the previous two were still retrying, and the node happily ran
+         *  all three: whichever completed last promoted and *evicted the session
+         *  that had already succeeded*. The peer then re-handshook, and the cycle
+         *  repeated every couple of minutes — a delayed session-replacement
+         *  planted by every rotation.
+         *
+         *  The cost is reaching a peer whose first candidate is wrong more
+         *  slowly. That is the right trade: the addresses only need cycling when
+         *  nothing is connected, and an established session is worth far more
+         *  than shaving seconds off finding one. */
+        private const val REPUSH_MS = 35_000L
 
         /** Blocking wait per poll for the core's UDP transport fd. Short so a
          *  mesh off→on cycle's fresh fd is picked up promptly, and so the

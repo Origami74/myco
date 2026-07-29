@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -44,7 +45,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -102,7 +102,6 @@ fun CircleScreen(
     state: AppState,
     client: AppCoreClient,
     onOpenQr: () -> Unit,
-    onOpenRequests: () -> Unit,
 ) {
     val context = LocalContext.current
     var name by remember(state.ownNpub) { mutableStateOf(DeviceName.current(context, state.ownNpub)) }
@@ -110,7 +109,7 @@ fun CircleScreen(
     // Tap/long-press a circle member → a menu sheet; "Remove" opens a confirm.
     var sheetFor by remember { mutableStateOf<CircleContact?>(null) }
     var confirmRemove by remember { mutableStateOf<CircleContact?>(null) }
-    val sent = remember { mutableStateListOf<String>() }
+    var cancelInvite by remember { mutableStateOf<String?>(null) }
 
     // NFC availability, re-checked on resume (e.g. back from NFC settings).
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -130,6 +129,10 @@ fun CircleScreen(
     }
 
     val connected = state.blePeers.filter { it.connected }.map { it.npub }.toSet()
+    // Who we have already invited, from the core rather than a list local to this
+    // screen: an invite outlives leaving the tab, and the core is what refuses to
+    // send a second one — the badge should agree with it.
+    val invited = state.outboundPairs.map { it.npub }.toSet()
     val circleNpubs = remember(state.circle) { state.circle.map { it.npub }.toSet() }
     // Sorted by display name (stable per npub) rather than the radio's signal-
     // strength/discovery order, so bubbles don't reshuffle as RSSI fluctuates.
@@ -154,10 +157,6 @@ fun CircleScreen(
                 }
             }
             item { IdentityChip(name = name, onEdit = { editing = true }) }
-
-            if (state.pendingPairRequests.isNotEmpty()) {
-                item { RequestsBar(count = state.pendingPairRequests.size, onClick = onOpenRequests) }
-            }
 
             if (nfc != NfcState.UNAVAILABLE) {
                 item { TapToConnect(nfc = nfc, onEnableNfc = { NfcStatus.openSettings(context) }) }
@@ -187,7 +186,7 @@ fun CircleScreen(
                         maxItemsInEachRow = 4,
                     ) {
                         nearby.forEach { peer ->
-                            val isSent = peer.npub in sent
+                            val isSent = peer.npub in invited
                             PersonBubble(
                                 label = DeviceName.generated(peer.npub),
                                 npub = peer.npub,
@@ -199,7 +198,6 @@ fun CircleScreen(
                                         client.dispatch(
                                             NativeActions.sendPairRequest(peer.npub, name, NsiteShare.newPairSecret())
                                         )
-                                        sent.add(peer.npub)
                                     }
                                 },
                             )
@@ -240,6 +238,63 @@ fun CircleScreen(
                         }
                     }
                 }
+            }
+
+            // Invites we sent and are waiting on. Without this the invite is
+            // invisible the moment its dialog is dismissed, which reads as
+            // nothing having happened.
+            if (state.outboundPairs.isNotEmpty()) {
+                item {
+                    SectionLabel("INVITED", trailing = "· tap to cancel", scanning = false)
+                }
+                item {
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        maxItemsInEachRow = 4,
+                    ) {
+                        state.outboundPairs.forEach { inv ->
+                            PersonBubble(
+                                label = inv.name.ifEmpty { DeviceName.generated(inv.npub) },
+                                npub = inv.npub,
+                                ring = Ring.DASHED,
+                                badge = Badge.SENT,
+                                dim = true,
+                                // Cancelling frees the peer to be invited again —
+                                // otherwise a request that is never accepted is a
+                                // dead end, since the core refuses duplicates.
+                                onClick = { cancelInvite = inv.npub },
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Requests sit here rather than behind their own screen: they are
+            // people asking to join this exact list, so showing them next to it
+            // makes the relationship obvious and saves a navigation step to act
+            // on what is usually one tap of work.
+            if (state.pendingPairRequests.isNotEmpty()) {
+                item {
+                    SectionLabel(
+                        "WAITING TO JOIN",
+                        trailing = "· ${state.pendingPairRequests.size}",
+                        scanning = false,
+                    )
+                }
+                items(state.pendingPairRequests, key = { it.npub }) { req ->
+                    RequestCard(
+                        req = req,
+                        onAccept = {
+                            // Adds them to the Circle; the "connected" celebration
+                            // fires from MycoApp when the Circle grows.
+                            client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name))
+                        },
+                        onIgnore = { client.dispatch(NativeActions.declinePairRequest(req.npub)) },
+                    )
+                }
+                item { VerifyHint() }
             }
 
             item { Spacer(Modifier.height(72.dp)) } // room for the FAB
@@ -297,6 +352,29 @@ fun CircleScreen(
             dismissButton = { TextButton(onClick = { confirmRemove = null }) { Text("Cancel") } },
             title = { Text("Remove ${c.name.ifEmpty { "this peer" }}?") },
             text = { Text("They'll be removed from your Circle. You can re-pair anytime.") },
+        )
+    }
+
+    cancelInvite?.let { npub ->
+        val who = state.outboundPairs.firstOrNull { it.npub == npub }?.name.orEmpty()
+        AlertDialog(
+            onDismissRequest = { cancelInvite = null },
+            confirmButton = {
+                TextButton(onClick = {
+                    client.dispatch(NativeActions.cancelPairInvite(npub))
+                    cancelInvite = null
+                }) {
+                    Text("Cancel invite", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { cancelInvite = null }) { Text("Keep waiting") } },
+            title = { Text("Cancel the invite to ${who.ifEmpty { "this device" }}?") },
+            text = {
+                Text(
+                    "They can't accept it after this. Cancelling also lets you invite " +
+                        "them again — while an invite is waiting, a second one isn't sent.",
+                )
+            },
         )
     }
 }
@@ -485,24 +563,6 @@ private fun PersonBubble(
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth(),
         )
-    }
-}
-
-@Composable
-private fun RequestsBar(count: Int, onClick: () -> Unit) {
-    Surface(shape = RoundedCornerShape(16.dp), color = EmeraldSoft, modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)) {
-        Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.MarkEmailUnread, contentDescription = null, tint = Emerald, modifier = Modifier.size(22.dp))
-            Spacer(Modifier.size(12.dp))
-            Text(
-                "$count ${if (count == 1) "request" else "requests"} waiting",
-                fontWeight = FontWeight.ExtraBold,
-                color = EmeraldInk,
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.weight(1f),
-            )
-            Icon(Icons.Filled.ChevronRight, contentDescription = null, tint = Emerald)
-        }
     }
 }
 

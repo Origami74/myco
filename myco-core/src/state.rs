@@ -39,6 +39,10 @@ pub struct AppState {
     /// direct-peer table ([`AppState::ble_peers`]) is *not* a substitute — it
     /// only ever names adjacent nodes.
     pub reachable_npubs: Vec<String>,
+    /// Invites we sent that nobody has accepted yet. Kept so the UI can say an
+    /// invite is *waiting* — a bump with no mesh route between the two phones
+    /// cannot be delivered at the time it is made.
+    pub outbound_pairs: Vec<crate::content::OutboundPairView>,
     /// Incoming pair requests awaiting accept/decline (the UI shows a pop-up).
     pub pending_pair_requests: Vec<crate::content::PairRequestView>,
     /// nsites discovered on Circle peers' relays (`SearchNsites` — "around me").

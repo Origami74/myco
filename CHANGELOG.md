@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-29
+
 ### Fixed
 
 - Circle members are reachable at any distance, not just as direct neighbours.
@@ -32,10 +34,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already connected to and treated a lapsed mDNS advert as a departure, each
   of which tore down a healthy session every few minutes.
 
+- Peering over a Wi-Fi access point stops dropping and re-forming every couple
+  of minutes. Myco tried a node's advertised addresses faster than a failed
+  attempt takes to expire, so several were live at once and whichever finished
+  last replaced the connection that had already succeeded. It also tried them
+  in the wrong order — the address on the network you actually joined is the
+  one certain to reach the node, and it was tried last. Connecting to an access
+  point now takes under a second instead of a minute and a half.
+- The same app no longer appears several times under Discover, once per Circle
+  member hosting it, and apps you have already pinned or that are already
+  offered under Suggested are left out of "Around you".
+- Sharing an app with someone already in your Circle no longer sends them
+  another invite to accept.
+- Bumping two phones that cannot reach each other over the mesh yet no longer
+  loses the invite silently, and bumping again no longer queues a second one.
+
 ### Added
 
 - A peers overview at the top of the Developer screen: who is connected, over
   which lane (Wi-Fi Aware / LAN / Bluetooth), and for how long.
+- The status pill's peer dot now shows how much mesh you have rather than just
+  whether you have any: red and pulsing with no peers, amber with one (working,
+  but nothing to fall back on), green with two or more.
+- Invites you have sent appear on the Circle screen under "Invited", and can be
+  cancelled — which is also how you re-invite someone who never accepted.
+
+### Changed
+
+- Requests to join your Circle now appear on the Circle screen itself, under
+  "Waiting to join", instead of behind a banner leading to a separate screen.
 
 ## [0.4.0] - 2026-07-29
 
