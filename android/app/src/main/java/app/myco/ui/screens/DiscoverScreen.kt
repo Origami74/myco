@@ -104,11 +104,13 @@ fun DiscoverScreen(
             }
         }
 
-        // Anything already offered above is not news down here — a suggested app
-        // that a Circle peer happens to host is the same tile twice, and the one
-        // in "Suggested" already opens it.
-        val suggestedHosts = SUGGESTED_APPS.map { it.host }.toSet()
-        val around = state.discovered.filter { it.host !in suggestedHosts }
+        // "Around you" is for apps you could add. Two things are therefore not
+        // news here: one already offered under Suggested (the tile above opens
+        // it), and one you have already pinned — that lives on your Apps tab, and
+        // finding it again on a peer's relay does not make it a discovery.
+        val alreadyOffered = SUGGESTED_APPS.map { it.host }.toSet() +
+            state.library.filter { it.pinned }.map { it.urlHost }
+        val around = state.discovered.filter { it.host !in alreadyOffered }
 
         item(span = { GridItemSpan(maxLineSpan) }) { SectionLabel("Around you") }
         if (around.isEmpty()) {
