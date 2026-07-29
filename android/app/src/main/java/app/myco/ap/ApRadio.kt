@@ -251,20 +251,21 @@ class ApRadio private constructor(private val context: Context) {
         publishWifi()
     }
 
-    /** Periodic tick while the browse is live. For a connected peer it re-pushes
-     *  the working address: NSD fires onServiceFound only once per appearance,
-     *  so a dropped UDP session would otherwise never get a fresh dial hint (the
-     *  core's alternate-path gates make a redundant push a no-op for a healthy
-     *  peer). For an unconnected one it advances to the next candidate address. */
+    /** Periodic tick while the browse is live: advance an *unconnected* peer to
+     *  its next candidate address.
+     *
+     *  A connected peer is deliberately left alone. Pushing a peer the core has
+     *  already authenticated is not free — it starts an alternate-path handshake
+     *  — so re-pushing on a timer meant a healthy session was continuously
+     *  raced by a fresh one, which showed up as endless
+     *  `Stale handshake connection timed out` churn and link ids in the
+     *  hundreds. A dropped session still recovers: it turns the peer
+     *  unconnected, and this tick resumes rotating. */
     private val repush = object : Runnable {
         override fun run() {
             if (browseListener == null) return
             for (npub in candidates.keys.toList()) {
-                if (connected(npub)) {
-                    pushed[npub]?.let { NativeCore.awarePeerFound(npub, it) }
-                } else {
-                    rotate(npub)
-                }
+                if (!connected(npub)) rotate(npub)
             }
             handler.postDelayed(this, REPUSH_MS)
         }
@@ -348,9 +349,17 @@ class ApRadio private constructor(private val context: Context) {
         val npub = npubByService.remove(serviceName) ?: return
         candidates.remove(npub)
         candidateIdx.remove(npub)
-        if (pushed.remove(npub) != null) {
+        val wasPushed = pushed.remove(npub) != null
+        // An mDNS advert lapsing does not mean the peer is gone — NSD drops and
+        // re-adds a service routinely, several times an hour here. Telling the
+        // core it was lost closes the pooled connection, so acting on this while
+        // a session is live tore down a perfectly healthy peer every few minutes.
+        // A session that has genuinely died is detected by its own keepalive.
+        if (wasPushed && !connected(npub)) {
             Log.i(TAG, "fips node ${short(npub)} gone from LAN")
             NativeCore.awarePeerLost(npub)
+        } else if (wasPushed) {
+            Log.i(TAG, "fips node ${short(npub)} advert lapsed, session still up — keeping it")
         }
         publishNodes()
     }

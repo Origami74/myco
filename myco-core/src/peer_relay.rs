@@ -58,6 +58,36 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKOFF_BASE: Duration = Duration::from_secs(8);
 const BACKOFF_CAP: Duration = Duration::from_secs(180);
 
+/// Pause before re-dialling through a cold route. A first send to a peer whose
+/// coordinates the node hasn't learned yet fails immediately *and triggers the
+/// lookup that fixes it*, so the retry usually lands. Short enough that a peer
+/// becomes reachable in about a second rather than at the next keepwarm tick.
+const WARMUP_RETRY: Duration = Duration::from_millis(1500);
+
+/// Why a dial failed, which decides whether it counts against the peer.
+enum DialFault {
+    /// No resolver yet — the mesh TUN is still coming up, so `<npub>.fips`
+    /// cannot resolve. Says nothing about the peer; must not arm its backoff,
+    /// or a peer can be held off for minutes because we dialled too early.
+    NoResolver,
+    /// The node has no route to the peer *yet*. Usually a cold route: the send
+    /// itself starts the lookup, so an immediate retry tends to succeed.
+    NoRoute,
+    /// Anything else — refused, timed out, protocol error. A real failure.
+    Hard,
+}
+
+fn classify(err: &tokio_tungstenite::tungstenite::Error) -> DialFault {
+    let text = err.to_string();
+    if text.contains("failed to lookup address information") {
+        DialFault::NoResolver
+    } else if text.contains("Network is unreachable") || text.contains("No route to host") {
+        DialFault::NoRoute
+    } else {
+        DialFault::Hard
+    }
+}
+
 /// Per-peer dial-failure state (see [`BACKOFF_BASE`]).
 struct DialBackoff {
     failures: u32,
@@ -231,6 +261,53 @@ impl PeerRelayPool {
     }
 }
 
+/// Dial the peer's relay, retrying once through a cold route.
+///
+/// Distinguishes *why* a dial failed, because the three cases deserve different
+/// treatment and lumping them together is what made this subsystem hard to
+/// reason about: a dial we sent before the tunnel existed used to arm the same
+/// exponential backoff as a genuinely absent peer, holding a perfectly good peer
+/// off for minutes over a startup race.
+async fn dial(
+    url: &str,
+    npub: &str,
+    dial_backoff: &BackoffMap,
+) -> Option<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+> {
+    for attempt in 0..2 {
+        match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url)).await {
+            Ok(Ok((ws, _))) => return Some(ws),
+            Ok(Err(e)) => match classify(&e) {
+                // The tunnel isn't up yet. Not the peer's fault — leave its
+                // backoff untouched so the next keepwarm tick dials again.
+                DialFault::NoResolver => {
+                    tracing::debug!(npub, url, "peer relay dial before the mesh TUN was up");
+                    return None;
+                }
+                // Cold route: this send starts the lookup that warms it, so give
+                // that a moment and try once more before counting a failure.
+                DialFault::NoRoute if attempt == 0 => {
+                    tracing::debug!(npub, url, "no route yet, warming");
+                    tokio::time::sleep(WARMUP_RETRY).await;
+                    continue;
+                }
+                _ => {
+                    tracing::warn!(npub, url, error = %e, "peer relay dial failed");
+                    record_dial_failure(dial_backoff, npub);
+                    return None;
+                }
+            },
+            Err(_) => {
+                tracing::warn!(npub, url, "peer relay dial timed out");
+                record_dial_failure(dial_backoff, npub);
+                return None;
+            }
+        }
+    }
+    None
+}
+
 /// The per-peer connection actor: connect once, then multiplex push + pull + ping
 /// over the one socket until it dies or the pool drops the command channel.
 async fn run(
@@ -242,22 +319,10 @@ async fn run(
 ) {
     // Bounded connect: a hang here (SYN black hole into a wedged session) must
     // fail fast, both to arm the backoff and to stop touching the stale session.
-    let ws =
-        match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url)).await {
-            Ok(Ok((ws, _))) => ws,
-            other => {
-                // Connect failed or timed out → back off this peer; the channel drops
-                // with this task and a post-backoff command respawns it. Log why:
-                // a silent failure here looks like "the peer is simply offline",
-                // which is indistinguishable from a dial we got wrong.
-                match other {
-                    Ok(Err(e)) => tracing::warn!(npub, url, error = %e, "peer relay dial failed"),
-                    _ => tracing::warn!(npub, url, "peer relay dial timed out"),
-                }
-                record_dial_failure(&dial_backoff, &npub);
-                return;
-            }
-        };
+    let ws = match dial(&url, &npub, &dial_backoff).await {
+        Some(ws) => ws,
+        None => return,
+    };
     // Live now — clear any backoff and mark reachable so the keepwarm loop sees
     // the (re)connect edge.
     dial_backoff.lock().unwrap().remove(&npub);
@@ -374,6 +439,31 @@ fn handle_inbound(txt: &str, pending: &mut HashMap<String, Pending>) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The classifier reads OS error text, so pin the three cases: mistaking a
+    /// startup race for a peer failure holds a good peer off for minutes.
+    #[test]
+    fn dial_faults_are_classified() {
+        use std::io::{Error, ErrorKind};
+        let io = |msg: &str| {
+            tokio_tungstenite::tungstenite::Error::Io(Error::new(ErrorKind::Other, msg.to_string()))
+        };
+        assert!(matches!(
+            classify(&io(
+                "failed to lookup address information: No address associated with hostname"
+            )),
+            DialFault::NoResolver
+        ));
+        assert!(matches!(
+            classify(&io("Network is unreachable (os error 101)")),
+            DialFault::NoRoute
+        ));
+        assert!(matches!(
+            classify(&io("Connection refused (os error 111)")),
+            DialFault::Hard
+        ));
+    }
+
     use myco_relay::server::serve_on;
     use myco_relay::RelayStore;
     use nostr::{EventBuilder, Keys, Kind, Tag};

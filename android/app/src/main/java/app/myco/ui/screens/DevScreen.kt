@@ -17,6 +17,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -58,6 +60,8 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         ScreenHeader("Dev", state, subtitle = "Technical details — myco-core state.")
+
+        PeersOverviewCard(state, awareLinks, apNodes)
 
         SpeedtestCard(state, client)
 
@@ -104,15 +108,7 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
                 }
                 // Stable alphabetical order — the state arrays arrive in snapshot
                 // order, which reshuffles between polls and makes the rows flap.
-                val peersSorted = state.blePeers.sortedBy { it.npub.ifEmpty { it.nodeAddrHex } }
                 val advertsSorted = state.bleAdverts.sortedBy { it.addr }
-                DevCard("PEERS (${state.blePeers.size})") {
-                    if (state.blePeers.isEmpty()) {
-                        EmptyLine("none connected")
-                    } else {
-                        peersSorted.forEach { PeerRow(it) }
-                    }
-                }
                 DevCard("RADIO ADVERTS (${state.bleAdverts.size})") {
                     if (state.bleAdverts.isEmpty()) {
                         EmptyLine("none")
@@ -196,6 +192,92 @@ private fun rate(mbps: Double): String =
 /** Payload size as KB or MB (the adaptive speedtest climbs from 256 KB to 16 MB). */
 private fun size(bytes: Long): String =
     if (bytes >= 1024 * 1024) "%.0f MB".format(bytes / (1024.0 * 1024.0)) else "%d KB".format(bytes / 1024)
+
+/**
+ * Every peer the node knows, in one place, so the transport sections below
+ * don't have to be cross-referenced by hand: who is connected, over which
+ * lane(s), and for how long.
+ *
+ * Lanes are attributed from **our own radios**, not from the node: Wi-Fi Aware
+ * rides the ordinary UDP transport, so the node reports "udp" for both Aware
+ * and the AP lane and cannot tell them apart. A peer can carry more than one
+ * marker while lanes overlap.
+ *
+ * Uptime is measured from when this screen first observed the peer connected,
+ * so it resets on app restart and reads "just now" for a session that predates
+ * the process. It is a diagnostic, not an SLA.
+ */
+@Composable
+private fun PeersOverviewCard(
+    state: AppState,
+    awareLinks: List<AwareLink>,
+    apNodes: List<LanFipsNode>,
+) {
+    // npub → epoch millis first seen connected; cleared when it drops, so a
+    // reconnect restarts the clock rather than reporting the older session.
+    val since = remember { mutableStateMapOf<String, Long>() }
+    val now = System.currentTimeMillis()
+    val connected = state.blePeers.filter { it.connected && it.npub.isNotEmpty() }
+    for (p in connected) since.putIfAbsent(p.npub, now)
+    since.keys.retainAll(connected.map { it.npub }.toSet())
+
+    val awareNpubs = awareLinks.filter { it.up }.map { it.npub }.toSet()
+    val udpNpubs = apNodes.filter { it.pushed }.map { it.npub }.toSet()
+
+    DevCard("PEERS (${connected.size})") {
+        if (state.blePeers.isEmpty()) {
+            Text(
+                "No peers yet.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Slate,
+            )
+        }
+        for (p in state.blePeers.sortedBy { it.npub }) {
+            val lanes = buildList {
+                if (p.npub in awareNpubs) add("aware")
+                if (p.npub in udpNpubs) add("udp")
+                // Nothing claimed it: BLE is the lane with no radio-side npub
+                // list of its own, so an otherwise-unattributed peer is one.
+                if (isEmpty() && p.connected) add("ble")
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    StatusDot(if (p.connected) StatusConnected else Slate)
+                    Text(
+                        short(p.npub.ifEmpty { p.nodeAddrHex }),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                Text(
+                    if (p.connected) "${lanes.joinToString("+")} · ${uptime(now - (since[p.npub] ?: now))}"
+                    else "offline",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (p.connected) Emerald else Slate,
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "aware = Wi-Fi Aware · udp = LAN/AP lane · ble = Bluetooth · uptime since first seen here",
+            style = MaterialTheme.typography.labelSmall,
+            color = Slate,
+        )
+    }
+}
+
+/** Compact duration for the peers card: `42s`, `7m`, `3h12m`. */
+private fun uptime(ms: Long): String {
+    val secs = (ms / 1000).coerceAtLeast(0)
+    return when {
+        secs < 60 -> "${secs}s"
+        secs < 3600 -> "${secs / 60}m"
+        else -> "${secs / 3600}h${(secs % 3600) / 60}m"
+    }
+}
 
 @Composable
 private fun DevCard(title: String, content: @Composable () -> Unit) {
