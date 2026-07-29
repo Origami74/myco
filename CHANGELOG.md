@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Circle members are reachable at any distance, not just as direct neighbours.
+  Myco decided for itself who was reachable by intersecting your Circle with
+  the mesh node's directly-connected peers, so a member two hops away was
+  treated as offline: their nsites never appeared under "around me" and pulls
+  skipped them. Chat was unaffected — it already targeted the whole Circle.
+- Peers are addressed by name (`<npub>.fips`) everywhere rather than by their
+  mesh address. Resolving the name is what registers a peer's identity with
+  the node, so dialling the raw address only ever worked for someone already
+  a direct neighbour — which is why this looked like a distance problem.
+- The reachable count in the status pill reflects peers we hold a live mesh
+  connection to, at any hop count, instead of only adjacent ones.
+- `.fips` names resolve reliably. The tunnel had listed the network's real
+  resolvers alongside its own, and any of them will deny a `.fips` name
+  authoritatively, so whether a mesh name resolved depended on which resolver
+  the system happened to pick. Myco's resolver now answers every lookup,
+  relaying non-mesh names to a real one.
+- Turning Bluetooth on no longer takes the mesh down. Starting the Bluetooth
+  radio rebuilt the embedded mesh node, dropping every peer and session — so
+  enabling one transport interrupted the others until everything re-handshook.
+- Peering over a Wi-Fi AP no longer flaps. Myco re-announced peers it was
+  already connected to and treated a lapsed mDNS advert as a departure, each
+  of which tore down a healthy session every few minutes.
+
+### Added
+
+- A peers overview at the top of the Developer screen: who is connected, over
+  which lane (Wi-Fi Aware / LAN / Bluetooth), and for how long.
+
 ## [0.4.0] - 2026-07-29
 
 ### Added
