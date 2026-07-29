@@ -104,6 +104,9 @@ data class AppState(
     val library: List<LibraryItem>,
     val cache: CacheStatus,
     val circle: List<CircleContact>,
+    /** Circle members with a live mesh relay connection right now — reachable
+     *  at any hop count, not just direct neighbours. */
+    val reachableNpubs: Set<String> = emptySet(),
     val discovered: List<DiscoveredNsite>,
     val pendingPairRequests: List<PairRequest>,
     val offlineOnly: Boolean,
@@ -262,6 +265,11 @@ data class AppState(
                 library = library,
                 cache = cache,
                 circle = circle,
+                reachableNpubs = buildSet {
+                    o.optJSONArray("reachableNpubs")?.let { arr ->
+                        for (i in 0 until arr.length()) add(arr.optString(i))
+                    }
+                },
                 discovered = discovered,
                 pendingPairRequests = pendingPairRequests,
                 offlineOnly = o.optBoolean("offlineOnly"),

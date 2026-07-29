@@ -33,6 +33,12 @@ pub struct AppState {
     pub cache: crate::content::CacheView,
     /// The user's **Circle**: paired peers we pull nsites from over the mesh.
     pub circle: Vec<crate::content::CircleContact>,
+    /// Circle members we currently hold a live mesh relay connection to. This
+    /// is the honest "reachable" signal: it means bytes are flowing to them
+    /// right now, whether they are a direct neighbour or many hops away. The
+    /// direct-peer table ([`AppState::ble_peers`]) is *not* a substitute — it
+    /// only ever names adjacent nodes.
+    pub reachable_npubs: Vec<String>,
     /// Incoming pair requests awaiting accept/decline (the UI shows a pop-up).
     pub pending_pair_requests: Vec<crate::content::PairRequestView>,
     /// nsites discovered on Circle peers' relays (`SearchNsites` — "around me").

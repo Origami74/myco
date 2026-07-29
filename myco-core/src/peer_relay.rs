@@ -245,9 +245,15 @@ async fn run(
     let ws =
         match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url)).await {
             Ok(Ok((ws, _))) => ws,
-            _ => {
+            other => {
                 // Connect failed or timed out → back off this peer; the channel drops
-                // with this task and a post-backoff command respawns it.
+                // with this task and a post-backoff command respawns it. Log why:
+                // a silent failure here looks like "the peer is simply offline",
+                // which is indistinguishable from a dial we got wrong.
+                match other {
+                    Ok(Err(e)) => tracing::warn!(npub, url, error = %e, "peer relay dial failed"),
+                    _ => tracing::warn!(npub, url, "peer relay dial timed out"),
+                }
                 record_dial_failure(&dial_backoff, &npub);
                 return;
             }

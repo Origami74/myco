@@ -24,7 +24,7 @@ use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use fips::upper::dns::{handle_dns_packet, DnsIdentityTx};
+use fips::upper::dns::{handle_dns_packet, DnsIdentityTx, DnsResolvedIdentity};
 use fips::upper::hosts::HostMap;
 use fips::upper::tcp_mss::recalculate_l4_checksum;
 
@@ -44,6 +44,28 @@ fn identity_tx() -> &'static Mutex<Option<DnsIdentityTx>> {
 /// is rebuilt on a transport off→on cycle, yielding a fresh channel).
 pub fn set_identity_tx(tx: DnsIdentityTx) {
     *identity_tx().lock().unwrap() = Some(tx);
+}
+
+/// Teach the node an npub's address→pubkey mapping without going through a DNS
+/// lookup, so a packet sent to that mesh address can open a session.
+///
+/// Dialling a peer by raw `fd00::` literal skips resolution, so nothing
+/// registers the identity and the node has no pubkey to open a session with —
+/// the send is dropped and the address looks unroutable. That is invisible for
+/// a *direct* neighbour, whose identity the node already holds from the
+/// handshake, which is why only adjacent peers used to be reachable. Every
+/// address is derived from the public key alone, so this needs no network.
+pub fn warm_route(npub: &str) {
+    let Ok(peer) = fips::PeerIdentity::from_npub(npub) else {
+        return;
+    };
+    let id = DnsResolvedIdentity {
+        node_addr: *peer.node_addr(),
+        pubkey: peer.pubkey_full(),
+    };
+    if let Some(tx) = identity_tx().lock().unwrap().as_ref() {
+        let _ = tx.try_send(id);
+    }
 }
 
 /// The sentinel DNS-server address, `fd00::53`. Chosen inside the routed

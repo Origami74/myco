@@ -858,7 +858,7 @@ impl Content {
 
     /// Every Circle member's npub. Hop count is deliberately not a factor: FIPS
     /// routes to a mesh address whether the peer is adjacent or many hops away,
-    /// so a routed `ws://[fd00::peer]:4870` dial reaches any of them. A member
+    /// so a routed `ws://<npub>.fips:4870` dial reaches any of them. A member
     /// who is genuinely offline costs one bounded dial (the callers time out)
     /// and is then held off by the per-peer backoff in [`crate::peer_relay`].
     /// See `docs/design/event-gossip.md`.
@@ -903,6 +903,21 @@ impl Content {
                     Some("ready") | Some("syncing")
                 )
             })
+            .collect()
+    }
+
+    /// Circle members we hold a live mesh relay connection to right now. The
+    /// keepwarm tick keeps one open per member, so this reflects who is
+    /// actually reachable — at any hop count — rather than who happens to be
+    /// an adjacent node.
+    pub fn reachable_npubs(&self) -> Vec<String> {
+        let live = self.peer_relays.connected_npubs();
+        self.circle
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| live.contains(&c.npub))
+            .map(|c| c.npub.clone())
             .collect()
     }
 
@@ -1048,14 +1063,15 @@ impl Content {
             return;
         };
         let name = self.device_name();
-        let peer = match fips::PeerIdentity::from_npub(target_npub) {
+        // Bind only to validate the npub; the dial is by name (see below).
+        let _peer = match fips::PeerIdentity::from_npub(target_npub) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(target_npub, error = %e, "pairing: bad target npub");
                 return;
             }
         };
-        let url = format!("ws://[{}]:4870", peer.address().to_ipv6());
+        let url = crate::ip_source::mesh_relay_url(target_npub);
         for attempt in 0..PAIR_DIAL_ATTEMPTS {
             if attempt > 0 {
                 tokio::time::sleep(PAIR_DIAL_RETRY_DELAY).await;
@@ -1112,10 +1128,10 @@ impl Content {
             }
             guard.values().cloned().collect::<Vec<_>>()
         };
-        let Ok(peer) = fips::PeerIdentity::from_npub(npub) else {
+        let Ok(_peer) = fips::PeerIdentity::from_npub(npub) else {
             return;
         };
-        let url = format!("ws://[{}]:4870", peer.address().to_ipv6());
+        let url = crate::ip_source::mesh_relay_url(npub);
         let mut stored = 0u32;
         for filters in subs {
             let events = self
@@ -1142,8 +1158,14 @@ impl Content {
     pub fn keepwarm_tick(self: &Arc<Self>) {
         let circle: HashSet<String> = self.circle_npubs().into_iter().collect();
         for npub in &circle {
-            if let Ok(peer) = fips::PeerIdentity::from_npub(npub) {
-                let url = format!("ws://[{}]:4870", peer.address().to_ipv6());
+            if fips::PeerIdentity::from_npub(npub).is_ok() {
+                // Teach the node this npub's address→pubkey mapping first. We
+                // dial a raw `fd00::` literal below, which skips DNS — and
+                // without the identity the node has no pubkey to open a session
+                // with, so the dial fails as unroutable for anyone who isn't
+                // already a direct neighbour. See `dns_intercept::warm_route`.
+                crate::dns_intercept::warm_route(npub);
+                let url = crate::ip_source::mesh_relay_url(npub);
                 self.peer_relays.ensure(npub, &url);
             }
         }
@@ -1166,10 +1188,10 @@ impl Content {
     /// persistent pooled connection (no per-message connect). `npub` is the target
     /// Circle peer. Non-blocking.
     pub fn gossip_to_peer(&self, npub: &str, frame: String) {
-        let Ok(peer) = fips::PeerIdentity::from_npub(npub) else {
+        let Ok(_peer) = fips::PeerIdentity::from_npub(npub) else {
             return;
         };
-        let url = format!("ws://[{}]:4870", peer.address().to_ipv6());
+        let url = crate::ip_source::mesh_relay_url(npub);
         self.peer_relays.send(npub, &url, frame);
     }
 
@@ -1210,7 +1232,7 @@ impl Content {
             if exclude == Some(ip) {
                 return None;
             }
-            let url = format!("ws://[{}]:4870", ip);
+            let url = crate::ip_source::mesh_relay_url(&npub);
             let filters = filters.clone();
             Some(async move {
                 pool.request(&npub, &url, filters, std::time::Duration::from_secs(8))
@@ -1229,17 +1251,17 @@ impl Content {
     // --- discovery ("nsites around me") ---
 
     /// Discover nsites on connected Circle peers' relays: query each reachable
-    /// member's mesh relay (`ws://[fd00::peer]:4870`) for manifest events in
+    /// member's mesh relay (`ws://<npub>.fips:4870`) for manifest events in
     /// parallel, then rebuild the discovered list. Spawn-not-block; the UI polls
     /// `discovered`. Opening a result pulls from that peer (its npub is the holder).
     pub async fn discover_from_circle(self: Arc<Self>) {
         let members = self.circle_contacts();
         let pool = &self.peer_relays;
         let queries = members.into_iter().map(move |(npub, name)| async move {
-            let Ok(peer) = fips::PeerIdentity::from_npub(&npub) else {
+            let Ok(_peer) = fips::PeerIdentity::from_npub(&npub) else {
                 return Vec::new();
             };
-            let relay_url = format!("ws://[{}]:4870", peer.address().to_ipv6());
+            let relay_url = crate::ip_source::mesh_relay_url(&npub);
             // Manifest kinds only; `req-ttl: 1` reaches our peers' peers (2 hops),
             // matching the old `discover_manifests` helper.
             let filter = serde_json::json!({
@@ -1339,8 +1361,9 @@ impl Content {
             .circle_npubs()
             .into_iter()
             .filter_map(|npub| {
-                let peer = fips::PeerIdentity::from_npub(&npub).ok()?;
-                Some((npub, format!("ws://[{}]:4870", peer.address().to_ipv6())))
+                fips::PeerIdentity::from_npub(&npub).ok()?; // validate
+                let url = crate::ip_source::mesh_relay_url(&npub);
+                Some((npub, url))
             })
             .collect();
         let online: Vec<String> = if self.is_offline_only() {
@@ -1632,6 +1655,13 @@ impl Content {
         // then the online fallback unless mesh-only. Activate when complete.
         let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
         if let Some(IpAddr::V6(ip)) = inbound.sender {
+            // The one place a bare mesh address is right: this is whoever just
+            // sent us the event, known only as a transport address — an address
+            // does not reduce back to an npub. It is safe here precisely because
+            // they just reached us, so the node already holds their identity;
+            // everywhere else, peers are addressed as `<npub>.fips` so that
+            // resolving the name registers that identity (see
+            // `ip_source::mesh_relay_url`).
             sources.push(Arc::new(
                 crate::ip_source::IpPeerSource::new(
                     vec![format!("ws://[{ip}]:4870")],

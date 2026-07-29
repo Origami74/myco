@@ -822,6 +822,11 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.circle_snapshot())
                 .unwrap_or_default(),
+            reachable_npubs: self
+                .content
+                .as_ref()
+                .map(|c| c.reachable_npubs())
+                .unwrap_or_default(),
             pending_pair_requests: self
                 .content
                 .as_ref()

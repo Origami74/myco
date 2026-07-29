@@ -326,12 +326,11 @@ val LocalMeshControl = androidx.compose.runtime.compositionLocalOf { MeshControl
 @Composable
 fun PeersPill(state: AppState) {
     val mesh = LocalMeshControl.current
-    val connectedNpubs = state.blePeers
-        .filter { it.connected && it.npub.isNotEmpty() }
-        .map { it.npub }
-        .toSet()
     val connected = state.blePeers.count { it.connected }
-    val reachable = state.circle.count { it.npub in connectedNpubs }
+    // Reachability is "we hold a live mesh relay to them", not "they are an
+    // adjacent node" — a Circle member many hops away is just as reachable, and
+    // counting only direct peers showed 0 while sync was working fine.
+    val reachable = state.reachableNpubs.size
     val circle = state.circle.size
     Surface(
         shape = CircleShape,
