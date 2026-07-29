@@ -128,7 +128,9 @@ fn scan_qname(dns_query: &[u8]) -> Option<(usize, bool)> {
 
 /// True if the query asks for a name under the `.fips` pseudo-TLD.
 fn is_fips_name(dns_query: &[u8]) -> bool {
-    scan_qname(dns_query).map(|(_, is_fips)| is_fips).unwrap_or(false)
+    scan_qname(dns_query)
+        .map(|(_, is_fips)| is_fips)
+        .unwrap_or(false)
 }
 
 /// A SERVFAIL response to `dns_query`: the header and question echoed back,
@@ -179,7 +181,7 @@ mod tests {
 
     /// Build a minimal IPv6/UDP DNS query packet for `qname` to `[fd00::53]:53`.
     fn make_query(qname: &str, dst: [u8; 16]) -> Vec<u8> {
-        use simple_dns::{Name, Packet, QCLASS, QTYPE, Question, TYPE};
+        use simple_dns::{Name, Packet, Question, QCLASS, QTYPE, TYPE};
         let mut q = Packet::new_query(0x1234);
         q.questions.push(Question::new(
             Name::new_unchecked(qname),
