@@ -110,6 +110,30 @@ pub struct DiscoveredNsite {
     pub holder_name: String,
 }
 
+/// One entry per site, keeping the freshest copy seen.
+///
+/// The same nsite legitimately turns up on several Circle peers' relays — the
+/// query runs per holder — but to someone browsing "around you" that is one
+/// app, not one per person who happens to have it. Ties on `updated_at` keep
+/// the first seen, so the result is stable when nobody has a newer version.
+///
+/// Keeping the newest also picks the right holder to pull from: whoever
+/// answered with the most recent manifest has the version we would want.
+fn dedup_by_host(found: Vec<DiscoveredNsite>) -> Vec<DiscoveredNsite> {
+    let mut best: Vec<DiscoveredNsite> = Vec::new();
+    for d in found {
+        match best.iter_mut().find(|b| b.host == d.host) {
+            Some(existing) => {
+                if d.updated_at > existing.updated_at {
+                    *existing = d;
+                }
+            }
+            None => best.push(d),
+        }
+    }
+    best
+}
+
 /// Cache/store counts for the UI.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1300,17 +1324,7 @@ impl Content {
         });
 
         let results = join_all(queries).await;
-        // Dedup by (host, holder): the same site may appear once per holder.
-        let mut seen: HashSet<(String, String)> = HashSet::new();
-        let mut found = Vec::new();
-        for batch in results {
-            for d in batch {
-                if seen.insert((d.host.clone(), d.holder_npub.clone())) {
-                    found.push(d);
-                }
-            }
-        }
-        *self.discovered.lock().unwrap() = found;
+        *self.discovered.lock().unwrap() = dedup_by_host(results.into_iter().flatten().collect());
     }
 
     pub fn discovered_snapshot(&self) -> Vec<DiscoveredNsite> {
@@ -2308,6 +2322,33 @@ mod tests {
         assert_eq!(content.device_name(), fallback, "blank clears the override");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discovery_keeps_one_entry_per_site_preferring_the_newest() {
+        let mk = |host: &str, holder: &str, updated: u64| DiscoveredNsite {
+            host: host.to_string(),
+            author_npub: "npub1author".to_string(),
+            d_tag: None,
+            title: "T".to_string(),
+            updated_at: updated,
+            holder_npub: holder.to_string(),
+            holder_name: holder.to_string(),
+        };
+        // Two peers carry the same site at different versions, plus an unrelated one.
+        let out = dedup_by_host(vec![
+            mk("site-a", "npub1alice", 100),
+            mk("site-b", "npub1alice", 50),
+            mk("site-a", "npub1bob", 300),
+        ]);
+
+        assert_eq!(out.len(), 2, "one entry per site, not one per holder");
+        let a = out.iter().find(|d| d.host == "site-a").unwrap();
+        assert_eq!(a.updated_at, 300, "keeps the freshest copy");
+        assert_eq!(
+            a.holder_npub, "npub1bob",
+            "and therefore the holder worth pulling from"
+        );
     }
 
     #[test]

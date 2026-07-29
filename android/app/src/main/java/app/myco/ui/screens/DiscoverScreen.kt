@@ -104,8 +104,14 @@ fun DiscoverScreen(
             }
         }
 
+        // Anything already offered above is not news down here — a suggested app
+        // that a Circle peer happens to host is the same tile twice, and the one
+        // in "Suggested" already opens it.
+        val suggestedHosts = SUGGESTED_APPS.map { it.host }.toSet()
+        val around = state.discovered.filter { it.host !in suggestedHosts }
+
         item(span = { GridItemSpan(maxLineSpan) }) { SectionLabel("Around you") }
-        if (state.discovered.isEmpty()) {
+        if (around.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Text(
                     "Nothing found yet. Make sure a Circle peer is connected, then tap Discover.",
@@ -115,7 +121,7 @@ fun DiscoverScreen(
                 )
             }
         } else {
-            items(state.discovered, key = { it.host + it.holderNpub }) { d ->
+            items(around, key = { it.host }) { d ->
                 DiscoverTile(
                     client = client,
                     iconHost = d.host,
