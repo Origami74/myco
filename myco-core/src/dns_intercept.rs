@@ -83,6 +83,15 @@ pub fn try_answer(packet: &[u8]) -> Option<Vec<u8>> {
     }
 
     let dns_query = &packet[IPV6_HEADER_LEN + UDP_HEADER_LEN..IPV6_HEADER_LEN + payload_len];
+
+    // Only `.fips` is ours. Everything else gets SERVFAIL, which makes the OS
+    // resolver fail over to the next server it was given (the real one, see the
+    // VpnService) — where NXDOMAIN would be an authoritative "does not exist"
+    // and would end the lookup, breaking all normal DNS on the device.
+    if !is_fips_name(dns_query) {
+        return Some(build_reply(src_addr, src_port, &servfail(dns_query)?));
+    }
+
     // Empty host map: `<npub>.fips` resolves by pure computation without it.
     let (dns_reply, identity) = handle_dns_packet(dns_query, ANSWER_TTL, &HostMap::new())?;
 
@@ -95,6 +104,48 @@ pub fn try_answer(packet: &[u8]) -> Option<Vec<u8>> {
     }
 
     Some(build_reply(src_addr, src_port, &dns_reply))
+}
+
+/// Walk the QNAME in `dns_query` (wire format, labels after the 12-byte
+/// header). Returns the offset just past the terminating zero label, plus
+/// whether the name's last label is `fips` (case-insensitive).
+fn scan_qname(dns_query: &[u8]) -> Option<(usize, bool)> {
+    let mut i = 12; // skip the fixed header
+    let mut last = Vec::new();
+    loop {
+        let len = *dns_query.get(i)? as usize;
+        if len == 0 {
+            return Some((i + 1, last.eq_ignore_ascii_case(b"fips")));
+        }
+        // Compression pointers never appear in a question's QNAME.
+        if len > 63 {
+            return None;
+        }
+        last = dns_query.get(i + 1..i + 1 + len)?.to_vec();
+        i += 1 + len;
+    }
+}
+
+/// True if the query asks for a name under the `.fips` pseudo-TLD.
+fn is_fips_name(dns_query: &[u8]) -> bool {
+    scan_qname(dns_query).map(|(_, is_fips)| is_fips).unwrap_or(false)
+}
+
+/// A SERVFAIL response to `dns_query`: the header and question echoed back,
+/// answer/authority/additional emptied, QR set and RCODE = 2.
+fn servfail(dns_query: &[u8]) -> Option<Vec<u8>> {
+    let (qname_end, _) = scan_qname(dns_query)?;
+    let question_end = qname_end + 4; // QTYPE + QCLASS
+    if dns_query.len() < question_end {
+        return None;
+    }
+    let mut reply = dns_query[..question_end].to_vec();
+    reply[2] |= 0x80; // QR = response
+    reply[3] = (reply[3] & 0xf0) | 2; // RCODE = SERVFAIL
+    reply[6..8].copy_from_slice(&0u16.to_be_bytes()); // ANCOUNT
+    reply[8..10].copy_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+    reply[10..12].copy_from_slice(&0u16.to_be_bytes()); // ARCOUNT
+    Some(reply)
 }
 
 /// Assemble the response IPv6/UDP packet: swap the query's src/dst and ports,
@@ -172,6 +223,22 @@ mod tests {
         let dns = &reply[IPV6_HEADER_LEN + UDP_HEADER_LEN..];
         let parsed = simple_dns::Packet::parse(dns).unwrap();
         assert_eq!(parsed.answers.len(), 1);
+    }
+
+    #[test]
+    fn non_fips_name_gets_servfail_not_nxdomain() {
+        // NXDOMAIN here would be authoritative and would end the lookup, so the
+        // device could resolve nothing but `.fips`. SERVFAIL makes the OS
+        // resolver fail over to the real server listed after our sentinel.
+        let pkt = make_query("google.com", SENTINEL);
+        let reply = try_answer(&pkt).expect("should answer non-.fips queries too");
+
+        let dns = &reply[IPV6_HEADER_LEN + UDP_HEADER_LEN..];
+        assert_eq!(dns[2] & 0x80, 0x80, "QR must be set");
+        assert_eq!(dns[3] & 0x0f, 2, "RCODE must be SERVFAIL");
+        let parsed = simple_dns::Packet::parse(dns).unwrap();
+        assert_eq!(parsed.questions.len(), 1, "question is echoed back");
+        assert_eq!(parsed.answers.len(), 0);
     }
 
     #[test]
