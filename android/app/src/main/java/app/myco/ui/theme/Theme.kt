@@ -19,6 +19,11 @@ val IndigoSoft = Color(0xFFE0E7FF)
 val IndigoInk = Color(0xFF3730A3)
 val StatusConnected = Color(0xFF22C55E)
 val StatusReachable = Color(0xFF14B8A6)
+/// One peer: the mesh works but has no redundancy — lose that peer and you are
+/// alone, so it reads as a caution rather than a fault.
+val StatusThin = Color(0xFFF59E0B)
+/// No peers at all: nothing to sync with, nothing to reach. A real fault state.
+val StatusAlone = Color(0xFFEF4444)
 val Ink = Color(0xFF0F172A)
 val Slate = Color(0xFF64748B)
 val Hairline = Color(0xFFE7E9EE)

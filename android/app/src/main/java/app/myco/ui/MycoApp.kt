@@ -1,5 +1,11 @@
 package app.myco.ui
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -69,7 +75,9 @@ import app.myco.ui.screens.RequestsScreen
 import app.myco.ui.screens.SettingsScreen
 import app.myco.ui.theme.EmeraldSoft
 import app.myco.ui.theme.Slate
+import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
+import app.myco.ui.theme.StatusThin
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -368,8 +376,11 @@ fun PeersPill(state: AppState) {
                 style = MaterialTheme.typography.labelLarge,
             )
             PillDivider()
-            // 3 — live mesh peers.
-            StatusDot(if (connected > 0) StatusConnected else Slate)
+            // 3 — live mesh peers, coloured by how much mesh you actually have:
+            // none is a fault (and pulses, since it is the one state you want
+            // noticed from across the room), one works but has no redundancy,
+            // two or more is healthy.
+            PeerCountDot(connected)
             Text(
                 "$connected",
                 fontWeight = FontWeight.SemiBold,
@@ -436,6 +447,38 @@ fun GroupLabel(text: String) {
 @Composable
 fun StatusDot(color: Color, size: Int = 9) {
     Box(modifier = Modifier.size(size.dp).background(color, CircleShape))
+}
+
+/**
+ * The mesh-peer dot: red and pulsing with no peers, amber with one, green with
+ * two or more.
+ *
+ * Only the zero case animates. A pulse is an attention-getter, so spending it
+ * on the states you can't act on would train people to ignore it — one peer is
+ * a working mesh, just a fragile one, and it says that in colour alone.
+ */
+@Composable
+fun PeerCountDot(peers: Int) {
+    val color = when {
+        peers == 0 -> StatusAlone
+        peers == 1 -> StatusThin
+        else -> StatusConnected
+    }
+    if (peers > 0) {
+        StatusDot(color)
+        return
+    }
+    val pulse = rememberInfiniteTransition(label = "no-peers")
+    val alpha by pulse.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "alpha",
+    )
+    StatusDot(color.copy(alpha = alpha))
 }
 
 /** A monospace label: value row (dev diagnostics). */
