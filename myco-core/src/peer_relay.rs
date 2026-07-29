@@ -327,6 +327,7 @@ async fn run(
     // the (re)connect edge.
     dial_backoff.lock().unwrap().remove(&npub);
     connected.lock().unwrap().insert(npub.clone());
+    tracing::info!(npub, "peer relay connected");
     let (mut sink, mut stream) = ws.split();
     let mut pending: HashMap<String, Pending> = HashMap::new();
     let mut next_sub: u64 = 0;
@@ -335,13 +336,19 @@ async fn run(
     let mut ping =
         tokio::time::interval_at(tokio::time::Instant::now() + PING_INTERVAL, PING_INTERVAL);
     let mut awaiting_pong = false;
+    // Why the actor exited, logged on the way out: a relay that connects and
+    // then dies is indistinguishable from one that never connected unless the
+    // exit says so.
+    #[allow(unused_assignments)] // each loop exit overwrites this before the log
+    let mut reason = "unknown";
 
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
-                None => break, // pool dropped the sender: shut the socket down
+                None => { reason = "pool dropped the command channel"; break }
                 Some(Command::Publish(frame)) => {
                     if sink.send(Message::Text(frame)).await.is_err() {
+                        reason = "write failed (publish)";
                         break;
                     }
                 }
@@ -355,6 +362,7 @@ async fn run(
                     let frame = serde_json::Value::Array(req).to_string();
                     if sink.send(Message::Text(frame)).await.is_err() {
                         let _ = reply.send(Vec::new());
+                        reason = "write failed (request)";
                         break;
                     }
                     pending.insert(sub_id, Pending { events: Vec::new(), reply });
@@ -374,19 +382,21 @@ async fn run(
                                 let _ = sink.send(Message::Text(close)).await;
                             }
                         }
-                        Message::Close(_) => break,
+                        Message::Close(_) => { reason = "peer closed the socket"; break }
                         _ => {} // pong / ping / binary — liveness already noted
                     }
                 }
-                Some(Err(_)) | None => break, // socket error or clean EOF → reconnect on next command
+                Some(Err(_)) | None => { reason = "socket error or EOF"; break }
             },
             _ = ping.tick() => {
                 // The previous ping went a whole interval unanswered by any frame →
                 // treat the connection as dead (this is the half-open catch).
                 if awaiting_pong {
+                    reason = "no frame within a ping interval (half-open)";
                     break;
                 }
                 if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                    reason = "write failed (ping)";
                     break;
                 }
                 awaiting_pong = true;
@@ -407,6 +417,7 @@ async fn run(
     }
     // No longer reachable — clear the flag so the keepwarm loop respawns us and
     // sees a fresh (re)connect edge when the peer comes back.
+    tracing::info!(npub, reason, "peer relay disconnected");
     connected.lock().unwrap().remove(&npub);
     // Pending replies drop here → their `request` callers get an empty batch.
     let _ = sink.send(Message::Close(None)).await;
@@ -444,10 +455,9 @@ mod tests {
     /// startup race for a peer failure holds a good peer off for minutes.
     #[test]
     fn dial_faults_are_classified() {
-        use std::io::{Error, ErrorKind};
-        let io = |msg: &str| {
-            tokio_tungstenite::tungstenite::Error::Io(Error::new(ErrorKind::Other, msg.to_string()))
-        };
+        use std::io::Error;
+        let io =
+            |msg: &str| tokio_tungstenite::tungstenite::Error::Io(Error::other(msg.to_string()));
         assert!(matches!(
             classify(&io(
                 "failed to lookup address information: No address associated with hostname"
