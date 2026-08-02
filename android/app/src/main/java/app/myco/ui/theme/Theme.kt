@@ -1,7 +1,10 @@
 package app.myco.ui.theme
 
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -30,6 +33,15 @@ val Hairline = Color(0xFFE7E9EE)
 val CardBg = Color(0xFFF4F5F7)
 val ScreenBg = Color(0xFFFFFFFF)
 
+/** Bright emerald retained as the primary brand accent on AMOLED black. */
+val AmoledAccent = Color(0xFF34D399)
+private val LightWarning = Color(0xFFB45309)
+private val LightWarningContainer = Color(0xFFFFF7ED)
+private val LightOnWarningContainer = Color(0xFF9A3412)
+private val AmoledWarning = Color(0xFFFFB74D)
+private val AmoledOutline = Color(0xFF3F3F46)
+private val AmoledError = Color(0xFFFF6B6B)
+
 private val MycoLightColors = lightColorScheme(
     primary = Emerald,
     onPrimary = Color.White,
@@ -39,6 +51,10 @@ private val MycoLightColors = lightColorScheme(
     onSecondary = Color.White,
     secondaryContainer = IndigoSoft,
     onSecondaryContainer = IndigoInk,
+    tertiary = LightWarning,
+    onTertiary = Color.White,
+    tertiaryContainer = LightWarningContainer,
+    onTertiaryContainer = LightOnWarningContainer,
     background = ScreenBg,
     onBackground = Ink,
     surface = ScreenBg,
@@ -49,6 +65,44 @@ private val MycoLightColors = lightColorScheme(
     outlineVariant = Hairline,
     error = Color(0xFFDC2626),
 )
+
+private val MycoAmoledColors = darkColorScheme(
+    primary = AmoledAccent,
+    onPrimary = Color.Black,
+    primaryContainer = Color.Black,
+    onPrimaryContainer = AmoledAccent,
+    secondary = Color(0xFFA5B4FC),
+    onSecondary = Color.Black,
+    secondaryContainer = Color.Black,
+    onSecondaryContainer = Color(0xFFA5B4FC),
+    tertiary = AmoledWarning,
+    onTertiary = Color.Black,
+    tertiaryContainer = Color.Black,
+    onTertiaryContainer = AmoledWarning,
+    background = Color.Black,
+    onBackground = Color.White,
+    surface = Color.Black,
+    onSurface = Color.White,
+    surfaceVariant = Color.Black,
+    onSurfaceVariant = Color.White,
+    surfaceDim = Color.Black,
+    surfaceBright = Color.Black,
+    surfaceContainerLowest = Color.Black,
+    surfaceContainerLow = Color.Black,
+    surfaceContainer = Color.Black,
+    surfaceContainerHigh = Color.Black,
+    surfaceContainerHighest = Color.Black,
+    surfaceTint = Color.Black,
+    outline = AmoledOutline,
+    outlineVariant = AmoledOutline,
+    error = AmoledError,
+    onError = Color.Black,
+    errorContainer = Color.Black,
+    onErrorContainer = AmoledError,
+)
+
+internal fun mycoColorScheme(darkTheme: Boolean): ColorScheme =
+    if (darkTheme) MycoAmoledColors else MycoLightColors
 
 /** Vibrant tile colors for nsite icons, assigned deterministically by host. */
 val TilePalette = listOf(
@@ -81,8 +135,13 @@ private val MycoTypography = Typography(
 )
 
 @Composable
-fun MycoTheme(content: @Composable () -> Unit) {
-    // Light-only for now: the mockups are light, and a fixed scheme is the most
-    // consistent choice across API levels.
-    MaterialTheme(colorScheme = MycoLightColors, typography = MycoTypography, content = content)
+fun MycoTheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    content: @Composable () -> Unit,
+) {
+    MaterialTheme(
+        colorScheme = mycoColorScheme(darkTheme),
+        typography = MycoTypography,
+        content = content,
+    )
 }

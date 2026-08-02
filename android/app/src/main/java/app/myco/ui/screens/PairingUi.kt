@@ -44,18 +44,18 @@ import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
 import app.myco.core.PairRequest
-import app.myco.ui.theme.Emerald
-import app.myco.ui.theme.EmeraldInk
-import app.myco.ui.theme.EmeraldSoft
-import app.myco.ui.theme.Slate
 import app.myco.ui.theme.avatarColorFor
 
-private val CardBg = Color(0xFFF4F5F7)
 
 @Composable
 fun RequestCard(req: PairRequest, onAccept: () -> Unit, onIgnore: () -> Unit) {
     val name = req.name.ifEmpty { "Unknown device" }
-    Surface(shape = RoundedCornerShape(18.dp), color = CardBg, modifier = Modifier.fillMaxWidth()) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
@@ -69,7 +69,7 @@ fun RequestCard(req: PairRequest, onAccept: () -> Unit, onIgnore: () -> Unit) {
                     Text(name, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleSmall)
                     Text(
                         shortNpub(req.npub),
-                        color = Slate,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                     )
                 }
@@ -78,17 +78,17 @@ fun RequestCard(req: PairRequest, onAccept: () -> Unit, onIgnore: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Surface(
                     shape = RoundedCornerShape(50),
-                    color = Color.White,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCBD5E1)),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                     modifier = Modifier.weight(1f).clickable(onClick = onIgnore),
                 ) {
                     Box(modifier = Modifier.padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
-                        Text("Ignore", color = Slate, fontWeight = FontWeight.Bold)
+                        Text("Ignore", color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold)
                     }
                 }
                 Surface(
                     shape = RoundedCornerShape(50),
-                    color = Emerald,
+                    color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.weight(1f).clickable(onClick = onAccept),
                 ) {
                     Row(
@@ -96,9 +96,9 @@ fun RequestCard(req: PairRequest, onAccept: () -> Unit, onIgnore: () -> Unit) {
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Icons.Filled.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Filled.Check, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.size(6.dp))
-                        Text("Accept", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text("Accept", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -110,19 +110,19 @@ fun RequestCard(req: PairRequest, onAccept: () -> Unit, onIgnore: () -> Unit) {
 fun VerifyHint() {
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = Color(0xFFFFF7ED),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFED7AA)),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
-                modifier = Modifier.size(22.dp).background(Color(0xFFFDE68A), CircleShape),
+                modifier = Modifier.size(22.dp).background(MaterialTheme.colorScheme.tertiary, CircleShape),
                 contentAlignment = Alignment.Center,
-            ) { Text("!", color = Color(0xFFB45309), fontWeight = FontWeight.ExtraBold) }
+            ) { Text("!", color = MaterialTheme.colorScheme.onTertiary, fontWeight = FontWeight.ExtraBold) }
             Spacer(Modifier.size(10.dp))
             Column {
-                Text("Names are self-chosen", color = Color(0xFF9A3412), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
-                Text("check it matches what they tell you out loud", color = Color(0xFFB45309), style = MaterialTheme.typography.bodySmall)
+                Text("Names are self-chosen", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+                Text("check it matches what they tell you out loud", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
@@ -132,7 +132,11 @@ fun VerifyHint() {
 @Composable
 fun PairConnectedDialog(theirName: String, onDone: () -> Unit) {
     Dialog(onDismissRequest = onDone) {
-        Surface(shape = RoundedCornerShape(24.dp), color = Color.White) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        ) {
             Column(
                 modifier = Modifier.padding(24.dp).fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -143,40 +147,44 @@ fun PairConnectedDialog(theirName: String, onDone: () -> Unit) {
                         Avatar("Y", Color(0xFF4F46E5))
                         Avatar(theirName.firstOrNull()?.uppercase() ?: "?", Color(0xFFF59E0B))
                     }
-                    Surface(shape = CircleShape, color = Color(0xFF16A34A), border = androidx.compose.foundation.BorderStroke(3.dp, Color.White)) {
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primary,
+                        border = androidx.compose.foundation.BorderStroke(3.dp, MaterialTheme.colorScheme.surface),
+                    ) {
                         Box(modifier = Modifier.size(34.dp), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Filled.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                            Icon(Icons.Filled.Check, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(20.dp))
                         }
                     }
                 }
                 Spacer(Modifier.height(18.dp))
                 Text("You're connected", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
                 Spacer(Modifier.height(10.dp))
-                Surface(shape = RoundedCornerShape(50), color = EmeraldSoft) {
+                Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.primaryContainer) {
                     Row(
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Icon(Icons.Filled.SwapHoriz, contentDescription = null, tint = Emerald, modifier = Modifier.size(16.dp))
-                        Text("mutual", color = EmeraldInk, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.labelMedium)
+                        Icon(Icons.Filled.SwapHoriz, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                        Text("mutual", color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.labelMedium)
                     }
                 }
                 Spacer(Modifier.height(14.dp))
                 Text(
                     "You and $theirName are now in each other's circle — one tap did both. Their apps will show up in Discover.",
-                    color = Slate,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center,
                 )
                 Spacer(Modifier.height(20.dp))
                 Surface(
                     shape = RoundedCornerShape(24.dp),
-                    color = Emerald,
+                    color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.fillMaxWidth().height(48.dp).clickable(onClick = onDone),
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Text("Done", color = Color.White, fontWeight = FontWeight.ExtraBold)
+                        Text("Done", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.ExtraBold)
                     }
                 }
             }
@@ -197,7 +205,11 @@ fun PairConnectedDialog(theirName: String, onDone: () -> Unit) {
 @Composable
 fun PairPendingDialog(theirName: String, onDone: () -> Unit) {
     Dialog(onDismissRequest = onDone) {
-        Surface(shape = RoundedCornerShape(24.dp), color = Color.White) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        ) {
             Column(
                 modifier = Modifier.padding(24.dp).fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -209,14 +221,14 @@ fun PairPendingDialog(theirName: String, onDone: () -> Unit) {
                     }
                     Surface(
                         shape = CircleShape,
-                        color = Color(0xFFF59E0B),
-                        border = androidx.compose.foundation.BorderStroke(3.dp, Color.White),
+                        color = MaterialTheme.colorScheme.tertiary,
+                        border = androidx.compose.foundation.BorderStroke(3.dp, MaterialTheme.colorScheme.surface),
                     ) {
                         Box(modifier = Modifier.size(34.dp), contentAlignment = Alignment.Center) {
                             Icon(
                                 Icons.Filled.HourglassTop,
                                 contentDescription = null,
-                                tint = Color.White,
+                                tint = MaterialTheme.colorScheme.onTertiary,
                                 modifier = Modifier.size(18.dp),
                             )
                         }
@@ -229,7 +241,11 @@ fun PairPendingDialog(theirName: String, onDone: () -> Unit) {
                     fontWeight = FontWeight.ExtraBold,
                 )
                 Spacer(Modifier.height(10.dp))
-                Surface(shape = RoundedCornerShape(50), color = Color(0xFFFEF3C7)) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary),
+                ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -238,12 +254,12 @@ fun PairPendingDialog(theirName: String, onDone: () -> Unit) {
                         Icon(
                             Icons.Filled.HourglassTop,
                             contentDescription = null,
-                            tint = Color(0xFFB45309),
+                            tint = MaterialTheme.colorScheme.tertiary,
                             modifier = Modifier.size(16.dp),
                         )
                         Text(
                             "waiting",
-                            color = Color(0xFF92400E),
+                            color = MaterialTheme.colorScheme.tertiary,
                             fontWeight = FontWeight.ExtraBold,
                             style = MaterialTheme.typography.labelMedium,
                         )
@@ -253,18 +269,18 @@ fun PairPendingDialog(theirName: String, onDone: () -> Unit) {
                 Text(
                     "$theirName needs to accept. If their phone isn't reachable yet, " +
                         "this keeps waiting — no need to bump again.",
-                    color = Slate,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center,
                 )
                 Spacer(Modifier.height(20.dp))
                 Surface(
                     shape = RoundedCornerShape(24.dp),
-                    color = Emerald,
+                    color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.fillMaxWidth().height(48.dp).clickable(onClick = onDone),
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Text("Got it", color = Color.White, fontWeight = FontWeight.ExtraBold)
+                        Text("Got it", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.ExtraBold)
                     }
                 }
             }
@@ -277,8 +293,8 @@ private fun Avatar(initial: String, color: Color) {
     Box(
         modifier = Modifier
             .size(60.dp)
-            .background(Color.White, CircleShape)
-            .border(3.dp, Color(0xFFBBF7D0), CircleShape)
+            .background(MaterialTheme.colorScheme.surface, CircleShape)
+            .border(3.dp, MaterialTheme.colorScheme.primary, CircleShape)
             .padding(4.dp)
             .background(color, CircleShape),
         contentAlignment = Alignment.Center,

@@ -86,8 +86,8 @@ internal fun PasteCodeButton(label: String, onPaste: (String) -> Unit) {
     val context = LocalContext.current
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = Color.White,
-        border = BorderStroke(1.dp, Color(0xFFCBD5E1)),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
         modifier = Modifier.fillMaxWidth().height(48.dp).clickable {
             val text = clipboard.getText()?.text?.trim().orEmpty()
             if (text.isNotEmpty()) onPaste(text)
@@ -99,9 +99,9 @@ internal fun PasteCodeButton(label: String, onPaste: (String) -> Unit) {
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Filled.ContentPaste, contentDescription = null, tint = Color(0xFF334155), modifier = Modifier.size(18.dp))
+            Icon(Icons.Filled.ContentPaste, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
             Spacer(Modifier.size(8.dp))
-            Text(label, color = Color(0xFF334155), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+            Text(label, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
         }
     }
 }

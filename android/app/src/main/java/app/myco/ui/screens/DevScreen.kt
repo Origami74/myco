@@ -38,8 +38,6 @@ import app.myco.ui.KeyVal
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
 import app.myco.ui.StatusDot
-import app.myco.ui.theme.Emerald
-import app.myco.ui.theme.Slate
 import app.myco.ui.theme.StatusConnected
 import kotlin.math.pow
 
@@ -176,7 +174,7 @@ private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
         if (resultLine != null) {
             Text(
                 resultLine,
-                color = if (st.error.isNotEmpty() && !st.running) MaterialTheme.colorScheme.error else Slate,
+                color = if (st.error.isNotEmpty() && !st.running) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
             )
@@ -229,7 +227,7 @@ private fun PeersOverviewCard(
             Text(
                 "No peers yet.",
                 style = MaterialTheme.typography.bodySmall,
-                color = Slate,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         for (p in state.blePeers.sortedBy { it.npub }) {
@@ -245,7 +243,7 @@ private fun PeersOverviewCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    StatusDot(if (p.connected) StatusConnected else Slate)
+                    StatusDot(if (p.connected) StatusConnected else MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
                         short(p.npub.ifEmpty { p.nodeAddrHex }),
                         style = MaterialTheme.typography.bodySmall,
@@ -256,7 +254,7 @@ private fun PeersOverviewCard(
                     if (p.connected) "${lanes.joinToString("+")} · ${uptime(now - (since[p.npub] ?: now))}"
                     else "offline",
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (p.connected) Emerald else Slate,
+                    color = if (p.connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -264,7 +262,7 @@ private fun PeersOverviewCard(
         Text(
             "aware = Wi-Fi Aware · udp = LAN/AP lane · ble = Bluetooth · uptime since first seen here",
             style = MaterialTheme.typography.labelSmall,
-            color = Slate,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -284,7 +282,7 @@ private fun DevCard(title: String, content: @Composable () -> Unit) {
     Column {
         Text(
             title,
-            color = Emerald,
+            color = MaterialTheme.colorScheme.primary,
             fontWeight = FontWeight.Bold,
             style = MaterialTheme.typography.titleSmall,
             modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
@@ -302,9 +300,9 @@ private fun KeyValDot(label: String, value: String, ok: Boolean) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
     ) {
-        Text(label, color = Slate, style = MaterialTheme.typography.bodyMedium)
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
         Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatusDot(if (ok) StatusConnected else Slate)
+            StatusDot(if (ok) StatusConnected else MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
                 value,
                 color = if (ok) StatusConnected else MaterialTheme.colorScheme.onSurface,
@@ -320,7 +318,7 @@ private fun PeerRow(peer: BlePeer) {
     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
         Text(
             if (peer.connected) "● connected" else "○ seen",
-            color = if (peer.connected) StatusConnected else Slate,
+            color = if (peer.connected) StatusConnected else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.labelMedium,
         )
         Text(
@@ -335,7 +333,7 @@ private fun AwareLinkRow(l: AwareLink) {
     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
         Text(
             if (l.up) "● ndp up" else "○ ndp requested",
-            color = if (l.up) StatusConnected else Slate,
+            color = if (l.up) StatusConnected else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.labelMedium,
         )
         Text(
@@ -350,7 +348,7 @@ private fun ApNodeRow(n: LanFipsNode) {
     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
         Text(
             if (n.pushed) "● pushed to node" else "○ resolved",
-            color = if (n.pushed) StatusConnected else Slate,
+            color = if (n.pushed) StatusConnected else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.labelMedium,
         )
         Text(
@@ -371,7 +369,7 @@ private fun AdvertRow(a: BleAdvert) {
 
 @Composable
 private fun EmptyLine(text: String) {
-    Text(text, color = Slate, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
+    Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
 }
 
 private fun short(hex: String): String =

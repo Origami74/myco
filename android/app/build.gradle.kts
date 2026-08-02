@@ -140,5 +140,6 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     // …and an in-app camera scanner to read one back.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    testImplementation("junit:junit:4.13.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

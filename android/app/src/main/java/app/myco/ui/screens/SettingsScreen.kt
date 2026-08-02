@@ -65,7 +65,7 @@ import app.myco.ui.RadioWarning
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
 import app.myco.ui.radioWarnings
-import app.myco.ui.theme.Slate
+
 
 /** The Settings surfaces: the root list and its three drill-in sub-pages. */
 private enum class SettingsPage { Root, Identity, Storage, Developer }
@@ -281,7 +281,7 @@ private fun RootSettings(
         }
         Text(
             "Myco ${state.appVersion}",
-            color = Slate,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 8.dp, start = 4.dp),
         )
@@ -308,7 +308,7 @@ private fun IdentitySettings(state: AppState, client: AppCoreClient, onBack: () 
                 Text(
                     "Nearby devices see this name when you pair, so they can confirm " +
                         "they're connecting to the right device.",
-                    color = Slate,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedTextField(
@@ -378,7 +378,7 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
                 Text(
                     "${humanBytes(used)} of 2 GB · ${humanBytes(free)} free · " +
                         "${state.cache.blobCount} blobs · ${state.cache.relayEvents} events",
-                    color = Slate,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -644,9 +644,9 @@ private fun SettingRow(
         }
         Column(modifier = Modifier.weight(1f)) {
             Text(title, color = titleColor, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
-            Text(subtitle, color = Slate, style = MaterialTheme.typography.bodySmall)
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
-        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = Slate)
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -659,7 +659,7 @@ private fun ToggleRow(
     onToggle: (Boolean) -> Unit,
     enabled: Boolean = true,
 ) {
-    val contentColor = if (enabled) MaterialTheme.colorScheme.onSurface else Slate
+    val contentColor = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -668,7 +668,7 @@ private fun ToggleRow(
         Spacer(Modifier.size(14.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(title, color = contentColor, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
-            Text(subtitle, color = Slate, style = MaterialTheme.typography.bodySmall)
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
         Switch(checked = checked, onCheckedChange = onToggle, enabled = enabled)
     }
@@ -681,16 +681,16 @@ private fun SoonRow(icon: ImageVector, title: String, subtitle: String) {
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        LeadingIcon(icon, tint = Slate)
+        LeadingIcon(icon, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.size(14.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, color = Slate, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
-            Text(subtitle, color = Slate, style = MaterialTheme.typography.bodySmall)
+            Text(title, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
         Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surface) {
             Text(
                 "SOON",
-                color = Slate,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.Bold,
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -719,7 +719,7 @@ private fun RowDivider() {
 @Composable
 private fun IdField(label: String, value: String) {
     Column {
-        Text(label, color = Slate, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelMedium)
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelMedium)
         Text(
             value.ifEmpty { "—" },
             style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
