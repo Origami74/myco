@@ -17,8 +17,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -33,12 +31,16 @@ import app.myco.core.AppState
 import app.myco.core.BleAdvert
 import app.myco.core.BlePeer
 import app.myco.core.NativeActions
+import app.myco.core.PeerDiagnostic
 import app.myco.share.DeviceName
 import app.myco.ui.KeyVal
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
 import app.myco.ui.StatusDot
+import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
+import app.myco.ui.theme.StatusReachable
+import app.myco.ui.theme.StatusThin
 import kotlin.math.pow
 
 /**
@@ -59,7 +61,7 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
     ) {
         ScreenHeader("Dev", state, subtitle = "Technical details — myco-core state.")
 
-        PeersOverviewCard(state, awareLinks, apNodes)
+        PeersOverviewCard(state)
 
         SpeedtestCard(state, client)
 
@@ -192,89 +194,91 @@ private fun size(bytes: Long): String =
     if (bytes >= 1024 * 1024) "%.0f MB".format(bytes / (1024.0 * 1024.0)) else "%d KB".format(bytes / 1024)
 
 /**
- * Every peer the node knows, in one place, so the transport sections below
- * don't have to be cross-referenced by hand: who is connected, over which
- * lane(s), and for how long.
- *
- * Lanes are attributed from **our own radios**, not from the node: Wi-Fi Aware
- * rides the ordinary UDP transport, so the node reports "udp" for both Aware
- * and the AP lane and cannot tell them apart. A peer can carry more than one
- * marker while lanes overlap.
- *
- * Uptime is measured from when this screen first observed the peer connected,
- * so it resets on app restart and reads "just now" for a session that predates
- * the process. It is a diagnostic, not an SLA.
+ * Every peer the node knows, in one place: state, last-heard and carrying
+ * transport — the merged `state.peers` row Rust already built (D-19), never
+ * re-joined here against `blePeers` / the radio lists. The full five-state
+ * grouping and expand-in-place detail (D-05/D-11) land in plan 01-04; this is
+ * the tracer slice that proves the row end-to-end for a connected peer.
  */
 @Composable
-private fun PeersOverviewCard(
-    state: AppState,
-    awareLinks: List<AwareLink>,
-    apNodes: List<LanFipsNode>,
-) {
-    // npub → epoch millis first seen connected; cleared when it drops, so a
-    // reconnect restarts the clock rather than reporting the older session.
-    val since = remember { mutableStateMapOf<String, Long>() }
-    val now = System.currentTimeMillis()
-    val connected = state.blePeers.filter { it.connected && it.npub.isNotEmpty() }
-    for (p in connected) since.putIfAbsent(p.npub, now)
-    since.keys.retainAll(connected.map { it.npub }.toSet())
-
-    val awareNpubs = awareLinks.filter { it.up }.map { it.npub }.toSet()
-    val udpNpubs = apNodes.filter { it.pushed }.map { it.npub }.toSet()
-
-    DevCard("PEERS (${connected.size})") {
-        if (state.blePeers.isEmpty()) {
+private fun PeersOverviewCard(state: AppState) {
+    val connectedCount = state.peers.count { it.state == "connected" }
+    DevCard("PEERS ($connectedCount)") {
+        if (state.peers.isEmpty()) {
             Text(
                 "No peers yet.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        for (p in state.blePeers.sortedBy { it.npub }) {
-            val lanes = buildList {
-                if (p.npub in awareNpubs) add("aware")
-                if (p.npub in udpNpubs) add("udp")
-                // Nothing claimed it: BLE is the lane with no radio-side npub
-                // list of its own, so an otherwise-unattributed peer is one.
-                if (isEmpty() && p.connected) add("ble")
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    StatusDot(if (p.connected) StatusConnected else MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        short(p.npub.ifEmpty { p.nodeAddrHex }),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                }
-                Text(
-                    if (p.connected) "${lanes.joinToString("+")} · ${uptime(now - (since[p.npub] ?: now))}"
-                    else "offline",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (p.connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+        for (p in state.peers) {
+            PeerDiagnosticRow(p)
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            "aware = Wi-Fi Aware · udp = LAN/AP lane · ble = Bluetooth · uptime since first seen here",
+            "aware = Wi-Fi Aware · udp = LAN/AP lane · ble = Bluetooth",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
 
-/** Compact duration for the peers card: `42s`, `7m`, `3h12m`. */
-private fun uptime(ms: Long): String {
-    val secs = (ms / 1000).coerceAtLeast(0)
-    return when {
-        secs < 60 -> "${secs}s"
-        secs < 3600 -> "${secs / 60}m"
-        else -> "${secs / 3600}h${(secs % 3600) / 60}m"
+/**
+ * One merged peer diagnostics row: state dot + monospace identity on the
+ * left, carrying transport + exact-seconds last-heard counter (D-18) on the
+ * right, in monospace. `lastSeenMs == 0L` and an empty transport both render
+ * as an em-dash rather than a false "0s"/blank value.
+ */
+@Composable
+private fun PeerDiagnosticRow(peer: PeerDiagnostic) {
+    val dotColor = when (peer.state) {
+        "connected" -> StatusConnected
+        "reachable-via-relay" -> StatusReachable
+        "paired-offline" -> StatusThin
+        "unreachable" -> StatusAlone
+        // "seen-unidentified" and any unrecognized state: neutral, matching
+        // the pre-existing "○ seen" convention.
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
+    val identity = peer.name.ifEmpty {
+        peer.npub.ifEmpty { peer.nodeAddrHex.ifEmpty { peer.bleAddr } }
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        ) {
+            StatusDot(dotColor)
+            Text(
+                short(identity),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Text(
+            "${peer.transport.ifEmpty { "—" }} · ${elapsedExact(peer.lastSeenMs)}",
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * Exact seconds counting up (`3s`, `47s`, `4m 12s`) — D-18: at the 1s Dev-tab
+ * poll cadence this is how a live link is told from a stale one. `0L` (never
+ * heard from) renders an em-dash, never a decades-long elapsed time.
+ */
+private fun elapsedExact(lastSeenMs: Long): String {
+    if (lastSeenMs <= 0L) return "—"
+    val elapsedMs = (System.currentTimeMillis() - lastSeenMs).coerceAtLeast(0)
+    val totalSecs = elapsedMs / 1000
+    val mins = totalSecs / 60
+    val secs = totalSecs % 60
+    return if (mins > 0) "${mins}m ${secs}s" else "${secs}s"
 }
 
 @Composable

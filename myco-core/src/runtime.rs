@@ -10,7 +10,8 @@ use crate::action::NativeAppAction;
 use crate::content::{CacheView, Content};
 use crate::identity_store;
 use crate::state::{
-    AppState, BleAdvert, BlePeer, BleStatus, IdentityView, NodeStatus, WifiAwareStatus,
+    AppState, BleAdvert, BlePeer, BleStatus, IdentityView, NodeStatus, PeerDiagnosticView,
+    WifiAwareStatus,
 };
 
 /// UDP port for the Wi-Fi Aware bulk lane. Both peers bind it on the NDP
@@ -732,22 +733,64 @@ impl AppRuntime {
         // Live peers, read lock-free from the node's tick-published snapshot
         // (empty until the loop runs / peers are seen). On Android every peer is
         // a BLE peer (the only transport configured).
-        let ble_peers: Vec<BlePeer> = self
+        let peer_views = self
             .read_handle
             .as_ref()
-            .map(|h| {
-                h.peer_views()
-                    .into_iter()
-                    .map(|p| BlePeer {
-                        node_addr_hex: p.node_addr_hex,
-                        npub: p.npub,
-                        connected: p.connected,
-                        psm: 0, // not surfaced in the snapshot yet
-                        rssi: None,
-                    })
-                    .collect()
-            })
+            .map(|h| h.peer_views())
             .unwrap_or_default();
+
+        let ble_peers: Vec<BlePeer> = peer_views
+            .iter()
+            .map(|p| BlePeer {
+                node_addr_hex: p.node_addr_hex.clone(),
+                npub: p.npub.clone(),
+                connected: p.connected,
+                psm: 0, // not surfaced in the snapshot yet
+                rssi: None,
+            })
+            .collect();
+
+        // Tracer path (Task 1 of 01-01): one merged row per *connected* peer
+        // only. Task 2 replaces this with the full five-state `merge_peers`
+        // join over ble_peers/ble_adverts/circle/pending pairs/outbound pairs.
+        let mut peers: Vec<PeerDiagnosticView> = peer_views
+            .iter()
+            .filter(|p| p.connected)
+            .map(|p| {
+                let key = if !p.npub.is_empty() {
+                    p.npub.clone()
+                } else {
+                    p.node_addr_hex.clone()
+                };
+                let transport = if p.transport.is_empty() {
+                    // Android's only configured transport today is BLE.
+                    "ble".to_string()
+                } else {
+                    p.transport.clone()
+                };
+                let name = truncate_peer_string(&p.display_name, 64);
+                PeerDiagnosticView {
+                    key,
+                    npub: p.npub.clone(),
+                    node_addr_hex: p.node_addr_hex.clone(),
+                    ble_addr: String::new(),
+                    name,
+                    state: "connected".to_string(),
+                    transport,
+                    also_reachable_via: Vec::new(),
+                    last_seen_ms: p.last_seen_ms,
+                    rssi: None,
+                    psm: 0,
+                    pair_state: String::new(),
+                    in_circle: false,
+                }
+            })
+            .collect();
+        peers.sort_by(|a, b| {
+            b.last_seen_ms
+                .cmp(&a.last_seen_ms)
+                .then_with(|| a.key.cmp(&b.key))
+        });
 
         // Feed the connected-peer npubs to the content layer so `open_site` can
         // pull from currently-reachable Circle members (and skip offline ones).
@@ -859,6 +902,7 @@ impl AppRuntime {
                 .map(|c| c.update_check_snapshot())
                 .unwrap_or_default(),
             speedtest: self.speedtest.lock().unwrap().clone(),
+            peers,
         }
     }
 
@@ -888,6 +932,16 @@ impl AppRuntime {
     pub fn state_json(&self) -> String {
         serde_json::to_string(&self.state())
             .unwrap_or_else(|e| format!(r#"{{"error":"serialize failed: {e}"}}"#))
+    }
+}
+
+/// Truncate a peer-supplied string to at most `max_chars` characters, on a
+/// UTF-8 char boundary, before it crosses the FFI (T-01-02: an oversized
+/// Circle/display name must not reach a fixed-width Dev-tab row).
+fn truncate_peer_string(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => s[..byte_idx].to_string(),
+        None => s.to_string(),
     }
 }
 

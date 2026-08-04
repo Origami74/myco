@@ -86,6 +86,32 @@ data class PairRequest(
     val secret: String,
 )
 
+/**
+ * One merged, npub-or-address-keyed peer diagnostics row (DIAG-01/03/04/06),
+ * built once in Rust from `ble_peers` / `ble_adverts` / `circle` / pending
+ * pairings — never re-joined here. `key` is the `npub` when resolved, else
+ * `nodeAddrHex`, else the raw BLE address of an unresolved advert.
+ */
+data class PeerDiagnostic(
+    val key: String,
+    val npub: String,
+    val nodeAddrHex: String,
+    val bleAddr: String,
+    val name: String,
+    /** "connected" | "reachable-via-relay" | "seen-unidentified" | "paired-offline" | "unreachable". */
+    val state: String,
+    /** Transport carrying this row when connected ("ble", "aware", "udp", "tcp"); empty otherwise. */
+    val transport: String,
+    val alsoReachableVia: List<String> = emptyList(),
+    /** 0 when never heard from — renders as an em-dash, never "0s". */
+    val lastSeenMs: Long,
+    val rssi: Int?,
+    val psm: Int,
+    /** "" | "incoming-waiting" | "outbound-waiting" | "paired". */
+    val pairState: String,
+    val inCircle: Boolean,
+)
+
 /** Parsed slice of the core's state snapshot (P1 BLE surface + P2 content). */
 data class AppState(
     val rev: Long,
@@ -121,6 +147,9 @@ data class AppState(
     val offlineOnly: Boolean,
     val updateCheck: UpdateCheck = UpdateCheck(),
     val speedtest: SpeedtestStatus = SpeedtestStatus(),
+    /** Merged per-identity peer diagnostics rows (DIAG-01/03/04/06). Built once
+     *  in Rust; the UI renders this directly, it never re-joins blePeers/circle. */
+    val peers: List<PeerDiagnostic> = emptyList(),
 ) {
     companion object {
         fun parse(json: String): AppState {
@@ -250,6 +279,36 @@ data class AppState(
                     }
                 }
             }
+            val peerDiagnosticsJson = o.optJSONArray("peers")
+            val peerDiagnostics = buildList {
+                if (peerDiagnosticsJson != null) {
+                    for (i in 0 until peerDiagnosticsJson.length()) {
+                        val p = peerDiagnosticsJson.optJSONObject(i) ?: continue
+                        val alsoReachableVia = buildList {
+                            p.optJSONArray("alsoReachableVia")?.let { arr ->
+                                for (j in 0 until arr.length()) add(arr.optString(j))
+                            }
+                        }
+                        add(
+                            PeerDiagnostic(
+                                key = p.optString("key"),
+                                npub = p.optString("npub"),
+                                nodeAddrHex = p.optString("nodeAddrHex"),
+                                bleAddr = p.optString("bleAddr"),
+                                name = p.optString("name"),
+                                state = p.optString("state"),
+                                transport = p.optString("transport"),
+                                alsoReachableVia = alsoReachableVia,
+                                lastSeenMs = p.optLong("lastSeenMs"),
+                                rssi = if (p.isNull("rssi")) null else p.optInt("rssi"),
+                                psm = p.optInt("psm"),
+                                pairState = p.optString("pairState"),
+                                inCircle = p.optBoolean("inCircle"),
+                            )
+                        )
+                    }
+                }
+            }
             val outboundJson = o.optJSONArray("outboundPairs")
             val outboundPairs = buildList {
                 if (outboundJson != null) {
@@ -316,6 +375,7 @@ data class AppState(
                         generation = u.optLong("generation"),
                     )
                 } ?: UpdateCheck(),
+                peers = peerDiagnostics,
             )
         }
     }

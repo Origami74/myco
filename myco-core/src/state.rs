@@ -53,6 +53,57 @@ pub struct AppState {
     pub update_check: crate::content::UpdateCheckView,
     /// Result of the dev-menu peer speedtest (a Blossom upload+download round-trip).
     pub speedtest: SpeedtestView,
+    /// The merged per-identity peer diagnostics view (DIAG-01/03/04/06):
+    /// one row per known peer, covering every state from `connected` through
+    /// `unreachable`, built once here rather than re-derived client-side from
+    /// `ble_peers` / `ble_adverts` / `circle` / `reachable_npubs`.
+    pub peers: Vec<PeerDiagnosticView>,
+}
+
+/// One merged, npub-or-address-keyed peer diagnostics row for the Dev tab
+/// (DIAG-01/03/04/06). `key` is the `npub` when resolved, else the
+/// `node_addr_hex`, else the raw BLE address — so a device seen only as an
+/// unresolved advert still gets a stable row (D-09). This is a rendering
+/// surface: it deliberately does NOT carry the one-time pairing credential
+/// value that [`crate::content::PairRequestView`] holds.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerDiagnosticView {
+    /// Stable row identity: `npub` when resolved, else `node_addr_hex`, else
+    /// the raw BLE address of an unresolved advert.
+    pub key: String,
+    /// Resolved npub; empty when not yet identified.
+    pub npub: String,
+    /// Resolved `node_addr` hex; empty when only a raw advert has been seen.
+    pub node_addr_hex: String,
+    /// Raw BLE address (`adapter/AA:BB:..`); empty unless this row was seen or
+    /// attributed as a scan advert.
+    pub ble_addr: String,
+    /// Best-known display label (Circle name or peer-advertised display name),
+    /// truncated to at most 64 characters before it crosses the FFI.
+    pub name: String,
+    /// One of `connected`, `reachable-via-relay`, `seen-unidentified`,
+    /// `paired-offline`, `unreachable`.
+    pub state: String,
+    /// Transport currently carrying this row, when connected (`ble`, `aware`,
+    /// `udp`, `tcp`); empty when not connected.
+    pub transport: String,
+    /// Other transports this peer is also reachable over, in the fixed order
+    /// `ble`, `aware`, `udp`, `tcp`. Empty until Phase 2 populates it.
+    pub also_reachable_via: Vec<String>,
+    /// Milliseconds-since-epoch this row was last heard from; `0` when never
+    /// heard from (renders as an em-dash, never "0s").
+    pub last_seen_ms: u64,
+    /// Signal strength from the most recent scan advert attributed to this
+    /// row, dBm; `None` when no advert has been attributed.
+    pub rssi: Option<i32>,
+    /// Advertised listener PSM from the most recent scan advert attributed to
+    /// this row; `0` when none.
+    pub psm: u16,
+    /// One of `""`, `incoming-waiting`, `outbound-waiting` or `paired`.
+    pub pair_state: String,
+    /// Whether this npub is a member of the user's Circle.
+    pub in_circle: bool,
 }
 
 /// Outcome of a peer speedtest: upload + download throughput measured by PUTting
