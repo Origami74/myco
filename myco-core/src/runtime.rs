@@ -10,8 +10,7 @@ use crate::action::NativeAppAction;
 use crate::content::{CacheView, Content};
 use crate::identity_store;
 use crate::state::{
-    AppState, BleAdvert, BlePeer, BleStatus, IdentityView, NodeStatus, PeerDiagnosticView,
-    WifiAwareStatus,
+    AppState, BleAdvert, BlePeer, BleStatus, IdentityView, NodeStatus, WifiAwareStatus,
 };
 
 /// UDP port for the Wi-Fi Aware bulk lane. Both peers bind it on the NDP
@@ -749,48 +748,54 @@ impl AppRuntime {
                 rssi: None,
             })
             .collect();
+        let ble_adverts = self.ble_adverts();
 
-        // Tracer path (Task 1 of 01-01): one merged row per *connected* peer
-        // only. Task 2 replaces this with the full five-state `merge_peers`
-        // join over ble_peers/ble_adverts/circle/pending pairs/outbound pairs.
-        let mut peers: Vec<PeerDiagnosticView> = peer_views
-            .iter()
-            .filter(|p| p.connected)
-            .map(|p| {
-                let key = if !p.npub.is_empty() {
-                    p.npub.clone()
-                } else {
-                    p.node_addr_hex.clone()
-                };
-                let transport = if p.transport.is_empty() {
-                    // Android's only configured transport today is BLE.
-                    "ble".to_string()
-                } else {
-                    p.transport.clone()
-                };
-                let name = truncate_peer_string(&p.display_name, 64);
-                PeerDiagnosticView {
-                    key,
-                    npub: p.npub.clone(),
-                    node_addr_hex: p.node_addr_hex.clone(),
-                    ble_addr: String::new(),
-                    name,
-                    state: "connected".to_string(),
-                    transport,
-                    also_reachable_via: Vec::new(),
-                    last_seen_ms: p.last_seen_ms,
-                    rssi: None,
-                    psm: 0,
-                    pair_state: String::new(),
-                    in_circle: false,
-                }
-            })
-            .collect();
-        peers.sort_by(|a, b| {
-            b.last_seen_ms
-                .cmp(&a.last_seen_ms)
-                .then_with(|| a.key.cmp(&b.key))
-        });
+        // content.rs snapshot accessors `state()` already calls unconditionally
+        // (RESEARCH.md Pitfall 5) — fetched once here and reused for both the
+        // peers merge below and the AppState fields further down, so the merge
+        // adds no new lock acquisitions.
+        let circle = self
+            .content
+            .as_ref()
+            .map(|c| c.circle_snapshot())
+            .unwrap_or_default();
+        let reachable_npubs = self
+            .content
+            .as_ref()
+            .map(|c| c.reachable_npubs())
+            .unwrap_or_default();
+        let outbound_pairs = self
+            .content
+            .as_ref()
+            .map(|c| c.outbound_pairs_snapshot())
+            .unwrap_or_default();
+        let pending_pair_requests = self
+            .content
+            .as_ref()
+            .map(|c| c.pending_pairs_snapshot())
+            .unwrap_or_default();
+
+        // Lane-origin overrides (npub → observed lane, e.g. "aware" vs the
+        // fips-reported "udp"): both Wi-Fi Aware and the LAN/AP lane ride
+        // fips's plain UDP transport and share one JNI push site today
+        // (`aware_bridge_jni.rs`'s hardcoded `TRANSPORT_TYPE = "udp"`), so
+        // fips cannot tell them apart — only the Kotlin push site can. Empty
+        // here; plan 01-02 threads a real npub→lane map through from
+        // `aware_bridge_jni.rs` without changing this call shape.
+        let lane_by_npub: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        let peers = crate::peer_diagnostics::merge_peers(
+            &peer_views,
+            &ble_peers,
+            &ble_adverts,
+            &circle,
+            &pending_pair_requests,
+            &outbound_pairs,
+            &reachable_npubs,
+            &lane_by_npub,
+            now_ms(),
+        );
 
         // Feed the connected-peer npubs to the content layer so `open_site` can
         // pull from currently-reachable Circle members (and skip offline ones).
@@ -842,7 +847,7 @@ impl AppRuntime {
                 },
             },
             ble_peers,
-            ble_adverts: self.ble_adverts(),
+            ble_adverts,
             wifi_aware: WifiAwareStatus {
                 enabled: self.wifi_aware_enabled,
                 port: if self.wifi_aware_enabled {
@@ -866,26 +871,10 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.cache_view())
                 .unwrap_or_else(CacheView::empty),
-            circle: self
-                .content
-                .as_ref()
-                .map(|c| c.circle_snapshot())
-                .unwrap_or_default(),
-            reachable_npubs: self
-                .content
-                .as_ref()
-                .map(|c| c.reachable_npubs())
-                .unwrap_or_default(),
-            outbound_pairs: self
-                .content
-                .as_ref()
-                .map(|c| c.outbound_pairs_snapshot())
-                .unwrap_or_default(),
-            pending_pair_requests: self
-                .content
-                .as_ref()
-                .map(|c| c.pending_pairs_snapshot())
-                .unwrap_or_default(),
+            circle,
+            reachable_npubs,
+            outbound_pairs,
+            pending_pair_requests,
             discovered: self
                 .content
                 .as_ref()
@@ -935,16 +924,6 @@ impl AppRuntime {
     }
 }
 
-/// Truncate a peer-supplied string to at most `max_chars` characters, on a
-/// UTF-8 char boundary, before it crosses the FFI (T-01-02: an oversized
-/// Circle/display name must not reach a fixed-width Dev-tab row).
-fn truncate_peer_string(s: &str, max_chars: usize) -> String {
-    match s.char_indices().nth(max_chars) {
-        Some((byte_idx, _)) => s[..byte_idx].to_string(),
-        None => s.to_string(),
-    }
-}
-
 /// nsites installed by default on first run (the bundled myco-bitchat app).
 const DEFAULT_SITES: &[&str] =
     &["4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivbitchat.nsite.lol"];
@@ -977,6 +956,15 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Milliseconds since the Unix epoch, passed to `merge_peers` (reserved for
+/// future staleness-based state work; unused by today's merge logic).
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 

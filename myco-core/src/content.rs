@@ -157,7 +157,7 @@ impl CacheView {
 /// An incoming pairing request awaiting the user's accept/decline (surfaced to the
 /// UI as a pop-up). The requester scanned our QR; `secret` is the one-time value
 /// from that QR, echoed back to prove they actually saw it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairRequestView {
     pub npub: String,

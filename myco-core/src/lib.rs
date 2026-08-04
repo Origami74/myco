@@ -17,6 +17,7 @@ mod content;
 mod gossip;
 mod identity_store;
 mod ip_source;
+mod peer_diagnostics;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod peer_relay;
 mod runtime;
