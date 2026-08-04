@@ -70,12 +70,14 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. User can see, for BLE and for Wi-Fi Aware separately, whether the radio is enabled and whether it is actively scanning right now.
   4. User can see their own npub and the Circle name other peers see them as, plus every pending pair request marked waiting, complete, or failed.
   5. After a failed connection, the diagnostics show — in the app, not a debugger — which BLE role this device chose for that peer, how long discovery took, and how many sends to it were dropped.
-**Plans**: 2 plans
+**Plans**: 4 plans
 **UI hint**: yes
 
 Plans:
-- [ ] 01-01: Instrument the peering path — per-peer role decision, discovery latency, connect-attempt outcome, send-failure/drop counters; expose over the FFI state surface
-- [ ] 01-02: Peer diagnostics screen — connection state, last-seen, transport, radio/scanning status, pending pair requests, own identity
+- [ ] 01-01-PLAN.md — Merge every known peer into one npub-keyed FFI array with true state, last-seen and transport
+- [ ] 01-02-PLAN.md — Both radios report observed scanning/advertising state instead of a computed proxy
+- [ ] 01-03-PLAN.md — Per-peer BLE role, discovery latency, attempt outcomes and send failures, persisted crash-tolerantly
+- [ ] 01-04-PLAN.md — The Dev tab rebuilt around peering: radio self-check, expanding peer rows, pending pairings, identity
 
 ### Phase 2: Peering That Converges and Recovers
 **Goal**: Phones in a room all find each other and connect without anyone touching anything, stay connected through Wi-Fi reconnects, MAC rotation, BLE flaps and backgrounding, and when a peer still isn't connected the list says why in plain language. **This phase is the release gate — "mesh quality measurably better than the current release" means this. Must land before 2026-08-05.**
@@ -151,7 +153,7 @@ Phases 1-3 are inside the 2026-08-05 release deadline. Phases 4-5 land after it.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Make Peering Observable | 0/2 | Not started | - |
+| 1. Make Peering Observable | 0/4 | Not started | - |
 | 2. Peering That Converges and Recovers | 0/3 | Not started | - |
 | 3. The Release Cut Behaves Itself | 0/1 | Not started | - |
 | 4. fips Rebased, Theme by Theme | 0/2 | Not started | - |
