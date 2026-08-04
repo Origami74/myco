@@ -99,6 +99,13 @@ empty with no warning; sync spawns unbounded concurrent tasks that swamp a BLE l
 
 **Field TODOs** are tracked in `reference/FIX-TODOS.md`.
 
+**Current release is v0.4.2** (2026-08-04) — system-aware AMOLED dark mode, merged
+from [#23](https://github.com/Origami74/myco/pull/23) and released outside the
+roadmap. It changed nothing about the mesh, but it is the baseline that Milestone A's
+"measurably better mesh quality" is measured against, and it establishes the Compose
+theming rules that Milestone A's new diagnostics UI has to follow — see the Android UI
+section of `.planning/codebase/CONVENTIONS.md`.
+
 **Napplet references.** napplet.run/docs is the authority: NIP-5D
 ([nips#2303](https://github.com/nostr-protocol/nips/pull/2303)), the NAP capability-domain
 registry ([napplet/naps](https://github.com/napplet/naps)), and Kehto's `RUNTIME-SPEC.md`

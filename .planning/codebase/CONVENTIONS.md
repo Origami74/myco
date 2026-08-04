@@ -221,6 +221,46 @@ const WIFI_AWARE_PORT: u16 = 4871;
 - Path dependencies: `fips` (local checkout at `reference/fips`), internal crates
 - Async runtime: Tokio multi-threaded, configured at workspace level
 
+## Android UI (Compose)
+
+<!-- Added 2026-08-04 after the v0.4.2 dark-mode merge (#23). The rest of this
+     document predates it and covers Rust only. -->
+
+The app follows the Android system theme. `MycoTheme` picks between
+`MycoLightColors` and `MycoAmoledColors` via `isSystemInDarkTheme()`, both defined
+in `android/app/src/main/java/app/myco/ui/theme/Theme.kt`.
+
+**New UI must not hardcode colours.** Read them from `MaterialTheme.colorScheme`
+semantic roles (`surface`, `onSurface`, `surfaceVariant`, `outline`, `primary`,
+`tertiary` for warnings) so both themes render correctly. The palette is fixed —
+no Material You / dynamic colour, which would need API 31+ while Myco targets
+API 29+.
+
+**Peer-state colours are already defined and are theme-independent** — reuse them
+rather than inventing new ones:
+
+| Constant | Meaning |
+|---|---|
+| `StatusConnected` | Live mesh connection |
+| `StatusReachable` | Reachable, not directly connected |
+| `StatusThin` | Exactly one peer — works, but no redundancy |
+| `StatusAlone` | No peers; a real fault state |
+
+Two deliberate exceptions to theme-following: the QR card stays white in both
+themes (scanners read dark-on-light far more reliably), and pending/warning
+states keep a distinct amber rather than collapsing into the theme's accent.
+
+`ThemeTest.kt` asserts palette invariants and runs in CI, so a new screen that
+reaches past the colour scheme will be caught there.
+
+## Build environment
+
+- **`reference/fips` must be checked out on `feat/platform-peer-queue`.** It is a
+  gitignored path dependency, and `master` does not export the symbols myco-core
+  needs (`fips::discovery::platform`, a public `ControlReadHandle`) — the Android
+  build fails to compile against it. `release.yml` clones the same ref from
+  `jmcorgan/fips`. Phase 4 is what removes this constraint.
+
 ---
 
-*Convention analysis: 2026-08-01*
+*Convention analysis: 2026-08-01; Android UI and build-environment sections added 2026-08-04*
