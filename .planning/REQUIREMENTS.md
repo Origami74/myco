@@ -122,4 +122,46 @@ becomes a roadmap of its own via `/gsd-new-milestone` once v1 ships.
 
 ## Traceability
 
-<!-- Filled by the roadmapper: REQ-ID → phase mapping -->
+v1 (Milestone A) only. All 24 v1 requirements map to exactly one phase — no orphans, no
+duplicates. Phases 1-3 are inside the 2026-08-05 release deadline; Phases 4-5 land after it.
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| PEER-01 | Phase 2 | Pending |
+| PEER-02 | Phase 2 | Pending |
+| PEER-03 | Phase 2 | Pending |
+| PEER-04 | Phase 2 | Pending |
+| PEER-05 | Phase 2 | Pending |
+| PEER-06 | Phase 2 | Pending |
+| DIAG-01 | Phase 1 | Pending |
+| DIAG-02 | Phase 2 | Pending |
+| DIAG-03 | Phase 1 | Pending |
+| DIAG-04 | Phase 1 | Pending |
+| DIAG-05 | Phase 1 | Pending |
+| DIAG-06 | Phase 1 | Pending |
+| DIAG-07 | Phase 1 | Pending |
+| FIPS-01 | Phase 4 | Pending |
+| FIPS-02 | Phase 4 | Pending |
+| FIPS-03 | Phase 4 | Pending |
+| FIPS-04 | Phase 4 | Pending |
+| CORE-01 | Phase 5 | Pending |
+| CORE-02 | Phase 5 | Pending |
+| CORE-03 | Phase 3 | Pending |
+| CORE-04 | Phase 2 | Pending |
+| CORE-05 | Phase 5 | Pending |
+| UX-01 | Phase 3 | Pending |
+| UX-02 | Phase 3 | Pending |
+
+**Coverage:** 24/24 v1 requirements mapped.
+
+**Notes on non-obvious placements:**
+- **DIAG-02** (reason codes) sits in Phase 2, not Phase 1, and lands last within it — a
+  plain-language reason on top of flaky reconnect logic is noise, not diagnosis.
+- **CORE-04** (durable pair requests) sits in Phase 2 with PEER-06 — both are the same
+  fire-and-forget-delivery defect, and both are needed for "connected" to mean "working".
+- **CORE-03** (corrupt Circle/Library) sits in Phase 3 with the field-reported UX fixes,
+  not with the Phase 5 code-health work — silently emptying a Circle destroys pairings, so
+  it belongs in the release cut.
+
+v2 requirements (MESH, BACK, WEB, NAP) are not mapped here. They become Milestone B's own
+roadmap via `/gsd-new-milestone` once v1 ships.

@@ -58,8 +58,11 @@ anything.** Every other feature is worthless if peering doesn't hold.
       libraries (applesauce, nostr-tools) with no shim
 - [ ] `window.myco.neighbours` convenience API layered over that URL
 - [ ] Mesh publish/subscribe is explicit in nsite code — never accidental
-- [ ] Myco runs napplets per the napplet.run protocol, implemented in Rust
+- [ ] Myco runs napplets per the NIP-5D protocol, implemented in Rust
+- [ ] Napplet v1 covers the conformant core plus the `identity`, `storage`, `outbox` and
+      `relay` NAP domains — enough for a napplet to read and publish Nostr through the host
 - [ ] `napplet.neighbours` API for mesh publish/subscribe from a napplet
+- [ ] `neighbours` written up as a candidate NAP domain and proposed upstream
 - [ ] Napplets distribute over the existing manifest + Blossom pipeline under their own
       event kind, appearing alongside nsites in one Library with a type badge
 
@@ -96,9 +99,19 @@ empty with no warning; sync spawns unbounded concurrent tasks that swamp a BLE l
 
 **Field TODOs** are tracked in `reference/FIX-TODOS.md`.
 
-**Napplet references.** napplet.run/docs is the authority on the protocol. `jodobear/uzel`
-is a port of the official kehto runtime packages and serves as a loose implementation
-reference — the v1 surface should at minimum match what uzel functionally covers.
+**Napplet references.** napplet.run/docs is the authority: NIP-5D
+([nips#2303](https://github.com/nostr-protocol/nips/pull/2303)), the NAP capability-domain
+registry ([napplet/naps](https://github.com/napplet/naps)), and Kehto's `RUNTIME-SPEC.md`
+as the best conformant-host description. `jodobear/uzel` turned out **not** to be a port of
+the Kehto runtime — it forks pablof7z's unrelated `nampplets`/NMP project, is Linux/Tauri
+only, and uses a domain vocabulary that diverges from the ratified NAP registry. It is not a
+scope floor and not a dependency.
+
+A napplet is host-assembled verified bytes injected into a sandboxed `srcdoc` iframe
+(`sandbox="allow-scripts"`, no `allow-same-origin`); the JS runs in the host's own engine, so
+Android WebView is already the runtime and no JS/WASM crate is needed. Manifests are kind
+35129, structurally near-identical to the nsite manifests `nsite-deck` already resolves.
+`neighbours` appears in none of the 23 NAP domains — it is Myco's own contribution.
 
 ## Constraints
 
@@ -125,6 +138,11 @@ reference — the v1 surface should at minimum match what uzel functionally cove
 | Mesh exposed as a relay URL plus a `window.myco` global | The URL keeps applesauce and nostr-tools working unmodified; the global keeps simple apps simple | — Pending |
 | Napplets ship on the existing manifest + Blossom pipeline, own event kind | Reuses sync, Discover, and Circle gating; the type distinction stays explicit | — Pending |
 | Peer diagnostics in the release cut | Demo failures need to be explainable, and field data drives the real hardening | — Pending |
+| Napplet v1 = conformant core plus `identity`, `storage`, `outbox`, `relay` | NAP domains are feature-detected, so a subset is conformant; this is the smallest set where a napplet can actually do Nostr | — Pending |
+| `neighbours` proposed upstream as a NAP domain, not kept private | Same reasoning as the fips upstreaming constraint — a mesh domain designed to registry conventions outlives Myco | — Pending |
+| uzel dropped as a reference | It forks pablof7z's unrelated nampplets/NMP project; treating it as a napplet.run reference would have imported a divergent vocabulary | ✓ Good |
+| Instrumentation phase before any peering fix | The tiebreaker and duty-cycle root causes are inferred from code, not device logs; fixing before observing is guessing | — Pending |
+| fips rebase after the release, theme by theme | 19 commits against 232 of upstream refactor is not two-day work, and the release must not depend on it | — Pending |
 
 ## Evolution
 
