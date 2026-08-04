@@ -1,7 +1,7 @@
 ---
 phase: 1
 slug: make-peering-observable
-status: draft
+status: approved
 shadcn_initialized: false
 preset: none
 created: 2026-08-04
@@ -111,6 +111,27 @@ palette rather than flagging the extra rows as undeclared color.
 
 ---
 
+## Focal Point & Visual Hierarchy
+
+Primary focal point: the **radio self-check card** — it is the diagnostic entry point that answers
+D-07's "is it me or is it them" question, so it renders first and is never scrolled past to reach
+the peer list.
+
+Visual order, top to bottom:
+
+1. Radio self-check card (focal point — BLE enabled/scanning/advertising, Wi-Fi Aware available)
+2. Peer list card (the screen's bulk content; scrollable, D-11 ordering)
+3. Pending pair requests card
+4. Identity card
+5. Speedtest card (demoted below all peering content, D-04)
+
+Interaction depth is flat: peer rows expand **in place** (D-05) — there is no per-peer detail
+screen and no navigation away from the Dev tab. Emphasis within a card comes from the SemiBold
+(600) status value and its state-colored dot, never from size jumps: all row-level content stays
+at 14sp/12sp so hierarchy reads through position and color, not scale.
+
+---
+
 ## Copywriting Contract
 
 | Element | Copy |
@@ -127,20 +148,65 @@ palette rather than flagging the extra rows as undeclared color.
 
 ## UI Considerations
 
-Applicable state considerations resolved: 9 covered, 2 backstop, 0 unresolved.
+Probe run over 6 described surfaces (E1–E6) × the 8-category closed taxonomy.
+**48 applicable — 42 covered, 6 backstop, 0 unresolved.**
 
-| Category | Element(s) | Status | Resolution / Reason |
-|----------|------------|--------|---------------------|
-| empty | peer list (list-collection) | ✅ covered | D-07: at zero peers, the radio self-check card renders first, followed by the empty peer list using the Empty State copy row above — never a bare blank screen. |
-| empty | pending pair requests (list-collection) | ✅ covered | No pending requests renders the existing `EmptyLine("none")` convention (matches `RADIO ADVERTS` / `WI-FI AP` cards' established empty pattern) — no new empty-state design needed for this list. |
-| loading | peer list first frame, before the Dev screen's own ~1s poll (D-16) lands | 🧪 backstop | Prescribed default: render the radio self-check card immediately from the state already present on `AppState` (bleAdverts/circle fields exist pre-Phase-1), and show a single terse row "loading peers…" in place of the peer list until the first `peers` array response arrives — never an empty list flashing before real data. Marked backstop because no explicit test currently pins this transient frame; verify visually against a cold Dev-tab open. |
-| loading | attempt log on row expand (D-05) | 🧪 backstop | Depends on a Claude's-Discretion item still open at the Rust layer (01-CONTEXT.md: "whether the attempt log rides the `state()` payload or is fetched on row expand"). UI rule either way: if the log rides the polled `peers` array, expand is instant with no loading state; if fetched separately, expand shows one line "loading history…" before rows render — the row must never jump from collapsed straight to a populated list with no transition cue. Marked backstop pending the 01-01 plan's transport choice. |
-| error | attempt log corrupted/unreadable | ✅ covered | D-13 + Error State copy row: degrades to "No history for this peer" in neutral `onSurfaceVariant`, never `colorScheme.error`, never blocks the screen or destroys the on-disk file. |
-| populated | peer list at typical demo-room volume (roughly 3-15 peers) | ✅ covered | Rows stay single-line collapsed (matches existing `PeerRow` height) inside the screen's existing `verticalScroll(rememberScrollState())` — no pagination, no virtualization needed at this volume; the column already scrolls. |
-| partial | peer row where Circle name is still the code's placeholder value (`CircleContact.name` is commented "a placeholder for now" — flagged in 01-CONTEXT.md canonical refs) | 🧪 backstop | Resolution: if the resolved Circle name equals the known placeholder sentinel, the row falls back to displaying only the truncated npub (via the existing `short()` helper) — the literal placeholder text must never reach the screen. Marked backstop because the exact placeholder sentinel string needs confirming against `content.rs` at implementation time; the fallback behavior itself is locked. |
-| overflow | long npub/hex values, attempt-log entries, Circle names | ✅ covered | Reuse the existing `short()` truncation helper (`hex.take(10)…hex.takeLast(4)` for values >18 chars) and `DeviceName.generated()` pattern already used in `SpeedtestCard` — no new truncation scheme. |
-| zero-one-many | peer list at 0 / 1 / many | ✅ covered | 0 → D-07 radio self-check + empty state; 1 → single row, no grouping chrome; many → D-11 ordering (state, then most-recently-heard) inside the existing scrollable column. No copy changes needed between singular/plural since rows carry no count-dependent text (unlike "PEERS (3)" card title, which already pluralizes via the numeral, not via word choice). |
-| long-text | Circle names supplied by peers, npubs | ✅ covered | Same truncation convention as overflow row above; Circle names are attacker-controllable (received from an untrusted peer over the mesh) so truncation is also a defensive measure, not just a layout one — never render an unbounded string from a peer into a fixed-width row. |
+Kind confirmation (propose-then-confirm): the heuristic classifier did **not** raise `long-text`
+for E2/E3/E4/E5, but all four render peer-supplied or peer-derived strings (Circle names, npubs,
+attempt-log text). `static-content` was added to those elements' kind set (union with detected)
+and the probe re-run, raising the four missed `long-text` considerations. E1 and E6 kept their
+detected kinds.
+
+| # | Category | Element | Status | Resolution / Statement |
+|---|----------|---------|--------|------------------------|
+| E1 | empty | Radio self-check card | ✅ covered | The card has no zero-data state: it always renders its fixed fact-row set. A fact whose source value is unavailable renders as a neutral `onSurfaceVariant` dot with the value "unknown" — the row is never omitted, so row count never varies. |
+| E1 | loading | Radio self-check card | 🧪 backstop | **Statement:** on cold Dev-tab open the card renders immediately from `AppState` fields that already exist pre-Phase-1 (bleAdverts/circle), with no spinner and no skeleton — the self-check is on screen before the first ~1s poll (D-16) lands. **Verification:** backstop — no test pins this transient first frame; verify visually against a cold open. |
+| E1 | error | Radio self-check card | ✅ covered | A failed or absent radio query renders that row's value as "unknown" in `onSurfaceVariant`. Never `colorScheme.error`, never a dialog, never a blocked screen (D-13 degrade-quietly rule). |
+| E1 | populated | Radio self-check card | ✅ covered | Happy path is 4–6 label/value rows, each `StatusDot` (9px) + label Regular 400 `onSurfaceVariant` + value SemiBold 600 in its state color, 6px vertical row padding — identical row anatomy to the existing `KeyValDot`. |
+| E1 | partial | Radio self-check card | ✅ covered | Facts are independent: any subset may be "unknown" while the rest show real values. No all-or-nothing card hiding, no aggregate "self-check unavailable" state. |
+| E1 | overflow | Radio self-check card | ✅ covered | Fact values are short enums (true/false/unknown), so a row never exceeds its container. Vertical growth is absorbed by the screen-level `verticalScroll(rememberScrollState())`. |
+| E1 | zero-one-many | Radio self-check card | ✅ covered | Not a variable collection by shape — the row set is fixed at compile time. No singular/plural copy exists in this card. |
+| E1 | long-text | Radio self-check card | ✅ covered | No free or remote text: labels are in-repo literals and values are fixed enum strings. No truncation path needed. |
+| E2 | empty | Peer list | ✅ covered | D-07: at zero peers the radio self-check card renders first, then the empty peer list using the Empty State copy above ("No peers yet" + body) — never a bare blank screen. |
+| E2 | loading | Peer list | 🧪 backstop | **Statement:** a single terse row "loading peers…" occupies the peer list until the first `peers` array response arrives — an empty list must never flash before real data, and the "No peers yet" empty state must never render pre-first-payload. **Verification:** backstop — no test pins this transient frame; verify visually against a cold Dev-tab open. |
+| E2 | error | Peer list | ✅ covered | There is no fetch-error state: peers come from the local `AppState` poll, not a network request. A response missing the `peers` key entirely is treated as zero peers (empty state), never as an error card. |
+| E2 | populated | Peer list | ✅ covered | Rows stay single-line collapsed (matching existing `PeerRow` height) inside the screen's existing `verticalScroll` — no pagination and no virtualization at the 3–15 demo-room volume; the column already scrolls. |
+| E2 | partial | Peer list | 🧪 backstop | **Statement:** a peer with no identity yet renders the `seen-unidentified` neutral dot plus its truncated address only; a peer whose resolved Circle name equals the known placeholder sentinel (`CircleContact.name` is commented "a placeholder for now") falls back to the truncated npub via `short()` — the literal placeholder text must never reach the screen. A row is never dropped for missing fields. **Verification:** backstop — the exact sentinel string needs confirming against `content.rs` at implementation time; the fallback behavior itself is locked. |
+| E2 | overflow | Peer list | ✅ covered | Values run through the existing `short()` helper (`hex.take(10)…hex.takeLast(4)` above 18 chars); the list's vertical extent is absorbed by the screen-level scroll. No new truncation scheme. |
+| E2 | zero-one-many | Peer list | ✅ covered | 0 → self-check + empty state; 1 → a single row with no grouping chrome; many → D-11 ordering (state, then most-recently-heard). Rows carry no count-dependent text — the only count is the numeral in the "PEERS (3)" card title, so no singular/plural copy fork exists. |
+| E2 | long-text | Peer list | ✅ covered | Circle names arrive from an untrusted peer over the mesh, so truncation via `short()` on a single clipped line is a defensive measure, not only a layout one — never render an unbounded peer-supplied string into a fixed-width row. |
+| E3 | empty | Expanded peer detail | ✅ covered | An empty attempt log renders "No history for this peer" in neutral `onSurfaceVariant` (Error State copy row) — the metric lines above it still render. |
+| E3 | loading | Expanded peer detail | 🧪 backstop | **Statement:** if the attempt log rides the polled `peers` array, expand is instant with no loading state; if it is fetched on expand, the row shows one line "loading history…" before entries render. Either way the row must never jump from collapsed straight to a populated list with no transition cue. **Verification:** backstop — pending the 01-01 plan's transport choice (a Claude's-Discretion item still open in `01-CONTEXT.md`). |
+| E3 | error | Expanded peer detail | ✅ covered | D-13: a corrupted, truncated or unreadable log degrades to the same "No history for this peer" — never red, never a blocked screen, and the on-disk file is never deleted or rewritten in response. |
+| E3 | populated | Expanded peer detail | ✅ covered | Role / discovery latency (ms) / drop count / RSSI render as `sm` (8px)-spaced lines with numeric values in `FontFamily.Monospace`, followed by attempt-log entries newest-first with monospace timestamps. |
+| E3 | partial | Expanded peer detail | ✅ covered | Any missing metric renders "—" while present metrics still show their real values; a partially-parseable log renders the entries that did parse and drops only the unparseable ones. |
+| E3 | overflow | Expanded peer detail | 🧪 backstop | **Statement:** the attempt log renders only the most recent N entries so an expanded row can never grow unbounded; older entries are not rendered and there is no "show more" affordance this phase (D-15: read-only). **Verification:** backstop — N is not yet fixed; the 01-01 plan must pin it against the log's on-disk retention. |
+| E3 | zero-one-many | Expanded peer detail | ✅ covered | 0 attempts → "No history for this peer"; 1 → a single entry with no list header; many → newest-first entries. No count word appears, so no singular/plural copy fork. |
+| E3 | long-text | Expanded peer detail | ✅ covered | Timestamps and outcome codes are fixed-width in-repo strings; any hex/npub inside an entry goes through `short()`. No peer-supplied free text is rendered raw. |
+| E4 | empty | Pending pair requests | ✅ covered | No pending requests renders the existing `EmptyLine("none")` convention, matching the established `RADIO ADVERTS` / `WI-FI AP` empty pattern — no new empty-state design. |
+| E4 | loading | Pending pair requests | 🧪 backstop | **Statement:** "none" is an assertion, so it must not render before the first payload — pre-first-poll the card renders "loading…" (or is suppressed) rather than falsely claiming there are no pending requests. **Verification:** backstop — same untested cold-open frame as E2; verify visually against a cold Dev-tab open. |
+| E4 | error | Pending pair requests | ✅ covered | Same local-poll source as the peer list: an absent key is treated as "none" in neutral copy, never an error state. |
+| E4 | populated | Pending pair requests | ✅ covered | One row per inbound request showing the requester's npub via `short()`, at the same 6px row padding as its legacy card neighbors. |
+| E4 | partial | Pending pair requests | ✅ covered | A request carrying no name renders the truncated npub alone; the row is never dropped for a missing display name. |
+| E4 | overflow | Pending pair requests | ✅ covered | `short()` truncation per row; card height absorbed by the screen-level scroll. |
+| E4 | zero-one-many | Pending pair requests | ✅ covered | 0 → "none"; 1 and many → rows, with any count carried as a numeral in the card title rather than as a pluralized word. |
+| E4 | long-text | Pending pair requests | ✅ covered | Requester-supplied strings are untrusted (same mesh origin as E2's Circle names) and go through `short()` on a clipped single line — never rendered unbounded. |
+| E5 | empty | Identity card | ✅ covered | The device keypair is generated at first run, so identity is always present. If it has not yet been generated the fields render "—", never a blank or collapsed card. |
+| E5 | loading | Identity card | ✅ covered | Identity is present in `AppState` from first composition — there is no async gap and therefore no loading affordance. |
+| E5 | error | Identity card | ✅ covered | An identity load failure surfaces through the existing app-level `AppState.error` banner, not inside this card; the card itself renders "—". |
+| E5 | populated | Identity card | ✅ covered | Own npub and device name in `FontFamily.Monospace`, truncated via `short()`, at the same row anatomy as `KeyVal`. |
+| E5 | partial | Identity card | ✅ covered | An absent device name renders the npub row alone; the card never hides wholesale for one missing field. |
+| E5 | overflow | Identity card | ✅ covered | `short()` truncation on both values; the card is two rows and cannot exceed its container. |
+| E5 | zero-one-many | Identity card | ✅ covered | Not a collection by shape — exactly one identity, fixed row set, no plural copy. |
+| E5 | long-text | Identity card | ✅ covered | The device name is locally generated (`DeviceName.generated()`) and bounded, but still passes through `short()` so the render path is identical to the untrusted-string path. |
+| E6 | empty | Speedtest card | ✅ covered | Pre-existing and unchanged this phase: renders the existing `EmptyLine("no connected peer to test")`. D-04 changes only its position in the column. |
+| E6 | loading | Speedtest card | ✅ covered | Pre-existing in-flight state of `SpeedtestCard`, unchanged — Phase 1 introduces no new loading affordance here. |
+| E6 | error | Speedtest card | ✅ covered | Pre-existing `st.error` line in `colorScheme.error`, unchanged — this is the one genuine-failure use of the error color on this screen (see Color section). |
+| E6 | populated | Speedtest card | ✅ covered | Pre-existing monospace result line, unchanged. |
+| E6 | partial | Speedtest card | ✅ covered | Pre-existing behavior for a run that produced some but not all metrics, unchanged. |
+| E6 | overflow | Speedtest card | ✅ covered | Pre-existing `short()` / `DeviceName.generated()` truncation, unchanged. |
+| E6 | zero-one-many | Speedtest card | ✅ covered | Not a collection by shape — a single result line, not a variable-length list. |
+| E6 | long-text | Speedtest card | ✅ covered | Pre-existing truncation of the tested peer's name/address, unchanged. |
 
 <!-- Status vocabulary (locked by probe-core projectTruths):
      ✅ covered   → a plain truth string lifted into must_haves.truths
@@ -164,11 +230,11 @@ system (no shadcn, no npm-based UI package registry consumed at build time for t
 
 ## Checker Sign-Off
 
-- [ ] Dimension 1 Copywriting: PASS
-- [ ] Dimension 2 Visuals: PASS
-- [ ] Dimension 3 Color: PASS
-- [ ] Dimension 4 Typography: PASS
-- [ ] Dimension 5 Spacing: PASS
-- [ ] Dimension 6 Registry Safety: PASS
+- [x] Dimension 1 Copywriting: PASS
+- [x] Dimension 2 Visuals: PASS (was FLAG — resolved by the Focal Point & Visual Hierarchy section)
+- [x] Dimension 3 Color: PASS
+- [x] Dimension 4 Typography: PASS
+- [x] Dimension 5 Spacing: PASS
+- [x] Dimension 6 Registry Safety: PASS
 
-**Approval:** pending
+**Approval:** approved (gsd-ui-checker, 2026-08-04)
