@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-04
+
+### Added
+
+- System-aware AMOLED dark mode. Myco now follows the Android system theme and
+  uses pure black (`#000000`) for dark backgrounds, surfaces, elevated
+  containers, and the launch-window handoff — easier on the eyes and on an
+  OLED battery. Fixed light colours were replaced with Material 3 semantic
+  roles throughout, so both themes stay legible: emerald remains the brand
+  accent, and pending and warning states keep their own distinct amber.
+  Edge-to-edge system-bar icons adapt to whichever theme is active. The QR
+  card deliberately stays white, because scanners are more reliable against
+  it. Covered by theme palette unit tests that run in CI.
+
 ## [0.4.1] - 2026-07-29
 
 ### Fixed
