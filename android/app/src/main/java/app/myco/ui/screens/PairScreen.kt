@@ -59,9 +59,6 @@ import app.myco.core.AppState
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
-import app.myco.ui.theme.Emerald
-import app.myco.ui.theme.EmeraldSoft
-import app.myco.ui.theme.Slate
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.ResultPoint
 import com.journeyapps.barcodescanner.BarcodeCallback
@@ -90,12 +87,12 @@ fun QrScreen(
         }
 
         Spacer(Modifier.height(12.dp))
-        Text("SCAN A FRIEND'S CODE", color = Slate, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+        Text("SCAN A FRIEND'S CODE", color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
         Spacer(Modifier.height(8.dp))
         Box(modifier = Modifier.fillMaxWidth().height(240.dp)) { ScanPanel(onScanned = onScanned) }
 
         Spacer(Modifier.height(20.dp))
-        Text("OR SHOW YOURS", color = Slate, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+        Text("OR SHOW YOURS", color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
         Spacer(Modifier.height(8.dp))
         MyCodePanel(state = state, deviceName = name)
 
@@ -116,7 +113,7 @@ internal fun ScanPanel(onScanned: (String) -> Unit) {
     LaunchedEffect(Unit) { if (!granted) permLauncher.launch(Manifest.permission.CAMERA) }
 
     Box(
-        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(Color(0xFF0F172A)),
+        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
         if (granted) {
@@ -197,6 +194,7 @@ private fun CameraScanner(onScanned: (String) -> Unit) {
 /** Emerald corner brackets framing the viewfinder. */
 @Composable
 private fun ReticleOverlay() {
+    val accent = MaterialTheme.colorScheme.primary
     Canvas(modifier = Modifier.fillMaxSize().padding(28.dp)) {
         val arm = 34.dp.toPx()
         val sw = 5.dp.toPx()
@@ -204,7 +202,7 @@ private fun ReticleOverlay() {
         val t = 0f
         val r = size.width
         val b = size.height
-        fun line(a: Offset, c: Offset) = drawLine(Emerald, a, c, strokeWidth = sw, cap = StrokeCap.Round)
+        fun line(a: Offset, c: Offset) = drawLine(accent, a, c, strokeWidth = sw, cap = StrokeCap.Round)
         line(Offset(l, t + arm), Offset(l, t)); line(Offset(l, t), Offset(l + arm, t))
         line(Offset(r - arm, t), Offset(r, t)); line(Offset(r, t), Offset(r, t + arm))
         line(Offset(l, b - arm), Offset(l, b)); line(Offset(l, b), Offset(l + arm, b))
@@ -221,7 +219,12 @@ private fun MyCodePanel(state: AppState, deviceName: String) {
     }
     val pairUri = PairPresent.payload.value ?: fallback
     val qr = remember(pairUri) { NsiteShare.qrBitmap(pairUri) }
-    Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -230,16 +233,16 @@ private fun MyCodePanel(state: AppState, deviceName: String) {
             Spacer(Modifier.height(12.dp))
             Text(deviceName, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(4.dp))
-            Text("Friend scans this — or taps phones — to add you", color = Slate, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
+            Text("Friend scans this — or taps phones — to add you", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
             Spacer(Modifier.height(10.dp))
-            Surface(shape = RoundedCornerShape(50), color = EmeraldSoft) {
+            Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.primaryContainer) {
                 Row(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Icon(Icons.Filled.Contactless, contentDescription = null, tint = Emerald, modifier = Modifier.size(14.dp))
-                    Text("also tap-to-pair ready", color = Color(0xFF047857), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+                    Icon(Icons.Filled.Contactless, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                    Text("also tap-to-pair ready", color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
                 }
             }
         }

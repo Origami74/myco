@@ -21,7 +21,6 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import app.myco.ui.theme.Emerald
 
 /**
  * The animated "tap to connect" NFC bubble — a filled circle whose two outer
@@ -33,10 +32,11 @@ import app.myco.ui.theme.Emerald
 internal fun NfcPulseBubble(
     modifier: Modifier = Modifier,
     size: Dp = 48.dp,
-    background: Color = Emerald,
+    background: Color? = null,
 ) {
+    val bubbleColor = background ?: androidx.compose.material3.MaterialTheme.colorScheme.primary
     androidx.compose.foundation.layout.Box(
-        modifier = modifier.size(size).background(background, CircleShape),
+        modifier = modifier.size(size).background(bubbleColor, CircleShape),
         contentAlignment = Alignment.Center,
     ) {
         val transition = rememberInfiniteTransition(label = "nfc")

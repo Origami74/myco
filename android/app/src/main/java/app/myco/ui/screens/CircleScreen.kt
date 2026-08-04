@@ -74,16 +74,9 @@ import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
 import app.myco.ui.PeersPill
-import app.myco.ui.theme.Emerald
-import app.myco.ui.theme.EmeraldInk
-import app.myco.ui.theme.EmeraldSoft
-import app.myco.ui.theme.Slate
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.avatarColorFor
 
-private val Ink = Color(0xFF0F172A)
-private val Hairline = Color(0xFFCBD5E1)
-private val CardBg = Color(0xFFF4F5F7)
 
 private enum class Ring { ONLINE, DASHED, NONE }
 private enum class Badge { NONE, PLUS, SENT }
@@ -173,7 +166,7 @@ fun CircleScreen(
                 item {
                     Text(
                         "Nobody nearby yet. Keep this screen open near another phone.",
-                        color = Slate,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -211,7 +204,7 @@ fun CircleScreen(
                 item {
                     Text(
                         "No one yet. Bump phones, or tap someone in Nearby.",
-                        color = Slate,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -303,7 +296,7 @@ fun CircleScreen(
         // QR bubble — scan / show / paste.
         Surface(
             shape = CircleShape,
-            color = Emerald,
+            color = MaterialTheme.colorScheme.primary,
             shadowElevation = 6.dp,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
@@ -312,7 +305,7 @@ fun CircleScreen(
                 .clickable(onClick = onOpenQr),
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.QrCode2, contentDescription = "Scan or show a code", tint = Color.White, modifier = Modifier.size(26.dp))
+                Icon(Icons.Filled.QrCode2, contentDescription = "Scan or show a code", tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(26.dp))
             }
         }
     }
@@ -401,7 +394,7 @@ private fun PersonSheet(
             Spacer(Modifier.width(12.dp))
             Column {
                 Text(contact.name.ifEmpty { "unknown" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text("in your circle", color = Slate, style = MaterialTheme.typography.bodySmall)
+                Text("in your circle", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
             }
         }
         Spacer(Modifier.height(16.dp))
@@ -416,7 +409,12 @@ private fun shortNpub(npub: String): String =
 
 @Composable
 private fun IdentityChip(name: String, onEdit: () -> Unit) {
-    Surface(shape = RoundedCornerShape(50), color = CardBg, modifier = Modifier.clickable(onClick = onEdit)) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        modifier = Modifier.clickable(onClick = onEdit),
+    ) {
         Row(
             modifier = Modifier.padding(start = 6.dp, end = 12.dp, top = 5.dp, bottom = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -429,7 +427,7 @@ private fun IdentityChip(name: String, onEdit: () -> Unit) {
                 Text(name.firstOrNull()?.uppercase() ?: "?", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
             }
             Text(name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
-            Icon(Icons.Filled.Edit, contentDescription = "Rename", tint = Slate, modifier = Modifier.size(15.dp))
+            Icon(Icons.Filled.Edit, contentDescription = "Rename", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(15.dp))
         }
     }
 }
@@ -450,11 +448,11 @@ private fun TapToConnect(nfc: NfcState, onEnableNfc: () -> Unit) {
             NfcBubble(warn = warn)
             Column(modifier = Modifier.weight(1f)) {
                 if (warn) {
-                    Text("NFC is off", fontWeight = FontWeight.ExtraBold, color = Color(0xFF9A3412), style = MaterialTheme.typography.titleSmall)
-                    Text("Tap to turn it on, then bump phones", color = Color(0xFFB45309), style = MaterialTheme.typography.bodySmall)
+                    Text("NFC is off", fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall)
+                    Text("Tap to turn it on, then bump phones", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 } else {
-                    Text("Bump phones to connect", fontWeight = FontWeight.ExtraBold, color = Ink, style = MaterialTheme.typography.titleSmall)
-                    Text("Hold the backs together — pairs instantly", color = Slate, style = MaterialTheme.typography.bodySmall)
+                    Text("Bump phones to connect", fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleSmall)
+                    Text("Hold the backs together — pairs instantly", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -467,10 +465,10 @@ private fun TapToConnect(nfc: NfcState, onEnableNfc: () -> Unit) {
 private fun NfcBubble(warn: Boolean) {
     if (warn) {
         Box(
-            modifier = Modifier.size(48.dp).background(Color(0xFFB45309), CircleShape),
+            modifier = Modifier.size(48.dp).background(MaterialTheme.colorScheme.error, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Filled.Contactless, contentDescription = null, tint = Color.White, modifier = Modifier.size(26.dp))
+            Icon(Icons.Filled.Contactless, contentDescription = null, tint = MaterialTheme.colorScheme.onError, modifier = Modifier.size(26.dp))
         }
     } else {
         NfcPulseBubble()
@@ -480,14 +478,14 @@ private fun NfcBubble(warn: Boolean) {
 @Composable
 private fun SectionLabel(text: String, trailing: String?, scanning: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Text(text, color = Slate, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+        Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
         if (trailing != null) {
             Spacer(Modifier.width(6.dp))
-            Text(trailing, color = Color(0xFF94A3B8), style = MaterialTheme.typography.labelMedium)
+            Text(trailing, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
         }
         if (scanning) {
             Spacer(Modifier.weight(1f))
-            Text("looking…", color = Color(0xFF94A3B8), style = MaterialTheme.typography.labelSmall)
+            Text("looking…", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
         }
     }
 }
@@ -503,6 +501,7 @@ private fun PersonBubble(
     onClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
 ) {
+    val outlineColor = MaterialTheme.colorScheme.outline
     Column(
         modifier = Modifier
             .width(58.dp)
@@ -522,7 +521,7 @@ private fun PersonBubble(
                 when (ring) {
                     Ring.ONLINE -> drawCircle(StatusConnected, r, style = Stroke(2.5.dp.toPx()))
                     Ring.DASHED -> drawCircle(
-                        Hairline, r,
+                        outlineColor, r,
                         style = Stroke(1.5.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f))),
                     )
                     Ring.NONE -> {}
@@ -540,7 +539,7 @@ private fun PersonBubble(
                         .align(Alignment.BottomEnd)
                         .size(18.dp)
                         .clip(CircleShape)
-                        .background(if (badge == Badge.SENT) Slate else Emerald)
+                        .background(if (badge == Badge.SENT) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary)
                         .border(2.dp, Color.White, CircleShape),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -559,7 +558,7 @@ private fun PersonBubble(
             fontSize = 10.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            color = if (dim) Slate else Ink,
+            color = if (dim) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -574,7 +573,7 @@ private fun RenameDialog(initial: String, onDismiss: () -> Unit, onSave: (String
         title = { Text("Your name") },
         text = {
             Column {
-                Text("How you appear to people you pair with. Pick something you can say out loud.", color = Slate, style = MaterialTheme.typography.bodyMedium)
+                Text("How you appear to people you pair with. Pick something you can say out loud.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(value = value, onValueChange = { value = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
             }

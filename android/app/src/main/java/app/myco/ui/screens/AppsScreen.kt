@@ -71,9 +71,7 @@ import app.myco.nfc.NfcReader
 import app.myco.nfc.PairPresent
 import app.myco.share.NsiteShare
 import app.myco.ui.ScreenHeader
-import app.myco.ui.theme.EmeraldInk
-import app.myco.ui.theme.EmeraldSoft
-import app.myco.ui.theme.Slate
+
 import app.myco.ui.theme.tileColorFor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -147,7 +145,7 @@ fun AppsScreen(
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Text(
                     "No apps yet — scan a friend's share QR or paste a link to add one.",
-                    color = Slate,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.fillMaxWidth().padding(top = 24.dp),
@@ -218,7 +216,7 @@ private fun SearchField(query: String, onChange: (String) -> Unit) {
         value = query,
         onValueChange = onChange,
         singleLine = true,
-        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = Slate) },
+        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
         placeholder = { Text("Search apps") },
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -344,10 +342,10 @@ private fun AddTile(onClick: () -> Unit) {
                 .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Filled.Add, contentDescription = "Add app", tint = Slate, modifier = Modifier.size(28.dp))
+            Icon(Icons.Filled.Add, contentDescription = "Add app", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
         }
         Spacer(Modifier.height(6.dp))
-        Text("Add", color = Slate, style = MaterialTheme.typography.labelMedium)
+        Text("Add", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
     }
 }
 
@@ -379,7 +377,7 @@ private fun AppSheet(
                 Text(
                     if (updating) "Updating… ${site.updatePulled}/${site.updateTotal}"
                     else "nsite · ${site.filesTotal} files · ${site.state}",
-                    color = if (updating) MaterialTheme.colorScheme.primary else Slate,
+                    color = if (updating) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -437,7 +435,12 @@ private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismis
         ) {
             Text("Share this app", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(12.dp))
-            Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Column(
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -448,7 +451,7 @@ private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismis
                     Spacer(Modifier.height(2.dp))
                     Text(
                         "Scan to open this app — and pair with this device",
-                        color = Slate,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall,
                         textAlign = TextAlign.Center,
                     )
@@ -457,7 +460,7 @@ private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismis
             Spacer(Modifier.height(12.dp))
             // The headline action: just bump phones (no scanning needed). The
             // breathing NFC bubble mirrors the Circle tab's tap-to-connect hint.
-            Surface(shape = RoundedCornerShape(16.dp), color = EmeraldSoft, modifier = Modifier.fillMaxWidth()) {
+            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -468,12 +471,12 @@ private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismis
                         Text(
                             "Tap phones together to share",
                             fontWeight = FontWeight.ExtraBold,
-                            color = EmeraldInk,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
                             style = MaterialTheme.typography.titleSmall,
                         )
                         Text(
                             "Hold the backs together — no scan needed",
-                            color = Color(0xFF047857),
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -518,7 +521,7 @@ private fun AddAppSheet(siteCount: Int, onScanned: (String) -> Unit, onDismiss: 
             }
             Spacer(Modifier.height(12.dp))
             // Same breathing NFC bubble as the share sheet — here you're the reader.
-            Surface(shape = RoundedCornerShape(16.dp), color = EmeraldSoft, modifier = Modifier.fillMaxWidth()) {
+            Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -529,12 +532,12 @@ private fun AddAppSheet(siteCount: Int, onScanned: (String) -> Unit, onDismiss: 
                         Text(
                             "Or tap a friend's phone",
                             fontWeight = FontWeight.ExtraBold,
-                            color = EmeraldInk,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
                             style = MaterialTheme.typography.titleSmall,
                         )
                         Text(
                             "Hold the backs together to add their app",
-                            color = Color(0xFF047857),
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }

@@ -73,8 +73,7 @@ import app.myco.ui.screens.DevScreen
 import app.myco.ui.screens.DiscoverScreen
 import app.myco.ui.screens.QrScreen
 import app.myco.ui.screens.SettingsScreen
-import app.myco.ui.theme.EmeraldSoft
-import app.myco.ui.theme.Slate
+
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.StatusThin
@@ -233,9 +232,9 @@ fun MycoApp(
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = MaterialTheme.colorScheme.primary,
                                 selectedTextColor = MaterialTheme.colorScheme.primary,
-                                indicatorColor = EmeraldSoft,
-                                unselectedIconColor = Slate,
-                                unselectedTextColor = Slate,
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
                             ),
                         )
                     }
@@ -436,7 +435,7 @@ fun ScreenHeader(title: String, state: AppState, subtitle: String? = null) {
         }
         if (subtitle != null) {
             Spacer(Modifier.size(6.dp))
-            Text(subtitle, color = Slate, style = MaterialTheme.typography.bodyMedium)
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -447,6 +446,7 @@ fun SectionCard(content: @Composable () -> Unit) {
     Surface(
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(vertical = 4.dp)) { content() }
@@ -458,7 +458,7 @@ fun SectionCard(content: @Composable () -> Unit) {
 fun GroupLabel(text: String) {
     Text(
         text,
-        color = Slate,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontWeight = FontWeight.Bold,
         style = MaterialTheme.typography.labelMedium,
         modifier = Modifier.padding(start = 4.dp),
@@ -510,7 +510,7 @@ fun KeyVal(label: String, value: String, valueColor: Color = MaterialTheme.color
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        Text(label, color = Slate, style = MaterialTheme.typography.bodyMedium)
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.width(12.dp))
         Text(
             value,

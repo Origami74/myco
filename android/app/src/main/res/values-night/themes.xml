@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Keep the hand-off from the black splash to Compose black in system dark
+         mode. Compose owns the content colors; these values prevent a white
+         window flash and keep pre-Compose system-bar icons legible. -->
+    <style name="Theme.Myco" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

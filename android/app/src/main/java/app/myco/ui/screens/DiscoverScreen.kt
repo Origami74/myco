@@ -45,7 +45,7 @@ import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
 import app.myco.ui.ScreenHeader
-import app.myco.ui.theme.Slate
+
 import app.myco.ui.theme.tileColorFor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -117,7 +117,7 @@ fun DiscoverScreen(
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Text(
                     "Nothing found yet. Make sure a Circle peer is connected, then tap Discover.",
-                    color = Slate,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(top = 4.dp),
                 )
