@@ -22,10 +22,10 @@ becomes a roadmap of its own via `/gsd-new-milestone` once v1 ships.
 
 ### Peer diagnostics
 
-- [ ] **DIAG-01**: User can see every known peer with its current connection state — connected, reachable via relay, or offline
+- [x] **DIAG-01**: User can see every known peer with its current connection state — connected, reachable via relay, or offline
 - [ ] **DIAG-02**: For any peer that is not connected, user can see a plain-language reason: no shared transport, handshake pending, handshake failed, out of range, or not paired
-- [ ] **DIAG-03**: User can see how long ago each peer was last heard from
-- [ ] **DIAG-04**: User can see which transport is currently carrying each connected peer
+- [x] **DIAG-03**: User can see how long ago each peer was last heard from
+- [x] **DIAG-04**: User can see which transport is currently carrying each connected peer
 - [ ] **DIAG-05**: User can see whether each radio is enabled and actively scanning, for both BLE and Wi-Fi Aware
 - [ ] **DIAG-06**: User can see pending pair requests and whether each is waiting, complete, or failed
 - [ ] **DIAG-07**: User can see their own identity and the Circle name other peers see them as
@@ -133,10 +133,10 @@ duplicates. Phases 1-3 are inside the 2026-08-05 release deadline; Phases 4-5 la
 | PEER-04 | Phase 2 | Pending |
 | PEER-05 | Phase 2 | Pending |
 | PEER-06 | Phase 2 | Pending |
-| DIAG-01 | Phase 1 | Pending |
+| DIAG-01 | Phase 1 | Complete |
 | DIAG-02 | Phase 2 | Pending |
-| DIAG-03 | Phase 1 | Pending |
-| DIAG-04 | Phase 1 | Pending |
+| DIAG-03 | Phase 1 | Complete |
+| DIAG-04 | Phase 1 | Complete |
 | DIAG-05 | Phase 1 | Pending |
 | DIAG-06 | Phase 1 | Pending |
 | DIAG-07 | Phase 1 | Pending |
@@ -155,10 +155,13 @@ duplicates. Phases 1-3 are inside the 2026-08-05 release deadline; Phases 4-5 la
 **Coverage:** 24/24 v1 requirements mapped.
 
 **Notes on non-obvious placements:**
+
 - **DIAG-02** (reason codes) sits in Phase 2, not Phase 1, and lands last within it — a
   plain-language reason on top of flaky reconnect logic is noise, not diagnosis.
+
 - **CORE-04** (durable pair requests) sits in Phase 2 with PEER-06 — both are the same
   fire-and-forget-delivery defect, and both are needed for "connected" to mean "working".
+
 - **CORE-03** (corrupt Circle/Library) sits in Phase 3 with the field-reported UX fixes,
   not with the Phase 5 code-health work — silently emptying a Circle destroys pairings, so
   it belongs in the release cut.

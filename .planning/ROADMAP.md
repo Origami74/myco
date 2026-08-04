@@ -76,13 +76,13 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. User can see their own npub and the Circle name other peers see them as, plus every pending pair request marked waiting, complete, or failed.
   5. After a failed connection, the diagnostics show — in the app, not a debugger — which BLE role this device chose for that peer, how long discovery took, and how many sends to it were dropped.
 
-**Plans**: 4 plans
+**Plans**: 1/4 plans executed
 **UI hint**: yes
 
 Plans:
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — Merge every known peer into one npub-keyed FFI array with true state, last-seen and transport
+- [x] 01-01-PLAN.md — Merge every known peer into one npub-keyed FFI array with true state, last-seen and transport
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -186,7 +186,7 @@ Phases 1-3 are inside the 2026-08-05 release deadline. Phases 4-5 land after it.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Make Peering Observable | 0/4 | Not started | - |
+| 1. Make Peering Observable | 1/4 | In Progress|  |
 | 2. Peering That Converges and Recovers | 0/3 | Not started | - |
 | 3. The Release Cut Behaves Itself | 0/1 | Not started | - |
 | 4. fips Rebased, Theme by Theme | 0/2 | Not started | - |
