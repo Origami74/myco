@@ -54,13 +54,16 @@ release, which is about mesh reliability.
 
 ## Getting it
 
-- **Android**: install the v0.4.2 APK from the
-  [release page](https://github.com/Origami74/myco/releases/tag/v0.4.2),
+- **Android**: install the APK from the
+  [v0.4.2 release](https://github.com/Origami74/myco/releases/tag/v0.4.2),
   or via [zapstore](https://zapstore.dev/apps/app.myco).
 - **From source**: `cd android && ./gradlew assembleDebug` from a checkout of
-  the v0.4.2 tag. See [CONTRIBUTING.md](CONTRIBUTING.md) for build prerequisites.
+  the v0.4.2 tag. See
+  [CONTRIBUTING.md](https://github.com/Origami74/myco/blob/main/CONTRIBUTING.md)
+  for build prerequisites.
 
-The full per-release change history lives in [CHANGELOG.md](CHANGELOG.md).
+The full per-release change history lives in
+[CHANGELOG.md](https://github.com/Origami74/myco/blob/main/CHANGELOG.md).
 Issues and discussion at [github.com/Origami74/myco](https://github.com/Origami74/myco).
 
 ## Contributors
@@ -69,3 +72,14 @@ Dark mode was contributed by [@Datawav](https://github.com/Datawav) in
 [#23](https://github.com/Origami74/myco/pull/23). Thanks also to everyone who
 contributed testing and bug reports, and to
 [@Origami74](https://github.com/Origami74) for maintaining the project.
+
+<!--
+This file is published verbatim as the GitHub Release body by
+.github/workflows/release.yml — the leading `# Myco vX.Y.Z` heading and
+`**Released**:` line are stripped, and the auto-generated "What's Changed"
+section is appended below. Two consequences when writing the next one:
+  1. Keep the version in the H1 matching the tag, or the workflow falls back
+     to generated notes rather than publishing stale text.
+  2. Use absolute links — relative paths 404 on a release page.
+-->
+

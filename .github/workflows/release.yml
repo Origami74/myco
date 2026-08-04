@@ -122,12 +122,42 @@ jobs:
           path: ${{ env.APK }}
           if-no-files-found: error
 
+      # Use the hand-written RELEASE-NOTES.md as the release body, so the notes
+      # we already maintain per release become the release page instead of a
+      # bare commit list. Its leading `# Myco vX.Y.Z` / `**Released**:` header
+      # duplicates the release title and date, so strip it. If the file is
+      # missing or still describes an older tag, fall back to generated notes
+      # rather than publishing something wrong.
+      - name: Prepare release body
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          notes="$GITHUB_WORKSPACE/RELEASE-NOTES.md"
+          if [ ! -f "$notes" ]; then
+            echo "No RELEASE-NOTES.md — falling back to generated notes."
+            exit 0
+          fi
+          if ! head -1 "$notes" | grep -qF "$GITHUB_REF_NAME"; then
+            echo "RELEASE-NOTES.md does not mention $GITHUB_REF_NAME (first line: $(head -1 "$notes"))."
+            echo "Falling back to generated notes rather than publishing stale notes."
+            exit 0
+          fi
+          # Drop the `# Myco vX.Y.Z` heading, the `**Released**:` line, and the
+          # blank lines around them; keep everything from the first section on.
+          awk 'NR==1 && /^# /  {next}
+               /^\*\*Released\*\*:/ {next}
+               !printed && NF==0 {next}
+               {printed=1; print}' "$notes" > "$RUNNER_TEMP/release-body.md"
+          echo "RELEASE_BODY_PATH=$RUNNER_TEMP/release-body.md" >> "$GITHUB_ENV"
+
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.APK }}
           name: Myco ${{ github.ref_name }}
+          # When body_path is set, generate_release_notes appends the
+          # auto-generated "What's Changed" + full-changelog link beneath it.
+          body_path: ${{ env.RELEASE_BODY_PATH }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
