@@ -39,28 +39,73 @@ long-lived prior process was scanning normally; the freshly reinstalled process 
 - App Bluetooth toggle off — on, confirmed by screenshot.
 - Radio code broken — after a node restart both phones scan *and* advertise correctly.
 
-**Where to look first —** `android/app/src/main/java/app/myco/ble/BleService.kt:66-99`
-(`startBle()`). Kotlin never calls `startScanning()` itself; the fips BLE transport drives the
-radio through the injected bridge:
+### Root cause (confirmed on-device)
 
-```kotlin
-// Inject-then-start: the node's BLE transport picks up the bridge and
-// begins driving the radio (listen → advertise → scan).
-client.dispatch(NativeActions.setBleEnabled(true))
-// Node lifecycle follows the mesh "Enable" master switch, not this
-// toggle — and a running node is never bounced to adopt this radio.
-// The core resolves the injected bridge per operation, so the fresh one
-// above is picked up in place.
+It is a **startup race, plus a one-shot transport start that is never retried.**
+
+The node's BLE transport calls `io.listen()` before the Android foreground service has injected
+the bridge. Both phones logged, at node start:
+
+```
+WARN fips::transport::ble: failed to start BLE listener adapter=ble0
+     error=io error: BLE radio not available
 ```
 
-That last claim — "picked up in place" — is what the evidence contradicts. `startBle()` injects a
-fresh bridge and dispatches `setBleEnabled(true)`, but when the node is already running nothing
-re-arms the listen → advertise → scan sequence. `startNode()` is deliberately skipped in that
-case (`if (meshOn && !client.state().nodeRunning)`), which is exactly the path that leaves BLE dark.
+On the Pixel that warn lands at `09:57:34.113` — **620 ms before** `MycoBleService: BLE service
+started` at `09:57:34.733`. The Samsung logged the same warn at `10:45:58` and then produced
+`INFO fips::transport::ble: BLE transport started adapter=ble0 psm=133` only at `11:02:36`,
+i.e. on the node restart, ~17 minutes later.
 
-Note the surrounding comment explains that path was chosen *deliberately* to avoid tearing down
-every peer and session on a Bluetooth toggle. Any fix must re-arm the BLE transport **without**
-bouncing the node, or it will reintroduce that regression.
+`reference/fips/src/transport/ble/mod.rs:218-222` handles that failure correctly:
+
+```rust
+Err(e) => {
+    warn!(adapter = %adapter, error = %e, "failed to start BLE listener");
+    self.state = TransportState::Failed;
+    return Err(e);
+}
+```
+
+The transport is not lying about its state — it marks itself `Failed` and returns. The defect is
+that **nothing ever restarts it.** `TransportState::Failed.can_start()` returns `true`
+(asserted by `src/transport/mod.rs:1396`), so restarting a failed transport is explicitly
+permitted — but `grep -rn "TransportState::Failed" src/node/` returns **no matches**. The node
+never inspects transport state and never retries. The capability exists; no supervisor exercises it.
+
+The whole listen → advertise → scan sequence at `ble/mod.rs:196-263` runs exactly once, inside
+`start()`. When the radio appears half a second later there is no trigger to re-run it.
+
+### Why commit `9121925` did not already fix this
+
+`9121925 feat(ble/android): adopt a radio without rebuilding the node` (2026-07-29, already on
+`feat/platform-peer-queue`) was written to solve exactly this class of problem, and its message
+claims:
+
+> Operations attempted with no radio present return a transport error instead of being
+> unreachable, **and recover on their own once a radio appears.**
+
+That claim holds only for *demand-driven* operations. `AndroidIo` now resolves the process-wide
+bridge per operation, so an outbound dial attempted later picks up the new radio and succeeds.
+But **listen, advertise and scan are not demand-driven** — they are a one-shot startup sequence
+with nothing to retrigger them. `9121925` made dials recover; it never made transport startup
+recover. That is the remaining gap.
+
+### Constraint on any fix
+
+`BleService.kt:84-91` deliberately does **not** restart the node when one is already running:
+
+```kotlin
+// Node lifecycle follows the mesh "Enable" master switch, not this
+// toggle — and a running node is never bounced to adopt this radio.
+```
+
+`9121925`'s message records why: bouncing the node "drops every peer, every session, and every
+route with it. Turning Bluetooth on took the whole mesh down for as long as re-handshaking took."
+
+So the fix must **re-arm the BLE transport without restarting the node** — most likely a
+supervisor that retries `start()` on a `Failed` transport (with backoff), or a signal from
+`set_android_ble_bridge()` that wakes a transport sitting in `Failed`. Restarting the node is
+what the user did manually to recover, and it is exactly what must not become the shipped fix.
 
 **Why Phase 1 caught it:** the pre-Phase-1 `scanning` value was computed as
 `ble_enabled && node_running`. In this exact state both are true, so the old Dev tab rendered
@@ -90,6 +135,51 @@ third FIPS device in range rather than either test phone.
 **Relevance:** plan 01-03's per-peer attempt log (discovery latency, attempt outcome, drop counts)
 is the artefact that will characterise this properly. Revisit F-02 once 01-03 lands rather than
 guessing now.
+
+---
+
+## F-03: Wi-Fi Aware has the same one-shot shape, with a partial safety net
+
+Asked during Phase 1 execution: does F-01 also apply to Wi-Fi Aware? **Same shape, smaller blast
+radius.** Not observed failing in the field yet — this is a code-read finding, unlike F-01 and F-02.
+
+The fips *transport-level* race does not apply. Aware rides the ordinary UDP transport, which
+binds a local socket and has no external radio that can be "not available", so it cannot fail
+`start()` the way the BLE transport does.
+
+But the Kotlin layer has the same one-shot pattern.
+`android/app/src/main/java/app/myco/aware/AwareRadio.kt:127-129`:
+
+```kotlin
+override fun onAttachFailed() {
+    Log.e(TAG, "Aware attach failed")
+}
+```
+
+Failure is logged and nothing else — no retry, no backoff. Compare `BleRadio.scheduleScanRetry()`
+(`BleRadio.kt:320-331`), which re-arms with exponential backoff capped at 60s.
+
+What saves Aware is `registerAvailability()` (`AwareRadio.kt:150-169`): a `BroadcastReceiver` on
+`ACTION_WIFI_AWARE_STATE_CHANGED` that re-attaches whenever Aware transitions to available:
+
+```kotlin
+if (mgr.isAvailable) {
+    if (session == null) {
+        Log.i(TAG, "Aware became available; attaching")
+        attach(mgr)
+    }
+}
+```
+
+So Aware recovers from unavailable → available transitions. It does **not** recover from a bare
+`onAttachFailed()` while Aware remains nominally available — that state is terminal until
+something else flips availability.
+
+**The architectural point, which is the real finding:** BLE fails in Rust at the fips transport
+layer, where there is no supervisor at all; Aware fails in Kotlin, where a broadcast receiver can
+rescue it. The generic missing piece is the same in both — *nothing retries a failed start*. A fix
+for F-01 that adds transport-start supervision in fips should be checked against whether it also
+wants to cover this, rather than bolting a second ad-hoc retry onto `onAttachFailed()`.
 
 ---
 
