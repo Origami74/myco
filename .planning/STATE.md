@@ -5,8 +5,8 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Make Peering Observable
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-08-04T18:10:54.124Z"
+stopped_at: Completed quick task 260805-e5h (retry failed BLE transport start)
+last_updated: "2026-08-05T09:43:31.238Z"
 last_activity: 2026-08-04
 last_activity_desc: Phase 01 execution started
 progress:
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-02)
 Phase: 01 (Make Peering Observable) — EXECUTING
 Plan: 2 of 4
 Status: Ready to execute
-Last activity: 2026-08-04 — Phase 01 execution started
+Last activity: 2026-08-05 — Completed quick task 260805-e5h: retry failed BLE transport start without restarting the node
 
 Progress: [███░░░░░░░] 25%
 
@@ -59,6 +59,7 @@ Progress: [███░░░░░░░] 25%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 60min | 2 tasks | 7 files |
+| Phase quick-260805-e5h P01 | 35min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,7 @@ Recent decisions affecting current work:
 - [Phase ?]: 01-01: PeerView additive fields (last_seen_ms/transport/display_name) sourced from fips's tick-published EntitySnapshot; transport crosses the FFI unmodified, never fabricated.
 - [Phase ?]: 01-01: merge_peers() gained a lane_by_npub override parameter (always empty this plan) so 01-02 can distinguish Wi-Fi Aware from the LAN/AP lane without re-signing the function.
 - [Phase ?]: 01-01: Only DIAG-01/03/04 marked complete; DIAG-06/07 remain open until 01-04 adds the pending-pairs and identity UI cards.
+- [Phase ?]: 260805-e5h: retry supervision (fips node/transport_restart.rs) recovers a BLE transport that failed to start due to the Android radio bridge injection race — retained + retried on the existing 1s tick, no node restart; confirmed on both phones with ~1.2s recovery
 
 ### Pending Todos
 
@@ -86,6 +88,12 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 - **Vendor divergence:** convergence and churn recovery must be demonstrated on at least three vendors (Samsung + Xiaomi + Pixel); Pixel alone is not representative.
 - **fips rebase risk:** 19 commits sit 232 commits behind a heavily refactored master; some themes likely dissolve entirely. Fallback is targeted fixes on `feat/platform-peer-queue`.
 
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Status | Directory |
+|---|-------------|------|--------|--------|-----------|
+| 260805-e5h | retry failed BLE transport start without restarting the node (fixes F-01) | 2026-08-05 | 8104849 | Needs Review | [260805-e5h-retry-failed-ble-transport-start-without](./quick/260805-e5h-retry-failed-ble-transport-start-without/) |
+
 ## Deferred Items
 
 | Category | Item | Status | Deferred At |
@@ -94,6 +102,6 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 
 ## Session Continuity
 
-Last session: 2026-08-04T18:10:54.118Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-08-05T09:43:31.228Z
+Stopped at: Completed quick task 260805-e5h (retry failed BLE transport start)
 Resume file: None
