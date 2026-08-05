@@ -140,6 +140,11 @@ data class AppState(
     val bleAdverts: List<BleAdvert>,
     val wifiAwareEnabled: Boolean,
     val wifiAwarePort: Int,
+    /** Whether the Aware lane is actively discovering right now, sourced from
+     *  the publish/subscribe session lifecycle. */
+    val wifiAwareScanning: Boolean = false,
+    /** False when [wifiAwareScanning] could not actually be observed. */
+    val wifiAwareScanningKnown: Boolean = false,
     val sites: List<SiteStatus>,
     val library: List<LibraryItem>,
     val cache: CacheStatus,
@@ -354,6 +359,8 @@ data class AppState(
                 bleAdverts = adverts,
                 wifiAwareEnabled = wifiAware.optBoolean("enabled"),
                 wifiAwarePort = wifiAware.optInt("port"),
+                wifiAwareScanning = wifiAware.optBoolean("scanning"),
+                wifiAwareScanningKnown = wifiAware.optBoolean("scanningKnown"),
                 sites = sites,
                 library = library,
                 cache = cache,

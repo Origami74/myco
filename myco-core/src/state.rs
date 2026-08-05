@@ -207,6 +207,15 @@ pub struct WifiAwareStatus {
     /// The UDP port the Aware radio advertises in its
     /// service-specific info (0 while the lane is off).
     pub port: u16,
+    /// Whether the Aware lane is actively discovering right now — the Aware
+    /// analogue of a BLE scan, sourced from the publish/subscribe session
+    /// lifecycle (`publishSession != null || subscribeSession != null`), never
+    /// derived from other flags.
+    pub scanning: bool,
+    /// False when `scanning` could not actually be observed (Kotlin has never
+    /// pushed a value) — the UI must render unknown rather than asserting a
+    /// value.
+    pub scanning_known: bool,
 }
 
 /// One peer seen or connected over BLE. Keyed by `node_addr` from the in-band

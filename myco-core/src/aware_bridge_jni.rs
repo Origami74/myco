@@ -16,8 +16,10 @@
 //! Compiled only on Android; the host build exercises the same seam directly
 //! through `fips::discovery::platform`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use jni::objects::{JClass, JString};
-use jni::sys::jint;
+use jni::sys::{jboolean, jint};
 use jni::JNIEnv;
 
 const TRANSPORT_TYPE: &str = "udp";
@@ -56,6 +58,47 @@ pub extern "system" fn Java_app_myco_core_NativeCore_awarePeerLost(
         return;
     };
     fips::discovery::platform::platform_peer_lost(&npub, TRANSPORT_TYPE);
+}
+
+// ============================================================================
+// Observed discovering state (developer diagnostics only)
+// ============================================================================
+
+/// Whether Kotlin has ever pushed a discovering state — until it has, the
+/// value is unknown, never a guessed false.
+static AWARE_DISCOVERING_KNOWN: AtomicBool = AtomicBool::new(false);
+/// The last-pushed discovering value, meaningful only once
+/// `AWARE_DISCOVERING_KNOWN` is true.
+static AWARE_DISCOVERING: AtomicBool = AtomicBool::new(false);
+
+/// Record whether the Aware publish/subscribe session pair is live right now
+/// — the Aware analogue of a BLE scan. Called from `awareSetDiscovering`.
+pub(crate) fn set_aware_discovering(on: bool) {
+    AWARE_DISCOVERING.store(on, Ordering::Relaxed);
+    AWARE_DISCOVERING_KNOWN.store(true, Ordering::Relaxed);
+}
+
+/// The last-observed discovering state, or `None` if Kotlin has never pushed
+/// one (radio never started, or a non-Android build) — the caller must render
+/// unknown rather than guessing false.
+pub(crate) fn aware_discovering() -> Option<bool> {
+    if AWARE_DISCOVERING_KNOWN.load(Ordering::Relaxed) {
+        Some(AWARE_DISCOVERING.load(Ordering::Relaxed))
+    } else {
+        None
+    }
+}
+
+/// Kotlin reports whether the Aware publish/subscribe session pair is live
+/// right now, pushed after publish/subscribe install and on teardown. The
+/// observed radio state for the developer diagnostics UI only.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_awareSetDiscovering(
+    _env: JNIEnv,
+    _class: JClass,
+    on: jboolean,
+) {
+    set_aware_discovering(on != 0);
 }
 
 /// Kotlin → Rust: the underlying network's real DNS servers, comma-separated

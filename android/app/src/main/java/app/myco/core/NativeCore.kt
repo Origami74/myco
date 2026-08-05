@@ -72,6 +72,11 @@ internal object NativeCore {
     /** Aware data path to `npub` lost: close the pooled UDP session. */
     external fun awarePeerLost(npub: String)
 
+    /** Whether the Aware publish/subscribe session pair is live right now —
+     *  the Aware analogue of a BLE scan. Observed radio state for the
+     *  developer diagnostics UI only. */
+    external fun awareSetDiscovering(on: Boolean)
+
     /** The underlying network's real DNS servers, comma-separated. The mesh
      *  tunnel advertises only its own sentinel resolver, so these are where the
      *  core relays every non-`.fips` query — without them the device resolves

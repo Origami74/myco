@@ -855,13 +855,18 @@ impl AppRuntime {
             },
             ble_peers,
             ble_adverts,
-            wifi_aware: WifiAwareStatus {
-                enabled: self.wifi_aware_enabled,
-                port: if self.wifi_aware_enabled {
-                    WIFI_AWARE_PORT
-                } else {
-                    0
-                },
+            wifi_aware: {
+                let (scanning, scanning_known) = self.aware_radio_state();
+                WifiAwareStatus {
+                    enabled: self.wifi_aware_enabled,
+                    port: if self.wifi_aware_enabled {
+                        WIFI_AWARE_PORT
+                    } else {
+                        0
+                    },
+                    scanning,
+                    scanning_known,
+                }
             },
             sites: self
                 .content
@@ -917,6 +922,23 @@ impl AppRuntime {
     #[cfg(not(target_os = "android"))]
     fn ble_radio_state(&self) -> (bool, bool, bool, bool) {
         (false, false, false, false)
+    }
+
+    /// The Wi-Fi Aware lane's observed discovering state, read from the Aware
+    /// bridge's process-global flag rather than derived from other flags.
+    /// `known` is false until Kotlin has pushed at least once (or on the host
+    /// build, where the Aware bridge does not exist).
+    #[cfg(target_os = "android")]
+    fn aware_radio_state(&self) -> (bool, bool) {
+        match crate::aware_bridge_jni::aware_discovering() {
+            Some(v) => (v, true),
+            None => (false, false),
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn aware_radio_state(&self) -> (bool, bool) {
+        (false, false)
     }
 
     /// Raw scan adverts (address / PSM / RSSI) from the BLE radio bridge. The

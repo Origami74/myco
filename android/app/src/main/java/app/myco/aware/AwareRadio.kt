@@ -93,7 +93,11 @@ class AwareRadio(
      */
     fun start() {
         if (running) return
-        val mgr = manager ?: run { Log.w(TAG, "no Wi-Fi Aware service"); return }
+        val mgr = manager ?: run {
+            Log.w(TAG, "no Wi-Fi Aware service")
+            NativeCore.awareSetDiscovering(false)
+            return
+        }
         running = true
         registerAvailability(mgr)
         if (mgr.isAvailable) {
@@ -102,6 +106,11 @@ class AwareRadio(
             Log.i(TAG, "Aware not available yet (is Wi-Fi on?); waiting for it")
         }
     }
+
+    /** The observed discovering state: live iff either session is up — the two
+     *  sessions start and stop together in this lifecycle, so a single boolean
+     *  does not under-report. */
+    private fun discovering(): Boolean = publishSession != null || subscribeSession != null
 
     private fun attach(mgr: WifiAwareManager) {
         if (session != null) return
@@ -174,6 +183,7 @@ class AwareRadio(
         publishSession = null
         subscribeSession = null
         session = null
+        NativeCore.awareSetDiscovering(discovering())
     }
 
     fun stop() {
@@ -204,6 +214,7 @@ class AwareRadio(
             override fun onPublishStarted(session: PublishDiscoverySession) {
                 Log.i(TAG, "publish started")
                 publishSession = session
+                NativeCore.awareSetDiscovering(discovering())
             }
 
             // A subscriber reached us. Reply with our npub so it can label the
@@ -236,6 +247,7 @@ class AwareRadio(
             override fun onSubscribeStarted(session: SubscribeDiscoverySession) {
                 Log.i(TAG, "subscribe started")
                 subscribeSession = session
+                NativeCore.awareSetDiscovering(discovering())
             }
 
             // We discovered a publisher: we are the INITIATOR toward it.
