@@ -128,6 +128,13 @@ data class AppState(
     val bleEnabled: Boolean,
     val bleRole: String,
     val bleScanning: Boolean,
+    /** False when [bleScanning] could not actually be observed (bridge absent,
+     *  radio never started, or a non-Android build) — render unknown, not a
+     *  value. */
+    val bleScanningKnown: Boolean = false,
+    val bleAdvertising: Boolean = false,
+    /** False when [bleAdvertising] could not actually be observed. */
+    val bleAdvertisingKnown: Boolean = false,
     val bleAdapterName: String,
     val blePeers: List<BlePeer>,
     val bleAdverts: List<BleAdvert>,
@@ -339,6 +346,9 @@ data class AppState(
                 bleEnabled = ble.optBoolean("enabled"),
                 bleRole = ble.optString("role"),
                 bleScanning = ble.optBoolean("scanning"),
+                bleScanningKnown = ble.optBoolean("scanningKnown"),
+                bleAdvertising = ble.optBoolean("advertising"),
+                bleAdvertisingKnown = ble.optBoolean("advertisingKnown"),
                 bleAdapterName = ble.optString("adapterName"),
                 blePeers = peers,
                 bleAdverts = adverts,

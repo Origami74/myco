@@ -47,6 +47,16 @@ internal object NativeCore {
     external fun bleChannelDeliverRecv(bridgeHandle: Long, chId: Long, data: ByteArray, len: Int): Boolean
     external fun bleChannelClosed(bridgeHandle: Long, chId: Long)
 
+    /** Whether the scan loop is live right now, pushed from the scan
+     *  callback's own start/stop/retry-failure sites. Observed radio state for
+     *  the developer diagnostics UI only. */
+    external fun bleDeliverScanningState(bridgeHandle: Long, on: Boolean)
+
+    /** Whether the advertiser is live right now, pushed from the advertise
+     *  callback's own install/clear sites. Observed radio state for the
+     *  developer diagnostics UI only. */
+    external fun bleDeliverAdvertisingState(bridgeHandle: Long, on: Boolean)
+
     /** Rust → Kotlin pull (blocks up to timeoutMs): >0 len, 0 timeout, -1 closed. */
     external fun bleChannelNextSend(bridgeHandle: Long, chId: Long, out: ByteArray, timeoutMs: Int): Int
 

@@ -836,15 +836,22 @@ impl AppRuntime {
                 running: self.node_running,
                 status_text: self.node_status.clone(),
             },
-            ble: BleStatus {
-                enabled: self.ble_enabled,
-                role: "peripheral+central".to_string(),
-                scanning: self.ble_enabled && self.node_running,
-                adapter_name: if self.node_running {
-                    "ble0".to_string()
-                } else {
-                    "—".to_string()
-                },
+            ble: {
+                let (scanning, scanning_known, advertising, advertising_known) =
+                    self.ble_radio_state();
+                BleStatus {
+                    enabled: self.ble_enabled,
+                    role: "peripheral+central".to_string(),
+                    scanning,
+                    scanning_known,
+                    advertising,
+                    advertising_known,
+                    adapter_name: if self.node_running {
+                        "ble0".to_string()
+                    } else {
+                        "—".to_string()
+                    },
+                }
             },
             ble_peers,
             ble_adverts,
@@ -893,6 +900,23 @@ impl AppRuntime {
             speedtest: self.speedtest.lock().unwrap().clone(),
             peers,
         }
+    }
+
+    /// The BLE radio's observed scanning/advertising state, read from the fips
+    /// bridge rather than computed from other flags. `known` is true only when
+    /// the bridge actually resolves (Android, radio started); the host build and
+    /// an absent bridge both report unknown.
+    #[cfg(target_os = "android")]
+    fn ble_radio_state(&self) -> (bool, bool, bool, bool) {
+        match fips::transport::ble::android_io::android_ble_bridge() {
+            Some(b) => (b.is_scanning(), true, b.is_advertising(), true),
+            None => (false, false, false, false),
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn ble_radio_state(&self) -> (bool, bool, bool, bool) {
+        (false, false, false, false)
     }
 
     /// Raw scan adverts (address / PSM / RSSI) from the BLE radio bridge. The

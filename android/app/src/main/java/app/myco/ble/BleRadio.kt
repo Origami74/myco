@@ -193,9 +193,11 @@ class BleRadio(context: Context) {
                 advertiseRetries = 0
                 BleHealth.advertiserExhausted = false
                 Log.i(TAG, "advertising PSM $psm (in primary advert)")
+                if (bridgeHandle != 0L) NativeCore.bleDeliverAdvertisingState(bridgeHandle, true)
             }
             override fun onStartFailure(errorCode: Int) {
                 Log.e(TAG, "advertise failed: $errorCode (1=DATA_TOO_LARGE, 2=TOO_MANY_ADVERTISERS)")
+                if (bridgeHandle != 0L) NativeCore.bleDeliverAdvertisingState(bridgeHandle, false)
                 if (errorCode == ADVERTISE_FAILED_TOO_MANY_ADVERTISERS) {
                     // Every advertising slot is taken (usually Play Services'
                     // Nearby Share / Fast Pair). Flag it for the UI and retry.
@@ -209,6 +211,7 @@ class BleRadio(context: Context) {
             adv.startAdvertising(settings, advData, cb)
         } catch (e: Exception) {
             Log.e(TAG, "startAdvertising failed", e)
+            if (bridgeHandle != 0L) NativeCore.bleDeliverAdvertisingState(bridgeHandle, false)
             scheduleAdvertiseRetry()
         }
     }
@@ -232,6 +235,7 @@ class BleRadio(context: Context) {
     fun stopAdvertising() {
         advertiseCallback?.let { runCatching { advertiser?.stopAdvertising(it) } }
         advertiseCallback = null
+        if (bridgeHandle != 0L) NativeCore.bleDeliverAdvertisingState(bridgeHandle, false)
     }
 
     fun startScanning() {
@@ -277,6 +281,7 @@ class BleRadio(context: Context) {
         try {
             sc.startScan(filters, settings, cb)
             Log.i(TAG, "scanning for FIPS peers (${if (backgroundMode) "low-power" else "low-latency"})")
+            if (bridgeHandle != 0L) NativeCore.bleDeliverScanningState(bridgeHandle, true)
         } catch (e: Exception) {
             Log.e(TAG, "startScanning failed", e)
             scheduleScanRetry(-1)
@@ -313,6 +318,7 @@ class BleRadio(context: Context) {
      *  same exponential backoff (5→10→20→40s, capped 60s) as the advertiser. The
      *  backoff resets once a scan result comes in. */
     private fun scheduleScanRetry(errorCode: Int) {
+        if (bridgeHandle != 0L) NativeCore.bleDeliverScanningState(bridgeHandle, false)
         if (stopped) return
         val backoff = minOf(60L, 5L shl minOf(scanRetries, 3))
         val delay =
@@ -335,6 +341,7 @@ class BleRadio(context: Context) {
     fun stopScanning() {
         scanCallback?.let { runCatching { scanner?.stopScan(it) } }
         scanCallback = null
+        if (bridgeHandle != 0L) NativeCore.bleDeliverScanningState(bridgeHandle, false)
     }
 
     fun closeChannel(chId: Long) {

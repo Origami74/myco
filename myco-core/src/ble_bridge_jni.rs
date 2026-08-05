@@ -241,6 +241,36 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverScan(
     }
 }
 
+/// Kotlin reports whether its BLE scan loop is live right now, pushed from the
+/// scan callback's own start/stop/retry-failure sites. Observed radio state for
+/// the developer diagnostics UI only — a zero or stale handle is a no-op.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverScanningState(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    on: jboolean,
+) {
+    if let Some(bridge) = unsafe { bridge_ref(handle) } {
+        bridge.set_scanning(on != 0);
+    }
+}
+
+/// Kotlin reports whether its BLE advertiser is live right now, pushed from the
+/// advertise callback's own install/clear sites. Observed radio state for the
+/// developer diagnostics UI only — a zero or stale handle is a no-op.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverAdvertisingState(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    on: jboolean,
+) {
+    if let Some(bridge) = unsafe { bridge_ref(handle) } {
+        bridge.set_advertising(on != 0);
+    }
+}
+
 /// Kotlin read one L2CAP packet. Returns 1 if delivered, 0 if the channel is gone.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_bleChannelDeliverRecv(

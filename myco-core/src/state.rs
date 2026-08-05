@@ -178,8 +178,19 @@ pub struct BleStatus {
     /// The node is both peripheral and central — symmetric per-peer PSM
     /// discovery, not fixed-central. Informational for the UI.
     pub role: String,
-    /// Whether the scan loop is currently running.
+    /// Whether the scan loop is currently running, sourced from the radio's own
+    /// scan-callback lifecycle (never derived from other flags).
     pub scanning: bool,
+    /// False when `scanning` could not actually be observed (bridge absent, radio
+    /// never started, or a non-Android build) — the UI must render unknown rather
+    /// than asserting a value.
+    pub scanning_known: bool,
+    /// Whether the advertiser is currently running, sourced from the advertise
+    /// callback's own install/clear lifecycle.
+    pub advertising: bool,
+    /// False when `advertising` could not actually be observed — the UI must
+    /// render unknown rather than asserting a value.
+    pub advertising_known: bool,
     /// Adapter label (a fixed tag on Android; "—" until the backend reports).
     pub adapter_name: String,
 }
