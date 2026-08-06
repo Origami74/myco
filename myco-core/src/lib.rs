@@ -10,6 +10,7 @@
 //! Android-only JNI glue, so [`AppRuntime`] is unit-testable on macOS/Linux.
 
 mod action;
+mod attempt_store;
 mod content;
 // The mesh gossiper is wired only into the Android relay server (runtime.rs); on
 // the host it is exercised only by its own tests, so it reads as dead there.

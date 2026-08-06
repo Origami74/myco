@@ -62,6 +62,11 @@ pub struct AppRuntime {
     /// content layer from here, so peer-driven relay sync keeps working while
     /// the app is backgrounded and the UI's `state()` poll is paused.
     shared_read: Arc<std::sync::Mutex<Option<ControlReadHandle>>>,
+    /// Crash-surviving history for the BLE attempt log (D-13). Shared so the
+    /// rate-limited flush can be spawned onto the tokio runtime rather than
+    /// running on the FFI thread. `None` only on a startup error, in which case
+    /// attempts simply have no persistence — never an `AppState.error`.
+    attempt_store: Option<Arc<crate::attempt_store::AttemptStore>>,
 }
 
 impl AppRuntime {
@@ -275,6 +280,11 @@ impl AppRuntime {
             content: Some(content),
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
             shared_read,
+            // Load once here; a missing file is an empty history, and an
+            // unreadable one degrades to empty rather than failing the launch.
+            attempt_store: Some(Arc::new(crate::attempt_store::AttemptStore::load(
+                Path::new(data_dir),
+            ))),
         })
     }
 
@@ -347,6 +357,9 @@ impl AppRuntime {
             content: None,
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
             shared_read: Arc::new(std::sync::Mutex::new(None)),
+            // No valid data dir on this path, so there is nowhere to persist to.
+            // Attempts still render live; they just do not survive a restart.
+            attempt_store: None,
         }
     }
 
@@ -787,7 +800,26 @@ impl AppRuntime {
         // Per-peer attempt history (role / discovery latency / outcome / send
         // failures) plus the learned address-to-node-address pairs the merge
         // uses to collapse an advert into its peer row.
-        let ble_attempts = self.ble_attempts();
+        //
+        // The live fips log is folded into the persistent store and read back
+        // merged, so a freshly launched app shows what was recorded before the
+        // last force-stop alongside the newest live attempts. `observe` does no
+        // I/O — it runs here on the FFI thread — and the flush is spawned onto
+        // the tokio runtime, rate limited to once every few seconds.
+        let ble_attempts = match self.attempt_store.as_ref() {
+            Some(store) => {
+                store.observe(&self.ble_attempts());
+                if store.flush_due() {
+                    if let Some(rt) = self.rt.as_ref() {
+                        let store = Arc::clone(store);
+                        let at = now_ms();
+                        rt.spawn(async move { store.flush(at) });
+                    }
+                }
+                store.snapshot()
+            }
+            None => self.ble_attempts(),
+        };
 
         let peers = crate::peer_diagnostics::merge_peers(
             &peer_views,
