@@ -27,7 +27,13 @@ internal object NativeCore {
      * (empty string if none). Blocks while the in-process gateway serves direct
      * from the local relay + Blossom.
      */
-    external fun gatewayGet(handle: Long, host: String, path: String, range: String): ByteArray
+    external fun gatewayGet(
+        handle: Long,
+        host: String,
+        path: String,
+        range: String,
+        allowSync: Boolean,
+    ): ByteArray
 
     // --- BLE byte-bridge (see docs/reference/ffi-surface.md "BLE bridge") ---
     // The Kotlin radio (BleRadio) calls these to push inbound bytes/events and

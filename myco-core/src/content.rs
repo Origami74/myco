@@ -488,18 +488,47 @@ impl Content {
     /// Serve and frame the response for the `gatewayGet` JNI: a 4-byte big-endian
     /// header length, then a JSON header (`status`, `contentType`, `headers`),
     /// then the raw body bytes. Kotlin slices the body after parsing the header.
+    ///
+    /// `allow_sync` decides what a 503 means. A **WebView load** passes `true`:
+    /// the user asked for this site, so a missing one should start pulling and
+    /// the loading page self-heals. A **passive probe** — a favicon fetch behind
+    /// a grid of tiles the user has not chosen — passes `false`, because
+    /// starting a sync there downloads and pins every site merely rendered on
+    /// screen. See `gateway_get_framed_no_sync`.
     pub async fn gateway_get_framed(
         self: Arc<Self>,
         host: &str,
         path: &str,
         range: Option<&str>,
     ) -> Vec<u8> {
+        self.gateway_get_framed_opts(host, path, range, true).await
+    }
+
+    /// [`Self::gateway_get_framed`] for passive probes: serves whatever is
+    /// already local and never triggers a sync, so rendering a tile can never
+    /// download or pin a site the user did not open.
+    pub async fn gateway_get_framed_no_sync(
+        self: Arc<Self>,
+        host: &str,
+        path: &str,
+        range: Option<&str>,
+    ) -> Vec<u8> {
+        self.gateway_get_framed_opts(host, path, range, false).await
+    }
+
+    async fn gateway_get_framed_opts(
+        self: Arc<Self>,
+        host: &str,
+        path: &str,
+        range: Option<&str>,
+        allow_sync: bool,
+    ) -> Vec<u8> {
         let mut resp = self.gateway_get(host, path, range).await;
         // A 503 means the site isn't fully present yet. Replace the generic
         // loading body with the real sync status, and (re)trigger a sync if none
         // is in flight — so the loading page self-heals for a freshly scanned or
         // home-screen-launched site that hasn't been pulled yet.
-        if resp.status == 503 {
+        if resp.status == 503 && allow_sync {
             if let Some(addr) = nsite_deck::resolve_host(host) {
                 let host_label = addr.host_label();
                 let status = self.sites.lock().unwrap().get(&host_label).cloned();

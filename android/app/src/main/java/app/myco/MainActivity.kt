@@ -60,9 +60,10 @@ class MainActivity : ComponentActivity() {
         if (prefs.getBoolean(PREF_BLE, true) && bleCorePermsGranted()) {
             BleService.start(this)
         }
-        // The Wi-Fi Aware lane is opt-in (default off); (re)start it too if the
-        // user had it on and its perms just landed.
-        if (prefs.getBoolean(PREF_AWARE, false) && AwareRadio.isSupported(this) && awarePermsGranted()) {
+        // The Wi-Fi Aware lane is ON by default — it is a peering transport, and
+        // a lane the user never turned on is a lane that silently never carries
+        // anyone. (Re)start it if its perms just landed.
+        if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this) && awarePermsGranted()) {
             AwareService.start(this)
         }
     }
@@ -110,9 +111,9 @@ class MainActivity : ComponentActivity() {
             if (bleCorePermsGranted()) BleService.start(this) else requestBlePermissionsIfNeeded()
         }
 
-        // Wi-Fi Aware is opt-in (default off); resume it if the user left it on
-        // and the hardware supports it.
-        if (prefs.getBoolean(PREF_AWARE, false) && AwareRadio.isSupported(this)) {
+        // Wi-Fi Aware is ON by default; resume it unless the user turned it off,
+        // and only where the hardware supports it.
+        if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this)) {
             if (awarePermsGranted()) AwareService.start(this) else requestAwarePermissionsIfNeeded()
         }
 

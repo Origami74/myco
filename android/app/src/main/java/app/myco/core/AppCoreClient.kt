@@ -434,9 +434,20 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
      * Serve one nsite request through the in-process gateway (for the WebView's
      * `shouldInterceptRequest`). Decodes the framed `[u32 header-len][header][body]`
      * the native side returns. `range` is the request's `Range` header (or "").
+     *
+     * [allowSync] must stay `true` for WebView loads — the user asked for that
+     * site, so a missing one should start pulling. Pass `false` for a **passive
+     * probe** the user did not ask for, such as a favicon behind a Discover
+     * tile: a sync there downloads and pins every site merely rendered on
+     * screen.
      */
-    fun gatewayGet(host: String, path: String, range: String): GatewayResult {
-        val framed = NativeCore.gatewayGet(requireHandle(), host, path, range)
+    fun gatewayGet(
+        host: String,
+        path: String,
+        range: String,
+        allowSync: Boolean = true,
+    ): GatewayResult {
+        val framed = NativeCore.gatewayGet(requireHandle(), host, path, range, allowSync)
         return GatewayResult.decode(framed)
     }
 
