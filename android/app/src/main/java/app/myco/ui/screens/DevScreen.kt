@@ -19,6 +19,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshots.SnapshotStateList
@@ -47,6 +51,11 @@ import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.StatusReachable
 import app.myco.ui.theme.StatusThin
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlin.math.pow
 
 /**
@@ -61,35 +70,59 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
     val awareLinks by AwareRadio.links.collectAsState()
     val apWifi by ApRadio.wifi.collectAsState()
     val apNodes by ApRadio.nodes.collectAsState()
+
+    // This screen refreshes faster than the rest of the app, because the peer
+    // list is only useful if it converges visibly while you watch it (D-16), and
+    // last-seen counts in exact seconds (D-18). It drives that itself rather
+    // than raising the shell's cadence: `state()` takes many core locks, and
+    // CONCERNS.md records that making every tab pay for this rate is not free.
+    //
+    // Seeded from the hoisted `state` so the first frame is real content — no
+    // spinner, no skeleton. The lifecycle gate is the shell's, so leaving the
+    // tab disposes the effect and backgrounding suspends it; the core keeps
+    // recording either way, so history is complete when the screen returns.
+    var devState by remember { mutableStateOf(state) }
+    var firstReadLanded by remember { mutableStateOf(false) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(Unit) {
+        lifecycleOwner.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                devState = withContext(Dispatchers.IO) { client.state() }
+                firstReadLanded = true
+                delay(1000)
+            }
+        }
+    }
+
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        ScreenHeader("Dev", state, subtitle = "Technical details — myco-core state.")
+        ScreenHeader("Dev", devState, subtitle = "Technical details — myco-core state.")
 
         // D-07: the radio self-check leads, because "no peers" is the actual
         // field complaint and this card is what answers "is it me or is it
         // them" without a second screen.
-        RadioSelfCheckCard(state, awareSupported, awareAvailable)
+        RadioSelfCheckCard(devState, awareSupported, awareAvailable)
 
-        PeersOverviewCard(state)
+        PeersOverviewCard(devState, firstReadLanded)
 
-        PendingPairingsCard(state)
+        PendingPairingsCard(devState, firstReadLanded)
 
-        IdentityCard(state)
+        IdentityCard(devState)
 
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 DevCard("NODE & FIPS") {
-                    KeyValDot("Status", if (state.nodeRunning) "running" else state.nodeStatus, state.nodeRunning)
-                    KeyVal("node_addr", short(state.nodeAddrHex))
-                    KeyVal("fips ipv6", short(state.fipsIpv6))
-                    KeyVal("mtu", if (state.fipsMtu > 0) state.fipsMtu.toString() else "—")
+                    KeyValDot("Status", if (devState.nodeRunning) "running" else devState.nodeStatus, devState.nodeRunning)
+                    KeyVal("node_addr", short(devState.nodeAddrHex))
+                    KeyVal("fips ipv6", short(devState.fipsIpv6))
+                    KeyVal("mtu", if (devState.fipsMtu > 0) devState.fipsMtu.toString() else "—")
                 }
                 DevCard("BLE") {
-                    KeyVal("adapter", state.bleAdapterName)
-                    KeyValDot("scanning", if (state.bleScanning) "active" else "idle", state.bleScanning)
-                    KeyVal("role", state.bleRole)
+                    KeyVal("adapter", devState.bleAdapterName)
+                    KeyValDot("scanning", if (devState.bleScanning) "active" else "idle", devState.bleScanning)
+                    KeyVal("role", devState.bleRole)
                 }
                 DevCard("WI-FI AWARE") {
                     KeyValDot("supported", if (awareSupported) "yes" else "no", awareSupported)
@@ -98,8 +131,8 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
                         if (awareAvailable) "yes" else "no — is Wi-Fi on?",
                         awareAvailable,
                     )
-                    KeyValDot("lane", if (state.wifiAwareEnabled) "enabled" else "off", state.wifiAwareEnabled)
-                    KeyVal("udp port", if (state.wifiAwarePort > 0) state.wifiAwarePort.toString() else "—")
+                    KeyValDot("lane", if (devState.wifiAwareEnabled) "enabled" else "off", devState.wifiAwareEnabled)
+                    KeyVal("udp port", if (devState.wifiAwarePort > 0) devState.wifiAwarePort.toString() else "—")
                     if (awareLinks.isEmpty()) {
                         EmptyLine("no data paths")
                     } else {
@@ -121,9 +154,9 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
                 }
                 // Stable alphabetical order — the state arrays arrive in snapshot
                 // order, which reshuffles between polls and makes the rows flap.
-                val advertsSorted = state.bleAdverts.sortedBy { it.addr }
-                DevCard("RADIO ADVERTS (${state.bleAdverts.size})") {
-                    if (state.bleAdverts.isEmpty()) {
+                val advertsSorted = devState.bleAdverts.sortedBy { it.addr }
+                DevCard("RADIO ADVERTS (${devState.bleAdverts.size})") {
+                    if (devState.bleAdverts.isEmpty()) {
                         EmptyLine("none")
                     } else {
                         advertsSorted.forEach { AdvertRow(it) }
@@ -134,7 +167,7 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
 
         // D-04: the speedtest is content-layer, not peering — it sits below
         // every peering card rather than second from the top.
-        SpeedtestCard(state, client)
+        SpeedtestCard(devState, client)
 
         Spacer(Modifier.height(8.dp))
     }
@@ -187,12 +220,14 @@ private fun RadioSelfCheckCard(state: AppState, awareSupported: Boolean, awareAv
  * row's identity and the name is decoration beside it, never in its place.
  */
 @Composable
-private fun PendingPairingsCard(state: AppState) {
+private fun PendingPairingsCard(state: AppState, firstReadLanded: Boolean) {
     val incoming = state.pendingPairRequests
     val outbound = state.outboundPairs
     DevCard("PENDING PAIRINGS (${incoming.size + outbound.size})") {
         if (incoming.isEmpty() && outbound.isEmpty()) {
-            EmptyLine("none")
+            // Same rule as the peer list: do not claim there are no pending
+            // requests until this screen has actually read once.
+            EmptyLine(if (firstReadLanded) "none" else "reading…")
         } else {
             incoming.forEach { PairingRow("incoming", it.npub, it.name) }
             outbound.forEach { PairingRow("outbound", it.npub, it.name) }
@@ -341,25 +376,32 @@ private fun size(bytes: Long): String =
  * the tracer slice that proves the row end-to-end for a connected peer.
  */
 @Composable
-private fun PeersOverviewCard(state: AppState) {
+private fun PeersOverviewCard(state: AppState, firstReadLanded: Boolean) {
     val connectedCount = state.peers.count { it.state == "connected" }
     // Survives both the 1s refresh and a configuration change, so a row a
     // developer opened to read stays open while the list underneath it updates.
     val expanded = rememberSaveable(saver = expandedKeysSaver) { mutableStateListOf<String>() }
     DevCard("PEERS ($connectedCount)") {
         if (state.peers.isEmpty()) {
-            Text(
-                "No peers yet",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp),
-            )
-            Text(
-                "Check the radio status above — a peer will show up here as soon as one is heard.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-            )
+            // "No peers" is an assertion of absence; it must not be made before
+            // this screen's own first read lands, or a cold open flashes it
+            // before real data arrives.
+            if (!firstReadLanded) {
+                EmptyLine("reading…")
+            } else {
+                Text(
+                    "No peers yet",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+                Text(
+                    "Check the radio status above — a peer will show up here as soon as one is heard.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
         }
         for (p in state.peers) {
             val isOpen = p.key in expanded
