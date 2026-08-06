@@ -42,6 +42,14 @@ If you would rather rebuild, note the Linux host needs
 
 ## D-1 — Does the tiebreaker actually agree at runtime? (highest value)
 
+> **Partially answered 2026-08-06 — see F-05.** One device's log (48 records) shows
+> the convention applied *consistently*, not raced: 6 `central`/`connected` and 28
+> `peripheral`/`lost-tiebreaker` against the same peer node. What it did surface is
+> that those 28 losses come from 28 distinct BLE addresses — the peer rotates
+> resolvable private addresses and every rotation dials in and is dropped.
+> **Still open:** comparing the *two phones'* logs for the same cycle. This device
+> agreeing with itself is not the same as two devices agreeing with each other.
+
 **Why this one matters most.** The roadmap's first sequencing rule is that Phase 2
 must not act on inference. The BLE role tiebreaker looks deterministic in source
 and is unit-tested for the convention, but until now nothing recorded whether
@@ -68,7 +76,13 @@ The JSONL is the durable artefact — attach both to the phase record.
 
 ---
 
-## D-2 — Attempt history survives a force-stop
+## D-2 — Attempt history survives a force-stop  ✅ DONE 2026-08-06
+
+**Result: passed.** 48 attempts on disk before the force-stop, 48 after relaunch,
+no `.corrupt` sibling, and the Dev tab rendered the history again. Run from the
+Linux host over the adb bridge. Nothing left to do here.
+
+<details><summary>original procedure</summary>
 
 Covers 01-03 Task 3's `<human-check>`. The corruption, truncation, cap and
 eviction contracts are already pinned by unit tests against real files; this
@@ -88,7 +102,16 @@ path rejects, which is a real bug worth stopping for.
 
 ---
 
-## D-3 — F-02: the PSM that never resolves
+</details>
+
+## D-3 — F-02: the PSM that never resolves  ⚠️ ATTEMPTED 2026-08-06, INCONCLUSIVE
+
+> Checked against a 48-record attempt log on the Samsung. `84:C5:A6:C8:43:F7`
+> appears **0** times — but so does the `PSM not in advert yet` symptom, and the
+> address itself never appears in this session's logcat at all. The advertiser
+> was simply not in range, so its absence from the attempt log means nothing.
+> **Re-run this while the symptom is actually reproducing**, then the
+> absent-vs-present rule below becomes decisive.
 
 01-03's attempt log is the instrument built for this. F-02 is the repeating
 `PSM not in advert yet (awaiting scan response)` against `84:C5:A6:C8:43:F7`,
@@ -143,7 +166,22 @@ Enable Wi-Fi Aware on both phones, get an NDP up, confirm the peer row reads
 
 ---
 
-## D-6 — 01-04 build + install (once 01-04 is written)
+## D-6 — 01-04 build + install  ✅ DONE 2026-08-06
+
+**Result: passed, with one bug caught.** 01-04 was written, built, installed and
+rendered on the Samsung from the Linux host. Screenshots confirm the column
+order, the six self-check rows, expansion onto real forensics (role=central,
+discovery=429ms, 7 timestamped attempts) and the neutral no-history degradation.
+
+A crash was found that compilation and the unit tests both missed — the
+`rememberSaveable` saver returned a non-Bundle-storable `EmptyList`, so the tab
+died on every cold open. Fixed in `41ab89b`. This is the Nyquist gap the plan
+recorded, demonstrated.
+
+Remaining visual judgement for a human: whether the rebuilt column *reads* well
+at a demo, which is taste rather than correctness.
+
+<details><summary>original procedure</summary>
 
 01-04 touches only `DevScreen.kt` and `AppCoreClient.kt`. It can be written on
 any host but should be **rendered on a real screen** before the phase closes —
@@ -152,6 +190,8 @@ speedtest are all visual judgements.
 
 Build with `cd android && ./gradlew assembleDebug`, install with
 `adb install -r`.
+
+</details>
 
 ---
 

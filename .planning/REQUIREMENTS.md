@@ -27,8 +27,8 @@ becomes a roadmap of its own via `/gsd-new-milestone` once v1 ships.
 - [x] **DIAG-03**: User can see how long ago each peer was last heard from
 - [x] **DIAG-04**: User can see which transport is currently carrying each connected peer
 - [x] **DIAG-05**: User can see whether each radio is enabled and actively scanning, for both BLE and Wi-Fi Aware
-- [ ] **DIAG-06**: User can see pending pair requests and whether each is waiting, complete, or failed
-- [ ] **DIAG-07**: User can see their own identity and the Circle name other peers see them as
+- [x] **DIAG-06**: User can see pending pair requests and whether each is waiting, complete, or failed
+- [x] **DIAG-07**: User can see their own identity and the Circle name other peers see them as
 
 ### Upstream mesh core
 
@@ -138,8 +138,8 @@ duplicates. Phases 1-3 are inside the 2026-08-05 release deadline; Phases 4-5 la
 | DIAG-03 | Phase 1 | Complete |
 | DIAG-04 | Phase 1 | Complete |
 | DIAG-05 | Phase 1 | Complete |
-| DIAG-06 | Phase 1 | Pending |
-| DIAG-07 | Phase 1 | Pending |
+| DIAG-06 | Phase 1 | Complete |
+| DIAG-07 | Phase 1 | Complete |
 | FIPS-01 | Phase 4 | Pending |
 | FIPS-02 | Phase 4 | Pending |
 | FIPS-03 | Phase 4 | Pending |

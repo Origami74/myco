@@ -266,6 +266,55 @@ timeout from a clean close.
 
 ---
 
+## F-05: the tiebreaker is not racing — it is thrashing against address rotation
+
+**Status: observed on-device**, from the 01-03 attempt log read on the Samsung
+(`R5CR916CDCF`) on 2026-08-06. 48 recorded attempts, 0 unparseable.
+
+**This is the first direct reading of the instrument 01-03 was built for, and it
+does not confirm the hypothesis it was built to test.**
+
+| Peer node address | Role + outcome | Count |
+|---|---|---|
+| `c66233c1eb43074e…` | `central` / `connected` | 6 |
+| `c66233c1eb43074e…` | `peripheral` / `lost-tiebreaker` | **28** |
+| `b4dc20096ff99f1f…` | `central` / `connected` | 13 |
+| *(unresolved)* | `peripheral` / `pubkey-exchange-failed` | 1 |
+
+**The tiebreaker race hypothesis is not supported by this sample.** Against
+`c66233c1…` this device consistently wins as central and consistently drops the
+peer's inbound as peripheral. That is the convention being applied *correctly* on
+both paths — the two sides agree. A race would look like both sides recording
+`lost-tiebreaker` for one cycle (nobody connects) or both recording `connected`
+(two connections); neither appears here.
+
+**What the log does show is different, and was not predicted.** All 28 peripheral
+losses are against the same *node* identity but **28 distinct BLE addresses**
+(`ble0/42:C3:…`, `ble0/43:0D:…`, `ble0/43:C7:…`, …). The peer uses resolvable
+private addresses and rotates them constantly. Every rotation presents as a new
+device, dials us inbound, loses the tiebreaker and is dropped — 28 times, against
+6 useful outbound connects. Discovery latencies on the dropped inbounds are tiny
+(16–189 ms), so this is cheap per event but relentless.
+
+That churn is a plausible cause of the "not always connecting with peers"
+complaint in `reference/FIX-TODOS.md`, but by a different mechanism than the one
+that was assumed: not a disputed tiebreaker, but repeated rediscovery of a peer
+this device already holds a connection to.
+
+**Caveats, stated because this is one sample.** One phone's log, one session,
+roughly twenty minutes. The counterpart phone's log has not been read, so the
+"both sides agree" claim rests on this device's own two paths agreeing rather
+than on comparing two devices — which is what `DEVICE-TEST-BATCH.md` D-1 still
+asks for. A different pair, or a pair whose node addresses sort the other way,
+could still surface a genuine disagreement. What is now settled is that the
+inferred race is not visible in the first real reading, and Phase 2 should not
+open by assuming it.
+
+Raw log preserved: 48 records, per-peer capped at 20, survived a force-stop
+(48 before, 48 after, no `.corrupt` sibling).
+
+---
+
 ## Not a finding
 
 `E BluetoothLeAdvertiser: Legacy advertiser should be only disabled on timeout, but was enabled!`

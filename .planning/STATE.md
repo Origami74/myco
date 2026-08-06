@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: Make Peering Observable
 status: executing
-stopped_at: Completed 01-03-PLAN.md (BLE attempt log + crash-surviving JSONL store)
+stopped_at: Completed 01-04-PLAN.md (Dev tab rebuilt) — all four plans done; phase tail remains
 last_updated: "2026-08-06T12:40:00.000Z"
 last_activity: 2026-08-06
-last_activity_desc: "Completed 01-03: per-peer BLE attempt log, both tiebreaker sides recorded, crash-surviving JSONL store"
+last_activity_desc: "Completed 01-04: Dev tab rebuilt; attempt log read on device — F-05 does not support the tiebreaker-race hypothesis"
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 4
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-02)
 ## Current Position
 
 Phase: 01 (Make Peering Observable) — EXECUTING
-Plan: 4 of 4
-Status: Ready to execute (01-04 needs a machine with the Android toolchain + a device for visual check)
+Plan: 4 of 4 — COMPLETE
+Status: Phase tail remaining (post-merge build+test gate, then gsd-verifier)
 Last activity: 2026-08-06 — Completed 01-03 (attempt log + persistence); device verification batched in DEVICE-TEST-BATCH.md
 
-Progress: [███████░░░] 75%
+Progress: [██████████] 100% (plans) — phase tail pending
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ Progress: [███████░░░] 75%
 | Phase quick-260805-e5h P01 | 35min | 3 tasks | 6 files |
 | Phase 01 P02 | 90min | 3 tasks | 11 files |
 | Phase 01 P03 | 150min | 3 tasks | 7 files |
+| Phase 01 P04 | 75min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -85,6 +86,8 @@ Recent decisions affecting current work:
 - [Phase ?]: 01-03: both sides of the cross-probe tiebreaker record (inbound drop = peripheral losing, outbound yield = central losing), so a runtime disagreement between two phones is visible as two recorded losses rather than inferred from source
 - [Phase ?]: 01-03: send-failure counts are recorded but never persisted — a stale count restored from disk would read as current evidence
 - [Phase ?]: 01-03: advert-to-peer attribution uses only address-to-node-address pairs the log actually learned; without one the advert keeps its own row, never inferred from address shape
+- [Phase ?]: 01-04: the Dev tab renders unobservable radio facts as a first-class `unknown`, and withholds "no peers"/"none" behind a first-read flag — an assertion of absence is a claim, not a default
+- [Phase ?]: 01-04: F-05 — the first real reading of the attempt log does NOT support the tiebreaker-race hypothesis. The convention is applied consistently; what churns is 28 inbound losses from 28 rotating BLE addresses belonging to ONE peer node. Phase 2 must not open by assuming the race.
 - [Phase ?]: 01-03: F-04 promoted to an observed finding — the deeper gap is that fips exposes only peer_views(), i.e. no routing API at all, so an honest reachability signal is a Phase 2 peering change
 
 ### Pending Todos
