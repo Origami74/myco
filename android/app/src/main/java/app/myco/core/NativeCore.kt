@@ -66,11 +66,18 @@ internal object NativeCore {
     // the bytes ride the ordinary UDP transport over the Aware data-path
     // interface.
 
-    /** Aware data path up: peer `npub` reachable at `addr` ("[fe80::x%ifindex]:port"). */
-    external fun awarePeerFound(npub: String, addr: String)
+    /** Aware data path up: peer `npub` reachable at `addr` ("[fe80::x%ifindex]:port"),
+     *  observed on `lane` ("aware" for the Wi-Fi Aware radio, "udp" for the
+     *  LAN/AP radio). Both lanes ride the same fips UDP transport and are
+     *  otherwise indistinguishable, so `lane` is the disambiguation the Dev
+     *  tab renders — it is recorded core-side and never reaches fips. */
+    external fun awarePeerFound(npub: String, addr: String, lane: String)
 
-    /** Aware data path to `npub` lost: close the pooled UDP session. */
-    external fun awarePeerLost(npub: String)
+    /** Aware data path to `npub` lost: close the pooled UDP session. `lane`
+     *  must match the lane that pushed the corresponding [awarePeerFound],
+     *  so a stale loss from one lane cannot clobber a fresher record from
+     *  the other. */
+    external fun awarePeerLost(npub: String, lane: String)
 
     /** Whether the Aware publish/subscribe session pair is live right now —
      *  the Aware analogue of a BLE scan. Observed radio state for the

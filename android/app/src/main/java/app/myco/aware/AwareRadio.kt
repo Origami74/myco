@@ -304,12 +304,12 @@ class AwareRadio(
                 val addr = formatPeerAddr(info.peerIpv6Addr) ?: return
                 Log.i(TAG, "Aware NDP up to ${short(peerNpub)} at $addr")
                 setLink(peerNpub, addr, up = true)
-                NativeCore.awarePeerFound(peerNpub, addr)
+                NativeCore.awarePeerFound(peerNpub, addr, LANE)
             }
 
             override fun onLost(network: Network) {
                 Log.i(TAG, "Aware NDP lost to ${short(peerNpub)}")
-                NativeCore.awarePeerLost(peerNpub)
+                NativeCore.awarePeerLost(peerNpub, LANE)
                 releaseNdp(peerNpub)
             }
 
@@ -412,6 +412,11 @@ class AwareRadio(
 
         /** The Myco Wi-Fi Aware service name (the analog of the FIPS service UUID). */
         private const val SERVICE_NAME = "myco.fips.v1"
+
+        /** The lane label pushed to [NativeCore.awarePeerFound]/[NativeCore.awarePeerLost]
+         *  — distinguishes this radio from [app.myco.ap.ApRadio], which pushes "udp"
+         *  through the same seam even though both ride fips's UDP transport. */
+        private const val LANE = "aware"
 
         /** Message id for the npub-exchange `sendMessage`. */
         private const val MSG_ID_NPUB = 1

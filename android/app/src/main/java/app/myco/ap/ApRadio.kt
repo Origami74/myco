@@ -36,9 +36,11 @@ import kotlinx.coroutines.flow.asStateFlow
  *     LAN discovery publishes (`reference/fips` `src/discovery/lan`), whose
  *     TXT carries the node's `npub`;
  *  3. on resolve, push `(npub, addr)` into the core's platform peer queue
- *     ([NativeCore.awarePeerFound], transport `"udp"`) — the same seam the
- *     Wi-Fi Aware radio uses. The node dials the UDP transport bound `:4871`
- *     and Noise IK authenticates; the pushed npub is only a routing hint.
+ *     ([NativeCore.awarePeerFound], transport `"udp"`, lane `"udp"`) — the
+ *     same seam the Wi-Fi Aware radio uses, labelled with this lane's own
+ *     name rather than masquerading as Aware. The node dials the UDP
+ *     transport bound `:4871` and Noise IK authenticates; the pushed npub is
+ *     only a routing hint.
  *
  * The browse is deliberately **not** gated on the literal `!FIPS` SSID: on
  * API 33+ the SSID is redacted unless the app holds location permission, so a
@@ -249,7 +251,7 @@ class ApRadio private constructor(private val context: Context) {
         resolveQueue.clear()
         // The LAN is gone with the link: tell the core so it closes the pooled
         // UDP sessions instead of re-using dead sockets.
-        for (npub in pushed.keys) NativeCore.awarePeerLost(npub)
+        for (npub in pushed.keys) NativeCore.awarePeerLost(npub, LANE)
         pushed.clear()
         candidates.clear()
         candidateIdx.clear()
@@ -341,7 +343,7 @@ class ApRadio private constructor(private val context: Context) {
         val addr = addrs[(candidateIdx[npub] ?: 0) % addrs.size]
         if (pushed[npub] == addr) return
         Log.i(TAG, "fips node ${short(npub)} at $addr — pushing to core")
-        NativeCore.awarePeerFound(npub, addr)
+        NativeCore.awarePeerFound(npub, addr, LANE)
         pushed[npub] = addr
     }
 
@@ -386,7 +388,7 @@ class ApRadio private constructor(private val context: Context) {
         // A session that has genuinely died is detected by its own keepalive.
         if (wasPushed && !connected(npub)) {
             Log.i(TAG, "fips node ${short(npub)} gone from LAN")
-            NativeCore.awarePeerLost(npub)
+            NativeCore.awarePeerLost(npub, LANE)
         } else if (wasPushed) {
             Log.i(TAG, "fips node ${short(npub)} advert lapsed, session still up — keeping it")
         }
@@ -476,6 +478,12 @@ class ApRadio private constructor(private val context: Context) {
 
         /** TXT key carrying the advertising node's npub. */
         private const val TXT_NPUB = "npub"
+
+        /** The lane label pushed to [NativeCore.awarePeerFound]/[NativeCore.awarePeerLost]
+         *  — distinguishes this radio from [app.myco.aware.AwareRadio], which shares
+         *  the same JNI seam and pushes "aware" even though both ride fips's UDP
+         *  transport underneath. */
+        private const val LANE = "udp"
 
         /** Candidate-rotation interval (see [rotate]).
          *

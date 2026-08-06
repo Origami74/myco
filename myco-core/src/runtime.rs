@@ -779,11 +779,10 @@ impl AppRuntime {
         // fips-reported "udp"): both Wi-Fi Aware and the LAN/AP lane ride
         // fips's plain UDP transport and share one JNI push site today
         // (`aware_bridge_jni.rs`'s hardcoded `TRANSPORT_TYPE = "udp"`), so
-        // fips cannot tell them apart — only the Kotlin push site can. Empty
-        // here; plan 01-02 threads a real npub→lane map through from
-        // `aware_bridge_jni.rs` without changing this call shape.
-        let lane_by_npub: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+        // fips cannot tell them apart — only the Kotlin push site can. Read
+        // from `lane_observation`'s process-global record of the lane each
+        // npub was last pushed on (Android; empty on the host build).
+        let lane_by_npub = self.observed_lane_by_npub();
 
         let peers = crate::peer_diagnostics::merge_peers(
             &peer_views,
@@ -939,6 +938,21 @@ impl AppRuntime {
     #[cfg(not(target_os = "android"))]
     fn aware_radio_state(&self) -> (bool, bool) {
         (false, false)
+    }
+
+    /// The lane ("aware" vs. "udp") each currently known npub was last
+    /// observed reached over, read from `lane_observation`'s process-global
+    /// record — the only place that can distinguish Wi-Fi Aware from the
+    /// LAN/AP lane, both of which ride fips's plain UDP transport. Empty on
+    /// the host build, where the Android Aware JNI bridge never pushes.
+    #[cfg(target_os = "android")]
+    fn observed_lane_by_npub(&self) -> std::collections::HashMap<String, String> {
+        crate::lane_observation::snapshot()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn observed_lane_by_npub(&self) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
     }
 
     /// Raw scan adverts (address / PSM / RSSI) from the BLE radio bridge. The
