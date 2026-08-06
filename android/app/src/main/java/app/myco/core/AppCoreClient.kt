@@ -110,6 +110,31 @@ data class PeerDiagnostic(
     /** "" | "incoming-waiting" | "outbound-waiting" | "paired". */
     val pairState: String,
     val inCircle: Boolean,
+    /** BLE role this device chose on the most recent recorded attempt:
+     *  "central" | "peripheral" | "" when nothing has been recorded. Never a guess. */
+    val role: String = "",
+    /** Discovery-to-resolution milliseconds for the newest attempt; 0 when unmeasured. */
+    val discoveryMs: Long = 0L,
+    /** Link-level send failures to this peer. Excludes MTU rejections. */
+    val sendDrops: Long = 0L,
+    /** Recorded connect attempts, newest first, capped at 20 by the core. */
+    val attempts: List<PeerAttempt> = emptyList(),
+)
+
+/**
+ * One recorded BLE connect attempt (DIAG-01/03), as surfaced on a peer row.
+ *
+ * Every field is an observed fact from the core's attempt log — a peer with no
+ * recorded history carries an empty list, never a fabricated entry.
+ */
+data class PeerAttempt(
+    val atMs: Long,
+    /** "central" | "peripheral". */
+    val role: String,
+    val discoveryMs: Long,
+    /** "connected" | "connect-timeout" | "connect-error" | "pubkey-exchange-failed"
+     *  | "lost-tiebreaker" | "pool-rejected". */
+    val outcome: String,
 )
 
 /** Parsed slice of the core's state snapshot (P1 BLE surface + P2 content). */
@@ -301,6 +326,24 @@ data class AppState(
                                 for (j in 0 until arr.length()) add(arr.optString(j))
                             }
                         }
+                        // Attempts arrive newest-first from the core, already
+                        // capped per peer. A payload predating plan 01-03 simply
+                        // has no `attempts` key and parses to an empty list.
+                        val attempts = buildList {
+                            p.optJSONArray("attempts")?.let { arr ->
+                                for (j in 0 until arr.length()) {
+                                    val a = arr.optJSONObject(j) ?: continue
+                                    add(
+                                        PeerAttempt(
+                                            atMs = a.optLong("atMs"),
+                                            role = a.optString("role"),
+                                            discoveryMs = a.optLong("discoveryMs"),
+                                            outcome = a.optString("outcome"),
+                                        )
+                                    )
+                                }
+                            }
+                        }
                         add(
                             PeerDiagnostic(
                                 key = p.optString("key"),
@@ -316,6 +359,10 @@ data class AppState(
                                 psm = p.optInt("psm"),
                                 pairState = p.optString("pairState"),
                                 inCircle = p.optBoolean("inCircle"),
+                                role = p.optString("role"),
+                                discoveryMs = p.optLong("discoveryMs"),
+                                sendDrops = p.optLong("sendDrops"),
+                                attempts = attempts,
                             )
                         )
                     }

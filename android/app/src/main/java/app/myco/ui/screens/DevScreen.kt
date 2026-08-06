@@ -1,5 +1,6 @@
 package app.myco.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,6 +18,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -31,6 +36,7 @@ import app.myco.core.AppState
 import app.myco.core.BleAdvert
 import app.myco.core.BlePeer
 import app.myco.core.NativeActions
+import app.myco.core.PeerAttempt
 import app.myco.core.PeerDiagnostic
 import app.myco.share.DeviceName
 import app.myco.ui.KeyVal
@@ -337,16 +343,29 @@ private fun size(bytes: Long): String =
 @Composable
 private fun PeersOverviewCard(state: AppState) {
     val connectedCount = state.peers.count { it.state == "connected" }
+    // Survives both the 1s refresh and a configuration change, so a row a
+    // developer opened to read stays open while the list underneath it updates.
+    val expanded = rememberSaveable(saver = expandedKeysSaver) { mutableStateListOf<String>() }
     DevCard("PEERS ($connectedCount)") {
         if (state.peers.isEmpty()) {
             Text(
-                "No peers yet.",
+                "No peers yet",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+            Text(
+                "Check the radio status above — a peer will show up here as soon as one is heard.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             )
         }
         for (p in state.peers) {
-            PeerDiagnosticRow(p)
+            val isOpen = p.key in expanded
+            PeerDiagnosticRow(p, isOpen) {
+                if (isOpen) expanded.remove(p.key) else expanded.add(p.key)
+            }
         }
         Spacer(Modifier.height(6.dp))
         Text(
@@ -365,7 +384,7 @@ private fun PeersOverviewCard(state: AppState) {
  * as an em-dash rather than a false "0s"/blank value.
  */
 @Composable
-private fun PeerDiagnosticRow(peer: PeerDiagnostic) {
+private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle: () -> Unit) {
     val dotColor = when (peer.state) {
         "connected" -> StatusConnected
         "reachable-via-relay" -> StatusReachable
@@ -375,32 +394,125 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic) {
         // the pre-existing "○ seen" convention.
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
-    val identity = peer.name.ifEmpty {
-        peer.npub.ifEmpty { peer.nodeAddrHex.ifEmpty { peer.bleAddr } }
+    // An unidentified peer shows its address only — never a fabricated name.
+    val identity = if (peer.state == "seen-unidentified") {
+        peer.bleAddr.ifEmpty { peer.nodeAddrHex }
+    } else {
+        peer.name.ifEmpty { peer.npub.ifEmpty { peer.nodeAddrHex.ifEmpty { peer.bleAddr } } }
     }
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-    ) {
+    Column(modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle)) {
         Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         ) {
-            StatusDot(dotColor)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                StatusDot(dotColor)
+                Text(
+                    short(identity),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
             Text(
-                short(identity),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
+                "${peer.transport.ifEmpty { "—" }} · ${elapsedExact(peer.lastSeenMs)}",
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        if (expanded) {
+            PeerForensics(peer)
+        }
+    }
+}
+
+/**
+ * The expanded body of a peer row: why a connection failed, in place (D-05).
+ *
+ * Metric lines first — they render even when there is no attempt history, so a
+ * peer that has never resolved an attempt still says what it knows. Then the
+ * newest [MAX_ATTEMPTS_SHOWN] attempts, newest first, matching the core store's
+ * per-peer retention exactly so this list can never grow unbounded.
+ *
+ * An empty, unreadable or partially corrupted log all degrade to the same
+ * neutral no-history line — never red, never a dialog, and nothing here ever
+ * rewrites or deletes the file behind it (D-13).
+ */
+@Composable
+private fun PeerForensics(peer: PeerDiagnostic) {
+    Column(
+        modifier = Modifier.padding(start = 30.dp, end = 16.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        ForensicLine("role", peer.role.ifEmpty { "—" })
+        ForensicLine("discovery", if (peer.discoveryMs > 0) "${peer.discoveryMs}ms" else "—")
+        ForensicLine("send drops", peer.sendDrops.toString())
+        ForensicLine("rssi", peer.rssi?.let { "${it}dBm" } ?: "—")
+        Spacer(Modifier.height(4.dp))
+        if (peer.attempts.isEmpty()) {
+            Text(
+                "No history for this peer",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            peer.attempts.take(MAX_ATTEMPTS_SHOWN).forEach { AttemptRow(it) }
+        }
+    }
+}
+
+/** One compact label/value line inside an expanded peer row. */
+@Composable
+private fun ForensicLine(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         Text(
-            "${peer.transport.ifEmpty { "—" }} · ${elapsedExact(peer.lastSeenMs)}",
+            value,
             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = MaterialTheme.colorScheme.onSurface,
         )
     }
 }
+
+/**
+ * One recorded attempt. Every value here is generated in-repo — a fixed-width
+ * clock time, an enum role and an enum outcome — so no peer-supplied text
+ * reaches this row.
+ */
+@Composable
+private fun AttemptRow(a: PeerAttempt) {
+    Text(
+        "${clockTime(a.atMs)}  ${a.role.take(4).padEnd(4)}  ${a.discoveryMs}ms  ${a.outcome}",
+        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/** Wall-clock `HH:mm:ss` for an attempt timestamp; an unset stamp renders as dashes. */
+private fun clockTime(atMs: Long): String {
+    if (atMs <= 0L) return "--:--:--"
+    val c = java.util.Calendar.getInstance().apply { timeInMillis = atMs }
+    return "%02d:%02d:%02d".format(
+        c.get(java.util.Calendar.HOUR_OF_DAY),
+        c.get(java.util.Calendar.MINUTE),
+        c.get(java.util.Calendar.SECOND),
+    )
+}
+
+/** Matches `MAX_ATTEMPTS_PER_PEER` in the core's attempt store (plan 01-03). */
+private const val MAX_ATTEMPTS_SHOWN = 20
+
+/** Persists which peer rows are open across configuration changes. */
+private val expandedKeysSaver: Saver<SnapshotStateList<String>, List<String>> = Saver(
+    save = { it.toList() },
+    restore = { mutableStateListOf<String>().apply { addAll(it) } },
+)
 
 /**
  * Exact seconds counting up (`3s`, `47s`, `4m 12s`) — D-18: at the 1s Dev-tab
