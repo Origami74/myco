@@ -183,6 +183,73 @@ wants to cover this, rather than bolting a second ad-hoc retry onto `onAttachFai
 
 ---
 
+## F-04: `reachable-via-relay` is socket-derived, not route-derived
+
+**Status: code-read finding, like F-03** — the flakiness was noticed in passing during
+Phase 1 execution but never reproduced under controlled conditions, so there is no
+device-log evidence here of the kind F-01 and F-02 carry. What follows is what the source
+guarantees, which is enough to explain a flapping row but *not* enough to claim it is the
+only cause of one.
+
+**Symptom:** a peer's diagnostics row flips between `reachable-via-relay` and
+`paired-offline` while nothing about the mesh path has changed.
+
+**Mechanism.** `AppState::reachable_npubs` (`myco-core/src/state.rs:41`) is documented as
+the honest reachability signal — "bytes are flowing to them right now, whether they are a
+direct neighbour or many hops away". In practice it is exactly the peer-relay pool's
+`connected` set, and that set tracks **one WebSocket actor's lifetime**, nothing else:
+
+- inserted once, immediately after a successful dial — `peer_relay.rs:329`
+- removed when the actor's loop exits, for *any* reason — `peer_relay.rs:421`
+
+`peer_diagnostics.rs:248-262` then renders membership of that set as
+`reachable-via-relay`, and a Circle member absent from it falls through to
+`paired-offline`.
+
+The actor exits on: the peer closing the socket, a socket error or EOF, any failed write
+(publish, request, or ping), the pool dropping the command channel — and, most relevant
+here, **10 seconds of total silence**:
+
+```rust
+_ = ping.tick() => {
+    // The previous ping went a whole interval unanswered by any frame →
+    // treat the connection as dead (this is the half-open catch).
+    if awaiting_pong {
+        reason = "no frame within a ping interval (half-open)";
+        break;
+```
+
+`PING_INTERVAL` is 10s (`peer_relay.rs:43`). That threshold is deliberate and its comment
+says why — it exists to catch a silent half-open in seconds rather than at the TCP
+retransmit horizon. But it means any 10-second gap on a lossy link tears down the socket
+and clears the flag, **whether or not a mesh route still exists**. Over BLE L2CAP, ten
+seconds of silence is not an exotic condition.
+
+Recovery is not immediate either. The keepwarm loop respawns the actor, but the redial
+carries `CONNECT_TIMEOUT` 10s (`:49`) and, on a `Hard` fault, a dial backoff escalating
+8s → 180s (`:59`). So a single transient stall can render a peer `paired-offline` for up
+to three minutes while the route underneath it is intact and healthy. `classify()`
+(`:80-89`) already distinguishes `NoResolver` / `NoRoute` / `Hard` for *backoff* purposes —
+that routing knowledge exists at dial time and is simply not carried into the displayed
+state.
+
+**Why this belongs to Phase 2, not Phase 1.** It is tempting to file this as an
+instrumentation fault, since the visible damage is a wrong label. It is not. The label is
+an accurate report of the only fact the code actually has: whether a socket is currently
+up. The missing thing is a route-derived reachability signal to report *instead*, and
+inventing one is a peering change, not a diagnostics change — exactly the boundary the
+roadmap draws.
+
+**What would confirm it.** A peer flipping to `paired-offline` while its route is still
+live should be visible as a `peer relay disconnected` log line carrying
+`reason="no frame within a ping interval (half-open)"` (that reason string is already
+logged at `peer_relay.rs:420`) with no corresponding transport-level loss. Worth capturing
+on-device before Phase 2 acts on this, per the roadmap's first sequencing constraint. Note
+that 01-03's attempt log will **not** cover it — that log records BLE connect attempts,
+and this fault lives in the relay layer above the transport.
+
+---
+
 ## Not a finding
 
 `E BluetoothLeAdvertiser: Legacy advertiser should be only disabled on timeout, but was enabled!`
