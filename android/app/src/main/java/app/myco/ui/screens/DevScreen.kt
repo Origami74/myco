@@ -550,9 +550,16 @@ private fun clockTime(atMs: Long): String {
 /** Matches `MAX_ATTEMPTS_PER_PEER` in the core's attempt store (plan 01-03). */
 private const val MAX_ATTEMPTS_SHOWN = 20
 
-/** Persists which peer rows are open across configuration changes. */
-private val expandedKeysSaver: Saver<SnapshotStateList<String>, List<String>> = Saver(
-    save = { it.toList() },
+/**
+ * Persists which peer rows are open across configuration changes.
+ *
+ * Saves an `ArrayList`, not a `List`: `rememberSaveable`'s default registry only
+ * accepts Bundle-storable types, and `toList()` on an empty collection returns
+ * Kotlin's `EmptyList` singleton, which is not one — so an empty expansion set
+ * (the state on every cold open) crashed the screen at composition.
+ */
+private val expandedKeysSaver: Saver<SnapshotStateList<String>, ArrayList<String>> = Saver(
+    save = { ArrayList(it) },
     restore = { mutableStateListOf<String>().apply { addAll(it) } },
 )
 
