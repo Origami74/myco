@@ -33,7 +33,13 @@ GENERAL:
   fail a fips transport start
 
 UI:
-- TOP bar usage should be opt-in, not opt-out like it is now (for nsites)
+- [DONE 2026-08-06] TOP bar usage should be opt-in, not opt-out like it is now (for nsites)
+    NsiteActivity drew edge-to-edge with the top explicitly full-bleed, so nsites
+    written for a browser with its own top chrome rendered their header under the
+    Android status icons. The status bar (and display cutout) is now reserved by
+    default; a page opts into the full height with viewport-fit=cover, the standard
+    signal that it handles env(safe-area-inset-*) itself. Re-probed per page load.
+    Verified on device: bitchat's #mesh header now sits below the status bar.
 - Can't see my own identity, no idea which 'circle's peer name' belongs to me
 - immediately offer to save to homescreen when downloading app from peer
 - [DONE 2026-08-06] camera sometimes doesn't focus...
