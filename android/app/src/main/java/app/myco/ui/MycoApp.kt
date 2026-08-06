@@ -114,6 +114,8 @@ fun MycoApp(
     onDeveloperModeToggle: (Boolean) -> Unit,
     initialExitProxy: String = "",
     onExitProxyChange: (String) -> Unit = {},
+    /** Clears the intro's "already seen" flag so it plays in full again. */
+    onReplayIntro: () -> Unit = {},
 ) {
     var state by remember { mutableStateOf(client.state()) }
     // Mesh toggle is hoisted here so it survives tab switches.
@@ -266,6 +268,7 @@ fun MycoApp(
                         bleExhausted = bleExhausted,
                         initialExitProxy = initialExitProxy,
                         onExitProxyChange = onExitProxyChange,
+                        onReplayIntro = onReplayIntro,
                     )
                 }
                 composable("dev") { DevScreen(state, client) }

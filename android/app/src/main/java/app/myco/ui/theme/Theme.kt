@@ -35,6 +35,24 @@ val ScreenBg = Color(0xFFFFFFFF)
 
 /** Bright emerald retained as the primary brand accent on AMOLED black. */
 val AmoledAccent = Color(0xFF34D399)
+
+// --- Intro mark -------------------------------------------------------------
+//
+// A third deliberate exception to theme-following, alongside the QR card and
+// the amber warning states. The intro is the mark from docs/myco-logo.png,
+// sampled off it, and it is identical in both themes: it runs before any app
+// chrome and owns the whole screen, so there is nothing for it to sit against
+// and no light-mode variant to render. Cyan filaments on near-black are the
+// asset, not a colour choice.
+/** The ground the mark grows out of. */
+val MarkGround = Color(0xFF03090C)
+/** Filament stroke. */
+val MarkFilament = Color(0xFF22D3EE)
+/** Trunk filaments and the prompt, one step lighter. */
+val MarkBright = Color(0xFFA5F3FC)
+/** The nodes, the spark, and the pupil's edge. */
+val MarkNodeColor = Color(0xFF67E8F9)
+
 private val LightWarning = Color(0xFFB45309)
 private val LightWarningContainer = Color(0xFFFFF7ED)
 private val LightOnWarningContainer = Color(0xFF9A3412)

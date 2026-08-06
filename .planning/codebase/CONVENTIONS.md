@@ -246,9 +246,14 @@ rather than inventing new ones:
 | `StatusThin` | Exactly one peer — works, but no redundancy |
 | `StatusAlone` | No peers; a real fault state |
 
-Two deliberate exceptions to theme-following: the QR card stays white in both
-themes (scanners read dark-on-light far more reliably), and pending/warning
-states keep a distinct amber rather than collapsing into the theme's accent.
+Three deliberate exceptions to theme-following: the QR card stays white in both
+themes (scanners read dark-on-light far more reliably), pending/warning states
+keep a distinct amber rather than collapsing into the theme's accent, and the
+first-run intro (`ui/intro/`) draws its mark in fixed cyan on near-black. The
+intro runs before any app chrome and owns the whole screen, so it has nothing
+to sit against and no light-mode variant to render — those are the logo's own
+colours rather than a colour choice, and they live as the `Mark*` constants in
+`Theme.kt`, next to the peer-state ones.
 
 `ThemeTest.kt` asserts palette invariants and runs in CI, so a new screen that
 reaches past the colour scheme will be caught there.
