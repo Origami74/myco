@@ -185,19 +185,30 @@ wants to cover this, rather than bolting a second ad-hoc retry onto `onAttachFai
 
 ## F-04: `reachable-via-relay` is socket-derived, not route-derived
 
-**Status: code-read finding, like F-03** — the flakiness was noticed in passing during
-Phase 1 execution but never reproduced under controlled conditions, so there is no
-device-log evidence here of the kind F-01 and F-02 carry. What follows is what the source
-guarantees, which is enough to explain a flapping row but *not* enough to claim it is the
-only cause of one.
+**Status: observed on-device.** Both phones, same session as F-01/F-02.
 
 **Symptom:** a peer's diagnostics row flips between `reachable-via-relay` and
-`paired-offline` while nothing about the mesh path has changed.
+`paired-offline` while the mesh path underneath is continuously healthy.
+
+**Observed evidence:**
+
+| Device | Relay dials connected | Failed | Error |
+|---|---|---|---|
+| Pixel 7 Pro | 2 | 5 | `ENETUNREACH` |
+| Samsung SM-A528B | 2 | 16 | `ENETUNREACH` |
+
+The failures included dials to **a peer the UI was simultaneously showing as directly
+BLE-connected**. Meanwhile `ping6` across the mesh ran at **0 % loss in both directions**
+for the same pair, at the same time. So the route was demonstrably fine and the
+reachability row was wrong — which is the whole finding.
 
 **Mechanism.** `AppState::reachable_npubs` (`myco-core/src/state.rs:41`) is documented as
 the honest reachability signal — "bytes are flowing to them right now, whether they are a
-direct neighbour or many hops away". In practice it is exactly the peer-relay pool's
-`connected` set, and that set tracks **one WebSocket actor's lifetime**, nothing else:
+direct neighbour or many hops away". In practice `Content::reachable_npubs()`
+(`myco-core/src/content.rs:962`) derives it from `peer_relays.connected_npubs()` filtered to
+Circle membership — i.e. purely from whether a keepwarm WebSocket to
+`ws://<npub>.fips:4870` happens to be open. That set tracks **one WebSocket actor's
+lifetime**, nothing else:
 
 - inserted once, immediately after a successful dial — `peer_relay.rs:329`
 - removed when the actor's loop exits, for *any* reason — `peer_relay.rs:421`
@@ -236,17 +247,22 @@ state.
 **Why this belongs to Phase 2, not Phase 1.** It is tempting to file this as an
 instrumentation fault, since the visible damage is a wrong label. It is not. The label is
 an accurate report of the only fact the code actually has: whether a socket is currently
-up. The missing thing is a route-derived reachability signal to report *instead*, and
-inventing one is a peering change, not a diagnostics change — exactly the boundary the
-roadmap draws.
+up. The missing thing is a route-derived reachability signal to report *instead*.
 
-**What would confirm it.** A peer flipping to `paired-offline` while its route is still
-live should be visible as a `peer relay disconnected` log line carrying
-`reason="no frame within a ping interval (half-open)"` (that reason string is already
-logged at `peer_relay.rs:420`) with no corresponding transport-level loss. Worth capturing
-on-device before Phase 2 acts on this, per the roadmap's first sequencing constraint. Note
-that 01-03's attempt log will **not** cover it — that log records BLE connect attempts,
-and this fault lives in the relay layer above the transport.
+And that is the deeper gap, which is what makes this Phase 2 work rather than a display
+fix: **fips publishes no routing or reachability API at all.**
+`fips::control::read_handle::ControlReadHandle` exposes exactly one public method —
+`peer_views()` — so Myco has nothing to ask about a route. A socket probe is not a
+substitute for routing state; it is what you fall back to when no routing state is exposed.
+Giving the UI an honest answer therefore means adding that surface to fips, which is a
+peering change, not a diagnostics change — exactly the boundary the roadmap draws.
+
+**Note for 01-03.** The attempt log landing in 01-03 will **not** characterise this. That
+log records BLE connect attempts at the transport; this fault lives in the relay layer
+above it, and the `ENETUNREACH` dials never reach a BLE connect attempt at all. The
+supporting trace to correlate on is instead the `peer relay disconnected` line and its
+`reason` field (`peer_relay.rs:420`), which already distinguishes the half-open ping
+timeout from a clean close.
 
 ---
 
