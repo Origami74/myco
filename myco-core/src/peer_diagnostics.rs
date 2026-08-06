@@ -16,8 +16,10 @@ use std::collections::HashMap;
 
 use fips::control::read_handle::PeerView;
 
+use fips::transport::ble::attempts::{BlePeerAttempts, MAX_ATTEMPTS_PER_PEER};
+
 use crate::content::{CircleContact, OutboundPairView, PairRequestView};
-use crate::state::{BleAdvert, BlePeer, PeerDiagnosticView};
+use crate::state::{BleAdvert, BlePeer, PeerAttemptView, PeerDiagnosticView};
 
 /// D-11 ordering weight for a row's `state` — lower sorts first.
 fn peer_state_rank(state: &str) -> u8 {
@@ -83,6 +85,13 @@ fn short(s: &str) -> String {
 /// link-local vs. routable) — that would be exactly the sort of
 /// inference-presented-as-observation this phase prohibits.
 ///
+/// `ble_attempts` is the fips BLE transport's per-peer attempt log, keyed by BLE
+/// address. It supplies three things: the role/discovery/outcome history joined
+/// onto each row, the per-peer link send-failure count, and the learned
+/// address-to-node-address pairs that let step 2 attribute an advert to an
+/// existing peer row instead of emitting a second one (D-09). Empty on the host
+/// build, where there is no radio.
+///
 /// `now_ms` is reserved for future staleness-based state work and unused
 /// today (state is derived purely from connectivity/pairing facts, per D-10).
 #[allow(clippy::too_many_arguments)]
@@ -95,6 +104,7 @@ pub fn merge_peers(
     outbound_pairs: &[OutboundPairView],
     reachable_npubs: &[String],
     lane_by_npub: &HashMap<String, String>,
+    ble_attempts: &[BlePeerAttempts],
     _now_ms: u64,
 ) -> Vec<PeerDiagnosticView> {
     let mut rows: Vec<PeerDiagnosticView> = Vec::new();
@@ -144,20 +154,39 @@ pub fn merge_peers(
             psm: bp.psm,
             pair_state: String::new(),
             in_circle: false,
+            role: String::new(),
+            discovery_ms: 0,
+            send_drops: 0,
+            attempts: Vec::new(),
         });
     }
 
+    // Address-to-node-address pairs the attempt log learned from attempts that
+    // got far enough to see a peer pubkey. This is the mapping 01-01 lacked; it
+    // is what lets step 2 below collapse a raw advert into the peer row it
+    // actually belongs to (D-09) rather than emitting a second row for the same
+    // device. Only pairs the log actually learned appear here — nothing is
+    // inferred from address shape.
+    let learned_node_addr: HashMap<&str, &str> = ble_attempts
+        .iter()
+        .filter(|a| !a.node_addr_hex.is_empty())
+        .map(|a| (a.ble_addr.as_str(), a.node_addr_hex.as_str()))
+        .collect();
+
     // Step 2: union in adverts as additional not-yet-resolved rows keyed by
-    // BLE address, but first attach any advert whose address is already
-    // attributed to an existing row (its rssi, psm and ble_addr) instead of
-    // creating a second row — a duplicate advert for the same address is the
-    // one attribution case this plan's data can exercise; the fuller
-    // address-to-node-address map lands in plan 01-03.
+    // BLE address, but first attach any advert already attributed to an
+    // existing row (its rssi, psm and ble_addr) instead of creating a second
+    // row. An advert is attributed either because the row already carries that
+    // address, or because the attempt log has learned which node address that
+    // BLE address belongs to.
     for adv in ble_adverts {
-        if let Some(row) = rows
-            .iter_mut()
-            .find(|r| r.ble_addr == adv.addr || r.key == adv.addr)
-        {
+        let learned = learned_node_addr.get(adv.addr.as_str()).copied();
+        if let Some(row) = rows.iter_mut().find(|r| {
+            r.ble_addr == adv.addr
+                || r.key == adv.addr
+                || learned
+                    .is_some_and(|node| !r.node_addr_hex.is_empty() && r.node_addr_hex == node)
+        }) {
             row.ble_addr = adv.addr.clone();
             row.rssi = Some(adv.rssi);
             row.psm = adv.psm;
@@ -176,6 +205,10 @@ pub fn merge_peers(
                 psm: adv.psm,
                 pair_state: String::new(),
                 in_circle: false,
+                role: String::new(),
+                discovery_ms: 0,
+                send_drops: 0,
+                attempts: Vec::new(),
             });
         }
     }
@@ -214,6 +247,10 @@ pub fn merge_peers(
             psm: 0,
             pair_state: String::new(),
             in_circle: false,
+            role: String::new(),
+            discovery_ms: 0,
+            send_drops: 0,
+            attempts: Vec::new(),
         });
     }
 
@@ -263,7 +300,52 @@ pub fn merge_peers(
         };
     }
 
-    // Step 6: sort by state rank, then last_seen_ms descending, then key
+    // Step 6: join the recorded attempt history onto each row. Rows are matched
+    // by BLE address, or by the node address the attempt log learned for that
+    // address. A row with no recorded attempts keeps an empty list, an empty
+    // role and zero counters — never a fabricated entry (DIAG-01/03).
+    for row in rows.iter_mut() {
+        let recorded = if !row.ble_addr.is_empty() {
+            ble_attempts.iter().find(|a| a.ble_addr == row.ble_addr)
+        } else if !row.node_addr_hex.is_empty() {
+            ble_attempts
+                .iter()
+                .find(|a| a.node_addr_hex == row.node_addr_hex)
+        } else {
+            None
+        };
+        let Some(rec) = recorded else { continue };
+
+        row.send_drops = rec.send_failures;
+        // Newest first for display. The log already caps each address at
+        // MAX_ATTEMPTS_PER_PEER; taking it again bounds what crosses the FFI
+        // regardless of what the transport hands over.
+        row.attempts = rec
+            .attempts
+            .iter()
+            .rev()
+            .take(MAX_ATTEMPTS_PER_PEER)
+            .map(|a| PeerAttemptView {
+                at_ms: a.at_ms,
+                role: a.role.as_str().to_string(),
+                discovery_ms: a.discovery_ms,
+                outcome: a.outcome.as_str().to_string(),
+            })
+            .collect();
+        // The row's headline role/duration are the newest attempt's, so a peer
+        // that has never resolved an attempt shows neither.
+        if let Some(newest) = row.attempts.first() {
+            row.role = newest.role.clone();
+            row.discovery_ms = newest.discovery_ms;
+        }
+        // A row reached only through the learned node-address pair has no BLE
+        // address of its own yet; adopt the one its attempts were recorded under.
+        if row.ble_addr.is_empty() {
+            row.ble_addr = rec.ble_addr.clone();
+        }
+    }
+
+    // Step 7: sort by state rank, then last_seen_ms descending, then key
     // ascending — a total order, so two polls over the same data always
     // produce the same sequence (D-11).
     rows.sort_by(|a, b| {
@@ -345,6 +427,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &[],
             0,
         );
         assert_eq!(out.len(), 2);
@@ -361,7 +444,18 @@ mod tests {
             pv("a2", "npub-newer", true, 9_000, "udp"),
         ];
         let peers = vec![bp("a1", "npub-older", true), bp("a2", "npub-newer", true)];
-        let out = merge_peers(&views, &peers, &[], &[], &[], &[], &[], &HashMap::new(), 0);
+        let out = merge_peers(
+            &views,
+            &peers,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            0,
+        );
         assert_eq!(out[0].npub, "npub-newer");
         assert_eq!(out[1].npub, "npub-older");
     }
@@ -373,7 +467,18 @@ mod tests {
             pv("a2", "npub-aaa", true, 5_000, "udp"),
         ];
         let peers = vec![bp("a1", "npub-zzz", true), bp("a2", "npub-aaa", true)];
-        let out = merge_peers(&views, &peers, &[], &[], &[], &[], &[], &HashMap::new(), 0);
+        let out = merge_peers(
+            &views,
+            &peers,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            0,
+        );
         assert_eq!(out[0].npub, "npub-aaa");
         assert_eq!(out[1].npub, "npub-zzz");
     }
@@ -412,6 +517,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &[],
             0,
         );
         let out_b = merge_peers(
@@ -423,6 +529,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &[],
             0,
         );
         let keys_a: Vec<&str> = out_a.iter().map(|r| r.key.as_str()).collect();
@@ -437,7 +544,18 @@ mod tests {
     fn ble_peer_with_empty_npub_is_seen_unidentified_keyed_by_node_addr() {
         let views = vec![pv("addrhex1", "", false, 0, "")];
         let peers = vec![bp("addrhex1", "", false)];
-        let out = merge_peers(&views, &peers, &[], &[], &[], &[], &[], &HashMap::new(), 0);
+        let out = merge_peers(
+            &views,
+            &peers,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            0,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].key, "addrhex1");
         assert_eq!(out[0].state, "seen-unidentified");
@@ -459,6 +577,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &[],
             0,
         );
         assert_eq!(out.len(), 1);
@@ -482,7 +601,18 @@ mod tests {
                 rssi: -40,
             },
         ];
-        let out = merge_peers(&[], &[], &adverts, &[], &[], &[], &[], &HashMap::new(), 0);
+        let out = merge_peers(
+            &[],
+            &[],
+            &adverts,
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            0,
+        );
         assert_eq!(
             out.len(),
             1,
@@ -495,7 +625,18 @@ mod tests {
     #[test]
     fn circle_only_npub_with_no_radio_or_pairing_is_paired_offline() {
         let members = vec![circle("npub-offline", "Friend")];
-        let out = merge_peers(&[], &[], &[], &members, &[], &[], &[], &HashMap::new(), 0);
+        let out = merge_peers(
+            &[],
+            &[],
+            &[],
+            &members,
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            0,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].state, "paired-offline");
         assert!(out[0].in_circle);
@@ -514,6 +655,7 @@ mod tests {
             &[],
             &reachable,
             &HashMap::new(),
+            &[],
             0,
         );
         assert_eq!(out.len(), 1);
@@ -532,6 +674,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &[],
             0,
         );
         assert_eq!(out.len(), 1);
@@ -551,6 +694,7 @@ mod tests {
             &outbound_pairs,
             &[],
             &HashMap::new(),
+            &[],
             0,
         );
         assert_eq!(out.len(), 1, "one row, not two");
@@ -564,7 +708,18 @@ mod tests {
             "npub1verylongidentifierthatexceedseighteenchars",
             "",
         )];
-        let out = merge_peers(&[], &[], &[], &members, &[], &[], &[], &HashMap::new(), 0);
+        let out = merge_peers(
+            &[],
+            &[],
+            &[],
+            &members,
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            0,
+        );
         assert_eq!(out.len(), 1);
         assert!(!out[0].name.is_empty(), "must never render an empty name");
         assert!(
@@ -577,14 +732,25 @@ mod tests {
     fn long_name_is_truncated_to_64_chars() {
         let long_name = "x".repeat(200);
         let members = vec![circle("npub-longname", &long_name)];
-        let out = merge_peers(&[], &[], &[], &members, &[], &[], &[], &HashMap::new(), 0);
+        let out = merge_peers(
+            &[],
+            &[],
+            &[],
+            &members,
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            0,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name.chars().count(), 64);
     }
 
     #[test]
     fn empty_inputs_produce_empty_vec_not_panic() {
-        let out = merge_peers(&[], &[], &[], &[], &[], &[], &[], &HashMap::new(), 0);
+        let out = merge_peers(&[], &[], &[], &[], &[], &[], &[], &HashMap::new(), &[], 0);
         assert!(out.is_empty());
     }
 
@@ -608,7 +774,18 @@ mod tests {
         // observed fact.
         let views = vec![pv("a1", "npub-no-transport", true, 1_000, "")];
         let peers = vec![bp("a1", "npub-no-transport", true)];
-        let out = merge_peers(&views, &peers, &[], &[], &[], &[], &[], &HashMap::new(), 0);
+        let out = merge_peers(
+            &views,
+            &peers,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            0,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].state, "connected");
         assert_eq!(
@@ -627,7 +804,18 @@ mod tests {
         let peers = vec![bp("a1", "npub-aware", true)];
         let mut lane_by_npub = HashMap::new();
         lane_by_npub.insert("npub-aware".to_string(), "aware".to_string());
-        let out = merge_peers(&views, &peers, &[], &[], &[], &[], &[], &lane_by_npub, 0);
+        let out = merge_peers(
+            &views,
+            &peers,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &lane_by_npub,
+            &[],
+            0,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].transport, "aware");
     }
@@ -638,8 +826,174 @@ mod tests {
         let peers = vec![bp("a1", "npub-plain-udp", true)];
         let mut lane_by_npub = HashMap::new();
         lane_by_npub.insert("some-other-npub".to_string(), "aware".to_string());
-        let out = merge_peers(&views, &peers, &[], &[], &[], &[], &[], &lane_by_npub, 0);
+        let out = merge_peers(
+            &views,
+            &peers,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &lane_by_npub,
+            &[],
+            0,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].transport, "udp");
+    }
+
+    /// The far end of the tracer: a lost outbound tiebreaker recorded inside the
+    /// fips BLE transport must survive the merge and reach the serialized
+    /// `AppState` JSON carrying its role, discovery duration and outcome.
+    #[test]
+    fn recorded_lost_tiebreaker_reaches_the_serialized_row() {
+        use fips::transport::ble::attempts::{BleAttempt, BleAttemptOutcome, BleRole};
+
+        let views = vec![pv("beef", "npub-tiebreak", false, 1_000, "ble")];
+        let peers = vec![bp("beef", "npub-tiebreak", false)];
+        let recorded = vec![BlePeerAttempts {
+            ble_addr: "ble0/AA:BB:CC:DD:EE:FF".to_string(),
+            node_addr_hex: "beef".to_string(),
+            send_failures: 3,
+            attempts: vec![BleAttempt {
+                at_ms: 1_700_000_000_000,
+                ble_addr: "ble0/AA:BB:CC:DD:EE:FF".to_string(),
+                node_addr_hex: "beef".to_string(),
+                role: BleRole::Central,
+                discovery_ms: 742,
+                outcome: BleAttemptOutcome::LostTiebreaker,
+            }],
+        }];
+
+        let out = merge_peers(
+            &views,
+            &peers,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &recorded,
+            0,
+        );
+        assert_eq!(out.len(), 1);
+
+        let row = &out[0];
+        assert_eq!(row.role, "central");
+        assert_eq!(row.discovery_ms, 742);
+        assert_eq!(row.send_drops, 3);
+        assert_eq!(row.attempts.len(), 1);
+        // The row adopts the address its attempts were recorded under.
+        assert_eq!(row.ble_addr, "ble0/AA:BB:CC:DD:EE:FF");
+
+        // Prove it survives serialization, in the camelCase the Dev tab reads.
+        let json = serde_json::to_string(row).expect("row serializes");
+        assert!(json.contains(r#""role":"central""#), "{json}");
+        assert!(json.contains(r#""discoveryMs":742"#), "{json}");
+        assert!(json.contains(r#""sendDrops":3"#), "{json}");
+        assert!(json.contains(r#""outcome":"lost-tiebreaker""#), "{json}");
+        assert!(json.contains(r#""atMs":1700000000000"#), "{json}");
+    }
+
+    /// A peer with no recorded attempts renders as having none — never as
+    /// having succeeded or failed, and never with a guessed role.
+    #[test]
+    fn peer_without_recorded_attempts_shows_no_history() {
+        let views = vec![pv("a1", "npub-quiet", true, 1_000, "ble")];
+        let peers = vec![bp("a1", "npub-quiet", true)];
+        let out = merge_peers(
+            &views,
+            &peers,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            0,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].role, "");
+        assert_eq!(out[0].discovery_ms, 0);
+        assert_eq!(out[0].send_drops, 0);
+        assert!(out[0].attempts.is_empty());
+    }
+
+    /// Step 2's completed attribution: an advert whose BLE address the log has
+    /// mapped to a known node address collapses into that peer's row instead of
+    /// producing a second one (D-09).
+    #[test]
+    fn advert_with_learned_node_addr_collapses_into_the_peer_row() {
+        use fips::transport::ble::attempts::{BleAttempt, BleAttemptOutcome, BleRole};
+
+        let views = vec![pv("beef", "npub-known", true, 1_000, "ble")];
+        let peers = vec![bp("beef", "npub-known", true)];
+        let adverts = vec![BleAdvert {
+            addr: "ble0/AA:BB:CC:DD:EE:FF".to_string(),
+            psm: 131,
+            rssi: -55,
+        }];
+        let recorded = vec![BlePeerAttempts {
+            ble_addr: "ble0/AA:BB:CC:DD:EE:FF".to_string(),
+            node_addr_hex: "beef".to_string(),
+            send_failures: 0,
+            attempts: vec![BleAttempt {
+                at_ms: 1,
+                ble_addr: "ble0/AA:BB:CC:DD:EE:FF".to_string(),
+                node_addr_hex: "beef".to_string(),
+                role: BleRole::Peripheral,
+                discovery_ms: 10,
+                outcome: BleAttemptOutcome::Connected,
+            }],
+        }];
+
+        let out = merge_peers(
+            &views,
+            &peers,
+            &adverts,
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &recorded,
+            0,
+        );
+
+        // One row, not two: the advert was attributed via the learned pair.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].npub, "npub-known");
+        assert_eq!(out[0].ble_addr, "ble0/AA:BB:CC:DD:EE:FF");
+        assert_eq!(out[0].psm, 131);
+        assert_eq!(out[0].rssi, Some(-55));
+        assert_eq!(out[0].role, "peripheral");
+    }
+
+    /// Without a learned pair the same advert must still produce its own row —
+    /// attribution is driven by recorded facts, never guessed.
+    #[test]
+    fn advert_without_learned_node_addr_stays_a_separate_row() {
+        let views = vec![pv("beef", "npub-known", true, 1_000, "ble")];
+        let peers = vec![bp("beef", "npub-known", true)];
+        let adverts = vec![BleAdvert {
+            addr: "ble0/AA:BB:CC:DD:EE:FF".to_string(),
+            psm: 131,
+            rssi: -55,
+        }];
+        let out = merge_peers(
+            &views,
+            &peers,
+            &adverts,
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            0,
+        );
+        assert_eq!(out.len(), 2);
     }
 }

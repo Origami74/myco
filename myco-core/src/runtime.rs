@@ -784,6 +784,11 @@ impl AppRuntime {
         // npub was last pushed on (Android; empty on the host build).
         let lane_by_npub = self.observed_lane_by_npub();
 
+        // Per-peer attempt history (role / discovery latency / outcome / send
+        // failures) plus the learned address-to-node-address pairs the merge
+        // uses to collapse an advert into its peer row.
+        let ble_attempts = self.ble_attempts();
+
         let peers = crate::peer_diagnostics::merge_peers(
             &peer_views,
             &ble_peers,
@@ -793,6 +798,7 @@ impl AppRuntime {
             &outbound_pairs,
             &reachable_npubs,
             &lane_by_npub,
+            &ble_attempts,
             now_ms(),
         );
 
@@ -975,6 +981,20 @@ impl AppRuntime {
 
     #[cfg(not(target_os = "android"))]
     fn ble_adverts(&self) -> Vec<BleAdvert> {
+        Vec::new()
+    }
+
+    /// Per-peer BLE connect-attempt history from the fips transport's process-
+    /// global log. The BLE transport only runs on Android; on the host there are
+    /// no attempts to report, so the merge sees an empty slice and every row
+    /// renders as having no recorded history.
+    #[cfg(target_os = "android")]
+    fn ble_attempts(&self) -> Vec<fips::transport::ble::attempts::BlePeerAttempts> {
+        fips::transport::ble::attempts::ble_attempt_log().snapshot()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn ble_attempts(&self) -> Vec<fips::transport::ble::attempts::BlePeerAttempts> {
         Vec::new()
     }
 

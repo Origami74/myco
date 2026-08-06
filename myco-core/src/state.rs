@@ -104,6 +104,41 @@ pub struct PeerDiagnosticView {
     pub pair_state: String,
     /// Whether this npub is a member of the user's Circle.
     pub in_circle: bool,
+    /// BLE role this device chose for the most recent recorded attempt against
+    /// this peer: `central`, `peripheral`, or empty when nothing has been
+    /// recorded. Never a guess — an empty string means "no attempt recorded",
+    /// not "central by default".
+    pub role: String,
+    /// Milliseconds between discovery and resolution for the most recent
+    /// recorded attempt; `0` when none was recorded or none was measured.
+    pub discovery_ms: u64,
+    /// Count of sends to this peer that failed at the link. Excludes packets
+    /// rejected for exceeding the MTU — that is a caller bug, not a property of
+    /// this peer's link.
+    pub send_drops: u64,
+    /// Recorded connect attempts against this peer, newest first, capped at 20.
+    /// Empty when nothing has been recorded.
+    pub attempts: Vec<PeerAttemptView>,
+}
+
+/// One recorded BLE connect attempt as rendered for the Dev tab (DIAG-01/03).
+///
+/// Every field is an observed fact from the fips transport's attempt log — a
+/// peer with no recorded history renders as having none, never as having
+/// succeeded or failed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerAttemptView {
+    /// Wall-clock milliseconds since the Unix epoch at which the attempt
+    /// resolved.
+    pub at_ms: u64,
+    /// `central` or `peripheral` — which side this device took.
+    pub role: String,
+    /// Milliseconds from discovery to resolution; `0` when not measured.
+    pub discovery_ms: u64,
+    /// One of `connected`, `connect-timeout`, `connect-error`,
+    /// `pubkey-exchange-failed`, `lost-tiebreaker`, `pool-rejected`.
+    pub outcome: String,
 }
 
 /// Outcome of a peer speedtest: upload + download throughput measured by PUTting
