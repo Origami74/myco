@@ -61,9 +61,16 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
     ) {
         ScreenHeader("Dev", state, subtitle = "Technical details — myco-core state.")
 
+        // D-07: the radio self-check leads, because "no peers" is the actual
+        // field complaint and this card is what answers "is it me or is it
+        // them" without a second screen.
+        RadioSelfCheckCard(state, awareSupported, awareAvailable)
+
         PeersOverviewCard(state)
 
-        SpeedtestCard(state, client)
+        PendingPairingsCard(state)
+
+        IdentityCard(state)
 
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -116,15 +123,142 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
                         advertsSorted.forEach { AdvertRow(it) }
                     }
                 }
-                DevCard("CACHE") {
-                    KeyVal("events", state.cache.relayEvents.toString())
-                    KeyVal("blobs", state.cache.blobCount.toString())
-                    KeyVal("bytes", state.cache.usedBytes.toString())
-                    KeyVal("rev", state.rev.toString())
-                }
             }
         }
+
+        // D-04: the speedtest is content-layer, not peering — it sits below
+        // every peering card rather than second from the top.
+        SpeedtestCard(state, client)
+
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+/**
+ * **The first card, always** (D-07). Six observed radio facts in a fixed order
+ * that never varies with data, so the person holding the phone can answer "is it
+ * me or is it them" before scrolling.
+ *
+ * Every fact is tri-state. A radio value the app could not actually observe —
+ * bridge absent, radio never started — renders "unknown" in the neutral colour,
+ * never a confident `false`. That is this phase's standing prohibition: an
+ * unobservable fact is a fact, not a failure, so it never uses the error colour
+ * and never blocks the screen.
+ */
+@Composable
+private fun RadioSelfCheckCard(state: AppState, awareSupported: Boolean, awareAvailable: Boolean) {
+    DevCard("RADIO SELF-CHECK") {
+        KeyValTri("ble enabled", state.bleEnabled, "on", "off")
+        KeyValTri(
+            "ble scanning",
+            if (state.bleScanningKnown) state.bleScanning else null,
+            "active",
+            "idle",
+        )
+        KeyValTri(
+            "ble advertising",
+            if (state.bleAdvertisingKnown) state.bleAdvertising else null,
+            "active",
+            "idle",
+        )
+        KeyValTri("aware supported", awareSupported, "yes", "no")
+        KeyValTri("aware available", awareAvailable, "yes", "no")
+        KeyValTri(
+            "aware discovering",
+            if (state.wifiAwareScanningKnown) state.wifiAwareScanning else null,
+            "active",
+            "idle",
+        )
+    }
+}
+
+/**
+ * Incoming pair requests and outbound invites, so a pairing that is waiting is
+ * visible rather than inferred from its absence elsewhere (DIAG-06).
+ *
+ * Requester names arrive from an untrusted mesh peer, so they go through the
+ * same shortening helper as every other peer-supplied string; the npub is the
+ * row's identity and the name is decoration beside it, never in its place.
+ */
+@Composable
+private fun PendingPairingsCard(state: AppState) {
+    val incoming = state.pendingPairRequests
+    val outbound = state.outboundPairs
+    DevCard("PENDING PAIRINGS (${incoming.size + outbound.size})") {
+        if (incoming.isEmpty() && outbound.isEmpty()) {
+            EmptyLine("none")
+        } else {
+            incoming.forEach { PairingRow("incoming", it.npub, it.name) }
+            outbound.forEach { PairingRow("outbound", it.npub, it.name) }
+        }
+    }
+}
+
+/** One pending-pairing row: direction, then the shortened npub with any name. */
+@Composable
+private fun PairingRow(direction: String, npub: String, name: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+    ) {
+        Text(direction, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            if (name.isEmpty()) short(npub) else "${short(name)}  ${short(npub)}",
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        )
+    }
+}
+
+/**
+ * This device's own identity: the npub peers address it by, and the Circle name
+ * they see it as (DIAG-07). Either value being empty renders an em-dash — never
+ * a blank card, never a placeholder sentinel.
+ */
+@Composable
+private fun IdentityCard(state: AppState) {
+    val context = LocalContext.current
+    val circleName = if (state.ownNpub.isEmpty()) "" else DeviceName.current(context, state.ownNpub)
+    DevCard("IDENTITY") {
+        KeyVal("own npub", state.ownNpub.ifEmpty { "—" }.let { if (it == "—") it else short(it) })
+        KeyVal("circle name", circleName.ifEmpty { "—" }.let { if (it == "—") it else short(it) })
+    }
+}
+
+/**
+ * The two-state [KeyValDot] row extended to three: `true`, `false`, and `null`
+ * for a fact the app could not observe.
+ *
+ * `null` renders the literal "unknown" against the neutral variant colour. It is
+ * deliberately not the error colour — a radio whose state cannot be read is
+ * reporting honestly, and colouring that as an error would tell the user to act
+ * on something that may be fine.
+ */
+@Composable
+private fun KeyValTri(label: String, state: Boolean?, yes: String, no: String) {
+    val value = when (state) {
+        true -> yes
+        false -> no
+        null -> "unknown"
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+    ) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+        Row(
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            StatusDot(if (state == true) StatusConnected else MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                value,
+                color = if (state == true) StatusConnected else MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            )
+        }
     }
 }
 
