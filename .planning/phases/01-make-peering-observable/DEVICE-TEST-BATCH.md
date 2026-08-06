@@ -21,6 +21,23 @@ learned the hard way and both silently corrupt results:
 
 Devices: Pixel 7 Pro `29131FDH3007HW`, Samsung SM-A528B `R5CR916CDCF`.
 
+## A build is already waiting
+
+A debug APK carrying all of 01-03 was built on the Linux host and is at:
+
+```
+android/app/build/outputs/apk/debug/app-debug.apk    (79 MB, package app.myco)
+```
+
+It packages `lib/arm64-v8a/libmyco_core.so` (22.7 MB) built from this branch, so
+it contains the attempt log, all twelve recording sites and the JSONL store.
+Install with **`adb install -r`** — see anti-pattern 2; never uninstall first.
+
+If you would rather rebuild, note the Linux host needs
+`ANDROID_NDK_HOME`, `QEMU_LD_PREFIX=/usr/x86_64-linux-gnu` and
+`MYCO_FIPS_REPO_PATH` set (all are in `~/.bashrc` there); on the Mac the ordinary
+`./gradlew assembleDebug` applies.
+
 ---
 
 ## D-1 — Does the tiebreaker actually agree at runtime? (highest value)
