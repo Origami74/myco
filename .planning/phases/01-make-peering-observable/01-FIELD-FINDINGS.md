@@ -399,6 +399,28 @@ End to end: the instrumentation built in 01-03 found the fault, the fix was
 written against that evidence, and the same instrument then recorded the fix
 working — with a new outcome label rather than the fault disappearing silently.
 
+### Follow-up: the first fix caused a smaller problem, now also fixed (fips `2120839`)
+
+Watching the field data after `cef3fc5` showed the same address being re-probed
+**every ~30s indefinitely** (gaps: 143, 30, 37, 30, 33, 30 s). The cause was the
+fix itself: a declined duplicate never enters the pool, so the pool-keyed cooldown
+guard above never sees it and the loop re-dials forever. Before the guard existed
+the address landed in the pool and was skipped — removing the corruption removed
+the skip with it. Seven full connects plus pubkey exchanges against one peer in
+four minutes.
+
+`scan_probe_loop` now remembers what a declined address resolved to and skips it
+while that node is still connected, dropping the mapping as soon as the node
+leaves the pool.
+
+**Verified in the field 2026-08-07:** against a prior rate of ~2 events/min,
+**zero** new `duplicate-node` events on either device across a 9-minute
+observation window (~18 expected), with the duplicate-guard log line firing zero
+times since relaunch. Crucially the suppression did not break legitimate
+connections — the Samsung promoted 2 connections to the pool in the same window.
+Suppressing the waste without suppressing real links was the thing to get wrong,
+and it did not.
+
 ---
 
 ## F-06 (release-gate): a device that never probes outbound deadlocks the tiebreaker
