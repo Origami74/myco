@@ -3,8 +3,9 @@ CRUCIAL:
     PREF_AWARE now defaults true at both MainActivity read sites. AwareService
     already dispatches setWifiAwareEnabled(true) on start, so the core's flag and
     the Settings toggle follow the radio — no displayed/real mismatch.
-- Show pending status peering request
-    (closes as part of phase 01 plan 01-04 — DIAG-06)
+- [DONE 2026-08-06] Show pending status peering request
+    01-04's PENDING PAIRINGS card (DIAG-06) shows incoming requests and outbound
+    invites with direction, name and npub. Verified on device.
 - not always connecting with peers? think handshake fails (tiebreaker related?)
     (this is the tiebreaker-race hypothesis. 01-03 built the per-peer attempt log
     that answers it; reading it needs two phones — see DEVICE-TEST-BATCH.md D-1)
@@ -40,7 +41,9 @@ UI:
     default; a page opts into the full height with viewport-fit=cover, the standard
     signal that it handles env(safe-area-inset-*) itself. Re-probed per page load.
     Verified on device: bitchat's #mesh header now sits below the status bar.
-- Can't see my own identity, no idea which 'circle's peer name' belongs to me
+- [DONE 2026-08-06] Can't see my own identity, no idea which 'circle's peer name' belongs to me
+    01-04's IDENTITY card (DIAG-07) shows this device's own npub and the Circle
+    name peers see it as. Verified on device: "cyan kai".
 - [DONE 2026-08-06] immediately offer to save to homescreen when downloading app from peer
     Offered when the download COMPLETES (state=="ready"), not at scan time — a
     home-screen icon for a site that never arrived is worse than no icon. The

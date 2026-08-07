@@ -313,6 +313,44 @@ open by assuming it.
 Raw log preserved: 48 records, per-peer capped at 20, survived a force-stop
 (48 before, 48 after, no `.corrupt` sibling).
 
+### Why this is worse than it looks — a code read prompted by F-05
+
+Reading the transport with the rotation in mind turns this from "wasteful churn"
+into a latent pool-thrash bug. Two facts, both verified in source:
+
+**1. Every identity check in the BLE transport keys on the BLE address, never the
+node address.** `ConnectionPool` holds `HashMap<TransportAddr, BleConnection<S>>`
+(`pool.rs:50`) and `pool.rs` never mentions `NodeAddr` at all. All three
+"already connected?" guards — `accept_loop` (`mod.rs:803`) and both in
+`scan_probe_loop` (`:1024`, `:1040`) — call `pool.contains(&addr.to_transport_addr())`,
+which for BLE is the address string. **A rotated address is therefore never
+recognised as a peer already connected**, on either the inbound or the outbound
+path.
+
+**2. The pool holds 7 connections by default** (`mod.rs:19` module doc,
+`ConnectionPool::new(max_conns)`), with eviction that only protects *static*
+configured peers — a discovered peer is always evictable.
+
+Put together: this session's 28 rotations were harmless **only because the
+tiebreaker happened to reject every one of them.** The convention is
+`our_addr < peer_addr` → our outbound wins, drop the inbound. Against
+`c66233c1…` this device sorts lower, so all 28 inbound dials were dropped before
+reaching the pool.
+
+**Had the two node addresses sorted the other way, those same 28 rotations would
+have been *accepted*** — each a new pool key, into 7 slots, evicting genuine
+peers roughly four times over in twenty minutes. The tiebreaker is what stood
+between the observed behaviour and a pool that thrashes itself empty, and which
+side it protects is decided by a byte comparison of two node addresses.
+
+**Phase 2 implication.** The fix is not to the tiebreaker, which is working. It
+is that BLE-address identity and node identity are conflated: once a peer's
+pubkey is known, the pool and the already-connected guards should key on the
+*node* address. 01-03's attempt log already learns and persists exactly that
+BLE-address-to-node-address mapping, so the data needed is on hand. This is
+inferred from source, not yet observed failing — a device whose address sorts
+above a rotating peer's would confirm it, and is worth constructing deliberately.
+
 ---
 
 ## Not a finding

@@ -1,7 +1,7 @@
 ---
 task: quick-260805-e5h
 verified: 2026-08-05T11:00:00Z
-status: human_needed
+status: verified
 score: 6/6 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
@@ -18,7 +18,7 @@ scanning, no advertising, zero BLE peers) until the node is manually restarted. 
 failed transport start without restarting the node.
 
 **Verified:** 2026-08-05T11:00:00Z
-**Status:** human_needed
+**Status:** verified
 **Re-verification:** No — initial verification
 
 ## Goal Achievement
@@ -78,9 +78,26 @@ None. Grepped all 6 touched fips files plus `reference/FIX-TODOS.md` for `TBD`/`
 | On-device: Pixel 7 Pro fresh launch | force-stop, clear logcat, monkey launch, 45s wait, logcat -d (verifier-run, independent of SUMMARY) | listener-fail warn → `Transport started after retry` (~1.17s) → scanning → `advertising PSM 161` | ✓ PASS |
 | On-device: Samsung SM-A528B fresh launch | same procedure (verifier-run) | listener-fail warn → `Transport started after retry` (~1.18s) → `advertising PSM 223` | ✓ PASS |
 
-### Human Verification Required
+### Human Verification — CLOSED 2026-08-06
 
-### 1. Two-phone co-located BLE discovery
+### 1. Two-phone co-located BLE discovery — ✅ SATISFIED
+
+**Closed by the 01-03 attempt log, read on device 2026-08-06.** The Samsung's
+`ble-attempts.jsonl` carries **19 `connected` outcomes** as BLE central against two
+distinct peer node identities (`c66233c1eb43074e…` ×6, `b4dc20096ff99f1f…` ×13),
+each with a real discovery latency. A recorded `connected` outcome is, by
+construction, a completed L2CAP connect plus a successful pubkey exchange — so
+BLE discovery and link formation between co-located devices is directly evidenced
+rather than inferred. The user had separately confirmed BLE pairing works
+end-to-end between the two test phones.
+
+Note this also supersedes the F-02 caveat below *for this check*: whatever is
+happening with `84:C5:A6:C8:43:F7`, it is not preventing BLE peer connections in
+general. F-02 itself remains open and separately tracked.
+
+<details><summary>original open item</summary>
+
+### 1. Two-phone co-located BLE discovery (original text)
 
 **Test:** Hold the Pixel 7 Pro (`29131FDH3007HW`) and Samsung SM-A528B (`R5CR916CDCF`)
 together with no shared Wi-Fi network, after a fresh app launch on both with no manual node
@@ -95,6 +112,8 @@ other* is a separate question gated by F-02 (PSM never resolving for at least on
 which this verifier's own fresh Pixel run reproduced live (`PSM not in advert yet` against
 `84:C5:A6:C8:43:F7`) — a known, separately-tracked issue explicitly out of scope for this task
 and deferred to plan 01-03.
+
+</details>
 
 ## Gaps Summary
 
