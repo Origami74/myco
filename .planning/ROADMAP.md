@@ -110,14 +110,35 @@ Plans:
   4. A peer never shows connected while silently dropping everything: a send into a full queue is retried or reported as failed, and a pair request made while a peer is away survives an app restart and completes when that peer returns.
   5. Every peer in the list that is not connected shows a plain-language reason — no shared transport, handshake pending, handshake failed, out of range, not paired — and the reason matches what the device logs actually did.
 
-**Plans**: 3 plans
+**Plans**: 4 plans (3 original, re-scoped; +1 investigation)
 **UI hint**: yes
 
 Plans:
 
-- [ ] 02-01: Deterministic BLE role tiebreaker over stable pubkeys with role-flip retry; foregrounded high-duty-cycle scan/advertise with jittered retry intervals
-- [ ] 02-02: Churn recovery — pubkey-keyed peer/Circle state with forced re-resolution on reconnect (FIPS#130), backgrounding survival, Wi-Fi Aware default-on
+> **Re-scoped 2026-08-07 against work that landed early.** Phase 1's instrumentation
+> was used to fix three things ahead of this phase (at the user's direction), and
+> two field findings changed this phase's premise. Read
+> `.planning/phases/01-make-peering-observable/01-FIELD-FINDINGS.md` F-05 and F-06
+> before planning — the original 02-01 wording assumes a tiebreaker race that the
+> field data does **not** show.
+>
+> **Already landed, do not re-plan:**
+>
+> | Was scoped as | Status |
+> |---|---|
+> | Wi-Fi Aware default-on (02-02) | ✅ done, device-verified — PEER-05 |
+> | Pubkey-keyed peer state, BLE pool half (02-02) | ✅ done, field-verified — fips `cef3fc5` + `2120839`; a rotating peer can no longer occupy several pool slots |
+> | Deterministic tiebreaker over stable pubkeys (02-01) | ✅ already correct — F-05 shows both sides applying the convention consistently; it was never racing |
+>
+> **What F-06 adds that was not scoped at all:** a device that never probes
+> outbound deadlocks the pair, because the tiebreaker defers to an outbound that
+> never comes and the losing side retries the same role at ~1 Hz forever. This is
+> PEER-02's own wording and is currently reproducible on the DC-1.
+
+- [ ] 02-01: **Role-flip retry** — a side that yields the tiebreaker notices the outbound it deferred to never materialised and flips role (F-06 defect 2, PEER-02). Generic; does not require diagnosing why a given device fails to probe. Plus foregrounded high-duty-cycle scan/advertise with jittered retry intervals. *(The tiebreaker convention itself is already correct — do not rewrite it.)*
+- [ ] 02-02: Churn recovery — pubkey-keyed **Circle/peer state at the myco layer** (the fips BLE pool half is done), forced re-resolution on reconnect (FIPS#130), backgrounding survival. *(Wi-Fi Aware default-on is done.)*
 - [ ] 02-03: Durable delivery (queue-full retry/report, persisted pair requests) then reason codes surfaced per peer — reason codes land last, once reconnect is sane
+- [ ] 02-04 (new, investigation): **Why does the DC-1 never probe outbound?** F-06 defect 1. Six causes already ruled out on-device; what remains is whether `ScanFilter.setServiceUuid(FIPS_PARCEL_UUID)` matches what that stack delivers. Sized as a spike, not a fix — and explicitly *not* blocking 02-01, which is what makes the deadlock survivable regardless of the answer.
 
 ### Phase 3: The Release Cut Behaves Itself
 

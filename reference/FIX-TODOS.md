@@ -50,13 +50,13 @@ UI:
     offer is the platform's own requestPinShortcut dialog rather than a bespoke
     prompt stacked in front of it. Asked once per site ever (prefs-remembered),
     so a re-share never re-asks; "unreachable" stops the watch, and it gives up
-    after 3 minutes. NEEDS DEVICE CHECK — the full path needs a peer share QR.
+    after 3 minutes. CONFIRMED WORKING by the user on device, 2026-08-07.
 - [DONE 2026-08-06] camera sometimes doesn't focus...
     zxing-android-embedded defaults to autofocus ON but continuous focus OFF, so
     the preview focuses once on open and never refocuses. CameraScanner now sets
     CameraSettings{isAutoFocusEnabled, isContinuousFocusEnabled} = true. Covers
-    both scanners (AppsScreen reuses PairScreen's ScanPanel). NEEDS DEVICE CHECK —
-    the symptom is intermittent and cannot be reproduced on a build host.
+    both scanners (AppsScreen reuses PairScreen's ScanPanel). CONFIRMED WORKING
+    by the user on device, 2026-08-07.
 - slow UI (thread blocking?)
 
 
