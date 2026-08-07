@@ -46,6 +46,13 @@ That instrument was then read, and it changed what we thought was wrong.
 
 The fips diff is deliberately upstream-extractable: three files, no Myco vocabulary anywhere in them (`grep -c 'myco\|Myco\|android' attempts.rs` → 0).
 
+### Dependency surface
+
+One addition, test-scope only: `testImplementation("junit:junit:4.13.2")`, which
+backs `ThemeTest`. No new runtime crates, no new system dependencies, no new
+Gradle runtime artifacts. The `Cargo.lock` delta is the `fips` version moving
+`0.4.0-dev` → `0.5.0-dev`, not a new package.
+
 ### Behavioural risk
 
 The two fips fixes change BLE admission control. A peer already connected is now recognised across a rotated link address and its duplicate declined; the tiebreaker itself is untouched. Both are field-verified (below), but they are the highest-risk change in this PR — everything else is additive UI and instrumentation.
@@ -100,6 +107,29 @@ Phase 2 has been re-scoped around both findings rather than planned from the ori
 Device verification ran on a Samsung SM-A528B and a Daylight DC-1, always via `adb install -r` so app data, identity and Circle survived every install.
 
 ---
+
+## Self-review against PR-REVIEW.md
+
+Run per CONTRIBUTING before opening. Notes where it is worth a reviewer's time:
+
+- **Commit hygiene** — 58 commits, none WIP/fixup/typo; each is a task-scoped
+  change with a message stating symptom, cause and fix shape. Base is fresh:
+  0 commits behind `main`, so this fast-forwards.
+- **Coherent whole** — two clusters, deliberately. The Phase 01 plans (01-01 …
+  01-04) are the instrumentation; the rest are fixes that instrumentation found
+  or that came off the field TODO list. If that is too broad for one PR, the
+  natural split is the `.planning/` + Dev-tab work from the BLE transport fixes.
+- **Test coverage** — new core logic is covered (`attempts.rs` 9 tests,
+  `attempt_store.rs` 8, `pool.rs` +4 including a regression test for the
+  rotation case, `peer_diagnostics.rs` +4). What is *not* covered is the Compose
+  layer — see the Nyquist gap above; that is stated rather than papered over.
+- **Documentation** — `CHANGELOG.md` updated under `[Unreleased]` with Added /
+  Changed / Fixed entries in user-facing language.
+- **Security** — the attempt log persists BLE addresses and timestamps, i.e. a
+  record of which devices were physically near this phone. Bounded to 20 entries
+  per peer and evicted after 24 hours, kept in app-private storage, with no
+  export path. Records carry no peer-supplied free text. Threat-modelled in
+  `01-03-PLAN.md`.
 
 ## Review notes
 
