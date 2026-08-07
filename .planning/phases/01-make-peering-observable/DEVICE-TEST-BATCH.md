@@ -42,6 +42,15 @@ If you would rather rebuild, note the Linux host needs
 
 ## D-1 — Does the tiebreaker actually agree at runtime? (highest value)
 
+> **Two-device comparison run 2026-08-07 (Samsung + DC-1, not the Pixel).** One
+> link, complementary roles, no duplicates: the Samsung logged exactly one
+> `BLE probe promoted to pool` (outbound/central) and the DC-1 exactly one
+> `BLE inbound connection accepted` (peripheral). That is the tiebreaker
+> convention agreeing *across two devices* rather than one device agreeing with
+> itself — the thing this check actually asked for. No cross-probe collision
+> occurred in the window, so no `lost-tiebreaker` was recorded on either side;
+> a deliberately provoked simultaneous probe would exercise that arm.
+>
 > **Partially answered 2026-08-06 — see F-05.** One device's log (48 records) shows
 > the convention applied *consistently*, not raced: 6 `central`/`connected` and 28
 > `peripheral`/`lost-tiebreaker` against the same peer node. What it did surface is

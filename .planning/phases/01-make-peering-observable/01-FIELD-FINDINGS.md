@@ -351,6 +351,38 @@ BLE-address-to-node-address mapping, so the data needed is on hand. This is
 inferred from source, not yet observed failing — a device whose address sorts
 above a rotating peer's would confirm it, and is worth constructing deliberately.
 
+### Fixed 2026-08-07 — fips `cef3fc5`
+
+Fixed at the user's explicit direction, out of the normal phase order (the same
+exception F-01 took). Recorded here rather than treated as a Phase 1 deliverable.
+
+`BleConnection` now carries the peer's `NodeAddr` once the pubkey exchange learns
+it, and `ConnectionPool::find_by_node` looks a peer up by the identity that does
+not rotate. Both admission points — `accept_loop` and `scan_probe_loop` — consult
+it after the exchange and decline a duplicate, **keeping the incumbent link**: it
+is known-good, and a genuinely dead one is already reaped by the send-error and
+receive-loop paths. Declines record a new `BleAttemptOutcome::DuplicateNode`
+(`"duplicate-node"`) so the absorption stays visible in the log that exposed the
+problem instead of becoming silent.
+
+The tiebreaker is untouched.
+
+**Verification status — deployed, unit-proven, NOT yet field-exercised.**
+
+| | |
+|---|---|
+| fips full suite | 1406 passed, 0 failed |
+| New pool tests | 4, including one pinning the regression: ten rotations of one peer leave the pool holding exactly one link |
+| Deployed | Samsung SM-A528B (`npub1ljqc795a…`) and DC-1 (`npub1tdmwef4l…`), both with app data preserved |
+| Field evidence of the fix firing | **none yet** — `duplicate-node` count is 0 on both devices |
+
+The zero is not a failure signal; it means the conditions have not recurred since
+install. The path fires only when an inbound arrives for a node already holding a
+pool entry, and the post-install window so far contains a single successful
+connect. The observable signature to watch for is `lost-tiebreaker` giving way to
+`duplicate-node` against a peer with many distinct link addresses. **Do not record
+this fix as field-verified until that appears.**
+
 ---
 
 ## Not a finding
