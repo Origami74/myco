@@ -17,7 +17,7 @@ becomes a roadmap of its own via `/gsd-new-milestone` once v1 ships.
 - [ ] **PEER-02**: Two devices that discover each other simultaneously always agree on their BLE roles — no device pair can deadlock by both choosing the same role
 - [ ] **PEER-03**: Peering recovers on its own after a Wi-Fi reconnect or MAC rotation, without the user toggling mesh off and on
 - [ ] **PEER-04**: Peering recovers on its own after a BLE link drop or after the app has been backgrounded
-- [ ] **PEER-05**: Wi-Fi Aware is enabled by default on a fresh install
+- [x] **PEER-05**: Wi-Fi Aware is enabled by default on a fresh install *(landed early, 2026-08-06, via the FIX-TODOS pass — device-verified)*
 - [ ] **PEER-06**: When a peer's send queue fills, the event is retried or reported as failed rather than silently dropped
 
 ### Peer diagnostics
@@ -47,7 +47,7 @@ becomes a roadmap of its own via `/gsd-new-milestone` once v1 ships.
 
 ### Field-reported fixes
 
-- [ ] **UX-01**: Opening one app from Discover pins that app only, not every app in the list
+- [x] **UX-01**: Opening one app from Discover pins that app only, not every app in the list *(landed early, 2026-08-06, via the FIX-TODOS pass — device-verified)*
 - [ ] **UX-02**: The UI stays responsive while the mesh syncs — state polling never blocks the UI thread
 
 ---
@@ -131,7 +131,7 @@ duplicates. Phases 1-3 are inside the 2026-08-05 release deadline; Phases 4-5 la
 | PEER-02 | Phase 2 | Pending |
 | PEER-03 | Phase 2 | Pending |
 | PEER-04 | Phase 2 | Pending |
-| PEER-05 | Phase 2 | Pending |
+| PEER-05 | Phase 2 | Complete (early) |
 | PEER-06 | Phase 2 | Pending |
 | DIAG-01 | Phase 1 | Complete |
 | DIAG-02 | Phase 2 | Pending |
@@ -149,7 +149,7 @@ duplicates. Phases 1-3 are inside the 2026-08-05 release deadline; Phases 4-5 la
 | CORE-03 | Phase 3 | Pending |
 | CORE-04 | Phase 2 | Pending |
 | CORE-05 | Phase 5 | Pending |
-| UX-01 | Phase 3 | Pending |
+| UX-01 | Phase 3 | Complete (early) |
 | UX-02 | Phase 3 | Pending |
 
 **Coverage:** 24/24 v1 requirements mapped.

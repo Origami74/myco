@@ -367,21 +367,37 @@ problem instead of becoming silent.
 
 The tiebreaker is untouched.
 
-**Verification status — deployed, unit-proven, NOT yet field-exercised.**
+**Verification status — FIELD-VERIFIED 2026-08-07 10:45.**
 
 | | |
 |---|---|
 | fips full suite | 1406 passed, 0 failed |
 | New pool tests | 4, including one pinning the regression: ten rotations of one peer leave the pool holding exactly one link |
 | Deployed | Samsung SM-A528B (`npub1ljqc795a…`) and DC-1 (`npub1tdmwef4l…`), both with app data preserved |
-| Field evidence of the fix firing | **none yet** — `duplicate-node` count is 0 on both devices |
+| Field evidence | ✅ the guard fired, against the same peer node F-05 was written about |
 
-The zero is not a failure signal; it means the conditions have not recurred since
-install. The path fires only when an inbound arrives for a node already holding a
-pool entry, and the post-install window so far contains a single successful
-connect. The observable signature to watch for is `lost-tiebreaker` giving way to
-`duplicate-node` against a peer with many distinct link addresses. **Do not record
-this fix as field-verified until that appears.**
+The fix caught a real rotation in the field:
+
+```
+BLE probe: peer already connected on another address, dropping duplicate
+    addr=ble0/6B:69:40:AE:45:EA  existing=ble0/60:6B:C1:8B:3C:44
+```
+
+```json
+{"atMs":1786092301360,"bleAddr":"ble0/6B:69:40:AE:45:EA",
+ "nodeAddrHex":"c66233c1eb43074e7a52d375cf9684c7","role":"central",
+ "discoveryMs":925,"outcome":"duplicate-node"}
+```
+
+The node address is `c66233c1…` — **the same peer whose 28 rotations produced this
+finding in the first place.** It rotated to a new link address, this device
+discovered it, dialled it, completed the pubkey exchange, and then recognised it
+as a peer already held on `ble0/60:6B:C1:8B:3C:44` and declined. Under the old
+code that would have become a second pool entry for one peer.
+
+End to end: the instrumentation built in 01-03 found the fault, the fix was
+written against that evidence, and the same instrument then recorded the fix
+working — with a new outcome label rather than the fault disappearing silently.
 
 ---
 
