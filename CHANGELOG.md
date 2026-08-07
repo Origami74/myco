@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Peers that are not direct neighbours are reachable again. Resolving a
+  `<npub>.fips` name is what teaches the mesh node that peer's identity, and
+  that step had been silently doing nothing since it was introduced: Myco
+  answers `.fips` itself in the tunnel, but left the mesh node's own DNS
+  responder switched on as well, and starting it discarded the channel the
+  answer travels back on. The name still resolved, so the failure surfaced only
+  on the first packet, as "no route" — which read like a distance problem
+  because a direct neighbour's identity comes from the connection handshake and
+  never needed resolving. Anyone further away was unreachable no matter how
+  good the mesh path was.
+
 ## [0.4.2] - 2026-08-04
 
 ### Added

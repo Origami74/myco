@@ -292,6 +292,23 @@ impl AppRuntime {
         config.node.identity.nsec = Some(nsec);
         config.node.identity.persistent = true;
         config.tun.enabled = false;
+        // No built-in DNS responder: we answer `.fips` ourselves in the TUN pump
+        // (`dns_intercept`), because on Android there is no system DNS socket to
+        // bind — the OS resolver is pointed at the in-mesh sentinel instead.
+        //
+        // This must be off, not merely unused. `dns.enabled` defaults to *true*,
+        // and the responder's start-up in `Node::start` assigns
+        // `self.dns_identity_rx`, clobbering the receiver that
+        // `enable_app_owned_dns()` installed moments earlier. Our sender in
+        // `dns_intercept` is then attached to a dropped receiver, so every
+        // `try_send` of a resolved identity fails silently and nothing is ever
+        // registered. The name still resolves — the interceptor answers the
+        // packet regardless — so the only visible symptom is that the first
+        // packet to a freshly-resolved `<npub>.fips` gets ICMPv6 "No route".
+        // That looks like a routing/distance bug, but reproduces with no peers
+        // at all: direct neighbours mask it because their identity comes from
+        // the Noise handshake, never from resolution.
+        config.dns.enabled = false;
         // No control socket: peer state is read via the in-process control read
         // handle (peer_views), not the Unix socket. The tick publishes the
         // snapshot regardless of this flag.
@@ -1020,6 +1037,44 @@ mod tests {
         assert!(
             !rt.state().node.running,
             "node should be stopped after StopNode"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every subsystem we run ourselves in-process must be switched off in the
+    /// node's config, not merely left unused.
+    ///
+    /// `dns` is the one that bites: it defaults to *enabled*, and the built-in
+    /// responder's start-up assigns `dns_identity_rx`, discarding the receiver
+    /// `enable_app_owned_dns()` installed. The identity sender in
+    /// `dns_intercept` is then orphaned and silently drops every resolved
+    /// identity, so a freshly-resolved `<npub>.fips` answers its AAAA but the
+    /// first packet to it is rejected with ICMPv6 "No route". Direct neighbours
+    /// hide the breakage (their identity comes from the Noise handshake), which
+    /// is what made it read as a multi-hop routing fault.
+    #[test]
+    fn in_process_subsystems_are_disabled_in_node_config() {
+        let dir = temp_dir("owned-subsystems");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp data dir");
+
+        let node = AppRuntime::build_node(dir.to_str().unwrap(), false)
+            .expect("node builds with a fresh identity");
+        let config = node.config();
+
+        assert!(
+            !config.dns.enabled,
+            "fips's DNS responder must be off — it would clobber the app-owned \
+             DNS identity channel and silently strip route warming"
+        );
+        assert!(
+            !config.tun.enabled,
+            "the TUN is app-owned (VpnService holds the fd)"
+        );
+        assert!(
+            !config.node.control.enabled,
+            "peer state is read via the in-process control read handle"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
