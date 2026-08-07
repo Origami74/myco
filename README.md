@@ -59,3 +59,4 @@ fully offline — one phone browses an app installed from the other. See the
 > Built on [nostr-vpn](https://github.com/mmalmi/nostr-vpn) (FIPS data plane),
 > reusing the [FIPS](https://github.com/k0sti/fips) mesh, and reimplementing the
 > nsite-deck content layer in Rust.
+

@@ -93,7 +93,11 @@ class AwareRadio(
      */
     fun start() {
         if (running) return
-        val mgr = manager ?: run { Log.w(TAG, "no Wi-Fi Aware service"); return }
+        val mgr = manager ?: run {
+            Log.w(TAG, "no Wi-Fi Aware service")
+            NativeCore.awareSetDiscovering(false)
+            return
+        }
         running = true
         registerAvailability(mgr)
         if (mgr.isAvailable) {
@@ -102,6 +106,11 @@ class AwareRadio(
             Log.i(TAG, "Aware not available yet (is Wi-Fi on?); waiting for it")
         }
     }
+
+    /** The observed discovering state: live iff either session is up — the two
+     *  sessions start and stop together in this lifecycle, so a single boolean
+     *  does not under-report. */
+    private fun discovering(): Boolean = publishSession != null || subscribeSession != null
 
     private fun attach(mgr: WifiAwareManager) {
         if (session != null) return
@@ -174,6 +183,7 @@ class AwareRadio(
         publishSession = null
         subscribeSession = null
         session = null
+        NativeCore.awareSetDiscovering(discovering())
     }
 
     fun stop() {
@@ -204,6 +214,7 @@ class AwareRadio(
             override fun onPublishStarted(session: PublishDiscoverySession) {
                 Log.i(TAG, "publish started")
                 publishSession = session
+                NativeCore.awareSetDiscovering(discovering())
             }
 
             // A subscriber reached us. Reply with our npub so it can label the
@@ -236,6 +247,7 @@ class AwareRadio(
             override fun onSubscribeStarted(session: SubscribeDiscoverySession) {
                 Log.i(TAG, "subscribe started")
                 subscribeSession = session
+                NativeCore.awareSetDiscovering(discovering())
             }
 
             // We discovered a publisher: we are the INITIATOR toward it.
@@ -292,12 +304,12 @@ class AwareRadio(
                 val addr = formatPeerAddr(info.peerIpv6Addr) ?: return
                 Log.i(TAG, "Aware NDP up to ${short(peerNpub)} at $addr")
                 setLink(peerNpub, addr, up = true)
-                NativeCore.awarePeerFound(peerNpub, addr)
+                NativeCore.awarePeerFound(peerNpub, addr, LANE)
             }
 
             override fun onLost(network: Network) {
                 Log.i(TAG, "Aware NDP lost to ${short(peerNpub)}")
-                NativeCore.awarePeerLost(peerNpub)
+                NativeCore.awarePeerLost(peerNpub, LANE)
                 releaseNdp(peerNpub)
             }
 
@@ -400,6 +412,11 @@ class AwareRadio(
 
         /** The Myco Wi-Fi Aware service name (the analog of the FIPS service UUID). */
         private const val SERVICE_NAME = "myco.fips.v1"
+
+        /** The lane label pushed to [NativeCore.awarePeerFound]/[NativeCore.awarePeerLost]
+         *  — distinguishes this radio from [app.myco.ap.ApRadio], which pushes "udp"
+         *  through the same seam even though both ride fips's UDP transport. */
+        private const val LANE = "aware"
 
         /** Message id for the npub-exchange `sendMessage`. */
         private const val MSG_ID_NPUB = 1

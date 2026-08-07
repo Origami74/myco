@@ -10,7 +10,7 @@
 use std::sync::Mutex;
 
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jbyteArray, jlong, jstring};
+use jni::sys::{jboolean, jbyteArray, jlong, jstring};
 use jni::JNIEnv;
 
 use crate::runtime::AppRuntime;
@@ -157,6 +157,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_gatewayGet(
     host: JString,
     path: JString,
     range: JString,
+    allow_sync: jboolean,
 ) -> jbyteArray {
     let host = get_string(&mut env, &host);
     let path = get_string(&mut env, &path);
@@ -171,9 +172,16 @@ pub extern "system" fn Java_app_myco_core_NativeCore_gatewayGet(
         None => None,
     };
 
+    // `allow_sync == 0` is a passive probe (a favicon behind a Discover tile):
+    // serve what is local, never start a sync. Otherwise a grid of tiles pulls
+    // and pins every site merely rendered on screen.
     let framed = match ctx {
         Some((content, rt_handle)) => {
-            rt_handle.block_on(content.gateway_get_framed(&host, &path, range_opt))
+            if allow_sync == 0 {
+                rt_handle.block_on(content.gateway_get_framed_no_sync(&host, &path, range_opt))
+            } else {
+                rt_handle.block_on(content.gateway_get_framed(&host, &path, range_opt))
+            }
         }
         None => Vec::new(),
     };

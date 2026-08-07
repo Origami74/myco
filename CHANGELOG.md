@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The Dev tab answers "is it me or is it them" before you scroll. It now opens
+  on a radio self-check — BLE enabled, scanning, advertising; Wi-Fi Aware
+  supported, available, discovering — in a fixed order that never changes with
+  the data. A fact the app genuinely cannot observe reads `unknown` rather than
+  guessing `off`, because a radio that can't be read is reporting honestly, not
+  failing.
+- Tapping a peer expands it in place onto why a connection failed: the BLE role
+  this device chose, how long discovery took, how many sends were dropped, the
+  signal strength, and the recent connect attempts with their outcomes and
+  timestamps. No debugger, no leaving the list. A peer with nothing recorded
+  says so plainly instead of showing a fabricated history.
+- That attempt history survives a force-stop. It is written as one JSON record
+  per line, so a truncated or damaged file costs the damaged lines and not the
+  whole history, and a file that mostly fails to parse is copied aside before
+  anything is rewritten rather than being replaced with a shorter one.
+- Pending pair requests and your own identity — the npub peers address you by,
+  and the Circle name they see you as — are now on screen.
+- After a peer shares an app with you, Myco offers to put it on your home
+  screen once the download actually finishes. Not while it is still
+  transferring, because an icon for an app that never arrived is worse than no
+  icon; and only once per app, so declining is respected.
+
+### Changed
+
+- Shared nsites keep the status bar by default. Most nsites are ordinary pages
+  written for a browser that supplies its own top chrome, and drawing them
+  full-bleed put their header underneath the Android clock and battery icons. A
+  page that wants the full height opts in with `viewport-fit=cover`, which is
+  already the standard way a page says it handles safe areas itself.
+
+### Fixed
+
+- Opening the Discover tab no longer downloads and pins every app in it. The
+  report was that tapping one app added all of them; the tap turned out to be
+  incidental — simply viewing the tab did it, because fetching each tile's icon
+  started a full sync for that site, and a completed sync adds the app to your
+  library. Icon previews are now served from what is already on the device and
+  never start a download.
+- Wi-Fi Aware is on out of the box. It is a peering transport, and a lane
+  nobody switches on is a lane that silently never carries anyone.
+- The QR scanner keeps focusing. It focused once when the camera opened and
+  never again, so a code moved closer or further away stayed blurred until you
+  left the screen and came back.
+- A peer that changes its Bluetooth address — which phones do routinely, for
+  privacy — is recognised as the same peer instead of appearing as a stranger
+  each time. Previously every change looked like a brand-new device dialling
+  in, and with a connection limit of seven those duplicates could crowd out
+  peers you were actually talking to.
+
 ## [0.4.2] - 2026-08-04
 
 ### Added

@@ -156,6 +156,15 @@ private fun CameraScanner(onScanned: (String) -> Unit) {
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
             BarcodeView(ctx).apply {
+                // zxing-android-embedded defaults to autofocus ON but continuous
+                // focus OFF, so the camera focuses once when the preview opens and
+                // never refocuses — a QR brought closer or further after that stays
+                // blurred until the screen is reopened. Continuous focus is what
+                // makes it track.
+                cameraSettings = com.journeyapps.barcodescanner.camera.CameraSettings().apply {
+                    isAutoFocusEnabled = true
+                    isContinuousFocusEnabled = true
+                }
                 decoderFactory = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE))
                 decodeContinuous(object : BarcodeCallback {
                     override fun barcodeResult(result: BarcodeResult) {

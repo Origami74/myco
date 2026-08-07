@@ -10,6 +10,7 @@
 //! Android-only JNI glue, so [`AppRuntime`] is unit-testable on macOS/Linux.
 
 mod action;
+mod attempt_store;
 mod content;
 // The mesh gossiper is wired only into the Android relay server (runtime.rs); on
 // the host it is exercised only by its own tests, so it reads as dead there.
@@ -17,6 +18,13 @@ mod content;
 mod gossip;
 mod identity_store;
 mod ip_source;
+// npub -> observed lane record (Wi-Fi Aware vs. LAN/AP), pushed by the
+// Android Aware JNI bridge and consumed by `AppRuntime::state()`'s
+// lane_by_npub override. Plain, non-JNI logic so it is unit-testable on the
+// host; the Android JNI bridge is its only real caller.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod lane_observation;
+mod peer_diagnostics;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod peer_relay;
 mod runtime;

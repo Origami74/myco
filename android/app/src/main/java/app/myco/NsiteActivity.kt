@@ -39,6 +39,20 @@ import java.io.ByteArrayInputStream
 class NsiteActivity : ComponentActivity() {
     private lateinit var client: AppCoreClient
     private lateinit var webView: WebView
+    private lateinit var root: FrameLayout
+
+    /**
+     * Whether the loaded page opted into drawing behind the status bar, by setting
+     * `viewport-fit=cover` on its viewport meta tag.
+     *
+     * Defaults to `false`, i.e. **the status bar is reserved**. Most nsites are
+     * ordinary pages written for a browser that has its own top chrome; drawn
+     * full-bleed they put their header underneath the clock and battery icons.
+     * `viewport-fit=cover` is the standard way a page declares it handles safe
+     * areas itself (via `env(safe-area-inset-*)`), so it is the right opt-in
+     * signal — a page that sets it has already said it wants the full height.
+     */
+    private var pageOptedIntoFullHeight = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,7 +92,7 @@ class NsiteActivity : ComponentActivity() {
             webViewClient = NsiteWebViewClient(
                 client,
                 "$hostLabel.localhost",
-                onContentVisible = { syncBarContrast() },
+                onContentVisible = { syncBarContrast(); syncTopInset() },
             )
         }
         // Host the WebView in a container we can inset. We draw edge-to-edge and
@@ -89,9 +103,12 @@ class NsiteActivity : ComponentActivity() {
         // viewport (the page still lays out at full `100dvh` and the content is just
         // clipped), so pad the *parent*: that shrinks the WebView's layout height,
         // and thus the page's viewport, lifting the composer above the bar. Works on
-        // every WebView version. Top stays full-bleed; the IME is handled by the
-        // page's own visual-viewport logic.
-        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        // every WebView version. The IME is handled by the page's own
+        // visual-viewport logic.
+        //
+        // The top is padded on the same parent, for the same reason, but is
+        // conditional: see [pageOptedIntoFullHeight].
+        root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         root.addView(
             webView,
             FrameLayout.LayoutParams(
@@ -108,7 +125,19 @@ class NsiteActivity : ComponentActivity() {
             // on WebViews too old for `interactive-widget`/visualViewport keyboard
             // handling (e.g. the DC-1). Newer WebViews then see no occlusion, so
             // their own keyboard logic becomes a no-op — no double lift.
-            v.setPadding(0, 0, 0, maxOf(nav, ime))
+            // Reserve the status bar unless the page opted into the full height.
+            // Take the display cutout too: on a notched/punch-hole device the
+            // cutout can extend past the status bar, and content under it is
+            // physically unreadable rather than merely cluttered.
+            val top = if (pageOptedIntoFullHeight) {
+                0
+            } else {
+                maxOf(
+                    insets.getInsets(WindowInsetsCompat.Type.statusBars()).top,
+                    insets.getInsets(WindowInsetsCompat.Type.displayCutout()).top,
+                )
+            }
+            v.setPadding(0, top, 0, maxOf(nav, ime))
             insets
         }
 
@@ -153,6 +182,24 @@ class NsiteActivity : ComponentActivity() {
     }
 
     /**
+     * Decide whether this page keeps the status-bar region or draws under it.
+     *
+     * Re-probed on every page becoming visible, so navigating between an opted-in
+     * page and an ordinary one updates the padding rather than keeping whatever
+     * the first page asked for. Runs on the WebView's JS callback (UI thread).
+     */
+    private fun syncTopInset() {
+        webView.evaluateJavascript(VIEWPORT_FIT_PROBE_JS) { raw ->
+            val wants = unquoteJs(raw) == "cover"
+            if (wants != pageOptedIntoFullHeight) {
+                pageOptedIntoFullHeight = wants
+                // Re-run the inset listener with the new decision.
+                ViewCompat.requestApplyInsets(root)
+            }
+        }
+    }
+
+    /**
      * Set the Recents task label + icon from the nsite itself — the title from the
      * manifest and the favicon (the blob the manifest maps at `/favicon.ico`,
      * falling back to common icon paths), fetched from the local gateway off the
@@ -191,6 +238,23 @@ class NsiteActivity : ComponentActivity() {
                 if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') return b;
                 return getComputedStyle(document.documentElement).backgroundColor || '';
               } catch (e) { return ''; }
+            })()
+        """
+
+        /**
+         * Does the page declare `viewport-fit=cover`? That is the standard signal
+         * that it handles safe areas itself via `env(safe-area-inset-*)`, so it is
+         * treated as opting into the status-bar region. Anything else — including a
+         * missing viewport meta, which is the common case for a page written for a
+         * browser with its own top chrome — keeps the status bar reserved.
+         */
+        private const val VIEWPORT_FIT_PROBE_JS = """
+            (function () {
+              try {
+                var m = document.querySelector('meta[name="viewport"]');
+                var c = m ? (m.getAttribute('content') || '') : '';
+                return /viewport-fit\s*=\s*cover/i.test(c) ? 'cover' : 'auto';
+              } catch (e) { return 'auto'; }
             })()
         """
 
