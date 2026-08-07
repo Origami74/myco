@@ -401,6 +401,68 @@ working — with a new outcome label rather than the fault disappearing silently
 
 ---
 
+## F-06 (release-gate): a device that never probes outbound deadlocks the tiebreaker
+
+**Status: observed on-device 2026-08-07**, Daylight DC-1 (`JP4R01994`) paired with
+the Samsung. This is **PEER-02**, the release-gate requirement, failing in the
+field — and the roadmap's own wording for it ("a failed attempt flips role rather
+than retrying the same one forever") describes the symptom exactly.
+
+**The evidence.** Across the DC-1's entire recorded attempt history — 61 records,
+persisted through a reinstall — **every single one is `peripheral`. Not one
+central-role attempt has ever been recorded on this device.** It has never
+initiated an outbound BLE connection.
+
+| | Samsung | DC-1 |
+|---|---|---|
+| attempt records | mixed central + peripheral | **61, all peripheral** |
+| `BLE probe …` debug lines (current process) | 4 | **0** |
+| scan callbacks (current process) | 3 | 1 |
+| advertising | yes (PSM 133) | yes (PSM 136) |
+
+So the DC-1 advertises fine and peers dial it — but it never dials anyone.
+
+**Why that deadlocks.** The cross-probe tiebreaker on the DC-1 fires
+`our_addr < peer_addr` → *"my outbound will win, so drop this inbound"*. It then
+drops the inbound. But there is no outbound, and there never will be. The peer
+gets no connection, retries, and is dropped again:
+
+```
+node c66233c1…  →  40 × peripheral / lost-tiebreaker
+                   58 of 60 inter-event gaps under 2 seconds
+```
+
+**~1 Hz, indefinitely, with neither side ever connecting.** The losing side never
+flips role, which is precisely the behaviour PEER-02 requires not to exist.
+
+**What is not yet established.** *Why* the DC-1 never probes outbound. Its Kotlin
+radio logs `scanning for FIPS peers (low-latency)`, so the scan is started; but
+scan callbacks are rare (1 in this process lifetime vs the Samsung's 3) and none
+reached a probe. Candidate causes not yet separated: the DC-1 is unusual hardware,
+the `ScanFilter.setServiceUuid(FIPS_PARCEL_UUID)` may not match what its stack
+delivers, or results arrive without a resolvable PSM (the F-02 path — though the
+`PSM not in advert` line does **not** appear on this device, so F-02's exact
+signature is absent here). Do not treat the cause as diagnosed.
+
+**Two separable defects, and the distinction matters for Phase 2:**
+
+1. **The DC-1 does not probe outbound** — cause unknown, possibly device-specific.
+2. **The tiebreaker has no liveness check on the outbound it defers to** — this
+   is generic, affects any pair where one side cannot probe, and is fixable
+   without knowing why (1) happens. A side that yields should notice that the
+   outbound it deferred to never materialised, and flip role.
+
+Defect 2 is the one PEER-02 names, and it is the one worth fixing first: it
+converts a one-sided radio problem from a total connectivity failure into a
+recoverable one.
+
+**Why Phase 1 found this.** The per-peer role recording from 01-03 is the whole
+reason this is visible. "All 61 attempts are peripheral" is not something the
+old diagnostics could have said, and without it the DC-1 simply looks like a
+phone that "sometimes doesn't connect".
+
+---
+
 ## Not a finding
 
 `E BluetoothLeAdvertiser: Legacy advertiser should be only disabled on timeout, but was enabled!`
