@@ -339,6 +339,7 @@ fn to_fips(rec: &PersistedAttempt) -> BleAttempt {
             "pubkey-exchange-failed" => BleAttemptOutcome::PubkeyExchangeFailed,
             "lost-tiebreaker" => BleAttemptOutcome::LostTiebreaker,
             "pool-rejected" => BleAttemptOutcome::PoolRejected,
+            "duplicate-node" => BleAttemptOutcome::DuplicateNode,
             _ => BleAttemptOutcome::ConnectError,
         },
     }

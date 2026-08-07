@@ -133,7 +133,7 @@ data class PeerAttempt(
     val role: String,
     val discoveryMs: Long,
     /** "connected" | "connect-timeout" | "connect-error" | "pubkey-exchange-failed"
-     *  | "lost-tiebreaker" | "pool-rejected". */
+     *  | "lost-tiebreaker" | "pool-rejected" | "duplicate-node". */
     val outcome: String,
 )
 
