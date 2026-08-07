@@ -20,6 +20,7 @@ import android.nfc.cardemulation.CardEmulation
 import android.nfc.tech.Ndef
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -28,6 +29,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.lifecycle.lifecycleScope
 import app.myco.ap.ApRadio
 import app.myco.aware.AwareRadio
 import app.myco.aware.AwareService
@@ -43,6 +45,10 @@ import app.myco.share.NsiteShare
 import app.myco.ui.MycoApp
 import app.myco.ui.theme.MycoTheme
 import app.myco.vpn.MycoVpnService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Developer-UI entry point: device identity, node status, BLE diagnostics, and
@@ -469,6 +475,50 @@ class MainActivity : ComponentActivity() {
         core.dispatch(NativeActions.openNsite(info.nsiteHost, holder = info.npub))
         val who = info.name.ifEmpty { "a peer" }
         Toast.makeText(this, "Downloading from $who — find it in Apps", Toast.LENGTH_SHORT).show()
+        offerHomeScreenWhenReady(info.nsiteHost)
+    }
+
+    /**
+     * Offer to pin an app a peer just shared, once its download actually finishes.
+     *
+     * Deliberately **not** at scan time: a site that is still syncing may fail or
+     * be unreachable, and a home-screen icon for something that never arrived is
+     * worse than no icon. Waiting for `ready` means the offer only appears for an
+     * app that works.
+     *
+     * The offer is the platform's own pin dialog — `requestPinShortcut` already
+     * asks "add to home screen?" with a cancel — rather than a bespoke prompt
+     * stacked in front of it, which would be two dialogs for one decision.
+     *
+     * Offered **once per site, ever** (remembered in prefs): a peer re-sharing an
+     * app you already declined must not re-ask. Declining the system dialog is
+     * indistinguishable from accepting it — the API reports neither — so "asked"
+     * is what we record, not "added".
+     */
+    private fun offerHomeScreenWhenReady(hostLabel: String) {
+        if (hostLabel.isEmpty()) return
+        val asked = prefs.getStringSet(PREF_HOME_OFFERED, emptySet()).orEmpty()
+        if (hostLabel in asked) return
+
+        lifecycleScope.launch {
+            // Give up rather than watch forever: a sync that has not landed in
+            // this long is a failure, and the user has moved on either way.
+            val deadline = SystemClock.elapsedRealtime() + HOME_OFFER_TIMEOUT_MS
+            while (SystemClock.elapsedRealtime() < deadline) {
+                val site = withContext(Dispatchers.IO) { core.state() }
+                    .sites.firstOrNull { it.host == hostLabel }
+                if (site != null && site.state == "ready") {
+                    prefs.edit()
+                        .putStringSet(PREF_HOME_OFFERED, asked + hostLabel)
+                        .apply()
+                    pinToHomeScreen(hostLabel, site.title)
+                    return@launch
+                }
+                // "unreachable" is terminal for this attempt; stop asking.
+                if (site != null && site.state == "unreachable") return@launch
+                delay(HOME_OFFER_POLL_MS)
+            }
+        }
     }
 
     // --- permissions ---
@@ -514,6 +564,14 @@ class MainActivity : ComponentActivity() {
         const val PREF_MESH = "mesh_enabled"
         const val PREF_OFFLINE_ONLY = "offline_only"
         const val PREF_DEV = "developer_mode"
+
+        /** Hosts we have already offered to pin, so a re-share never re-asks. */
+        private const val PREF_HOME_OFFERED = "home_screen_offered"
+
+        /** How long to wait for a peer-shared app to finish downloading before
+         *  giving up on offering it — a sync that has not landed by now failed. */
+        private const val HOME_OFFER_TIMEOUT_MS = 3 * 60 * 1000L
+        private const val HOME_OFFER_POLL_MS = 1500L
         const val PREF_EXIT_PROXY = "exit_proxy"
     }
 }

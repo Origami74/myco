@@ -41,7 +41,13 @@ UI:
     signal that it handles env(safe-area-inset-*) itself. Re-probed per page load.
     Verified on device: bitchat's #mesh header now sits below the status bar.
 - Can't see my own identity, no idea which 'circle's peer name' belongs to me
-- immediately offer to save to homescreen when downloading app from peer
+- [DONE 2026-08-06] immediately offer to save to homescreen when downloading app from peer
+    Offered when the download COMPLETES (state=="ready"), not at scan time — a
+    home-screen icon for a site that never arrived is worse than no icon. The
+    offer is the platform's own requestPinShortcut dialog rather than a bespoke
+    prompt stacked in front of it. Asked once per site ever (prefs-remembered),
+    so a re-share never re-asks; "unreachable" stops the watch, and it gives up
+    after 3 minutes. NEEDS DEVICE CHECK — the full path needs a peer share QR.
 - [DONE 2026-08-06] camera sometimes doesn't focus...
     zxing-android-embedded defaults to autofocus ON but continuous focus OFF, so
     the preview focuses once on open and never refocuses. CameraScanner now sets
