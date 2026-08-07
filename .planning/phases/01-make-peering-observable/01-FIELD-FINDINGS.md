@@ -438,11 +438,24 @@ flips role, which is precisely the behaviour PEER-02 requires not to exist.
 **What is not yet established.** *Why* the DC-1 never probes outbound. Its Kotlin
 radio logs `scanning for FIPS peers (low-latency)`, so the scan is started; but
 scan callbacks are rare (1 in this process lifetime vs the Samsung's 3) and none
-reached a probe. Candidate causes not yet separated: the DC-1 is unusual hardware,
-the `ScanFilter.setServiceUuid(FIPS_PARCEL_UUID)` may not match what its stack
-delivers, or results arrive without a resolvable PSM (the F-02 path — though the
-`PSM not in advert` line does **not** appear on this device, so F-02's exact
-signature is absent here). Do not treat the cause as diagnosed.
+reached a probe. **Cause not diagnosed.**
+
+Ruled out on-device, so nobody repeats them:
+
+| Candidate | Verdict |
+|---|---|
+| `BLUETOOTH_SCAN` not granted | ❌ `granted=true` on both devices |
+| `BLUETOOTH_CONNECT` / `ADVERTISE` missing | ❌ both granted |
+| System Bluetooth off | ❌ `bluetooth_on = 1` |
+| Location services off blocking the scan | ❌ manifest declares `BLUETOOTH_SCAN` with `neverForLocation`, and `ACCESS_FINE_LOCATION` is `maxSdkVersion=32`; the DC-1 is SDK 33, so location is not required (it is off, `location_mode = 0`, and that is fine) |
+| F-02 (PSM never resolving) | ❌ the `PSM not in advert` line does not appear on this device at all |
+| Radio never started | ❌ logs `scanning for FIPS peers (low-latency)` and `advertising PSM 136` |
+
+Still open: whether `ScanFilter.setServiceUuid(FIPS_PARCEL_UUID)` matches what
+this stack delivers, and whether the DC-1's BLE firmware reports service UUIDs in
+the primary advert at all. Device: Daylight DC-1, Android 13 / SDK 33 — unusual
+hardware, and the same device the codebase already special-cases for an old
+WebView (`NsiteActivity`'s IME comment names it).
 
 **Two separable defects, and the distinction matters for Phase 2:**
 
