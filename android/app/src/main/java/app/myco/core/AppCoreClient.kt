@@ -86,6 +86,57 @@ data class PairRequest(
     val secret: String,
 )
 
+/**
+ * One merged, npub-or-address-keyed peer diagnostics row (DIAG-01/03/04/06),
+ * built once in Rust from `ble_peers` / `ble_adverts` / `circle` / pending
+ * pairings — never re-joined here. `key` is the `npub` when resolved, else
+ * `nodeAddrHex`, else the raw BLE address of an unresolved advert.
+ */
+data class PeerDiagnostic(
+    val key: String,
+    val npub: String,
+    val nodeAddrHex: String,
+    val bleAddr: String,
+    val name: String,
+    /** "connected" | "reachable-via-relay" | "seen-unidentified" | "paired-offline" | "unreachable". */
+    val state: String,
+    /** Transport carrying this row when connected ("ble", "aware", "udp", "tcp"); empty otherwise. */
+    val transport: String,
+    val alsoReachableVia: List<String> = emptyList(),
+    /** 0 when never heard from — renders as an em-dash, never "0s". */
+    val lastSeenMs: Long,
+    val rssi: Int?,
+    val psm: Int,
+    /** "" | "incoming-waiting" | "outbound-waiting" | "paired". */
+    val pairState: String,
+    val inCircle: Boolean,
+    /** BLE role this device chose on the most recent recorded attempt:
+     *  "central" | "peripheral" | "" when nothing has been recorded. Never a guess. */
+    val role: String = "",
+    /** Discovery-to-resolution milliseconds for the newest attempt; 0 when unmeasured. */
+    val discoveryMs: Long = 0L,
+    /** Link-level send failures to this peer. Excludes MTU rejections. */
+    val sendDrops: Long = 0L,
+    /** Recorded connect attempts, newest first, capped at 20 by the core. */
+    val attempts: List<PeerAttempt> = emptyList(),
+)
+
+/**
+ * One recorded BLE connect attempt (DIAG-01/03), as surfaced on a peer row.
+ *
+ * Every field is an observed fact from the core's attempt log — a peer with no
+ * recorded history carries an empty list, never a fabricated entry.
+ */
+data class PeerAttempt(
+    val atMs: Long,
+    /** "central" | "peripheral". */
+    val role: String,
+    val discoveryMs: Long,
+    /** "connected" | "connect-timeout" | "connect-error" | "pubkey-exchange-failed"
+     *  | "lost-tiebreaker" | "pool-rejected" | "duplicate-node". */
+    val outcome: String,
+)
+
 /** Parsed slice of the core's state snapshot (P1 BLE surface + P2 content). */
 data class AppState(
     val rev: Long,
@@ -102,11 +153,23 @@ data class AppState(
     val bleEnabled: Boolean,
     val bleRole: String,
     val bleScanning: Boolean,
+    /** False when [bleScanning] could not actually be observed (bridge absent,
+     *  radio never started, or a non-Android build) — render unknown, not a
+     *  value. */
+    val bleScanningKnown: Boolean = false,
+    val bleAdvertising: Boolean = false,
+    /** False when [bleAdvertising] could not actually be observed. */
+    val bleAdvertisingKnown: Boolean = false,
     val bleAdapterName: String,
     val blePeers: List<BlePeer>,
     val bleAdverts: List<BleAdvert>,
     val wifiAwareEnabled: Boolean,
     val wifiAwarePort: Int,
+    /** Whether the Aware lane is actively discovering right now, sourced from
+     *  the publish/subscribe session lifecycle. */
+    val wifiAwareScanning: Boolean = false,
+    /** False when [wifiAwareScanning] could not actually be observed. */
+    val wifiAwareScanningKnown: Boolean = false,
     val sites: List<SiteStatus>,
     val library: List<LibraryItem>,
     val cache: CacheStatus,
@@ -121,6 +184,9 @@ data class AppState(
     val offlineOnly: Boolean,
     val updateCheck: UpdateCheck = UpdateCheck(),
     val speedtest: SpeedtestStatus = SpeedtestStatus(),
+    /** Merged per-identity peer diagnostics rows (DIAG-01/03/04/06). Built once
+     *  in Rust; the UI renders this directly, it never re-joins blePeers/circle. */
+    val peers: List<PeerDiagnostic> = emptyList(),
 ) {
     companion object {
         fun parse(json: String): AppState {
@@ -250,6 +316,58 @@ data class AppState(
                     }
                 }
             }
+            val peerDiagnosticsJson = o.optJSONArray("peers")
+            val peerDiagnostics = buildList {
+                if (peerDiagnosticsJson != null) {
+                    for (i in 0 until peerDiagnosticsJson.length()) {
+                        val p = peerDiagnosticsJson.optJSONObject(i) ?: continue
+                        val alsoReachableVia = buildList {
+                            p.optJSONArray("alsoReachableVia")?.let { arr ->
+                                for (j in 0 until arr.length()) add(arr.optString(j))
+                            }
+                        }
+                        // Attempts arrive newest-first from the core, already
+                        // capped per peer. A payload predating plan 01-03 simply
+                        // has no `attempts` key and parses to an empty list.
+                        val attempts = buildList {
+                            p.optJSONArray("attempts")?.let { arr ->
+                                for (j in 0 until arr.length()) {
+                                    val a = arr.optJSONObject(j) ?: continue
+                                    add(
+                                        PeerAttempt(
+                                            atMs = a.optLong("atMs"),
+                                            role = a.optString("role"),
+                                            discoveryMs = a.optLong("discoveryMs"),
+                                            outcome = a.optString("outcome"),
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                        add(
+                            PeerDiagnostic(
+                                key = p.optString("key"),
+                                npub = p.optString("npub"),
+                                nodeAddrHex = p.optString("nodeAddrHex"),
+                                bleAddr = p.optString("bleAddr"),
+                                name = p.optString("name"),
+                                state = p.optString("state"),
+                                transport = p.optString("transport"),
+                                alsoReachableVia = alsoReachableVia,
+                                lastSeenMs = p.optLong("lastSeenMs"),
+                                rssi = if (p.isNull("rssi")) null else p.optInt("rssi"),
+                                psm = p.optInt("psm"),
+                                pairState = p.optString("pairState"),
+                                inCircle = p.optBoolean("inCircle"),
+                                role = p.optString("role"),
+                                discoveryMs = p.optLong("discoveryMs"),
+                                sendDrops = p.optLong("sendDrops"),
+                                attempts = attempts,
+                            )
+                        )
+                    }
+                }
+            }
             val outboundJson = o.optJSONArray("outboundPairs")
             val outboundPairs = buildList {
                 if (outboundJson != null) {
@@ -280,11 +398,16 @@ data class AppState(
                 bleEnabled = ble.optBoolean("enabled"),
                 bleRole = ble.optString("role"),
                 bleScanning = ble.optBoolean("scanning"),
+                bleScanningKnown = ble.optBoolean("scanningKnown"),
+                bleAdvertising = ble.optBoolean("advertising"),
+                bleAdvertisingKnown = ble.optBoolean("advertisingKnown"),
                 bleAdapterName = ble.optString("adapterName"),
                 blePeers = peers,
                 bleAdverts = adverts,
                 wifiAwareEnabled = wifiAware.optBoolean("enabled"),
                 wifiAwarePort = wifiAware.optInt("port"),
+                wifiAwareScanning = wifiAware.optBoolean("scanning"),
+                wifiAwareScanningKnown = wifiAware.optBoolean("scanningKnown"),
                 sites = sites,
                 library = library,
                 cache = cache,
@@ -316,6 +439,7 @@ data class AppState(
                         generation = u.optLong("generation"),
                     )
                 } ?: UpdateCheck(),
+                peers = peerDiagnostics,
             )
         }
     }
@@ -357,9 +481,20 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
      * Serve one nsite request through the in-process gateway (for the WebView's
      * `shouldInterceptRequest`). Decodes the framed `[u32 header-len][header][body]`
      * the native side returns. `range` is the request's `Range` header (or "").
+     *
+     * [allowSync] must stay `true` for WebView loads — the user asked for that
+     * site, so a missing one should start pulling. Pass `false` for a **passive
+     * probe** the user did not ask for, such as a favicon behind a Discover
+     * tile: a sync there downloads and pins every site merely rendered on
+     * screen.
      */
-    fun gatewayGet(host: String, path: String, range: String): GatewayResult {
-        val framed = NativeCore.gatewayGet(requireHandle(), host, path, range)
+    fun gatewayGet(
+        host: String,
+        path: String,
+        range: String,
+        allowSync: Boolean = true,
+    ): GatewayResult {
+        val framed = NativeCore.gatewayGet(requireHandle(), host, path, range, allowSync)
         return GatewayResult.decode(framed)
     }
 

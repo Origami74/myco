@@ -62,6 +62,11 @@ pub struct AppRuntime {
     /// content layer from here, so peer-driven relay sync keeps working while
     /// the app is backgrounded and the UI's `state()` poll is paused.
     shared_read: Arc<std::sync::Mutex<Option<ControlReadHandle>>>,
+    /// Crash-surviving history for the BLE attempt log (D-13). Shared so the
+    /// rate-limited flush can be spawned onto the tokio runtime rather than
+    /// running on the FFI thread. `None` only on a startup error, in which case
+    /// attempts simply have no persistence — never an `AppState.error`.
+    attempt_store: Option<Arc<crate::attempt_store::AttemptStore>>,
 }
 
 impl AppRuntime {
@@ -275,6 +280,11 @@ impl AppRuntime {
             content: Some(content),
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
             shared_read,
+            // Load once here; a missing file is an empty history, and an
+            // unreadable one degrades to empty rather than failing the launch.
+            attempt_store: Some(Arc::new(crate::attempt_store::AttemptStore::load(
+                Path::new(data_dir),
+            ))),
         })
     }
 
@@ -364,6 +374,9 @@ impl AppRuntime {
             content: None,
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
             shared_read: Arc::new(std::sync::Mutex::new(None)),
+            // No valid data dir on this path, so there is nowhere to persist to.
+            // Attempts still render live; they just do not survive a restart.
+            attempt_store: None,
         }
     }
 
@@ -749,22 +762,94 @@ impl AppRuntime {
         // Live peers, read lock-free from the node's tick-published snapshot
         // (empty until the loop runs / peers are seen). On Android every peer is
         // a BLE peer (the only transport configured).
-        let ble_peers: Vec<BlePeer> = self
+        let peer_views = self
             .read_handle
             .as_ref()
-            .map(|h| {
-                h.peer_views()
-                    .into_iter()
-                    .map(|p| BlePeer {
-                        node_addr_hex: p.node_addr_hex,
-                        npub: p.npub,
-                        connected: p.connected,
-                        psm: 0, // not surfaced in the snapshot yet
-                        rssi: None,
-                    })
-                    .collect()
-            })
+            .map(|h| h.peer_views())
             .unwrap_or_default();
+
+        let ble_peers: Vec<BlePeer> = peer_views
+            .iter()
+            .map(|p| BlePeer {
+                node_addr_hex: p.node_addr_hex.clone(),
+                npub: p.npub.clone(),
+                connected: p.connected,
+                psm: 0, // not surfaced in the snapshot yet
+                rssi: None,
+            })
+            .collect();
+        let ble_adverts = self.ble_adverts();
+
+        // content.rs snapshot accessors `state()` already calls unconditionally
+        // (RESEARCH.md Pitfall 5) — fetched once here and reused for both the
+        // peers merge below and the AppState fields further down, so the merge
+        // adds no new lock acquisitions.
+        let circle = self
+            .content
+            .as_ref()
+            .map(|c| c.circle_snapshot())
+            .unwrap_or_default();
+        let reachable_npubs = self
+            .content
+            .as_ref()
+            .map(|c| c.reachable_npubs())
+            .unwrap_or_default();
+        let outbound_pairs = self
+            .content
+            .as_ref()
+            .map(|c| c.outbound_pairs_snapshot())
+            .unwrap_or_default();
+        let pending_pair_requests = self
+            .content
+            .as_ref()
+            .map(|c| c.pending_pairs_snapshot())
+            .unwrap_or_default();
+
+        // Lane-origin overrides (npub → observed lane, e.g. "aware" vs the
+        // fips-reported "udp"): both Wi-Fi Aware and the LAN/AP lane ride
+        // fips's plain UDP transport and share one JNI push site today
+        // (`aware_bridge_jni.rs`'s hardcoded `TRANSPORT_TYPE = "udp"`), so
+        // fips cannot tell them apart — only the Kotlin push site can. Read
+        // from `lane_observation`'s process-global record of the lane each
+        // npub was last pushed on (Android; empty on the host build).
+        let lane_by_npub = self.observed_lane_by_npub();
+
+        // Per-peer attempt history (role / discovery latency / outcome / send
+        // failures) plus the learned address-to-node-address pairs the merge
+        // uses to collapse an advert into its peer row.
+        //
+        // The live fips log is folded into the persistent store and read back
+        // merged, so a freshly launched app shows what was recorded before the
+        // last force-stop alongside the newest live attempts. `observe` does no
+        // I/O — it runs here on the FFI thread — and the flush is spawned onto
+        // the tokio runtime, rate limited to once every few seconds.
+        let ble_attempts = match self.attempt_store.as_ref() {
+            Some(store) => {
+                store.observe(&self.ble_attempts());
+                if store.flush_due() {
+                    if let Some(rt) = self.rt.as_ref() {
+                        let store = Arc::clone(store);
+                        let at = now_ms();
+                        rt.spawn(async move { store.flush(at) });
+                    }
+                }
+                store.snapshot()
+            }
+            None => self.ble_attempts(),
+        };
+
+        let peers = crate::peer_diagnostics::merge_peers(
+            &peer_views,
+            &ble_peers,
+            &ble_adverts,
+            &circle,
+            &pending_pair_requests,
+            &outbound_pairs,
+            &reachable_npubs,
+            &lane_by_npub,
+            &ble_attempts,
+            now_ms(),
+        );
 
         // Feed the connected-peer npubs to the content layer so `open_site` can
         // pull from currently-reachable Circle members (and skip offline ones).
@@ -805,25 +890,37 @@ impl AppRuntime {
                 running: self.node_running,
                 status_text: self.node_status.clone(),
             },
-            ble: BleStatus {
-                enabled: self.ble_enabled,
-                role: "peripheral+central".to_string(),
-                scanning: self.ble_enabled && self.node_running,
-                adapter_name: if self.node_running {
-                    "ble0".to_string()
-                } else {
-                    "—".to_string()
-                },
+            ble: {
+                let (scanning, scanning_known, advertising, advertising_known) =
+                    self.ble_radio_state();
+                BleStatus {
+                    enabled: self.ble_enabled,
+                    role: "peripheral+central".to_string(),
+                    scanning,
+                    scanning_known,
+                    advertising,
+                    advertising_known,
+                    adapter_name: if self.node_running {
+                        "ble0".to_string()
+                    } else {
+                        "—".to_string()
+                    },
+                }
             },
             ble_peers,
-            ble_adverts: self.ble_adverts(),
-            wifi_aware: WifiAwareStatus {
-                enabled: self.wifi_aware_enabled,
-                port: if self.wifi_aware_enabled {
-                    WIFI_AWARE_PORT
-                } else {
-                    0
-                },
+            ble_adverts,
+            wifi_aware: {
+                let (scanning, scanning_known) = self.aware_radio_state();
+                WifiAwareStatus {
+                    enabled: self.wifi_aware_enabled,
+                    port: if self.wifi_aware_enabled {
+                        WIFI_AWARE_PORT
+                    } else {
+                        0
+                    },
+                    scanning,
+                    scanning_known,
+                }
             },
             sites: self
                 .content
@@ -840,26 +937,10 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.cache_view())
                 .unwrap_or_else(CacheView::empty),
-            circle: self
-                .content
-                .as_ref()
-                .map(|c| c.circle_snapshot())
-                .unwrap_or_default(),
-            reachable_npubs: self
-                .content
-                .as_ref()
-                .map(|c| c.reachable_npubs())
-                .unwrap_or_default(),
-            outbound_pairs: self
-                .content
-                .as_ref()
-                .map(|c| c.outbound_pairs_snapshot())
-                .unwrap_or_default(),
-            pending_pair_requests: self
-                .content
-                .as_ref()
-                .map(|c| c.pending_pairs_snapshot())
-                .unwrap_or_default(),
+            circle,
+            reachable_npubs,
+            outbound_pairs,
+            pending_pair_requests,
             discovered: self
                 .content
                 .as_ref()
@@ -876,7 +957,57 @@ impl AppRuntime {
                 .map(|c| c.update_check_snapshot())
                 .unwrap_or_default(),
             speedtest: self.speedtest.lock().unwrap().clone(),
+            peers,
         }
+    }
+
+    /// The BLE radio's observed scanning/advertising state, read from the fips
+    /// bridge rather than computed from other flags. `known` is true only when
+    /// the bridge actually resolves (Android, radio started); the host build and
+    /// an absent bridge both report unknown.
+    #[cfg(target_os = "android")]
+    fn ble_radio_state(&self) -> (bool, bool, bool, bool) {
+        match fips::transport::ble::android_io::android_ble_bridge() {
+            Some(b) => (b.is_scanning(), true, b.is_advertising(), true),
+            None => (false, false, false, false),
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn ble_radio_state(&self) -> (bool, bool, bool, bool) {
+        (false, false, false, false)
+    }
+
+    /// The Wi-Fi Aware lane's observed discovering state, read from the Aware
+    /// bridge's process-global flag rather than derived from other flags.
+    /// `known` is false until Kotlin has pushed at least once (or on the host
+    /// build, where the Aware bridge does not exist).
+    #[cfg(target_os = "android")]
+    fn aware_radio_state(&self) -> (bool, bool) {
+        match crate::aware_bridge_jni::aware_discovering() {
+            Some(v) => (v, true),
+            None => (false, false),
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn aware_radio_state(&self) -> (bool, bool) {
+        (false, false)
+    }
+
+    /// The lane ("aware" vs. "udp") each currently known npub was last
+    /// observed reached over, read from `lane_observation`'s process-global
+    /// record — the only place that can distinguish Wi-Fi Aware from the
+    /// LAN/AP lane, both of which ride fips's plain UDP transport. Empty on
+    /// the host build, where the Android Aware JNI bridge never pushes.
+    #[cfg(target_os = "android")]
+    fn observed_lane_by_npub(&self) -> std::collections::HashMap<String, String> {
+        crate::lane_observation::snapshot()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn observed_lane_by_npub(&self) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
     }
 
     /// Raw scan adverts (address / PSM / RSSI) from the BLE radio bridge. The
@@ -899,6 +1030,20 @@ impl AppRuntime {
 
     #[cfg(not(target_os = "android"))]
     fn ble_adverts(&self) -> Vec<BleAdvert> {
+        Vec::new()
+    }
+
+    /// Per-peer BLE connect-attempt history from the fips transport's process-
+    /// global log. The BLE transport only runs on Android; on the host there are
+    /// no attempts to report, so the merge sees an empty slice and every row
+    /// renders as having no recorded history.
+    #[cfg(target_os = "android")]
+    fn ble_attempts(&self) -> Vec<fips::transport::ble::attempts::BlePeerAttempts> {
+        fips::transport::ble::attempts::ble_attempt_log().snapshot()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn ble_attempts(&self) -> Vec<fips::transport::ble::attempts::BlePeerAttempts> {
         Vec::new()
     }
 
@@ -940,6 +1085,15 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Milliseconds since the Unix epoch, passed to `merge_peers` (reserved for
+/// future staleness-based state work; unused by today's merge logic).
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 

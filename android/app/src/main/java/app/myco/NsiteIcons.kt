@@ -15,7 +15,10 @@ object NsiteIcons {
     fun fetch(client: AppCoreClient, host: String): Bitmap? =
         ICON_PATHS.firstNotNullOfOrNull { path ->
             runCatching {
-                val res = client.gatewayGet(host, path, "")
+                // allowSync = false: an icon probe is not a site the user opened.
+                // With sync enabled, rendering a grid of tiles pulls and pins
+                // every one of them into the Apps list.
+                val res = client.gatewayGet(host, path, "", allowSync = false)
                 if (res.status == 200 && res.body.isNotEmpty()) {
                     BitmapFactory.decodeByteArray(res.body, 0, res.body.size)
                 } else {
