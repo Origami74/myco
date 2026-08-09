@@ -94,6 +94,7 @@ fun SettingsScreen(
     bleExhausted: Boolean = false,
     initialExitProxy: String = "",
     onExitProxyChange: (String) -> Unit = {},
+    onReplayIntro: () -> Unit = {},
 ) {
     var page by remember { mutableStateOf(SettingsPage.Root) }
 
@@ -124,6 +125,7 @@ fun SettingsScreen(
             onOfflineOnlyToggle = onOfflineOnlyToggle,
             initialExitProxy = initialExitProxy,
             onExitProxyChange = onExitProxyChange,
+            onReplayIntro = onReplayIntro,
             onBack = { page = SettingsPage.Root },
         )
     }
@@ -437,6 +439,7 @@ private fun DeveloperSettings(
     onOfflineOnlyToggle: (Boolean) -> Unit,
     initialExitProxy: String,
     onExitProxyChange: (String) -> Unit,
+    onReplayIntro: () -> Unit,
     onBack: () -> Unit,
 ) {
     SettingsColumn {
@@ -482,6 +485,37 @@ private fun DeveloperSettings(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { onExitProxyChange(field.trim()) }) { Text("Apply") }
                     TextButton(onClick = { field = ""; onExitProxyChange("") }) { Text("Turn off") }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        GroupLabel("INTRO")
+        SectionCard {
+            var replayed by rememberSaveable { mutableStateOf(false) }
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "The intro plays in full on first launch; after that it is only the " +
+                        "dive. This puts it back to first-launch state, without clearing " +
+                        "app data.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Button(onClick = { onReplayIntro(); replayed = true }) { Text("Play again") }
+                    if (replayed) {
+                        Text(
+                            "Plays in full next launch.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }

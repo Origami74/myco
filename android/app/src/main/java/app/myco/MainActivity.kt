@@ -24,6 +24,17 @@ import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.unit.dp
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions
@@ -43,6 +54,8 @@ import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
 import app.myco.ui.MycoApp
+import app.myco.ui.intro.IntroMode
+import app.myco.ui.intro.IntroScreen
 import app.myco.ui.theme.MycoTheme
 import app.myco.vpn.MycoVpnService
 import kotlinx.coroutines.Dispatchers
@@ -137,22 +150,64 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MycoTheme {
-                MycoApp(
-                    client = core,
-                    onBleToggle = { enabled -> setBleEnabled(enabled) },
-                    wifiAwareSupported = AwareRadio.isSupported(this),
-                    onWifiAwareToggle = { enabled -> setWifiAwareEnabled(enabled) },
-                    onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
-                    onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
-                    onScanned = { text -> handleScannedText(text) },
-                    initialMeshEnabled = prefs.getBoolean(PREF_MESH, true),
-                    onMeshToggle = { enabled -> setMeshEnabled(enabled) },
-                    onOfflineOnlyToggle = { enabled -> setOfflineOnly(enabled) },
-                    initialDeveloperMode = prefs.getBoolean(PREF_DEV, BuildConfig.DEBUG),
-                    onDeveloperModeToggle = { enabled -> prefs.edit().putBoolean(PREF_DEV, enabled).apply() },
-                    initialExitProxy = prefs.getString(PREF_EXIT_PROXY, "").orEmpty(),
-                    onExitProxyChange = { spec -> setExitProxy(spec) },
-                )
+                // The intro is an overlay, not a nav destination: the app is
+                // composed and laid out underneath it from the first frame. The
+                // pupil is a hole in that overlay, so the app is what shows
+                // through it — live, from the moment it opens — and the dive is
+                // that hole growing until there is no overlay left to see. A
+                // nav destination would have had nothing behind it to reveal.
+                // The full sequence is a first-launch event; after that the
+                // intro is only the dive, so it never stands between someone
+                // and the app they opened. Reset it from Dev.
+                val introMode = remember {
+                    if (prefs.getBoolean(PREF_INTRO_SEEN, false)) {
+                        IntroMode.Returning
+                    } else {
+                        IntroMode.FirstRun
+                    }
+                }
+                var introShowing by rememberSaveable { mutableStateOf(true) }
+                // How frosted the pupil is. The intro washes the hole itself;
+                // this blurs what shows through it by the same amount, so
+                // early on you can see there is something behind the mark
+                // without being able to read it. Modifier.blur is a no-op
+                // below API 31, where the wash carries it alone.
+                var frost by remember { mutableFloatStateOf(if (introShowing) 1f else 0f) }
+
+                Box(Modifier.fillMaxSize()) {
+                    Box(Modifier.blur(14.dp * frost)) {
+                        MycoApp(
+                            client = core,
+                            onBleToggle = { enabled -> setBleEnabled(enabled) },
+                            wifiAwareSupported = AwareRadio.isSupported(this@MainActivity),
+                            onWifiAwareToggle = { enabled -> setWifiAwareEnabled(enabled) },
+                            onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
+                            onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
+                            onScanned = { text -> handleScannedText(text) },
+                            initialMeshEnabled = prefs.getBoolean(PREF_MESH, true),
+                            onMeshToggle = { enabled -> setMeshEnabled(enabled) },
+                            onOfflineOnlyToggle = { enabled -> setOfflineOnly(enabled) },
+                            initialDeveloperMode = prefs.getBoolean(PREF_DEV, BuildConfig.DEBUG),
+                            onDeveloperModeToggle = { enabled -> prefs.edit().putBoolean(PREF_DEV, enabled).apply() },
+                            initialExitProxy = prefs.getString(PREF_EXIT_PROXY, "").orEmpty(),
+                            onExitProxyChange = { spec -> setExitProxy(spec) },
+                            onReplayIntro = {
+                                prefs.edit().putBoolean(PREF_INTRO_SEEN, false).apply()
+                            },
+                        )
+                    }
+
+                    if (introShowing) {
+                        IntroScreen(
+                            mode = introMode,
+                            onFrost = { frost = it },
+                            onFinished = {
+                                introShowing = false
+                                prefs.edit().putBoolean(PREF_INTRO_SEEN, true).apply()
+                            },
+                        )
+                    }
+                }
             }
         }
 
@@ -573,5 +628,7 @@ class MainActivity : ComponentActivity() {
         private const val HOME_OFFER_TIMEOUT_MS = 3 * 60 * 1000L
         private const val HOME_OFFER_POLL_MS = 1500L
         const val PREF_EXIT_PROXY = "exit_proxy"
+        /** Set once the intro has played all the way through. */
+        const val PREF_INTRO_SEEN = "intro_seen"
     }
 }
