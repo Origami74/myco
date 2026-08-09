@@ -30,6 +30,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   screen once the download actually finishes. Not while it is still
   transferring, because an icon for an app that never arrived is worse than no
   icon; and only once per app, so declining is respected.
+- A link can now point at a place *inside* an app, not just at the app:
+  `myco://app/<host>/<path>`. Follow one for an app you don't have and Myco
+  fetches it from whoever nearby is carrying it, then opens it on the spot the
+  link named — five seconds later if a peer is in the room, or after a reboot
+  next week if nobody was. Opening the app yourself from the Apps grid spends
+  the link just the same, so the first time you see that app is the time you
+  land where you were sent. Deep links deliberately carry no pairing secret:
+  they travel through channels nobody controls, so anything inside one is
+  public and replayable. Pairing keeps its own face-to-face carrier.
+- Apps can serve their own routes. A path an app's manifest doesn't list now
+  gets the app's shell instead of a 404, so client-side routing works —
+  bounded to navigation-style paths, because answering a missing script with a
+  page would turn a broken asset into a silent one. An app that ships its own
+  `404.html` still owns that answer.
+- Dumplings joins bitchat and ICS in Discover's suggested apps — save a link,
+  hand it to whoever is next to you, and it arrives as something they can
+  choose to keep.
 
 ### Changed
 
