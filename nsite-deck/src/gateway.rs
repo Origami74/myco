@@ -8,7 +8,7 @@
 //! served once **all** its referenced blobs are present; until then the gateway
 //! returns a small loading page (HTTP 503) so a half-synced site never renders.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::content_type;
 use crate::host::{self, SiteAddr};
@@ -117,13 +117,9 @@ pub async fn serve(
 
     let normalized = normalize_path(path);
 
-    // Map path -> sha256, falling back to /404.html, then a gateway 404.
-    let (hash, status) = match manifest.hash_for(&normalized) {
-        Some(h) => (h.to_string(), 200u16),
-        None => match manifest.hash_for("/404.html") {
-            Some(h) => (h.to_string(), 404),
-            None => return GatewayResponse::html(404, gateway_404_page(&normalized)),
-        },
+    let (hash, status) = match resolve_hash(&manifest.paths, &normalized) {
+        Some((h, status)) => (h.to_string(), status),
+        None => return GatewayResponse::html(404, gateway_404_page(&normalized)),
     };
 
     match blobs.get(&hash).await {
@@ -141,6 +137,37 @@ pub async fn serve(
         Ok(None) => GatewayResponse::html(503, loading_page("Loading…")),
         Err(e) => GatewayResponse::html(500, format!("<h1>500</h1><pre>{e}</pre>")),
     }
+}
+
+/// Map an already-[`normalize_path`]d request path to `(sha256, http status)`.
+///
+/// Precedence on a miss:
+/// 1. `/404.html` — an nsite that ships its own not-found page owns that answer.
+/// 2. `/index.html` — the **SPA fallback**: the app shell, served with **200**, so a
+///    client-side route (`/dumpling/<payload>`, a deep link's landing path) reaches the
+///    router that knows what to do with it instead of dying on the doormat.
+/// 3. Nothing — the caller renders the gateway's own 404.
+///
+/// The shell fallback is deliberately limited to **navigation-style** requests: those
+/// where [`normalize_path`] produced a `…/index.html` (root, trailing slash, or an
+/// extensionless last segment). A missing `/assets/app.js` must keep 404ing — serving
+/// it HTML with a 200 turns a broken asset into a silent, much harder bug.
+fn resolve_hash<'a>(
+    paths: &'a BTreeMap<String, String>,
+    normalized: &str,
+) -> Option<(&'a str, u16)> {
+    if let Some(h) = paths.get(normalized) {
+        return Some((h.as_str(), 200));
+    }
+    if let Some(h) = paths.get("/404.html") {
+        return Some((h.as_str(), 404));
+    }
+    if normalized.ends_with("/index.html") {
+        if let Some(h) = paths.get("/index.html") {
+            return Some((h.as_str(), 200));
+        }
+    }
+    None
 }
 
 /// Normalize a request path to a manifest path: index.html fallback for the
@@ -286,6 +313,62 @@ mod tests {
         assert_eq!(normalize_path("/style.css"), "/style.css");
         assert_eq!(normalize_path("index.html"), "/index.html");
         assert_eq!(normalize_path("/a/b.js?v=2"), "/a/b.js");
+    }
+
+    /// A manifest's path map, built from `(path, hash)` pairs.
+    fn paths(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(p, h)| (p.to_string(), h.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn serves_an_exact_path_before_any_fallback() {
+        let p = paths(&[("/style.css", "css"), ("/index.html", "shell")]);
+        assert_eq!(resolve_hash(&p, "/style.css"), Some(("css", 200)));
+        assert_eq!(resolve_hash(&p, "/index.html"), Some(("shell", 200)));
+    }
+
+    #[test]
+    fn falls_back_to_the_app_shell_for_an_unknown_route() {
+        // `/dumpling/dmpl1abc` normalizes to `…/index.html` — a client-side route.
+        let p = paths(&[("/index.html", "shell")]);
+        assert_eq!(
+            resolve_hash(&p, &normalize_path("/dumpling/dmpl1abc")),
+            Some(("shell", 200)),
+            "a deep-link route reaches the router, not a 404",
+        );
+        assert_eq!(resolve_hash(&p, &normalize_path("/")), Some(("shell", 200)));
+        assert_eq!(
+            resolve_hash(&p, &normalize_path("/deep/nested/route")),
+            Some(("shell", 200)),
+        );
+    }
+
+    #[test]
+    fn a_missing_asset_still_404s() {
+        // Serving the shell for a missing script would turn a broken asset into a
+        // silent bug: 200 OK, HTML where JS was expected.
+        let p = paths(&[("/index.html", "shell")]);
+        assert_eq!(resolve_hash(&p, &normalize_path("/assets/app.js")), None);
+        assert_eq!(resolve_hash(&p, &normalize_path("/favicon.ico")), None);
+    }
+
+    #[test]
+    fn a_sites_own_404_page_wins_over_the_shell() {
+        let p = paths(&[("/index.html", "shell"), ("/404.html", "notfound")]);
+        assert_eq!(
+            resolve_hash(&p, &normalize_path("/nope")),
+            Some(("notfound", 404)),
+            "an nsite that ships a 404 page owns that answer",
+        );
+    }
+
+    #[test]
+    fn no_shell_means_the_gateway_404s() {
+        let p = paths(&[("/style.css", "css")]);
+        assert_eq!(resolve_hash(&p, &normalize_path("/anything")), None);
     }
 
     #[test]

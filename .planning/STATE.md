@@ -78,6 +78,12 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 - **Vendor divergence:** convergence and churn recovery must be demonstrated on at least three vendors (Samsung + Xiaomi + Pixel); Pixel alone is not representative.
 - **fips rebase risk:** 19 commits sit 232 commits behind a heavily refactored master; some themes likely dissolve entirely. Fallback is targeted fixes on `feat/platform-peer-queue`.
 
+## Quick Tasks Completed
+
+| ID | Task | Date | Branch | Summary |
+|----|------|------|--------|---------|
+| 260809-nyq | Myco deep linking (`myco://app/<host>/<path>`) + deferred open, and the myco-dumplings test nsite | 2026-08-09 | `feat/deep-links` | `.planning/quick/260809-nyq-myco-deep-linking-myco-app-host-path-def/SUMMARY.md` |
+
 ## Deferred Items
 
 | Category | Item | Status | Deferred At |

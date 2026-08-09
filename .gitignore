@@ -45,6 +45,7 @@ node_modules/
 # Standalone nsite app, developed as its own git repo
 /myco-bitchat/
 /myco-ics/
+/myco-dumplings/
 
 .env
 # Standalone mesh exit-node daemon (developed in-tree, not shipped)

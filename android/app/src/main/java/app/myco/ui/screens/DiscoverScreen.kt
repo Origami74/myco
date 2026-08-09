@@ -222,4 +222,5 @@ private data class SuggestedApp(val title: String, val host: String)
 private val SUGGESTED_APPS = listOf(
     SuggestedApp("bitchat", "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivbitchat"),
     SuggestedApp("ICS", "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivics"),
+    SuggestedApp("Dumplings", "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivdumplings"),
 )

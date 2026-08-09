@@ -47,6 +47,7 @@ Full design docs are in **[docs/](docs/README.md)**:
 - [Architecture](docs/design/architecture.md)
 - [The nsite layer](docs/design/nsite-layer.md) · [Propagation](docs/design/propagation.md) · [BLE interop](docs/design/ble-interop.md)
 - [Identity & pairing](docs/design/identity-pairing.md) · [Security](docs/design/security.md)
+- [Deep links](docs/design/deep-links.md) — linking to a place inside an app, and what happens when that app isn't installed yet
 - [Roadmap](docs/roadmap.md)
 
 ## Status
