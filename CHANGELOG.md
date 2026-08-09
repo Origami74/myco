@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-09
+
 ### Added
 
 - The Dev tab answers "is it me or is it them" before you scroll. It now opens
@@ -47,6 +49,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dumplings joins bitchat and ICS in Discover's suggested apps — save a link,
   hand it to whoever is next to you, and it arrives as something they can
   choose to keep.
+- A first-run intro. A spark appears, mycelial filaments grow out of it into
+  the Myco mark, and the ring closes around them; the mark then breathes while
+  it waits. Tapping anywhere opens a pupil in the middle of it, which contracts
+  and dilates the way a real one does before the camera falls into it and the
+  app is there. The pupil is a hole rather than a black disc, so the app itself
+  shows through it: frosted at first, clearing as the dive starts. It plays in
+  full on first launch only; later launches take a shorter path straight into
+  the dive, and Settings has a developer control to play it again. The mark is
+  generated at runtime rather than shipped as an asset — one quadrant of
+  branching filaments drawn four times, which is where the logo's fourfold
+  symmetry comes from. Geometry is covered by unit tests that run in CI.
 
 ### Changed
 
@@ -84,17 +97,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each time. Previously every change looked like a brand-new device dialling
   in, and with a connection limit of seven those duplicates could crowd out
   peers you were actually talking to.
-- A first-run intro. A spark appears, mycelial filaments grow out of it into
-  the Myco mark, and the ring closes around them; the mark then breathes while
-  it waits. Tapping anywhere opens a pupil in the middle of it, which contracts
-  and dilates the way a real one does before the camera falls into it and the
-  app is there. The pupil is a hole rather than a black disc, so the app itself
-  shows through it: frosted at first, clearing as the dive starts. It plays in
-  full on first launch only; later launches take a shorter path straight into
-  the dive, and Settings has a developer control to play it again. The mark is
-  generated at runtime rather than shipped as an asset — one quadrant of
-  branching filaments drawn four times, which is where the logo's fourfold
-  symmetry comes from. Geometry is covered by unit tests that run in CI.
 
 ## [0.4.2] - 2026-08-04
 
