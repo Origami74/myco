@@ -41,6 +41,10 @@ class NsiteActivity : ComponentActivity() {
     private lateinit var webView: WebView
     private lateinit var root: FrameLayout
 
+    /** The nsite this task belongs to; a re-delivered intent for anything else is
+     *  not ours to render (the task is keyed by host — see [documentUri]). */
+    private var hostLabel: String = ""
+
     /**
      * Whether the loaded page opted into drawing behind the status bar, by setting
      * `viewport-fit=cover` on its viewport meta tag.
@@ -70,7 +74,7 @@ class NsiteActivity : ComponentActivity() {
         enableEdgeToEdge()
         client = MycoCore.client(this)
 
-        val hostLabel = intent.getStringExtra(EXTRA_HOST).orEmpty()
+        hostLabel = intent.getStringExtra(EXTRA_HOST).orEmpty()
         if (hostLabel.isEmpty()) {
             finish()
             return
@@ -150,7 +154,30 @@ class NsiteActivity : ComponentActivity() {
         // `*.localhost` as loopback + a secure context, so the nsite's
         // `ws://localhost:4870` to the embedded relay isn't blocked by Private/
         // Local Network Access (a `.nsite` page is classed "public" → blocked).
-        webView.loadUrl("http://$hostLabel.localhost/")
+        webView.loadUrl(pageUrl(intent))
+    }
+
+    /**
+     * A deep link into an nsite that is **already open**.
+     *
+     * The task is keyed by host, so a second `myco://app/<host>/…` re-surfaces this
+     * task rather than starting a new one — and without this the user would be handed
+     * back whatever page they left behind instead of the one they just tapped.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        // The task is per-host; an intent for a different nsite isn't ours to render.
+        val host = intent.getStringExtra(EXTRA_HOST).orEmpty()
+        if (host.isNotEmpty() && !host.equals(hostLabel, ignoreCase = true)) return
+        if (this::webView.isInitialized) webView.loadUrl(pageUrl(intent))
+    }
+
+    /** The gateway URL this intent asks for: the nsite root, or its deep path. */
+    private fun pageUrl(intent: Intent): String {
+        val path = intent.getStringExtra(EXTRA_PATH).orEmpty().ifEmpty { "/" }
+        val rooted = if (path.startsWith("/")) path else "/$path"
+        return "http://$hostLabel.localhost$rooted"
     }
 
     override fun onDestroy() {
@@ -225,7 +252,16 @@ class NsiteActivity : ComponentActivity() {
         const val EXTRA_HOST = "app.myco.extra.HOST"
         const val EXTRA_TITLE = "app.myco.extra.TITLE"
 
-        /** A per-host document URI so re-opening the same nsite re-surfaces its task. */
+        /** Where inside the nsite to land — a deep link's path. Root when absent. */
+        const val EXTRA_PATH = "app.myco.extra.PATH"
+
+        /**
+         * A per-host document URI so re-opening the same nsite re-surfaces its task.
+         *
+         * Host-only **on purpose**: the deep path travels in [EXTRA_PATH], not here.
+         * Folding it into the document URI would make every route a distinct document,
+         * so each route would spawn its own Recents card for the same app.
+         */
         fun documentUri(hostLabel: String): Uri = Uri.parse("myco://app/$hostLabel")
 
         /** Read the page's declared theme-color, else the computed body/html background. */

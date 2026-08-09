@@ -52,7 +52,9 @@ import app.myco.core.NativeActions
 import app.myco.nfc.NfcReader
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
+import app.myco.share.MycoLink
 import app.myco.share.NsiteShare
+import app.myco.share.PendingDeepLinks
 import app.myco.ui.MycoApp
 import app.myco.ui.intro.IntroMode
 import app.myco.ui.intro.IntroScreen
@@ -73,6 +75,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var core: AppCoreClient
     private val prefs by lazy { getSharedPreferences("myco_prefs", MODE_PRIVATE) }
     private val nfcAdapter by lazy { NfcAdapter.getDefaultAdapter(this) }
+
+    /** Hosts with a live [watchPendingLink] coroutine, so resumes don't stack them. */
+    private val pendingWatchers = mutableSetOf<String>()
 
     private val permLauncher = registerForActivityResult(RequestMultiplePermissions()) {
         // BLE is enabled by default / remembered; (re)start it once perms land.
@@ -297,6 +302,9 @@ class MainActivity : ComponentActivity() {
         core.state().ownNpub.takeIf { it.isNotEmpty() }?.let {
             core.dispatch(NativeActions.setDeviceName(DeviceName.current(this, it)))
         }
+        // Deep links followed before the app existed (possibly in a previous process)
+        // get their chance every time Myco comes back to the foreground.
+        reconcilePendingLinks()
     }
 
     override fun onPause() {
@@ -421,18 +429,28 @@ class MainActivity : ComponentActivity() {
 
     // --- nsite launching ---
 
-    /** The intent that opens an nsite as its own fullscreen task (one per host). */
-    private fun nsiteIntent(hostLabel: String, title: String): Intent =
+    /** The intent that opens an nsite as its own fullscreen task (one per host),
+     *  at [path] inside it (the root unless a deep link said otherwise). */
+    private fun nsiteIntent(hostLabel: String, title: String, path: String = "/"): Intent =
         Intent(this, NsiteActivity::class.java).apply {
             action = Intent.ACTION_VIEW
+            // Host-only, so a deep link re-surfaces the app's existing Recents card
+            // instead of opening a second one per route.
             data = NsiteActivity.documentUri(hostLabel)
             putExtra(NsiteActivity.EXTRA_HOST, hostLabel)
             putExtra(NsiteActivity.EXTRA_TITLE, title)
+            putExtra(NsiteActivity.EXTRA_PATH, path)
             addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
         }
 
-    private fun launchNsite(hostLabel: String, title: String) {
-        startActivity(nsiteIntent(hostLabel, title))
+    /**
+     * Open an nsite. With no explicit [path], any deep link still waiting on this app
+     * is spent here — so tapping it yourself in the Apps grid lands on the link you
+     * followed days ago just as surely as Myco opening it for you would have.
+     */
+    private fun launchNsite(hostLabel: String, title: String, path: String? = null) {
+        val target = path ?: PendingDeepLinks.take(this, hostLabel) ?: "/"
+        startActivity(nsiteIntent(hostLabel, title, target))
     }
 
     /** Pin an nsite to the home screen as an app-like shortcut (favicon + title). */
@@ -504,6 +522,10 @@ class MainActivity : ComponentActivity() {
             openSharedNsite(info)
             return
         }
+        MycoLink.parseAppLink(text)?.let { link ->
+            openAppLink(link)
+            return
+        }
         // Fall back to treating it as a pasteable nsite link.
         core.dispatch(NativeActions.openNsite(text))
         Toast.makeText(this, "Opening app...", Toast.LENGTH_SHORT).show()
@@ -513,6 +535,94 @@ class MainActivity : ComponentActivity() {
         val data = intent?.data ?: return
         if (data.scheme != NsiteShare.SCHEME) return
         handleScannedText(data.toString())
+    }
+
+    /**
+     * Follow a `myco://app/<host>/<path>` deep link.
+     *
+     * Installed already → open it, there, now. Not installed → start retrieving it and
+     * **remember the path**: the app may arrive in five seconds or next week, and
+     * either way its first open belongs to the link that asked for it. Nothing about
+     * the wait is shown as a modal — the app appears in the Apps grid with its
+     * download ring, same as any other incoming app.
+     *
+     * No holder is passed because the link carries none by design (see [MycoLink]);
+     * `open_site` falls through every Circle peer and then the public source anyway.
+     */
+    private fun openAppLink(link: MycoLink.AppLink) {
+        val site = core.state().sites.firstOrNull { it.host == link.host }
+        if (site != null && site.state == "ready") {
+            launchNsite(link.host, site.title, link.path)
+            PendingDeepLinks.remove(this, link.host)
+            return
+        }
+        PendingDeepLinks.put(this, link.host, link.path)
+        core.dispatch(NativeActions.openNsite(link.host))
+        Toast.makeText(this, "Getting the app — it opens when it lands", Toast.LENGTH_LONG).show()
+        watchPendingLink(link.host)
+    }
+
+    /**
+     * Open the apps whose deep links have been waiting, and retry the ones that
+     * haven't arrived.
+     *
+     * Runs on every resume, which is what makes the wait survivable: the watcher
+     * coroutine started at tap time dies with the process, but this doesn't — a link
+     * followed before a reboot still opens the first time Myco comes back up with the
+     * app in hand. An `unreachable` site is re-dispatched rather than dropped: it means
+     * nobody in range had it *then*, and someone who does may have walked in since.
+     */
+    private fun reconcilePendingLinks() {
+        val hosts = PendingDeepLinks.hosts(this)
+        if (hosts.isEmpty()) return
+        lifecycleScope.launch {
+            val sites = withContext(Dispatchers.IO) { core.state() }.sites
+            for (host in hosts) {
+                val path = PendingDeepLinks.peek(this@MainActivity, host) ?: continue
+                val site = sites.firstOrNull { it.host == host }
+                when (site?.state) {
+                    "ready" -> {
+                        PendingDeepLinks.remove(this@MainActivity, host)
+                        launchNsite(host, site.title, path)
+                    }
+                    // Still coming — the watcher below opens it the moment it lands.
+                    "syncing" -> watchPendingLink(host)
+                    // Never started, or nobody had it last time. Ask again.
+                    else -> {
+                        core.dispatch(NativeActions.openNsite(host))
+                        watchPendingLink(host)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Watch one pending app while Myco is open, so a sync that finishes in the next few
+     * seconds — the common case, a peer right there in the room — opens the link
+     * immediately instead of waiting for the next resume. Bounded and de-duplicated;
+     * the durable half of the promise is [reconcilePendingLinks].
+     */
+    private fun watchPendingLink(hostLabel: String) {
+        if (!pendingWatchers.add(hostLabel)) return
+        lifecycleScope.launch {
+            try {
+                val deadline = SystemClock.elapsedRealtime() + PENDING_WATCH_MS
+                while (SystemClock.elapsedRealtime() < deadline) {
+                    delay(PENDING_WATCH_POLL_MS)
+                    val path = PendingDeepLinks.peek(this@MainActivity, hostLabel) ?: return@launch
+                    val site = withContext(Dispatchers.IO) { core.state() }
+                        .sites.firstOrNull { it.host == hostLabel }
+                    if (site != null && site.state == "ready") {
+                        PendingDeepLinks.remove(this@MainActivity, hostLabel)
+                        launchNsite(hostLabel, site.title, path)
+                        return@launch
+                    }
+                }
+            } finally {
+                pendingWatchers.remove(hostLabel)
+            }
+        }
     }
 
     /**
@@ -627,6 +737,11 @@ class MainActivity : ComponentActivity() {
          *  giving up on offering it — a sync that has not landed by now failed. */
         private const val HOME_OFFER_TIMEOUT_MS = 3 * 60 * 1000L
         private const val HOME_OFFER_POLL_MS = 1500L
+
+        /** How long a foreground watcher waits for a deep-linked app to land before
+         *  handing the wait back to the durable store (opened on a later resume). */
+        private const val PENDING_WATCH_MS = 3 * 60 * 1000L
+        private const val PENDING_WATCH_POLL_MS = 1000L
         const val PREF_EXIT_PROXY = "exit_proxy"
         /** Set once the intro has played all the way through. */
         const val PREF_INTRO_SEEN = "intro_seen"
