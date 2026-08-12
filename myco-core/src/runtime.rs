@@ -39,6 +39,17 @@ const WIFI_AWARE_PORT: u16 = 4871;
 /// exit; the node keeps running.
 const PEER_FEED_FAILURES_BEFORE_ERROR: u32 = 3;
 
+/// How long a `StopNode` waits for the node's own graceful teardown before
+/// giving up and aborting the loop task.
+///
+/// fips bounds the drain itself with `node.drain_timeout_secs` (2s by default)
+/// and the teardown after it is a handful of `abort()`s plus a best-effort
+/// `stop_advertising`, so this only has to be comfortably longer than that.
+/// Reaching it means the transports leaked — exactly the failure the graceful
+/// path exists to prevent — so it is logged at error level, and the abort is the
+/// last resort that keeps the toggle from wedging forever.
+const NODE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// How the control-socket peer feed is doing. Written by the 8s tick (a
 /// detached task with no `&mut self`), read synchronously by `state()`.
 #[derive(Clone, Debug, Default)]
@@ -77,9 +88,24 @@ pub struct AppRuntime {
     /// it does not query a control socket that cannot exist yet. Mirrors
     /// `node_running`, which the tick has no `&self` to read.
     node_live: Arc<AtomicBool>,
-    /// The background task running `node.start()` + `run_rx_loop()`. Aborting it
-    /// drops the node and stops its transports.
+    /// The background task running `node.start()`, the rx loop, and the node's
+    /// own graceful teardown. It is *completing* — not aborting — that stops the
+    /// transports; see [`AppRuntime::stop_node`].
     loop_task: Option<JoinHandle<()>>,
+    /// Fires the rx loop's shutdown signal. Sending on it (or dropping it) makes
+    /// `Node::run_rx_loop_with_shutdown` enter fips's bounded drain and return,
+    /// after which the loop task calls `Node::finish_shutdown` and the
+    /// transports are genuinely down.
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Set at `StopNode` and cleared only once the loop task has actually
+    /// finished. [`AppRuntime::start_node`] refuses to build a second node while
+    /// it is set: two live nodes fighting over the single Kotlin BLE radio is
+    /// the failure this whole dance exists to prevent. Shared and atomic because
+    /// the detached watchdog that clears it has no `&mut self`.
+    stopping: Arc<AtomicBool>,
+    /// A `StartNode` that arrived while `stopping` was still set, replayed by
+    /// [`AppRuntime::poll_pending_start`] on the next state read.
+    start_pending: bool,
     /// The content layer (embedded relay + Blossom + gateway + Library). `None`
     /// only on a startup error (no valid data dir).
     content: Option<Arc<Content>>,
@@ -357,6 +383,9 @@ impl AppRuntime {
             node: Some(node),
             node_live,
             loop_task: None,
+            shutdown_tx: None,
+            stopping: Arc::new(AtomicBool::new(false)),
+            start_pending: false,
             content: Some(content),
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
             peer_cache,
@@ -415,6 +444,7 @@ impl AppRuntime {
         // file from a force-stop is removed and rebound on the next launch.
         config.node.control.enabled = true;
         config.node.control.socket_path = crate::control_client::socket_path(data_dir);
+        Self::clear_control_socket(&config.node.control.socket_path);
         // On Android, configure a BLE transport instance so node.start() brings up
         // the AndroidIo backend (the Kotlin radio drives it via the injected
         // bridge). Host builds have no BLE backend, so this is Android-only.
@@ -448,6 +478,34 @@ impl AppRuntime {
         fips::Node::new(config).map_err(|e| anyhow::anyhow!("fips Node::new failed: {e}"))
     }
 
+    /// Unlink the control socket file before a node is built, so the next
+    /// `ControlSocket::bind` inside `run_rx_loop` always gets the path.
+    ///
+    /// fips spawns its control accept loop from `run_rx_loop` without keeping
+    /// the `JoinHandle`, so the previous node's accept task — and the
+    /// `UnixListener` it owns — survives that node's teardown. `bind` treats a
+    /// path that still answers `connect()` as "already in use" and refuses,
+    /// which would leave the freshly started node with no control socket at all:
+    /// no `show_peers`, no platform peer pushes, an empty Dev tab.
+    ///
+    /// Unlinking first leaves the orphan bound to an unnamed inode — unreachable
+    /// by any new client, and harmless — while the new node binds a fresh one.
+    /// Safe because Myco is a single process and the path is app-private, so the
+    /// "someone else is listening" case `bind` guards against cannot arise; and
+    /// because the only caller either has no node running yet (`try_new`) or has
+    /// waited for the previous one to finish (`start_node`).
+    fn clear_control_socket(socket_path: &str) {
+        match std::fs::remove_file(socket_path) {
+            Ok(()) => tracing::info!(path = socket_path, "removed the previous control socket"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                path = socket_path,
+                error = %e,
+                "could not remove the previous control socket; the node may fail to bind it"
+            ),
+        }
+    }
+
     fn from_error(app_version: &str, msg: &str) -> Self {
         Self {
             app_version: app_version.to_string(),
@@ -463,6 +521,9 @@ impl AppRuntime {
             node: None,
             node_live: Arc::new(AtomicBool::new(false)),
             loop_task: None,
+            shutdown_tx: None,
+            stopping: Arc::new(AtomicBool::new(false)),
+            start_pending: false,
             content: None,
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
             peer_cache: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -760,9 +821,35 @@ impl AppRuntime {
     }
 
     fn start_node(&mut self) {
+        // A loop task that has already finished on its own — `node.start()`
+        // failed, or the packet channel closed — otherwise leaves
+        // `node_running` stuck true and the mesh permanently down, with no way
+        // back short of a process restart. Treat it as stopped so this call can
+        // rebuild. The task tears its own node down before returning, so there
+        // is nothing left running to collide with.
+        if self.node_running && self.loop_task.as_ref().is_some_and(|t| t.is_finished()) {
+            tracing::warn!("fips loop task exited on its own; rebuilding the node");
+            self.loop_task = None;
+            self.shutdown_tx = None;
+            self.node_running = false;
+            self.node_live.store(false, Ordering::Relaxed);
+        }
         if self.node_running {
             return;
         }
+        // Never build a second node while the previous one's transports are
+        // still up. They would both drive the one shared Kotlin BLE radio, and
+        // the node the UI reads (the new one, which rebinds the control socket
+        // last) is not the node doing the work — so the app reports an empty
+        // room while BLE is genuinely peered. Queue the start instead;
+        // `poll_pending_start` replays it on the next state read, within a
+        // second of the drain finishing.
+        if self.stopping.load(Ordering::Acquire) {
+            self.start_pending = true;
+            self.node_status = "waiting for the previous node to stop".to_string();
+            return;
+        }
+        self.start_pending = false;
         // Rebuild the node if a prior stop consumed it (BLE toggled off then on).
         if self.node.is_none() {
             match Self::build_node(&self.data_dir, self.wifi_aware_enabled) {
@@ -807,10 +894,18 @@ impl AppRuntime {
             // slot rather than waiting to be handed a radio.
             crate::ble_bridge_jni::set_radio_slot(node.enable_app_owned_ble_radio());
         }
+        // The rx loop serves until this fires, then drains in place. Dropping
+        // the sender resolves the receiver too, so a runtime torn down without a
+        // `StopNode` still asks the node to shut down rather than vanishing.
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = rt.spawn(async move {
             let mut node = node;
             if let Err(e) = node.start().await {
                 tracing::error!("fips node start failed: {e}");
+                // A partial start can still have left children up (a transport
+                // bound, the responder listening). Tear down what exists rather
+                // than dropping the node on top of them.
+                node.finish_shutdown().await;
                 return;
             }
             // Publish where the built-in `.fips` responder bound, so the TUN
@@ -827,33 +922,121 @@ impl AppRuntime {
                 None => tracing::warn!("fips DNS responder is not running; .fips will not resolve"),
             }
             crate::dns_intercept::set_responder_addr(dns_addr);
-            // Runs until the packet channel closes or the task is aborted.
-            if let Err(e) = node.run_rx_loop().await {
+            // Serves until `StopNode` fires the signal (or the packet channel
+            // closes), then runs fips's bounded in-place drain and returns.
+            if let Err(e) = node
+                .run_rx_loop_with_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+            {
                 tracing::warn!("fips rx loop ended: {e}");
             }
+            // The half that actually stops the radios. The BLE accept loop, the
+            // scan+probe loop and the advertiser are separately spawned tasks
+            // holding `Arc` clones of the pool, the io and the stats; only
+            // `Transport::stop` — reached from here — aborts them, and `Drop`
+            // cannot run async teardown to catch them.
+            node.finish_shutdown().await;
+            // The responder socket is gone with the node's children, so retract
+            // its address now (not at `StopNode`: it kept answering for the
+            // whole drain window). Nothing can have republished it in between —
+            // `start_node` will not build a new node until this task has
+            // finished.
+            crate::dns_intercept::set_responder_addr(None);
+            tracing::info!("fips node stopped and its transports torn down");
         });
         // The control socket is bound inside `run_rx_loop`, so peer queries only
         // start making sense once this flag is up — and even then not for the
         // first tick or two.
         self.node_live.store(true, Ordering::Relaxed);
         self.loop_task = Some(task);
+        self.shutdown_tx = Some(shutdown_tx);
         self.node_running = true;
         self.node_status = "running".to_string();
     }
 
+    /// Stop the node — without blocking, and without leaving its transports
+    /// running.
+    ///
+    /// This used to be `loop_task.abort()`, on the belief that dropping the node
+    /// stopped its transports. It does not. The BLE accept loop, the scan+probe
+    /// loop and the advertiser are *separately spawned* tokio tasks holding
+    /// `Arc` clones of the connection pool, the io backend and the stats;
+    /// aborting the parent touches none of them, and async teardown cannot run
+    /// from `Drop`. The old node kept scanning, advertising and dialling the one
+    /// shared Kotlin radio forever, and the next `StartNode` stacked a second
+    /// node on top of it — two DNS responders, two BLE transports, one process.
+    /// The new node rebound the control socket last, so `show_peers` reported
+    /// *its* peers (none) while the old node held the live BLE session.
+    ///
+    /// The constraint that makes this awkward: `stop_node` runs on the FFI
+    /// thread under the reducer mutex, so it must never await the teardown.
+    /// Instead it fires the shutdown signal and hands the waiting to a detached
+    /// watchdog. `start_node` refuses to build a new node until that watchdog
+    /// clears [`Self::stopping`], and `poll_pending_start` replays the queued
+    /// start when it does.
     fn stop_node(&mut self) {
-        // Aborting the loop task drops the node, stopping its transports.
-        if let Some(task) = self.loop_task.take() {
-            task.abort();
+        // An explicit stop cancels a start that was queued behind an earlier one.
+        self.start_pending = false;
+        // Ask the rx loop to drain. Dropping the sender would do it too; sending
+        // says so explicitly, and a closed receiver just means the task is
+        // already on its way out.
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
         }
+        let task = self.loop_task.take();
+        if let (Some(task), Some(rt)) = (task, self.rt.as_ref()) {
+            self.stopping.store(true, Ordering::Release);
+            let stopping = self.stopping.clone();
+            rt.spawn(async move {
+                let mut task = task;
+                if tokio::time::timeout(NODE_STOP_TIMEOUT, &mut task)
+                    .await
+                    .is_err()
+                {
+                    tracing::error!(
+                        timeout_secs = NODE_STOP_TIMEOUT.as_secs(),
+                        "fips node teardown did not finish; aborting the loop task as a last \
+                         resort — its BLE loops may survive and fight the next node for the radio"
+                    );
+                    task.abort();
+                    let _ = task.await;
+                    // The task never reached its own retraction.
+                    crate::dns_intercept::set_responder_addr(None);
+                }
+                // Releases the gate in `start_node`: the transports are down (or
+                // as down as an abort can make them), so a new node may claim
+                // the radio. Ordered after the retraction above so a queued
+                // start can only ever publish a fresh responder address.
+                stopping.store(false, Ordering::Release);
+            });
+        } else {
+            // Nothing was running (or there is no runtime): no drain to wait
+            // for, so retract the responder address here instead.
+            crate::dns_intercept::set_responder_addr(None);
+            self.stopping.store(false, Ordering::Release);
+        }
+        // Gates the 8s peer tick and the platform-peer drainer off immediately:
+        // the node is on its way out and must not be handed new peers to dial.
+        // The control socket does keep answering for the drain window, but
+        // nothing should be reading a draining node's peer list.
         self.node_live.store(false, Ordering::Relaxed);
-        // The responder dies with the node; leaving its address published would
-        // send every `.fips` query to a closed socket.
-        crate::dns_intercept::set_responder_addr(None);
         self.peer_cache.lock().unwrap().clear();
         *self.peer_feed.lock().unwrap() = PeerFeedHealth::default();
         self.node_running = false;
         self.node_status = "stopped".to_string();
+    }
+
+    /// Replay a `StartNode` that arrived while the previous node was still
+    /// draining. Called from `state_json` — which the UI polls at 1Hz and which
+    /// every `dispatch_json` ends with — so a queued start lands within about a
+    /// second of the old node actually being down.
+    fn poll_pending_start(&mut self) {
+        if self.start_pending && !self.stopping.load(Ordering::Acquire) {
+            tracing::info!("previous node is down; starting the queued node");
+            self.start_node();
+        }
     }
 
     /// Parse a JSON action, reduce it, and return the new state as JSON. A bad
@@ -996,7 +1179,18 @@ impl AppRuntime {
             identity: self.identity.clone(),
             node: NodeStatus {
                 running: self.node_running,
-                status_text: self.node_status.clone(),
+                // The drain is a real, visible state: the node is neither
+                // running nor yet gone, and a queued start is waiting on it.
+                // Saying so beats a flat "stopped" that the toggle contradicts.
+                status_text: if self.stopping.load(Ordering::Acquire) {
+                    if self.start_pending {
+                        "restarting (draining the previous node)".to_string()
+                    } else {
+                        "stopping (draining)".to_string()
+                    }
+                } else {
+                    self.node_status.clone()
+                },
             },
             ble: {
                 let (scanning, scanning_known, advertising, advertising_known) =
@@ -1167,7 +1361,10 @@ impl AppRuntime {
         Vec::new()
     }
 
-    pub fn state_json(&self) -> String {
+    pub fn state_json(&mut self) -> String {
+        // The 1Hz UI poll is also the clock a deferred start runs on; see
+        // `poll_pending_start`.
+        self.poll_pending_start();
         serde_json::to_string(&self.state())
             .unwrap_or_else(|e| format!(r#"{{"error":"serialize failed: {e}"}}"#))
     }
@@ -1313,6 +1510,142 @@ mod tests {
             "node should be stopped after StopNode"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Wait for the detached stop watchdog to report the old node down.
+    /// Generous: the point is to catch "never finishes", not to time it.
+    fn await_stopped(rt: &AppRuntime) {
+        let deadline = Instant::now() + NODE_STOP_TIMEOUT + Duration::from_secs(5);
+        while rt.stopping.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// `StopNode` must actually take the node down, and must do it gracefully —
+    /// the loop task has to run to completion (rx-loop drain →
+    /// `Node::finish_shutdown` → `Transport::stop`), not be aborted.
+    ///
+    /// Aborting is what the old code did, and it is why two nodes could be live
+    /// in one process: the BLE accept / scan+probe / advertiser tasks hold `Arc`
+    /// clones and survive their parent, so nothing but `finish_shutdown` stops
+    /// them. There is no BLE transport on the host, so what this pins down is
+    /// the sequencing: the stop completes on its own well inside
+    /// [`NODE_STOP_TIMEOUT`], i.e. the last-resort abort never had to fire.
+    #[test]
+    fn stopping_the_node_completes_the_loop_task_rather_than_aborting_it() {
+        let dir = temp_dir("node-graceful-stop");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+
+        rt.dispatch(NativeAppAction::StartNode);
+        assert!(rt.state().node.running, "node should be running");
+
+        let stopped_at = Instant::now();
+        rt.dispatch(NativeAppAction::StopNode);
+        await_stopped(&rt);
+
+        assert!(
+            !rt.stopping.load(Ordering::Acquire),
+            "the graceful stop never finished — the watchdog would have had to abort"
+        );
+        assert!(
+            stopped_at.elapsed() < NODE_STOP_TIMEOUT,
+            "stop took {:?}, which means the last-resort abort fired",
+            stopped_at.elapsed()
+        );
+        assert!(
+            rt.loop_task.is_none() && rt.shutdown_tx.is_none(),
+            "the loop task and its shutdown signal must be released by StopNode"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `StartNode` that lands while the previous node is still draining must
+    /// be queued, not honoured. Honouring it is the bug: two nodes in one
+    /// process, both driving the single Kotlin BLE radio, with the UI reading
+    /// the idle one.
+    ///
+    /// The gate is driven directly here rather than by racing a real drain —
+    /// on the host, with no transports and no peers, the drain finishes in
+    /// microseconds and the window would be untestable.
+    #[test]
+    fn a_start_during_a_drain_is_queued_until_the_old_node_is_down() {
+        let dir = temp_dir("node-restart-gate");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+
+        // Stand in for "the previous node is still tearing down".
+        rt.stopping.store(true, Ordering::Release);
+
+        rt.dispatch(NativeAppAction::StartNode);
+        assert!(
+            !rt.node_running && rt.loop_task.is_none(),
+            "no second node may be built while the first one's transports are up"
+        );
+        assert!(
+            rt.start_pending,
+            "the start must be remembered, not dropped"
+        );
+        let status = rt.state().node.status_text;
+        assert!(
+            status.contains("draining"),
+            "the UI needs to see the restart in flight, got: {status}"
+        );
+
+        // A state read while still draining must not start it either.
+        let _ = rt.state_json();
+        assert!(!rt.node_running, "still draining — still no node");
+
+        // The watchdog's release edge.
+        rt.stopping.store(false, Ordering::Release);
+        let _ = rt.state_json();
+        assert!(
+            rt.node_running && rt.loop_task.is_some(),
+            "the queued start must be replayed once the old node is down"
+        );
+        assert!(!rt.start_pending, "the queued start must be consumed");
+
+        rt.dispatch(NativeAppAction::StopNode);
+        await_stopped(&rt);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An off→on cycle must leave exactly one node behind. Same shape as the
+    /// mesh toggle on the device: stop, then start again immediately.
+    #[test]
+    fn an_off_on_cycle_leaves_one_node() {
+        let dir = temp_dir("node-off-on");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+
+        rt.dispatch(NativeAppAction::StartNode);
+        assert!(rt.state().node.running);
+
+        rt.dispatch(NativeAppAction::StopNode);
+        // The toggle's own start, fired before the drain can possibly be done.
+        rt.dispatch(NativeAppAction::StartNode);
+        assert!(
+            rt.node_running || rt.start_pending,
+            "the restart is either immediate or queued, never lost"
+        );
+
+        // Drive the 1Hz poll the UI would be doing.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !rt.node_running && Instant::now() < deadline {
+            let _ = rt.state_json();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(rt.node_running, "the node must come back after an off→on");
+        assert!(!rt.start_pending);
+        assert!(
+            !rt.stopping.load(Ordering::Acquire),
+            "the old node must be down before the new one exists"
+        );
+
+        rt.dispatch(NativeAppAction::StopNode);
+        await_stopped(&rt);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
