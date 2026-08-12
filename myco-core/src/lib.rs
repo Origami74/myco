@@ -12,6 +12,12 @@
 mod action;
 mod attempt_store;
 mod content;
+// Client for the fips node's Unix-domain control socket — the only way to read
+// peer state or push a platform-discovered peer into a node whose `run_rx_loop`
+// has borrowed it. Polled only by the Android peer-state tick and the platform
+// peer drainer, so it reads as dead on the host build (its own tests aside).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod control_client;
 // The mesh gossiper is wired only into the Android relay server (runtime.rs); on
 // the host it is exercised only by its own tests, so it reads as dead there.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
