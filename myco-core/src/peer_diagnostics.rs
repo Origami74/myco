@@ -14,9 +14,9 @@
 
 use std::collections::HashMap;
 
-use fips::control::read_handle::PeerView;
+use crate::control_client::PeerView;
 
-use fips::transport::ble::attempts::{BlePeerAttempts, MAX_ATTEMPTS_PER_PEER};
+use crate::ble_diag::{BlePeerAttempts, MAX_ATTEMPTS_PER_PEER};
 
 use crate::content::{CircleContact, OutboundPairView, PairRequestView};
 use crate::state::{BleAdvert, BlePeer, PeerAttemptView, PeerDiagnosticView};
@@ -85,7 +85,7 @@ fn short(s: &str) -> String {
 /// link-local vs. routable) — that would be exactly the sort of
 /// inference-presented-as-observation this phase prohibits.
 ///
-/// `ble_attempts` is the fips BLE transport's per-peer attempt log, keyed by BLE
+/// `ble_attempts` is the per-peer BLE connect-attempt log, keyed by BLE
 /// address. It supplies three things: the role/discovery/outcome history joined
 /// onto each row, the per-peer link send-failure count, and the learned
 /// address-to-node-address pairs that let step 2 attribute an advert to an
@@ -847,7 +847,7 @@ mod tests {
     /// `AppState` JSON carrying its role, discovery duration and outcome.
     #[test]
     fn recorded_lost_tiebreaker_reaches_the_serialized_row() {
-        use fips::transport::ble::attempts::{BleAttempt, BleAttemptOutcome, BleRole};
+        use crate::ble_diag::{BleAttempt, BleAttemptOutcome, BleRole};
 
         let views = vec![pv("beef", "npub-tiebreak", false, 1_000, "ble")];
         let peers = vec![bp("beef", "npub-tiebreak", false)];
@@ -926,7 +926,7 @@ mod tests {
     /// producing a second one (D-09).
     #[test]
     fn advert_with_learned_node_addr_collapses_into_the_peer_row() {
-        use fips::transport::ble::attempts::{BleAttempt, BleAttemptOutcome, BleRole};
+        use crate::ble_diag::{BleAttempt, BleAttemptOutcome, BleRole};
 
         let views = vec![pv("beef", "npub-known", true, 1_000, "ble")];
         let peers = vec![bp("beef", "npub-known", true)];

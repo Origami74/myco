@@ -11,6 +11,11 @@
 
 mod action;
 mod attempt_store;
+// Myco-owned BLE connect-attempt vocabulary. These used to be fips types read
+// out of a transport-global log; the restacked fips counts outcomes into
+// `BleStats` instead. Nothing produces these yet — see the module doc's
+// TODO(stage 2).
+mod ble_diag;
 mod content;
 // Client for the fips node's Unix-domain control socket — the only way to read
 // peer state or push a platform-discovered peer into a node whose `run_rx_loop`
