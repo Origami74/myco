@@ -802,6 +802,12 @@ impl AppRuntime {
             // handshake replies can be lost to a competing validated default
             // network (e.g. cellular).
             crate::udp_fd_bridge::install(node.enable_app_owned_udp_fd());
+            // Hand this node's BLE radio slot to the JNI bridge. The radio
+            // itself belongs to `BleService` and may already be running (it
+            // deliberately does not bounce the node when it starts a fresh
+            // one), so the bridge installs whatever it is holding into the new
+            // slot rather than waiting to be handed a radio.
+            crate::ble_bridge_jni::set_radio_slot(node.enable_app_owned_ble_radio());
         }
         let task = rt.spawn(async move {
             let mut node = node;
@@ -1072,19 +1078,17 @@ impl AppRuntime {
         }
     }
 
-    /// The BLE radio's observed scanning/advertising state, read from the fips
-    /// bridge rather than computed from other flags. `known` is true only when
-    /// the bridge actually resolves (Android, radio started); the host build and
-    /// an absent bridge both report unknown.
-    #[cfg(target_os = "android")]
-    fn ble_radio_state(&self) -> (bool, bool, bool, bool) {
-        match fips::transport::ble::android_io::android_ble_bridge() {
-            Some(b) => (b.is_scanning(), true, b.is_advertising(), true),
-            None => (false, false, false, false),
-        }
-    }
-
-    #[cfg(not(target_os = "android"))]
+    /// The BLE radio's observed scanning/advertising state, as
+    /// `(scanning, scanning_known, advertising, advertising_known)`.
+    ///
+    /// TODO(stage 2): always reports unknown. The flags used to be read back off
+    /// fips's `AndroidBleBridge`, which no longer keeps them — correctly, since
+    /// they were only ever Kotlin's own pushes bouncing off a struct in the
+    /// wrong crate. Restore by mirroring the Aware lane's two Myco-owned
+    /// atomics; the JNI push sites are still there, discarding their argument.
+    /// Diagnostic only: it decides whether the Dev tab renders "scanning" or
+    /// "unknown", nothing more. Reporting unknown is the honest degradation —
+    /// the code has always refused to guess `false`.
     fn ble_radio_state(&self) -> (bool, bool, bool, bool) {
         (false, false, false, false)
     }
@@ -1121,40 +1125,30 @@ impl AppRuntime {
         std::collections::HashMap::new()
     }
 
-    /// Raw scan adverts (address / PSM / RSSI) from the BLE radio bridge. The
-    /// radio is Android-only; on the host there is no bridge.
-    #[cfg(target_os = "android")]
-    fn ble_adverts(&self) -> Vec<BleAdvert> {
-        fips::transport::ble::android_io::android_ble_bridge()
-            .map(|b| {
-                b.advert_views()
-                    .into_iter()
-                    .map(|a| BleAdvert {
-                        addr: a.addr,
-                        psm: a.psm,
-                        rssi: a.rssi,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    #[cfg(not(target_os = "android"))]
+    /// Raw scan adverts (address / PSM / RSSI) seen by the BLE radio.
+    ///
+    /// TODO(stage 2): always empty. `AndroidBleBridge::advert_views()` is gone;
+    /// the bridge forwards each advert straight into the transport's scanner
+    /// channel now and keeps no list. Every advert still crosses
+    /// `bleDeliverScan` in `ble_bridge_jni`, so the cheapest restoration is a
+    /// small Myco-owned ring populated there. Diagnostic only: this feeds
+    /// `AppState.ble_adverts` and the merge step that collapses an advert onto
+    /// an existing peer row.
     fn ble_adverts(&self) -> Vec<BleAdvert> {
         Vec::new()
     }
 
-    /// Per-peer BLE connect-attempt history from the fips transport's process-
-    /// global log. The BLE transport only runs on Android; on the host there are
-    /// no attempts to report, so the merge sees an empty slice and every row
-    /// renders as having no recorded history.
-    #[cfg(target_os = "android")]
-    fn ble_attempts(&self) -> Vec<fips::transport::ble::attempts::BlePeerAttempts> {
-        fips::transport::ble::attempts::ble_attempt_log().snapshot()
-    }
-
-    #[cfg(not(target_os = "android"))]
-    fn ble_attempts(&self) -> Vec<fips::transport::ble::attempts::BlePeerAttempts> {
+    /// Per-peer BLE connect-attempt history.
+    ///
+    /// TODO(stage 2): always empty, so every Dev-tab row renders as having no
+    /// recorded history. `fips::transport::ble::attempts` is gone; the restacked
+    /// transport counts connect outcomes into `BleStats`, readable over the
+    /// control socket's `show_transports`. Note the shape gap before wiring it:
+    /// those are aggregate counters per transport, and these are per-attempt
+    /// records keyed by BLE address. Diagnostic only — verified by tracing every
+    /// consumer (`AttemptStore`, `merge_peers`, `AppState.peers`, the Kotlin Dev
+    /// tab); nothing branches on it.
+    fn ble_attempts(&self) -> Vec<crate::ble_diag::BlePeerAttempts> {
         Vec::new()
     }
 
