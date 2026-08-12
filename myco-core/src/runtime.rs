@@ -1,13 +1,14 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use fips::control::read_handle::ControlReadHandle;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 
 use crate::action::NativeAppAction;
 use crate::content::{CacheView, Content};
+use crate::control_client::PeerView;
 use crate::identity_store;
 use crate::state::{
     AppState, BleAdvert, BlePeer, BleStatus, IdentityView, NodeStatus, WifiAwareStatus,
@@ -20,6 +21,33 @@ use crate::state::{
 /// path (which this reuses) is already UDP + scoped link-local IPv6.
 /// See docs/design/wifi-aware-interop.md.
 const WIFI_AWARE_PORT: u16 = 4871;
+
+/// Consecutive failed `show_peers` queries before the peer feed is reported as
+/// broken in [`AppState::error`].
+///
+/// A failure on the first tick after `StartNode` is normal: fips binds the
+/// control socket *inside* `run_rx_loop`, which only begins after
+/// `node.start()` completes, so there is a startup window where the node is up
+/// and the socket is not yet accepting. Three ticks is ~24s — long past that
+/// window, and short enough to be visible while the fault is still on screen.
+///
+/// Shouting matters because the failure is otherwise invisible at every layer
+/// at once: the Dev tab's peer rows come from this same source so they read as
+/// "no peers nearby", the relay-reachability rows come from the relay pool and
+/// keep populating, and the radios' own diagnostics are Myco-owned and keep
+/// reporting "discovering". A bind failure in fips only warns and lets its task
+/// exit; the node keeps running.
+const PEER_FEED_FAILURES_BEFORE_ERROR: u32 = 3;
+
+/// How the control-socket peer feed is doing. Written by the 8s tick (a
+/// detached task with no `&mut self`), read synchronously by `state()`.
+#[derive(Clone, Debug, Default)]
+struct PeerFeedHealth {
+    /// Failed queries since the last success. Reset to zero on any success.
+    consecutive_failures: u32,
+    /// The most recent failure's reason, for the error banner.
+    last_error: String,
+}
 
 /// The app runtime behind the FFI. Owns the device identity, a multi-thread
 /// Tokio runtime, and the embedded fips node. A `Mutex<AppRuntime>` is what the
@@ -45,9 +73,10 @@ pub struct AppRuntime {
     rt: Option<Runtime>,
     /// The embedded fips node, held until `StartNode` moves it into the loop task.
     node: Option<fips::Node>,
-    /// Lock-free read view of the running node's peer state (cloned out of the
-    /// node before it moves into the loop task; safe to read while the loop runs).
-    read_handle: Option<ControlReadHandle>,
+    /// Whether the node's loop task is live, shared with the detached 8s tick so
+    /// it does not query a control socket that cannot exist yet. Mirrors
+    /// `node_running`, which the tick has no `&self` to read.
+    node_live: Arc<AtomicBool>,
     /// The background task running `node.start()` + `run_rx_loop()`. Aborting it
     /// drops the node and stops its transports.
     loop_task: Option<JoinHandle<()>>,
@@ -57,11 +86,17 @@ pub struct AppRuntime {
     /// Latest dev-menu peer speedtest result; written by the spawned run task and
     /// read back into `state()`. Shared so the async task can update it in place.
     speedtest: Arc<std::sync::Mutex<crate::state::SpeedtestView>>,
-    /// Read-handle slot shared with the keepwarm loop (populated on StartNode,
-    /// cleared on StopNode). The keepwarm tick feeds mesh connectivity to the
-    /// content layer from here, so peer-driven relay sync keeps working while
-    /// the app is backgrounded and the UI's `state()` poll is paused.
-    shared_read: Arc<std::sync::Mutex<Option<ControlReadHandle>>>,
+    /// Last peer snapshot the 8s tick pulled off the control socket.
+    ///
+    /// `state()` runs on the FFI thread holding the reducer mutex and must
+    /// never block, so it reads this cache rather than querying. That is a real
+    /// change from the lock-free `peer_views()` read it replaces: the Dev tab's
+    /// peer rows are now up to 8s stale.
+    peer_cache: Arc<std::sync::Mutex<Vec<PeerView>>>,
+    /// Whether the peer feed is working, so an unbound control socket surfaces
+    /// as an error instead of an empty room. See
+    /// [`PEER_FEED_FAILURES_BEFORE_ERROR`].
+    peer_feed: Arc<std::sync::Mutex<PeerFeedHealth>>,
     /// Crash-surviving history for the BLE attempt log (D-13). Shared so the
     /// rate-limited flush can be spawned onto the tokio runtime rather than
     /// running on the FFI thread. `None` only on a startup error, in which case
@@ -118,9 +153,14 @@ impl AppRuntime {
         // file makes this idempotent and lets a user who removes it stay removed.
         seed_default_sites(&content, &rt, Path::new(data_dir));
 
-        // Read-handle slot for the keepwarm loop; populated once the node starts.
-        let shared_read: Arc<std::sync::Mutex<Option<ControlReadHandle>>> =
-            Arc::new(std::sync::Mutex::new(None));
+        // Peer state now comes off the node's control socket, so the tick needs
+        // somewhere to publish it and somewhere to record whether the feed
+        // works at all. Both are read synchronously by `state()`.
+        let peer_cache: Arc<std::sync::Mutex<Vec<PeerView>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let peer_feed: Arc<std::sync::Mutex<PeerFeedHealth>> =
+            Arc::new(std::sync::Mutex::new(PeerFeedHealth::default()));
+        let node_live = Arc::new(AtomicBool::new(false));
 
         // Serve the relay + Blossom over the mesh so paired peers can pull this
         // device's nsites at ws://<npub>.fips:4870 / http://<npub>.fips:24243.
@@ -233,26 +273,59 @@ impl AppRuntime {
             // then.
             {
                 let content = content.clone();
-                let shared_read = shared_read.clone();
+                let peer_cache = peer_cache.clone();
+                let peer_feed = peer_feed.clone();
+                let node_live = node_live.clone();
+                let control =
+                    crate::control_client::ControlClient::new(crate::control_client::socket_path(
+                        data_dir,
+                    ));
                 rt.spawn(async move {
                     let mut tick = tokio::time::interval(std::time::Duration::from_secs(8));
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     loop {
                         tick.tick().await;
-                        let handle = shared_read.lock().unwrap().clone();
-                        if let Some(h) = handle {
-                            let connected: Vec<String> = h
-                                .peer_views()
-                                .into_iter()
-                                .filter(|p| p.connected && !p.npub.is_empty())
-                                .map(|p| p.npub)
-                                .collect();
-                            content.set_connected_peers(connected);
-                            if !content.circle_npubs().is_empty() {
-                                for addr in content.retriable_library_addrs() {
-                                    let content = content.clone();
-                                    tokio::spawn(
-                                        async move { content.open_site(addr, None).await },
+                        // Nothing binds the socket until the node's rx loop is
+                        // up; querying before then would only manufacture
+                        // failures for the health counter to shout about.
+                        if node_live.load(Ordering::Relaxed) {
+                            match control.show_peers().await {
+                                Ok(peers) => {
+                                    let connected: Vec<String> = peers
+                                        .iter()
+                                        .filter(|p| p.connected && !p.npub.is_empty())
+                                        .map(|p| p.npub.clone())
+                                        .collect();
+                                    *peer_cache.lock().unwrap() = peers;
+                                    {
+                                        let mut health = peer_feed.lock().unwrap();
+                                        health.consecutive_failures = 0;
+                                        health.last_error.clear();
+                                    }
+                                    content.set_connected_peers(connected);
+                                    if !content.circle_npubs().is_empty() {
+                                        for addr in content.retriable_library_addrs() {
+                                            let content = content.clone();
+                                            tokio::spawn(async move {
+                                                content.open_site(addr, None).await
+                                            });
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    // The last snapshot is deliberately kept:
+                                    // stale peer rows plus a visible error beat
+                                    // an empty list that reads as a quiet room.
+                                    let mut health = peer_feed.lock().unwrap();
+                                    health.consecutive_failures =
+                                        health.consecutive_failures.saturating_add(1);
+                                    health.last_error = e.clone();
+                                    let n = health.consecutive_failures;
+                                    drop(health);
+                                    tracing::warn!(
+                                        error = %e,
+                                        consecutive_failures = n,
+                                        "peer state query failed"
                                     );
                                 }
                             }
@@ -275,11 +348,12 @@ impl AppRuntime {
             node_status: "fips node constructed (not started)".to_string(),
             rt: Some(rt),
             node: Some(node),
-            read_handle: None,
+            node_live,
             loop_task: None,
             content: Some(content),
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
-            shared_read,
+            peer_cache,
+            peer_feed,
             // Load once here; a missing file is an empty history, and an
             // unreadable one degrades to empty rather than failing the launch.
             attempt_store: Some(Arc::new(crate::attempt_store::AttemptStore::load(
@@ -319,10 +393,18 @@ impl AppRuntime {
         // at all: direct neighbours mask it because their identity comes from
         // the Noise handshake, never from resolution.
         config.dns.enabled = false;
-        // No control socket: peer state is read via the in-process control read
-        // handle (peer_views), not the Unix socket. The tick publishes the
-        // snapshot regardless of this flag.
-        config.node.control.enabled = false;
+        // The control socket is now load-bearing, not an operator convenience:
+        // it carries peer state (`show_peers`, the 8s tick) and every
+        // platform-discovered peer push (`connect`). Without it the Wi-Fi Aware
+        // and AP lanes carry no peers at all.
+        //
+        // The default path resolves `/run/fips` → `$XDG_RUNTIME_DIR` → `/tmp`,
+        // none of which an Android app UID can write, so it is pointed at
+        // app-private storage. Verified on device under SELinux Enforcing: the
+        // socket binds with the app's own `app_data_file` label, and a stale
+        // file from a force-stop is removed and rebound on the next launch.
+        config.node.control.enabled = true;
+        config.node.control.socket_path = crate::control_client::socket_path(data_dir);
         // On Android, configure a BLE transport instance so node.start() brings up
         // the AndroidIo backend (the Kotlin radio drives it via the injected
         // bridge). Host builds have no BLE backend, so this is Android-only.
@@ -369,11 +451,12 @@ impl AppRuntime {
             node_status: "error".to_string(),
             rt: None,
             node: None,
-            read_handle: None,
+            node_live: Arc::new(AtomicBool::new(false)),
             loop_task: None,
             content: None,
             speedtest: Arc::new(std::sync::Mutex::new(crate::state::SpeedtestView::default())),
-            shared_read: Arc::new(std::sync::Mutex::new(None)),
+            peer_cache: Arc::new(std::sync::Mutex::new(Vec::new())),
+            peer_feed: Arc::new(std::sync::Mutex::new(PeerFeedHealth::default())),
             // No valid data dir on this path, so there is nowhere to persist to.
             // Attempts still render live; they just do not survive a restart.
             attempt_store: None,
@@ -713,9 +796,6 @@ impl AppRuntime {
             // network (e.g. cellular).
             crate::udp_fd_bridge::install(node.enable_app_owned_udp_fd());
         }
-        // Clone the lock-free read handle out before the node moves into the loop
-        // task — peer state is then readable while run_rx_loop owns the node.
-        let handle = node.control_read_handle();
         let task = rt.spawn(async move {
             let mut node = node;
             if let Err(e) = node.start().await {
@@ -727,8 +807,10 @@ impl AppRuntime {
                 tracing::warn!("fips rx loop ended: {e}");
             }
         });
-        *self.shared_read.lock().unwrap() = Some(handle.clone());
-        self.read_handle = Some(handle);
+        // The control socket is bound inside `run_rx_loop`, so peer queries only
+        // start making sense once this flag is up — and even then not for the
+        // first tick or two.
+        self.node_live.store(true, Ordering::Relaxed);
         self.loop_task = Some(task);
         self.node_running = true;
         self.node_status = "running".to_string();
@@ -739,8 +821,9 @@ impl AppRuntime {
         if let Some(task) = self.loop_task.take() {
             task.abort();
         }
-        *self.shared_read.lock().unwrap() = None;
-        self.read_handle = None;
+        self.node_live.store(false, Ordering::Relaxed);
+        self.peer_cache.lock().unwrap().clear();
+        *self.peer_feed.lock().unwrap() = PeerFeedHealth::default();
         self.node_running = false;
         self.node_status = "stopped".to_string();
     }
@@ -759,14 +842,11 @@ impl AppRuntime {
     }
 
     pub fn state(&self) -> AppState {
-        // Live peers, read lock-free from the node's tick-published snapshot
-        // (empty until the loop runs / peers are seen). On Android every peer is
-        // a BLE peer (the only transport configured).
-        let peer_views = self
-            .read_handle
-            .as_ref()
-            .map(|h| h.peer_views())
-            .unwrap_or_default();
+        // Peers as of the last 8s tick. `state()` holds the reducer mutex on the
+        // FFI thread, so it must never query the control socket itself — a
+        // connect + write + read with a 5s timeout is not a drop-in for the
+        // lock-free snapshot read this replaces.
+        let peer_views: Vec<PeerView> = self.peer_cache.lock().unwrap().clone();
 
         let ble_peers: Vec<BlePeer> = peer_views
             .iter()
@@ -883,7 +963,7 @@ impl AppRuntime {
 
         AppState {
             rev: self.rev,
-            error: self.error.clone(),
+            error: self.error_with_feed_health(),
             app_version: self.app_version.clone(),
             identity: self.identity.clone(),
             node: NodeStatus {
@@ -958,6 +1038,30 @@ impl AppRuntime {
                 .unwrap_or_default(),
             speedtest: self.speedtest.lock().unwrap().clone(),
             peers,
+        }
+    }
+
+    /// `self.error` plus, once the peer feed has failed
+    /// [`PEER_FEED_FAILURES_BEFORE_ERROR`] ticks running, a line saying so.
+    ///
+    /// The tick is a detached task with no `&mut self`, so it cannot write
+    /// `self.error` itself; it records into a shared health slot and the banner
+    /// is composed here. Without this the only symptom of an unbound control
+    /// socket is an empty peer list, which is exactly what a room with no peers
+    /// in it looks like.
+    fn error_with_feed_health(&self) -> String {
+        let health = self.peer_feed.lock().unwrap();
+        if health.consecutive_failures < PEER_FEED_FAILURES_BEFORE_ERROR {
+            return self.error.clone();
+        }
+        let note = format!(
+            "peer state unavailable ({} failed queries): {}",
+            health.consecutive_failures, health.last_error
+        );
+        if self.error.is_empty() {
+            note
+        } else {
+            format!("{}; {note}", self.error)
         }
     }
 
@@ -1196,19 +1300,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every subsystem we run ourselves in-process must be switched off in the
-    /// node's config, not merely left unused.
+    /// Which of the node's subsystems Myco runs itself, and which it now
+    /// depends on the node to run. Getting either wrong is silent.
     ///
-    /// `dns` is the one that bites: it defaults to *enabled*, and the built-in
-    /// responder's start-up assigns `dns_identity_rx`, discarding the receiver
-    /// `enable_app_owned_dns()` installed. The identity sender in
-    /// `dns_intercept` is then orphaned and silently drops every resolved
-    /// identity, so a freshly-resolved `<npub>.fips` answers its AAAA but the
-    /// first packet to it is rejected with ICMPv6 "No route". Direct neighbours
-    /// hide the breakage (their identity comes from the Noise handshake), which
-    /// is what made it read as a multi-hop routing fault.
+    /// The TUN stays app-owned: the VpnService holds the fd, so a system TUN
+    /// would be a second, competing packet plane.
+    ///
+    /// `dns` is now **on**, and that is the inversion. Myco used to answer
+    /// `.fips` itself and push each resolved identity into the node over a
+    /// channel; the responder's own start-up clobbered the receiver on that
+    /// channel, so route warming silently stopped and the first packet to a
+    /// freshly-resolved `<npub>.fips` came back "No route". The fix then was to
+    /// switch the responder off. The fix now is the opposite: the responder
+    /// runs, publishes where it bound, and Myco forwards `.fips` queries to it
+    /// — so registering the identity is the responder's own side effect and
+    /// there is no app-owned channel left to clobber.
+    ///
+    /// `control` is on because peer state and every platform peer push ride it.
     #[test]
-    fn in_process_subsystems_are_disabled_in_node_config() {
+    fn node_config_matches_who_owns_each_subsystem() {
         let dir = temp_dir("owned-subsystems");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp data dir");
@@ -1218,17 +1328,59 @@ mod tests {
         let config = node.config();
 
         assert!(
-            !config.dns.enabled,
-            "fips's DNS responder must be off — it would clobber the app-owned \
-             DNS identity channel and silently strip route warming"
+            config.dns.enabled,
+            "fips's DNS responder must be on — Myco proxies `.fips` queries to \
+             it, and answering them is what warms the route"
         );
         assert!(
             !config.tun.enabled,
             "the TUN is app-owned (VpnService holds the fd)"
         );
         assert!(
-            !config.node.control.enabled,
-            "peer state is read via the in-process control read handle"
+            config.node.control.enabled,
+            "peer state and platform peer pushes both ride the control socket"
+        );
+        assert_eq!(
+            config.node.control.socket_path,
+            crate::control_client::socket_path(dir.to_str().unwrap()),
+            "the default path resolves to /run, $XDG_RUNTIME_DIR or /tmp — none \
+             writable by an Android app UID"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A broken peer feed must not look like an empty room. Three consecutive
+    /// failures is the threshold; below it the banner stays clean, because the
+    /// socket is bound inside `run_rx_loop` and the first tick after StartNode
+    /// legitimately races it.
+    #[test]
+    fn a_sustained_peer_feed_failure_reaches_the_error_banner() {
+        let dir = temp_dir("peer-feed-health");
+        let _ = std::fs::remove_dir_all(&dir);
+        let rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+
+        assert!(rt.state().error.is_empty(), "healthy by default");
+
+        {
+            let mut health = rt.peer_feed.lock().unwrap();
+            health.consecutive_failures = PEER_FEED_FAILURES_BEFORE_ERROR - 1;
+            health.last_error = "connect: No such file or directory".to_string();
+        }
+        assert!(
+            rt.state().error.is_empty(),
+            "a startup-window failure must not shout"
+        );
+
+        rt.peer_feed.lock().unwrap().consecutive_failures = PEER_FEED_FAILURES_BEFORE_ERROR;
+        let error = rt.state().error;
+        assert!(
+            error.contains("peer state unavailable"),
+            "sustained failure must be visible, got: {error}"
+        );
+        assert!(
+            error.contains("No such file or directory"),
+            "the reason must survive into the banner, got: {error}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
