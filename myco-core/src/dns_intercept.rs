@@ -105,9 +105,9 @@ pub fn warm_route(npub: &str) {
     if fips::PeerIdentity::from_npub(npub).is_err() {
         return;
     }
-    if responder_addr().is_none() {
+    let Some(addr) = responder_addr() else {
         return; // no node, nothing to warm; retried on the next tick
-    }
+    };
     if !warmed().lock().unwrap().insert(npub.to_string()) {
         return;
     }
@@ -117,7 +117,7 @@ pub fn warm_route(npub: &str) {
     std::thread::spawn(move || {
         // The answer is discarded — registering the identity is the side
         // effect this exists for.
-        let _ = resolve_via_responder(&query);
+        let _ = resolve_via_responder(addr, &query);
     });
 }
 
@@ -135,14 +135,17 @@ fn build_aaaa_query(name: &str) -> Option<Vec<u8>> {
     packet.build_bytes_vec().ok()
 }
 
-/// One blocking UDP round trip to the node's responder, returning the DNS reply
-/// payload. `None` if there is no responder, or it did not answer in time, or
-/// the answer did not match the question.
-fn resolve_via_responder(dns_query: &[u8]) -> Option<Vec<u8>> {
+/// One blocking UDP round trip to the responder at `addr`, returning the DNS
+/// reply payload. `None` if it did not answer in time, or the answer did not
+/// match the question.
+///
+/// Takes the address rather than reading the published one so the round trip is
+/// testable without publishing a responder — publishing one would leak DNS
+/// replies into the shared TUN queue that other tests read.
+fn resolve_via_responder(addr: SocketAddr, dns_query: &[u8]) -> Option<Vec<u8>> {
     if dns_query.len() < 2 {
         return None;
     }
-    let addr = responder_addr()?;
     let bind: SocketAddr = if addr.is_ipv6() {
         "[::1]:0".parse().ok()?
     } else {
@@ -248,15 +251,15 @@ fn parse_query(packet: &[u8]) -> Option<(&[u8], u16, &[u8])> {
 /// the name simply does not resolve, which is the honest outcome: answering it
 /// here would resolve the name while leaving the node unable to reach it.
 fn forward_to_responder(src_addr: &[u8], src_port: u16, dns_query: &[u8]) {
-    if responder_addr().is_none() {
+    let Some(addr) = responder_addr() else {
         return;
-    }
+    };
     let mut querier = [0u8; 16];
     querier.copy_from_slice(src_addr);
     let query = dns_query.to_vec();
 
     std::thread::spawn(move || {
-        if let Some(reply) = resolve_via_responder(&query) {
+        if let Some(reply) = resolve_via_responder(addr, &query) {
             crate::tun_bridge::push_local(build_reply(&querier, src_port, &reply));
         }
     });
@@ -434,10 +437,9 @@ mod tests {
     /// public key is the side effect the whole indirection exists for.
     #[test]
     fn a_fips_query_round_trips_through_the_responder() {
-        set_responder_addr(Some(fake_responder()));
-
+        let addr = fake_responder();
         let query = build_aaaa_query(&format!("{NPUB}.fips")).expect("query builds");
-        let reply = resolve_via_responder(&query).expect("responder answered");
+        let reply = resolve_via_responder(addr, &query).expect("responder answered");
 
         assert_eq!(&reply[..2], &query[..2], "transaction id must match");
         assert_ne!(
@@ -445,33 +447,29 @@ mod tests {
             0,
             "must be a response, not the echo of a query"
         );
-
-        set_responder_addr(None);
     }
 
     /// An answer from somewhere other than the responder, or to a different
     /// question, must not be spliced into the tunnel.
     #[test]
     fn a_mismatched_transaction_id_is_rejected() {
-        set_responder_addr(Some(fake_responder()));
-
+        let addr = fake_responder();
         let query = build_aaaa_query(&format!("{NPUB}.fips")).expect("query builds");
         let mut different = query.clone();
         different[0] ^= 0xff;
         // The fake echoes the id it was sent, so asking with one id and
         // checking against another is the same shape as an off-query reply.
-        let reply = resolve_via_responder(&different).expect("responder answered");
+        let reply = resolve_via_responder(addr, &different).expect("responder answered");
         assert_ne!(&reply[..2], &query[..2]);
-
-        set_responder_addr(None);
     }
 
-    /// With no responder published, a `.fips` name resolves to nothing rather
-    /// than being answered locally. Answering it would hand the caller an
-    /// address the node has no key for, which is the "No route" failure.
+    /// A `.fips` query is consumed here whatever happens next — never handed to
+    /// the mesh, and never answered locally. Answering it locally would give
+    /// the caller an address the node has no key for, which is the "No route"
+    /// failure this whole indirection exists to avoid. No responder is
+    /// published in tests, so this exercises the no-responder path too.
     #[test]
     fn a_fips_query_is_consumed_but_not_answered_locally() {
-        set_responder_addr(None);
         let pkt = make_query(&format!("{NPUB}.fips"), SENTINEL);
         assert!(
             matches!(handle_query(&pkt), Dns::Forwarded),
