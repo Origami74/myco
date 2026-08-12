@@ -91,10 +91,6 @@ impl ControlClient {
         }
     }
 
-    pub fn path(&self) -> &str {
-        &self.socket_path
-    }
-
     /// Issue one command and return its `data` object.
     ///
     /// Every failure mode — the socket not existing (the bind failed, or the
@@ -132,13 +128,10 @@ impl ControlClient {
             .map_err(|e| format!("shutdown: {e}"))?;
 
         let mut response = String::new();
-        timeout(
-            IO_TIMEOUT,
-            BufReader::new(reader).read_line(&mut response),
-        )
-        .await
-        .map_err(|_| "read timed out".to_string())?
-        .map_err(|e| format!("read: {e}"))?;
+        timeout(IO_TIMEOUT, BufReader::new(reader).read_line(&mut response))
+            .await
+            .map_err(|_| "read timed out".to_string())?
+            .map_err(|e| format!("read: {e}"))?;
         if response.is_empty() {
             return Err("server closed the connection without a response".to_string());
         }
@@ -213,7 +206,11 @@ fn peer_from_json(peer: &Value) -> PeerView {
     PeerView {
         node_addr_hex: s("node_addr"),
         npub: s("npub"),
-        connected: is_connected(peer.get("connectivity").and_then(Value::as_str).unwrap_or("")),
+        connected: is_connected(
+            peer.get("connectivity")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        ),
         last_seen_ms: peer
             .get("last_seen_ms")
             .and_then(Value::as_u64)
@@ -236,7 +233,10 @@ mod tests {
         assert!(is_connected("stale"));
         assert!(!is_connected("reconnecting"));
         assert!(!is_connected("disconnected"));
-        assert!(!is_connected(""), "an absent key must not read as connected");
+        assert!(
+            !is_connected(""),
+            "an absent key must not read as connected"
+        );
     }
 
     /// Field mapping against a row observed verbatim on device (probe

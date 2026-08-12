@@ -8,9 +8,16 @@
 //! synthesises a reply, so any app can resolve `<npub>.fips` (and, via a host map
 //! later, aliases) to a mesh `fd00::` address — without a real DNS server socket.
 //!
-//! Resolution itself is pure computation: `<npub>.fips` → `fd00::` is derived from
-//! the public key alone (see [`fips::upper::dns::handle_dns_packet`]), so this
-//! works with no network and no upstream resolver.
+//! Resolution itself is **not** done here. The node runs its own `.fips`
+//! responder and publishes the address it bound to ([`set_responder_addr`]);
+//! this module lifts the DNS payload out of the packet, sends it there over an
+//! ordinary UDP socket, and splices the answer back into a reply packet. That
+//! is the whole point of the indirection: answering a `<npub>.fips` query is
+//! what puts the peer's public key into the node's identity cache, and a mesh
+//! address is a truncated hash — the key cannot be recovered from it. With no
+//! cache entry the first packet to a freshly-resolved name is rejected with
+//! ICMPv6 "No route", a failure direct neighbours mask entirely because their
+//! identity arrives with the Noise handshake.
 //!
 //! Because the sentinel is the *only* resolver the tunnel advertises, this
 //! module owns every name the device looks up, not just mesh ones: non-`.fips`
@@ -20,52 +27,138 @@
 //! real one denies it authoritatively, so mesh names would resolve or not
 //! depending on which server happened to be picked.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use fips::upper::dns::{handle_dns_packet, DnsIdentityTx, DnsResolvedIdentity};
-use fips::upper::hosts::HostMap;
 use fips::upper::tcp_mss::recalculate_l4_checksum;
 
-/// Sender that feeds each DNS-resolved identity to the node's rx-loop so it
-/// populates its identity cache — the route-warming side effect the built-in
-/// desktop DNS responder provides. Without it, a resolved `<npub>.fips` answers
-/// the AAAA but the first packet to that address has no cached pubkey to open a
-/// session with, so it is dropped and the connection silently hangs. Installed
-/// from `runtime.rs` via [`fips::Node::enable_app_owned_dns`].
-static IDENTITY_TX: OnceLock<Mutex<Option<DnsIdentityTx>>> = OnceLock::new();
-
-fn identity_tx() -> &'static Mutex<Option<DnsIdentityTx>> {
-    IDENTITY_TX.get_or_init(|| Mutex::new(None))
-}
-
-/// Install the node's DNS-identity sender. Replaces any prior install (the node
-/// is rebuilt on a transport off→on cycle, yielding a fresh channel).
-pub fn set_identity_tx(tx: DnsIdentityTx) {
-    *identity_tx().lock().unwrap() = Some(tx);
-}
-
-/// Teach the node an npub's address→pubkey mapping without going through a DNS
-/// lookup, so a packet sent to that mesh address can open a session.
+/// Where the node's built-in `.fips` responder is listening, or `None` when it
+/// is not running.
 ///
-/// Dialling a peer by raw `fd00::` literal skips resolution, so nothing
-/// registers the identity and the node has no pubkey to open a session with —
-/// the send is dropped and the address looks unroutable. That is invisible for
-/// a *direct* neighbour, whose identity the node already holds from the
-/// handshake, which is why only adjacent peers used to be reachable. Every
-/// address is derived from the public key alone, so this needs no network.
+/// Published by `runtime::start_node` from `Node::dns_local_addr()` once
+/// `start()` has returned — a one-shot read, because `run_rx_loop` then borrows
+/// the node for the rest of its life. The responder is either up for that whole
+/// life or it never came up.
+///
+/// This replaces the app-owned DNS identity channel, and inverts the data path
+/// while it is at it. Myco used to answer `.fips` itself and push each resolved
+/// identity *into* the node; the node's own responder start-up then overwrote
+/// the receiver on that channel, so every push was silently dropped and route
+/// warming quietly stopped. Now the responder answers and registers the
+/// identity as its own side effect, and there is no channel left to clobber.
+static RESPONDER: OnceLock<Mutex<Option<SocketAddr>>> = OnceLock::new();
+
+fn responder() -> &'static Mutex<Option<SocketAddr>> {
+    RESPONDER.get_or_init(|| Mutex::new(None))
+}
+
+/// Publish (or retract) the responder's address. Replaces any prior value: the
+/// node is rebuilt on a transport off→on cycle and binds a fresh socket.
+///
+/// Clears the warmed-npub set, because a fresh node has a fresh, empty identity
+/// cache and everything has to be warmed again.
+pub fn set_responder_addr(addr: Option<SocketAddr>) {
+    *responder().lock().unwrap() = addr;
+    warmed().lock().unwrap().clear();
+}
+
+fn responder_addr() -> Option<SocketAddr> {
+    *responder().lock().unwrap()
+}
+
+/// How long to wait for the responder. It is in-process on loopback, so this is
+/// a liveness bound, not a latency budget.
+const RESPONDER_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// npubs already resolved through the responder since the current node started.
+///
+/// `keepwarm_tick` calls [`warm_route`] for every Circle member every 8s. That
+/// used to be an in-memory channel send; it is a UDP round trip now, on the
+/// battery-sensitive background path, so it happens once per npub per node.
+static WARMED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn warmed() -> &'static Mutex<HashSet<String>> {
+    WARMED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Transaction ids for synthesised queries, so a reply can be matched to the
+/// query that asked for it.
+static QUERY_ID: AtomicU16 = AtomicU16::new(1);
+
+/// Teach the node an npub's address→pubkey mapping ahead of any dial, so the
+/// first packet to that mesh address can open a session.
+///
+/// A FIPS address is a truncated double hash of the public key, so the node
+/// cannot recover the key from the address; with no cache entry the send is
+/// dropped and the address looks unroutable. A *direct* neighbour hides this,
+/// since its identity came from the Noise handshake.
+///
+/// `keepwarm_tick`'s dials go to `ws://<npub>.fips:4870`, a name — so they warm
+/// themselves through resolution eventually. This pre-warm exists because the
+/// dial and the resolution are concurrent, and losing that race is the whole
+/// failure. Fire-and-forget on its own thread: the caller is a tokio task and
+/// this must not be what stalls the keepwarm loop.
 pub fn warm_route(npub: &str) {
-    let Ok(peer) = fips::PeerIdentity::from_npub(npub) else {
+    if fips::PeerIdentity::from_npub(npub).is_err() {
+        return;
+    }
+    if responder_addr().is_none() {
+        return; // no node, nothing to warm; retried on the next tick
+    }
+    if !warmed().lock().unwrap().insert(npub.to_string()) {
+        return;
+    }
+    let Some(query) = build_aaaa_query(&format!("{npub}.fips")) else {
         return;
     };
-    let id = DnsResolvedIdentity {
-        node_addr: *peer.node_addr(),
-        pubkey: peer.pubkey_full(),
-    };
-    if let Some(tx) = identity_tx().lock().unwrap().as_ref() {
-        let _ = tx.try_send(id);
+    std::thread::spawn(move || {
+        // The answer is discarded — registering the identity is the side
+        // effect this exists for.
+        let _ = resolve_via_responder(&query);
+    });
+}
+
+/// A minimal AAAA query for `name`, as the responder expects it: payload only,
+/// no IP or UDP header.
+fn build_aaaa_query(name: &str) -> Option<Vec<u8>> {
+    use simple_dns::{Name, Packet, Question, CLASS, QCLASS, QTYPE, TYPE};
+    let mut packet = Packet::new_query(QUERY_ID.fetch_add(1, Ordering::Relaxed));
+    packet.questions.push(Question::new(
+        Name::new(name).ok()?,
+        QTYPE::TYPE(TYPE::AAAA),
+        QCLASS::CLASS(CLASS::IN),
+        false,
+    ));
+    packet.build_bytes_vec().ok()
+}
+
+/// One blocking UDP round trip to the node's responder, returning the DNS reply
+/// payload. `None` if there is no responder, or it did not answer in time, or
+/// the answer did not match the question.
+fn resolve_via_responder(dns_query: &[u8]) -> Option<Vec<u8>> {
+    if dns_query.len() < 2 {
+        return None;
     }
+    let addr = responder_addr()?;
+    let bind: SocketAddr = if addr.is_ipv6() {
+        "[::1]:0".parse().ok()?
+    } else {
+        "127.0.0.1:0".parse().ok()?
+    };
+    let sock = std::net::UdpSocket::bind(bind).ok()?;
+    sock.set_read_timeout(Some(RESPONDER_TIMEOUT)).ok()?;
+    sock.send_to(dns_query, addr).ok()?;
+
+    let mut buf = [0u8; 1500];
+    let (n, from) = sock.recv_from(&mut buf).ok()?;
+    // Only the server we asked, and only an answer to the question we sent.
+    if from.ip() != addr.ip() || n < 2 || buf[..2] != dns_query[..2] {
+        return None;
+    }
+    Some(buf[..n].to_vec())
 }
 
 /// The sentinel DNS-server address, `fd00::53`. Chosen inside the routed
@@ -73,12 +166,10 @@ pub fn warm_route(npub: &str) {
 /// npub-derived node address (those fill the whole 128 bits from a hash).
 const SENTINEL: [u8; 16] = [0xfd, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x53];
 
-/// String form used by the Kotlin VPN builder's `addDnsServer`.
+/// String form used by the Kotlin VPN builder's `addDnsServer`. Its only
+/// consumer is on the other side of the FFI, so nothing in Rust reads it.
+#[allow(dead_code)]
 pub const SENTINEL_STR: &str = "fd00::53";
-
-/// TTL (seconds) on synthesised AAAA answers. Short: a node's mesh address is
-/// stable, but keeping it low means a stale mapping self-heals quickly.
-const ANSWER_TTL: u32 = 30;
 
 const IPV6_HEADER_LEN: usize = 40;
 const UDP_HEADER_LEN: usize = 8;
@@ -87,34 +178,33 @@ const DNS_PORT: u16 = 53;
 
 /// What [`handle_query`] did with a packet.
 pub enum Dns {
-    /// A `.fips` query, answered here — write this reply to the TUN.
-    Answered(Vec<u8>),
-    /// Not ours to answer, sent to a real resolver instead; the reply will be
-    /// delivered later through [`crate::tun_bridge::push_local`]. The caller
-    /// must consume the packet either way.
+    /// Ours, and now in flight to a resolver — the node's own `.fips` responder
+    /// or a real upstream one. The reply is delivered later through
+    /// [`crate::tun_bridge::push_local`]; the caller must consume the packet
+    /// regardless, because it must not reach the mesh either way.
     Forwarded,
     /// Not a DNS query to the sentinel — forward it into the mesh unchanged.
     NotOurs,
 }
 
 /// Handle a packet the TUN pump read, if it is a UDP DNS query to
-/// `[fd00::53]:53`. `.fips` names are answered from the public key alone;
-/// everything else is relayed to a real resolver (see [`set_upstream`]),
-/// because the sentinel is the tunnel's *only* advertised server — anything we
-/// decline here would simply fail to resolve on the device.
+/// `[fd00::53]:53`. `.fips` names go to the node's own responder; everything
+/// else is relayed to a real resolver (see [`set_upstream`]), because the
+/// sentinel is the tunnel's *only* advertised server — anything we decline here
+/// would simply fail to resolve on the device.
+///
+/// Both paths are asynchronous now. `.fips` used to be answered inline, from
+/// the public key alone; it is a round trip to the responder instead, so the
+/// route-warming side effect happens where the identity cache actually lives.
 pub fn handle_query(packet: &[u8]) -> Dns {
     match parse_query(packet) {
         Some((src_addr, src_port, dns_query)) => {
             if is_fips_name(dns_query) {
-                match answer_fips(src_addr, src_port, dns_query) {
-                    Some(reply) => Dns::Answered(reply),
-                    // Malformed enough that even SERVFAIL can't be built.
-                    None => Dns::Forwarded,
-                }
+                forward_to_responder(src_addr, src_port, dns_query);
             } else {
                 forward_upstream(src_addr, src_port, dns_query);
-                Dns::Forwarded
             }
+            Dns::Forwarded
         }
         None => Dns::NotOurs,
     }
@@ -145,20 +235,31 @@ fn parse_query(packet: &[u8]) -> Option<(&[u8], u16, &[u8])> {
     Some((&packet[8..24], src_port, dns_query))
 }
 
-/// Answer a `.fips` query from the public key alone, and warm the route.
-fn answer_fips(src_addr: &[u8], src_port: u16, dns_query: &[u8]) -> Option<Vec<u8>> {
-    // Empty host map: `<npub>.fips` resolves by pure computation without it.
-    let (dns_reply, identity) = handle_dns_packet(dns_query, ANSWER_TTL, &HostMap::new())?;
-
-    // Warm the route: hand the resolved identity to the node so it caches the
-    // pubkey and can open a session to this address (see [`set_identity_tx`]).
-    if let Some(id) = identity {
-        if let Some(tx) = identity_tx().lock().unwrap().as_ref() {
-            let _ = tx.try_send(id);
-        }
+/// Send a `.fips` query to the node's own responder and inject its answer back
+/// into the TUN.
+///
+/// Runs on its own thread for the same reason [`forward_upstream`] does: the
+/// caller is the TUN read loop, and blocking it would stall every other packet
+/// on the device. Mesh DNS volume is low enough that a thread per outstanding
+/// query is cheaper than the machinery to avoid one.
+///
+/// A dropped query is a query the OS resolver retries. With no responder
+/// published — the node is stopped, or its bind failed — nothing is sent and
+/// the name simply does not resolve, which is the honest outcome: answering it
+/// here would resolve the name while leaving the node unable to reach it.
+fn forward_to_responder(src_addr: &[u8], src_port: u16, dns_query: &[u8]) {
+    if responder_addr().is_none() {
+        return;
     }
+    let mut querier = [0u8; 16];
+    querier.copy_from_slice(src_addr);
+    let query = dns_query.to_vec();
 
-    Some(build_reply(src_addr, src_port, &dns_reply))
+    std::thread::spawn(move || {
+        if let Some(reply) = resolve_via_responder(&query) {
+            crate::tun_bridge::push_local(build_reply(&querier, src_port, &reply));
+        }
+    });
 }
 
 /// Real resolvers to relay non-`.fips` queries to, set by the platform from the
@@ -307,27 +408,94 @@ mod tests {
         pkt
     }
 
-    #[test]
-    fn resolves_npub_fips_query() {
-        // A valid npub (from fips test vectors would be ideal; use a well-formed one).
-        let npub = "npub1mqelkzqp4659fws35h2wvr7z9caka5ml8qddj3ssnwaulwpxdd9sdc3esw";
-        let pkt = make_query(&format!("{npub}.fips"), SENTINEL);
-        let Dns::Answered(reply) = handle_query(&pkt) else {
-            panic!("a .fips query must be answered here, not forwarded");
-        };
+    const NPUB: &str = "npub1mqelkzqp4659fws35h2wvr7z9caka5ml8qddj3ssnwaulwpxdd9sdc3esw";
 
-        // Reply is IPv6/UDP, from :53, back to the querier, addressed to the client.
+    /// A stand-in for the node's built-in responder: echoes back whatever it is
+    /// sent, with the DNS QR bit set so it reads as a response. Returns the
+    /// address it bound to.
+    fn fake_responder() -> SocketAddr {
+        let sock = std::net::UdpSocket::bind("[::1]:0").expect("bind fake responder");
+        let addr = sock.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1500];
+            while let Ok((n, from)) = sock.recv_from(&mut buf) {
+                if n >= 3 {
+                    buf[2] |= 0x80; // QR = response
+                }
+                let _ = sock.send_to(&buf[..n], from);
+            }
+        });
+        addr
+    }
+
+    /// The load-bearing leg: a `.fips` query is proxied to the responder and its
+    /// answer comes back, matched by transaction id. Route warming rides on this
+    /// round trip actually happening — the responder registering the peer's
+    /// public key is the side effect the whole indirection exists for.
+    #[test]
+    fn a_fips_query_round_trips_through_the_responder() {
+        set_responder_addr(Some(fake_responder()));
+
+        let query = build_aaaa_query(&format!("{NPUB}.fips")).expect("query builds");
+        let reply = resolve_via_responder(&query).expect("responder answered");
+
+        assert_eq!(&reply[..2], &query[..2], "transaction id must match");
+        assert_ne!(
+            reply[2] & 0x80,
+            0,
+            "must be a response, not the echo of a query"
+        );
+
+        set_responder_addr(None);
+    }
+
+    /// An answer from somewhere other than the responder, or to a different
+    /// question, must not be spliced into the tunnel.
+    #[test]
+    fn a_mismatched_transaction_id_is_rejected() {
+        set_responder_addr(Some(fake_responder()));
+
+        let query = build_aaaa_query(&format!("{NPUB}.fips")).expect("query builds");
+        let mut different = query.clone();
+        different[0] ^= 0xff;
+        // The fake echoes the id it was sent, so asking with one id and
+        // checking against another is the same shape as an off-query reply.
+        let reply = resolve_via_responder(&different).expect("responder answered");
+        assert_ne!(&reply[..2], &query[..2]);
+
+        set_responder_addr(None);
+    }
+
+    /// With no responder published, a `.fips` name resolves to nothing rather
+    /// than being answered locally. Answering it would hand the caller an
+    /// address the node has no key for, which is the "No route" failure.
+    #[test]
+    fn a_fips_query_is_consumed_but_not_answered_locally() {
+        set_responder_addr(None);
+        let pkt = make_query(&format!("{NPUB}.fips"), SENTINEL);
+        assert!(
+            matches!(handle_query(&pkt), Dns::Forwarded),
+            "a .fips query is ours, so it must never reach the mesh"
+        );
+    }
+
+    /// The reply packet assembly is unchanged and still owned here: the
+    /// responder returns a DNS payload, not an IPv6 packet.
+    #[test]
+    fn reply_packets_are_addressed_back_to_the_querier() {
+        let pkt = make_query(&format!("{NPUB}.fips"), SENTINEL);
+        let reply = build_reply(&pkt[8..24], 40000, b"\x12\x34payload");
+
         assert_eq!(reply[0] >> 4, 6);
         assert_eq!(reply[6], NEXT_HEADER_UDP);
         assert_eq!(&reply[8..24], &SENTINEL); // src = sentinel
         assert_eq!(&reply[24..40], &pkt[8..24]); // dst = original client
         assert_eq!(u16::from_be_bytes([reply[40], reply[41]]), DNS_PORT);
         assert_eq!(u16::from_be_bytes([reply[42], reply[43]]), 40000);
-
-        // The DNS answer carries an AAAA in the mesh prefix.
-        let dns = &reply[IPV6_HEADER_LEN + UDP_HEADER_LEN..];
-        let parsed = simple_dns::Packet::parse(dns).unwrap();
-        assert_eq!(parsed.answers.len(), 1);
+        assert_eq!(
+            &reply[IPV6_HEADER_LEN + UDP_HEADER_LEN..],
+            b"\x12\x34payload"
+        );
     }
 
     #[test]
@@ -344,10 +512,9 @@ mod tests {
 
     #[test]
     fn ignores_wrong_destination() {
-        let npub = "npub1mqelkzqp4659fws35h2wvr7z9caka5ml8qddj3ssnwaulwpxdd9sdc3esw";
         // Same query but to a non-sentinel address → not ours, forward to mesh.
         let other = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9];
-        let pkt = make_query(&format!("{npub}.fips"), other);
+        let pkt = make_query(&format!("{NPUB}.fips"), other);
         assert!(matches!(handle_query(&pkt), Dns::NotOurs));
     }
 

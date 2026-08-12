@@ -383,23 +383,26 @@ impl AppRuntime {
         config.node.identity.nsec = Some(nsec);
         config.node.identity.persistent = true;
         config.tun.enabled = false;
-        // No built-in DNS responder: we answer `.fips` ourselves in the TUN pump
-        // (`dns_intercept`), because on Android there is no system DNS socket to
-        // bind — the OS resolver is pointed at the in-mesh sentinel instead.
+        // The built-in `.fips` responder runs, and Myco proxies to it.
         //
-        // This must be off, not merely unused. `dns.enabled` defaults to *true*,
-        // and the responder's start-up in `Node::start` assigns
-        // `self.dns_identity_rx`, clobbering the receiver that
-        // `enable_app_owned_dns()` installed moments earlier. Our sender in
-        // `dns_intercept` is then attached to a dropped receiver, so every
-        // `try_send` of a resolved identity fails silently and nothing is ever
-        // registered. The name still resolves — the interceptor answers the
-        // packet regardless — so the only visible symptom is that the first
-        // packet to a freshly-resolved `<npub>.fips` gets ICMPv6 "No route".
-        // That looks like a routing/distance bug, but reproduces with no peers
-        // at all: direct neighbours mask it because their identity comes from
-        // the Noise handshake, never from resolution.
-        config.dns.enabled = false;
+        // Android has no system DNS socket to point at the responder — the
+        // VpnService aims the OS resolver into the tunnel, so queries surface
+        // as IPv6/UDP packets on the app's own fd. Myco still owns the packet
+        // plane, but it lifts the DNS payload out and forwards it here instead
+        // of resolving in-app: answering a `<npub>.fips` query is what puts
+        // that peer's public key in the node's identity cache, and the key
+        // cannot be recovered from the mesh address.
+        //
+        // This is the inversion of the previous fix, not a regression of it.
+        // Before, Myco answered and pushed identities *into* the node over a
+        // channel that the responder's own start-up then overwrote — so the
+        // responder had to be off. Now there is no app-owned channel to
+        // clobber, and the responder being off is what would break warming.
+        //
+        // Port 0: the address is read back off the bound socket via
+        // `dns_local_addr()`, so the kernel picks and nothing squats on 5354.
+        config.dns.enabled = true;
+        config.dns.port = Some(0);
         // The control socket is now load-bearing, not an operator convenience:
         // it carries peer state (`show_peers`, the 8s tick) and every
         // platform-discovered peer push (`connect`). Without it the Wi-Fi Aware
@@ -791,11 +794,6 @@ impl AppRuntime {
             let max_mss = node.effective_ipv6_mtu().saturating_sub(60);
             let (tun_outbound_tx, tun_inbound_rx) = node.enable_app_owned_tun();
             crate::tun_bridge::install(tun_outbound_tx, tun_inbound_rx, max_mss);
-            // Wire the app-owned DNS interceptor's identity channel into the node
-            // so resolving `<npub>.fips` warms the route (caches the pubkey), the
-            // same side effect fips's own DNS responder has. Without this the
-            // first packet to a resolved address has no session and is dropped.
-            crate::dns_intercept::set_identity_tx(node.enable_app_owned_dns());
             // Let Android learn the UDP transport's raw fd once it opens, so it
             // can pin the socket to whichever local-only network (Wi-Fi Aware
             // NDP, the `!FIPS` AP) carries a platform-pushed peer — otherwise
@@ -815,6 +813,20 @@ impl AppRuntime {
                 tracing::error!("fips node start failed: {e}");
                 return;
             }
+            // Publish where the built-in `.fips` responder bound, so the TUN
+            // pump can forward queries to it. This has to happen *here*, inside
+            // the task: `dns_local_addr()` is only meaningful after `start()`
+            // returns, and `run_rx_loop` below borrows the node for the rest of
+            // its life, so this is the only moment a `&Node` exists and the
+            // value is settled. `None` means the responder never came up (its
+            // bind only warns), and `.fips` then resolves to nothing rather
+            // than to an address the node has no key for.
+            let dns_addr = node.dns_local_addr();
+            match dns_addr {
+                Some(addr) => tracing::info!(%addr, "fips DNS responder listening"),
+                None => tracing::warn!("fips DNS responder is not running; .fips will not resolve"),
+            }
+            crate::dns_intercept::set_responder_addr(dns_addr);
             // Runs until the packet channel closes or the task is aborted.
             if let Err(e) = node.run_rx_loop().await {
                 tracing::warn!("fips rx loop ended: {e}");
@@ -835,6 +847,9 @@ impl AppRuntime {
             task.abort();
         }
         self.node_live.store(false, Ordering::Relaxed);
+        // The responder dies with the node; leaving its address published would
+        // send every `.fips` query to a closed socket.
+        crate::dns_intercept::set_responder_addr(None);
         self.peer_cache.lock().unwrap().clear();
         *self.peer_feed.lock().unwrap() = PeerFeedHealth::default();
         self.node_running = false;
