@@ -271,15 +271,22 @@ impl AppRuntime {
             // 1Hz for foreground snappiness, but its poll pauses when the app is
             // backgrounded — this loop is what keeps peer-driven relay sync alive
             // then.
+            let control = crate::control_client::ControlClient::new(
+                crate::control_client::socket_path(data_dir),
+            );
+
+            // Platform-discovered peers (Wi-Fi Aware, the AP lane) reach the
+            // node over the same socket. The Kotlin radios push into a bounded
+            // queue from their own callback threads; this task owns the client
+            // and issues `connect`. Spawned once for the process, so it spans
+            // node rebuilds and the window before the first StartNode.
+            crate::platform_peers::spawn_drainer(&rt, control.clone(), node_live.clone());
+
             {
                 let content = content.clone();
                 let peer_cache = peer_cache.clone();
                 let peer_feed = peer_feed.clone();
                 let node_live = node_live.clone();
-                let control =
-                    crate::control_client::ControlClient::new(crate::control_client::socket_path(
-                        data_dir,
-                    ));
                 rt.spawn(async move {
                     let mut tick = tokio::time::interval(std::time::Duration::from_secs(8));
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

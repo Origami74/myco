@@ -38,6 +38,10 @@ mod lane_observation;
 mod peer_diagnostics;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod peer_relay;
+// Bounded queue + drainer between the Kotlin radios' callback threads and the
+// node's control socket, where pushing a platform-discovered peer now lives.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod platform_peers;
 mod runtime;
 mod state;
 // The bridge is pumped only by the Android VpnService (via tun_bridge_jni) and

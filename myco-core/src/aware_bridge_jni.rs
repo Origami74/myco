@@ -5,8 +5,10 @@
 //! terminates in a kernel network interface, so the bytes ride the ordinary
 //! UDP transport (bound at `runtime::WIFI_AWARE_PORT` on the NDP interface).
 //! The Kotlin `AwareRadio` runs discovery autonomously and only pushes
-//! "peer reachable / lost" events into fips's process-global platform peer
-//! queue (`fips::discovery::platform`), which the node drains each tick.
+//! "peer reachable" events into Myco's own bounded queue
+//! ([`crate::platform_peers`]), which a tokio task drains onto the node's
+//! control socket. The push itself never touches the socket: it arrives on the
+//! radio's single `HandlerThread`, which must not be held.
 //!
 //! Kotlin passes the peer's link-local address already formatted with a
 //! *numeric* scope (`"[fe80::x%3]:4871"`, ifindex resolved from
@@ -14,7 +16,7 @@
 //! docs/design/wifi-aware-interop.md § "Dialing a link-local peer").
 //!
 //! Compiled only on Android; the host build exercises the same seam directly
-//! through `fips::discovery::platform`.
+//! through [`crate::platform_peers`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -54,17 +56,32 @@ pub extern "system" fn Java_app_myco_core_NativeCore_awarePeerFound(
         return;
     };
     crate::lane_observation::set_lane(&npub, &lane);
-    fips::discovery::platform::platform_peer_available(&npub, &addr, TRANSPORT_TYPE);
+    crate::platform_peers::push(&npub, &addr, TRANSPORT_TYPE);
 }
 
-/// Kotlin observed the Wi-Fi Aware data path to `npub` go away. The node
-/// closes the pooled UDP session so the dead socket is not re-used;
-/// reconnection (e.g. falling back to BLE) is the node's ordinary job.
+/// Kotlin observed the Wi-Fi Aware data path to `npub` go away.
 ///
-/// `lane` names which radio observed the loss; [`crate::lane_observation`]
-/// clears the recorded lane for `npub` only if it still matches `lane`, so a
-/// stale loss from one lane cannot erase a fresher record pushed by the
-/// other.
+/// **Nothing is told to the node, deliberately.** This used to call fips's
+/// `platform_peer_lost`, which resolved the peer and asked the named transport
+/// to close its connection — but the name pushed here is always `"udp"` for
+/// both lanes, and the UDP transport does not override `close_connection`; it
+/// falls through to the connectionless no-op default. So the call has never
+/// had any effect, and the premise it was written on ("the node closes the
+/// pooled UDP session so the dead socket is not re-used") was wrong: a
+/// connectionless transport has no pooled socket. Falling back to BLE was
+/// always the node's ordinary liveness machinery doing its job.
+///
+/// The control socket's `disconnect` is not a replacement. It keys on npub
+/// alone, with no transport parameter, and does a full teardown — notify the
+/// peer, drop every session, index and link, and suppress auto-reconnect. Aware
+/// data paths are fragile and `onLost` fires often, so wiring it here would let
+/// a routine NDP drop tear down a live BLE session to the same peer. That is a
+/// direct hit on the one thing the product has to do.
+///
+/// What remains is the Myco-owned Dev-tab label: `lane` names which radio
+/// observed the loss, and [`crate::lane_observation`] clears the recorded lane
+/// for `npub` only if it still matches, so a stale loss from one lane cannot
+/// erase a fresher record pushed by the other.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_awarePeerLost(
     mut env: JNIEnv,
@@ -76,7 +93,6 @@ pub extern "system" fn Java_app_myco_core_NativeCore_awarePeerLost(
         return;
     };
     crate::lane_observation::clear_lane(&npub, &lane);
-    fips::discovery::platform::platform_peer_lost(&npub, TRANSPORT_TYPE);
 }
 
 // ============================================================================
