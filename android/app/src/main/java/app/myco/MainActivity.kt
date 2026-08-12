@@ -221,18 +221,68 @@ class MainActivity : ComponentActivity() {
 
     // --- mesh adapter (app-owned TUN) ---
 
+    /**
+     * The mesh master switch. Takes the node **and the BLE radio** with it.
+     *
+     * The radio has to follow, and this is the one place it does. The BLE
+     * byte-bridge hands its scan and accept receivers to whichever transport
+     * asks first, and never gets them back — so a node rebuilt underneath a
+     * surviving radio comes up with a scanner that receives nothing and an
+     * acceptor that accepts nothing: BLE looks alive (advertising, the radio
+     * still scanning) while no advert ever reaches the new node. Rebuilding the
+     * radio alongside the node gives the new transport a fresh bridge to take.
+     *
+     * This does not contradict [BleService]'s rule that starting a radio must
+     * never bounce the node — that is about the *radio* toggle. Here the node is
+     * going down regardless; the radio is following it, not driving it.
+     */
     private fun setMeshEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(PREF_MESH, enabled).apply()
+        val bleOn = prefs.getBoolean(PREF_BLE, true)
         if (enabled) {
             // Node follows the master switch (radio toggles only gate radios).
             core.dispatch(NativeActions.startNode())
+            startBleWhenNodeUp()
             // Android requires user consent before any app can run a VPN.
             val consent = VpnService.prepare(this)
             android.util.Log.i("MycoVpn", "setMeshEnabled(true): consent needed=${consent != null}")
             if (consent != null) vpnConsentLauncher.launch(consent) else startMeshNow()
         } else {
             MycoVpnService.stop(this)
+            // Stop the node first: its drain wants to get a shutdown Disconnect
+            // out over whatever links are still up, including BLE.
             core.dispatch(NativeActions.stopNode())
+            if (bleOn) BleService.stop(this)
+        }
+    }
+
+    /**
+     * Start the BLE radio, but not before the node is actually running.
+     *
+     * The order is load-bearing. The byte-bridge's scan and accept receivers are
+     * single-take: whichever transport resolves the bridge first keeps them for
+     * good. Creating the radio while the previous node is still draining hands
+     * the fresh bridge to the *dying* transport, and the node that replaces it
+     * comes up deaf — advertising normally, scanning normally, and receiving
+     * nothing. Waiting for `nodeRunning` means the new transport is the one that
+     * takes them.
+     *
+     * Same retry budget as [startMeshNow], and the same reasoning: a stop that
+     * has to drain first can hold the start back for a couple of seconds.
+     */
+    private fun startBleWhenNodeUp(attempt: Int = 0) {
+        if (!prefs.getBoolean(PREF_BLE, true)) return
+        if (!bleCorePermsGranted()) {
+            requestBlePermissionsIfNeeded()
+            return
+        }
+        // Out of retries: start anyway rather than leaving BLE off entirely. A
+        // bridge that arrives late is picked up in place — the running scanner
+        // re-resolves the slot and takes the new receivers.
+        if (core.state().nodeRunning || attempt >= MESH_START_RETRIES) {
+            BleService.start(this)
+        } else {
+            window.decorView.postDelayed({ startBleWhenNodeUp(attempt + 1) }, MESH_START_RETRY_MS)
         }
     }
 
