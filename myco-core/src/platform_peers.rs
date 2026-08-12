@@ -190,19 +190,18 @@ mod tests {
     use super::*;
 
     /// The queue is process-global, so the tests share it and must not assume
-    /// they own it. Each uses its own npub prefix and drains what it enqueued.
-    fn drain_now(rx: &mut Receiver<PlatformPeer>, prefix: &str) -> Vec<PlatformPeer> {
+    /// they own it — and there is exactly one receiver to take, so this is one
+    /// test rather than several racing for it.
+    fn drain_now(rx: &mut Receiver<PlatformPeer>) -> Vec<PlatformPeer> {
         let mut out = Vec::new();
         while let Ok(p) = rx.try_recv() {
-            if p.npub.starts_with(prefix) {
-                out.push(p);
-            }
+            out.push(p);
         }
         out
     }
 
     #[tokio::test]
-    async fn a_repush_of_the_same_pair_is_suppressed_but_a_new_address_is_not() {
+    async fn the_queue_suppresses_duplicates_and_drops_rather_than_blocks() {
         let mut rx = queue()
             .rx
             .lock()
@@ -210,6 +209,9 @@ mod tests {
             .take()
             .expect("no drainer runs in tests");
 
+        // Re-push suppression is per (npub, address): the same pair inside the
+        // window is a duplicate dial, a new address for the same peer is a path
+        // change and must get through.
         assert!(push("npub1sup", "[fe80::1%3]:4871", "udp"));
         assert!(
             !push("npub1sup", "[fe80::1%3]:4871", "udp"),
@@ -220,26 +222,15 @@ mod tests {
             "a new address for the same peer is a path change, not a duplicate"
         );
 
-        let got = drain_now(&mut rx, "npub1sup");
+        let got = drain_now(&mut rx);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].address, "[fe80::1%3]:4871");
         assert_eq!(got[1].address, "[fe80::2%3]:4871");
         assert_eq!(got[0].transport, "udp");
 
-        *queue().rx.lock().unwrap() = Some(rx);
-    }
-
-    /// Overflow must not block the caller: it is a framework callback thread
-    /// that also serves every other event on its lane.
-    #[tokio::test]
-    async fn a_full_queue_drops_the_arriving_push_without_blocking() {
-        let mut rx = queue()
-            .rx
-            .lock()
-            .unwrap()
-            .take()
-            .expect("no drainer runs in tests");
-
+        // Overflow must not block the caller: it is a framework callback thread
+        // that also serves every other event on its lane. Nothing is drained
+        // meanwhile, so the queue genuinely fills.
         let mut accepted = 0;
         for i in 0..(QUEUE_CAP * 2) {
             if push("npub1full", &format!("[fe80::{i}%3]:4871"), "udp") {
@@ -251,8 +242,12 @@ mod tests {
             "the queue is bounded at {QUEUE_CAP}, accepted {accepted}"
         );
         assert!(accepted > 0, "pushes must get through at all");
+        assert_eq!(
+            drain_now(&mut rx).len(),
+            accepted,
+            "everything accepted is queued, and nothing else is"
+        );
 
-        drain_now(&mut rx, "npub1full");
         *queue().rx.lock().unwrap() = Some(rx);
     }
 }
