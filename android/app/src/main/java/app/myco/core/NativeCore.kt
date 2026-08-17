@@ -42,6 +42,11 @@ internal object NativeCore {
 
     /** Create the bridge over a BleRadio, inject it into the core, return a handle. */
     external fun bleBridgeNew(appHandle: Long, radio: Any): Long
+
+    /** Retract a shut-down radio from the core's slot, without freeing the
+     *  handle. The core then parks until a live radio is injected, rather than
+     *  driving one whose sockets are already closed. */
+    external fun bleBridgeClear(bridgeHandle: Long)
     external fun bleBridgeFree(bridgeHandle: Long)
 
     /** Kotlin → Rust pushes (non-blocking). */

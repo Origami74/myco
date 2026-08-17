@@ -184,6 +184,36 @@ fn set_radio_bridge(bridge: Arc<AndroidBleBridge>) {
     install.bridge = Some(bridge);
 }
 
+/// Retract a radio Kotlin has shut down, clearing it out of the node's slot.
+///
+/// Without this the installation kept holding a dead radio, and the next
+/// [`set_radio_slot`] — which a mesh toggle reaches, because rebuilding the
+/// node yields a fresh slot — installed that dead radio into the new slot.
+/// The transport's `listen` and `start_advertising` then ran against closed
+/// sockets until Kotlin's next `bleBridgeNew` replaced it, about a second
+/// later. Benign in that window, but it is the same shape as the stale-PSM
+/// bug: state that outlives the thing it describes. An empty slot parks the
+/// backend until a live radio arrives, which is the correct degradation.
+///
+/// Retracts only the radio it was handed. `bleBridgeNew` may already have
+/// installed a newer one — a stop racing a start must not take that one down.
+fn clear_radio_bridge(bridge: &Arc<AndroidBleBridge>) {
+    let mut install = installation().lock().unwrap_or_else(|e| e.into_inner());
+    if !install
+        .bridge
+        .as_ref()
+        .is_some_and(|held| Arc::ptr_eq(held, bridge))
+    {
+        return;
+    }
+    install.bridge = None;
+    if let Some(slot) = install.slot.as_ref() {
+        if slot.current().is_some_and(|c| Arc::ptr_eq(&c, bridge)) {
+            slot.clear();
+        }
+    }
+}
+
 // ============================================================================
 // Bridge handle + helpers
 // ============================================================================
@@ -227,6 +257,27 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleBridgeNew(
     // BLE off/on cycle, or not yet built — ends up driving this one.
     set_radio_bridge(Arc::clone(&bridge));
     Box::into_raw(Box::new(bridge)) as jlong
+}
+
+/// Retract the radio behind `handle` from the node's slot.
+///
+/// Called by `BleService.stopBle` after it shuts the radio down. Does *not*
+/// free the handle — the radio's I/O threads may still be winding down through
+/// it — it only stops the core from driving a radio that is gone.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_bleBridgeClear(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: borrows, without reclaiming, the Box that `bleBridgeNew`
+    // leaked. Kotlin holds the handle for the life of its radio and passes it
+    // back exactly once, before any `bleBridgeFree`.
+    let bridge = unsafe { &*(handle as *const Arc<AndroidBleBridge>) };
+    clear_radio_bridge(bridge);
 }
 
 #[no_mangle]

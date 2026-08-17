@@ -111,6 +111,12 @@ class BleService : Service() {
         }
         radio?.shutdown()
         radio = null
+        // Retract the dead radio from the core's slot. Without this the core kept
+        // holding it, and the next node rebuild (a mesh toggle) installed the
+        // shut-down radio into the fresh slot — so `listen` and `start_advertising`
+        // ran against closed sockets until `bleBridgeNew` replaced it a second
+        // later. An empty slot parks the backend instead, which is correct.
+        if (bridgeHandle != 0L) runCatching { NativeCore.bleBridgeClear(bridgeHandle) }
         // Intentionally NOT freeing the bridge handle: the radio's I/O threads may
         // still reference it as they wind down, and the rebuilt node will inject a
         // fresh bridge on the next start. Freeing here risks a use-after-free; the
