@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The Android BLE radio. Kotlin owns the radio; the Rust core (fips `AndroidIo`)
@@ -102,6 +103,19 @@ class BleRadio(context: Context) {
     // SCAN_FAILED_SCANNING_TOO_FREQUENTLY) used to be logged and abandoned, which
     // permanently killed peer discovery until the mesh was toggled. We re-arm it.
     private var scanRetries = 0
+
+    // Scan-report accounting, summarised on a timer instead of logged per
+    // result. Per-result logging emitted several lines a second on a busy
+    // radio and rotated every other MycoBleRadio line out of the buffer within
+    // seconds. The timer fires whether or not anything was seen, because a
+    // scanner producing *nothing* is as much of a symptom as one producing
+    // adverts with no PSM — a device in that state is inbound-only, and under
+    // a log-only-when-there-is-something scheme it would look healthy.
+    private val scanWithPsm = AtomicInteger()
+    private val scanWithoutPsm = AtomicInteger()
+    private val scanPsmAddrs = ConcurrentHashMap.newKeySet<String>()
+    private val scanNoPsmAddrs = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var scanSummaryTask: ScheduledFuture<*>? = null
 
     // Background mode (set from the service via ProcessLifecycleOwner): while the
     // app is not visible, discovery drops from LOW_LATENCY (~100% RX duty) to
@@ -381,6 +395,14 @@ class BleRadio(context: Context) {
             sc.startScan(filters, settings, cb)
             Log.i(TAG, "scanning for FIPS peers (${if (backgroundMode) "low-power" else "low-latency"})")
             if (bridgeHandle != 0L) NativeCore.bleDeliverScanningState(bridgeHandle, true)
+            scanSummaryTask = runCatching {
+                retryExec.scheduleWithFixedDelay(
+                    { if (!stopped) runCatching { logScanSummary() } },
+                    SCAN_SUMMARY_SECS,
+                    SCAN_SUMMARY_SECS,
+                    TimeUnit.SECONDS,
+                )
+            }.getOrNull()
         } catch (e: Exception) {
             Log.e(TAG, "startScanning failed", e)
             scheduleScanRetry(-1)
@@ -404,10 +426,44 @@ class BleRadio(context: Context) {
         // core fall back to the legacy default PSM (0x0085) and dial the
         // wrong L2CAP port, which the peer rejects every time.
         if (psm > 0) {
+            scanWithPsm.incrementAndGet()
+            scanPsmAddrs.add(addr)
             NativeCore.bleDeliverScan(bridgeHandle, addr, psm, result.rssi)
         } else {
-            Log.d(TAG, "scan $addr: PSM not in advert yet (awaiting scan response)")
+            // Counted, not logged: this fires several times a second per peer
+            // while a scan response is outstanding. [logScanSummary] reports
+            // the addresses that never produced one, which is the real signal.
+            scanWithoutPsm.incrementAndGet()
+            scanNoPsmAddrs.add(addr)
         }
+    }
+
+    /** Summarise the last window of scan reports; scheduled from [startScanning]. */
+    private fun logScanSummary() {
+        val withPsm = scanWithPsm.getAndSet(0)
+        val withoutPsm = scanWithoutPsm.getAndSet(0)
+        val silent = scanNoPsmAddrs.minus(scanPsmAddrs)
+        scanPsmAddrs.clear()
+        scanNoPsmAddrs.clear()
+        val secs = SCAN_SUMMARY_SECS
+        if (withPsm == 0 && withoutPsm == 0) {
+            // Loud on purpose. A radio that advertises and listens but scans
+            // nothing is inbound-only: it can never learn a peer's PSM, so
+            // every dial it makes falls back to the configured default and
+            // fails. That is invisible unless it is said out loud.
+            Log.w(TAG, "scan summary: 0 adverts in ${secs}s — scanner produced nothing")
+            return
+        }
+        val tail = if (silent.isEmpty()) {
+            ""
+        } else {
+            ", no PSM from ${silent.size}: ${silent.joinToString(" ")}"
+        }
+        Log.i(
+            TAG,
+            "scan summary: ${withPsm + withoutPsm} adverts in ${secs}s " +
+                "($withPsm with psm, $withoutPsm awaiting scan response$tail)",
+        )
     }
 
     /** Re-arm scanning after a failure, so a transient throttle/error doesn't
@@ -440,6 +496,10 @@ class BleRadio(context: Context) {
     fun stopScanning() {
         scanCallback?.let { runCatching { scanner?.stopScan(it) } }
         scanCallback = null
+        // No scan, nothing to summarise — otherwise the timer would report
+        // "0 adverts" against a scanner nobody asked to be running.
+        scanSummaryTask?.cancel(false)
+        scanSummaryTask = null
         if (bridgeHandle != 0L) NativeCore.bleDeliverScanningState(bridgeHandle, false)
     }
 
@@ -694,6 +754,11 @@ class BleRadio(context: Context) {
          *  core's probe timeout (10s) so a dial that is merely slow is left
          *  alone, and well below the ~30s+ this has been seen to block for. */
         private const val DIAL_WATCHDOG_MS = 15_000L
+
+        /** How often the scanner reports what it has seen. Long enough that the
+         *  summary costs one line a window instead of several a second, short
+         *  enough that a scanner going silent shows up while you are watching. */
+        private const val SCAN_SUMMARY_SECS = 30L
 
         /** Background scan: batched delivery window (controller-offloaded). */
         private const val BACKGROUND_BATCH_MS = 5000L
