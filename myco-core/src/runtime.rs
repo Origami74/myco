@@ -1288,16 +1288,28 @@ impl AppRuntime {
     }
 
     /// The BLE radio's observed scanning/advertising state, as
-    /// `(scanning, scanning_known, advertising, advertising_known)`.
+    /// `(scanning, scanning_known, advertising, advertising_known)`, read from
+    /// the BLE bridge's process-global flags rather than derived from other
+    /// flags. Each `known` is false until Kotlin has pushed at least once (or
+    /// on the host build, where the BLE bridge does not exist) — the UI renders
+    /// unknown rather than guessing false.
     ///
-    /// TODO(stage 2): always reports unknown. The flags used to be read back off
-    /// fips's `AndroidBleBridge`, which no longer keeps them — correctly, since
-    /// they were only ever Kotlin's own pushes bouncing off a struct in the
-    /// wrong crate. Restore by mirroring the Aware lane's two Myco-owned
-    /// atomics; the JNI push sites are still there, discarding their argument.
-    /// Diagnostic only: it decides whether the Dev tab renders "scanning" or
-    /// "unknown", nothing more. Reporting unknown is the honest degradation —
-    /// the code has always refused to guess `false`.
+    /// Diagnostic only: it decides whether the Dev tab's radio self-check card
+    /// renders "active"/"idle" or "unknown", nothing more.
+    #[cfg(target_os = "android")]
+    fn ble_radio_state(&self) -> (bool, bool, bool, bool) {
+        let (scanning, scanning_known) = match crate::ble_bridge_jni::ble_scanning() {
+            Some(v) => (v, true),
+            None => (false, false),
+        };
+        let (advertising, advertising_known) = match crate::ble_bridge_jni::ble_advertising() {
+            Some(v) => (v, true),
+            None => (false, false),
+        };
+        (scanning, scanning_known, advertising, advertising_known)
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn ble_radio_state(&self) -> (bool, bool, bool, bool) {
         (false, false, false, false)
     }

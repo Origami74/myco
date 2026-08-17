@@ -13,6 +13,7 @@
 //! Compiled only on Android (the host build drives `AppRuntime` directly and the
 //! fips bridge logic is unit-tested with a mock radio in fips itself).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -371,38 +372,69 @@ fn rssi_from_jint(rssi: jint) -> Option<i16> {
     }
 }
 
+/// Whether Kotlin has ever pushed a scanning state — until it has, the value is
+/// unknown, never a guessed false.
+static BLE_SCANNING_KNOWN: AtomicBool = AtomicBool::new(false);
+/// The last-pushed scanning value, meaningful only once `BLE_SCANNING_KNOWN`.
+static BLE_SCANNING: AtomicBool = AtomicBool::new(false);
+/// Whether Kotlin has ever pushed an advertising state.
+static BLE_ADVERTISING_KNOWN: AtomicBool = AtomicBool::new(false);
+/// The last-pushed advertising value, meaningful only once
+/// `BLE_ADVERTISING_KNOWN`.
+static BLE_ADVERTISING: AtomicBool = AtomicBool::new(false);
+
+/// The last-observed scanning state, or `None` if Kotlin has never pushed one
+/// (radio never started, or a non-Android build) — the caller must render
+/// unknown rather than guessing false.
+pub(crate) fn ble_scanning() -> Option<bool> {
+    if BLE_SCANNING_KNOWN.load(Ordering::Relaxed) {
+        Some(BLE_SCANNING.load(Ordering::Relaxed))
+    } else {
+        None
+    }
+}
+
+/// The last-observed advertising state, or `None` if Kotlin has never pushed
+/// one.
+pub(crate) fn ble_advertising() -> Option<bool> {
+    if BLE_ADVERTISING_KNOWN.load(Ordering::Relaxed) {
+        Some(BLE_ADVERTISING.load(Ordering::Relaxed))
+    } else {
+        None
+    }
+}
+
 /// Kotlin reports whether its BLE scan loop is live right now, pushed from the
 /// scan callback's own start/stop/retry-failure sites.
 ///
-/// TODO(stage 2): currently discarded. The restacked `AndroidBleBridge` has no
-/// `set_scanning`/`is_scanning` — and it should not: this was only ever Myco
-/// reading back a flag Kotlin had pushed into a struct that happened to live in
-/// fips. The Aware lane already keeps the equivalent in two Myco-owned
-/// `AtomicBool`s (`aware_bridge_jni::set_aware_discovering`); mirror that here
-/// so `AppState.ble.scanning` reports observed state again instead of
-/// "unknown". Diagnostic only — nothing functional reads it. The export is kept
-/// so the Kotlin call site does not have to change twice.
+/// Kept in a Myco-owned atomic rather than read back off fips's
+/// `AndroidBleBridge`, which is where it used to live: the flag was only ever
+/// Kotlin's own push bouncing off a struct in the wrong crate. Same shape as
+/// the Aware lane's `set_aware_discovering`. Diagnostic only — nothing
+/// functional reads it.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverScanningState(
     _env: JNIEnv,
     _class: JClass,
     _handle: jlong,
-    _on: jboolean,
+    on: jboolean,
 ) {
+    BLE_SCANNING.store(on != 0, Ordering::Relaxed);
+    BLE_SCANNING_KNOWN.store(true, Ordering::Relaxed);
 }
 
 /// Kotlin reports whether its BLE advertiser is live right now, pushed from the
-/// advertise callback's own install/clear sites.
-///
-/// TODO(stage 2): currently discarded, for the same reason and with the same
-/// fix as [`Java_app_myco_core_NativeCore_bleDeliverScanningState`].
+/// advertise callback's own install/clear sites. Same ownership rationale as
+/// [`Java_app_myco_core_NativeCore_bleDeliverScanningState`].
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverAdvertisingState(
     _env: JNIEnv,
     _class: JClass,
     _handle: jlong,
-    _on: jboolean,
+    on: jboolean,
 ) {
+    BLE_ADVERTISING.store(on != 0, Ordering::Relaxed);
+    BLE_ADVERTISING_KNOWN.store(true, Ordering::Relaxed);
 }
 
 /// Kotlin read one L2CAP packet. Returns 1 if delivered, 0 if the channel is gone.
