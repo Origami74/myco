@@ -26,6 +26,7 @@ import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 
 /**
@@ -57,6 +58,11 @@ class BleRadio(context: Context) {
     private var bridgeHandle: Long = 0
     private val io = Executors.newCachedThreadPool()
     private val channels = ConcurrentHashMap<Long, BluetoothSocket>()
+    // Dials parked inside BluetoothSocket.connect(), by device MAC. Android's
+    // connect blocks well past the core's probe timeout, so without this the
+    // core's re-dials stack up: several sockets per device, each holding an LE
+    // connect slot, none of them closed. See [connect].
+    private val dialing = ConcurrentHashMap<String, BluetoothSocket>()
     // A parallel GATT per channel, used only to request a low connection interval
     // (L2CAP CoC exposes no priority API). Bumps mesh throughput ~2-4x.
     private val gatts = ConcurrentHashMap<Long, GattPrio>()
@@ -139,28 +145,121 @@ class BleRadio(context: Context) {
         }
     }
 
-    /** Dial a peer; deliver the result (and, on success, start the channel). */
+    /**
+     * Dial a peer; deliver the result (and, on success, start the channel).
+     *
+     * Every exit closes the socket unless the core adopted it. A
+     * [BluetoothSocket] whose `connect()` threw is *not* self-closing, and an
+     * abandoned one keeps its slot in the BT stack's LE connect table: leak
+     * enough of them and every later dial hangs for its full timeout and then
+     * fails, with nothing in the app's own state to explain it. Only killing
+     * the process gets them back.
+     *
+     * The dial is also bounded twice over, because `connect()` blocks for far
+     * longer than the core is willing to wait — the core gives up at its
+     * probe timeout and re-dials while this thread is still parked inside
+     * Android:
+     *
+     * - one in-flight dial per device ([dialing]): a fresh dial to the same
+     *   MAC closes the previous socket, which unblocks it promptly;
+     * - [DIAL_WATCHDOG_MS] as a backstop, for the peer the core discovers
+     *   once and never probes again.
+     *
+     * So the socket is closed on every exit that is not an adoption — a
+     * `connect()` that threw, a success the core declined to take, the
+     * watchdog, and [shutdown] — and the core is answered on every exit
+     * including the two that never reach a socket at all (already stopped,
+     * and a thread pool that refuses the work).
+     */
     fun connect(connectId: Long, addr: String, psm: Int) {
-        if (stopped) return
-        runCatching {
-        io.execute {
-            val mac = addr.substringAfter('/', addr)
-            try {
-                val device = adapter?.getRemoteDevice(mac)
-                    ?: throw IOException("no adapter / bad addr $addr")
-                val sock = device.createInsecureL2capChannel(psm)
-                sock.connect()
-                val chId = NativeCore.bleDeliverConnectResult(
-                    bridgeHandle, connectId, true, addr, sendMtu(sock), recvMtu(sock),
-                )
-                if (chId > 0) startChannel(chId, sock) else closeQuietly(sock)
-            } catch (e: Exception) {
-                Log.w(TAG, "connect $addr psm $psm failed: ${e.message}")
-                NativeCore.bleDeliverConnectResult(bridgeHandle, connectId, false, addr, 0, 0)
-            }
+        // Every return from here answers the core, one way or another. A dial
+        // that is silently dropped costs the probe loop its full 10s timeout
+        // waiting for an attempt that was never made.
+        if (stopped) {
+            failDial(connectId, addr)
+            return
         }
+        val submitted = runCatching { io.execute { dial(connectId, addr, psm) } }
+        if (submitted.isFailure) {
+            // The pool was shut down underneath this call, so the dial will
+            // never run.
+            failDial(connectId, addr)
         }
     }
+
+    /** Tell the core a dial did not produce a channel. Safe at any point,
+     *  including after [shutdown]: the bridge handle outlives the radio (see
+     *  [BleService.stopBle]), and an answer for a dial the core already gave up
+     *  on is discarded there rather than allocating anything. */
+    private fun failDial(connectId: Long, addr: String) {
+        runCatching {
+            NativeCore.bleDeliverConnectResult(bridgeHandle, connectId, false, addr, 0, 0)
+        }
+    }
+
+    /** The dial itself, on an [io] thread. See [connect] for why it is bounded. */
+    private fun dial(connectId: Long, addr: String, psm: Int) {
+        val mac = addr.substringAfter('/', addr)
+        var sock: BluetoothSocket? = null
+        var adopted = false
+        var watchdog: ScheduledFuture<*>? = null
+        try {
+            val device = adapter?.getRemoteDevice(mac)
+                ?: throw IOException("no adapter / bad addr $addr")
+            val s = device.createInsecureL2capChannel(psm)
+            sock = s
+            // Supersede any dial to this device still parked in connect():
+            // the core only re-dials once it has given up on the last one,
+            // so the old socket is dead weight holding an LE connect slot.
+            dialing.put(mac, s)?.let { closeQuietly(it) }
+            // Re-checked here, and in this order. [shutdown] sets `stopped`
+            // and only then drains [dialing], so registering before checking
+            // is what makes the race unloseable: either the drain sees our
+            // socket and closes it, or we see `stopped` and close it
+            // ourselves. Checking first and registering after would let a
+            // dial slip between the two and outlive the radio, parked in the
+            // BT stack where `shutdownNow` cannot reach it.
+            if (stopped) throw IOException("radio stopped")
+            watchdog = armDialWatchdog(mac, s)
+            s.connect()
+            val chId = NativeCore.bleDeliverConnectResult(
+                bridgeHandle, connectId, true, addr, sendMtu(s), recvMtu(s),
+            )
+            // Adopted *before* the channel is started, not after: from this
+            // point the socket belongs to [channels]. A throw out of
+            // startChannel must not close it underneath the core, nor report
+            // this dial failed after it has already been reported succeeded.
+            if (chId > 0) {
+                adopted = true
+                startChannel(chId, s)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "connect $addr psm $psm failed: ${e.message}")
+            if (!adopted) failDial(connectId, addr)
+        } finally {
+            // Nothing left to watch: dropping it keeps a resolved dial's socket
+            // out of the shared scheduler's queue for the next 15s.
+            watchdog?.cancel(false)
+            // Only clear the entry if it is still ours — a superseding dial
+            // owns it now, and closing its socket would kill a live attempt.
+            sock?.let { dialing.remove(mac, it) }
+            if (!adopted) sock?.let { closeQuietly(it) }
+        }
+    }
+
+    /** Close a dial still unresolved after [DIAL_WATCHDOG_MS], so a connect
+     *  Android never answers cannot hold an LE connect slot indefinitely.
+     *  Closing makes the parked `connect()` throw, and the dial's own `finally`
+     *  does the rest. */
+    private fun armDialWatchdog(mac: String, sock: BluetoothSocket): ScheduledFuture<*>? =
+        runCatching {
+            retryExec.schedule({
+                if (dialing.remove(mac, sock)) {
+                    Log.w(TAG, "dial $mac still unresolved after ${DIAL_WATCHDOG_MS}ms — closing")
+                    closeQuietly(sock)
+                }
+            }, DIAL_WATCHDOG_MS, TimeUnit.MILLISECONDS)
+        }.getOrNull()
 
     fun startAdvertising(psm: Int) {
         if (stopped) return
@@ -356,6 +455,11 @@ class BleRadio(context: Context) {
         stopAdvertising()
         runCatching { serverSocket?.close() }
         serverSocket = null
+        // Dials parked in connect() outlive the radio otherwise: the thread
+        // pool is shut down below, but shutdownNow cannot interrupt a thread
+        // blocked in the BT stack. Closing the socket is what releases it.
+        dialing.values.toList().forEach { closeQuietly(it) }
+        dialing.clear()
         channels.keys.toList().forEach { closeChannel(it) }
         gatts.keys.toList().forEach { dropGatt(it) }
         io.shutdownNow()
@@ -585,6 +689,11 @@ class BleRadio(context: Context) {
         // read() fits one SDU and next_send never truncates an outbound packet.
         private const val MAX_PACKET = 8192
         private const val SEND_TIMEOUT_MS = 1000
+
+        /** Backstop for a dial Android never resolves. Comfortably above the
+         *  core's probe timeout (10s) so a dial that is merely slow is left
+         *  alone, and well below the ~30s+ this has been seen to block for. */
+        private const val DIAL_WATCHDOG_MS = 15_000L
 
         /** Background scan: batched delivery window (controller-offloaded). */
         private const val BACKGROUND_BATCH_MS = 5000L
