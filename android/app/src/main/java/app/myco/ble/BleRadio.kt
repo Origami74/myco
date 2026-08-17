@@ -395,6 +395,12 @@ class BleRadio(context: Context) {
             sc.startScan(filters, settings, cb)
             Log.i(TAG, "scanning for FIPS peers (${if (backgroundMode) "low-power" else "low-latency"})")
             if (bridgeHandle != 0L) NativeCore.bleDeliverScanningState(bridgeHandle, true)
+            // A scanner that has only just started has not been silent yet, so
+            // the streak restarts here — this is what keeps the warning off
+            // screen in the first moments after the mesh is switched on. The
+            // *verdict* ([BleHealth.scannerConfirmedSilent]) deliberately does
+            // not restart with it: see that field.
+            BleHealth.emptyScanWindows = 0
             scanSummaryTask = runCatching {
                 retryExec.scheduleWithFixedDelay(
                     { if (!stopped) runCatching { logScanSummary() } },
@@ -451,9 +457,18 @@ class BleRadio(context: Context) {
             // nothing is inbound-only: it can never learn a peer's PSM, so
             // every dial it makes falls back to the configured default and
             // fails. That is invisible unless it is said out loud.
-            Log.w(TAG, "scan summary: 0 adverts in ${secs}s — scanner produced nothing")
+            val empty = BleHealth.emptyScanWindows + 1
+            BleHealth.emptyScanWindows = empty
+            if (empty >= SILENT_WINDOWS_BEFORE_ALARM) BleHealth.scannerConfirmedSilent = true
+            Log.w(TAG, "scan summary: 0 adverts in ${secs}s — scanner produced nothing (window $empty)")
             return
         }
+        // One advert of any kind proves the scanner is delivering, so both the
+        // streak and the verdict are over. This is the *only* place the
+        // verdict is cleared: nothing short of a real advert counts as the
+        // radio having recovered.
+        BleHealth.emptyScanWindows = 0
+        BleHealth.scannerConfirmedSilent = false
         val tail = if (silent.isEmpty()) {
             ""
         } else {
@@ -500,6 +515,10 @@ class BleRadio(context: Context) {
         // "0 adverts" against a scanner nobody asked to be running.
         scanSummaryTask?.cancel(false)
         scanSummaryTask = null
+        // Silence only means something while we are listening. A stopped
+        // scanner has heard nothing by definition, and leaving the streak
+        // standing would accuse the phone of a fault while the mesh is off.
+        BleHealth.emptyScanWindows = 0
         if (bridgeHandle != 0L) NativeCore.bleDeliverScanningState(bridgeHandle, false)
     }
 
@@ -511,6 +530,11 @@ class BleRadio(context: Context) {
     /** Tear everything down (called when the service stops). */
     fun shutdown() {
         stopped = true
+        // The radio is being destroyed — on a mesh toggle a fresh one is built
+        // in its place, and it must start with no verdict against it. This is
+        // the one thing other than a real advert that clears the latch, and it
+        // is not a shortcut: there is no scanner left to be deaf.
+        BleHealth.scannerConfirmedSilent = false
         stopScanning()
         stopAdvertising()
         runCatching { serverSocket?.close() }
@@ -760,6 +784,12 @@ class BleRadio(context: Context) {
          *  enough that a scanner going silent shows up while you are watching. */
         private const val SCAN_SUMMARY_SECS = 30L
 
+        /** Consecutive empty [SCAN_SUMMARY_SECS] windows before the radio is
+         *  called deaf ([BleHealth.scannerConfirmedSilent]). Two, not one: a
+         *  full minute of listening, so a scanner merely slow to deliver its
+         *  first result is never accused. */
+        private const val SILENT_WINDOWS_BEFORE_ALARM = 2
+
         /** Background scan: batched delivery window (controller-offloaded). */
         private const val BACKGROUND_BATCH_MS = 5000L
 
@@ -803,4 +833,36 @@ object BleHealth {
      *  Cleared automatically once advertising succeeds on a retry. */
     @Volatile
     var advertiserExhausted: Boolean = false
+
+    /**
+     * How many consecutive scan-summary windows have produced **no advert at
+     * all** — the count behind `scan summary: 0 adverts in 30s`. Restarts at
+     * zero every time the scanner starts, which is what keeps a freshly
+     * enabled mesh from being accused before it has had time to hear anything.
+     */
+    @Volatile
+    var emptyScanWindows: Int = 0
+
+    /**
+     * **The verdict**: this radio has been listening and heard nothing for
+     * long enough that it is not merely quiet, it is deaf.
+     *
+     * This is the observable half of the vendor-stack bug that cost a day of
+     * diagnosis: a device whose scan callback never fires is inbound-only — it
+     * advertises, accepts connections, and can never learn a peer's PSM, so it
+     * never dials anyone. `startScan` reports success throughout. Only the
+     * absence of results says so.
+     *
+     * Kept separate from [emptyScanWindows] because the streak is far too
+     * fragile to drive a warning off directly. The scanner re-arms on every
+     * fore/background flip, and tapping the warning to open location settings
+     * is itself such a flip — so the streak-only version hid the warning the
+     * moment the user acted on it, then stayed hidden for another minute with
+     * nothing fixed. A conclusion once reached is held until something
+     * disproves it, and the only thing that disproves it is a real advert (see
+     * [BleRadio.logScanSummary]) or the radio ceasing to exist (see
+     * [BleRadio.shutdown]).
+     */
+    @Volatile
+    var scannerConfirmedSilent: Boolean = false
 }

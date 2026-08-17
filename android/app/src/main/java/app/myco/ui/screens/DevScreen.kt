@@ -48,6 +48,7 @@ import app.myco.ui.KeyVal
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
 import app.myco.ui.StatusDot
+import app.myco.ui.locationServicesEnabled
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.StatusReachable
@@ -84,11 +85,16 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
     // recording either way, so history is complete when the screen returns.
     var devState by remember { mutableStateOf(state) }
     var firstReadLanded by remember { mutableStateOf(false) }
+    // Re-read on the same tick as the core state rather than once at
+    // composition: this is the row you watch while flipping the setting in
+    // another app, so a value frozen at screen entry would be a lie.
+    var locationOn by remember { mutableStateOf(locationServicesEnabled(context)) }
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(Unit) {
         lifecycleOwner.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
                 devState = withContext(Dispatchers.IO) { client.state() }
+                locationOn = withContext(Dispatchers.IO) { locationServicesEnabled(context) }
                 firstReadLanded = true
                 delay(1000)
             }
@@ -118,7 +124,7 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
 
         PeersOverviewCard(devState, firstReadLanded)
 
-        RadioSelfCheckCard(devState, awareSupported, awareAvailable)
+        RadioSelfCheckCard(devState, awareSupported, awareAvailable, locationOn)
 
         PendingPairingsCard(devState, firstReadLanded)
 
@@ -185,7 +191,7 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
 }
 
 /**
- * **The first card, always** (D-07). Six observed radio facts in a fixed order
+ * **The first card, always** (D-07). Seven observed radio facts in a fixed order
  * that never varies with data, so the person holding the phone can answer "is it
  * me or is it them" before scrolling.
  *
@@ -196,7 +202,12 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
  * and never blocks the screen.
  */
 @Composable
-private fun RadioSelfCheckCard(state: AppState, awareSupported: Boolean, awareAvailable: Boolean) {
+private fun RadioSelfCheckCard(
+    state: AppState,
+    awareSupported: Boolean,
+    awareAvailable: Boolean,
+    locationOn: Boolean,
+) {
     DevCard("RADIO SELF-CHECK") {
         KeyValTri("ble enabled", state.bleEnabled, "on", "off")
         KeyValTri(
@@ -211,6 +222,14 @@ private fun RadioSelfCheckCard(state: AppState, awareSupported: Boolean, awareAv
             "active",
             "idle",
         )
+        // Sits with the BLE rows because that is what it explains. Some vendor
+        // stacks gate BLE scan callbacks on the location master switch even
+        // though Myco declares `neverForLocation` and asks for no location
+        // permission at all; the device then advertises and accepts inbound
+        // connections normally while receiving nothing, which reads as
+        // "ble scanning: active" and an empty peer list. Off here, with the
+        // rows above green, is the whole answer.
+        KeyValTri("location services", locationOn, "on", "off")
         KeyValTri("aware supported", awareSupported, "yes", "no")
         KeyValTri("aware available", awareAvailable, "yes", "no")
         KeyValTri(
