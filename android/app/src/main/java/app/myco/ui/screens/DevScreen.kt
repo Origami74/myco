@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -109,16 +110,17 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
                 ?: "Technical details — myco-core state.",
         )
 
-        // D-07: the radio self-check leads, because "no peers" is the actual
-        // field complaint and this card is what answers "is it me or is it
-        // them" without a second screen.
-        RadioSelfCheckCard(devState, awareSupported, awareAvailable)
+        // Who am I, then who can I see, then why. Identity leads because it is
+        // what a second device is compared against; the self-check sits under
+        // the peer list rather than over it, since it is the follow-up question
+        // once the list is empty or short, not the first thing read.
+        IdentityCard(devState)
 
         PeersOverviewCard(devState, firstReadLanded)
 
-        PendingPairingsCard(devState, firstReadLanded)
+        RadioSelfCheckCard(devState, awareSupported, awareAvailable)
 
-        IdentityCard(devState)
+        PendingPairingsCard(devState, firstReadLanded)
 
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -412,7 +414,16 @@ private fun PeersOverviewCard(state: AppState, firstReadLanded: Boolean) {
                 )
             }
         }
-        for (p in state.peers) {
+        // Ruled between rows, not merely spaced: a two-line row against a
+        // two-line neighbour reads as one four-line block without them, and the
+        // expanded body makes that worse.
+        state.peers.forEachIndexed { i, p ->
+            if (i > 0) {
+                HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(start = 16.dp),
+                )
+            }
             val isOpen = p.key in expanded
             PeerDiagnosticRow(p, isOpen) {
                 if (isOpen) expanded.remove(p.key) else expanded.add(p.key)
@@ -429,10 +440,19 @@ private fun PeersOverviewCard(state: AppState, firstReadLanded: Boolean) {
 }
 
 /**
- * One merged peer diagnostics row: state dot + monospace identity on the
- * left, carrying transport + exact-seconds last-heard counter (D-18) on the
- * right, in monospace. `lastSeenMs == 0L` and an empty transport both render
- * as an em-dash rather than a false "0s"/blank value.
+ * One merged peer diagnostics row, over two lines: state dot + monospace
+ * identity with the expand caret on the first, transport and the two link
+ * clocks on the second.
+ *
+ * "seen" is the exact-seconds last-heard counter (D-18); "up" is the FMP
+ * session age. They answer different questions — a link heard from a second
+ * ago that is only ever a few seconds "up" is re-establishing, which reads as
+ * healthy if only the last-heard value is shown. The session survives rekeys
+ * (`receiver_idx` rotates roughly every 120s), so a long "up" means the link
+ * has held rather than that a handshake went stale.
+ *
+ * `lastSeenMs == 0L`, `authenticatedAtMs == 0L` and an empty transport all
+ * render as an em-dash rather than a false "0s"/blank value.
  */
 @Composable
 private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle: () -> Unit) {
@@ -452,8 +472,10 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
         peer.name.ifEmpty { peer.npub.ifEmpty { peer.nodeAddrHex.ifEmpty { peer.bleAddr } } }
     }
     Column(modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle)) {
+        // Line 1: who. The caret is the affordance — a row that opens has to
+        // look like one before it is tapped, and the dot alone never said so.
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         ) {
@@ -469,7 +491,26 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
                 )
             }
             Text(
-                "${peer.transport.ifEmpty { "—" }} · ${elapsedExact(peer.lastSeenMs)}",
+                if (expanded) "⌃" else "⌄",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        // Line 2: the link, at a glance. Session age rides here rather than
+        // only in the expanded body — it is the number that separates a link
+        // that keeps re-establishing from one that is simply holding, and that
+        // is worth seeing without opening every row.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 30.dp, end = 16.dp, top = 1.dp, bottom = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                peer.transport.ifEmpty { "—" },
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "seen ${elapsedExact(peer.lastSeenMs)} · up ${elapsedExact(peer.authenticatedAtMs)}",
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -498,10 +539,6 @@ private fun PeerForensics(peer: PeerDiagnostic) {
         modifier = Modifier.padding(start = 30.dp, end = 16.dp, bottom = 8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        // Session age, not index age: the FMP receiver_idx rotates on every
-        // rekey (~120s) while the session survives, so a long value here means
-        // the link has held rather than that a handshake went stale.
-        ForensicLine("session age", elapsedExact(peer.authenticatedAtMs))
         ForensicLine("role", peer.role.ifEmpty { "—" })
         ForensicLine("discovery", if (peer.discoveryMs > 0) "${peer.discoveryMs}ms" else "—")
         ForensicLine("send drops", peer.sendDrops.toString())
