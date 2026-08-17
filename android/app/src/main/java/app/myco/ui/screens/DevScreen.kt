@@ -98,7 +98,16 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        ScreenHeader("Dev", devState, subtitle = "Technical details — myco-core state.")
+        // The own npub leads the screen: it is the first thing needed when
+        // comparing two devices side by side, and the identity card carrying it
+        // sits several cards down.
+        ScreenHeader(
+            "Dev",
+            devState,
+            subtitle = devState.ownNpub.takeIf { it.isNotEmpty() }
+                ?.let { "you: ${short(it)}" }
+                ?: "Technical details — myco-core state.",
+        )
 
         // D-07: the radio self-check leads, because "no peers" is the actual
         // field complaint and this card is what answers "is it me or is it
@@ -489,6 +498,10 @@ private fun PeerForensics(peer: PeerDiagnostic) {
         modifier = Modifier.padding(start = 30.dp, end = 16.dp, bottom = 8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
+        // Session age, not index age: the FMP receiver_idx rotates on every
+        // rekey (~120s) while the session survives, so a long value here means
+        // the link has held rather than that a handshake went stale.
+        ForensicLine("session age", elapsedExact(peer.authenticatedAtMs))
         ForensicLine("role", peer.role.ifEmpty { "—" })
         ForensicLine("discovery", if (peer.discoveryMs > 0) "${peer.discoveryMs}ms" else "—")
         ForensicLine("send drops", peer.sendDrops.toString())

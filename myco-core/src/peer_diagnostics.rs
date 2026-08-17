@@ -133,6 +133,7 @@ pub fn merge_peers(
             .or_else(|| pv.map(|p| p.transport.clone()))
             .unwrap_or_default();
         let last_seen_ms = pv.map(|p| p.last_seen_ms).unwrap_or(0);
+        let authenticated_at_ms = pv.map(|p| p.authenticated_at_ms).unwrap_or(0);
         rows.push(PeerDiagnosticView {
             key,
             npub: bp.npub.clone(),
@@ -150,6 +151,7 @@ pub fn merge_peers(
             transport,
             also_reachable_via: Vec::new(),
             last_seen_ms,
+            authenticated_at_ms,
             rssi: bp.rssi,
             psm: bp.psm,
             pair_state: String::new(),
@@ -201,6 +203,7 @@ pub fn merge_peers(
                 transport: String::new(),
                 also_reachable_via: Vec::new(),
                 last_seen_ms: 0,
+                authenticated_at_ms: 0,
                 rssi: Some(adv.rssi),
                 psm: adv.psm,
                 pair_state: String::new(),
@@ -243,6 +246,7 @@ pub fn merge_peers(
             transport: String::new(),
             also_reachable_via: Vec::new(),
             last_seen_ms: 0,
+            authenticated_at_ms: 0,
             rssi: None,
             psm: 0,
             pair_state: String::new(),
@@ -374,6 +378,7 @@ mod tests {
             npub: npub.to_string(),
             connected,
             last_seen_ms,
+            authenticated_at_ms: 0,
             transport: transport.to_string(),
             display_name: String::new(),
         }

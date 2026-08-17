@@ -56,6 +56,12 @@ pub struct PeerView {
     pub connected: bool,
     /// Milliseconds since the epoch this peer was last heard from.
     pub last_seen_ms: u64,
+    /// Milliseconds since the epoch the FMP session with this peer completed
+    /// authentication. The age derived from this is the *session's* lifetime,
+    /// not the current FMP index's: `receiver_idx` rotates on every rekey
+    /// (`node.rekey.after_secs`, default 120s) while the session survives, so
+    /// a long age here is the link holding rather than a stale handshake.
+    pub authenticated_at_ms: u64,
     /// Transport type carrying the peer's link (`"ble"`, `"udp"`, …).
     pub transport: String,
     /// fips's render-ready name. **This is an abbreviated npub**
@@ -215,6 +221,10 @@ fn peer_from_json(peer: &Value) -> PeerView {
             .get("last_seen_ms")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        authenticated_at_ms: peer
+            .get("authenticated_at_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         transport: s("transport_type"),
         display_name: s("display_name"),
     }
@@ -264,6 +274,7 @@ mod tests {
         );
         assert!(view.connected);
         assert_eq!(view.last_seen_ms, 1786484197793);
+        assert_eq!(view.authenticated_at_ms, 1786483829884);
         assert_eq!(view.transport, "udp");
         assert_eq!(view.display_name, "npub1qrjr...msuc");
     }
@@ -275,6 +286,9 @@ mod tests {
         assert!(view.connected);
         assert!(view.transport.is_empty());
         assert_eq!(view.last_seen_ms, 0);
+        // A peer row without it must read as "unknown", never as "aged zero" —
+        // the UI shows a dash rather than an age computed from the epoch.
+        assert_eq!(view.authenticated_at_ms, 0);
     }
 
     fn temp_socket(tag: &str) -> std::path::PathBuf {
