@@ -59,6 +59,7 @@ import app.myco.share.PendingDeepLinks
 import app.myco.ui.MycoApp
 import app.myco.ui.intro.IntroMode
 import app.myco.ui.FirstRunNameDialog
+import app.myco.ui.applyDeviceName
 import app.myco.ui.intro.IntroScreen
 import app.myco.ui.theme.MycoTheme
 import app.myco.vpn.MycoVpnService
@@ -203,10 +204,7 @@ class MainActivity : ComponentActivity() {
                         // JNI and takes the core's locks.
                         val npub = remember { core.state().ownNpub }
                         FirstRunNameDialog(ownNpub = npub) { picked ->
-                            DeviceName.set(this@MainActivity, picked)
-                            core.dispatch(NativeActions.setDeviceName(picked))
-                            BleRadio.localName = picked
-                            BleRadio.localNodeAddrHex = core.state().nodeAddrHex
+                            applyDeviceName(this@MainActivity, core, npub, picked)
                             prefs.edit().putBoolean(PREF_NAME_CHOSEN, true).apply()
                             askName = false
                             // Deferred from the intro on a first run; a no-op
@@ -419,15 +417,13 @@ class MainActivity : ComponentActivity() {
         // here (not just onCreate) in case the device identity wasn't ready yet at
         // first launch; set_device_name is idempotent.
         core.state().ownNpub.takeIf { it.isNotEmpty() }?.let {
-            val name = DeviceName.current(this, it)
-            core.dispatch(NativeActions.setDeviceName(name))
-            // Same name into the radio, so peers who have never paired with us
-            // still see it in their Nearby list. The node address rides with
-            // it: the name has to say whose it is, since the peer hearing it
-            // may end up carrying us over a different transport entirely.
-            // Re-advertises only when either actually changed.
-            BleRadio.localName = name
-            BleRadio.localNodeAddrHex = core.state().nodeAddrHex
+            // Re-assert rather than set: passing the stored override back
+            // through resolves to the same name, and every publish site is
+            // idempotent. This is the belt to the rename sites' braces, for a
+            // radio that started after the last rename.
+            val stored = getSharedPreferences("myco_prefs", MODE_PRIVATE)
+                .getString("device_name", "").orEmpty()
+            applyDeviceName(this, core, it, stored)
         }
         // Deep links followed before the app existed (possibly in a previous process)
         // get their chance every time Myco comes back to the foreground.

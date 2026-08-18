@@ -74,6 +74,7 @@ import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
 import app.myco.ui.NameSuggestions
+import app.myco.ui.applyDeviceName
 import app.myco.ui.PeersPill
 import app.myco.ui.peerLabel
 import app.myco.ui.theme.StatusConnected
@@ -318,9 +319,7 @@ fun CircleScreen(
             ownNpub = state.ownNpub,
             onDismiss = { editing = false },
             onSave = {
-                DeviceName.set(context, it)
-                client.dispatch(NativeActions.setDeviceName(it))
-                name = it
+                name = applyDeviceName(context, client, state.ownNpub, it)
                 // Refresh the NFC payload so we present the new name immediately.
                 if (state.ownNpub.isNotEmpty()) PairPresent.begin(context, state.ownNpub, it)
                 editing = false

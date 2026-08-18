@@ -61,6 +61,7 @@ import app.myco.core.NativeActions
 import app.myco.share.DeviceName
 import app.myco.ui.GroupLabel
 import app.myco.ui.NameSuggestions
+import app.myco.ui.applyDeviceName
 import app.myco.ui.RadioAction
 import app.myco.ui.RadioWarning
 import app.myco.ui.ScreenHeader
@@ -332,18 +333,14 @@ private fun IdentitySettings(state: AppState, client: AppCoreClient, onBack: () 
                 // since there is nothing left to confirm about a name you chose
                 // off a list rather than typed.
                 NameSuggestions(state.ownNpub, name) { picked ->
-                    name = picked
-                    DeviceName.set(context, picked)
-                    client.dispatch(NativeActions.setDeviceName(picked))
+                    name = applyDeviceName(context, client, state.ownNpub, picked)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Spacer(Modifier.weight(1f))
                     TextButton(
                         enabled = name.isNotBlank() && name.trim() != saved,
                         onClick = {
-                            val trimmed = name.trim()
-                            DeviceName.set(context, trimmed)
-                            client.dispatch(NativeActions.setDeviceName(trimmed))
+                            applyDeviceName(context, client, state.ownNpub, name.trim())
                             onBack()
                         },
                     ) { Text("Save") }

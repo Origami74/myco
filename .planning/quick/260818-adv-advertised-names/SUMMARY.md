@@ -95,3 +95,31 @@ since it pushes its name and node address from `onResume`.
 
 Also unchanged: this is BLE-only. A peer found over Wi-Fi Aware or the LAN
 still carries no advertised name.
+
+## Follow-up: a rename didn't reach the radio
+
+Renaming from Settings or the Circle dialog wrote the preference and told the
+core, but never touched `BleRadio` — only `onResume` and the first-run dialog
+pushed the name in. So a rename took effect on the next app foreground, not on
+save, and the old name kept going out over the air. That is the surface a
+rename is usually aimed at.
+
+`applyDeviceName()` is now the single way to change the name and moves all
+three publish points together: the preference, the core (which stamps pair
+events), and the radio (which broadcasts it). All four call sites go through
+it — Settings chips, Settings save, the Circle rename dialog, and the first-run
+dialog — and `onResume` re-asserts through the same function.
+
+### Rendering confirmed
+
+The tablet's Nearby list showed `riley` and `DC-1`. Neither is producible by
+the generator, which only ever emits lowercase `colour name`, so both can only
+have arrived over the air.
+
+One peer advertised `DC-1` while its Circle name, learned from its signed pair
+event, was `frank`. That divergence is this exact bug seen from the other side:
+a device renamed on a build predating the fix keeps broadcasting the old name
+until it next foregrounds. It should resolve once that device runs this build.
+Worth re-checking — if a peer still shows a stale advertised name after
+restarting on this build, the join is attributing to the wrong row and that is
+a different problem.
