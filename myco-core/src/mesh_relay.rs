@@ -391,6 +391,17 @@ async fn admit(
     next.run(req).await
 }
 
+/// Has this connection's peer lost access since it was admitted?
+///
+/// Admission is checked once, at the upgrade, so without re-checking here a
+/// subscription opened while paired would keep streaming after the peer was
+/// removed from the circle. Revocation has to reach connections that already
+/// exist, not just the next one (`reference/thinning-custom-relay.md`, D6).
+/// Loopback is the in-app WebView and is never gated.
+fn revoked(hub: &RelayHub, origin: Origin, peer_ip: IpAddr) -> bool {
+    origin == Origin::Mesh && hub.gate.as_ref().is_some_and(|g| !g.may_connect(peer_ip))
+}
+
 /// One client connection: serve `REQ` backlog + keep the subscription live, accept
 /// `EVENT`s (store → fan to local subs → drive the gossiper), honour `CLOSE`.
 async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
@@ -437,6 +448,15 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
             event = live.recv() => {
                 match event {
                     Ok(ev) => {
+                        // Re-check membership before feeding an open subscription.
+                        // Admission happens once, at the upgrade, so without this a
+                        // subscription opened while paired would keep streaming
+                        // after the peer was removed — revocation has to reach
+                        // connections that already exist, not just the next one.
+                        if revoked(&hub, origin, peer_ip) {
+                            tracing::info!(peer = %peer_ip, "relay: dropping a revoked peer's connection");
+                            break 'conn;
+                        }
                         for (sub_id, filters) in subs.iter() {
                             if filters.iter().any(|f| matches_filter(&ev, f)) {
                                 let frame = serde_json::json!(["EVENT", sub_id, ev]).to_string();
@@ -1001,6 +1021,61 @@ mod tests {
             "an unpaired peer must be refused at the door, not upgraded and then \
              told no per frame"
         );
+    }
+
+    /// Revocation reaches a connection that is already open.
+    ///
+    /// Admission is checked once, at the upgrade, so a peer removed from the
+    /// circle mid-session would otherwise keep receiving events on a `REQ` it
+    /// opened while still paired. `axum`'s `WebSocket` cannot be built from a raw
+    /// socket, and a real socket here could only be loopback (which is exempt by
+    /// design), so this covers the decision the live-event branch makes rather
+    /// than the socket teardown around it
+    /// (`reference/thinning-custom-relay.md`, D6).
+    #[test]
+    fn a_revoked_peer_stops_being_fed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Revocable(Arc<AtomicBool>);
+        impl PeerGate for Revocable {
+            fn may_connect(&self, _ip: IpAddr) -> bool {
+                self.0.load(Ordering::Relaxed)
+            }
+            fn may_read(&self, _ip: IpAddr) -> bool {
+                true
+            }
+            fn may_publish(&self, _ip: IpAddr, _kind: u16) -> bool {
+                true
+            }
+        }
+
+        let paired = Arc::new(AtomicBool::new(true));
+        let hub = RelayHub::with_gate(
+            Arc::new(RelayStore::in_memory()),
+            None,
+            Some(Arc::new(Revocable(paired.clone()))),
+        );
+        let mesh_peer: IpAddr = "fd00::1".parse().unwrap();
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+
+        assert!(
+            !revoked(&hub, Origin::Mesh, mesh_peer),
+            "paired peer is fed"
+        );
+
+        paired.store(false, Ordering::Relaxed);
+        assert!(
+            revoked(&hub, Origin::Mesh, mesh_peer),
+            "unpairing must close a connection that is already open"
+        );
+        assert!(
+            !revoked(&hub, Origin::Local, loopback),
+            "the in-app WebView is never gated"
+        );
+
+        // A hub with no gate is open, which is what the tests and local runs use.
+        let open = RelayHub::new(Arc::new(RelayStore::in_memory()), None);
+        assert!(!revoked(&open, Origin::Mesh, mesh_peer));
     }
 
     /// An nsite cannot start a circle-wide pull, and its `EOSE` never waits on a
