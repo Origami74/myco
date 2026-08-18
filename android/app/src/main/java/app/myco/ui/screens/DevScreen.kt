@@ -14,7 +14,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,7 +30,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -51,14 +49,12 @@ import app.myco.ui.KeyVal
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
 import app.myco.ui.StatusDot
+import app.myco.ui.TransportIcon
 import app.myco.ui.locationServicesEnabled
-import app.myco.R
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.StatusReachable
 import app.myco.ui.theme.StatusThin
-import app.myco.ui.theme.TransportBluetooth
-import app.myco.ui.theme.TransportNetwork
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
@@ -556,42 +552,6 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
             PeerForensics(peer)
         }
     }
-}
-
-/**
- * The transport a peer is reachable over, as an icon.
- *
- * Three lanes, three glyphs: the Bluetooth rune, the Wi-Fi Aware arcs, and a
- * globe for anything routed (LAN, the `!FIPS` AP, mDNS). An unknown or absent
- * transport draws nothing rather than guessing — a peer with no resolved link
- * is a real state and a wrong icon would assert a link that does not exist.
- *
- * Bluetooth keeps its brand blue and the routed lane the app's emerald;
- * Aware follows `onSurface`, so it reads as the plain radio in either theme.
- */
-@Composable
-private fun TransportIcon(transport: String, modifier: Modifier = Modifier) {
-    val (res, tint, label) = when (transport) {
-        "ble" -> Triple(R.drawable.ic_transport_bluetooth, TransportBluetooth, "Bluetooth")
-        "aware" -> Triple(
-            R.drawable.ic_transport_wifi_aware,
-            MaterialTheme.colorScheme.onSurface,
-            "Wi-Fi Aware",
-        )
-        "" -> Triple(0, MaterialTheme.colorScheme.onSurfaceVariant, "")
-        // udp, tcp and anything else routed: it reached us over IP.
-        else -> Triple(R.drawable.ic_transport_network, TransportNetwork, "Network")
-    }
-    if (res == 0) {
-        Spacer(modifier.size(26.dp))
-        return
-    }
-    Icon(
-        painter = painterResource(res),
-        contentDescription = label,
-        tint = tint,
-        modifier = modifier.size(26.dp),
-    )
 }
 
 /**

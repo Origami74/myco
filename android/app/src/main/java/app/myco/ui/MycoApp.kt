@@ -7,6 +7,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -354,6 +356,12 @@ val LocalMeshControl = androidx.compose.runtime.compositionLocalOf { MeshControl
 /**
  * The status pill shown top-right on every screen. Three segments:
  * mesh on/off toggle · Circle reachable/total · live peer count.
+ *
+ * Tapping anywhere but the switch opens [MeshStatusSheet] — the pill is a
+ * summary, and the summary is only useful if the thing it summarises is one
+ * tap away. With the mesh off the whole pill goes red rather than merely
+ * showing an unchecked switch: "off" is a state worth noticing from across the
+ * room, and a grey slider is not.
  */
 @Composable
 fun PeersPill(state: AppState) {
@@ -364,52 +372,86 @@ fun PeersPill(state: AppState) {
     // counting only direct peers showed 0 while sync was working fine.
     val reachable = state.reachableNpubs.size
     val circle = state.circle.size
+    var sheetOpen by remember { mutableStateOf(false) }
+
+    if (sheetOpen) {
+        MeshStatusSheet(state, meshEnabled = mesh.enabled, onDismiss = { sheetOpen = false })
+    }
+
     Surface(
         shape = CircleShape,
-        color = MaterialTheme.colorScheme.primaryContainer,
-        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        color = if (mesh.enabled) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.errorContainer
+        },
+        contentColor = if (mesh.enabled) {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        } else {
+            MaterialTheme.colorScheme.onErrorContainer
+        },
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(start = 6.dp, end = 4.dp),
         ) {
             // 1 — mesh master switch: the same slider as the Settings rows,
-            // scaled down to pill height (the Box bounds its layout footprint;
-            // the scale is a draw transform).
+            // scaled down to pill height. The Box is the touch target, not the
+            // drawn slider (the scale is a draw transform only), so it is sized
+            // to Material's 48dp minimum — the old 36×20 box was the whole
+            // reason this was fiddly to hit.
             Box(
-                modifier = Modifier.size(width = 36.dp, height = 20.dp),
+                modifier = Modifier.size(width = 52.dp, height = 48.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 androidx.compose.material3.Switch(
                     checked = mesh.enabled,
                     onCheckedChange = { mesh.toggle(it) },
-                    modifier = Modifier.scale(0.6f),
+                    modifier = Modifier.scale(0.75f),
+                    colors = androidx.compose.material3.SwitchDefaults.colors(
+                        // Off is a fault state here, not a neutral one.
+                        uncheckedTrackColor = MaterialTheme.colorScheme.error,
+                        uncheckedBorderColor = MaterialTheme.colorScheme.error,
+                        uncheckedThumbColor = MaterialTheme.colorScheme.onError,
+                    ),
                 )
             }
-            PillDivider()
-            // 2 — Circle: reachable now / total paired.
-            Icon(
-                Icons.Filled.People,
-                contentDescription = "Circle reachable / total",
-                modifier = Modifier.size(16.dp),
-            )
-            Text(
-                "$reachable/$circle",
-                fontWeight = FontWeight.SemiBold,
-                style = MaterialTheme.typography.labelLarge,
-            )
-            PillDivider()
-            // 3 — live mesh peers, coloured by how much mesh you actually have:
-            // none is a fault (and pulses, since it is the one state you want
-            // noticed from across the room), one works but has no redundancy,
-            // two or more is healthy.
-            PeerCountDot(connected)
-            Text(
-                "$connected",
-                fontWeight = FontWeight.SemiBold,
-                style = MaterialTheme.typography.labelLarge,
-            )
+            // 2/3 — the counts, and the whole of them is the panel affordance.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                modifier = Modifier
+                    .clickable(
+                        onClick = { sheetOpen = true },
+                        onClickLabel = "Show mesh and circle status",
+                    )
+                    .padding(start = 2.dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
+            ) {
+                PillDivider()
+                // Circle: reachable now / total paired.
+                Icon(
+                    Icons.Filled.People,
+                    contentDescription = "Circle reachable / total",
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    "$reachable/$circle",
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                PillDivider()
+                // Live mesh peers, coloured by how much mesh you actually have:
+                // none is a fault (and pulses, since it is the one state you
+                // want noticed from across the room), one works but has no
+                // redundancy, two or more is healthy.
+                PeerCountDot(connected)
+                Text(
+                    "$connected",
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleSmall,
+                )
+            }
         }
     }
 }
@@ -418,9 +460,8 @@ fun PeersPill(state: AppState) {
 private fun PillDivider() {
     Box(
         Modifier
-            .padding(start = 2.dp)
-            .size(width = 1.dp, height = 14.dp)
-            .background(MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.25f)),
+            .size(width = 1.dp, height = 16.dp)
+            .background(LocalContentColor.current.copy(alpha = 0.25f)),
     )
 }
 
