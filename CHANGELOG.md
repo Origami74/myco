@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heard from. Those answer different questions, and only the second was
   visible: a link re-establishing every few seconds looks perfectly healthy if
   all you can see is that it was heard from a moment ago.
+- Share files with **any** phone — no Myco on the other side. A new hotspot
+  bubble on the Circle tab (above the QR bubble) opens a local-only Wi-Fi
+  hotspot on this phone and a plain web page served from it. The other phone
+  scans one QR to join the hotspot, opens the shown address in its browser, and
+  can download the files you chose to share and upload files back to you.
+  Received files land in `Download/Myco/`, so they show up in the Files app
+  like any other download. The hotspot runs in a foreground service with a
+  Stop action, so it survives leaving the tab and is always one tap to kill.
 
 ### Changed
 
