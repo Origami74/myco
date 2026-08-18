@@ -37,7 +37,7 @@ class PairHostApduService : HostApduService() {
                     SW_OK
                 }
                 fileId.contentEquals(NDEF_FILE_ID) -> {
-                    val uri = PairPresent.payload.value
+                    val uri = PairPresent.effective
                     if (uri.isNullOrEmpty()) {
                         android.util.Log.i("MycoNfc", "HCE select NDEF but no payload")
                         SW_ERROR

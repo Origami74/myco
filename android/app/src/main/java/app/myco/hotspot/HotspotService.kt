@@ -20,11 +20,18 @@ import app.myco.MainActivity
 import app.myco.R
 import app.myco.aware.AwareRadio
 import app.myco.aware.AwareService
+import app.myco.nfc.PairPresent
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * Foreground service owning the **file-share hotspot**: a
@@ -48,6 +55,8 @@ class HotspotService : Service() {
     private var pausedAware = false
     private var lohsRetries = 0
     private val handler = Handler(Looper.getMainLooper())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var approvalsJob: Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -140,7 +149,28 @@ class HotspotService : Service() {
         Log.i(TAG, "hotspot '$ssid' up, file page on port ${srv.listeningPort}")
         publish(HotspotView(phase = HotspotPhase.ON, ssid = ssid, passphrase = pass))
         updateNotification("Hotspot “$ssid” is on")
+        watchApprovals(ssid)
         awaitOwnAddress(srv.listeningPort, tries = IP_POLL_TRIES)
+    }
+
+    /** Keep the notification pointing at the most urgent thing: a transfer
+     *  waiting for the owner's OK beats the idle "hotspot is on" line, because
+     *  the guest's request times out to a deny if nobody notices it. */
+    private fun watchApprovals(ssid: String) {
+        approvalsJob?.cancel()
+        approvalsJob = scope.launch {
+            TransferGate.pending.collect { reqs ->
+                val first = reqs.firstOrNull()
+                updateNotification(
+                    when {
+                        first == null -> "Hotspot “$ssid” is on"
+                        first.direction == TransferGate.Direction.DOWNLOAD ->
+                            "Guest asks for “${first.name}” — open Myco to allow"
+                        else -> "Guest sends “${first.name}” — open Myco to accept"
+                    },
+                )
+            }
+        }
     }
 
     /** Bind the file page, walking a few ports in case one is taken. */
@@ -166,7 +196,11 @@ class HotspotService : Service() {
     private fun awaitOwnAddress(port: Int, tries: Int) {
         val ip = hotspotIpv4()
         if (ip != null) {
-            publish(_view.value.copy(url = "http://$ip:$port"))
+            val url = "http://$ip:$port"
+            publish(_view.value.copy(url = url))
+            // From here a bump hands any phone the page: the emulated NFC tag
+            // serves the URL and the reader's OS opens it in its browser.
+            PairPresent.beginUrl(url)
             return
         }
         if (tries <= 0 || reservation == null) {
@@ -233,6 +267,12 @@ class HotspotService : Service() {
 
     private fun shutdown(finalView: HotspotView = HotspotView()) {
         handler.removeCallbacksAndMessages(null)
+        approvalsJob?.cancel()
+        approvalsJob = null
+        PairPresent.stopUrl()
+        // Fail waiting transfers first, so their server threads unblock and the
+        // server's stop() isn't held up by sockets mid-approval.
+        TransferGate.denyAll()
         server?.let { runCatching { it.stop() } }
         server = null
         reservation?.let { runCatching { it.close() } }
@@ -253,6 +293,7 @@ class HotspotService : Service() {
 
     override fun onDestroy() {
         if (reservation != null || server != null || starting) shutdown()
+        scope.cancel()
         super.onDestroy()
     }
 
