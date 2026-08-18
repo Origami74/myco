@@ -101,6 +101,15 @@ pub enum NativeAppAction {
     /// when this device has internet (e.g. it's acting as a hotspot).
     SetOfflineOnly { enabled: bool },
 
+    /// Point the event store at a **custom relay**, or back at the built-in one
+    /// with an empty `url`.
+    ///
+    /// Persisted and applied on the next launch: the backend is chosen when the
+    /// content layer is constructed, so swapping it live would mean tearing down
+    /// and rebuilding everything holding state on top of it. The UI says so
+    /// rather than pretending the change is immediate.
+    SetCustomRelay { url: String },
+
     /// Set this device's human label (memorable name). Stamped on outgoing pair
     /// request/accept events so peers show the name the user chose. The Android
     /// app owns the value (persisted there) and re-applies it on launch.

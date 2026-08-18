@@ -348,6 +348,10 @@ pub struct Content {
     /// The event store, through the seam — so it can be the embedded relay or
     /// any other NIP-01 relay (`reference/thinning-custom-relay.md`, D3).
     relay: Arc<dyn RelayBackend>,
+    /// The custom relay, when one is configured — kept so its reachability can
+    /// be reported. A backend that has gone away otherwise looks like an app
+    /// with no content, every site missing and no explanation.
+    relay_remote: Option<Arc<crate::remote_backend::RemoteBackend>>,
     /// The embedded store, when that is what `relay` points at.
     ///
     /// Held separately because two things it answers are not NIP-01 and cannot
@@ -520,11 +524,14 @@ impl Content {
     /// way (`reference/thinning-custom-relay.md`, D3).
     pub fn open_with_relay(
         data_dir: &Path,
-        custom: Option<Arc<dyn RelayBackend>>,
+        custom: Option<Arc<crate::remote_backend::RemoteBackend>>,
     ) -> anyhow::Result<Self> {
         let embedded = Arc::new(RelayStore::open(data_dir.join("relay"))?);
         let using_custom = custom.is_some();
-        let relay: Arc<dyn RelayBackend> = custom.unwrap_or_else(|| embedded.clone());
+        let relay: Arc<dyn RelayBackend> = match &custom {
+            Some(remote) => remote.clone(),
+            None => embedded.clone(),
+        };
         // Kept only while it is the thing serving: the usage counts and the
         // selective retain it backs describe our store, not someone else's.
         let relay_store = (!using_custom).then_some(embedded);
@@ -537,6 +544,7 @@ impl Content {
         let active_manifests = load_active(&active_path);
         Ok(Self {
             relay,
+            relay_remote: custom,
             relay_store,
             blobs,
             source: Mutex::new(None),
@@ -579,6 +587,15 @@ impl Content {
     /// The event store (shared), for the mesh WS proxy in front of it.
     pub fn relay(&self) -> Arc<dyn RelayBackend> {
         self.relay.clone()
+    }
+
+    /// What to tell the user about the configured relay: its URL, and why it is
+    /// unreachable if it is. Empty when the built-in store is in use.
+    pub fn relay_health(&self) -> crate::remote_backend::BackendHealth {
+        self.relay_remote
+            .as_ref()
+            .map(|r| r.health())
+            .unwrap_or_default()
     }
 
     /// The embedded store, if that is what we are using. `None` once a custom
@@ -2502,9 +2519,9 @@ mod tests {
 
         let dir = tmp("custom-relay");
         let _ = std::fs::remove_dir_all(&dir);
-        let backend: Arc<dyn nsite_deck::RelayBackend> = Arc::new(
-            crate::remote_backend::RemoteBackend::new(format!("ws://{addr}")),
-        );
+        let backend = Arc::new(crate::remote_backend::RemoteBackend::new(format!(
+            "ws://{addr}"
+        )));
         let content = Content::open_with_relay(&dir, Some(backend)).unwrap();
 
         // Publishing through the content layer lands on their relay, not ours.

@@ -47,6 +47,10 @@ mod mesh_wire;
 // Not wired to settings yet, so it reads as dead outside its own tests.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod remote_backend;
+// Settings that must survive a restart, because they decide how the content
+// layer is constructed rather than how it behaves.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod settings_store;
 // npub -> observed lane record (Wi-Fi Aware vs. LAN/AP), pushed by the
 // Android Aware JNI bridge and consumed by `AppRuntime::state()`'s
 // lane_by_npub override. Plain, non-JNI logic so it is unit-testable on the

@@ -358,8 +358,8 @@ private fun IdentitySettings(state: AppState, client: AppCoreClient, onBack: () 
 private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -> Unit) {
     var confirmCache by remember { mutableStateOf(false) }
     var confirmAll by remember { mutableStateOf(false) }
-    // The rows below are laid out but not wired: the store cannot be swapped yet.
-    // Better to say so on tap than to look functional and do nothing.
+    var editRelay by remember { mutableStateOf(false) }
+    // Blossom has no backend to point at yet, so that row still says so.
     var notYet by remember { mutableStateOf<String?>(null) }
 
     val used = state.cache.usedBytes
@@ -417,16 +417,22 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
 
         Spacer(Modifier.height(8.dp))
         GroupLabel("ADVANCED")
+        // A backend that has gone away otherwise looks like an app with no
+        // content: every site missing, no explanation. Warn the way the radio
+        // warnings do, since the cause is equally invisible from the app.
+        if (state.relayBackend.error.isNotEmpty()) {
+            BackendUnreachableCard(state.relayBackend.error)
+            Spacer(Modifier.height(8.dp))
+        }
         SectionCard {
             SettingRow(
                 icon = null,
                 title = "Custom relay",
-                subtitle = if (state.cache.externalRelay) {
-                    "Events are stored on a relay you chose"
-                } else {
-                    "Use another Nostr relay instead of the built-in one"
+                subtitle = when {
+                    state.pendingRelayUrl.isNotEmpty() -> state.pendingRelayUrl
+                    else -> "Use another Nostr relay instead of the built-in one"
                 },
-                onClick = { notYet = "relay" },
+                onClick = { editRelay = true },
             )
             RowDivider()
             SettingRow(
@@ -462,6 +468,16 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
         }
     }
 
+    if (editRelay) {
+        CustomRelayDialog(
+            current = state.pendingRelayUrl,
+            onSave = { url ->
+                client.dispatch(NativeActions.setCustomRelay(url))
+                editRelay = false
+            },
+            onDismiss = { editRelay = false },
+        )
+    }
     notYet?.let { what ->
         AlertDialog(
             onDismissRequest = { notYet = null },
@@ -719,6 +735,89 @@ private fun RadioWarningCard(warning: RadioWarning, onClick: () -> Unit) {
 /** Warning shown when the OS denied our BLE advertiser (TOO_MANY_ADVERTISERS):
  *  other apps hold every advertising slot, so peers can't discover this device.
  *  The radio keeps retrying on a backoff; this tells the user how to free a slot. */
+@Composable
+private fun BackendUnreachableCard(detail: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                MaterialTheme.colorScheme.errorContainer,
+                RoundedCornerShape(14.dp),
+            )
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.size(10.dp))
+            Text(
+                "Can't reach your relay",
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleMedium,
+            )
+        }
+        Text(
+            "$detail\n\nYour apps and messages are stored there, so they won't load " +
+                "until it's reachable again. Check that it's running and on the same " +
+                "network, or clear the setting below to go back to the built-in store.",
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+/**
+ * Enter (or clear) the custom relay URL.
+ *
+ * Carries the trust warning at the point of the decision rather than in a help
+ * page: reads are not re-verified, so whoever runs the relay decides what this
+ * device believes.
+ */
+@Composable
+private fun CustomRelayDialog(
+    current: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var url by remember { mutableStateOf(current) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = { onSave(url.trim()) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        title = { Text("Custom relay") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    singleLine = true,
+                    label = { Text("Relay URL") },
+                    placeholder = { Text("ws://192.168.1.10:4869") },
+                )
+                Text(
+                    "Your apps and messages will be stored on this relay instead of on " +
+                        "this device. Myco trusts it to check signatures, so whoever runs " +
+                        "it decides what this device believes — only use one you control.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "Leave it empty to go back to the built-in store. Either way it takes " +
+                        "effect the next time Myco starts.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
 @Composable
 private fun BleExhaustedCard() {
     Column(

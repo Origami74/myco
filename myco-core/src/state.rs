@@ -49,6 +49,13 @@ pub struct AppState {
     pub discovered: Vec<crate::content::DiscoveredNsite>,
     /// "Mesh-only": the IP online fallback is disabled (pull only over the mesh).
     pub offline_only: bool,
+    /// The configured custom relay and whether it can be reached. Empty `url`
+    /// means the built-in store; a non-empty `error` is what the Storage screen
+    /// warns about, the same way it warns about a radio being off.
+    pub relay_backend: crate::remote_backend::BackendHealth,
+    /// The custom relay URL as last saved, which may differ from the one in use
+    /// until the app restarts.
+    pub pending_relay_url: String,
     /// Status of the latest nsite update check (feedback for "Check for updates").
     pub update_check: crate::content::UpdateCheckView,
     /// Result of the dev-menu peer speedtest (a Blossom upload+download round-trip).

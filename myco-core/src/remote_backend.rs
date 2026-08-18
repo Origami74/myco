@@ -25,7 +25,7 @@
 //! (`reference/thinning-custom-relay.md`, D7).
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -73,6 +73,23 @@ struct Pending {
 pub struct RemoteBackend {
     url: String,
     tx: Mutex<Option<mpsc::UnboundedSender<Command>>>,
+    /// Why the last attempt to reach it failed, or `None` while it is working.
+    /// Shared with the connection actor, which is what actually learns.
+    ///
+    /// Worth surfacing rather than only logging: a relay that has moved, or a
+    /// laptop that went to sleep, otherwise looks like an app with no content —
+    /// every site missing, no explanation. The settings screen warns instead.
+    last_error: Arc<Mutex<Option<String>>>,
+}
+
+/// What the settings screen shows about a configured backend.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendHealth {
+    /// The configured URL, empty when the built-in store is in use.
+    pub url: String,
+    /// Why it is unreachable, empty when it is fine or not configured.
+    pub error: String,
 }
 
 impl RemoteBackend {
@@ -80,6 +97,15 @@ impl RemoteBackend {
         Self {
             url: url.into(),
             tx: Mutex::new(None),
+            last_error: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// What to tell the user about this backend right now.
+    pub fn health(&self) -> BackendHealth {
+        BackendHealth {
+            url: self.url.clone(),
+            error: self.last_error.lock().unwrap().clone().unwrap_or_default(),
         }
     }
 
@@ -100,7 +126,8 @@ impl RemoteBackend {
         }
         let (tx, rx) = mpsc::unbounded_channel();
         let url = self.url.clone();
-        tokio::spawn(async move { run(url, rx).await });
+        let health = self.last_error.clone();
+        tokio::spawn(async move { run(url, rx, health).await });
         *slot = Some(tx.clone());
         tx
     }
@@ -151,20 +178,28 @@ impl RelayBackend for RemoteBackend {
 /// to start a fresh actor on the next call.
 ///
 /// [`sender`]: RemoteBackend::sender
-async fn run(url: String, mut rx: mpsc::UnboundedReceiver<Command>) {
+async fn run(
+    url: String,
+    mut rx: mpsc::UnboundedReceiver<Command>,
+    health: Arc<Mutex<Option<String>>>,
+) {
     let connect = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url));
     let ws = match connect.await {
         Ok(Ok((ws, _))) => ws,
         Ok(Err(e)) => {
             tracing::warn!(url, error = %e, "relay backend: connect failed");
+            *health.lock().unwrap() = Some(format!("Could not reach {url}: {e}"));
             return;
         }
         Err(_) => {
             tracing::warn!(url, "relay backend: connect timed out");
+            *health.lock().unwrap() = Some(format!("{url} did not respond"));
             return;
         }
     };
     tracing::info!(url, "relay backend: connected");
+    // Reaching it clears whatever the last failure was.
+    *health.lock().unwrap() = None;
 
     let (mut sink, mut stream) = ws.split();
     let mut pending: HashMap<String, Pending> = HashMap::new();
@@ -240,6 +275,10 @@ async fn run(url: String, mut rx: mpsc::UnboundedReceiver<Command>) {
     for (_, reply) in publishes.drain() {
         let _ = reply.send(false);
     }
+    // A closed connection is not itself a fault — the next call reopens it — but
+    // record why, so a relay that keeps dropping us is visible rather than just
+    // slow.
+    *health.lock().unwrap() = Some(format!("Lost the connection to {url}: {reason}"));
     tracing::info!(url, reason, "relay backend: connection closed");
 }
 
@@ -283,7 +322,6 @@ fn handle_inbound(
 mod tests {
     use super::*;
     use nsite_deck::seams::AdminBackend;
-    use std::sync::Arc;
 
     /// Stand up the embedded relay and drive it through `RemoteBackend`, which is
     /// the arrangement P6 is for: Myco talking to a relay it does not own, over

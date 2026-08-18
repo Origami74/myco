@@ -119,6 +119,10 @@ pub struct AppRuntime {
     data_dir: String,
     rev: u64,
     error: String,
+    /// The custom relay URL as last saved — which is what the settings screen
+    /// should show, even though the running store is still the previous one
+    /// until the app is restarted.
+    pending_relay_url: String,
     identity: IdentityView,
     ble_enabled: bool,
     wifi_aware_enabled: bool,
@@ -200,7 +204,15 @@ impl AppRuntime {
 
         // The content layer (relay + Blossom + gateway + Library) lives for the
         // whole process; it is independent of the node's start/stop lifecycle.
-        let content = Arc::new(Content::open(Path::new(data_dir))?);
+        // The backend is chosen before anything else opens, so the setting has to
+        // come off disk first. A custom relay means the embedded store stays on
+        // disk but stops serving (`reference/thinning-custom-relay.md`, D3).
+        let settings = crate::settings_store::load(Path::new(data_dir));
+        let custom_relay = settings.relay_url().map(|url| {
+            tracing::info!(url, "content: using a custom relay");
+            Arc::new(crate::remote_backend::RemoteBackend::new(url))
+        });
+        let content = Arc::new(Content::open_with_relay(Path::new(data_dir), custom_relay)?);
 
         // The device keypair (same nsec the node uses) is the pairing identity —
         // pair request/accept events are signed with it.
@@ -452,6 +464,7 @@ impl AppRuntime {
         Ok(Self {
             app_version: app_version.to_string(),
             data_dir: data_dir.to_string(),
+            pending_relay_url: settings.relay_url().unwrap_or_default(),
             rev: 0,
             error: mesh_warning,
             identity,
@@ -600,6 +613,7 @@ impl AppRuntime {
             data_dir: String::new(),
             rev: 0,
             error: msg.to_string(),
+            pending_relay_url: String::new(),
             identity: IdentityView::default(),
             ble_enabled: false,
             wifi_aware_enabled: false,
@@ -752,6 +766,24 @@ impl AppRuntime {
             NativeAppAction::SetOfflineOnly { enabled } => {
                 if let Some(content) = &self.content {
                     content.set_offline_only(enabled);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SetCustomRelay { url } => {
+                let settings = crate::settings_store::Settings {
+                    custom_relay_url: Some(url.clone()),
+                };
+                match crate::settings_store::save(Path::new(&self.data_dir), &settings) {
+                    // Takes effect at the next launch; the store in use right now
+                    // does not change under the running content layer.
+                    Ok(()) => {
+                        self.pending_relay_url = settings.relay_url().unwrap_or_default();
+                        tracing::info!(url, "settings: custom relay saved");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "settings: could not save the custom relay");
+                        self.error = format!("Could not save the relay setting: {e}");
+                    }
                 }
                 self.rev += 1;
             }
@@ -1345,6 +1377,12 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.is_offline_only())
                 .unwrap_or(false),
+            relay_backend: self
+                .content
+                .as_ref()
+                .map(|c| c.relay_health())
+                .unwrap_or_default(),
+            pending_relay_url: self.pending_relay_url.clone(),
             update_check: self
                 .content
                 .as_ref()

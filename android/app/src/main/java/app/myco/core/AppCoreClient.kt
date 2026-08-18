@@ -56,6 +56,14 @@ data class CacheStatus(
     val externalBlobs: Boolean = false,
 )
 
+/** The configured custom relay, and why it is unreachable if it is. */
+data class RelayBackendHealth(
+    /** Empty when the built-in store is in use. */
+    val url: String = "",
+    /** Empty when reachable, or when there is no custom relay. */
+    val error: String = "",
+)
+
 /** A Circle contact: a paired peer we pull nsites from over the mesh. */
 data class CircleContact(
     val npub: String,
@@ -200,6 +208,10 @@ data class AppState(
     /** Invites we sent that are still waiting to be accepted. */
     val outboundPairs: List<OutboundPair> = emptyList(),
     val offlineOnly: Boolean,
+    /** The configured custom relay and whether it can be reached. */
+    val relayBackend: RelayBackendHealth = RelayBackendHealth(),
+    /** The custom relay URL as last saved; may differ from the one in use until restart. */
+    val pendingRelayUrl: String = "",
     val updateCheck: UpdateCheck = UpdateCheck(),
     val speedtest: SpeedtestStatus = SpeedtestStatus(),
     /** Merged per-identity peer diagnostics rows (DIAG-01/03/04/06). Built once
@@ -444,6 +456,13 @@ data class AppState(
                 pendingPairRequests = pendingPairRequests,
                 outboundPairs = outboundPairs,
                 offlineOnly = o.optBoolean("offlineOnly"),
+                relayBackend = o.optJSONObject("relayBackend").let { rb ->
+                    RelayBackendHealth(
+                        url = rb?.optString("url").orEmpty(),
+                        error = rb?.optString("error").orEmpty(),
+                    )
+                },
+                pendingRelayUrl = o.optString("pendingRelayUrl"),
                 speedtest = o.optJSONObject("speedtest")?.let { s ->
                     SpeedtestStatus(
                         running = s.optBoolean("running"),
@@ -646,6 +665,14 @@ object NativeActions {
     fun searchNsites(): JSONObject = JSONObject().put("type", "search_nsites")
 
     /** Toggle mesh-only: when enabled, don't use the public IP relay/Blossom fallback. */
+    /**
+     * Point the event store at [url], or back at the built-in store with an
+     * empty string. Applied on the next launch — the backend is chosen when the
+     * content layer is built.
+     */
+    fun setCustomRelay(url: String): JSONObject =
+        JSONObject().put("type", "SetCustomRelay").put("url", url)
+
     fun setOfflineOnly(enabled: Boolean): JSONObject =
         JSONObject().put("type", "set_offline_only").put("enabled", enabled)
 
