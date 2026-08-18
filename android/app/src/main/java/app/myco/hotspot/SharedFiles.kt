@@ -16,16 +16,17 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * The files the hotspot file page serves and receives.
  *
- * Two sources, one list:
+ * Two sources, one list — both scoped to the **current hotspot session**
+ * ([beginSession] wipes the slate when a hotspot starts, so a guest is never
+ * offered anything the owner didn't put up *this* time):
  *
  *  - **Received uploads** live in public `Download/Myco/` via [MediaStore], so
- *    the phone's owner finds them in the Files app like any other download.
- *    Under scoped storage an unprivileged query returns only rows this app
- *    created — which is exactly the set we want to re-serve.
+ *    the phone's owner finds them in the Files app like any other download —
+ *    and keeps them across sessions. Only the rows created this session are
+ *    re-served, though; earlier sessions' files stay private to the owner.
  *  - **Picked shares** are documents the owner adds through the system picker
- *    (SAF `OpenMultipleDocuments`). The read grant is session-scoped, which
- *    matches the hotspot's lifetime; they are streamed from their content URIs,
- *    never copied.
+ *    (SAF `OpenMultipleDocuments`). They are streamed from their content URIs,
+ *    never copied, and forgotten at the next session start.
  *
  * Entry ids are `m<mediastore-id>` / `u<index>` — opaque to the web page.
  * A process-wide singleton (like the radios) so the service's server threads
@@ -38,12 +39,25 @@ class SharedFiles private constructor(private val context: Context) {
     private data class Picked(val uri: Uri, val name: String, val size: Long)
 
     private val picked = ArrayList<Picked>()
+
+    /** Entry ids (`m<rowid>`) of uploads received during the current hotspot
+     *  session — the only MediaStore rows [list] serves. */
+    private val sessionUploads = HashSet<String>()
     private val lock = Any()
 
     private val _entries = MutableStateFlow<List<Entry>>(emptyList())
 
     /** Live list for the sheet; the server re-queries per request instead. */
     val entries: StateFlow<List<Entry>> = _entries.asStateFlow()
+
+    /** A hotspot session is starting: nothing from before is on offer. */
+    fun beginSession() {
+        synchronized(lock) {
+            picked.clear()
+            sessionUploads.clear()
+        }
+        refresh()
+    }
 
     /** Add documents picked with SAF to the served list (session-scoped). */
     fun addUris(uris: List<Uri>) {
@@ -57,9 +71,10 @@ class SharedFiles private constructor(private val context: Context) {
         refresh()
     }
 
-    /** Everything currently served: received uploads first, then picked shares. */
+    /** Everything currently served: this session's uploads, then picked shares. */
     fun list(): List<Entry> {
-        val fromStore = queryUploads()
+        val session = synchronized(lock) { sessionUploads.toSet() }
+        val fromStore = queryUploads().filter { it.id in session }
         val fromPicker = synchronized(lock) {
             picked.mapIndexed { i, p -> Entry("u$i", p.name, p.size) }
         }
@@ -104,6 +119,7 @@ class SharedFiles private constructor(private val context: Context) {
             values.clear()
             values.put(MediaStore.MediaColumns.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
+            synchronized(lock) { sessionUploads.add("m${ContentUris.parseId(uri)}") }
             refresh()
             true
         }.getOrElse {

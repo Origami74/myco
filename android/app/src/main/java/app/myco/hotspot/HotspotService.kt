@@ -83,6 +83,9 @@ class HotspotService : Service() {
         // From this moment NFC belongs to the hotspot: pairing-by-bump is off,
         // and once the page address is known a bump serves that instead.
         PairPresent.beginHotspot()
+        // A fresh session offers nothing from previous ones: only files the
+        // owner picks now, or uploads received now, are served to guests.
+        SharedFiles.get(this).beginSession()
         // The Wi-Fi chip cannot host an AP interface next to the Aware (NAN)
         // session the mesh's Aware lane holds — seen on Pixel 9 as HalDevMgr
         // "bestIfaceCreationProposal is null" followed by ERROR_INCOMPATIBLE_MODE.
