@@ -8,6 +8,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +48,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -397,17 +400,33 @@ fun PeersPill(state: AppState) {
             modifier = Modifier.padding(start = 6.dp, end = 4.dp),
         ) {
             // 1 — mesh master switch: the same slider as the Settings rows,
-            // scaled down to pill height. The Box is the touch target, not the
-            // drawn slider (the scale is a draw transform only), so it is sized
-            // to Material's 48dp minimum — the old 36×20 box was the whole
-            // reason this was fiddly to hit.
+            // scaled down to pill height.
+            //
+            // The whole left block toggles, not the slider. Sizing the Box was
+            // not enough on its own: the Switch keeps its own hit rect and
+            // swallows everything inside it, so taps landing in the Box but
+            // beside the slider did nothing — which is what made this fiddly.
+            // Handing the click to the Box and passing the Switch a null
+            // onCheckedChange makes the slider a pure indicator and the entire
+            // 72×48 block the target. `scale` is a draw transform only, so the
+            // slider stays small while the target does not.
             Box(
-                modifier = Modifier.size(width = 52.dp, height = 48.dp),
+                modifier = Modifier
+                    .size(width = 72.dp, height = 48.dp)
+                    .toggleable(
+                        value = mesh.enabled,
+                        onValueChange = { mesh.toggle(it) },
+                        role = Role.Switch,
+                        // No ripple: a bounded indication on a block wider than
+                        // the thing it draws reads as a misaligned button.
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 androidx.compose.material3.Switch(
                     checked = mesh.enabled,
-                    onCheckedChange = { mesh.toggle(it) },
+                    onCheckedChange = null,
                     modifier = Modifier.scale(0.75f),
                     colors = androidx.compose.material3.SwitchDefaults.colors(
                         // Off is a fault state here, not a neutral one.
