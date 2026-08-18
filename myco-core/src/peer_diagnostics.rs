@@ -134,6 +134,9 @@ pub fn merge_peers(
             .unwrap_or_default();
         let last_seen_ms = pv.map(|p| p.last_seen_ms).unwrap_or(0);
         let authenticated_at_ms = pv.map(|p| p.authenticated_at_ms).unwrap_or(0);
+        // `None` both when there is no PeerView and when MMP has not measured
+        // the link yet — the row cannot tell those apart and must not pretend.
+        let srtt_ms = pv.and_then(|p| p.srtt_ms);
         rows.push(PeerDiagnosticView {
             key,
             npub: bp.npub.clone(),
@@ -152,6 +155,7 @@ pub fn merge_peers(
             also_reachable_via: Vec::new(),
             last_seen_ms,
             authenticated_at_ms,
+            srtt_ms,
             rssi: bp.rssi,
             psm: bp.psm,
             pair_state: String::new(),
@@ -204,6 +208,7 @@ pub fn merge_peers(
                 also_reachable_via: Vec::new(),
                 last_seen_ms: 0,
                 authenticated_at_ms: 0,
+                srtt_ms: None,
                 rssi: Some(adv.rssi),
                 psm: adv.psm,
                 pair_state: String::new(),
@@ -247,6 +252,7 @@ pub fn merge_peers(
             also_reachable_via: Vec::new(),
             last_seen_ms: 0,
             authenticated_at_ms: 0,
+            srtt_ms: None,
             rssi: None,
             psm: 0,
             pair_state: String::new(),
@@ -380,6 +386,7 @@ mod tests {
             last_seen_ms,
             authenticated_at_ms: 0,
             transport: transport.to_string(),
+            srtt_ms: None,
             display_name: String::new(),
         }
     }
@@ -416,6 +423,31 @@ mod tests {
             name: name.to_string(),
             since: 0,
         }
+    }
+
+    /// The ping the status panel shows is the peer's MMP SRTT, carried through
+    /// untouched. A row with no `PeerView` behind it (a Circle member who is
+    /// merely paired-offline) carries `None` rather than inheriting anyone's.
+    #[test]
+    fn srtt_rides_the_peer_view_onto_the_row() {
+        let mut view = pv("a1", "npub1connected", true, 1_000, "udp");
+        view.srtt_ms = Some(37.5);
+        let peers = vec![bp("a1", "npub1connected", true)];
+        let members = vec![circle("npub2offline", "Offline Friend")];
+        let out = merge_peers(
+            &[view],
+            &peers,
+            &[],
+            &members,
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &[],
+            0,
+        );
+        assert_eq!(out[0].srtt_ms, Some(37.5));
+        assert_eq!(out[1].srtt_ms, None);
     }
 
     #[test]

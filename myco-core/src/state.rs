@@ -102,6 +102,10 @@ pub struct PeerDiagnosticView {
     /// itself survives, so a long age means the link has held, not that a
     /// handshake is stale.
     pub authenticated_at_ms: u64,
+    /// Smoothed round-trip time over this peer's link, milliseconds, as MMP
+    /// measured it. `None` when there is no measurement — an unmeasured link
+    /// renders as an em-dash, never as a confident `0ms`.
+    pub srtt_ms: Option<f64>,
     /// Signal strength from the most recent scan advert attributed to this
     /// row, dBm; `None` when no advert has been attributed.
     pub rssi: Option<i32>,
