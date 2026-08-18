@@ -47,11 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page's address instead, and the other phone's own system opens it in its
   browser — nothing to install, nothing to type.
 - Nothing is transferred behind your back: every download and upload a guest
-  starts waits on the hotspot sheet as an explicit Allow / Deny, with the
-  file's name and size. The guest's browser simply waits for your answer; an
-  unanswered request is denied after 90 seconds, and stopping the hotspot
-  denies everything still waiting. The notification names the file that is
-  waiting so a request can't sit there unseen.
+  starts pops an accept-or-decline dialog on your phone — wherever in Myco you
+  are, not just on the hotspot sheet — with the file's name and size. The
+  guest's browser simply waits for your answer; an unanswered request is
+  denied after 90 seconds, and stopping the hotspot denies everything still
+  waiting. The notification names the file that is waiting so a request can't
+  sit there unseen.
+- Sending now works like AirDrop in both directions. "Send a file" on the
+  hotspot sheet pushes any document straight at the guest: their browser pops
+  an accept-or-decline dialog with the file's name and size, accepting saves
+  it as a normal download, and the sheet shows each offer's fate — waiting,
+  sent, or declined.
 
 ### Changed
 

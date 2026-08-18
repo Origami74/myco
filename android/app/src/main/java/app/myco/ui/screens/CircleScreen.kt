@@ -76,6 +76,7 @@ import app.myco.core.CircleContact
 import app.myco.core.NativeActions
 import app.myco.hotspot.HotspotPhase
 import app.myco.hotspot.HotspotService
+import app.myco.hotspot.Outbox
 import app.myco.hotspot.SharedFiles
 import app.myco.nfc.NfcState
 import app.myco.nfc.NfcStatus
@@ -128,6 +129,12 @@ fun CircleScreen(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         if (uris.isNotEmpty()) SharedFiles.get(context).addUris(uris)
+    }
+    // "Send a file": each pick becomes an offer the guest's page must accept.
+    val pickSendFiles = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) Outbox.get(context).add(uris)
     }
 
     // NFC availability, re-checked on resume (e.g. back from NFC settings).
@@ -373,6 +380,7 @@ fun CircleScreen(
             },
             onStop = { HotspotService.stop(context) },
             onAddFiles = { pickShareFiles.launch(arrayOf("*/*")) },
+            onSendFiles = { pickSendFiles.launch(arrayOf("*/*")) },
             onDismiss = { hotspotSheet = false },
         )
     }

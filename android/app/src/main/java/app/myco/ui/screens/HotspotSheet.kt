@@ -35,10 +35,11 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import app.myco.hotspot.HotspotPhase
 import app.myco.hotspot.HotspotView
+import app.myco.hotspot.Outbox
 import app.myco.hotspot.SharedFiles
-import app.myco.hotspot.TransferGate
 import app.myco.hotspot.WifiQr
 import app.myco.share.NsiteShare
 
@@ -59,6 +60,7 @@ fun HotspotSheet(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onAddFiles: () -> Unit,
+    onSendFiles: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -111,7 +113,7 @@ fun HotspotSheet(
                     Text("Starting the hotspot…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
 
-                HotspotPhase.ON -> HotspotOn(view, shared, onStop, onAddFiles)
+                HotspotPhase.ON -> HotspotOn(view, shared, onStop, onAddFiles, onSendFiles)
             }
         }
     }
@@ -123,23 +125,11 @@ private fun HotspotOn(
     shared: List<SharedFiles.Entry>,
     onStop: () -> Unit,
     onAddFiles: () -> Unit,
+    onSendFiles: () -> Unit,
 ) {
     val ssid = view.ssid.orEmpty()
     val pass = view.passphrase.orEmpty()
     val wifiQr = remember(ssid, pass) { NsiteShare.qrBitmap(WifiQr.payload(ssid, pass)) }
-
-    // Transfers the guest started, parked on this phone's Allow/Deny. First,
-    // because a waiting guest is the most time-critical thing on this sheet.
-    val pending by TransferGate.pending.collectAsState()
-    if (pending.isNotEmpty()) {
-        StepLabel("WAITING FOR YOUR OK")
-        Spacer(Modifier.height(8.dp))
-        pending.forEach { req ->
-            ApprovalRow(req)
-            Spacer(Modifier.height(6.dp))
-        }
-        Spacer(Modifier.height(12.dp))
-    }
 
     StepLabel("1 · JOIN THIS PHONE'S WI-FI")
     Spacer(Modifier.height(10.dp))
@@ -188,6 +178,31 @@ private fun HotspotOn(
     }
 
     Spacer(Modifier.height(18.dp))
+    StepLabel("SEND TO THE OTHER PHONE")
+    Spacer(Modifier.height(6.dp))
+    // Push a file AirDrop-style: it pops an accept/decline dialog on their page.
+    val offers by Outbox.get(LocalContext.current).offers.collectAsState()
+    offers.forEach { offer ->
+        Text(
+            offer.name + sizeSuffix(offer.size) + when (offer.status) {
+                Outbox.Status.WAITING -> " — waiting for them…"
+                Outbox.Status.SENT -> " — sent ✓"
+                Outbox.Status.DECLINED -> " — they declined"
+            },
+            color = when (offer.status) {
+                Outbox.Status.DECLINED -> MaterialTheme.colorScheme.error
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+        )
+    }
+    if (offers.isNotEmpty()) Spacer(Modifier.height(6.dp))
+    Button(onClick = onSendFiles) {
+        Text("Send a file")
+    }
+
+    Spacer(Modifier.height(18.dp))
     StepLabel("SHARED FROM THIS PHONE")
     Spacer(Modifier.height(6.dp))
     Text(
@@ -209,44 +224,6 @@ private fun HotspotOn(
         }
         TextButton(onClick = onStop) {
             Text("Stop hotspot", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
-        }
-    }
-}
-
-/** One transfer awaiting consent: what and which way, then Allow / Deny. */
-@Composable
-private fun ApprovalRow(req: TransferGate.Pending) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    req.name,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                )
-                Text(
-                    when (req.direction) {
-                        TransferGate.Direction.DOWNLOAD -> "wants to download" + sizeSuffix(req.size)
-                        TransferGate.Direction.UPLOAD -> "wants to send you this" + sizeSuffix(req.size)
-                    },
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            TextButton(onClick = { TransferGate.decide(req.id, false) }) {
-                Text("Deny", color = MaterialTheme.colorScheme.error)
-            }
-            Button(onClick = { TransferGate.decide(req.id, true) }) {
-                Text("Allow")
-            }
         }
     }
 }
