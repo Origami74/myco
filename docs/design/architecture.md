@@ -180,7 +180,7 @@ no good Android app to forward to:
   is the embedded relay; optionally it can **forward to a local relay app (e.g.
   Citrine)** for devs who already run one. Embedding is the default and earliest
   path,
-- **Blossom** (`http://localhost:24243`) is **always embedded** — a small
+- **Blossom** (`http://localhost:24243`) is **currently always embedded** — a small
   content-addressed HTTP store (`GET /<sha256>`, `PUT /upload`, `HEAD`). There is
   no good Android Blossom app to forward to, so embedding is the only sensible
   path.
@@ -356,7 +356,7 @@ Provenance for each band, matching the legend in
 | `NsiteActivity` (fullscreen WebView per nsite, no chrome) | **net-new (thin)** | own task/instance; standard WebView; nsite-deck "loads localhost" pattern |
 | Local gateway + `*.nsite` resolution | **port (site-deck)** | Go → **Rust** in `nsite-deck`; HTTP-listener placement TBD/open |
 | Embedded Nostr relay (`:4870`) | **port (site-deck) → Rust** | was Khatru/Go; now the **`myco-relay`** crate (impl `RelayBackend`); embedded default, optional Citrine-forward backend |
-| Embedded Blossom (`:24243`) | **port (site-deck) → Rust** | now the **`myco-blossom`** crate (impl `BlobStore`); always embedded; content-addressed blobs, BUD-01 |
+| Embedded Blossom (`:24243`) | **port (site-deck) → Rust** | now the **`myco-blossom`** crate (impl `BlobStore`); the only implementation today, a pluggable blob backend is planned; content-addressed blobs, BUD-01 |
 | Store-and-forward cache (re-serve peers' events/blobs) | **net-new** | the offline-propagation mechanism; Blossom blob store, LRU 2 GB, Library = pinned |
 | nsite sync (fetch + verify + retain over `.fips`) | **net-new** | runs in **`nsite-deck`**; v0 serves direct from relay + Blossom |
 | htdocs serving cache (path-named files under `current/`) | **deferred** | nsite-deck speed optimization; not needed for v0 |

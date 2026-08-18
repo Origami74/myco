@@ -242,9 +242,11 @@ pub struct OutboundPairView {
     pub since: u64,
 }
 
-/// Mutual-pairing handshake events, delivered point-to-point over a peer's mesh
-/// relay (NOT gossiped). Both are signed by the **device** key (the pairing
-/// identity) and self-destruct (NIP-40). See `docs/design/event-gossip.md`.
+/// Mutual-pairing handshake events, POSTed point-to-point to a peer's **auth
+/// service** at `:4871` (never gossiped, and never stored — the relay refuses
+/// these kinds from every source). Signed by the **device** key, which is the
+/// pairing identity, and carrying a NIP-40 expiry the auth service checks on
+/// receipt. See `docs/design/identity-pairing.md`.
 pub const KIND_PAIR_REQUEST: u16 = 9101;
 pub const KIND_PAIR_ACCEPT: u16 = 9102;
 /// Sent when a peer forgets you, so both sides drop the pairing symmetrically.
@@ -1476,11 +1478,11 @@ impl Content {
     }
 
     /// Pull plane: forward a REQ's filters to connected Circle peers and
-    /// aggregate their matching events. `req_ttl` is the remaining forward budget
-    /// *after* this hop — it is stamped back into each filter so the next relay
-    /// decrements from here (without it the peer would re-read the original value).
-    /// `exclude` is the requester's mesh address (split-horizon). Per-peer queries
-    /// run in parallel, each hard-bounded so a dead relay can't stall discovery.
+    /// aggregate their matching events. `meta` is the incoming envelope, already
+    /// decremented, so the hop budget and query id carry onward while the filters
+    /// stay canonical NIP-01. `exclude` is the requester's mesh address
+    /// (split-horizon). Per-peer queries run in parallel, each bounded by the
+    /// budget that arrived so a dead relay can't stall discovery.
     pub async fn pull_from_peers(
         &self,
         filters: Vec<serde_json::Value>,
@@ -1609,7 +1611,8 @@ impl Content {
         // Query set, one combined REQ per relay read until EOSE
         // (docs/design/nsite-updates.md §3.2):
         //  - connected peers' mesh relays, carrying one more hop so the check reaches
-        //    2 hops just like discovery (their peers' manifests come back too);
+        //    2 hops just like discovery (their peers' manifests come back too),
+        //    which rides the envelope rather than the filter;
         //  - online relays, unless mesh-only is on.
         let mesh_filter = serde_json::json!({
             "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
@@ -1652,8 +1655,19 @@ impl Content {
         let mesh_q = mesh_peers.into_iter().map(|(npub, url)| {
             let f = mesh_filter.clone();
             async move {
-                pool.request(&npub, &url, vec![f], std::time::Duration::from_secs(15))
-                    .await
+                let meta = crate::mesh_wire::MeshMeta::pull(
+                    1,
+                    crate::mesh_wire::new_query_id(),
+                    PULL_BUDGET_MS,
+                );
+                pool.request_with(
+                    &npub,
+                    &url,
+                    vec![f],
+                    Some(meta),
+                    std::time::Duration::from_secs(15),
+                )
+                .await
             }
         });
         let online_q = online.into_iter().map(|url| {
@@ -1901,11 +1915,20 @@ impl Content {
 
         // Forward budget (mirrors chat): originate at the default for a local
         // publish, else the ttl that rode in. Clamp so a peer can't over-extend us.
+        // The same per-peer clamp the chat push plane applies: a peer we have not
+        // granted multihop writes still gets its manifest stored and served here,
+        // it simply travels no further through us. Manifests were missing this
+        // check, so that grant was enforced on one plane but not the other (D10).
+        let peer_cap = match inbound.sender {
+            Some(ip) if !self.may_forward_from(ip) => 0,
+            _ => MANIFEST_EVENT_TTL,
+        };
         let effective = match inbound.origin {
             Origin::Local => MANIFEST_EVENT_TTL,
             Origin::Mesh => inbound.event_ttl.unwrap_or(0),
         }
-        .min(MANIFEST_EVENT_TTL);
+        .min(MANIFEST_EVENT_TTL)
+        .min(peer_cap);
         let out_ttl = effective.saturating_sub(1);
 
         if !self.is_in_library(&addr) {
@@ -2445,6 +2468,56 @@ mod tests {
         assert!(!gate.may_read(stranger_ip));
         assert!(!gate.may_publish(stranger_ip, KIND_PAIR_REQUEST));
         assert!(!gate.may_publish(stranger_ip, 9));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A peer denied multihop writes must not have its **manifests** relayed
+    /// either.
+    ///
+    /// The chat push plane consulted the grant; the manifest push plane did not,
+    /// so the same permission was enforced on one plane and ignored on the other.
+    /// Both clamps read the same record, so testing the record is what pins the
+    /// invariant (`reference/thinning-custom-relay.md`, D10).
+    #[test]
+    fn revoking_multihop_writes_covers_both_push_planes() {
+        let dir = tmp("multihop-clamp");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+
+        let peer = Keys::generate();
+        let npub = peer.public_key().to_bech32().unwrap();
+        content.add_to_circle(&npub, "Peer");
+        let ip = IpAddr::V6(
+            fips::PeerIdentity::from_npub(&npub)
+                .unwrap()
+                .address()
+                .to_ipv6(),
+        );
+
+        assert!(
+            content.may_forward_from(ip),
+            "multihop writes are granted by default"
+        );
+
+        // Revoke it the way the UI eventually will.
+        {
+            let mut circle = content.circle.lock().unwrap();
+            circle[0].perms.relay_write_multihop = false;
+        }
+        assert!(
+            !content.may_forward_from(ip),
+            "a revoked peer's events stop here, on either plane"
+        );
+        // An unknown peer is not forwarded for either.
+        let stranger = Keys::generate().public_key().to_bech32().unwrap();
+        let stranger_ip = IpAddr::V6(
+            fips::PeerIdentity::from_npub(&stranger)
+                .unwrap()
+                .address()
+                .to_ipv6(),
+        );
+        assert!(!content.may_forward_from(stranger_ip));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

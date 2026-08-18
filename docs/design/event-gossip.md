@@ -116,7 +116,7 @@ The shape lives in
 | --- | --- | --- |
 | `ttl` | `u8` (omitted when 0) | Remaining forward hops. `0` means store it, do not pass it on. |
 | `qid` | string, optional | Query id for a pull, stamped by the originating proxy so each node serves a given query once (§7). |
-| `budgetMs` | `u32`, optional | Relative time budget for a pull. **Carried but not yet enforced** — every hop currently uses a hardcoded timeout. |
+| `budgetMs` | `u32`, optional | Relative time budget for a pull. A forwarded hop waits no longer than the budget that arrived (§7). |
 
 Future fields (a path vector, an origin hint, a rate class) extend the metadata,
 never the inner message.
@@ -344,12 +344,27 @@ FIFO.
 ### Decided — carry a relative budget, do not compose deadlines
 
 `budgetMs` is **relative**, never a wall-clock deadline, because mesh clocks are
-not synced. Each hop is meant to spend about 60% of what it received on the hop
-below and keep the rest to receive and relay, so a depth-2 peer is not squeezed
-inside its parent's timeout.
+not synced. The originator stamps 10 s; each hop passes on about 60% of what it
+received and keeps the rest to receive and relay.
 
-**Not yet enforced.** The field is stamped, decayed per hop, and carried, but
-every hop still applies a hardcoded timeout. Enforcement is a separate change.
+**A forwarded hop waits `min(budget, fallback)`.** Without that the field was
+decorative: every hop applied its own fixed 8 s, so each hop's window started
+fresh *inside* its parent's and a peer two hops out that honestly used most of
+its time answered after the hop above had already given up.
+
+Three properties fall out:
+
+- **Hop windows nest, they do not add up.** Each hop must allow strictly less
+  than the one above it, which is what makes a wave terminate.
+- **A peer cannot extend us.** A large incoming budget is clamped to our own
+  fallback (8 s).
+- **A floor of 1.5 s.** A budget worn down by several hops still leaves time for
+  a BLE connect. A peer that sends no budget at all falls back to the fixed
+  timeout.
+
+The budget only bounds how long a node holds query state. Late results are not an
+error; they stream to whoever is still listening, and a node whose budget has
+expired drops them.
 
 ### Decided — the recursion stays synchronous for now
 
@@ -372,7 +387,7 @@ still a proposal: the per-app record and the `Origin` mapping are not built yet.
 
 Sane per-`Origin` caps that stop a runaway app from saturating a BLE link without
 throttling normal chat; slow-down over hard-fail. Starting numbers in
-[nsite-permissions.md §4](./nsite-permissions.md).
+[nsite-permissions.md §5](./nsite-permissions.md).
 
 ### Still open
 

@@ -16,6 +16,12 @@ content source and how that reach goes transitive), [security.md](./security.md)
 (key storage threat model, self-authenticating data, what a mutual pairing does and
 does not authorize).
 
+> **Where pairing lives now.** Pairing is **not** relay traffic. It has its own
+> service, `POST /pair` on `:4871` (§6.2), and it is the only port an unpaired
+> device can reach. The content ports — `:4870` relay, `:24243` Blossom — require
+> circle membership with no exceptions. The handshake events and their signatures
+> are unchanged; only where they land changed.
+
 ## 1. One device identity = three derived forms
 
 Myco reuses the FIPS unification: a single Nostr keypair is the **device
@@ -302,7 +308,7 @@ Once mutually paired:
 How the poll is carried, how often, scope/TTL, and whether Carl's content is
 pulled eagerly or on demand are propagation concerns — see
 [propagation.md](./propagation.md). Author-signed manifest events (kinds
-15128 / 35128) flood with a default TTL of 5 hops, while the large blobs stay
+15128 / 35128) flood with a default budget of 3 hops, while the large blobs stay
 pull-only (fetched only when a site is opened).
 
 ### 6.2 Where the handshake lands: the auth service on `:4871`
@@ -431,12 +437,12 @@ held to the phone is read but ignored, never opened.
 
 **Where the secret lives.** §6.1 framed the `pairSecret` as echoed back inside the
 Noise-encrypted channel to `<npub_A>.fips`. The implementation keeps that property:
-the scanner/tapper sends a signed pair **request** (kind 9101) to
-`<npub_A>.fips:4870` — already Noise-XK encrypted and authenticated to A — carrying
-the secret. What differs from the doc is *who matches it*: A enforces single-use
-locally, via a small persisted ledger of the secrets it has issued. Each presented
-code mints a fresh secret; it is consumed on first accept and the presented payload
-rotates, so a captured QR/tag can't pair twice.
+the scanner/tapper posts a signed pair **request** (kind 9101) to
+`<npub_A>.fips:4871/pair` — already Noise-XK encrypted and authenticated to A —
+carrying the secret. What differs from the doc is *who matches it*: A enforces
+single-use locally, via a small persisted ledger of the secrets it has issued. Each
+presented code mints a fresh secret; it is consumed on first accept and the
+presented payload rotates, so a captured QR/tag can't pair twice.
 
 **Auto-accept scope.** A request auto-accepts only while A is actively presenting
 (on the Circle tab) and the secret matches a live issued one. A request that
@@ -444,11 +450,16 @@ arrives otherwise — A on another screen, or Myco launched by the tap — surfa
 accept/ignore prompt instead, keeping the §6.1 human-in-the-loop confirmation.
 
 **Unpairing (partially answers the open question above).** Forgetting a peer now
-sends a signed **pair-remove** event (kind 9103) to their relay; on receipt they
-drop the sender from their Circle, so the two sides stay symmetric. It is
-best-effort and fire-once — an offline peer is not retried, so their Circle keeps a
-stale entry until they forget us or we re-pair. A durable (queue + ack) handshake
-is left open.
+posts a signed **pair-remove** event (kind 9103) to their auth service; on receipt
+they drop the sender from their Circle, so the two sides stay symmetric. Delivery
+is retried on the same schedule as a request (about a minute), and a `403` from
+the peer stops the loop rather than burning the whole window. A peer that stays
+offline for the whole window keeps a stale entry until they forget us or we
+re-pair. A durable (queue + ack) handshake is left open.
+
+**Revocation reaches open connections.** Because admission to the content ports is
+checked once, at the WebSocket upgrade, dropping a peer also **closes connections
+they already hold** rather than only blocking the next one.
 
 **NFC exposure.** While presenting, the emulated tag answers *any* NFC reader, not
 just another Myco device, with `{npub, name, pairSecret}`. This is acceptable: the

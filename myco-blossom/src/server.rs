@@ -1,6 +1,8 @@
 //! The BUD-01 Blossom HTTP server over [`FsBlobStore`], so the node can serve its
-//! blobs to mesh peers at `http://[fd00::self]:24243`. No auth on the mesh-local
-//! server (the blob hash is self-authenticating). Routes:
+//! blobs to mesh peers at `http://[fd00::self]:24243`. Blobs are
+//! self-authenticating, so there is no per-blob auth; access is decided per
+//! request by an [`AccessFn`] taking the [`BlobOp`], which is how `myco-core`
+//! grants reads to paired peers while withholding uploads. Routes:
 //!
 //! - `GET  /<sha256>` → blob bytes (`application/octet-stream`; the gateway infers
 //!   the real content-type from the manifest path, not from Blossom).

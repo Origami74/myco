@@ -11,9 +11,10 @@
 //! - **Mesh origin** re-forwards with the budget that rode in,
 //!   **except back to the sender** (split-horizon), until the budget runs out.
 //!
-//! The loop guard is the relay's id-dedup: the gossiper is only ever called for an
-//! event that was *new* to the store, so a copy arriving via a second path is
-//! never re-forwarded (`docs/design/event-gossip.md` §3–4). Manifest kinds
+//! The loop guard is the proxy's own seen-set: the gossiper is only ever called
+//! the first time this device sees an id, so a copy arriving via a second path is
+//! never re-forwarded — and unlike the store's dedup, that holds even after the
+//! event has been GC'd (`docs/design/event-gossip.md` §3–4). Manifest kinds
 //! (15128/35128) are excluded — they have their own path
 //! (`docs/design/nsite-layer.md` §2.1); everything else is gossip-eligible by
 //! default (`docs/design/nsite-permissions.md`).

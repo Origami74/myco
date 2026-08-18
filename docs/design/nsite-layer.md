@@ -154,13 +154,17 @@ socket is refused with a `NOTICE`.
 
 #### The backend seam
 
-`nsite-deck`'s [`RelayBackend`](../../nsite-deck/src/seams.rs) is the seam. It is
-being re-cut around the verbs every relay already speaks (`publish`, `query` over
-real `nostr::Filter`s, a live `subscribe`), with operations that have no NIP-01
-expression — the selective cache wipe that keeps pinned sites — split into a
-separate admin trait that only the embedded store implements. Where that trait is
-absent, the settings UI should report the operation as unavailable rather than
-silently doing nothing.
+`nsite-deck`'s [`RelayBackend`](../../nsite-deck/src/seams.rs) is the seam, and it
+is cut around the verbs every relay already speaks: `publish`, and `query` over
+real `nostr::Filter`s. Using real filters rather than a hand-rolled subset means
+`since`, `until`, ids, and general tag matching all work, and a remote backend
+needs no translation layer. "Newest event in a replaceable slot" is a helper over
+`query`, not a backend method, because it is an ordinary filter.
+
+Operations with **no NIP-01 expression** — the selective cache wipe that keeps
+pinned sites — live in a separate `AdminBackend` trait that only the embedded
+store implements. Where it is absent, the settings UI should report the operation
+as unavailable rather than silently doing nothing.
 
 **Planned, not built:** a `RemoteBackend` that speaks WebSocket to a configured
 relay URL — [Citrine](https://github.com/greenart7c3/Citrine) on the same device,

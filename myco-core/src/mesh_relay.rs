@@ -57,9 +57,10 @@ pub struct Inbound {
     pub sender: Option<IpAddr>,
 }
 
-/// The mesh fan-out hook. The relay calls this for every **newly-accepted** event
-/// (the store's id-dedup is the loop guard: a duplicate is never re-delivered
-/// here). The implementor (`myco-core`) decides whether and how far to push it to
+/// The mesh fan-out hook. The proxy calls this for every event it sees for the
+/// **first time** — its own seen-set is the loop guard, not the store's dedup, so
+/// an id the store has since forgotten is still not re-flooded (D2). The
+/// implementor (`myco-core`) decides whether and how far to push it to
 /// circle peers using the [`Inbound`] context (see `docs/design/event-gossip.md`).
 /// The default does nothing — the relay never fans out on its own.
 #[async_trait]
@@ -678,9 +679,10 @@ async fn handle_client_frame(
                 return Vec::new();
             };
             let id = event.id.to_hex();
-            // Mesh access gate: an unpaired peer may publish only the pairing
-            // handshake (so pairing can bootstrap); everything else is rejected
-            // until they're in our Circle.
+            // Only a paired peer reaches this at all (admission refused the rest
+            // before the upgrade), so this is the peer's write grant — plus the
+            // pairing kinds, which belong to the auth plane and are refused from
+            // every source.
             if origin == Origin::Mesh {
                 if let Some(gate) = &hub.gate {
                     if !gate.may_publish(peer_ip, event.kind.as_u16()) {
