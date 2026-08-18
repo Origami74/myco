@@ -66,12 +66,17 @@ pub struct Inbound {
 pub trait Gossiper: Send + Sync {
     async fn on_event(&self, event: Event, inbound: Inbound);
 
-    /// The **pull plane**: forward a `REQ`'s filters to circle peers carrying a
-    /// decremented `req-ttl`, returning their matching (signature-verified) events
-    /// to fold into the backlog before `EOSE`. `exclude` is the requester's mesh
-    /// address (split-horizon — never forward straight back to it). The default
-    /// does nothing, so a relay with no gossiper stays single-hop. See
-    /// `docs/design/event-gossip.md` (req-ttl).
+    /// The **pull plane**, forwarding half: a mesh peer asked us with hops left,
+    /// so pass its filters to our own circle peers carrying a decremented
+    /// `req-ttl` and return their matching events to fold into the backlog before
+    /// `EOSE`. `exclude` is the requester's mesh address (split-horizon — never
+    /// forward straight back to it).
+    ///
+    /// Only ever called for a **mesh-origin** `REQ`. A loopback client cannot
+    /// reach this, so its `EOSE` never waits on a peer; the core drives multi-hop
+    /// pull itself, through the peer pool. The default does nothing, so a relay
+    /// with no gossiper stays single-hop. See `docs/design/event-gossip.md`
+    /// (req-ttl) and `reference/thinning-custom-relay.md` (D8).
     async fn on_req(
         &self,
         _filters: Vec<serde_json::Value>,
@@ -455,15 +460,26 @@ async fn handle_client_frame(
                 }
             }
             let raw_filters: Vec<serde_json::Value> = array.iter().skip(2).cloned().collect();
-            // `req-ttl` rides *inside* a filter object (a transient extension key,
-            // like `event-ttl` rides the EVENT) — the remaining mesh forward hops.
-            // parse_filter ignores the key, so it never affects local matching.
-            let req_ttl = raw_filters
-                .iter()
-                .filter_map(|f| f.get("req-ttl").and_then(|v| v.as_u64()))
-                .max()
-                .map(|n| n.min(MAX_REQ_TTL as u64) as u8)
-                .unwrap_or(0);
+            // `req-ttl` is a **mesh-only** forward budget, honoured for a peer's
+            // REQ and ignored on the loopback socket. An nsite must not be able to
+            // turn one filter key into a circle-wide flood — a single key must not
+            // change a query's cost by orders of magnitude — so multi-hop pull is a
+            // core-driven operation (discovery, update checks) that goes through
+            // the peer pool directly, never through a client's filter. See
+            // `reference/thinning-custom-relay.md` (D8).
+            //
+            // It rides inside a filter object today; the `MESH` envelope moves it
+            // out in P5. `parse_filter` ignores the key either way, so it never
+            // affects local matching.
+            let req_ttl = match origin {
+                Origin::Local => 0,
+                Origin::Mesh => raw_filters
+                    .iter()
+                    .filter_map(|f| f.get("req-ttl").and_then(|v| v.as_u64()))
+                    .max()
+                    .map(|n| n.min(MAX_REQ_TTL as u64) as u8)
+                    .unwrap_or(0),
+            };
             let filters: Vec<ManifestFilter> =
                 raw_filters.iter().filter_map(parse_filter).collect();
 
@@ -475,15 +491,16 @@ async fn handle_client_frame(
                 }
             }
 
-            // Pull plane: fold in peers' matching events up to `req-ttl` more hops.
-            // Bounded by the gossiper's own per-peer timeouts. Only paid when a
-            // client opts in by setting req-ttl (e.g. discovery), so plain chat
-            // REQs stay single-hop and cheap.
+            // Forwarding half of the pull plane: a peer asked with hops left, so
+            // fold in our own peers' matching events before answering. Only a mesh
+            // REQ reaches here, so a local client's `EOSE` is never held up by a
+            // slow or unreachable peer — it arrives at local-store speed, and
+            // anything a peer delivers later reaches the client through the live
+            // subscription instead.
             if req_ttl > 0 {
                 if let Some(gossip) = hub.gossip.clone() {
-                    let exclude = (origin == Origin::Mesh).then_some(peer_ip);
                     let remote = gossip
-                        .on_req(raw_filters.clone(), req_ttl - 1, exclude)
+                        .on_req(raw_filters.clone(), req_ttl - 1, Some(peer_ip))
                         .await;
                     events.extend(remote);
                 }
@@ -863,6 +880,71 @@ mod tests {
             store.count(),
             1,
             "still stored again — publishing is idempotent, only the fan-out is suppressed"
+        );
+    }
+
+    /// An nsite cannot start a circle-wide pull, and its `EOSE` never waits on a
+    /// peer.
+    ///
+    /// `req-ttl` is a mesh-only forward budget. If a loopback client could set it,
+    /// one filter key would turn a plain chat query into a flood across the whole
+    /// circle, and the client would block until every peer answered or timed out.
+    /// The gossiper here would hang for a minute if it were ever consulted, so a
+    /// prompt `EOSE` is the assertion. See `reference/thinning-custom-relay.md`
+    /// (D8).
+    #[tokio::test]
+    async fn client_req_ttl_is_ignored_and_never_blocks_eose() {
+        use std::sync::Mutex;
+
+        struct Hang(Mutex<usize>);
+        #[async_trait]
+        impl Gossiper for Hang {
+            async fn on_event(&self, _event: Event, _inbound: Inbound) {}
+            async fn on_req(
+                &self,
+                _filters: Vec<serde_json::Value>,
+                _req_ttl: u8,
+                _exclude: Option<IpAddr>,
+            ) -> Vec<Event> {
+                *self.0.lock().unwrap() += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Vec::new()
+            }
+        }
+
+        let store = Arc::new(RelayStore::in_memory());
+        let hang = Arc::new(Hang(Mutex::new(0)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on_with(store, listener, Some(hang.clone())));
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        // A client asking for two hops of reach — exactly what must not be honoured.
+        let req = serde_json::json!(["REQ", "s1", { "kinds": [9], "req-ttl": 2 }]);
+        ws.send(WsMessage::Text(req.to_string())).await.unwrap();
+
+        let eose = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(Ok(WsMessage::Text(txt))) = ws.next().await {
+                let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
+                if v.get(0).and_then(|x| x.as_str()) == Some("EOSE") {
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+
+        assert_eq!(
+            eose,
+            Ok(true),
+            "EOSE must arrive at local-store speed, not after a peer round trip"
+        );
+        assert_eq!(
+            *hang.0.lock().unwrap(),
+            0,
+            "a client filter must not reach the peer fan-out at all"
         );
     }
 
