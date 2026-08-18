@@ -26,6 +26,7 @@ import android.os.SystemClock
 import android.util.Log
 import app.myco.core.NativeCore
 import app.myco.core.UdpSocketPin
+import app.myco.ble.BleRadio
 import java.net.Inet6Address
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -223,6 +224,7 @@ class AwareRadio(
         for ((_, st) in retries) st.pending?.let { handler.removeCallbacks(it) }
         retries.clear()
         liveNdps.clear()
+        publishCoexState()
         ndpTargets.clear()
         peerIdentities.clear()
         _links.value = emptyList()
@@ -413,6 +415,7 @@ class AwareRadio(
                 val addr = formatPeerAddr(info.peerIpv6Addr, remote.port) ?: return
                 Log.i(TAG, "Aware NDP up to ${short(peerNpub)} at $addr")
                 liveNdps.add(peerNpub)
+                publishCoexState()
                 // The link is good: hand the peer a fresh retry budget.
                 if (retries.containsKey(peerNpub)) handler.post { clearRetry(peerNpub) }
                 // Pin BEFORE announcing the peer: the core dials as soon as it
@@ -634,8 +637,15 @@ class AwareRadio(
     }
 
     /** Unregister and forget a peer's NDP request, freeing its data-path slot. */
+    /** Tell the BLE radio whether any data path is live, so the PIN_TO_AWARE
+     *  experiment can stop the core from moving a peer off Aware onto BLE. */
+    private fun publishCoexState() {
+        BleRadio.awareNdpActive = liveNdps.isNotEmpty()
+    }
+
     private fun releaseNdp(peerNpub: String) {
         liveNdps.remove(peerNpub)
+        publishCoexState()
         ndpCallbacks.remove(peerNpub)?.let {
             runCatching { connectivity.unregisterNetworkCallback(it) }
         }

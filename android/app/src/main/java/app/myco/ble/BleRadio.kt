@@ -156,6 +156,17 @@ class BleRadio(context: Context) {
     @Volatile
     private var backgroundMode = false
 
+    // True while at least one Wi-Fi Aware data path is live, published by
+    // AwareRadio. Read only by the PIN_TO_AWARE experiment in [connect].
+    @Volatile
+    private var awareNdpLive = false
+
+    /** Adopt the current Aware state; a rebuilt radio would otherwise start
+     *  stale, since the companion setter only fires on a change. */
+    private fun onAwareNdpActiveChanged(active: Boolean) {
+        awareNdpLive = active
+    }
+
     /** Flip fore/background discovery intensity; restarts the scan if one is live. */
     fun setBackgroundMode(bg: Boolean) {
         if (backgroundMode == bg) return
@@ -168,6 +179,12 @@ class BleRadio(context: Context) {
     }
 
     init {
+        // Adopt the current Aware state. A rebuilt radio (mesh toggle, adapter
+        // off/on) starts with the field default, and the companion setter only
+        // fires on a *change* — so without this a new instance would dial a
+        // peer that Aware is already carrying.
+        awareNdpLive = awareActiveField
+
         // There is only ever one radio per process (BleService guards it), and
         // the app needs a handle on it to push the display name in without
         // threading a reference through the service's start intents.
@@ -258,6 +275,18 @@ class BleRadio(context: Context) {
         // that is silently dropped costs the probe loop its full 10s timeout
         // waiting for an attempt that was never made.
         if (stopped) {
+            failDial(connectId, addr)
+            return
+        }
+        // EXPERIMENT (PIN_TO_AWARE): refuse outbound dials while a Wi-Fi Aware
+        // data path is live, so the core can never move a peer from Aware onto
+        // BLE. Tests whether the ~60s NAN data-path teardowns are caused by the
+        // core re-establishing the same peer across transports rather than by
+        // radio coexistence. Inbound connections, advertising and scanning are
+        // untouched — only our own dialling is suppressed. Blunt on purpose: it
+        // also blocks dials to BLE-only peers, so it is not shippable as-is.
+        if (PIN_TO_AWARE && awareNdpLive) {
+            Log.i(TAG, "PIN_TO_AWARE: refusing BLE dial to $addr (aware data path live)")
             failDial(connectId, addr)
             return
         }
@@ -942,6 +971,9 @@ class BleRadio(context: Context) {
          *  first result is never accused. */
         private const val SILENT_WINDOWS_BEFORE_ALARM = 2
 
+        /** Experiment switch — see [BleRadio.connect]. Must be false to ship. */
+        private const val PIN_TO_AWARE = true
+
         /** Background scan: batched delivery window (controller-offloaded). */
         private const val BACKGROUND_BATCH_MS = 5000L
 
@@ -990,6 +1022,21 @@ class BleRadio(context: Context) {
                 if (next == nameField) return
                 nameField = next
                 instance?.reAdvertiseForName()
+            }
+
+        @Volatile
+        private var awareActiveField = false
+
+        /** Whether any Wi-Fi Aware data path is currently up, published by
+         *  [app.myco.aware.AwareRadio]. The two radios live in separate
+         *  services; the dial gate in [connect] needs to know when a data path
+         *  is carrying the peer. */
+        var awareNdpActive: Boolean
+            get() = awareActiveField
+            set(value) {
+                if (value == awareActiveField) return
+                awareActiveField = value
+                instance?.onAwareNdpActiveChanged(value)
             }
 
         @Volatile
