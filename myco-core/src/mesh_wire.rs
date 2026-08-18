@@ -27,6 +27,8 @@
 //! behind it. Only proxy-to-proxy traffic over `.fips` is ours to shape. See
 //! `reference/thinning-custom-relay.md` (D1, D8).
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 /// The verb. Anything that does not know it replies `NOTICE` and ignores the
@@ -111,7 +113,31 @@ impl MeshMeta {
         self.ttl = self.ttl.min(max_ttl);
         self
     }
+
+    /// How long this hop may wait on the peers it forwards to.
+    ///
+    /// This is what stops deadlines nesting. Without it every hop starts a fresh
+    /// full-length timer inside its parent's, so a peer two hops out that
+    /// honestly takes most of its window returns after the hop above has already
+    /// given up — depth 2 then looks implemented while reliably yielding nothing.
+    /// Taking the budget that arrived means the whole wave collapses inside the
+    /// originator's window.
+    ///
+    /// `fallback` is used when no budget rode in — an older peer, or a plain
+    /// pull that never carried one. Both ends are bounded: never longer than the
+    /// budget allows, and never so short that a slow BLE link cannot answer.
+    pub fn hop_timeout(&self, fallback: Duration) -> Duration {
+        match self.budget_ms {
+            Some(ms) => Duration::from_millis(ms as u64).clamp(MIN_HOP_TIMEOUT, fallback),
+            None => fallback,
+        }
+    }
 }
+
+/// Floor on a forwarded hop's timeout. A budget worn down by several hops can get
+/// small; below this there is no point dialling at all over BLE, where a connect
+/// alone can take a second.
+const MIN_HOP_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// A fresh query id for a pull this node originates.
 ///
@@ -201,6 +227,69 @@ mod tests {
         assert_eq!(hop2.budget_ms, Some(3_600));
 
         assert!(hop2.next_hop().is_none(), "the wave terminates");
+    }
+
+    /// A forwarded hop waits no longer than the budget that arrived.
+    ///
+    /// This is the whole point of carrying one. With a fresh full-length timer
+    /// per hop, each hop's window sits inside its parent's, so a peer two hops
+    /// out that honestly uses most of its time returns after the hop above has
+    /// given up — depth 2 looks implemented and reliably yields nothing.
+    #[test]
+    fn a_hop_waits_within_the_budget_it_was_given() {
+        let fallback = Duration::from_secs(8);
+
+        // A budget shorter than the fallback wins.
+        let tight = MeshMeta::pull(1, "q", 3_000);
+        assert_eq!(tight.hop_timeout(fallback), Duration::from_millis(3_000));
+
+        // A budget longer than the fallback does not extend us: a peer cannot
+        // ask us to hold a connection open for a minute.
+        let greedy = MeshMeta::pull(1, "q", 600_000);
+        assert_eq!(greedy.hop_timeout(fallback), fallback);
+
+        // No budget at all (an older peer) falls back to the fixed timeout.
+        assert_eq!(MeshMeta::push(1).hop_timeout(fallback), fallback);
+
+        // A budget worn down to nearly nothing still leaves time to dial, since
+        // a BLE connect alone can take about a second.
+        let spent = MeshMeta::pull(1, "q", 10);
+        assert_eq!(spent.hop_timeout(fallback), MIN_HOP_TIMEOUT);
+    }
+
+    /// Each hop's window fits strictly inside its parent's.
+    ///
+    /// Hop windows nest rather than add up: hop 2 does its waiting *inside* hop
+    /// 1's window. So the property that makes a wave terminate is that every hop
+    /// allows less time than the hop above it, and the first allows no more than
+    /// the originator's budget. A fixed timeout per hop fails at the first step —
+    /// every hop would allow exactly as long as its parent, so the deepest one is
+    /// still running when the originator has already given up.
+    #[test]
+    fn each_hop_waits_less_than_the_one_above_it() {
+        let fallback = Duration::from_secs(8);
+        let originator_budget = Duration::from_millis(10_000);
+
+        let mut meta = MeshMeta::pull(3, "q", 10_000);
+        let mut windows = Vec::new();
+        while let Some(next) = meta.next_hop() {
+            windows.push(next.hop_timeout(fallback));
+            meta = next;
+        }
+
+        assert_eq!(windows.len(), 3, "three hops of budget");
+        assert!(
+            windows[0] <= originator_budget,
+            "the first hop stays inside the originator's budget"
+        );
+        for pair in windows.windows(2) {
+            assert!(
+                pair[1] < pair[0],
+                "each hop must allow less than its parent, got {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 
     /// A peer cannot set a large hop count and make us amplify for it.

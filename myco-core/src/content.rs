@@ -268,6 +268,11 @@ const MANIFEST_EVENT_TTL: u8 = 3;
 /// (`reference/thinning-custom-relay.md`, D8).
 const PULL_BUDGET_MS: u32 = 10_000;
 
+/// Longest a single forwarded hop will wait on a peer, used when no budget rode
+/// in (an older peer, or a pull that never carried one). A budget that did
+/// arrive only ever shortens this.
+const PULL_HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// The mesh access gate backing the relay + Blossom servers: content (reads, chat,
 /// manifests, blobs) is restricted to **paired** (Circle) peers, and what a paired
 /// peer may do is its own [`PeerPerms`] record.
@@ -1489,15 +1494,14 @@ impl Content {
             let url = crate::ip_source::mesh_relay_url(&npub);
             let filters = filters.clone();
             let meta = meta.clone();
+            // Wait only as long as the budget that arrived allows, not a fresh
+            // full-length timer. Otherwise this hop's window sits *inside* the
+            // one above it, and a peer further out returns after the requester
+            // has already given up (D8).
+            let timeout = meta.hop_timeout(PULL_HOP_TIMEOUT);
             Some(async move {
-                pool.request_with(
-                    &npub,
-                    &url,
-                    filters,
-                    Some(meta),
-                    std::time::Duration::from_secs(8),
-                )
-                .await
+                pool.request_with(&npub, &url, filters, Some(meta), timeout)
+                    .await
             })
         });
 
