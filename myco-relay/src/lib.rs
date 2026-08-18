@@ -1,7 +1,11 @@
 //! `myco-relay` — a generic embedded **Nostr relay**: a NIP-01 event store
-//! implementing `nsite-deck`'s [`RelayBackend`] seam, plus a `ws://…:4870` socket
-//! ([`server`]). See `docs/design/nsite-layer.md` §2.1 and
-//! `docs/design/event-gossip.md`.
+//! implementing `nsite-deck`'s [`RelayBackend`] seam. See
+//! `docs/design/nsite-layer.md` §2.1 and `docs/design/event-gossip.md`.
+//!
+//! This crate holds no Myco concepts — no mesh, no ttl, no circles. The
+//! WebSocket front door that applies those is `myco-core::mesh_relay`, which
+//! keeps this store swappable for any other NIP-01 relay
+//! (`reference/thinning-custom-relay.md`).
 //!
 //! Two kinds of event live here:
 //!
@@ -27,8 +31,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use nostr::{Event, PublicKey};
 use nsite_deck::seams::{ManifestFilter, RelayBackend};
-
-pub mod server;
 
 /// An embedded NIP-01 event store, keyed by event id, with replaceable/addressable
 /// dedup, NIP-40 expiry, and JSON persistence of the non-expiring (manifest) set.

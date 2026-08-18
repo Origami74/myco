@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use nostr::nips::nip19::ToBech32;
 use nostr::Event;
 
-use myco_relay::server::{Gossiper, Inbound, Origin};
+use crate::mesh_relay::{Gossiper, Inbound, Origin};
 
 use crate::content::Content;
 

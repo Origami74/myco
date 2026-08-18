@@ -474,7 +474,7 @@ mod tests {
         ));
     }
 
-    use myco_relay::server::serve_on;
+    use crate::mesh_relay::serve_on;
     use myco_relay::RelayStore;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use std::sync::Arc;

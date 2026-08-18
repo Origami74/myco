@@ -250,14 +250,14 @@ impl AppRuntime {
             // live subscription on localhost (shared store + live bus + gossiper).
             // The gossiper fans this device's own nsite events out to Circle peers
             // (docs/design/event-gossip.md).
-            let gossiper: Arc<dyn myco_relay::server::Gossiper> =
+            let gossiper: Arc<dyn crate::mesh_relay::Gossiper> =
                 Arc::new(crate::gossip::MeshGossiper::new(content.clone()));
             // Restrict mesh access to paired (Circle) peers — only the pairing
             // handshake is open, so strangers can request to pair but can't read or
             // push content. Loopback (the in-app WebView) always bypasses the gate.
-            let gate: Arc<dyn myco_relay::server::PeerGate> =
+            let gate: Arc<dyn crate::mesh_relay::PeerGate> =
                 Arc::new(crate::content::CircleGate::new(content.clone()));
-            let hub = myco_relay::server::RelayHub::with_gate(
+            let hub = crate::mesh_relay::RelayHub::with_gate(
                 content.relay(),
                 Some(gossiper),
                 Some(gate),
@@ -265,11 +265,11 @@ impl AppRuntime {
 
             // Mesh socket: IPV6_V6ONLY `[::]:4870` so it doesn't collide with the
             // loopback bind and is reachable by peers at `ws://<npub>.fips:4870`.
-            match myco_relay::server::bind("[::]:4870".parse::<SocketAddr>().unwrap()) {
+            match crate::mesh_relay::bind("[::]:4870".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
                     let hub = hub.clone();
                     rt.spawn(async move {
-                        if let Err(e) = myco_relay::server::serve_on_hub(hub, listener).await {
+                        if let Err(e) = crate::mesh_relay::serve_on_hub(hub, listener).await {
                             tracing::error!(error = %e, "mesh relay server exited");
                         }
                     });
@@ -282,11 +282,11 @@ impl AppRuntime {
             // Loopback socket: the in-app nsite WebView talks to `ws://localhost:4870`
             // / `ws://127.0.0.1:4870`; the mesh socket is v6only, so serve loopback
             // explicitly. Connections here are classified as `Origin::Local`.
-            match myco_relay::server::bind("127.0.0.1:4870".parse::<SocketAddr>().unwrap()) {
+            match crate::mesh_relay::bind("127.0.0.1:4870".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
                     let hub = hub.clone();
                     rt.spawn(async move {
-                        if let Err(e) = myco_relay::server::serve_on_hub(hub, listener).await {
+                        if let Err(e) = crate::mesh_relay::serve_on_hub(hub, listener).await {
                             tracing::error!(error = %e, "loopback relay server exited");
                         }
                     });

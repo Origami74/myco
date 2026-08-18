@@ -27,7 +27,7 @@ use nsite_deck::{sync, GatewayResponse, SiteAddr, SyncOutcome};
 use serde::{Deserialize, Serialize};
 
 use myco_blossom::FsBlobStore;
-use myco_relay::server::{Inbound, Origin};
+use crate::mesh_relay::{Inbound, Origin};
 use myco_relay::RelayStore;
 
 /// Per-site sync/readiness, mirroring the FFI `SiteStatus` shape.
@@ -215,7 +215,7 @@ impl CircleGate {
     }
 }
 
-impl myco_relay::server::PeerGate for CircleGate {
+impl crate::mesh_relay::PeerGate for CircleGate {
     fn may_read(&self, ip: IpAddr) -> bool {
         self.content.is_paired_ip(ip)
     }

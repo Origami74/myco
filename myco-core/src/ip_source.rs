@@ -512,7 +512,7 @@ mod tests {
         let store = Arc::new(myco_relay::RelayStore::in_memory());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(myco_relay::server::serve_on(store.clone(), listener));
+        tokio::spawn(crate::mesh_relay::serve_on(store.clone(), listener));
 
         let keys = nostr::Keys::generate();
         let ev = nostr::EventBuilder::new(nostr::Kind::from(9u16), "hi over mesh")

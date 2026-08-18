@@ -1,13 +1,19 @@
-//! A NIP-01 WebSocket relay over [`RelayStore`]. Serves the node's events to the
-//! in-app WebView at `ws://localhost:4870` and to mesh peers at
-//! `ws://[fd00::self]:4870`.
+//! The **mesh relay proxy**: the NIP-01 WebSocket front door serving the in-app
+//! WebView at `ws://localhost:4870` and mesh peers at `ws://[fd00::self]:4870`,
+//! with a relay store behind it.
 //!
-//! Unlike the original manifest-only socket, this one keeps **live subscriptions**
-//! (a `REQ` stays open; newly-stored events that match are pushed as they arrive),
-//! which is what makes nearby chat feel live. New events also drive an optional
-//! [`Gossiper`] — the mesh fan-out hook (`docs/design/event-gossip.md`) — with the
-//! connection's [`Origin`] (loopback = the local WebView, else a mesh peer) so the
-//! gossiper can apply the push/pull and `event-ttl` rules.
+//! This is the only Myco-specific code on the content path. It keeps **live
+//! subscriptions** (a `REQ` stays open; newly-stored events that match are pushed
+//! as they arrive), which is what makes nearby chat feel live, and it drives both
+//! mesh planes: a [`Gossiper`] for fan-out (`docs/design/event-gossip.md`) and a
+//! [`PeerGate`] for access, each keyed off the connection's [`Origin`] (loopback =
+//! the local WebView, else a mesh peer).
+//!
+//! It lives here rather than in `myco-relay` so the store behind it stays a plain
+//! NIP-01 relay with no Myco concepts in it, and can be swapped for any other
+//! relay later. This is step P1 of `reference/thinning-custom-relay.md`. A proxy
+//! built with no gossiper and no gate behaves as an ordinary NIP-01 relay, which
+//! is what the tests use.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -24,7 +30,7 @@ use nostr::{Event, PublicKey};
 use nsite_deck::seams::{ManifestFilter, RelayBackend};
 use tokio::sync::broadcast;
 
-use crate::{matches_filter, RelayStore};
+use myco_relay::{matches_filter, RelayStore};
 
 /// Where an event reached this relay from: the local WebView (a loopback socket)
 /// or a mesh peer (a `.fips` socket). Drives the gossiper's push/pull split.
