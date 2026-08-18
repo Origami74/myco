@@ -33,6 +33,20 @@ GENERAL:
   transport restart supervisor since Aware rides the ordinary UDP transport and can't
   fail a fips transport start
 
+- a shared custom relay's other writers never reach an open nsite subscription
+    The proxy's live bus is fed where it accepts a frame, not by watching the
+    store, so it only carries events the proxy itself handled. That was the same
+    set back when the store was ours and the proxy was the only writer; pointing
+    at a shared relay pulls them apart. If another Nostr app writes to the same
+    Citrine, the event IS in the store and a fresh REQ finds it, but no open
+    subscription is ever told — a chat view stays silent until something makes it
+    re-query. Fix is an upstream REQ the proxy republishes onto the bus, which
+    costs a permanently open subscription to the backend and needs the seen-set to
+    suppress the echo of our own writes, or every local publish reaches the client
+    twice. Only bites when the relay is genuinely shared — a Citrine run solely
+    for Myco has no other writers — so it is waiting on whether that is a real use
+    case. See reference/thinning-custom-relay.md.
+
 UI:
 - [DONE 2026-08-06] TOP bar usage should be opt-in, not opt-out like it is now (for nsites)
     NsiteActivity drew edge-to-edge with the top explicitly full-bleed, so nsites
