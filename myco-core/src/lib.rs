@@ -34,6 +34,7 @@ mod ip_source;
 // lane_by_npub override. Plain, non-JNI logic so it is unit-testable on the
 // host; the Android JNI bridge is its only real caller.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod advert_names;
 mod lane_observation;
 mod peer_diagnostics;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]

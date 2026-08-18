@@ -44,6 +44,7 @@ import androidx.lifecycle.lifecycleScope
 import app.myco.ap.ApRadio
 import app.myco.aware.AwareRadio
 import app.myco.aware.AwareService
+import app.myco.ble.BleRadio
 import app.myco.ble.BleService
 import app.myco.BuildConfig
 import app.myco.core.AppCoreClient
@@ -204,6 +205,7 @@ class MainActivity : ComponentActivity() {
                         FirstRunNameDialog(ownNpub = npub) { picked ->
                             DeviceName.set(this@MainActivity, picked)
                             core.dispatch(NativeActions.setDeviceName(picked))
+                            BleRadio.localName = picked
                             prefs.edit().putBoolean(PREF_NAME_CHOSEN, true).apply()
                             askName = false
                             // Deferred from the intro on a first run; a no-op
@@ -416,7 +418,12 @@ class MainActivity : ComponentActivity() {
         // here (not just onCreate) in case the device identity wasn't ready yet at
         // first launch; set_device_name is idempotent.
         core.state().ownNpub.takeIf { it.isNotEmpty() }?.let {
-            core.dispatch(NativeActions.setDeviceName(DeviceName.current(this, it)))
+            val name = DeviceName.current(this, it)
+            core.dispatch(NativeActions.setDeviceName(name))
+            // Same name into the radio, so peers who have never paired with us
+            // still see it in their Nearby list. Re-advertises only when it
+            // actually changed.
+            BleRadio.localName = name
         }
         // Deep links followed before the app existed (possibly in a previous process)
         // get their chance every time Myco comes back to the foreground.

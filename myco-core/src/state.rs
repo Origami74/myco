@@ -102,6 +102,14 @@ pub struct PeerDiagnosticView {
     /// itself survives, so a long age means the link has held, not that a
     /// handshake is stale.
     pub authenticated_at_ms: u64,
+    /// The display name this peer broadcasts for itself in its BLE scan
+    /// response; empty when it has advertised none or was not found over BLE.
+    ///
+    /// **Unauthenticated** — a plaintext broadcast anyone in range can forge.
+    /// It exists so a device you have never paired with can still show the name
+    /// its owner chose, and it must always rank *below* any name learned from
+    /// signed pair traffic, never above.
+    pub advertised_name: String,
     /// Smoothed round-trip time over this peer's link, milliseconds, as MMP
     /// measured it. `None` when there is no measurement — an unmeasured link
     /// renders as an em-dash, never as a confident `0ms`.

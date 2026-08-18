@@ -119,6 +119,16 @@ class BleRadio(context: Context) {
     // Nearby Share/Fast Pair), we keep retrying on a backoff until a slot frees.
     private val retryExec = Executors.newSingleThreadScheduledExecutor()
     @Volatile private var advertisePsm = 0
+
+
+    /** Last advertised name seen per address, so the log fires on change only. */
+    private val lastAdvertName = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** Re-issue the advert so a changed [localName] reaches the scan response,
+     *  which is fixed at start time. No-op unless we are actually advertising. */
+    private fun reAdvertiseForName() {
+        if (!stopped && advertiseCallback != null) startAdvertising(advertisePsm)
+    }
     private var advertiseRetries = 0
     // Scanner-retry state: a failed scan (Android throttles ~5 startScan/30s →
     // SCAN_FAILED_SCANNING_TOO_FREQUENTLY) used to be logged and abandoned, which
@@ -155,6 +165,13 @@ class BleRadio(context: Context) {
         // (screen off / app switch), far below the ~5 startScan/30s throttle;
         // if we do trip it, scheduleScanRetry re-arms with the 30s floor.
         if (scanCallback != null) startScanning()
+    }
+
+    init {
+        // There is only ever one radio per process (BleService guards it), and
+        // the app needs a handle on it to push the display name in without
+        // threading a reference through the service's start intents.
+        instance = this
     }
 
     fun bindBridge(handle: Long) {
@@ -326,6 +343,15 @@ class BleRadio(context: Context) {
             }, DIAL_WATCHDOG_MS, TimeUnit.MILLISECONDS)
         }.getOrNull()
 
+    /** `s` as UTF-8, cut to at most [max] bytes on a character boundary. */
+    private fun truncateUtf8(s: String, max: Int): ByteArray {
+        var text = s
+        while (text.toByteArray(Charsets.UTF_8).size > max) {
+            text = text.dropLast(1)
+        }
+        return text.toByteArray(Charsets.UTF_8)
+    }
+
     fun startAdvertising(psm: Int) {
         if (stopped) return
         advertisePsm = psm
@@ -357,11 +383,24 @@ class BleRadio(context: Context) {
             .addServiceUuid(FIPS_PARCEL_UUID)
             .addServiceData(PSM_SD_PARCEL_UUID, psmLe)
             .build()
+        // The chosen name goes in the scan response's own 31 bytes, so the
+        // primary advert above is untouched and the PSM's delivery guarantee is
+        // unchanged. Null when no name has been pushed yet — advertise nothing
+        // rather than an empty string, so a scanner can tell "chose no name"
+        // from "advertised a blank one".
+        val nameBytes = localName?.let { truncateUtf8(it, MAX_NAME_BYTES) }
+        val scanResponse = nameBytes?.let {
+            AdvertiseData.Builder()
+                .setIncludeDeviceName(false)
+                .addServiceData(NAME_SD_PARCEL_UUID, it)
+                .build()
+        }
         val cb = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
                 advertiseRetries = 0
                 BleHealth.advertiserExhausted = false
-                Log.i(TAG, "advertising PSM $psm (in primary advert)")
+                Log.i(TAG, "advertising PSM $psm (in primary advert)" +
+                    (localName?.let { ", name '$it' (in scan response)" } ?: ""))
                 if (bridgeHandle != 0L) NativeCore.bleDeliverAdvertisingState(bridgeHandle, true)
             }
             override fun onStartFailure(errorCode: Int) {
@@ -377,7 +416,11 @@ class BleRadio(context: Context) {
         }
         advertiseCallback = cb
         try {
-            adv.startAdvertising(settings, advData, cb)
+            if (scanResponse != null) {
+                adv.startAdvertising(settings, advData, scanResponse, cb)
+            } else {
+                adv.startAdvertising(settings, advData, cb)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "startAdvertising failed", e)
             if (bridgeHandle != 0L) NativeCore.bleDeliverAdvertisingState(bridgeHandle, false)
@@ -496,6 +539,23 @@ class BleRadio(context: Context) {
             scanWithPsm.incrementAndGet()
             scanPsmAddrs.add(addr)
             NativeCore.bleDeliverScan(bridgeHandle, addr, psm, result.rssi)
+            // The peer's chosen name, when its scan response reached us. Pushed
+            // separately from the PSM: it is a Myco-layer label with no bearing
+            // on routing, so it never enters the fips bridge. Absent is normal
+            // — a scan response can simply not arrive — and pushing nothing is
+            // how the display layer keeps showing the npub-derived name.
+            result.scanRecord?.getServiceData(NAME_SD_PARCEL_UUID)
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { bytes ->
+                    val advertised = String(bytes, Charsets.UTF_8)
+                    NativeCore.bleDeliverAdvertName(addr, advertised)
+                    // Logged on change only. The push itself fires several
+                    // times a second per peer, but a name that just appeared or
+                    // just changed is the one thing worth seeing in a log.
+                    if (lastAdvertName.put(addr, advertised) != advertised) {
+                        Log.i(TAG, "$addr advertises name '$advertised'")
+                    }
+                }
         } else {
             // Counted, not logged: this fires several times a second per peer
             // while a scan response is outstanding. [logScanSummary] reports
@@ -591,6 +651,7 @@ class BleRadio(context: Context) {
     /** Tear everything down (called when the service stops). */
     fun shutdown() {
         stopped = true
+        if (instance === this) instance = null
         // The radio is being destroyed — on a mesh toggle a fresh one is built
         // in its place, and it must start with no verdict against it. This is
         // the one thing other than a real advert that clears the latch, and it
@@ -876,6 +937,34 @@ class BleRadio(context: Context) {
          *  no head-of-line batching of multiple packets into one giant frame. */
         private const val MESH_MTU_CAP = 1500
 
+        /** The live radio, or null when none is running. Set on construction and
+         *  cleared on [shutdown]. */
+        @Volatile
+        private var instance: BleRadio? = null
+
+        @Volatile
+        private var nameField: String? = null
+
+        /**
+         * The display name this device broadcasts for itself, or null to
+         * broadcast none.
+         *
+         * Process-global rather than per-radio because the app asserts the name
+         * on every resume, which can happen before [BleService] has built a
+         * radio at all — held here, it is simply read by the next advert. Set
+         * while already advertising, it re-issues the advert, since the scan
+         * response is fixed at start time and a rename that waited for the next
+         * radio restart would look broken to whoever just made it.
+         */
+        var localName: String?
+            get() = nameField
+            set(value) {
+                val next = value?.trim()?.ifBlank { null }
+                if (next == nameField) return
+                nameField = next
+                instance?.reAdvertiseForName()
+            }
+
         /** FIPS service UUID — must match fips-core. */
         val FIPS_UUID: UUID = UUID.fromString("9c90b790-2cc5-42c0-9f87-c9cc40648f4c")
         val FIPS_PARCEL_UUID = ParcelUuid(FIPS_UUID)
@@ -885,6 +974,18 @@ class BleRadio(context: Context) {
          *  Bluetooth base UUID). A 16-bit key keeps PSM service-data + the full
          *  128-bit FIPS UUID inside one 31-byte legacy advert. */
         val PSM_SD_PARCEL_UUID = ParcelUuid.fromString("00009c90-0000-1000-8000-00805f9b34fb")
+
+        /** Compact 16-bit service-data UUID carrying this device's chosen display
+         *  name in the SCAN RESPONSE (0x9C91 — the PSM key's neighbour). It rides
+         *  the scan response precisely because the PSM must not: a scan response
+         *  needs an active-scan round-trip that drops asymmetrically, which is
+         *  fatal for the PSM but merely cosmetic for a name. A name that never
+         *  arrives just leaves the peer showing its npub-derived one. */
+        val NAME_SD_PARCEL_UUID = ParcelUuid.fromString("00009c91-0000-1000-8000-00805f9b34fb")
+
+        /** Longest name that fits the 31-byte scan response beside its 4-byte
+         *  service-data header. Cut on a UTF-8 boundary, never mid-character. */
+        private const val MAX_NAME_BYTES = 27
     }
 }
 

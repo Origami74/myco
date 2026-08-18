@@ -55,6 +55,11 @@ internal object NativeCore {
         bridgeHandle: Long, connectId: Long, ok: Boolean, addr: String, sendMtu: Int, recvMtu: Int,
     ): Long
     external fun bleDeliverScan(bridgeHandle: Long, addr: String, psm: Int, rssi: Int)
+
+    /** A peer's self-advertised display name, read from its BLE scan response.
+     *  Takes no bridge handle: the name never enters the fips bridge, it lands
+     *  in Myco's own address-keyed record. Unauthenticated by nature. */
+    external fun bleDeliverAdvertName(addr: String, name: String)
     external fun bleChannelDeliverRecv(bridgeHandle: Long, chId: Long, data: ByteArray, len: Int): Boolean
     external fun bleChannelClosed(bridgeHandle: Long, chId: Long)
 

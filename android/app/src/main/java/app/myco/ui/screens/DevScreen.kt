@@ -573,6 +573,11 @@ private fun PeerForensics(peer: PeerDiagnostic) {
         modifier = Modifier.padding(start = 30.dp, end = 16.dp, bottom = 8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
+        // The name the peer broadcasts for itself, as received — never the
+        // resolved label. This row is what separates "they advertised this" from
+        // "we generated it from their npub", which the peer list alone cannot
+        // show when the two happen to agree.
+        ForensicLine("advert name", peer.advertisedName.ifEmpty { "—" })
         ForensicLine("role", peer.role.ifEmpty { "—" })
         ForensicLine("discovery", if (peer.discoveryMs > 0) "${peer.discoveryMs}ms" else "—")
         ForensicLine("send drops", peer.sendDrops.toString())

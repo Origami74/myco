@@ -13,16 +13,21 @@ import app.myco.share.DeviceName
  * Those are checked in that order — most recently confirmed first — and the
  * npub-derived name is the floor, not the default.
  *
- * The floor still matters. A peer we are merely connected to and have never
- * exchanged pair traffic with has told us nothing but an npub: the BLE advert
- * is 27 of its 31 bytes already, and fips's own `display_name` is a local
- * alias, not something the far side sends. For those the generated name is all
- * there is, and it is at least the same two words on both screens.
+ * Below those sits the name a peer broadcasts for itself in its BLE scan
+ * response. It is deliberately last-but-one: it is an unauthenticated plaintext
+ * broadcast that anyone in range can forge, so it may fill a gap but must never
+ * displace a name that arrived signed. It is also BLE-only — a peer found over
+ * Wi-Fi Aware or the LAN carries none.
+ *
+ * The npub-derived name remains the floor, for a peer that has told us nothing
+ * at all. It is at least the same two words on both screens.
  */
 fun peerLabel(state: AppState, npub: String): String {
     if (npub.isEmpty()) return DeviceName.generated(npub)
     val told = state.circle.firstOrNull { it.npub == npub }?.name
         ?: state.pendingPairRequests.firstOrNull { it.npub == npub }?.name
         ?: state.outboundPairs.firstOrNull { it.npub == npub }?.name
-    return told?.trim()?.ifBlank { null } ?: DeviceName.generated(npub)
+    told?.trim()?.ifBlank { null }?.let { return it }
+    val advertised = state.peers.firstOrNull { it.npub == npub }?.advertisedName
+    return advertised?.trim()?.ifBlank { null } ?: DeviceName.generated(npub)
 }

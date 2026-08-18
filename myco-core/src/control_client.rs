@@ -64,6 +64,16 @@ pub struct PeerView {
     pub authenticated_at_ms: u64,
     /// Transport type carrying the peer's link (`"ble"`, `"udp"`, …).
     pub transport: String,
+    /// The transport-level address the link currently runs over, exactly as
+    /// fips formats it: `adapter/AA:BB:CC:DD:EE:FF` for BLE, `[addr]:port` for
+    /// the IP transports. Empty when the peer has no resolved address.
+    ///
+    /// For BLE this is the one thing that ties an authenticated peer to the
+    /// address its scan adverts arrive on. Without it a peer that connected
+    /// *inbound* has no recorded address at all — the connect-attempt log only
+    /// covers dials we made — so its adverts, and the RSSI and self-advertised
+    /// name they carry, could never be attributed to it.
+    pub transport_addr: String,
     /// Smoothed round-trip time over this peer's link, milliseconds, as MMP
     /// measured it. `None` when MMP has taken no measurement yet — fips omits
     /// the key entirely in that case, and an unmeasured link must render as
@@ -231,6 +241,7 @@ fn peer_from_json(peer: &Value) -> PeerView {
             .and_then(Value::as_u64)
             .unwrap_or(0),
         transport: s("transport_type"),
+        transport_addr: s("transport_addr"),
         srtt_ms: peer
             .get("mmp")
             .and_then(|mmp| mmp.get("srtt_ms"))
@@ -290,6 +301,7 @@ mod tests {
         assert_eq!(view.last_seen_ms, 1786484197793);
         assert_eq!(view.authenticated_at_ms, 1786483829884);
         assert_eq!(view.transport, "udp");
+        assert_eq!(view.transport_addr, "[::ffff:192.168.8.238]:2121");
         assert_eq!(view.display_name, "npub1qrjr...msuc");
         assert_eq!(view.srtt_ms, Some(42.5));
     }

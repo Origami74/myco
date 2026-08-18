@@ -85,6 +85,12 @@ fn short(s: &str) -> String {
 /// link-local vs. routable) — that would be exactly the sort of
 /// inference-presented-as-observation this phase prohibits.
 ///
+/// `advert_names` is BLE-address-keyed self-advertised display names, read out
+/// of peers' scan responses. It is joined on after adverts have been attributed
+/// to rows, so a row only carries one if a scan actually saw that address. The
+/// value is unauthenticated (see [`crate::advert_names`]) and is therefore only
+/// ever surfaced as a fallback below the Circle/pairing names.
+///
 /// `ble_attempts` is the per-peer BLE connect-attempt log, keyed by BLE
 /// address. It supplies three things: the role/discovery/outcome history joined
 /// onto each row, the per-peer link send-failure count, and the learned
@@ -104,6 +110,7 @@ pub fn merge_peers(
     outbound_pairs: &[OutboundPairView],
     reachable_npubs: &[String],
     lane_by_npub: &HashMap<String, String>,
+    advert_names: &HashMap<String, String>,
     ble_attempts: &[BlePeerAttempts],
     _now_ms: u64,
 ) -> Vec<PeerDiagnosticView> {
@@ -137,11 +144,20 @@ pub fn merge_peers(
         // `None` both when there is no PeerView and when MMP has not measured
         // the link yet — the row cannot tell those apart and must not pretend.
         let srtt_ms = pv.and_then(|p| p.srtt_ms);
+        // A BLE peer's link address is its scan address, so recording it here
+        // is what lets steps 2 and 5b attribute that device's adverts — its
+        // RSSI and the name it broadcasts — to this row. Only for BLE: on the
+        // IP transports the same field is a socket address, which would key
+        // into nothing and match nothing.
+        let ble_addr = match pv {
+            Some(p) if p.transport == "ble" => p.transport_addr.clone(),
+            _ => String::new(),
+        };
         rows.push(PeerDiagnosticView {
             key,
             npub: bp.npub.clone(),
             node_addr_hex: bp.node_addr_hex.clone(),
-            ble_addr: String::new(),
+            ble_addr,
             name,
             // Only "connected" is decided here (the one state a row can
             // already know for certain); every other state is assigned in
@@ -155,6 +171,7 @@ pub fn merge_peers(
             also_reachable_via: Vec::new(),
             last_seen_ms,
             authenticated_at_ms,
+            advertised_name: String::new(),
             srtt_ms,
             rssi: bp.rssi,
             psm: bp.psm,
@@ -208,6 +225,7 @@ pub fn merge_peers(
                 also_reachable_via: Vec::new(),
                 last_seen_ms: 0,
                 authenticated_at_ms: 0,
+                advertised_name: String::new(),
                 srtt_ms: None,
                 rssi: Some(adv.rssi),
                 psm: adv.psm,
@@ -252,6 +270,7 @@ pub fn merge_peers(
             also_reachable_via: Vec::new(),
             last_seen_ms: 0,
             authenticated_at_ms: 0,
+            advertised_name: String::new(),
             srtt_ms: None,
             rssi: None,
             psm: 0,
@@ -308,6 +327,20 @@ pub fn merge_peers(
         } else {
             "unreachable".to_string()
         };
+    }
+
+    // Step 5b: join self-advertised names on by BLE address. Runs after step 2
+    // has attributed adverts to rows, so `ble_addr` is populated wherever a
+    // scan actually saw the device. Nothing is written for a row we never saw
+    // an advert for — the absence of a broadcast name is a fact, and inventing
+    // one from the npub here would rob the display layer of the distinction.
+    for row in rows.iter_mut() {
+        if row.ble_addr.is_empty() {
+            continue;
+        }
+        if let Some(name) = advert_names.get(&row.ble_addr) {
+            row.advertised_name = name.clone();
+        }
     }
 
     // Step 6: join the recorded attempt history onto each row. Rows are matched
@@ -386,6 +419,7 @@ mod tests {
             last_seen_ms,
             authenticated_at_ms: 0,
             transport: transport.to_string(),
+            transport_addr: String::new(),
             srtt_ms: None,
             display_name: String::new(),
         }
@@ -425,6 +459,104 @@ mod tests {
         }
     }
 
+    /// An inbound BLE peer — one we never dialled, so the attempt log knows
+    /// nothing about it — must still be attributed its own adverts. Its link
+    /// address is what supplies that, and without it the RSSI and the
+    /// self-advertised name both go missing on exactly the peers most likely to
+    /// have connected that way.
+    #[test]
+    fn an_inbound_ble_peer_is_keyed_by_its_link_address() {
+        let mut view = pv("a1", "npub-inbound", true, 1_000, "ble");
+        view.transport_addr = "ble0/77:B5:98:5E:D1:E6".to_string();
+        let mut ip = pv("a2", "npub-over-ip", true, 1_000, "udp");
+        ip.transport_addr = "[::ffff:192.168.8.238]:2121".to_string();
+        let peers = vec![
+            bp("a1", "npub-inbound", true),
+            bp("a2", "npub-over-ip", true),
+        ];
+        let adverts = vec![BleAdvert {
+            addr: "ble0/77:B5:98:5E:D1:E6".to_string(),
+            psm: 196,
+            rssi: -61,
+        }];
+        let names = HashMap::from([(
+            "ble0/77:B5:98:5E:D1:E6".to_string(),
+            "orchid eero".to_string(),
+        )]);
+        let out = merge_peers(
+            &[view, ip],
+            &peers,
+            &adverts,
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &names,
+            // Deliberately empty: this is the no-dial-history case.
+            &[],
+            0,
+        );
+        assert_eq!(out.len(), 2, "the advert must not become a second row");
+        let inbound = out.iter().find(|r| r.npub == "npub-inbound").expect("row");
+        assert_eq!(inbound.ble_addr, "ble0/77:B5:98:5E:D1:E6");
+        assert_eq!(inbound.rssi, Some(-61));
+        assert_eq!(inbound.advertised_name, "orchid eero");
+        // A socket address is not a scan address and must key into nothing.
+        let over_ip = out.iter().find(|r| r.npub == "npub-over-ip").expect("row");
+        assert_eq!(over_ip.ble_addr, "");
+        assert_eq!(over_ip.advertised_name, "");
+    }
+
+    /// A self-advertised name is joined on by BLE address, and only for a row
+    /// an advert was actually attributed to. A peer seen over another lane
+    /// entirely carries none — the display layer has to be able to tell "chose
+    /// no name" from "we never heard one".
+    #[test]
+    fn an_advertised_name_lands_on_the_row_its_advert_was_attributed_to() {
+        let views = vec![
+            pv("a1", "npub-ble-seen", true, 1_000, "ble"),
+            pv("a2", "npub-udp-only", true, 1_000, "udp"),
+        ];
+        let peers = vec![
+            bp("a1", "npub-ble-seen", true),
+            bp("a2", "npub-udp-only", true),
+        ];
+        // The advert's address is learned onto the first row by the attempt log.
+        let attempts = vec![BlePeerAttempts {
+            ble_addr: "ble0/AA:01".to_string(),
+            node_addr_hex: "a1".to_string(),
+            send_failures: 0,
+            attempts: Vec::new(),
+        }];
+        let adverts = vec![BleAdvert {
+            addr: "ble0/AA:01".to_string(),
+            psm: 133,
+            rssi: -55,
+        }];
+        let names = HashMap::from([("ble0/AA:01".to_string(), "DC-1".to_string())]);
+        let out = merge_peers(
+            &views,
+            &peers,
+            &adverts,
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &names,
+            &attempts,
+            0,
+        );
+        let seen = out.iter().find(|r| r.npub == "npub-ble-seen").expect("row");
+        assert_eq!(seen.advertised_name, "DC-1");
+        let other = out.iter().find(|r| r.npub == "npub-udp-only").expect("row");
+        assert_eq!(
+            other.advertised_name, "",
+            "a row with no attributed advert must not borrow another's name"
+        );
+    }
+
     /// The ping the status panel shows is the peer's MMP SRTT, carried through
     /// untouched. A row with no `PeerView` behind it (a Circle member who is
     /// merely paired-offline) carries `None` rather than inheriting anyone's.
@@ -442,6 +574,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
@@ -463,6 +596,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
@@ -490,6 +624,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &HashMap::new(),
             &[],
             0,
         );
@@ -512,6 +647,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
@@ -554,6 +690,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &HashMap::new(),
             &[],
             0,
         );
@@ -565,6 +702,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
@@ -590,6 +728,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &HashMap::new(),
             &[],
             0,
         );
@@ -613,6 +752,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
@@ -647,6 +787,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &HashMap::new(),
             &[],
             0,
         );
@@ -671,6 +812,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &HashMap::new(),
             &[],
             0,
         );
@@ -692,6 +834,7 @@ mod tests {
             &[],
             &reachable,
             &HashMap::new(),
+            &HashMap::new(),
             &[],
             0,
         );
@@ -710,6 +853,7 @@ mod tests {
             &pending_pairs,
             &[],
             &[],
+            &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
@@ -730,6 +874,7 @@ mod tests {
             &pending_pairs,
             &outbound_pairs,
             &[],
+            &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
@@ -753,6 +898,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
@@ -778,6 +924,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &HashMap::new(),
             &[],
             0,
         );
@@ -787,7 +934,19 @@ mod tests {
 
     #[test]
     fn empty_inputs_produce_empty_vec_not_panic() {
-        let out = merge_peers(&[], &[], &[], &[], &[], &[], &[], &HashMap::new(), &[], 0);
+        let out = merge_peers(
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            0,
+        );
         assert!(out.is_empty());
     }
 
@@ -820,6 +979,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &HashMap::new(),
             &[],
             0,
         );
@@ -850,6 +1010,7 @@ mod tests {
             &[],
             &[],
             &lane_by_npub,
+            &HashMap::new(),
             &[],
             0,
         );
@@ -872,6 +1033,7 @@ mod tests {
             &[],
             &[],
             &lane_by_npub,
+            &HashMap::new(),
             &[],
             0,
         );
@@ -911,6 +1073,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &HashMap::new(),
             &recorded,
             0,
         );
@@ -947,6 +1110,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
@@ -995,6 +1159,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
+            &HashMap::new(),
             &recorded,
             0,
         );
@@ -1027,6 +1192,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
