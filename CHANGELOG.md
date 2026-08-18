@@ -89,7 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - While the hotspot is on, bumping the phones hands the other phone the file
   page directly: the NFC tag Myco already emulates for pairing serves the
   page's address instead, and the other phone's own system opens it in its
-  browser — nothing to install, nothing to type.
+  browser — nothing to install, nothing to type. For the whole hotspot
+  session NFC does *only* that — pairing by bump is fully disabled, in both
+  directions (this phone neither presents a pair code nor acts on one it
+  reads), and comes back the moment the hotspot stops.
 - Nothing is transferred behind your back: every download and upload a guest
   starts pops an accept-or-decline dialog on your phone — wherever in Myco you
   are, not just on the hotspot sheet — with the file's name and size. The

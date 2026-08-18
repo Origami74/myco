@@ -29,19 +29,27 @@ object PairPresent {
     /** The `myco://pair/...` URI currently being emulated, or null when not presenting. */
     val payload = mutableStateOf<String?>(null)
 
-    /** While set, this URI is presented *instead of* the pairing payload — the
-     *  file-share hotspot parks its page's `http://…` address here so a bump
-     *  hands any phone the URL (the reader's OS opens it in the browser; no
-     *  Myco needed on that side). Pairing-by-bump resumes when it clears. */
+    /** While the file-share hotspot runs, it owns the NFC surface outright:
+     *  the tag serves the page's `http://…` address (the reader's OS opens it
+     *  in the browser; no Myco needed on that side) — and until that address
+     *  is known it serves *nothing*, never the pairing payload. Pairing by
+     *  bump is disabled for the whole hotspot session and resumes when it
+     *  stops. */
+    private val hotspotActiveState = mutableStateOf(false)
     private val urlOverride = mutableStateOf<String?>(null)
 
     private val pairPresenting = mutableStateOf(false)
 
+    /** True while the hotspot owns the NFC surface — read by the tag-dispatch
+     *  paths to drop a peer's `myco://pair` tag instead of pairing on it. */
+    val hotspotActive: Boolean get() = hotspotActiveState.value
+
     /** True while we're emulating a card. Read it from composition to observe flips. */
-    val presenting: Boolean get() = pairPresenting.value || urlOverride.value != null
+    val presenting: Boolean get() = pairPresenting.value || hotspotActiveState.value
 
     /** What the emulated tag actually serves right now ([PairHostApduService]). */
-    val effective: String? get() = urlOverride.value ?: payload.value
+    val effective: String?
+        get() = if (hotspotActiveState.value) urlOverride.value else payload.value
 
     /** Set by the Activity to react when presenting starts/stops (toggle HCE). */
     @Volatile
@@ -69,13 +77,24 @@ object PairPresent {
         payload.value = NsiteShare.buildPairUri(ownNpub, deviceName, PairSecrets.issue(context))
     }
 
+    /** The hotspot is starting: take the NFC surface away from pairing now,
+     *  before the page URL is even known — a bump in that window must hand
+     *  over nothing rather than a pair code. */
+    fun beginHotspot() {
+        hotspotActiveState.value = true
+        onChanged?.invoke()
+    }
+
     /** Present `uri` to every bump until [stopUrl] — outlives the Circle tab. */
     fun beginUrl(uri: String) {
+        hotspotActiveState.value = true
         urlOverride.value = uri
         onChanged?.invoke()
     }
 
+    /** The hotspot stopped: hand the NFC surface back to pairing. */
     fun stopUrl() {
+        hotspotActiveState.value = false
         urlOverride.value = null
         onChanged?.invoke()
     }

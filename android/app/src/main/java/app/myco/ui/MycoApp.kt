@@ -167,7 +167,9 @@ fun MycoApp(
     // issued is proof the peer read our live code. Consuming it is single-use, so a
     // replayed code can't pair again; those fall through to the manual inbox.
     androidx.compose.runtime.LaunchedEffect(state.pendingPairRequests) {
-        if (!PairPresent.presenting) return@LaunchedEffect
+        // Auto-accept is a *pairing* behavior: while the file-share hotspot owns
+        // the NFC surface no pair code is presented, so nothing may pair silently.
+        if (!PairPresent.presenting || PairPresent.hotspotActive) return@LaunchedEffect
         for (req in state.pendingPairRequests) {
             if (PairSecrets.consume(context, req.secret)) {
                 state = client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name))

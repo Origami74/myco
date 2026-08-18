@@ -80,6 +80,9 @@ class HotspotService : Service() {
         startForegroundCompat()
         starting = true
         publish(HotspotView(phase = HotspotPhase.STARTING))
+        // From this moment NFC belongs to the hotspot: pairing-by-bump is off,
+        // and once the page address is known a bump serves that instead.
+        PairPresent.beginHotspot()
         // The Wi-Fi chip cannot host an AP interface next to the Aware (NAN)
         // session the mesh's Aware lane holds — seen on Pixel 9 as HalDevMgr
         // "bestIfaceCreationProposal is null" followed by ERROR_INCOMPATIBLE_MODE.
