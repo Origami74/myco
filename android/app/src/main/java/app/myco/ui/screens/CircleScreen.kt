@@ -75,6 +75,7 @@ import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
 import app.myco.ui.NameSuggestions
 import app.myco.ui.PeersPill
+import app.myco.ui.peerLabel
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.avatarColorFor
 
@@ -132,7 +133,7 @@ fun CircleScreen(
     // strength/discovery order, so bubbles don't reshuffle as RSSI fluctuates.
     val nearby = state.blePeers.filter {
         it.connected && it.npub.isNotEmpty() && it.npub != state.ownNpub && it.npub !in circleNpubs
-    }.sortedWith(compareBy({ DeviceName.generated(it.npub).lowercase() }, { it.npub }))
+    }.sortedWith(compareBy({ peerLabel(state, it.npub).lowercase() }, { it.npub }))
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -182,7 +183,7 @@ fun CircleScreen(
                         nearby.forEach { peer ->
                             val isSent = peer.npub in invited
                             PersonBubble(
-                                label = DeviceName.generated(peer.npub),
+                                label = peerLabel(state, peer.npub),
                                 npub = peer.npub,
                                 ring = Ring.DASHED,
                                 badge = if (isSent) Badge.SENT else Badge.PLUS,
@@ -250,7 +251,7 @@ fun CircleScreen(
                     ) {
                         state.outboundPairs.forEach { inv ->
                             PersonBubble(
-                                label = inv.name.ifEmpty { DeviceName.generated(inv.npub) },
+                                label = peerLabel(state, inv.npub),
                                 npub = inv.npub,
                                 ring = Ring.DASHED,
                                 badge = Badge.SENT,

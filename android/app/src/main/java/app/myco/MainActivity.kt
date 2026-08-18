@@ -124,34 +124,16 @@ class MainActivity : ComponentActivity() {
         // (Device name is asserted in onResume, which also covers identity not yet
         // being ready at this point.)
 
-        // The `!FIPS` AP lane: watch Wi-Fi and browse the LAN for fips-node
-        // mDNS adverts, feeding them to the node (Dev panel shows results).
-        // Passive and permissionless; process-wide, so idempotent across
-        // Activity recreation.
-        ApRadio.ensureStarted(this)
-
-        // BLE on by default, and remembered thereafter.
-        if (prefs.getBoolean(PREF_BLE, true)) {
-            if (bleCorePermsGranted()) BleService.start(this) else requestBlePermissionsIfNeeded()
-        }
-
-        // Wi-Fi Aware is ON by default; resume it unless the user turned it off,
-        // and only where the hardware supports it.
-        if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this)) {
-            if (awarePermsGranted()) AwareService.start(this) else requestAwarePermissionsIfNeeded()
-        }
-
-        // The mesh adapter (app-owned TUN) is ON by default — it's how this device
-        // reaches the mesh, so it's effectively required. Bring it up at launch,
-        // prompting for the one-time VPN consent the first time it's needed.
-        // The fips node's lifecycle follows this master "Enable" switch (the
-        // radio toggles only gate their radios), so start it here too — the
-        // dispatch is idempotent with the radio services' own startNode calls.
-        if (prefs.getBoolean(PREF_MESH, true)) {
-            core.dispatch(NativeActions.startNode())
-            val consent = VpnService.prepare(this)
-            if (consent == null) startMeshNow() else vpnConsentLauncher.launch(consent)
-        }
+        // Nothing starts and nothing is asked for until the intro has been seen
+        // once. On a cold install this block would otherwise run before the
+        // first frame: LAN browse up, the Bluetooth and Wi-Fi Aware permission
+        // dialogs stacked, and the system's "Myco wants to set up a VPN
+        // connection" prompt on top of them — four system dialogs over a splash
+        // animation, before the app has said what it is. Every one of them now
+        // arrives after the intro, which is the first thing that explains
+        // anything. Returning launches are unchanged: the flag is set, so this
+        // runs here exactly as it always did.
+        if (prefs.getBoolean(PREF_INTRO_SEEN, false)) startEnabledLanes()
 
         setContent {
             MycoTheme {
@@ -208,7 +190,16 @@ class MainActivity : ComponentActivity() {
                             onFrost = { frost = it },
                             onFinished = {
                                 introShowing = false
+                                val firstRun = !prefs.getBoolean(PREF_INTRO_SEEN, false)
                                 prefs.edit().putBoolean(PREF_INTRO_SEEN, true).apply()
+                                // First run: onCreate deliberately started
+                                // nothing, so this is where the radios come up
+                                // and the permission prompts are allowed to
+                                // appear. A replayed intro clears the flag too
+                                // and so takes this branch as well, which is a
+                                // no-op — every call in there is idempotent and
+                                // the lanes are already running.
+                                if (firstRun) startEnabledLanes()
                             },
                         )
                     }
@@ -220,6 +211,46 @@ class MainActivity : ComponentActivity() {
     }
 
     // --- mesh adapter (app-owned TUN) ---
+
+    /**
+     * Bring up every lane the user has left enabled, and ask for whatever
+     * permission each one still needs.
+     *
+     * Called from `onCreate` on every launch after the first, and from the
+     * intro's completion on the first — see the gate at its `onCreate` call
+     * site for why. Idempotent: each service's `start` is, `ApRadio` is
+     * process-wide, and `startNode` is a no-op on a running node.
+     */
+    private fun startEnabledLanes() {
+        // The `!FIPS` AP lane: watch Wi-Fi and browse the LAN for fips-node
+        // mDNS adverts, feeding them to the node (Dev panel shows results).
+        // Passive and permissionless; process-wide, so idempotent across
+        // Activity recreation.
+        ApRadio.ensureStarted(this)
+
+        // BLE on by default, and remembered thereafter.
+        if (prefs.getBoolean(PREF_BLE, true)) {
+            if (bleCorePermsGranted()) BleService.start(this) else requestBlePermissionsIfNeeded()
+        }
+
+        // Wi-Fi Aware is ON by default; resume it unless the user turned it off,
+        // and only where the hardware supports it.
+        if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this)) {
+            if (awarePermsGranted()) AwareService.start(this) else requestAwarePermissionsIfNeeded()
+        }
+
+        // The mesh adapter (app-owned TUN) is ON by default — it's how this device
+        // reaches the mesh, so it's effectively required. Bring it up at launch,
+        // prompting for the one-time VPN consent the first time it's needed.
+        // The fips node's lifecycle follows this master "Enable" switch (the
+        // radio toggles only gate their radios), so start it here too — the
+        // dispatch is idempotent with the radio services' own startNode calls.
+        if (prefs.getBoolean(PREF_MESH, true)) {
+            core.dispatch(NativeActions.startNode())
+            val consent = VpnService.prepare(this)
+            if (consent == null) startMeshNow() else vpnConsentLauncher.launch(consent)
+        }
+    }
 
     /**
      * The mesh master switch. Takes the node **and the BLE radio** with it.

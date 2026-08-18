@@ -183,7 +183,7 @@ private fun CircleSection(state: AppState, nowMs: Long) {
 private fun CircleLine(state: AppState, member: CircleContact, dot: Color, nowMs: Long) {
     val peer = state.peers.firstOrNull { it.npub == member.npub && it.npub.isNotEmpty() }
     PeerLine(
-        name = member.name.ifEmpty { "a device" },
+        name = peerLabel(state, member.npub),
         transport = peer?.transport.orEmpty(),
         dot = dot,
         peer = peer,
@@ -220,6 +220,7 @@ private fun MeshSection(
     GroupLabel("MESH — ${connected.size} PEER${if (connected.size == 1) "" else "S"}")
     SectionCard {
         LaneBlock(
+            state = state,
             transport = "ble",
             label = "Bluetooth",
             // Tri-state on purpose: the bridge can be absent or the radio never
@@ -239,6 +240,7 @@ private fun MeshSection(
         if (awareSupported) {
             Divider()
             LaneBlock(
+                state = state,
                 transport = "aware",
                 label = "Wi-Fi Aware",
                 scanning = when {
@@ -253,6 +255,7 @@ private fun MeshSection(
         }
         Divider()
         LaneBlock(
+            state = state,
             transport = "udp",
             label = "Network",
             // The routed lane's "scanning" is the mDNS browse that finds fips
@@ -269,6 +272,7 @@ private fun MeshSection(
 /** A lane header — icon, name, scan state — over the peers it is carrying. */
 @Composable
 private fun LaneBlock(
+    state: AppState,
     transport: String,
     label: String,
     scanning: Boolean?,
@@ -314,7 +318,15 @@ private fun LaneBlock(
         } else {
             peers.forEach { p ->
                 PeerLine(
-                    name = p.name.ifEmpty { p.npub.ifEmpty { p.nodeAddrHex.ifEmpty { p.bleAddr } } },
+                    // `p.name` is fips's own label, which is an abbreviated
+                    // npub rather than anything a person chose — resolve
+                    // through the names we have actually been told first, and
+                    // fall back to an address only for a row with no npub yet.
+                    name = if (p.npub.isNotEmpty()) {
+                        peerLabel(state, p.npub)
+                    } else {
+                        p.nodeAddrHex.ifEmpty { p.bleAddr }
+                    },
                     transport = "",
                     dot = StatusConnected,
                     peer = p,

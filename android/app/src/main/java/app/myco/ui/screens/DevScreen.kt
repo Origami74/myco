@@ -49,6 +49,7 @@ import app.myco.ui.KeyVal
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
 import app.myco.ui.StatusDot
+import app.myco.ui.peerLabel
 import app.myco.ui.TransportIcon
 import app.myco.ui.locationServicesEnabled
 import app.myco.ui.theme.StatusAlone
@@ -350,7 +351,7 @@ private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
             EmptyLine("no connected peer to test")
         } else {
             peers.forEach { peer ->
-                val name = DeviceName.generated(peer.npub)
+                val name = peerLabel(state, peer.npub)
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -373,11 +374,11 @@ private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
         }
 
         val resultLine = when {
-            st.running -> "Testing ${DeviceName.generated(st.peerNpub)}…"
+            st.running -> "Testing ${peerLabel(state, st.peerNpub)}…"
             st.generation == 0L -> null
             st.error.isNotEmpty() -> "✗ ${st.error}"
             else -> "↑ %s   ↓ %s   (%s, %s)".format(
-                rate(st.upMbps), rate(st.downMbps), DeviceName.generated(st.peerNpub), size(st.bytes),
+                rate(st.upMbps), rate(st.downMbps), peerLabel(state, st.peerNpub), size(st.bytes),
             )
         }
         if (resultLine != null) {
