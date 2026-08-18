@@ -43,6 +43,10 @@ mod mesh_relay;
 // NIP-01 message on the peer link. See `reference/thinning-custom-relay.md`.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod mesh_wire;
+// A RelayBackend backed by someone else's NIP-01 relay — the point of the seam.
+// Not wired to settings yet, so it reads as dead outside its own tests.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod remote_backend;
 // npub -> observed lane record (Wi-Fi Aware vs. LAN/AP), pushed by the
 // Android Aware JNI bridge and consumed by `AppRuntime::state()`'s
 // lane_by_npub override. Plain, non-JNI logic so it is unit-testable on the
