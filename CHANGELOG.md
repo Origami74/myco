@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The status pill opens. Tapping the counts brings up a panel with the two
+  questions people actually have — can I reach my Circle, and what are the
+  radios doing. Circle members are listed reachable-first (alphabetically
+  inside each group, so the list never reshuffles under your thumb), with the
+  offline ones folded behind a single line. Each radio lane says whether it is
+  scanning and lists the peers it is carrying, with ping, how long the session
+  has held, and when it was last heard from — "now" for anything inside ten
+  seconds, because a counter flickering 1s/2s/3s reads as a fault when it is
+  the healthy case. A lane whose scan state cannot be observed says `unknown`
+  rather than `idle`, and a radio the phone does not have is left out entirely.
+- Peers show a ping. FIPS has been measuring a smoothed round-trip time per
+  link all along and Myco was discarding it at the boundary. A link that has
+  never been timed shows no ping rather than a confident `0ms`.
+- Myco asks what to call this device, once, on first run — and defaults to the
+  name the phone already has. "Arjen's S21" is far easier to pick out across a
+  table than "green sammy", but it usually carries a real name and it travels
+  in every pair request, so it is shown before it is used rather than adopted
+  silently. The pseudonymous generated name sits beside it as a single tap.
+- That chosen name now rides the Bluetooth advert, so people see it in Nearby
+  before pairing rather than a name derived from your public key. It is a
+  plaintext broadcast anyone in range can forge, so it never displaces a name
+  learned from a signed pair request — it only fills the gap where there was no
+  name at all.
+- Wherever a peer is named it is now the name they chose: Nearby, the Circle,
+  the Dev peer list, the speedtest. The key-derived name is the floor rather
+  than the default.
 - Wi-Fi Aware carries mesh traffic for the first time. The fast lane had been
   negotiating a data path with nearby phones for months and never moving a
   byte over it: the mesh node had one UDP socket, and the LAN lane pinned it to
@@ -37,6 +63,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Nothing starts and nothing is asked for until the intro has played. A cold
+  install used to bring up the LAN browse and then stack the Bluetooth prompt,
+  the Wi-Fi Aware prompt and the system's "Myco wants to set up a VPN
+  connection" dialog over the splash animation, before the app had said what it
+  is. Every one of those now arrives after the intro. Later launches are
+  unchanged.
+- The status pill is bigger, and turns red outright when the mesh is off — a
+  grey slider was not enough to notice across a room. Its whole left third
+  toggles the mesh rather than the slider alone: the slider swallowed every tap
+  that landed beside it, which is what made this fiddly, not the target being
+  small.
+- The generated device name has 2048 combinations instead of 144, which is why
+  duplicates kept turning up — a room of fourteen phones was already even money
+  for a collision. The colour and the name are now drawn from independent parts
+  of a real hash rather than from correlated bits of one small one.
 - The mesh node is rebuilt on current FIPS. The version Myco had been building
   against had drifted a long way behind, and the gap included fixes to path
   MTU, framing, peer identity and the control plane. Everything Myco needs from
@@ -51,6 +92,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Renaming your device changes what goes out over the air. The rename wrote the
+  preference and told the mesh node but never told the radio, so the old name
+  kept being broadcast until the app was next brought to the foreground — which
+  is exactly the surface a rename is usually aimed at.
+- A peer that connected to us, rather than being dialled by us, is attributed
+  its own Bluetooth adverts again. Only outbound dials were recorded, so an
+  inbound peer had no address on file and its signal strength — and now the name
+  it advertises — went missing.
 - Bluetooth works again after being switched off and on. Turning the radio off
   and back on — or leaving and returning from airplane mode — left the app
   permanently unable to see any Bluetooth peer until it was force-stopped,
