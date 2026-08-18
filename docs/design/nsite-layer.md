@@ -163,14 +163,24 @@ needs no translation layer. "Newest event in a replaceable slot" is a helper ove
 
 Operations with **no NIP-01 expression** — the selective cache wipe that keeps
 pinned sites — live in a separate `AdminBackend` trait that only the embedded
-store implements. Where it is absent, the settings UI should report the operation
-as unavailable rather than silently doing nothing.
+store implements. Where it is absent the operation is skipped, and the Storage
+screen says so: with a custom store configured, Delete states that it clears this
+device only and leaves the custom store alone. Claiming otherwise would be a lie
+about a destructive action.
 
-**Planned, not built:** a `RemoteBackend` that speaks WebSocket to a configured
-relay URL — [Citrine](https://github.com/greenart7c3/Citrine) on the same device,
-a `strfry` or `nostr-rs-relay` on the LAN — plus the settings field that selects
-it. Today the embedded store is the only implementation. Two things the settings
-screen will have to say when a custom backend is configured:
+**Built.** [`RemoteBackend`](../../myco-core/src/remote_backend.rs) speaks
+WebSocket to a configured relay URL — [Citrine](https://github.com/greenart7c3/Citrine)
+on the same device, a `strfry` or `nostr-rs-relay` on the LAN. It holds one
+connection open and multiplexes publishes and queries over it by subscription id;
+an unreachable relay is an error rather than an empty result, because an empty
+set would render as a missing site.
+
+The URL lives under **Settings → Storage → Advanced**, persisted in
+`settings.json` and read at startup, since the backend is chosen when the content
+layer is constructed. Changing it therefore applies on the next launch, and the
+app offers to restart. Citrine has been confirmed working as the store.
+
+Two things the settings screen says when a custom backend is configured:
 
 - **We stop verifying what comes back out.** Signatures are checked once, at
   ingress; reads from the backend are trusted because NIP-01 already requires a
@@ -253,14 +263,20 @@ loopback bypasses, and a mesh source must pass an access function supplied by
 from uploads, so `myco-blossom` stays a generic store that knows nothing about
 circles.
 
-**One implementation today; a second is planned.** The filesystem store described
-here is currently the only `BlobStore`. A `RemoteBlobStore` that reads through to
-an external Blossom server is planned — the HTTP client already exists in
-[`ip_source.rs`](../../myco-core/src/ip_source.rs) and needs collecting behind the
-seam, plus kind-24242 upload authorization and hash verification on read (the
-embedded store can skip re-hashing because the only way bytes get in is a verified
-write; a shared store cannot). **Not built yet**, and when it lands the settings
-screen has to carry two warnings sharper than the relay's:
+**Two implementations.** The filesystem store described here is the default;
+[`RemoteBlobStore`](../../myco-core/src/remote_blobs.rs) reads through to an
+external Blossom server over BUD-01, with kind-24242 upload authorization signed
+by the device key and **hash verification on every read** (the embedded store can
+skip re-hashing because the only way bytes get in is a verified write; a shared
+store cannot, so bytes that do not match the requested hash are treated as
+absent).
+
+With a custom server configured the mesh Blossom listener on `:24243` is **not
+bound at all**: it exists to serve our own blobs to peers, and there are none —
+peers reach that server by its own URL rather than through us.
+
+Not yet exercised against a third-party Blossom implementation. The settings
+screen carries two warnings sharper than the relay's:
 
 - **A remote backend breaks offline-first.** Blobs are the bulk of an nsite, so
   pointing this at an internet server means a peer pulling an app from us needs

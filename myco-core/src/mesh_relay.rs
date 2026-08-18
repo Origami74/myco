@@ -148,7 +148,9 @@ pub trait PeerGate: Send + Sync {
 }
 
 /// Default clamp on the pull hop budget we'll honour, so a peer can't turn us
-/// into an unbounded query amplifier (mirrors `MAX_EVENT_TTL` on the push plane).
+/// into an unbounded query amplifier. Lower than the push plane's
+/// [`EVENT_TTL`](crate::mesh_wire::EVENT_TTL) on purpose: a flooded read costs
+/// more, because every hop answers as well as forwards.
 /// A gate may lower it per peer — see [`PeerGate::max_req_ttl`].
 pub(crate) const MAX_REQ_TTL: u8 = 2;
 

@@ -116,6 +116,11 @@ impl BlobStore for RemoteBlobStore {
                 r.status().is_success()
             }
             Err(e) => {
+                // The seam has no way to say "I could not tell" here, so an
+                // unreachable server and a missing blob both read as `false`.
+                // Recording the failure is what keeps them distinguishable: the
+                // settings screen shows the reason, rather than the user seeing
+                // a site stuck at "incomplete" with nothing to explain it.
                 self.note(Some(format!("Could not reach {}: {e}", self.base)));
                 false
             }
@@ -274,6 +279,11 @@ mod tests {
 
     /// An unreachable server is an error on read, not an empty answer — the same
     /// distinction the relay backend makes, for the same reason.
+    ///
+    /// `has` is the exception, because the seam returns a bare `bool` with no
+    /// way to say "could not tell". It records the failure instead, so the
+    /// reason is on the settings screen rather than a site sitting at
+    /// "incomplete" with nothing to explain it.
     #[tokio::test]
     async fn an_unreachable_server_is_an_error() {
         let store = RemoteBlobStore::new("http://127.0.0.1:1", keys());
@@ -282,6 +292,14 @@ mod tests {
         assert!(
             !store.health().error.is_empty(),
             "the failure is recorded for the settings screen"
+        );
+
+        let unreachable = RemoteBlobStore::new("http://127.0.0.1:1", keys());
+        assert!(!unreachable.has(&sha256_hex(b"x")).await);
+        assert!(
+            !unreachable.health().error.is_empty(),
+            "has() cannot report the failure in its return value, so it must \
+             leave it where the user will see it"
         );
     }
 

@@ -20,7 +20,7 @@ sync-over-FIPS), [../design/nsite-layer.md §3.2](../design/nsite-layer.md)
 | --- | --- | --- | --- | --- |
 | Embedded Nostr relay | `127.0.0.1` (localhost) | **4870** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:4870`, paired peers only |
 | Auth service (pairing) | `[::]` (mesh only) | **4871** | peers asking to pair | **Yes** — at `<npub>.fips:4871`, and the only port open to a peer we have never met |
-| Embedded Blossom server | `127.0.0.1` (localhost) | **24243** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:24243`, paired peers only |
+| Embedded Blossom server | `127.0.0.1` (localhost) | **24243** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:24243`, paired peers only. Not bound at all when a custom Blossom is configured |
 | Local HTTP gateway | `127.0.0.1` (localhost) | **80** | any browser on the device (system-wide `*.nsite` interception) | **No** — localhost-only, never over the mesh |
 | DNS interceptor | inside the VpnService/TUN reader (not a bound socket) | n/a | the whole device's resolver | n/a — it *produces* the addresses below |
 | FIPS IPv6 adapter | FSP port **256** (internal mesh port, not a localhost socket) | 256 | FIPS session layer | n/a — this is the mesh transport that *carries* IPv6 to `fd00::` |

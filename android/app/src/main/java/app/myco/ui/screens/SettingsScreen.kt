@@ -393,6 +393,9 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
     // why nothing changed.
     var restartPrompt by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    // Deleting only ever clears the built-in stores. Saying otherwise would be a
+    // lie about a destructive action, which is the one place it matters most.
+    val external = state.cache.externalRelay || state.cache.externalBlobs
 
     val used = state.cache.usedBytes
     val fraction = (used.toDouble() / STORAGE_CAP_BYTES).coerceIn(0.0, 1.0).toFloat()
@@ -485,7 +488,11 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
             SettingRow(
                 icon = null,
                 title = "Delete cache",
-                subtitle = "Free up space — keeps your pinned apps, clears everything else",
+                subtitle = if (external) {
+                    "Frees space on this device — your custom store is untouched"
+                } else {
+                    "Free up space — keeps your pinned apps, clears everything else"
+                },
                 titleColor = MaterialTheme.colorScheme.error,
                 onClick = { confirmCache = true },
             )
@@ -493,7 +500,11 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
             SettingRow(
                 icon = null,
                 title = "Delete all data, including apps",
-                subtitle = "Wipe entirely (keeps identity & Circle)",
+                subtitle = if (external) {
+                    "Wipes this device only (keeps identity & Circle)"
+                } else {
+                    "Wipe entirely (keeps identity & Circle)"
+                },
                 titleColor = MaterialTheme.colorScheme.error,
                 onClick = { confirmAll = true },
             )
@@ -543,8 +554,14 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
     if (confirmCache) {
         ConfirmDialog(
             title = "Delete cache?",
-            body = "Clears all downloaded relay events and blobs except your pinned apps, " +
-                "which keep working offline.",
+            body = if (external) {
+                "Clears what's stored on this device, except your pinned apps. " +
+                    "Anything on your custom relay or Blossom stays where it is — " +
+                    "it isn't ours to delete."
+            } else {
+                "Clears all downloaded relay events and blobs except your pinned apps, " +
+                    "which keep working offline."
+            },
             confirmLabel = "Delete cache",
             onConfirm = { client.dispatch(NativeActions.wipeCache()); confirmCache = false },
             onDismiss = { confirmCache = false },
@@ -553,8 +570,14 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
     if (confirmAll) {
         ConfirmDialog(
             title = "Delete all data?",
-            body = "Removes every downloaded nsite, including pinned apps (relay events + blobs). " +
-                "Your identity and Circle stay.",
+            body = if (external) {
+                "Removes every downloaded nsite stored on this device, including pinned " +
+                    "apps. Anything on your custom relay or Blossom stays where it is — " +
+                    "it isn't ours to delete. Your identity and Circle stay."
+            } else {
+                "Removes every downloaded nsite, including pinned apps (relay events + blobs). " +
+                    "Your identity and Circle stay."
+            },
             confirmLabel = "Delete all",
             onConfirm = { client.dispatch(NativeActions.wipeStores()); confirmAll = false },
             onDismiss = { confirmAll = false },

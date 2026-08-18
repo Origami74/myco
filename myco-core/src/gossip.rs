@@ -7,7 +7,7 @@
 //! decrementing hop budget, carried in the `MESH` envelope:
 //!
 //! - **Local origin** (a loopback publish from the in-app nsite) originates at
-//!   `DEFAULT_EVENT_TTL`.
+//!   `mesh_wire::EVENT_TTL`.
 //! - **Mesh origin** re-forwards with the budget that rode in,
 //!   **except back to the sender** (split-horizon), until the budget runs out.
 //!
@@ -28,12 +28,6 @@ use nostr::Event;
 use crate::mesh_relay::{Gossiper, Inbound, Origin};
 
 use crate::content::Content;
-
-/// Hop budget this device stamps on its **own** events (experimental default).
-const DEFAULT_EVENT_TTL: u8 = 3;
-/// Clamp on any TTL we'll honour/forward, so a peer can't set a huge value and
-/// turn us into a flood amplifier (`docs/design/event-gossip.md` §3).
-const MAX_EVENT_TTL: u8 = 3;
 
 /// Fans events to connected Circle peers' relays over the mesh, hop-bounded.
 pub struct MeshGossiper {
@@ -69,7 +63,7 @@ impl Gossiper for MeshGossiper {
         // Effective budget: originate at the default for our own publishes; for a
         // mesh-received event use the TTL it carried (absent => 0 => don't forward).
         let effective = match inbound.origin {
-            Origin::Local => DEFAULT_EVENT_TTL,
+            Origin::Local => crate::mesh_wire::EVENT_TTL,
             Origin::Mesh => inbound.event_ttl.unwrap_or(0),
         };
         // A peer we have not granted multihop writes still gets its events
@@ -77,9 +71,9 @@ impl Gossiper for MeshGossiper {
         // clamp of 0 is how that is expressed (D10).
         let peer_cap = match inbound.sender {
             Some(ip) if !self.content.may_forward_from(ip) => 0,
-            _ => MAX_EVENT_TTL,
+            _ => crate::mesh_wire::EVENT_TTL,
         };
-        let fwd = effective.min(MAX_EVENT_TTL).min(peer_cap);
+        let fwd = effective.min(crate::mesh_wire::EVENT_TTL).min(peer_cap);
         if fwd == 0 {
             return;
         }

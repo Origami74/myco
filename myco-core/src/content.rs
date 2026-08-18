@@ -276,10 +276,6 @@ const PAIR_TTL_SECS: u64 = 120;
 const PAIR_DIAL_ATTEMPTS: usize = 15;
 const PAIR_DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// Hop budget for manifest (update) propagation over the mesh — mirrors the chat
-/// push plane's default. See `docs/design/nsite-updates.md` §4.
-const MANIFEST_EVENT_TTL: u8 = 3;
-
 /// Time budget stamped on a pull this node originates. Relative, and only bounds
 /// how long a node downstream holds query state — late results are not an error,
 /// they simply arrive to whoever is still listening
@@ -1943,7 +1939,11 @@ impl Content {
             .download_and_activate(addr, candidate.clone(), sources, true)
             .await;
         if activated {
-            self.forward_manifest(&candidate, MANIFEST_EVENT_TTL.saturating_sub(1), None);
+            self.forward_manifest(
+                &candidate,
+                crate::mesh_wire::EVENT_TTL.saturating_sub(1),
+                None,
+            );
         }
         activated
     }
@@ -2043,13 +2043,13 @@ impl Content {
         // check, so that grant was enforced on one plane but not the other (D10).
         let peer_cap = match inbound.sender {
             Some(ip) if !self.may_forward_from(ip) => 0,
-            _ => MANIFEST_EVENT_TTL,
+            _ => crate::mesh_wire::EVENT_TTL,
         };
         let effective = match inbound.origin {
-            Origin::Local => MANIFEST_EVENT_TTL,
+            Origin::Local => crate::mesh_wire::EVENT_TTL,
             Origin::Mesh => inbound.event_ttl.unwrap_or(0),
         }
-        .min(MANIFEST_EVENT_TTL)
+        .min(crate::mesh_wire::EVENT_TTL)
         .min(peer_cap);
         let out_ttl = effective.saturating_sub(1);
 

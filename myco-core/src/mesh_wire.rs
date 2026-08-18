@@ -69,6 +69,16 @@ fn is_zero(n: &u8) -> bool {
     *n == 0
 }
 
+/// How far a pushed event travels: the budget a node stamps on its own events,
+/// and the most it will honour from a peer. One constant, because they are the
+/// same number for the same reason — the reach a wave is allowed — and having
+/// chat, manifests, and the clamp each name it separately let them drift.
+///
+/// The pull plane's counterpart is [`MAX_REQ_TTL`](crate::mesh_relay::MAX_REQ_TTL),
+/// deliberately lower: a flooded read costs more than a flooded write, since
+/// every hop answers as well as forwards.
+pub const EVENT_TTL: u8 = 3;
+
 /// Share of the remaining budget a hop may spend downstream, keeping the rest to
 /// receive and relay. Deadlines are not composed — see [`MeshMeta::budget_ms`].
 const BUDGET_SHARE: f64 = 0.6;
