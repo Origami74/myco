@@ -138,6 +138,8 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.4")
     // QR generation for share-an-nsite (encodes the nsite id + pairing info)…
     implementation("com.google.zxing:core:3.5.3")
+    // Embedded HTTP server for the file-share hotspot's upload/download page.
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
     // …and an in-app camera scanner to read one back.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     testImplementation("junit:junit:4.13.2")

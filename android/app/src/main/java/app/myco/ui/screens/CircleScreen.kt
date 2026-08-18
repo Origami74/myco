@@ -1,5 +1,8 @@
 package app.myco.ui.screens
 
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -33,6 +36,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MarkEmailUnread
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.WifiTethering
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -44,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,6 +66,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -68,6 +74,9 @@ import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.CircleContact
 import app.myco.core.NativeActions
+import app.myco.hotspot.HotspotPhase
+import app.myco.hotspot.HotspotService
+import app.myco.hotspot.SharedFiles
 import app.myco.nfc.NfcState
 import app.myco.nfc.NfcStatus
 import app.myco.nfc.PairPresent
@@ -89,8 +98,9 @@ private enum class Badge { NONE, PLUS, SENT }
  * "Add to circle" screen is merged in here). Top to bottom: who you appear as,
  * a tap-to-connect (NFC) hint, **Nearby** people (tap a bubble to add), and your
  * **Circle** as bubbles (green ring = online). A QR bubble (bottom-right) opens
- * scan / show / paste. While this screen is open the device presents over NFC, so
- * two phones both here pair on a single bump.
+ * scan / show / paste; the hotspot bubble above it shares files with *any* phone
+ * over a local-only hotspot ([HotspotSheet]). While this screen is open the
+ * device presents over NFC, so two phones both here pair on a single bump.
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -106,6 +116,22 @@ fun CircleScreen(
     var sheetFor by remember { mutableStateOf<CircleContact?>(null) }
     var confirmRemove by remember { mutableStateOf<CircleContact?>(null) }
     var cancelInvite by remember { mutableStateOf<String?>(null) }
+
+    // File-share hotspot: the sheet views state the HotspotService owns, so it
+    // survives dismissing the sheet and leaving the tab.
+    var hotspotSheet by remember { mutableStateOf(false) }
+    val hotspot by HotspotService.view.collectAsState()
+    val sharedFiles by SharedFiles.get(context).entries.collectAsState()
+    val hotspotPerms = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        if (grants.values.all { it }) HotspotService.start(context)
+    }
+    val pickShareFiles = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) SharedFiles.get(context).addUris(uris)
+    }
 
     // NFC availability, re-checked on resume (e.g. back from NFC settings).
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -296,21 +322,62 @@ fun CircleScreen(
             item { Spacer(Modifier.height(72.dp)) } // room for the FAB
         }
 
-        // QR bubble — scan / show / paste.
-        Surface(
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.primary,
-            shadowElevation = 6.dp,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(24.dp)
-                .size(56.dp)
-                .clickable(onClick = onOpenQr),
+        Column(
+            modifier = Modifier.align(Alignment.BottomEnd).padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(Icons.Filled.QrCode2, contentDescription = "Scan or show a code", tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(26.dp))
+            // Hotspot bubble — share files with any phone over a local hotspot.
+            val hotspotLive = hotspot.phase == HotspotPhase.ON || hotspot.phase == HotspotPhase.STARTING
+            Surface(
+                shape = CircleShape,
+                color = if (hotspotLive) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.surfaceVariant,
+                border = if (hotspotLive) null else androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clickable(onClick = { hotspotSheet = true }),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Filled.WifiTethering,
+                        contentDescription = "Share files over hotspot",
+                        tint = if (hotspotLive) MaterialTheme.colorScheme.onTertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+            }
+            // QR bubble — scan / show / paste.
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary,
+                shadowElevation = 6.dp,
+                modifier = Modifier
+                    .size(56.dp)
+                    .clickable(onClick = onOpenQr),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.QrCode2, contentDescription = "Scan or show a code", tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(26.dp))
+                }
             }
         }
+    }
+
+    if (hotspotSheet) {
+        HotspotSheet(
+            view = hotspot,
+            shared = sharedFiles,
+            onStart = {
+                val needed = HotspotService.permissions().filter {
+                    ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+                }
+                if (needed.isEmpty()) HotspotService.start(context)
+                else hotspotPerms.launch(needed.toTypedArray())
+            },
+            onStop = { HotspotService.stop(context) },
+            onAddFiles = { pickShareFiles.launch(arrayOf("*/*")) },
+            onDismiss = { hotspotSheet = false },
+        )
     }
 
     if (editing) {
