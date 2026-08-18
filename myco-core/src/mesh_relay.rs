@@ -15,9 +15,10 @@
 //! built with no gossiper and no gate behaves as an ordinary NIP-01 relay, which
 //! is what the tests use.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -114,6 +115,98 @@ pub trait PeerGate: Send + Sync {
 /// unbounded query amplifier (mirrors `MAX_EVENT_TTL` on the push plane).
 const MAX_REQ_TTL: u8 = 2;
 
+/// How long a non-expiring event's id is remembered as seen. A push wave lives
+/// for seconds, so this only has to outlast retries and a slow multi-hop path.
+const SEEN_RETENTION_SECS: u64 = 30 * 60;
+/// Floor for an event that carries a NIP-40 expiry in the past or very near
+/// future — remember it briefly regardless, so a wave in flight still terminates.
+const SEEN_FLOOR_SECS: u64 = 60;
+/// Cap on remembered ids. At ~40 bytes an entry this is a few hundred KB worst
+/// case, and chat (the high-rate kind) expires itself out well before the cap.
+const SEEN_CAPACITY: usize = 4096;
+
+/// The ids this proxy has already handled, and therefore will not fan out again.
+///
+/// This is the mesh loop-guard, and it deliberately does **not** live in the
+/// store. Storage answers "do I hold this?", which is a different question: an
+/// id GC'd at NIP-40 expiry looks new again on the next pull, and a
+/// store-triggered fan-out would start a fresh wave for an old message every
+/// time someone new comes into range. Novelty is a property of this node's
+/// history, so this node keeps it. See `reference/thinning-custom-relay.md` (D2)
+/// and `docs/design/event-gossip.md` §4.
+#[derive(Default)]
+struct SeenSet {
+    inner: Mutex<SeenInner>,
+}
+
+#[derive(Default)]
+struct SeenInner {
+    /// id -> the second after which the id may be forgotten.
+    until: HashMap<[u8; 32], u64>,
+    /// Insertion order, so the oldest id is the one evicted at capacity.
+    order: VecDeque<[u8; 32]>,
+}
+
+impl SeenSet {
+    /// Record an id, returning `true` if this is the **first** time we have seen
+    /// it — the caller's signal to fan out.
+    fn insert(&self, event: &Event) -> bool {
+        let now = now_secs();
+        // Remember an expiring event until it expires everywhere; a manifest (no
+        // expiry) for a fixed window. Either way at least the floor, so an event
+        // that arrives already stale cannot be re-forwarded on every hop.
+        let until = myco_relay::expiration(event)
+            .unwrap_or(now + SEEN_RETENTION_SECS)
+            .max(now + SEEN_FLOOR_SECS);
+
+        let id = event.id.to_bytes();
+        let mut inner = self.inner.lock().unwrap();
+        inner.gc(now);
+        if inner.until.contains_key(&id) {
+            return false;
+        }
+        while inner.order.len() >= SEEN_CAPACITY {
+            let Some(oldest) = inner.order.pop_front() else {
+                break;
+            };
+            inner.until.remove(&oldest);
+        }
+        inner.until.insert(id, until);
+        inner.order.push_back(id);
+        true
+    }
+}
+
+impl SeenInner {
+    /// Drop ids whose retention has run out. Cheap in the common case: the queue
+    /// is in insertion order and retention is near-uniform, so this stops at the
+    /// first live entry.
+    fn gc(&mut self, now: u64) {
+        while let Some(id) = self.order.front() {
+            match self.until.get(id) {
+                Some(&until) if until > now => break,
+                Some(_) => {
+                    let id = *id;
+                    self.until.remove(&id);
+                    self.order.pop_front();
+                }
+                // Already evicted by capacity; drop the stale queue entry.
+                None => {
+                    self.order.pop_front();
+                }
+            }
+        }
+    }
+}
+
+/// Seconds since the Unix epoch.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Shared per-relay state: the store, a broadcast bus that fans newly-stored
 /// events to all live subscriptions on this device, and the optional mesh gossiper.
 ///
@@ -128,6 +221,9 @@ pub struct RelayHub {
     /// Mesh access policy. `None` = open (local/test default); `Some` restricts
     /// mesh peers to paired (Circle) devices. Loopback always bypasses it.
     gate: Option<Arc<dyn PeerGate>>,
+    /// Ids already handled here, so a copy arriving by a second path is stored
+    /// but not re-flooded. Shared across every listener on this hub.
+    seen: SeenSet,
 }
 
 impl RelayHub {
@@ -152,6 +248,7 @@ impl RelayHub {
             live,
             gossip,
             gate,
+            seen: SeenSet::default(),
         })
     }
 }
@@ -452,26 +549,32 @@ async fn handle_client_frame(
                     serde_json::json!(["OK", id, false, "invalid: bad signature"]).to_string(),
                 ];
             }
-            match hub.store.store_event(event.clone()).await {
-                Ok(true) => {
-                    // Fan to this device's live subscriptions (incl. the WebView).
-                    let _ = hub.live.send(event.clone());
-                    // Drive the mesh gossiper off the socket path (non-blocking).
-                    if let Some(gossip) = hub.gossip.clone() {
-                        let inbound = Inbound {
-                            origin,
-                            event_ttl,
-                            sender: (origin == Origin::Mesh).then_some(peer_ip),
-                        };
-                        tokio::spawn(async move { gossip.on_event(event, inbound).await });
-                    }
-                    vec![serde_json::json!(["OK", id, true, ""]).to_string()]
+            // Novelty is the proxy's own call, made *before* storing and
+            // independent of what the store does with the event. Storing is
+            // idempotent, so it happens either way; only a first sighting fans
+            // out. See `reference/thinning-custom-relay.md` (D2).
+            let first_sighting = hub.seen.insert(&event);
+            if let Err(e) = hub.store.publish(event.clone()).await {
+                return vec![
+                    serde_json::json!(["OK", id, false, format!("error: {e}")]).to_string()
+                ];
+            }
+            if first_sighting {
+                // Fan to this device's live subscriptions (incl. the WebView).
+                let _ = hub.live.send(event.clone());
+                // Drive the mesh gossiper off the socket path (non-blocking).
+                if let Some(gossip) = hub.gossip.clone() {
+                    let inbound = Inbound {
+                        origin,
+                        event_ttl,
+                        sender: (origin == Origin::Mesh).then_some(peer_ip),
+                    };
+                    tokio::spawn(async move { gossip.on_event(event, inbound).await });
                 }
-                // Duplicate / superseded: still an accepted outcome per NIP-01.
-                Ok(false) => vec![serde_json::json!(["OK", id, true, "duplicate:"]).to_string()],
-                Err(e) => {
-                    vec![serde_json::json!(["OK", id, false, format!("error: {e}")]).to_string()]
-                }
+                vec![serde_json::json!(["OK", id, true, ""]).to_string()]
+            } else {
+                // Duplicate: still an accepted outcome per NIP-01.
+                vec![serde_json::json!(["OK", id, true, "duplicate:"]).to_string()]
             }
         }
         Some("CLOSE") => {
@@ -547,7 +650,7 @@ mod tests {
         let store = Arc::new(RelayStore::in_memory());
         let keys = Keys::generate();
         let site = build_test_site_with_keys(&keys, &[("/index.html", b"x")], None, None);
-        store.store_event(site.manifest.clone()).await.unwrap();
+        store.admit_event(site.manifest.clone()).await.unwrap();
 
         let addr = spawn_relay(store.clone()).await;
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
@@ -702,6 +805,65 @@ mod tests {
         // 127.0.0.1 is loopback → Local origin, no sender (originator stamps TTL).
         assert_eq!(seen[0].1.origin, Origin::Local);
         assert_eq!(seen[0].1.sender, None);
+    }
+
+    /// An event the store no longer holds must still not be re-flooded.
+    ///
+    /// This is the failure the seen-set exists to prevent. When novelty came from
+    /// the store, an id GC'd at NIP-40 expiry — or any backend that forgot it —
+    /// read as new on the next pull, so a fresh wave went out for an old message
+    /// every time someone came into range. Novelty belongs to this node's
+    /// history, not to what storage currently holds
+    /// (`reference/thinning-custom-relay.md` D2, `event-gossip.md` §4).
+    #[tokio::test]
+    async fn a_forgotten_event_is_not_re_flooded() {
+        use std::sync::Mutex;
+
+        struct Count(Mutex<usize>);
+        #[async_trait]
+        impl Gossiper for Count {
+            async fn on_event(&self, _event: Event, _inbound: Inbound) {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+
+        let store = Arc::new(RelayStore::in_memory());
+        let count = Arc::new(Count(Mutex::new(0)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on_with(store.clone(), listener, Some(count.clone())));
+
+        let keys = Keys::generate();
+        let msg = chat_event(&keys, "mesh", "old news");
+        let frame = serde_json::json!(["EVENT", msg]).to_string();
+
+        let publish = |frame: String| async move {
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+                .await
+                .unwrap();
+            ws.send(WsMessage::Text(frame)).await.unwrap();
+            let _ = ws.next().await; // await the OK
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+
+        publish(frame.clone()).await;
+        assert_eq!(*count.0.lock().unwrap(), 1, "first sighting fans out");
+
+        // Empty the store, standing in for expiry GC or a backend that forgot.
+        store.wipe().await.unwrap();
+        assert_eq!(store.count(), 0);
+
+        publish(frame).await;
+        assert_eq!(
+            *count.0.lock().unwrap(),
+            1,
+            "the store forgot it, but we have not: no second wave"
+        );
+        assert_eq!(
+            store.count(),
+            1,
+            "still stored again — publishing is idempotent, only the fan-out is suppressed"
+        );
     }
 
     /// A loopback client's REQ is reported to the gossiper as a local subscription

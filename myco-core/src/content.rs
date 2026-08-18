@@ -307,8 +307,8 @@ struct ActiveBackend<'a> {
 
 #[async_trait]
 impl RelayBackend for ActiveBackend<'_> {
-    async fn store_event(&self, event: Event) -> anyhow::Result<bool> {
-        self.relay.store_event(event).await
+    async fn publish(&self, event: Event) -> anyhow::Result<()> {
+        self.relay.publish(event).await
     }
     async fn get_manifest(
         &self,
@@ -667,7 +667,7 @@ impl Content {
                         // it's stored (idempotent) and pin it as the active version;
                         // title/count come straight from the manifest we held.
                         Some(m) => {
-                            let _ = self.relay.store_event(m.event.clone()).await;
+                            let _ = self.relay.publish(m.event.clone()).await;
                             self.set_active(&m.event);
                             let n = m.paths.len() as u64;
                             self.set_status_titled(
@@ -1262,8 +1262,9 @@ impl Content {
                 .request(npub, &url, filters, std::time::Duration::from_secs(15))
                 .await;
             for ev in events {
-                // Signatures were checked by the pool at ingress.
-                if self.relay.store_event(ev).await.unwrap_or(false) {
+                // Signatures were checked by the pool at ingress. Storing is
+                // idempotent, so this counts events pulled, not new arrivals.
+                if self.relay.publish(ev).await.is_ok() {
                     stored += 1;
                 }
             }
@@ -1715,7 +1716,7 @@ impl Content {
                 p.pulled = p.total;
             }
             if store_in_relay {
-                let _ = self.relay.store_event(candidate.clone()).await;
+                let _ = self.relay.publish(candidate.clone()).await;
             }
             self.set_active(&candidate);
             let n = manifest.paths.len() as u64;

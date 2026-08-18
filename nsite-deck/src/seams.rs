@@ -29,10 +29,14 @@ pub struct ManifestFilter {
 /// the backend's responsibility.
 #[async_trait]
 pub trait RelayBackend: Send + Sync {
-    /// Store an already-signed, already-verified event. Returns `true` if it was
-    /// accepted as the newest in its (replaceable) slot, `false` if an
-    /// equal-or-newer event already won that slot.
-    async fn store_event(&self, event: Event) -> anyhow::Result<bool>;
+    /// Store an already-signed, already-verified event.
+    ///
+    /// Idempotent: a relay dedups by id and collapses replaceable slots on its
+    /// own, so re-publishing is a no-op and there is nothing useful to report
+    /// back. Deliberately no "was it new?" answer — NIP-01's `OK true` covers
+    /// accept and duplicate alike, so no arbitrary backend could supply one, and
+    /// nothing should depend on it (`reference/thinning-custom-relay.md`, D2).
+    async fn publish(&self, event: Event) -> anyhow::Result<()>;
 
     /// The newest manifest for a replaceable slot: `kind` + `author`, plus the
     /// `d-tag` for parameterized-replaceable (35128). `d_tag = None` selects the

@@ -153,8 +153,10 @@ fn slot_of(event: &Event) -> (u16, [u8; 32], Option<String>) {
     (kind, event.pubkey.to_bytes(), d)
 }
 
-/// The NIP-40 `expiration` tag value (a unix timestamp), if present.
-fn expiration(event: &Event) -> Option<u64> {
+/// The NIP-40 `expiration` tag value (a unix timestamp), if present. Public so
+/// the proxy in front can size its seen-set to how long an event can still be
+/// circulating.
+pub fn expiration(event: &Event) -> Option<u64> {
     event.tags.iter().find_map(|t| {
         let s = t.as_slice();
         (s.first().map(String::as_str) == Some("expiration"))
@@ -212,9 +214,17 @@ fn admit(map: &mut HashMap<[u8; 32], Event>, event: Event, now: u64) -> bool {
     }
 }
 
-#[async_trait]
-impl RelayBackend for RelayStore {
-    async fn store_event(&self, event: Event) -> anyhow::Result<bool> {
+impl RelayStore {
+    /// Store an event, reporting whether it was **new** to this store — `false`
+    /// for a duplicate id or an event already superseded in its replaceable slot.
+    ///
+    /// This answer describes *this store*, and nothing else should be built on
+    /// it. In particular it is not a mesh loop-guard: an id GC'd at NIP-40 expiry
+    /// looks new again on a later pull, so gossip novelty is the proxy's own
+    /// seen-set instead (`reference/thinning-custom-relay.md`, D2). The
+    /// [`RelayBackend`] seam therefore does not expose it — an arbitrary NIP-01
+    /// relay could not answer it anyway.
+    pub async fn admit_event(&self, event: Event) -> anyhow::Result<bool> {
         let now = now_secs();
         let persistable = expiration(&event).is_none();
         let snapshot = {
@@ -237,6 +247,13 @@ impl RelayBackend for RelayStore {
             self.persist(&snapshot);
         }
         Ok(true)
+    }
+}
+
+#[async_trait]
+impl RelayBackend for RelayStore {
+    async fn publish(&self, event: Event) -> anyhow::Result<()> {
+        self.admit_event(event).await.map(|_| ())
     }
 
     async fn get_manifest(
@@ -323,8 +340,8 @@ mod tests {
         let root = build_test_site_with_keys(&keys, &[("/index.html", b"r")], None, None);
         let named = build_test_site_with_keys(&keys, &[("/index.html", b"n")], Some("blog"), None);
 
-        assert!(store.store_event(root.manifest.clone()).await.unwrap());
-        assert!(store.store_event(named.manifest.clone()).await.unwrap());
+        assert!(store.admit_event(root.manifest.clone()).await.unwrap());
+        assert!(store.admit_event(named.manifest.clone()).await.unwrap());
 
         let got_root = store
             .get_manifest(KIND_ROOT, &keys.public_key(), None)
@@ -348,8 +365,8 @@ mod tests {
 
         let m1 = chat_event(&keys, "mesh", "hello", None);
         let m2 = chat_event(&keys, "mesh", "world", None);
-        assert!(store.store_event(m1.clone()).await.unwrap());
-        assert!(store.store_event(m2.clone()).await.unwrap());
+        assert!(store.admit_event(m1.clone()).await.unwrap());
+        assert!(store.admit_event(m2.clone()).await.unwrap());
 
         let filter = ManifestFilter {
             kinds: vec![9],
@@ -360,7 +377,7 @@ mod tests {
         assert_eq!(got.len(), 2, "both chat messages retained");
 
         // Re-storing the same id is a no-op (dedup), not a second copy.
-        assert!(!store.store_event(m1).await.unwrap());
+        assert!(!store.admit_event(m1).await.unwrap());
         assert_eq!(store.query(&filter).await.unwrap().len(), 2);
     }
 
@@ -373,9 +390,9 @@ mod tests {
         let live = chat_event(&keys, "mesh", "fresh", Some(now + 600));
         let dead = chat_event(&keys, "mesh", "stale", Some(now.saturating_sub(10)));
 
-        assert!(store.store_event(live.clone()).await.unwrap());
+        assert!(store.admit_event(live.clone()).await.unwrap());
         assert!(
-            !store.store_event(dead).await.unwrap(),
+            !store.admit_event(dead).await.unwrap(),
             "an already-expired event is not stored"
         );
 
@@ -398,9 +415,9 @@ mod tests {
 
         {
             let store = RelayStore::open(&dir).unwrap();
-            store.store_event(site.manifest.clone()).await.unwrap();
+            store.admit_event(site.manifest.clone()).await.unwrap();
             store
-                .store_event(chat_event(&keys, "mesh", "ephemeral", Some(now + 600)))
+                .admit_event(chat_event(&keys, "mesh", "ephemeral", Some(now + 600)))
                 .await
                 .unwrap();
             assert_eq!(store.count(), 2, "both live in memory");
@@ -427,7 +444,7 @@ mod tests {
 
         {
             let store = RelayStore::open(&dir).unwrap();
-            store.store_event(site.manifest.clone()).await.unwrap();
+            store.admit_event(site.manifest.clone()).await.unwrap();
         }
         let store = RelayStore::open(&dir).unwrap();
         assert_eq!(store.count(), 1);

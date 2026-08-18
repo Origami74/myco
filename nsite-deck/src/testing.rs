@@ -116,7 +116,7 @@ fn slot_of(event: &Event) -> Slot {
 
 #[async_trait]
 impl RelayBackend for MemRelay {
-    async fn store_event(&self, event: Event) -> anyhow::Result<bool> {
+    async fn publish(&self, event: Event) -> anyhow::Result<()> {
         let slot = slot_of(&event);
         let mut map = self.events.lock().unwrap();
         let accept = match map.get(&slot) {
@@ -126,7 +126,7 @@ impl RelayBackend for MemRelay {
         if accept {
             map.insert(slot, event);
         }
-        Ok(accept)
+        Ok(())
     }
 
     async fn get_manifest(
