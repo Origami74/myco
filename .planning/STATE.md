@@ -83,6 +83,7 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 | ID | Task | Date | Branch | Summary |
 |----|------|------|--------|---------|
 | 260809-nyq | Myco deep linking (`myco://app/<host>/<path>`) + deferred open, and the myco-dumplings test nsite | 2026-08-09 | `feat/deep-links` | `.planning/quick/260809-nyq-myco-deep-linking-myco-app-host-path-def/SUMMARY.md` |
+| 260818-l65 | Status pill: bigger, red when mesh off, easier switch, and a Circle/Mesh status panel behind it (per-lane scanning + per-peer ping/uptime/last-seen) | 2026-08-18 | `feat/status-pill-panel` | `.planning/quick/260818-l65-status-pill-panel/SUMMARY.md` |
 
 ## Deferred Items
 
