@@ -105,6 +105,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an accept-or-decline dialog with the file's name and size, accepting saves
   it as a normal download, and the sheet shows each offer's fate — waiting,
   sent, or declined.
+- The file page only ever offers this session's files. Starting a hotspot
+  wipes the served list; only what you pick now, or receive now, shows up for
+  the guest — files from earlier sessions stay in `Download/Myco/`, visible
+  to you alone.
 
 ### Changed
 
