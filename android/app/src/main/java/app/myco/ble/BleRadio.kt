@@ -20,6 +20,7 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.util.Log
 import app.myco.core.NativeCore
 import java.io.IOException
@@ -156,15 +157,54 @@ class BleRadio(context: Context) {
     @Volatile
     private var backgroundMode = false
 
-    // True while at least one Wi-Fi Aware data path is live, published by
-    // AwareRadio. Read only by the PIN_TO_AWARE experiment in [connect].
+    // node_addr prefixes (hex, [NODE_PREFIX_BYTES] bytes) of peers currently
+    // carried by a Wi-Fi Aware data path, published by AwareRadio. A peer on
+    // Aware must not also be dialled over BLE: the core re-establishing one
+    // peer across two transports is what drives the ~60s NAN data-path
+    // teardowns. Keyed by node_addr because that is the only identity both
+    // radios can compute — BLE learns it from the scan response, Aware derives
+    // it from the peer's npub.
     @Volatile
-    private var awareNdpLive = false
+    private var awarePrefixes: Set<String> = emptySet()
 
-    /** Adopt the current Aware state; a rebuilt radio would otherwise start
+    /** node_addr prefix last advertised by each BLE MAC, so a dial (which only
+     *  carries an address) can be attributed to a peer. Populated from scan
+     *  responses; a peer whose response never arrives is simply not matched
+     *  and is dialled as before.
+     *
+     *  Keyed by MAC, so a peer that rotates its RPA re-learns the mapping from
+     *  the next scan response on the new address — the prefix itself is stable
+     *  because it derives from the peer's identity key, not its address. The
+     *  dead entry the rotation leaves behind is what [pruneNodePrefixes]
+     *  clears; without it this map grows for the life of the process, one
+     *  entry per rotation per peer. */
+    private val nodePrefixByMac = ConcurrentHashMap<String, PrefixSighting>()
+
+    private class PrefixSighting(val prefix: String, @Volatile var lastSeenMs: Long)
+
+    /** Sightings of an address whose peer we could not identify, while Aware
+     *  had peers to protect. Bounded by [SIGHTINGS_BEFORE_UNIDENTIFIED_PUSH] so
+     *  a peer that never sends a scan response is still reported. */
+    private val unidentifiedSightings = ConcurrentHashMap<String, Int>()
+
+    /** The node_addr prefix carried by this scan record, if it brought one. */
+    private fun nodePrefixOf(result: ScanResult): String? =
+        result.scanRecord?.getServiceData(NAME_SD_PARCEL_UUID)
+            ?.takeIf { it.size > NODE_PREFIX_BYTES }
+            ?.take(NODE_PREFIX_BYTES)
+            ?.joinToString("") { "%02x".format(it) }
+
+    /** Drop mappings for addresses not seen for [PREFIX_TTL_MS]. Rotation makes
+     *  the old address unreachable, so a stale entry can only mislead. */
+    private fun pruneNodePrefixes(now: Long) {
+        if (nodePrefixByMac.size < PREFIX_PRUNE_AT) return
+        nodePrefixByMac.entries.removeIf { now - it.value.lastSeenMs > PREFIX_TTL_MS }
+    }
+
+    /** Adopt the current Aware set; a rebuilt radio would otherwise start
      *  stale, since the companion setter only fires on a change. */
-    private fun onAwareNdpActiveChanged(active: Boolean) {
-        awareNdpLive = active
+    private fun onAwarePrefixesChanged(prefixes: Set<String>) {
+        awarePrefixes = prefixes
     }
 
     /** Flip fore/background discovery intensity; restarts the scan if one is live. */
@@ -183,7 +223,7 @@ class BleRadio(context: Context) {
         // off/on) starts with the field default, and the companion setter only
         // fires on a *change* — so without this a new instance would dial a
         // peer that Aware is already carrying.
-        awareNdpLive = awareActiveField
+        awarePrefixes = awarePrefixField
 
         // There is only ever one radio per process (BleService guards it), and
         // the app needs a handle on it to push the display name in without
@@ -278,15 +318,15 @@ class BleRadio(context: Context) {
             failDial(connectId, addr)
             return
         }
-        // EXPERIMENT (PIN_TO_AWARE): refuse outbound dials while a Wi-Fi Aware
-        // data path is live, so the core can never move a peer from Aware onto
-        // BLE. Tests whether the ~60s NAN data-path teardowns are caused by the
-        // core re-establishing the same peer across transports rather than by
-        // radio coexistence. Inbound connections, advertising and scanning are
-        // untouched — only our own dialling is suppressed. Blunt on purpose: it
-        // also blocks dials to BLE-only peers, so it is not shippable as-is.
-        if (PIN_TO_AWARE && awareNdpLive) {
-            Log.i(TAG, "PIN_TO_AWARE: refusing BLE dial to $addr (aware data path live)")
+        // A peer already carried by Wi-Fi Aware is not dialled over BLE. The
+        // core otherwise re-establishes the same peer alternately on both
+        // transports, and that churn is what tears the NAN data path down
+        // every ~60s. Only this peer's dials are suppressed: BLE-only peers
+        // dial normally, and inbound connections, advertising and scanning are
+        // untouched on every peer.
+        val prefix = nodePrefixByMac[addr]?.prefix
+        if (prefix != null && prefix in awarePrefixes) {
+            Log.i(TAG, "aware carries $prefix… — refusing BLE dial to $addr")
             failDial(connectId, addr)
             return
         }
@@ -590,6 +630,31 @@ class BleRadio(context: Context) {
         if (psm > 0) {
             scanWithPsm.incrementAndGet()
             scanPsmAddrs.add(addr)
+            // Identify the peer before handing the core a BLE address for it.
+            // Refusing the dial afterwards is too late on a freshly rotated
+            // RPA: the core dials the moment it learns the address, and the
+            // scan response carrying the node_addr may not have arrived yet —
+            // one such dial is enough to restart the transport churn that
+            // tears the Aware data path down.
+            //
+            // Unidentified peers are held back only while Aware actually has
+            // something to protect, and only for a few sightings: a peer with
+            // no display name set never sends a scan response at all (see the
+            // advertiser), and must still be reachable over BLE.
+            val seenPrefix = nodePrefixOf(result) ?: nodePrefixByMac[addr]?.prefix
+            val holdBack =
+                when {
+                    seenPrefix != null -> seenPrefix in awarePrefixes
+                    awarePrefixes.isEmpty() -> false
+                    else ->
+                        unidentifiedSightings.merge(addr, 1, Int::plus)!! <=
+                            SIGHTINGS_BEFORE_UNIDENTIFIED_PUSH
+                }
+            if (holdBack) {
+                if (seenPrefix != null) unidentifiedSightings.remove(addr)
+                return
+            }
+            unidentifiedSightings.remove(addr)
             NativeCore.bleDeliverScan(bridgeHandle, addr, psm, result.rssi)
             // The peer's chosen name, when its scan response reached us. Pushed
             // separately from the PSM: it is a Myco-layer label with no bearing
@@ -604,6 +669,16 @@ class BleRadio(context: Context) {
                     val advertised = String(
                         blob, NODE_PREFIX_BYTES, blob.size - NODE_PREFIX_BYTES, Charsets.UTF_8,
                     )
+                    val now = SystemClock.elapsedRealtime()
+                    nodePrefixByMac.compute(addr) { _, prev ->
+                        if (prev != null && prev.prefix == nodePrefix) {
+                            prev.lastSeenMs = now
+                            prev
+                        } else {
+                            PrefixSighting(nodePrefix, now)
+                        }
+                    }
+                    pruneNodePrefixes(now)
                     NativeCore.bleDeliverAdvertName(nodePrefix, advertised)
                     // Logged on change only. The push itself fires several
                     // times a second per peer, but a name that just appeared or
@@ -971,9 +1046,6 @@ class BleRadio(context: Context) {
          *  first result is never accused. */
         private const val SILENT_WINDOWS_BEFORE_ALARM = 2
 
-        /** Experiment switch — see [BleRadio.connect]. Must be false to ship. */
-        private const val PIN_TO_AWARE = true
-
         /** Background scan: batched delivery window (controller-offloaded). */
         private const val BACKGROUND_BATCH_MS = 5000L
 
@@ -1025,18 +1097,18 @@ class BleRadio(context: Context) {
             }
 
         @Volatile
-        private var awareActiveField = false
+        private var awarePrefixField: Set<String> = emptySet()
 
-        /** Whether any Wi-Fi Aware data path is currently up, published by
-         *  [app.myco.aware.AwareRadio]. The two radios live in separate
-         *  services; the dial gate in [connect] needs to know when a data path
-         *  is carrying the peer. */
-        var awareNdpActive: Boolean
-            get() = awareActiveField
+        /** node_addr prefixes of peers currently carried by a Wi-Fi Aware data
+         *  path, published by [app.myco.aware.AwareRadio]. The two radios live
+         *  in separate services, so this is how the dial gate in [connect]
+         *  learns which peers Aware already has. */
+        var awareNodePrefixes: Set<String>
+            get() = awarePrefixField
             set(value) {
-                if (value == awareActiveField) return
-                awareActiveField = value
-                instance?.onAwareNdpActiveChanged(value)
+                if (value == awarePrefixField) return
+                awarePrefixField = value
+                instance?.onAwarePrefixesChanged(value)
             }
 
         @Volatile
@@ -1081,6 +1153,19 @@ class BleRadio(context: Context) {
          *  of node address: ample against accidental collision in a room, and
          *  cheap enough to leave the name most of the payload. */
         const val NODE_PREFIX_BYTES = 6
+
+        /** How long a MAC -> node_addr mapping stays usable after the last
+         *  sighting. Comfortably longer than the RPA rotation period so an
+         *  in-use peer is never forgotten, short enough that rotated-away
+         *  addresses do not accumulate. */
+        private const val PREFIX_TTL_MS = 30 * 60 * 1000L
+        private const val PREFIX_PRUNE_AT = 128
+
+        /** How many sightings an unidentified address is held back for before
+         *  it is reported anyway. At observed advert rates this is a second or
+         *  two — long enough for a scan response, short enough that a peer
+         *  which never sends one is not stranded. */
+        private const val SIGHTINGS_BEFORE_UNIDENTIFIED_PUSH = 4
 
         /** Longest name that fits the 31-byte scan response beside its 4-byte
          *  service-data header and the node-address prefix. Cut on a UTF-8
