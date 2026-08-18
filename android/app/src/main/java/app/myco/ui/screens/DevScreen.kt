@@ -14,7 +14,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,7 +30,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -51,14 +49,13 @@ import app.myco.ui.KeyVal
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
 import app.myco.ui.StatusDot
+import app.myco.ui.peerLabel
+import app.myco.ui.TransportIcon
 import app.myco.ui.locationServicesEnabled
-import app.myco.R
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.StatusReachable
 import app.myco.ui.theme.StatusThin
-import app.myco.ui.theme.TransportBluetooth
-import app.myco.ui.theme.TransportNetwork
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
@@ -354,7 +351,7 @@ private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
             EmptyLine("no connected peer to test")
         } else {
             peers.forEach { peer ->
-                val name = DeviceName.generated(peer.npub)
+                val name = peerLabel(state, peer.npub)
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -377,11 +374,11 @@ private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
         }
 
         val resultLine = when {
-            st.running -> "Testing ${DeviceName.generated(st.peerNpub)}…"
+            st.running -> "Testing ${peerLabel(state, st.peerNpub)}…"
             st.generation == 0L -> null
             st.error.isNotEmpty() -> "✗ ${st.error}"
             else -> "↑ %s   ↓ %s   (%s, %s)".format(
-                rate(st.upMbps), rate(st.downMbps), DeviceName.generated(st.peerNpub), size(st.bytes),
+                rate(st.upMbps), rate(st.downMbps), peerLabel(state, st.peerNpub), size(st.bytes),
             )
         }
         if (resultLine != null) {
@@ -559,42 +556,6 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
 }
 
 /**
- * The transport a peer is reachable over, as an icon.
- *
- * Three lanes, three glyphs: the Bluetooth rune, the Wi-Fi Aware arcs, and a
- * globe for anything routed (LAN, the `!FIPS` AP, mDNS). An unknown or absent
- * transport draws nothing rather than guessing — a peer with no resolved link
- * is a real state and a wrong icon would assert a link that does not exist.
- *
- * Bluetooth keeps its brand blue and the routed lane the app's emerald;
- * Aware follows `onSurface`, so it reads as the plain radio in either theme.
- */
-@Composable
-private fun TransportIcon(transport: String, modifier: Modifier = Modifier) {
-    val (res, tint, label) = when (transport) {
-        "ble" -> Triple(R.drawable.ic_transport_bluetooth, TransportBluetooth, "Bluetooth")
-        "aware" -> Triple(
-            R.drawable.ic_transport_wifi_aware,
-            MaterialTheme.colorScheme.onSurface,
-            "Wi-Fi Aware",
-        )
-        "" -> Triple(0, MaterialTheme.colorScheme.onSurfaceVariant, "")
-        // udp, tcp and anything else routed: it reached us over IP.
-        else -> Triple(R.drawable.ic_transport_network, TransportNetwork, "Network")
-    }
-    if (res == 0) {
-        Spacer(modifier.size(26.dp))
-        return
-    }
-    Icon(
-        painter = painterResource(res),
-        contentDescription = label,
-        tint = tint,
-        modifier = modifier.size(26.dp),
-    )
-}
-
-/**
  * The expanded body of a peer row: why a connection failed, in place (D-05).
  *
  * Metric lines first — they render even when there is no attempt history, so a
@@ -612,6 +573,11 @@ private fun PeerForensics(peer: PeerDiagnostic) {
         modifier = Modifier.padding(start = 30.dp, end = 16.dp, bottom = 8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
+        // The name the peer broadcasts for itself, as received — never the
+        // resolved label. This row is what separates "they advertised this" from
+        // "we generated it from their npub", which the peer list alone cannot
+        // show when the two happen to agree.
+        ForensicLine("advert name", peer.advertisedName.ifEmpty { "—" })
         ForensicLine("role", peer.role.ifEmpty { "—" })
         ForensicLine("discovery", if (peer.discoveryMs > 0) "${peer.discoveryMs}ms" else "—")
         ForensicLine("send drops", peer.sendDrops.toString())

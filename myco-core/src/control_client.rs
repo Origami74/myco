@@ -43,7 +43,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Named after the `fips::control::read_handle::PeerView` it replaces so the
 /// merge in [`crate::peer_diagnostics`] keeps its shape, but Myco-owned now.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PeerView {
     /// The peer's `node_addr`, hex-encoded (`node_addr` on the wire — the value
     /// is hex, the key is not).
@@ -64,6 +64,21 @@ pub struct PeerView {
     pub authenticated_at_ms: u64,
     /// Transport type carrying the peer's link (`"ble"`, `"udp"`, …).
     pub transport: String,
+    /// The transport-level address the link currently runs over, exactly as
+    /// fips formats it: `adapter/AA:BB:CC:DD:EE:FF` for BLE, `[addr]:port` for
+    /// the IP transports. Empty when the peer has no resolved address.
+    ///
+    /// For BLE this is the one thing that ties an authenticated peer to the
+    /// address its scan adverts arrive on. Without it a peer that connected
+    /// *inbound* has no recorded address at all — the connect-attempt log only
+    /// covers dials we made — so its adverts, and the RSSI and self-advertised
+    /// name they carry, could never be attributed to it.
+    pub transport_addr: String,
+    /// Smoothed round-trip time over this peer's link, milliseconds, as MMP
+    /// measured it. `None` when MMP has taken no measurement yet — fips omits
+    /// the key entirely in that case, and an unmeasured link must render as
+    /// "no ping", never as a confident `0`.
+    pub srtt_ms: Option<f64>,
     /// fips's render-ready name. **This is an abbreviated npub**
     /// (`"npub1qrjr...msuc"`), not a profile name — observed on device.
     pub display_name: String,
@@ -226,6 +241,11 @@ fn peer_from_json(peer: &Value) -> PeerView {
             .and_then(Value::as_u64)
             .unwrap_or(0),
         transport: s("transport_type"),
+        transport_addr: s("transport_addr"),
+        srtt_ms: peer
+            .get("mmp")
+            .and_then(|mmp| mmp.get("srtt_ms"))
+            .and_then(Value::as_f64),
         display_name: s("display_name"),
     }
 }
@@ -265,6 +285,11 @@ mod tests {
             "npub": "npub1qrjrvpelneupkjnk5nmkxxjfyxkyp5yg5l38t3e8fxs75lzwtgqqfqmsuc",
             "transport_addr": "[::ffff:192.168.8.238]:2121",
             "transport_type": "udp",
+            "mmp": {
+                "mode": "reliable",
+                "srtt_ms": 42.5,
+                "loss_rate": 0.0,
+            },
         });
         let view = peer_from_json(&row);
         assert_eq!(view.node_addr_hex, "ad9d5cb1a248d4ff21e9f30c10b3ea40");
@@ -276,7 +301,26 @@ mod tests {
         assert_eq!(view.last_seen_ms, 1786484197793);
         assert_eq!(view.authenticated_at_ms, 1786483829884);
         assert_eq!(view.transport, "udp");
+        assert_eq!(view.transport_addr, "[::ffff:192.168.8.238]:2121");
         assert_eq!(view.display_name, "npub1qrjr...msuc");
+        assert_eq!(view.srtt_ms, Some(42.5));
+    }
+
+    /// fips omits `srtt_ms` from the inline MMP block until MMP has taken a
+    /// measurement, and omits the whole block on a peer with no MMP session.
+    /// Both must read as "no measurement" — a link that has never been timed
+    /// must never render as a 0ms ping.
+    #[test]
+    fn an_unmeasured_link_carries_no_ping() {
+        let no_srtt = serde_json::json!({
+            "npub": "npub1x",
+            "connectivity": "connected",
+            "mmp": { "mode": "reliable", "loss_rate": 0.0 },
+        });
+        assert_eq!(peer_from_json(&no_srtt).srtt_ms, None);
+
+        let no_mmp = serde_json::json!({ "npub": "npub1x", "connectivity": "connected" });
+        assert_eq!(peer_from_json(&no_mmp).srtt_ms, None);
     }
 
     #[test]

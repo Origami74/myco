@@ -360,6 +360,34 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverScan(
     }
 }
 
+/// Kotlin read a self-advertised display name out of a peer's BLE scan
+/// response.
+///
+/// Separate from [`Java_app_myco_core_NativeCore_bleDeliverScan`] on purpose:
+/// the name has no bearing on routing, so it never enters the fips bridge and
+/// lands in Myco's own [`crate::advert_names`] record instead. Needs no bridge
+/// handle for the same reason — the map is process-global, like the lane
+/// record.
+///
+/// The value is an unauthenticated broadcast anyone in range can forge. It is
+/// stored as such; the display layer is what keeps it below every name learned
+/// from signed pair traffic.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverAdvertName(
+    mut env: JNIEnv,
+    _class: JClass,
+    addr: JString,
+    name: JString,
+) {
+    let Ok(addr) = env.get_string(&addr) else {
+        return;
+    };
+    let Ok(name) = env.get_string(&name) else {
+        return;
+    };
+    crate::advert_names::set_name(&String::from(addr), &String::from(name));
+}
+
 /// Android's `ScanResult.rssi` in dBm, as an optional signal strength.
 ///
 /// `127` is the platform's "RSSI unknown" sentinel and is not a real reading,

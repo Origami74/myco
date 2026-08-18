@@ -44,6 +44,7 @@ import androidx.lifecycle.lifecycleScope
 import app.myco.ap.ApRadio
 import app.myco.aware.AwareRadio
 import app.myco.aware.AwareService
+import app.myco.ble.BleRadio
 import app.myco.ble.BleService
 import app.myco.BuildConfig
 import app.myco.core.AppCoreClient
@@ -57,6 +58,8 @@ import app.myco.share.NsiteShare
 import app.myco.share.PendingDeepLinks
 import app.myco.ui.MycoApp
 import app.myco.ui.intro.IntroMode
+import app.myco.ui.FirstRunNameDialog
+import app.myco.ui.applyDeviceName
 import app.myco.ui.intro.IntroScreen
 import app.myco.ui.theme.MycoTheme
 import app.myco.vpn.MycoVpnService
@@ -124,6 +127,137 @@ class MainActivity : ComponentActivity() {
         // (Device name is asserted in onResume, which also covers identity not yet
         // being ready at this point.)
 
+        // Nothing starts and nothing is asked for until the intro has been seen
+        // once. On a cold install this block would otherwise run before the
+        // first frame: LAN browse up, the Bluetooth and Wi-Fi Aware permission
+        // dialogs stacked, and the system's "Myco wants to set up a VPN
+        // connection" prompt on top of them — four system dialogs over a splash
+        // animation, before the app has said what it is. Every one of them now
+        // arrives after the intro, which is the first thing that explains
+        // anything. Returning launches are unchanged: the flag is set, so this
+        // runs here exactly as it always did.
+        if (prefs.getBoolean(PREF_INTRO_SEEN, false)) startEnabledLanes()
+
+        setContent {
+            MycoTheme {
+                // The intro is an overlay, not a nav destination: the app is
+                // composed and laid out underneath it from the first frame. The
+                // pupil is a hole in that overlay, so the app is what shows
+                // through it — live, from the moment it opens — and the dive is
+                // that hole growing until there is no overlay left to see. A
+                // nav destination would have had nothing behind it to reveal.
+                // The full sequence is a first-launch event; after that the
+                // intro is only the dive, so it never stands between someone
+                // and the app they opened. Reset it from Dev.
+                val introMode = remember {
+                    if (prefs.getBoolean(PREF_INTRO_SEEN, false)) {
+                        IntroMode.Returning
+                    } else {
+                        IntroMode.FirstRun
+                    }
+                }
+                var introShowing by rememberSaveable { mutableStateOf(true) }
+                // How frosted the pupil is. The intro washes the hole itself;
+                // this blurs what shows through it by the same amount, so
+                // early on you can see there is something behind the mark
+                // without being able to read it. Modifier.blur is a no-op
+                // below API 31, where the wash carries it alone.
+                var frost by remember { mutableFloatStateOf(if (introShowing) 1f else 0f) }
+                // The name question, asked exactly once. Raised here rather than
+                // only from the intro's completion so an upgrade from a build
+                // that never asked still gets it on its next launch, with the
+                // intro already behind it.
+                var askName by rememberSaveable {
+                    mutableStateOf(
+                        !prefs.getBoolean(PREF_NAME_CHOSEN, false) &&
+                            prefs.getBoolean(PREF_INTRO_SEEN, false),
+                    )
+                }
+
+                Box(Modifier.fillMaxSize()) {
+                    Box(Modifier.blur(14.dp * frost)) {
+                        MycoApp(
+                            client = core,
+                            onBleToggle = { enabled -> setBleEnabled(enabled) },
+                            wifiAwareSupported = AwareRadio.isSupported(this@MainActivity),
+                            onWifiAwareToggle = { enabled -> setWifiAwareEnabled(enabled) },
+                            onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
+                            onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
+                            onScanned = { text -> handleScannedText(text) },
+                            initialMeshEnabled = prefs.getBoolean(PREF_MESH, true),
+                            onMeshToggle = { enabled -> setMeshEnabled(enabled) },
+                            onOfflineOnlyToggle = { enabled -> setOfflineOnly(enabled) },
+                            initialDeveloperMode = prefs.getBoolean(PREF_DEV, BuildConfig.DEBUG),
+                            onDeveloperModeToggle = { enabled -> prefs.edit().putBoolean(PREF_DEV, enabled).apply() },
+                            initialExitProxy = prefs.getString(PREF_EXIT_PROXY, "").orEmpty(),
+                            onExitProxyChange = { spec -> setExitProxy(spec) },
+                            onReplayIntro = {
+                                prefs.edit().putBoolean(PREF_INTRO_SEEN, false).apply()
+                            },
+                        )
+                    }
+
+                    // Sits above the app and below nothing: the intro is gone
+                    // by the time this can show.
+                    if (askName && !introShowing) {
+                        // Read once, not on every keystroke — state() crosses
+                        // JNI and takes the core's locks.
+                        val npub = remember { core.state().ownNpub }
+                        FirstRunNameDialog(ownNpub = npub) { picked ->
+                            applyDeviceName(this@MainActivity, core, npub, picked)
+                            prefs.edit().putBoolean(PREF_NAME_CHOSEN, true).apply()
+                            askName = false
+                            // Deferred from the intro on a first run; a no-op
+                            // when the lanes are already up.
+                            startEnabledLanes()
+                        }
+                    }
+
+                    if (introShowing) {
+                        IntroScreen(
+                            mode = introMode,
+                            onFrost = { frost = it },
+                            onFinished = {
+                                introShowing = false
+                                val firstRun = !prefs.getBoolean(PREF_INTRO_SEEN, false)
+                                prefs.edit().putBoolean(PREF_INTRO_SEEN, true).apply()
+                                // First run: onCreate deliberately started
+                                // nothing. Ask the name before the radios come
+                                // up rather than after — the permission dialogs
+                                // would sit on top of this one, and the name is
+                                // what every later pair request carries, so it
+                                // should be settled before anything can send
+                                // one. A replayed intro has already answered it
+                                // and falls through to starting the lanes,
+                                // which is a no-op there since every call in
+                                // startEnabledLanes is idempotent.
+                                if (firstRun && !prefs.getBoolean(PREF_NAME_CHOSEN, false)) {
+                                    askName = true
+                                } else if (firstRun) {
+                                    startEnabledLanes()
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+        }
+
+        handleDeepLink(intent)
+    }
+
+    // --- mesh adapter (app-owned TUN) ---
+
+    /**
+     * Bring up every lane the user has left enabled, and ask for whatever
+     * permission each one still needs.
+     *
+     * Called from `onCreate` on every launch after the first, and from the
+     * intro's completion on the first — see the gate at its `onCreate` call
+     * site for why. Idempotent: each service's `start` is, `ApRadio` is
+     * process-wide, and `startNode` is a no-op on a running node.
+     */
+    private fun startEnabledLanes() {
         // The `!FIPS` AP lane: watch Wi-Fi and browse the LAN for fips-node
         // mDNS adverts, feeding them to the node (Dev panel shows results).
         // Passive and permissionless; process-wide, so idempotent across
@@ -152,74 +286,7 @@ class MainActivity : ComponentActivity() {
             val consent = VpnService.prepare(this)
             if (consent == null) startMeshNow() else vpnConsentLauncher.launch(consent)
         }
-
-        setContent {
-            MycoTheme {
-                // The intro is an overlay, not a nav destination: the app is
-                // composed and laid out underneath it from the first frame. The
-                // pupil is a hole in that overlay, so the app is what shows
-                // through it — live, from the moment it opens — and the dive is
-                // that hole growing until there is no overlay left to see. A
-                // nav destination would have had nothing behind it to reveal.
-                // The full sequence is a first-launch event; after that the
-                // intro is only the dive, so it never stands between someone
-                // and the app they opened. Reset it from Dev.
-                val introMode = remember {
-                    if (prefs.getBoolean(PREF_INTRO_SEEN, false)) {
-                        IntroMode.Returning
-                    } else {
-                        IntroMode.FirstRun
-                    }
-                }
-                var introShowing by rememberSaveable { mutableStateOf(true) }
-                // How frosted the pupil is. The intro washes the hole itself;
-                // this blurs what shows through it by the same amount, so
-                // early on you can see there is something behind the mark
-                // without being able to read it. Modifier.blur is a no-op
-                // below API 31, where the wash carries it alone.
-                var frost by remember { mutableFloatStateOf(if (introShowing) 1f else 0f) }
-
-                Box(Modifier.fillMaxSize()) {
-                    Box(Modifier.blur(14.dp * frost)) {
-                        MycoApp(
-                            client = core,
-                            onBleToggle = { enabled -> setBleEnabled(enabled) },
-                            wifiAwareSupported = AwareRadio.isSupported(this@MainActivity),
-                            onWifiAwareToggle = { enabled -> setWifiAwareEnabled(enabled) },
-                            onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
-                            onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
-                            onScanned = { text -> handleScannedText(text) },
-                            initialMeshEnabled = prefs.getBoolean(PREF_MESH, true),
-                            onMeshToggle = { enabled -> setMeshEnabled(enabled) },
-                            onOfflineOnlyToggle = { enabled -> setOfflineOnly(enabled) },
-                            initialDeveloperMode = prefs.getBoolean(PREF_DEV, BuildConfig.DEBUG),
-                            onDeveloperModeToggle = { enabled -> prefs.edit().putBoolean(PREF_DEV, enabled).apply() },
-                            initialExitProxy = prefs.getString(PREF_EXIT_PROXY, "").orEmpty(),
-                            onExitProxyChange = { spec -> setExitProxy(spec) },
-                            onReplayIntro = {
-                                prefs.edit().putBoolean(PREF_INTRO_SEEN, false).apply()
-                            },
-                        )
-                    }
-
-                    if (introShowing) {
-                        IntroScreen(
-                            mode = introMode,
-                            onFrost = { frost = it },
-                            onFinished = {
-                                introShowing = false
-                                prefs.edit().putBoolean(PREF_INTRO_SEEN, true).apply()
-                            },
-                        )
-                    }
-                }
-            }
-        }
-
-        handleDeepLink(intent)
     }
-
-    // --- mesh adapter (app-owned TUN) ---
 
     /**
      * The mesh master switch. Takes the node **and the BLE radio** with it.
@@ -350,7 +417,13 @@ class MainActivity : ComponentActivity() {
         // here (not just onCreate) in case the device identity wasn't ready yet at
         // first launch; set_device_name is idempotent.
         core.state().ownNpub.takeIf { it.isNotEmpty() }?.let {
-            core.dispatch(NativeActions.setDeviceName(DeviceName.current(this, it)))
+            // Re-assert rather than set: passing the stored override back
+            // through resolves to the same name, and every publish site is
+            // idempotent. This is the belt to the rename sites' braces, for a
+            // radio that started after the last rename.
+            val stored = getSharedPreferences("myco_prefs", MODE_PRIVATE)
+                .getString("device_name", "").orEmpty()
+            applyDeviceName(this, core, it, stored)
         }
         // Deep links followed before the app existed (possibly in a previous process)
         // get their chance every time Myco comes back to the foreground.
@@ -795,5 +868,10 @@ class MainActivity : ComponentActivity() {
         const val PREF_EXIT_PROXY = "exit_proxy"
         /** Set once the intro has played all the way through. */
         const val PREF_INTRO_SEEN = "intro_seen"
+
+        /** Set once the first-run name question has been answered. Separate from
+         *  [PREF_INTRO_SEEN] so replaying the intro doesn't re-ask it, and so an
+         *  upgrade from a build that never asked still gets the question once. */
+        private const val PREF_NAME_CHOSEN = "name_chosen"
     }
 }

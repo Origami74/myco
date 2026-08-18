@@ -1193,6 +1193,7 @@ impl AppRuntime {
             &outbound_pairs,
             &reachable_npubs,
             &lane_by_npub,
+            &crate::advert_names::snapshot(),
             &ble_attempts,
             now_ms(),
         );

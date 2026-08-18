@@ -73,7 +73,10 @@ import app.myco.nfc.NfcStatus
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
+import app.myco.ui.NameSuggestions
+import app.myco.ui.applyDeviceName
 import app.myco.ui.PeersPill
+import app.myco.ui.peerLabel
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.avatarColorFor
 
@@ -131,7 +134,7 @@ fun CircleScreen(
     // strength/discovery order, so bubbles don't reshuffle as RSSI fluctuates.
     val nearby = state.blePeers.filter {
         it.connected && it.npub.isNotEmpty() && it.npub != state.ownNpub && it.npub !in circleNpubs
-    }.sortedWith(compareBy({ DeviceName.generated(it.npub).lowercase() }, { it.npub }))
+    }.sortedWith(compareBy({ peerLabel(state, it.npub).lowercase() }, { it.npub }))
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -181,7 +184,7 @@ fun CircleScreen(
                         nearby.forEach { peer ->
                             val isSent = peer.npub in invited
                             PersonBubble(
-                                label = DeviceName.generated(peer.npub),
+                                label = peerLabel(state, peer.npub),
                                 npub = peer.npub,
                                 ring = Ring.DASHED,
                                 badge = if (isSent) Badge.SENT else Badge.PLUS,
@@ -249,7 +252,7 @@ fun CircleScreen(
                     ) {
                         state.outboundPairs.forEach { inv ->
                             PersonBubble(
-                                label = inv.name.ifEmpty { DeviceName.generated(inv.npub) },
+                                label = peerLabel(state, inv.npub),
                                 npub = inv.npub,
                                 ring = Ring.DASHED,
                                 badge = Badge.SENT,
@@ -313,11 +316,10 @@ fun CircleScreen(
     if (editing) {
         RenameDialog(
             initial = name,
+            ownNpub = state.ownNpub,
             onDismiss = { editing = false },
             onSave = {
-                DeviceName.set(context, it)
-                client.dispatch(NativeActions.setDeviceName(it))
-                name = it
+                name = applyDeviceName(context, client, state.ownNpub, it)
                 // Refresh the NFC payload so we present the new name immediately.
                 if (state.ownNpub.isNotEmpty()) PairPresent.begin(context, state.ownNpub, it)
                 editing = false
@@ -566,7 +568,12 @@ private fun PersonBubble(
 }
 
 @Composable
-private fun RenameDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+private fun RenameDialog(
+    initial: String,
+    ownNpub: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
     var value by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -575,7 +582,17 @@ private fun RenameDialog(initial: String, onDismiss: () -> Unit, onSave: (String
             Column {
                 Text("How you appear to people you pair with. Pick something you can say out loud.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(value = value, onValueChange = { value = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it.take(DeviceName.MAX_LENGTH) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(10.dp))
+                // Tapping a chip fills the field rather than saving outright —
+                // in a dialog, Save is the commit and short-circuiting it would
+                // leave Cancel meaning nothing.
+                NameSuggestions(ownNpub, value) { value = it }
             }
         },
         confirmButton = { TextButton(onClick = { if (value.isNotBlank()) onSave(value.trim()) }) { Text("Save") } },

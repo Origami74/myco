@@ -109,6 +109,16 @@ data class PeerDiagnostic(
      *  The age from this is the session's, not the current FMP index's — the
      *  index rotates on every rekey (~120s) while the session survives. */
     val authenticatedAtMs: Long = 0L,
+    /** The name this peer broadcasts for itself in its BLE scan response; empty
+     *  when it advertised none or was not found over BLE.
+     *
+     *  **Unauthenticated** — anyone in radio range can forge it. Ranks below
+     *  every name learned from signed pair traffic, never above. */
+    val advertisedName: String = "",
+    /** Smoothed round-trip time over this peer's link in milliseconds, as MMP
+     *  measured it; null when the link has never been timed (renders as an
+     *  em-dash, never "0ms"). */
+    val srttMs: Double? = null,
     val rssi: Int?,
     val psm: Int,
     /** "" | "incoming-waiting" | "outbound-waiting" | "paired". */
@@ -360,6 +370,8 @@ data class AppState(
                                 alsoReachableVia = alsoReachableVia,
                                 lastSeenMs = p.optLong("lastSeenMs"),
                                 authenticatedAtMs = p.optLong("authenticatedAtMs"),
+                                advertisedName = p.optString("advertisedName"),
+                                srttMs = if (p.isNull("srttMs")) null else p.optDouble("srttMs"),
                                 rssi = if (p.isNull("rssi")) null else p.optInt("rssi"),
                                 psm = p.optInt("psm"),
                                 pairState = p.optString("pairState"),
