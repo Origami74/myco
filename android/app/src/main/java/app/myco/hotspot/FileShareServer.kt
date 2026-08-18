@@ -6,6 +6,8 @@ import java.io.FileInputStream
 import java.io.InputStream
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -28,14 +30,24 @@ class FileShareServer(
     port: Int,
 ) : NanoHTTPD(port) {
 
+    /** Approved-download tokens: token → (file id, expiry). Single-use. */
+    private val downloadTokens = ConcurrentHashMap<String, Pair<String, Long>>()
+
     override fun serve(session: IHTTPSession): Response = try {
         when {
             session.method == Method.GET && session.uri == "/" -> {
                 val sent = session.parameters["sent"]?.firstOrNull()?.toIntOrNull()
                 page(banner = sent?.let { "Received $it file${if (it == 1) "" else "s"}." })
             }
+            // Approval is asked for FIRST, via fetch — so a denial can be a
+            // dialog on the page instead of a navigation the browser saves as
+            // a "rejected" file. Approval mints a one-time token; the real GET
+            // spends it and streams without asking again.
+            session.method == Method.POST && session.uri.startsWith(FILE_PREFIX) &&
+                session.uri.endsWith(REQUEST_SUFFIX) ->
+                requestDownload(session.uri.removePrefix(FILE_PREFIX).removeSuffix(REQUEST_SUFFIX))
             session.method == Method.GET && session.uri.startsWith(FILE_PREFIX) ->
-                download(session.uri.removePrefix(FILE_PREFIX))
+                download(session.uri.removePrefix(FILE_PREFIX), session)
             session.method == Method.PUT && session.uri.startsWith(UPLOAD_PREFIX) ->
                 uploadPut(session)
             session.method == Method.POST && session.uri == "/upload" -> upload(session)
@@ -54,14 +66,45 @@ class FileShareServer(
         newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "error\n")
     }
 
-    private fun download(id: String): Response {
+    /** Ask the owner about one download; blocks this request thread until the
+     *  dialog is answered. Allowed → a short-lived single-use token the page
+     *  navigates with; denied → 403 the page turns into a dialog. */
+    private fun requestDownload(id: String): Response {
         val entry = files.list().firstOrNull { it.id == id }
             ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "gone\n")
-        // Blocks this request thread until the owner taps Allow — the guest's
-        // browser sits on a spinning tab, then the download starts (or 403s).
         val allowed = TransferGate.request(TransferGate.Direction.DOWNLOAD, entry.name, entry.size)
         Log.i(TAG, "download '${entry.name}' ${if (allowed) "allowed" else "denied"}")
-        if (!allowed) return denied()
+        if (!allowed) {
+            return newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"ok\":false}")
+        }
+        val token = UUID.randomUUID().toString()
+        downloadTokens[token] = id to System.currentTimeMillis() + TOKEN_TTL_MS
+        return newFixedLengthResponse(
+            Response.Status.OK, "application/json",
+            JSONObject().put("ok", true).put("token", token).toString(),
+        )
+    }
+
+    /** Spend a token minted by [requestDownload]. */
+    private fun consumeToken(token: String?, id: String): Boolean {
+        if (token == null) return false
+        val now = System.currentTimeMillis()
+        downloadTokens.entries.removeIf { it.value.second < now }
+        val v = downloadTokens.remove(token) ?: return false
+        return v.first == id
+    }
+
+    private fun download(id: String, session: IHTTPSession): Response {
+        val entry = files.list().firstOrNull { it.id == id }
+            ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "gone\n")
+        if (!consumeToken(session.parameters["t"]?.firstOrNull(), id)) {
+            // No-JS fallback: gate here, like before. The denial is an HTML
+            // page (no attachment header), so even a plain navigation renders
+            // it instead of saving a "rejected" file.
+            val allowed = TransferGate.request(TransferGate.Direction.DOWNLOAD, entry.name, entry.size)
+            Log.i(TAG, "download '${entry.name}' ${if (allowed) "allowed" else "denied"} (no-token path)")
+            if (!allowed) return deniedPage()
+        }
         val (stream, size) = files.open(id)
             ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "gone\n")
         val resp = if (size > 0) {
@@ -136,8 +179,11 @@ class FileShareServer(
     }
 
     private fun page(banner: String?): Response {
+        // No `download` attribute: saving is driven by the Content-Disposition
+        // header, so a no-JS denial (an HTML page) renders instead of being
+        // saved as a "rejected" file.
         val rows = files.list().joinToString("\n") { e ->
-            """<li><a href="$FILE_PREFIX${e.id}" download>${esc(e.name)}</a> <span>${human(e.size)}</span></li>"""
+            """<li><a href="$FILE_PREFIX${e.id}">${esc(e.name)}</a> <span>${human(e.size)}</span></li>"""
         }
         val listing = if (rows.isEmpty()) "<p class=\"empty\">No files shared yet.</p>" else "<ul>\n$rows\n</ul>"
         val note = banner?.let { "<p class=\"banner\">${esc(it)}</p>" } ?: ""
@@ -193,6 +239,47 @@ class FileShareServer(
                 } catch (_) {}
               }
               location.href = '/?sent=' + sent;
+            });
+            </script>
+            <div class="overlay" id="statusOverlay">
+              <div class="dialog">
+                <p id="statusText"></p>
+                <div class="actions" id="statusActions" style="display:none">
+                  <button id="statusOk">OK</button>
+                </div>
+              </div>
+            </div>
+            <script>
+            // Downloads ask the phone's owner first (POST …/request blocks on
+            // their dialog). Denial becomes THIS dialog — never a saved file;
+            // approval navigates with a one-time token and streams instantly.
+            const sOverlay = document.getElementById('statusOverlay');
+            const sText = document.getElementById('statusText');
+            const sActions = document.getElementById('statusActions');
+            document.getElementById('statusOk').addEventListener('click', () => sOverlay.classList.remove('show'));
+            function showStatus(text, dismissible) {
+              sText.textContent = text;
+              sActions.style.display = dismissible ? 'flex' : 'none';
+              sOverlay.classList.add('show');
+            }
+            document.querySelectorAll('a[href^="$FILE_PREFIX"]').forEach(a => {
+              a.addEventListener('click', async (e) => {
+                e.preventDefault();
+                const href = a.getAttribute('href');
+                showStatus("Waiting for the OK on the other phone…", false);
+                try {
+                  const r = await fetch(href + '$REQUEST_SUFFIX', {method: 'POST'});
+                  if (r.ok) {
+                    const data = await r.json();
+                    sOverlay.classList.remove('show');
+                    window.location.href = href + '?t=' + data.token;
+                  } else {
+                    showStatus("The phone's owner declined this download.", true);
+                  }
+                } catch (err) {
+                  showStatus("Connection lost — try again.", true);
+                }
+              });
             });
             </script>
             <div class="overlay" id="offerOverlay">
@@ -299,6 +386,19 @@ class FileShareServer(
         "The phone's owner did not approve this transfer.\n",
     )
 
+    /** Denial for a plain navigation (no-JS): a page, never a saved file. */
+    private fun deniedPage(): Response = newFixedLengthResponse(
+        Response.Status.FORBIDDEN, MIME_HTML,
+        """
+        <!doctype html>
+        <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Not approved</title>
+        <p style="font-family: system-ui, sans-serif; margin: 2rem;">
+          The phone's owner did not approve this transfer. <a href="/">Back</a>
+        </p>
+        """.trimIndent(),
+    )
+
     private fun esc(s: String): String = s
         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
 
@@ -315,6 +415,11 @@ class FileShareServer(
         private const val FILE_PREFIX = "/files/"
         private const val UPLOAD_PREFIX = "/upload/"
         private const val OFFER_PREFIX = "/offer/"
+        private const val REQUEST_SUFFIX = "/request"
+
+        /** How long an approved-download token stays spendable. Generous — it
+         *  only bridges the page's redirect after the owner already said yes. */
+        private const val TOKEN_TTL_MS = 60_000L
     }
 }
 
