@@ -16,13 +16,13 @@ import org.json.JSONObject
  * links and an upload form. Served on every interface (the guest reaches it
  * via the hotspot's gateway address); state lives in [SharedFiles].
  *
- * Framework-free HTML with two inline scripts: the form submits each picked
- * file as a raw `PUT /upload/<urlencoded-name>`, because NanoHTTPD 2.3.1's
- * multipart parser surfaces only the first of several same-named file parts
- * and mangles non-ASCII filenames (it decodes part headers as ASCII) — the
- * multipart POST stays as the no-JS fallback. The second script polls
- * `/offers` for files the phone is pushing ([Outbox]) and pops an
- * accept/decline dialog per offer, AirDrop-style.
+ * Framework-free HTML styled to the app's AMOLED theme, with one inline
+ * script. Uploads go as one raw `PUT /upload/<urlencoded-name>` per picked
+ * file, because NanoHTTPD 2.3.1's multipart parser surfaces only the first of
+ * several same-named file parts and mangles non-ASCII filenames (it decodes
+ * part headers as ASCII) — a multipart POST form stays as the no-JS fallback.
+ * The script also polls `/offers` for files the phone is pushing ([Outbox])
+ * and pops an accept/decline dialog per offer, AirDrop-style.
  */
 class FileShareServer(
     private val files: SharedFiles,
@@ -183,54 +183,141 @@ class FileShareServer(
         // header, so a no-JS denial (an HTML page) renders instead of being
         // saved as a "rejected" file.
         val rows = files.list().joinToString("\n") { e ->
-            """<li><a href="$FILE_PREFIX${e.id}">${esc(e.name)}</a> <span>${human(e.size)}</span></li>"""
+            """<li><a href="$FILE_PREFIX${e.id}"><span class="fname">${esc(e.name)}</span><span class="fsize">${human(e.size)}</span></a></li>"""
         }
-        val listing = if (rows.isEmpty()) "<p class=\"empty\">No files shared yet.</p>" else "<ul>\n$rows\n</ul>"
+        val listing = if (rows.isEmpty()) {
+            "<p class=\"muted\">Nothing shared from the phone yet.</p>"
+        } else {
+            "<ul class=\"files\">\n$rows\n</ul>"
+        }
         val note = banner?.let { "<p class=\"banner\">${esc(it)}</p>" } ?: ""
+        // Styled to match the app's AMOLED theme (ui/theme/Theme.kt): black
+        // ground, white text, emerald 34D399 accent with black on-accent,
+        // 3F3F46 outlines, FF6B6B error — and the hotspot sheet's shapes
+        // (uppercase section labels, pill buttons, a green tethering mark).
         val html = """
             <!doctype html>
             <html lang="en">
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta name="theme-color" content="#000000">
             <title>Myco file share</title>
             <style>
-              body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 32rem; padding: 1.2rem; }
-              h1 { font-size: 1.3rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
-              ul { list-style: none; padding: 0; }
-              li { display: flex; justify-content: space-between; gap: 1rem; padding: .45rem 0; border-bottom: 1px solid #ddd; }
-              li span { color: #777; white-space: nowrap; }
-              a { word-break: break-all; }
-              .banner { background: #e6f4ea; border: 1px solid #b7dfc2; padding: .5rem .8rem; border-radius: .5rem; }
-              .empty { color: #777; }
-              form { margin-top: .6rem; }
-              button { margin-top: .6rem; padding: .45rem 1rem; }
-              .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: center; justify-content: center; }
+              :root { --bg:#000; --fg:#fff; --muted:#9ca3af; --accent:#34d399; --on-accent:#000;
+                      --outline:#3f3f46; --error:#ff6b6b; --surface:#101012; }
+              * { box-sizing: border-box; }
+              body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg);
+                     margin: 0 auto; max-width: 30rem; padding: 1.4rem 1.2rem 3rem; }
+              header { display: flex; align-items: center; gap: .6rem; margin-bottom: .3rem; }
+              header svg { flex: none; }
+              h1 { font-size: 1.35rem; font-weight: 800; margin: 0; }
+              .hint { color: var(--muted); font-size: .85rem; margin: .3rem 0 1.2rem; }
+              .label { color: var(--muted); font-weight: 700; font-size: .72rem; letter-spacing: .08em;
+                       text-transform: uppercase; margin: 1.7rem 0 .5rem; }
+              .muted { color: var(--muted); font-size: .9rem; }
+              ul.files { list-style: none; margin: 0; padding: 0; }
+              ul.files li + li { border-top: 1px solid var(--outline); }
+              ul.files a { display: flex; justify-content: space-between; gap: 1rem; align-items: baseline;
+                           padding: .8rem .2rem; text-decoration: none; color: var(--fg); }
+              .fname { word-break: break-all; font-weight: 600; }
+              .fsize { color: var(--muted); white-space: nowrap; font-size: .85rem; }
+              .banner { background: #04241a; border: 1px solid #14532d; color: var(--accent);
+                        padding: .6rem .9rem; border-radius: .7rem; font-size: .9rem; }
+              .pick-list { list-style: none; margin: .4rem 0 0; padding: 0; }
+              .pick-list li { display: flex; justify-content: space-between; gap: 1rem;
+                              color: var(--muted); font-size: .85rem; padding: .25rem .2rem; }
+              .actions { display: flex; gap: .8rem; align-items: center; margin-top: .9rem; }
+              .btn { border-radius: 999px; padding: .65rem 1.4rem; font-size: .95rem; font-weight: 700;
+                     border: 1px solid transparent; font-family: inherit; cursor: pointer; }
+              .btn-primary { background: var(--accent); color: var(--on-accent); }
+              .btn-primary:disabled { background: #1f2937; color: #6b7280; }
+              .btn-outline { background: transparent; color: var(--accent); border-color: var(--outline); }
+              .btn-text-danger { background: none; border: none; color: var(--error); font-weight: 700;
+                                 font-family: inherit; font-size: .95rem; cursor: pointer; }
+              #fileInput { display: none; }
+              .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+                         align-items: center; justify-content: center; }
               .overlay.show { display: flex; }
-              .dialog { background: #fff; color: #111; border-radius: .8rem; padding: 1.2rem; max-width: 20rem; margin: 1rem; box-shadow: 0 8px 30px rgba(0,0,0,.25); }
-              .dialog h2 { margin: 0 0 .5rem; }
-              .dialog .actions { display: flex; gap: .8rem; justify-content: flex-end; margin-top: 1rem; }
-              .dialog button { margin-top: 0; }
+              .dialog { background: var(--surface); color: var(--fg); border: 1px solid var(--outline);
+                        border-radius: 1rem; padding: 1.2rem 1.2rem 1rem; max-width: 20rem; margin: 1rem;
+                        box-shadow: 0 8px 30px rgba(0,0,0,.5); }
+              .dialog h2 { margin: 0 0 .5rem; font-size: 1.05rem; }
+              .dialog p { margin: 0; }
+              .dialog .actions { justify-content: flex-end; margin-top: 1rem; }
             </style>
-            <h1>Myco file share</h1>
-            <p class="empty">Every transfer waits for an OK on this phone — give it a moment.</p>
+            <header>
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                <circle cx="12" cy="14" r="2" fill="#34d399" stroke="none"/>
+                <path d="M8.5 10.5a5 5 0 0 1 7 0"/>
+                <path d="M5.7 7.7a9 9 0 0 1 12.6 0"/>
+              </svg>
+              <h1>Share files over hotspot</h1>
+            </header>
+            <p class="hint">Every transfer waits for an OK on the phone — give it a moment.</p>
             $note
-            <h2>Download</h2>
+            <div class="label">Download from the phone</div>
             $listing
-            <h2>Send files to this phone</h2>
-            <form method="post" action="/upload" enctype="multipart/form-data">
-              <input type="file" name="file" multiple>
-              <button type="submit">Upload</button>
-            </form>
+            <div class="label">Send files to the phone</div>
+            <input type="file" id="fileInput" multiple>
+            <ul class="pick-list" id="pickList"></ul>
+            <div class="actions">
+              <label for="fileInput" class="btn btn-outline">+ Choose files</label>
+              <button class="btn btn-primary" id="sendBtn" disabled>Send</button>
+            </div>
+            <noscript>
+              <p class="muted">JavaScript is off — transfers with approval need it. Basic upload:</p>
+              <form method="post" action="/upload" enctype="multipart/form-data">
+                <input type="file" name="file" multiple>
+                <button type="submit">Upload</button>
+              </form>
+            </noscript>
+            <div class="overlay" id="statusOverlay">
+              <div class="dialog">
+                <p id="statusText"></p>
+                <div class="actions" id="statusActions" style="display:none">
+                  <button class="btn btn-outline" id="statusOk">OK</button>
+                </div>
+              </div>
+            </div>
+            <div class="overlay" id="offerOverlay">
+              <div class="dialog">
+                <h2>Incoming file</h2>
+                <p id="offerText"></p>
+                <div class="actions">
+                  <button class="btn-text-danger" id="offerDecline">Decline</button>
+                  <button class="btn btn-primary" id="offerAccept">Accept</button>
+                </div>
+              </div>
+            </div>
             <script>
-            // One raw PUT per file (see the server's uploadPut); the form's
-            // multipart POST remains as the no-JS fallback.
-            const form = document.querySelector('form');
-            form.addEventListener('submit', async (e) => {
-              e.preventDefault();
-              const files = form.querySelector('input[type=file]').files;
+            function humanSize(b) {
+              if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+              if (b >= 1024) return Math.round(b / 1024) + ' kB';
+              return b > 0 ? b + ' B' : '';
+            }
+
+            // --- picking + sending (one raw PUT per file; see uploadPut) ---
+            const fileInput = document.getElementById('fileInput');
+            const pickList = document.getElementById('pickList');
+            const sendBtn = document.getElementById('sendBtn');
+            fileInput.addEventListener('change', () => {
+              pickList.textContent = '';
+              for (const f of fileInput.files) {
+                const li = document.createElement('li');
+                const name = document.createElement('span');
+                name.textContent = f.name;
+                const size = document.createElement('span');
+                size.textContent = humanSize(f.size);
+                li.append(name, size);
+                pickList.append(li);
+              }
+              sendBtn.disabled = fileInput.files.length === 0;
+            });
+            sendBtn.addEventListener('click', async () => {
+              const files = fileInput.files;
               if (!files.length) return;
-              const btn = form.querySelector('button');
-              btn.disabled = true; btn.textContent = 'Waiting for the OK…';
+              sendBtn.disabled = true;
+              sendBtn.textContent = 'Waiting for the OK…';
               let sent = 0;
               for (const f of files) {
                 try {
@@ -240,19 +327,8 @@ class FileShareServer(
               }
               location.href = '/?sent=' + sent;
             });
-            </script>
-            <div class="overlay" id="statusOverlay">
-              <div class="dialog">
-                <p id="statusText"></p>
-                <div class="actions" id="statusActions" style="display:none">
-                  <button id="statusOk">OK</button>
-                </div>
-              </div>
-            </div>
-            <script>
-            // Downloads ask the phone's owner first (POST …/request blocks on
-            // their dialog). Denial becomes THIS dialog — never a saved file;
-            // approval navigates with a one-time token and streams instantly.
+
+            // --- status dialog (download approval / denial) ---
             const sOverlay = document.getElementById('statusOverlay');
             const sText = document.getElementById('statusText');
             const sActions = document.getElementById('statusActions');
@@ -262,6 +338,9 @@ class FileShareServer(
               sActions.style.display = dismissible ? 'flex' : 'none';
               sOverlay.classList.add('show');
             }
+            // Downloads ask the phone's owner first (POST …/request blocks on
+            // their dialog). Denial becomes THIS dialog — never a saved file;
+            // approval navigates with a one-time token and streams instantly.
             document.querySelectorAll('a[href^="$FILE_PREFIX"]').forEach(a => {
               a.addEventListener('click', async (e) => {
                 e.preventDefault();
@@ -281,30 +360,12 @@ class FileShareServer(
                 }
               });
             });
-            </script>
-            <div class="overlay" id="offerOverlay">
-              <div class="dialog">
-                <h2>Incoming file</h2>
-                <p id="offerText"></p>
-                <div class="actions">
-                  <button id="offerDecline">Decline</button>
-                  <button id="offerAccept">Accept</button>
-                </div>
-              </div>
-            </div>
-            <script>
-            // AirDrop-style receive: poll the phone for files it is offering;
-            // each one pops this accept/decline dialog. Accepting navigates to
-            // the offer URL, which the browser saves as a normal download.
+
+            // --- AirDrop-style receive: poll for files the phone is offering ---
             const overlay = document.getElementById('offerOverlay');
             const offerText = document.getElementById('offerText');
             let current = null;
             const handled = new Set();
-            function humanSize(b) {
-              if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
-              if (b >= 1024) return Math.round(b / 1024) + ' kB';
-              return b > 0 ? b + ' B' : '';
-            }
             function settle(accepted) {
               if (!current) return;
               handled.add(current.id);
