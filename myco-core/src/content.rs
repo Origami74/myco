@@ -345,7 +345,16 @@ impl crate::mesh_relay::PeerGate for CircleGate {
 /// The content layer. Cheap to `Arc`-clone; the gateway path clones one out of the
 /// `AppRuntime` mutex and serves without holding it.
 pub struct Content {
-    relay: Arc<RelayStore>,
+    /// The event store, through the seam — so it can be the embedded relay or
+    /// any other NIP-01 relay (`reference/thinning-custom-relay.md`, D3).
+    relay: Arc<dyn RelayBackend>,
+    /// The embedded store, when that is what `relay` points at.
+    ///
+    /// Held separately because two things it answers are not NIP-01 and cannot
+    /// be asked of an arbitrary relay: the usage counts the Storage screen
+    /// shows, and the selective retain the cache wipe needs. `None` once a
+    /// custom relay is configured, which is exactly what the screen reports.
+    relay_store: Option<Arc<RelayStore>>,
     blobs: Arc<FsBlobStore>,
     /// The pull source for not-yet-present sites. `None` in P2 M2 (local only);
     /// set to the IP online-fallback source in M3, the FIPS source in P3.
@@ -413,7 +422,7 @@ pub struct Content {
 /// straight through to the relay. This is what keeps a working app serving while a
 /// newer manifest is still downloading. See `docs/design/nsite-updates.md` §1.
 struct ActiveBackend<'a> {
-    relay: &'a RelayStore,
+    relay: &'a dyn RelayBackend,
     active: &'a Mutex<HashMap<String, Event>>,
 }
 
@@ -500,7 +509,25 @@ fn event_d_tag(ev: &Event) -> Option<String> {
 impl Content {
     /// Open the content layer under `data_dir` (relay + blossom subdirs).
     pub fn open(data_dir: &Path) -> anyhow::Result<Self> {
-        let relay = Arc::new(RelayStore::open(data_dir.join("relay"))?);
+        Self::open_with_relay(data_dir, None)
+    }
+
+    /// Open with events stored on a **custom relay** instead of the embedded one.
+    ///
+    /// The embedded store is still opened and still occupies disk — it simply
+    /// stops serving, which is what the Storage screen reports. Nothing else in
+    /// the content layer changes: it reads and writes through the seam either
+    /// way (`reference/thinning-custom-relay.md`, D3).
+    pub fn open_with_relay(
+        data_dir: &Path,
+        custom: Option<Arc<dyn RelayBackend>>,
+    ) -> anyhow::Result<Self> {
+        let embedded = Arc::new(RelayStore::open(data_dir.join("relay"))?);
+        let using_custom = custom.is_some();
+        let relay: Arc<dyn RelayBackend> = custom.unwrap_or_else(|| embedded.clone());
+        // Kept only while it is the thing serving: the usage counts and the
+        // selective retain it backs describe our store, not someone else's.
+        let relay_store = (!using_custom).then_some(embedded);
         let blobs = Arc::new(FsBlobStore::open(data_dir.join("blossom"))?);
         let library_path = data_dir.join("library.json");
         let library = load_library(&library_path);
@@ -510,6 +537,7 @@ impl Content {
         let active_manifests = load_active(&active_path);
         Ok(Self {
             relay,
+            relay_store,
             blobs,
             source: Mutex::new(None),
             offline_only: AtomicBool::new(false),
@@ -548,9 +576,16 @@ impl Content {
         self.offline_only.load(Ordering::Relaxed)
     }
 
-    /// The relay store (shared), for the mesh WS server.
-    pub fn relay(&self) -> Arc<RelayStore> {
+    /// The event store (shared), for the mesh WS proxy in front of it.
+    pub fn relay(&self) -> Arc<dyn RelayBackend> {
         self.relay.clone()
+    }
+
+    /// The embedded store, if that is what we are using. `None` once a custom
+    /// relay is configured — the caller decides what an absent one means, since
+    /// nothing here can be asked of an arbitrary relay.
+    pub fn relay_store(&self) -> Option<Arc<RelayStore>> {
+        self.relay_store.clone()
     }
 
     /// The blob store (shared), for the mesh Blossom server.
@@ -2032,7 +2067,11 @@ impl Content {
     /// Clear the local relay + Blossom + Library + status (the `WipeStores` dev
     /// action). Content-only; identity is untouched.
     pub async fn wipe(&self) -> anyhow::Result<()> {
-        nsite_deck::seams::AdminBackend::wipe(self.relay.as_ref()).await?;
+        // Only ours to clear. A custom relay's contents belong to whoever runs
+        // it, and NIP-01 has no "delete everything" to ask for anyway.
+        if let Some(store) = &self.relay_store {
+            nsite_deck::seams::AdminBackend::wipe(store.as_ref()).await?;
+        }
         self.blobs.wipe().await?;
         self.library.lock().unwrap().clear();
         self.sites.lock().unwrap().clear();
@@ -2087,7 +2126,9 @@ impl Content {
             }
         }
 
-        self.relay.retain_events(&keep_events);
+        if let Some(store) = &self.relay_store {
+            store.retain_events(&keep_events);
+        }
         self.blobs.retain_blobs(&keep_blobs);
 
         // Drop unpinned Library entries and the live status of anything unpinned.
@@ -2143,10 +2184,12 @@ impl Content {
         // here. Nothing external is configurable yet, so neither flag is set;
         // they follow the configured backend once that lands.
         CacheView {
-            relay_events: self.relay.count() as u64,
+            // The embedded store's own count, or nothing to count when a custom
+            // relay has taken over — which the flag tells the screen to say.
+            relay_events: self.relay_store.as_ref().map_or(0, |s| s.count() as u64),
             blob_count: self.blobs.count() as u64,
             used_bytes: self.blobs.total_bytes(),
-            external_relay: false,
+            external_relay: self.relay_store.is_none(),
             external_blobs: false,
         }
     }
@@ -2441,6 +2484,64 @@ mod tests {
         assert!(p.blossom_read, "reads stay on for an existing peer");
         assert!(p.relay_read && p.relay_write);
         assert!(p.relay_read_multihop && p.relay_write_multihop);
+    }
+
+    /// The content layer works with the store swapped for a relay we do not own.
+    ///
+    /// This is what every phase before it was for: the same import, gateway read
+    /// and library behaviour, with events living on a relay Myco only reaches
+    /// over NIP-01. It also pins what the Storage screen is told — the usage
+    /// counts stop describing what serves, and say so.
+    #[tokio::test]
+    async fn content_runs_on_a_relay_it_does_not_own() {
+        // A relay that is emphatically not ours: its own store, its own socket.
+        let theirs = Arc::new(myco_relay::RelayStore::in_memory());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(crate::mesh_relay::serve_on(theirs.clone(), listener));
+
+        let dir = tmp("custom-relay");
+        let _ = std::fs::remove_dir_all(&dir);
+        let backend: Arc<dyn nsite_deck::RelayBackend> = Arc::new(
+            crate::remote_backend::RemoteBackend::new(format!("ws://{addr}")),
+        );
+        let content = Content::open_with_relay(&dir, Some(backend)).unwrap();
+
+        // Publishing through the content layer lands on their relay, not ours.
+        let site = build_test_site(&[("/index.html", b"hi")], None, Some("Remote"));
+        content
+            .relay()
+            .publish(site.manifest.clone())
+            .await
+            .unwrap();
+        assert_eq!(theirs.count(), 1, "the event went to the custom relay");
+
+        // And reads come back through the seam.
+        let found = nsite_deck::seams::newest_in_slot(
+            content.relay().as_ref(),
+            nsite_deck::KIND_ROOT,
+            &site.author,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.map(|e| e.id), Some(site.manifest.id));
+
+        // The Storage screen is told the built-in store is no longer serving.
+        let cache = content.cache_view();
+        assert!(cache.external_relay, "usage must report the swap");
+        assert_eq!(cache.relay_events, 0, "our store holds nothing now");
+        assert!(content.relay_store().is_none());
+
+        // Wiping is ours only: their relay keeps its events.
+        content.wipe().await.unwrap();
+        assert_eq!(
+            theirs.count(),
+            1,
+            "a custom relay's contents are not ours to clear"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The content ports have no exceptions left.

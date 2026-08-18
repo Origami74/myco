@@ -31,7 +31,9 @@ use nostr::Filter;
 use nsite_deck::seams::RelayBackend;
 use tokio::sync::broadcast;
 
-use myco_relay::{matches_filter, RelayStore};
+use myco_relay::matches_filter;
+#[cfg(test)]
+use myco_relay::RelayStore;
 
 /// Where an event reached this relay from: the local WebView (a loopback socket)
 /// or a mesh peer (a `.fips` socket). Drives the gossiper's push/pull split.
@@ -281,7 +283,9 @@ impl SeenQueries {
 /// live bus, store, and gossiper are shared across them — a peer's event pushed on
 /// the mesh socket reaches a WebView subscription on the loopback socket.
 pub struct RelayHub {
-    store: Arc<RelayStore>,
+    /// Whatever is answering NIP-01 behind us: the embedded store by default,
+    /// or a relay the user pointed us at. The proxy never needs to know which.
+    store: Arc<dyn RelayBackend>,
     live: broadcast::Sender<Event>,
     gossip: Option<Arc<dyn Gossiper>>,
     /// Mesh access policy. `None` = open (local/test default); `Some` restricts
@@ -298,14 +302,14 @@ pub struct RelayHub {
 impl RelayHub {
     /// Build a shared hub. Pass `None` for `gossip` to disable mesh fan-out. No
     /// access gate — every connection is served (the local/test default).
-    pub fn new(store: Arc<RelayStore>, gossip: Option<Arc<dyn Gossiper>>) -> Arc<Self> {
+    pub fn new(store: Arc<dyn RelayBackend>, gossip: Option<Arc<dyn Gossiper>>) -> Arc<Self> {
         Self::with_gate(store, gossip, None)
     }
 
     /// Build a hub that restricts **mesh** access to paired peers via `gate`
     /// (loopback is always allowed). Pass `None` for `gate` to stay open.
     pub fn with_gate(
-        store: Arc<RelayStore>,
+        store: Arc<dyn RelayBackend>,
         gossip: Option<Arc<dyn Gossiper>>,
         gate: Option<Arc<dyn PeerGate>>,
     ) -> Arc<Self> {
@@ -324,7 +328,7 @@ impl RelayHub {
 }
 
 /// Serve the relay on `addr` until the future is dropped/aborted (no gossiper).
-pub async fn serve(store: Arc<RelayStore>, addr: SocketAddr) -> anyhow::Result<()> {
+pub async fn serve(store: Arc<dyn RelayBackend>, addr: SocketAddr) -> anyhow::Result<()> {
     serve_on(store, bind(addr)?).await
 }
 
@@ -352,7 +356,7 @@ pub fn bind(addr: SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
 
 /// Serve on an already-bound listener with no mesh gossiper (the local/test path).
 pub async fn serve_on(
-    store: Arc<RelayStore>,
+    store: Arc<dyn RelayBackend>,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
     serve_on_with(store, listener, None).await
@@ -361,7 +365,7 @@ pub async fn serve_on(
 /// Serve on an already-bound listener, fanning newly-accepted events to `gossip`
 /// (the mesh propagator). The runtime uses this so chat events reach peers.
 pub async fn serve_on_with(
-    store: Arc<RelayStore>,
+    store: Arc<dyn RelayBackend>,
     listener: tokio::net::TcpListener,
     gossip: Option<Arc<dyn Gossiper>>,
 ) -> anyhow::Result<()> {

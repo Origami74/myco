@@ -328,7 +328,10 @@ mod tests {
         assert_eq!(pending[0].secret, "s3cret");
 
         assert_eq!(
-            content.relay().count(),
+            content
+                .relay_store()
+                .expect("embedded store in tests")
+                .count(),
             0,
             "the handshake is control traffic — nothing reaches the event store"
         );
