@@ -44,12 +44,11 @@ const LAN_UDP_PORT: u16 = 4871;
 /// path (which this reuses) is already UDP + scoped link-local IPv6.
 /// See docs/design/wifi-aware-interop.md.
 ///
-/// **This is a flag day between phones.** The port is embedded in the address
-/// each phone advertises over Aware (`AwareRadio` formats
-/// `"[fe80::x%ifindex]:port"` from `AppState.wifi_aware.port`), so two phones
-/// on either side of this change will not peer over Aware until both are
-/// flashed. Nothing else is affected — the Aware lane carried no traffic
-/// before this change, and desktop LAN peers stay on [`LAN_UDP_PORT`].
+/// **Not a flag day.** Each phone advertises this port to its peers in the
+/// Aware identity exchange and is dialled at the port it advertised, so a
+/// phone on a build from before this port existed — which advertises no port
+/// and listens on [`LAN_UDP_PORT`] — is still reachable. `AwareRadio` formats
+/// `"[fe80::x%ifindex]:<peer's port>"`; see its `parsePeer`.
 const AWARE_UDP_PORT: u16 = 4872;
 
 /// Which UDP transport instance a Kotlin radio's lane rides.
