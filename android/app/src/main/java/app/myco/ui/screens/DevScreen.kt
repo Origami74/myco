@@ -8,11 +8,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -29,6 +31,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -49,10 +52,13 @@ import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
 import app.myco.ui.StatusDot
 import app.myco.ui.locationServicesEnabled
+import app.myco.R
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.StatusReachable
 import app.myco.ui.theme.StatusThin
+import app.myco.ui.theme.TransportBluetooth
+import app.myco.ui.theme.TransportNetwork
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
@@ -491,10 +497,20 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
         peer.name.ifEmpty { peer.npub.ifEmpty { peer.nodeAddrHex.ifEmpty { peer.bleAddr } } }
     }
     Column(modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        ) {
+        // Which radio carried this peer, read at a glance down the left edge.
+        // Deliberately larger than the text beside it: scanning the column for
+        // "which of these is on Bluetooth" is the common question, and it
+        // should not require reading a word on the second line.
+        TransportIcon(peer.transport, Modifier.padding(start = 14.dp, end = 2.dp))
+        Column(modifier = Modifier.weight(1f)) {
         // Line 1: who. The caret is the affordance — a row that opens has to
         // look like one before it is tapped, and the dot alone never said so.
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 2.dp, end = 16.dp, top = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         ) {
@@ -520,7 +536,7 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
         // that keeps re-establishing from one that is simply holding, and that
         // is worth seeing without opening every row.
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 30.dp, end = 16.dp, top = 1.dp, bottom = 8.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 1.dp, bottom = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
@@ -534,10 +550,48 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        }
+        }
         if (expanded) {
             PeerForensics(peer)
         }
     }
+}
+
+/**
+ * The transport a peer is reachable over, as an icon.
+ *
+ * Three lanes, three glyphs: the Bluetooth rune, the Wi-Fi Aware arcs, and a
+ * globe for anything routed (LAN, the `!FIPS` AP, mDNS). An unknown or absent
+ * transport draws nothing rather than guessing — a peer with no resolved link
+ * is a real state and a wrong icon would assert a link that does not exist.
+ *
+ * Bluetooth keeps its brand blue and the routed lane the app's emerald;
+ * Aware follows `onSurface`, so it reads as the plain radio in either theme.
+ */
+@Composable
+private fun TransportIcon(transport: String, modifier: Modifier = Modifier) {
+    val (res, tint, label) = when (transport) {
+        "ble" -> Triple(R.drawable.ic_transport_bluetooth, TransportBluetooth, "Bluetooth")
+        "aware" -> Triple(
+            R.drawable.ic_transport_wifi_aware,
+            MaterialTheme.colorScheme.onSurface,
+            "Wi-Fi Aware",
+        )
+        "" -> Triple(0, MaterialTheme.colorScheme.onSurfaceVariant, "")
+        // udp, tcp and anything else routed: it reached us over IP.
+        else -> Triple(R.drawable.ic_transport_network, TransportNetwork, "Network")
+    }
+    if (res == 0) {
+        Spacer(modifier.size(26.dp))
+        return
+    }
+    Icon(
+        painter = painterResource(res),
+        contentDescription = label,
+        tint = tint,
+        modifier = modifier.size(26.dp),
+    )
 }
 
 /**
