@@ -260,11 +260,19 @@ reaches past the colour scheme will be caught there.
 
 ## Build environment
 
-- **`reference/fips` must be checked out on `feat/platform-peer-queue`.** It is a
-  gitignored path dependency, and `master` does not export the symbols myco-core
-  needs (`fips::discovery::platform`, a public `ControlReadHandle`) — the Android
-  build fails to compile against it. `release.yml` clones the same ref from
-  `jmcorgan/fips`. Phase 4 is what removes this constraint.
+- **`reference/fips` must be checked out on `integration/platform`.** It is a
+  gitignored path dependency. That branch sits on current fips master and adds
+  the mobile seams myco-core needs: Android BLE behind the existing `BleIo`
+  backend trait, per-instance transport addressing (the LAN and Wi-Fi Aware
+  lanes take one UDP socket each), and the app-owned TUN/UDP/radio seams.
+  `ci.yml` and `release.yml` clone the same ref from `jmcorgan/fips`.
+
+  The old `feat/platform-peer-queue` branch is gone from the build. What
+  myco-core used to reach for there — `fips::discovery::platform`, a public
+  `ControlReadHandle`, `ble::attempts`, `ble::android_io` — no longer exists in
+  any form. Peer state and peer commands now go over the node's own control
+  socket, and each commit on `integration/platform` is shaped to be
+  cherry-picked upstream on its own rather than living as a fork.
 
 ---
 
