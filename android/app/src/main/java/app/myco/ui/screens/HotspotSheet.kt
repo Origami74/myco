@@ -26,6 +26,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import app.myco.hotspot.HotspotPhase
 import app.myco.hotspot.HotspotView
 import app.myco.hotspot.SharedFiles
+import app.myco.hotspot.TransferGate
 import app.myco.hotspot.WifiQr
 import app.myco.share.NsiteShare
 
@@ -125,6 +128,19 @@ private fun HotspotOn(
     val pass = view.passphrase.orEmpty()
     val wifiQr = remember(ssid, pass) { NsiteShare.qrBitmap(WifiQr.payload(ssid, pass)) }
 
+    // Transfers the guest started, parked on this phone's Allow/Deny. First,
+    // because a waiting guest is the most time-critical thing on this sheet.
+    val pending by TransferGate.pending.collectAsState()
+    if (pending.isNotEmpty()) {
+        StepLabel("WAITING FOR YOUR OK")
+        Spacer(Modifier.height(8.dp))
+        pending.forEach { req ->
+            ApprovalRow(req)
+            Spacer(Modifier.height(6.dp))
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+
     StepLabel("1 · JOIN THIS PHONE'S WI-FI")
     Spacer(Modifier.height(10.dp))
     QrCodeCard(wifiQr, contentDescription = "Scan to join the hotspot")
@@ -156,6 +172,13 @@ private fun HotspotOn(
         )
         Spacer(Modifier.height(4.dp))
         Mono(view.url, big = true)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "…or bump the phones — the page opens in their browser.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            textAlign = TextAlign.Center,
+        )
     } else {
         Text(
             "Finding this phone's address…",
@@ -188,6 +211,51 @@ private fun HotspotOn(
             Text("Stop hotspot", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
         }
     }
+}
+
+/** One transfer awaiting consent: what and which way, then Allow / Deny. */
+@Composable
+private fun ApprovalRow(req: TransferGate.Pending) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    req.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                )
+                Text(
+                    when (req.direction) {
+                        TransferGate.Direction.DOWNLOAD -> "wants to download" + sizeSuffix(req.size)
+                        TransferGate.Direction.UPLOAD -> "wants to send you this" + sizeSuffix(req.size)
+                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            TextButton(onClick = { TransferGate.decide(req.id, false) }) {
+                Text("Deny", color = MaterialTheme.colorScheme.error)
+            }
+            Button(onClick = { TransferGate.decide(req.id, true) }) {
+                Text("Allow")
+            }
+        }
+    }
+}
+
+private fun sizeSuffix(bytes: Long): String = when {
+    bytes >= 1L shl 20 -> " · %.1f MB".format(bytes.toDouble() / (1L shl 20))
+    bytes >= 1L shl 10 -> " · %.0f kB".format(bytes.toDouble() / (1L shl 10))
+    bytes > 0 -> " · $bytes B"
+    else -> ""
 }
 
 @Composable

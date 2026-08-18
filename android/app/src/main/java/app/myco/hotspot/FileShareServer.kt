@@ -44,6 +44,11 @@ class FileShareServer(
     private fun download(id: String): Response {
         val entry = files.list().firstOrNull { it.id == id }
             ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "gone\n")
+        // Blocks this request thread until the owner taps Allow — the guest's
+        // browser sits on a spinning tab, then the download starts (or 403s).
+        val allowed = TransferGate.request(TransferGate.Direction.DOWNLOAD, entry.name, entry.size)
+        Log.i(TAG, "download '${entry.name}' ${if (allowed) "allowed" else "denied"}")
+        if (!allowed) return denied()
         val (stream, size) = files.open(id)
             ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "gone\n")
         val resp = if (size > 0) {
@@ -69,6 +74,15 @@ class FileShareServer(
         // stop at Content-Length rather than reading to end-of-stream.
         val len = session.headers["content-length"]?.toLongOrNull()
             ?: return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "length required\n")
+        // Ask the owner *before* reading the body — TCP backpressure holds the
+        // guest's send while the request waits. A denial answers without ever
+        // consuming the body, so the connection must close rather than let the
+        // unread bytes garble the next keep-alive request.
+        val allowed = TransferGate.request(TransferGate.Direction.UPLOAD, name, len)
+        Log.i(TAG, "upload '$name' ($len B) ${if (allowed) "allowed" else "denied"}")
+        if (!allowed) {
+            return denied().apply { addHeader("Connection", "close") }
+        }
         val ok = files.saveUpload(name, BoundedInputStream(session.inputStream, len))
         return if (ok) {
             newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "ok\n")
@@ -94,6 +108,9 @@ class FileShareServer(
             // An empty <input type=file> still submits one nameless, empty part.
             if (clientName.isNullOrBlank() && java.io.File(tmp).length() == 0L) continue
             val name = clientName?.takeIf { it.isNotBlank() } ?: "upload-$i.bin"
+            // The bytes are already in the temp file, but nothing is kept
+            // without the owner's OK.
+            if (!TransferGate.request(TransferGate.Direction.UPLOAD, name, java.io.File(tmp).length())) continue
             FileInputStream(tmp).use { if (files.saveUpload(name, it)) saved++ }
         }
         // Re-render instead of redirecting, so the confirmation and the fresh
@@ -126,6 +143,7 @@ class FileShareServer(
               button { margin-top: .6rem; padding: .45rem 1rem; }
             </style>
             <h1>Myco file share</h1>
+            <p class="empty">Every transfer waits for an OK on this phone — give it a moment.</p>
             $note
             <h2>Download</h2>
             $listing
@@ -143,7 +161,7 @@ class FileShareServer(
               const files = form.querySelector('input[type=file]').files;
               if (!files.length) return;
               const btn = form.querySelector('button');
-              btn.disabled = true; btn.textContent = 'Uploading…';
+              btn.disabled = true; btn.textContent = 'Waiting for the OK…';
               let sent = 0;
               for (const f of files) {
                 try {
@@ -160,6 +178,11 @@ class FileShareServer(
         resp.addHeader("Cache-Control", "no-store")
         return resp
     }
+
+    private fun denied(): Response = newFixedLengthResponse(
+        Response.Status.FORBIDDEN, MIME_PLAINTEXT,
+        "The phone's owner did not approve this transfer.\n",
+    )
 
     private fun esc(s: String): String = s
         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")

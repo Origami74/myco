@@ -42,6 +42,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Received files land in `Download/Myco/`, so they show up in the Files app
   like any other download. The hotspot runs in a foreground service with a
   Stop action, so it survives leaving the tab and is always one tap to kill.
+- While the hotspot is on, bumping the phones hands the other phone the file
+  page directly: the NFC tag Myco already emulates for pairing serves the
+  page's address instead, and the other phone's own system opens it in its
+  browser — nothing to install, nothing to type.
+- Nothing is transferred behind your back: every download and upload a guest
+  starts waits on the hotspot sheet as an explicit Allow / Deny, with the
+  file's name and size. The guest's browser simply waits for your answer; an
+  unanswered request is denied after 90 seconds, and stopping the hotspot
+  denies everything still waiting. The notification names the file that is
+  waiting so a request can't sit there unseen.
 
 ### Changed
 
