@@ -4,11 +4,11 @@
 //! **P2 — multi-hop flood.** An event is pushed to the whole Circle's relays
 //! (`ws://<npub>.fips:4870`) — every member, not just direct neighbours, so a
 //! peer reachable only multi-hop over the mesh still receives it — carrying a
-//! decrementing `event-ttl`:
+//! decrementing hop budget, carried in the `MESH` envelope:
 //!
 //! - **Local origin** (a loopback publish from the in-app nsite) originates at
 //!   `DEFAULT_EVENT_TTL`.
-//! - **Mesh origin** re-forwards with the TTL that rode in (`event-ttl`),
+//! - **Mesh origin** re-forwards with the budget that rode in,
 //!   **except back to the sender** (split-horizon), until the budget runs out.
 //!
 //! The loop guard is the relay's id-dedup: the gossiper is only ever called for an
@@ -34,7 +34,7 @@ const DEFAULT_EVENT_TTL: u8 = 3;
 /// turn us into a flood amplifier (`docs/design/event-gossip.md` §3).
 const MAX_EVENT_TTL: u8 = 3;
 
-/// Fans events to connected Circle peers' relays over the mesh, with `event-ttl`.
+/// Fans events to connected Circle peers' relays over the mesh, hop-bounded.
 pub struct MeshGossiper {
     content: Arc<Content>,
 }
@@ -84,19 +84,20 @@ impl Gossiper for MeshGossiper {
         }
         let out_ttl = fwd - 1;
 
-        // Build the outbound relay frame once: the canonical event plus the
-        // decremented transient `event-ttl` (a top-level field, stripped on store).
-        let mut ev_json = match serde_json::to_value(&event) {
+        // Build the outbound frame once: a canonical NIP-01 EVENT, with the
+        // decremented hop budget carried beside it in the envelope rather than
+        // added to the event. Nothing has to be stripped before storing.
+        let ev_json = match serde_json::to_value(&event) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, "gossip: serialize event failed");
                 return;
             }
         };
-        if let Some(obj) = ev_json.as_object_mut() {
-            obj.insert("event-ttl".to_string(), serde_json::json!(out_ttl));
-        }
-        let frame = serde_json::json!(["EVENT", ev_json]).to_string();
+        let frame = crate::mesh_wire::wrap(
+            &crate::mesh_wire::MeshMeta::push(out_ttl),
+            serde_json::json!(["EVENT", ev_json]),
+        );
 
         // Fan out to the *whole* Circle over persistent pooled connections (no
         // per-message connect), skipping the peer it came from (split-horizon). Not
@@ -115,18 +116,16 @@ impl Gossiper for MeshGossiper {
         }
     }
 
-    /// Pull plane (`docs/design/event-gossip.md`, req-ttl): forward the REQ's
+    /// Pull plane: forward the REQ's
     /// filters to connected Circle peers carrying the decremented `req_ttl`,
     /// aggregating their matching events. `exclude` is split-horizon.
     async fn on_req(
         &self,
         filters: Vec<serde_json::Value>,
-        req_ttl: u8,
+        meta: crate::mesh_wire::MeshMeta,
         exclude: Option<IpAddr>,
     ) -> Vec<Event> {
-        self.content
-            .pull_from_peers(filters, req_ttl, exclude)
-            .await
+        self.content.pull_from_peers(filters, meta, exclude).await
     }
 
     fn on_local_subscribe(&self, key: &str, filters: Vec<serde_json::Value>) {

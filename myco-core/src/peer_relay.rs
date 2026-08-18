@@ -127,6 +127,9 @@ enum Command {
     /// then reply once with the batch and close the subscription (the pull plane).
     Request {
         filters: Vec<serde_json::Value>,
+        /// Mesh state for this pull, carried in the envelope around the `REQ`.
+        /// `None` sends a plain NIP-01 `REQ`: single hop, no query id.
+        meta: Option<crate::mesh_wire::MeshMeta>,
         reply: oneshot::Sender<Vec<Event>>,
     },
 }
@@ -245,6 +248,20 @@ impl PeerRelayPool {
         filters: Vec<serde_json::Value>,
         timeout: Duration,
     ) -> Vec<Event> {
+        self.request_with(npub, url, filters, None, timeout).await
+    }
+
+    /// As [`request`](Self::request), but carrying mesh state — a hop budget,
+    /// query id, and time budget — in the envelope around the `REQ`. Used by the
+    /// core-driven multi-hop pulls (discovery, update checks).
+    pub async fn request_with(
+        &self,
+        npub: &str,
+        url: &str,
+        filters: Vec<serde_json::Value>,
+        meta: Option<crate::mesh_wire::MeshMeta>,
+        timeout: Duration,
+    ) -> Vec<Event> {
         let (reply_tx, reply_rx) = oneshot::channel();
         {
             let mut peers = self.peers.lock().unwrap();
@@ -255,6 +272,7 @@ impl PeerRelayPool {
             if tx
                 .send(Command::Request {
                     filters,
+                    meta,
                     reply: reply_tx,
                 })
                 .is_err()
@@ -368,14 +386,20 @@ async fn run(
                         break;
                     }
                 }
-                Some(Command::Request { filters, reply }) => {
+                Some(Command::Request { filters, meta, reply }) => {
                     let sub_id = format!("r{next_sub}");
                     next_sub += 1;
                     let mut req: Vec<serde_json::Value> = Vec::with_capacity(filters.len() + 2);
                     req.push(serde_json::Value::from("REQ"));
                     req.push(serde_json::Value::from(sub_id.clone()));
                     req.extend(filters);
-                    let frame = serde_json::Value::Array(req).to_string();
+                    let req = serde_json::Value::Array(req);
+                    // The filters stay canonical NIP-01; anything mesh-specific
+                    // rides the envelope around them.
+                    let frame = match &meta {
+                        Some(meta) => crate::mesh_wire::wrap(meta, req),
+                        None => req.to_string(),
+                    };
                     if sink.send(Message::Text(frame)).await.is_err() {
                         let _ = reply.send(Vec::new());
                         reason = "write failed (request)";

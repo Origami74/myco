@@ -48,9 +48,9 @@ pub enum Origin {
 pub struct Inbound {
     /// Where the event arrived from (loopback WebView vs a mesh peer).
     pub origin: Origin,
-    /// The `event-ttl` that rode on the inbound EVENT (transient, stripped on
-    /// store). `None` for a local publish — the gossiper stamps the originate
-    /// default. See `docs/design/event-gossip.md` §2.
+    /// The hop budget that rode in the `MESH` envelope. `None` for a local
+    /// publish — the gossiper stamps the originate default. The event itself is
+    /// canonical NIP-01, so there is nothing to strip before storing.
     pub event_ttl: Option<u8>,
     /// The mesh peer's address the event came from, for split-horizon (never
     /// forward back to the sender). `None` for a local publish.
@@ -68,7 +68,7 @@ pub trait Gossiper: Send + Sync {
 
     /// The **pull plane**, forwarding half: a mesh peer asked us with hops left,
     /// so pass its filters to our own circle peers carrying a decremented
-    /// `req-ttl` and return their matching events to fold into the backlog before
+    /// hop budget and return their matching events to fold into the backlog before
     /// `EOSE`. `exclude` is the requester's mesh address (split-horizon — never
     /// forward straight back to it).
     ///
@@ -76,11 +76,11 @@ pub trait Gossiper: Send + Sync {
     /// reach this, so its `EOSE` never waits on a peer; the core drives multi-hop
     /// pull itself, through the peer pool. The default does nothing, so a relay
     /// with no gossiper stays single-hop. See `docs/design/event-gossip.md`
-    /// (req-ttl) and `reference/thinning-custom-relay.md` (D8).
+    /// and `reference/thinning-custom-relay.md` (D8).
     async fn on_req(
         &self,
         _filters: Vec<serde_json::Value>,
-        _req_ttl: u8,
+        _meta: crate::mesh_wire::MeshMeta,
         _exclude: Option<IpAddr>,
     ) -> Vec<Event> {
         Vec::new()
@@ -144,9 +144,9 @@ pub trait PeerGate: Send + Sync {
     }
 }
 
-/// Default clamp on the `req-ttl` we'll honour, so a peer can't turn us into an
-/// unbounded query amplifier (mirrors `MAX_EVENT_TTL` on the push plane). A gate
-/// may lower it per peer — see [`PeerGate::max_req_ttl`].
+/// Default clamp on the pull hop budget we'll honour, so a peer can't turn us
+/// into an unbounded query amplifier (mirrors `MAX_EVENT_TTL` on the push plane).
+/// A gate may lower it per peer — see [`PeerGate::max_req_ttl`].
 pub(crate) const MAX_REQ_TTL: u8 = 2;
 
 /// How long a non-expiring event's id is remembered as seen. A push wave lives
@@ -233,6 +233,45 @@ impl SeenInner {
     }
 }
 
+/// Query ids this node has already served.
+///
+/// Without it a pull multiplies: a circle is a graph, so the same query arrives
+/// by several paths and each arrival re-fans it to every peer. Event-id dedup at
+/// merge hides that in the *results* while the cost has already been paid — at
+/// ttl 2 across a circle of ten, on the order of a hundred requests over BLE for
+/// one query. It is also the amplification bound.
+///
+/// Bounded and FIFO-evicted. Queries are short-lived, so there is no expiry to
+/// track beyond capacity — an id that falls out the back is one whose wave ended
+/// long ago. See `reference/thinning-custom-relay.md` (D8).
+#[derive(Default)]
+struct SeenQueries {
+    inner: Mutex<(std::collections::HashSet<String>, VecDeque<String>)>,
+}
+
+/// Cap on remembered query ids. A pull is rare next to an event, so this is
+/// generous relative to the traffic.
+const SEEN_QUERIES_CAPACITY: usize = 512;
+
+impl SeenQueries {
+    /// Record a query id, returning `true` if this node had not served it yet.
+    fn insert_query(&self, qid: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let (set, order) = &mut *inner;
+        if set.contains(qid) {
+            return false;
+        }
+        while order.len() >= SEEN_QUERIES_CAPACITY {
+            if let Some(oldest) = order.pop_front() {
+                set.remove(&oldest);
+            }
+        }
+        set.insert(qid.to_string());
+        order.push_back(qid.to_string());
+        true
+    }
+}
+
 /// Seconds since the Unix epoch.
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -258,6 +297,9 @@ pub struct RelayHub {
     /// Ids already handled here, so a copy arriving by a second path is stored
     /// but not re-flooded. Shared across every listener on this hub.
     seen: SeenSet,
+    /// Query ids already served, so a pull that reaches us by several paths is
+    /// answered once instead of re-fanned each time.
+    seen_queries: SeenQueries,
 }
 
 impl RelayHub {
@@ -283,6 +325,7 @@ impl RelayHub {
             gossip,
             gate,
             seen: SeenSet::default(),
+            seen_queries: SeenQueries::default(),
         })
     }
 }
@@ -512,9 +555,30 @@ async fn handle_client_frame(
     conn_id: u64,
     subs: &mut HashMap<String, Vec<ManifestFilter>>,
 ) -> Vec<String> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+    let Ok(frame) = serde_json::from_str::<serde_json::Value>(text) else {
         return Vec::new();
     };
+
+    // Unwrap a MESH envelope, if this is one: mesh state travels beside the NIP-01
+    // message, never inside it, and what comes out is passed on untouched. A plain
+    // frame is equally valid here and carries no metadata — store it, do not
+    // forward it. See `reference/thinning-custom-relay.md` (D1).
+    let (meta, value) = match crate::mesh_wire::unwrap(&frame) {
+        // Boundary 1: the in-app client is an ordinary Nostr client and has no
+        // business speaking our framing. Refusing it here is what stops an nsite
+        // reaching the mesh planes through a hand-built frame.
+        Some(_) if origin == Origin::Local => {
+            tracing::debug!("relay: refusing a MESH frame from a local client");
+            return vec![serde_json::json!([
+                "NOTICE",
+                "MESH framing is mesh-only; this relay speaks plain NIP-01 here"
+            ])
+            .to_string()];
+        }
+        Some((meta, inner)) => (meta, inner),
+        None => (crate::mesh_wire::MeshMeta::default(), frame),
+    };
+
     let Some(array) = value.as_array() else {
         return Vec::new();
     };
@@ -540,34 +604,24 @@ async fn handle_client_frame(
                 }
             }
             let raw_filters: Vec<serde_json::Value> = array.iter().skip(2).cloned().collect();
-            // `req-ttl` is a **mesh-only** forward budget, honoured for a peer's
-            // REQ and ignored on the loopback socket. An nsite must not be able to
-            // turn one filter key into a circle-wide flood — a single key must not
-            // change a query's cost by orders of magnitude — so multi-hop pull is a
+            // The forward budget comes from the envelope, clamped to what this
+            // peer is granted. A loopback client cannot send an envelope at all,
+            // so an nsite's REQ is always single-hop: one filter key must never
+            // change a query's cost by orders of magnitude. Multi-hop pull is a
             // core-driven operation (discovery, update checks) that goes through
-            // the peer pool directly, never through a client's filter. See
-            // `reference/thinning-custom-relay.md` (D8).
-            //
-            // It rides inside a filter object today; the `MESH` envelope moves it
-            // out in P5. `parse_filter` ignores the key either way, so it never
-            // affects local matching.
-            let req_ttl = match origin {
-                Origin::Local => 0,
-                Origin::Mesh => {
-                    // The clamp is this peer's own, so a peer without the
-                    // multihop grant is answered from our store alone.
-                    let cap = hub
-                        .gate
-                        .as_ref()
-                        .map_or(MAX_REQ_TTL, |g| g.max_req_ttl(peer_ip));
-                    raw_filters
-                        .iter()
-                        .filter_map(|f| f.get("req-ttl").and_then(|v| v.as_u64()))
-                        .max()
-                        .map(|n| n.min(cap as u64) as u8)
-                        .unwrap_or(0)
-                }
-            };
+            // the peer pool directly. See `reference/thinning-custom-relay.md` (D8).
+            let cap = hub
+                .gate
+                .as_ref()
+                .map_or(MAX_REQ_TTL, |g| g.max_req_ttl(peer_ip));
+            let hop = meta.clone().clamped(cap.min(MAX_REQ_TTL));
+            // A circle is a graph, not a tree, so the same query reaches us by
+            // several paths. Serve each query id once: answer from our own store
+            // as usual, but do not fan it out again.
+            let repeat = hop
+                .qid
+                .as_deref()
+                .is_some_and(|qid| !hub.seen_queries.insert_query(qid));
             let filters: Vec<ManifestFilter> =
                 raw_filters.iter().filter_map(parse_filter).collect();
 
@@ -585,12 +639,16 @@ async fn handle_client_frame(
             // slow or unreachable peer — it arrives at local-store speed, and
             // anything a peer delivers later reaches the client through the live
             // subscription instead.
-            if req_ttl > 0 {
-                if let Some(gossip) = hub.gossip.clone() {
-                    let remote = gossip
-                        .on_req(raw_filters.clone(), req_ttl - 1, Some(peer_ip))
-                        .await;
-                    events.extend(remote);
+            if !repeat {
+                if let Some(next) = hop.next_hop() {
+                    if let Some(gossip) = hub.gossip.clone() {
+                        // `next` carries the incoming query id onward, so every
+                        // node downstream serves this query once.
+                        let remote = gossip
+                            .on_req(raw_filters.clone(), next, Some(peer_ip))
+                            .await;
+                        events.extend(remote);
+                    }
                 }
             }
 
@@ -622,13 +680,9 @@ async fn handle_client_frame(
             let Some(event_value) = array.get(1) else {
                 return Vec::new();
             };
-            // The transient `event-ttl` (top-level, not a tag) rides the EVENT for
-            // mesh fan-out; read it before parsing (parsing to Event drops it, so
-            // it is never stored). See docs/design/event-gossip.md §2.
-            let event_ttl = event_value
-                .get("event-ttl")
-                .and_then(|v| v.as_u64())
-                .map(|n| n.min(u8::MAX as u64) as u8);
+            // The hop budget rides the envelope, so the event itself is canonical
+            // NIP-01 and there is nothing to strip before storing it.
+            let event_ttl = (origin == Origin::Mesh).then_some(meta.ttl);
             let Ok(event) = serde_json::from_value::<Event>(event_value.clone()) else {
                 return Vec::new();
             };
@@ -971,6 +1025,194 @@ mod tests {
         );
     }
 
+    /// A wave crosses hops, decrements, and dies — and a hostile budget is clamped.
+    ///
+    /// Walks A→B→C by feeding each node the frame the previous one emitted, which
+    /// is the part that has to hold: the hop count has to survive the envelope, not
+    /// the event, and the event has to arrive canonical at every hop.
+    #[tokio::test]
+    async fn a_push_wave_decrements_and_terminates() {
+        use std::sync::Mutex;
+
+        struct Capture(Mutex<Vec<Option<u8>>>);
+        #[async_trait]
+        impl Gossiper for Capture {
+            async fn on_event(&self, _event: Event, inbound: Inbound) {
+                self.0.lock().unwrap().push(inbound.event_ttl);
+            }
+        }
+
+        // One node, fed a frame as if from a mesh peer; returns the ttl its
+        // gossiper saw, which is what decides how much further the wave goes.
+        async fn hop(frame: &str) -> Option<u8> {
+            let cap = Arc::new(Capture(Mutex::new(Vec::new())));
+            let hub = RelayHub::new(Arc::new(RelayStore::in_memory()), Some(cap.clone()));
+            let mut subs = HashMap::new();
+            let peer: IpAddr = "fd00::9".parse().unwrap();
+            handle_client_frame(frame, &hub, Origin::Mesh, peer, 0, &mut subs).await;
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            let seen = cap.0.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1, "the event was accepted exactly once");
+            seen[0]
+        }
+
+        let keys = Keys::generate();
+        let msg = chat_event(&keys, "mesh", "ripple");
+        let event = serde_json::to_value(&msg).unwrap();
+
+        // A originates at ttl 2; B sees 2 and forwards 1; C sees 1 and forwards 0.
+        let at_b = hop(&crate::mesh_wire::wrap(
+            &crate::mesh_wire::MeshMeta::push(2),
+            serde_json::json!(["EVENT", event.clone()]),
+        ))
+        .await;
+        assert_eq!(at_b, Some(2));
+
+        let at_c = hop(&crate::mesh_wire::wrap(
+            &crate::mesh_wire::MeshMeta::push(1),
+            serde_json::json!(["EVENT", event.clone()]),
+        ))
+        .await;
+        assert_eq!(at_c, Some(1));
+
+        // The last hop has nothing left to spend.
+        let at_d = hop(&crate::mesh_wire::wrap(
+            &crate::mesh_wire::MeshMeta::push(0),
+            serde_json::json!(["EVENT", event.clone()]),
+        ))
+        .await;
+        assert_eq!(at_d, Some(0), "stored, but the wave stops here");
+
+        // A plain frame from a peer carries no budget and is equally terminal.
+        let plain = hop(&serde_json::json!(["EVENT", event]).to_string()).await;
+        assert_eq!(plain, Some(0));
+    }
+
+    /// One query id is served once per node, however many paths it arrives by.
+    ///
+    /// A circle is a graph, so the same pull reaches a node from several peers.
+    /// Without this the fan-out multiplies — at ttl 2 across a circle of ten, on
+    /// the order of a hundred requests over BLE for a single query
+    /// (`reference/thinning-custom-relay.md`, D8).
+    #[tokio::test]
+    async fn a_repeated_query_id_is_not_re_fanned() {
+        use std::sync::Mutex;
+
+        struct CountReq(Mutex<usize>);
+        #[async_trait]
+        impl Gossiper for CountReq {
+            async fn on_event(&self, _event: Event, _inbound: Inbound) {}
+            async fn on_req(
+                &self,
+                _filters: Vec<serde_json::Value>,
+                _meta: crate::mesh_wire::MeshMeta,
+                _exclude: Option<IpAddr>,
+            ) -> Vec<Event> {
+                *self.0.lock().unwrap() += 1;
+                Vec::new()
+            }
+        }
+
+        let counter = Arc::new(CountReq(Mutex::new(0)));
+        let hub = RelayHub::new(Arc::new(RelayStore::in_memory()), Some(counter.clone()));
+        let query = crate::mesh_wire::wrap(
+            &crate::mesh_wire::MeshMeta::pull(2, "q-loop", 10_000),
+            serde_json::json!(["REQ", "s1", { "kinds": [9] }]),
+        );
+
+        // The same query arriving from three different peers, as it would in a
+        // circle wired A–B, B–C, C–A.
+        for (i, peer) in ["fd00::1", "fd00::2", "fd00::3"].iter().enumerate() {
+            let mut subs = HashMap::new();
+            let out = handle_client_frame(
+                &query,
+                &hub,
+                Origin::Mesh,
+                peer.parse().unwrap(),
+                i as u64,
+                &mut subs,
+            )
+            .await;
+            assert!(
+                out.iter().any(|f| f.contains("EOSE")),
+                "every arrival is still answered from our own store"
+            );
+        }
+
+        assert_eq!(
+            *counter.0.lock().unwrap(),
+            1,
+            "the query is fanned out once, not once per path"
+        );
+    }
+
+    /// The two boundaries, asserted rather than left as a convention.
+    ///
+    /// Everything in this plan rests on two rules: the nsite link speaks plain
+    /// NIP-01, and so does the link to whatever relay sits behind us. If either
+    /// ever carries a `MESH` verb or a ttl key, the relay has stopped being
+    /// swappable and the design has quietly reversed itself. That is worth a test
+    /// rather than a comment (`reference/thinning-custom-relay.md`).
+    #[tokio::test]
+    async fn no_mesh_framing_crosses_the_client_or_backend_links() {
+        let store = Arc::new(RelayStore::in_memory());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on(store.clone(), listener));
+
+        let keys = Keys::generate();
+        let msg = chat_event(&keys, "mesh", "hello");
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        ws.send(WsMessage::Text(
+            serde_json::json!(["REQ", "s1", { "kinds": [9] }]).to_string(),
+        ))
+        .await
+        .unwrap();
+        ws.send(WsMessage::Text(
+            serde_json::json!(["EVENT", msg]).to_string(),
+        ))
+        .await
+        .unwrap();
+
+        // Collect everything the client link carries back.
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            match tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await {
+                Ok(Some(Ok(WsMessage::Text(txt)))) => seen.push(txt.to_string()),
+                _ => break,
+            }
+        }
+        assert!(!seen.is_empty(), "the client link carried something");
+        for frame in &seen {
+            assert!(
+                !frame.contains(crate::mesh_wire::MESH)
+                    && !frame.contains("event-ttl")
+                    && !frame.contains("req-ttl"),
+                "boundary 1 must stay plain NIP-01, got: {frame}"
+            );
+        }
+
+        // The backend link: what actually landed in the store is a canonical
+        // event, with no mesh state smuggled into it.
+        let stored = store
+            .query(&ManifestFilter {
+                kinds: vec![9],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        let json = serde_json::to_string(&stored[0]).unwrap();
+        assert!(
+            !json.contains("event-ttl") && !json.contains(crate::mesh_wire::MESH),
+            "boundary 2 must store a canonical NIP-01 event, got: {json}"
+        );
+        assert_eq!(stored[0].id, msg.id, "and it is the same event");
+    }
+
     /// An unpaired peer never gets a socket at all.
     ///
     /// Refusing per frame would still hand a stranger a WebSocket upgrade and a
@@ -1081,14 +1323,16 @@ mod tests {
     /// An nsite cannot start a circle-wide pull, and its `EOSE` never waits on a
     /// peer.
     ///
-    /// `req-ttl` is a mesh-only forward budget. If a loopback client could set it,
-    /// one filter key would turn a plain chat query into a flood across the whole
-    /// circle, and the client would block until every peer answered or timed out.
-    /// The gossiper here would hang for a minute if it were ever consulted, so a
-    /// prompt `EOSE` is the assertion. See `reference/thinning-custom-relay.md`
-    /// (D8).
+    /// Two halves. A plain `REQ` — what every client actually sends — is answered
+    /// from the local store without touching the fan-out. And a hand-built `MESH`
+    /// frame, the only way a client could ask for hops, is refused outright:
+    /// boundary 1 says the loopback socket speaks plain NIP-01, so mesh framing
+    /// has no meaning there (`reference/thinning-custom-relay.md`, D1 and D8).
+    ///
+    /// The gossiper here hangs for a minute if consulted, so a prompt `EOSE` is
+    /// the assertion.
     #[tokio::test]
-    async fn client_req_ttl_is_ignored_and_never_blocks_eose() {
+    async fn a_client_cannot_reach_the_fan_out() {
         use std::sync::Mutex;
 
         struct Hang(Mutex<usize>);
@@ -1098,7 +1342,7 @@ mod tests {
             async fn on_req(
                 &self,
                 _filters: Vec<serde_json::Value>,
-                _req_ttl: u8,
+                _meta: crate::mesh_wire::MeshMeta,
                 _exclude: Option<IpAddr>,
             ) -> Vec<Event> {
                 *self.0.lock().unwrap() += 1;
@@ -1116,10 +1360,13 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
             .await
             .unwrap();
-        // A client asking for two hops of reach — exactly what must not be honoured.
-        let req = serde_json::json!(["REQ", "s1", { "kinds": [9], "req-ttl": 2 }]);
-        ws.send(WsMessage::Text(req.to_string())).await.unwrap();
 
+        // The ordinary client path: a plain REQ, answered locally.
+        ws.send(WsMessage::Text(
+            serde_json::json!(["REQ", "s1", { "kinds": [9] }]).to_string(),
+        ))
+        .await
+        .unwrap();
         let eose = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while let Some(Ok(WsMessage::Text(txt))) = ws.next().await {
                 let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
@@ -1130,16 +1377,35 @@ mod tests {
             false
         })
         .await;
-
         assert_eq!(
             eose,
             Ok(true),
             "EOSE must arrive at local-store speed, not after a peer round trip"
         );
+
+        // The only way to ask for hops is mesh framing, which does not belong on
+        // this socket.
+        ws.send(WsMessage::Text(crate::mesh_wire::wrap(
+            &crate::mesh_wire::MeshMeta::pull(2, "q1", 10_000),
+            serde_json::json!(["REQ", "s2", { "kinds": [9] }]),
+        )))
+        .await
+        .unwrap();
+        let notice = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("a prompt answer")
+            .expect("a frame")
+            .expect("text");
+        let WsMessage::Text(txt) = notice else {
+            panic!("expected a NOTICE")
+        };
+        let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
+        assert_eq!(v.get(0).and_then(|x| x.as_str()), Some("NOTICE"));
+
         assert_eq!(
             *hang.0.lock().unwrap(),
             0,
-            "a client filter must not reach the peer fan-out at all"
+            "a client must not reach the peer fan-out by either route"
         );
     }
 

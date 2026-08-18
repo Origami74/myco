@@ -39,6 +39,10 @@ mod ip_source;
 // relay). See `reference/thinning-custom-relay.md`.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod mesh_relay;
+// The `MESH` envelope that carries mesh state alongside — never inside — a
+// NIP-01 message on the peer link. See `reference/thinning-custom-relay.md`.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod mesh_wire;
 // npub -> observed lane record (Wi-Fi Aware vs. LAN/AP), pushed by the
 // Android Aware JNI bridge and consumed by `AppRuntime::state()`'s
 // lane_by_npub override. Plain, non-JNI logic so it is unit-testable on the

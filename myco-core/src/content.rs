@@ -111,13 +111,13 @@ pub struct PeerPerms {
     /// May open a `REQ` and receive our stored events.
     #[serde(default = "yes")]
     pub relay_read: bool,
-    /// Their `REQ` may be forwarded to our other peers (`req-ttl` clamp).
+    /// Their `REQ` may be forwarded to our other peers (a hop-budget clamp).
     #[serde(default = "yes")]
     pub relay_read_multihop: bool,
     /// May publish events to us.
     #[serde(default = "yes")]
     pub relay_write: bool,
-    /// Events from them may be forwarded onward by us (`event-ttl` clamp).
+    /// Events from them may be forwarded onward by us (a hop-budget clamp).
     #[serde(default = "yes")]
     pub relay_write_multihop: bool,
     /// May `GET` / `HEAD` blobs from us.
@@ -261,6 +261,12 @@ const PAIR_DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_sec
 /// Hop budget for manifest (update) propagation over the mesh — mirrors the chat
 /// push plane's default. See `docs/design/nsite-updates.md` §4.
 const MANIFEST_EVENT_TTL: u8 = 3;
+
+/// Time budget stamped on a pull this node originates. Relative, and only bounds
+/// how long a node downstream holds query state — late results are not an error,
+/// they simply arrive to whoever is still listening
+/// (`reference/thinning-custom-relay.md`, D8).
+const PULL_BUDGET_MS: u32 = 10_000;
 
 /// The mesh access gate backing the relay + Blossom servers: content (reads, chat,
 /// manifests, blobs) is restricted to **paired** (Circle) peers, and what a paired
@@ -1467,7 +1473,7 @@ impl Content {
         self.peer_relays.send(npub, &url, frame);
     }
 
-    /// Pull plane (req-ttl): forward a REQ's filters to connected Circle peers and
+    /// Pull plane: forward a REQ's filters to connected Circle peers and
     /// aggregate their matching events. `req_ttl` is the remaining forward budget
     /// *after* this hop — it is stamped back into each filter so the next relay
     /// decrements from here (without it the peer would re-read the original value).
@@ -1476,23 +1482,12 @@ impl Content {
     pub async fn pull_from_peers(
         &self,
         filters: Vec<serde_json::Value>,
-        req_ttl: u8,
+        meta: crate::mesh_wire::MeshMeta,
         exclude: Option<std::net::IpAddr>,
     ) -> Vec<Event> {
-        // Re-stamp req-ttl (or strip it at the last hop) on each filter object.
-        let filters: Vec<serde_json::Value> = filters
-            .into_iter()
-            .map(|mut f| {
-                if let Some(obj) = f.as_object_mut() {
-                    if req_ttl > 0 {
-                        obj.insert("req-ttl".to_string(), serde_json::json!(req_ttl));
-                    } else {
-                        obj.remove("req-ttl");
-                    }
-                }
-                f
-            })
-            .collect();
+        // The filters go out untouched — hops, query id, and budget ride the
+        // envelope. `meta` is the *incoming* one, already decremented, so the
+        // query id survives the hop and every node downstream serves it once.
 
         // All filters ride in one REQ per peer over the shared connection (the relay
         // any-matches across them), so a pull is a single round-trip, not one socket
@@ -1506,9 +1501,16 @@ impl Content {
             }
             let url = crate::ip_source::mesh_relay_url(&npub);
             let filters = filters.clone();
+            let meta = meta.clone();
             Some(async move {
-                pool.request(&npub, &url, filters, std::time::Duration::from_secs(8))
-                    .await
+                pool.request_with(
+                    &npub,
+                    &url,
+                    filters,
+                    Some(meta),
+                    std::time::Duration::from_secs(8),
+                )
+                .await
             })
         });
 
@@ -1529,18 +1531,22 @@ impl Content {
                 return Vec::new();
             };
             let relay_url = crate::ip_source::mesh_relay_url(&npub);
-            // Manifest kinds only; `req-ttl: 1` reaches our peers' peers (2 hops),
-            // matching the old `discover_manifests` helper.
+            // Manifest kinds only. One more hop reaches our peers' peers (2 hops
+            // in total), carried in the envelope so the filter stays canonical.
             let filter = serde_json::json!({
                 "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
                 "limit": 200,
-                "req-ttl": 1,
             });
             let events = pool
-                .request(
+                .request_with(
                     &npub,
                     &relay_url,
                     vec![filter],
+                    Some(crate::mesh_wire::MeshMeta::pull(
+                        1,
+                        crate::mesh_wire::new_query_id(),
+                        PULL_BUDGET_MS,
+                    )),
                     std::time::Duration::from_secs(15),
                 )
                 .await;
@@ -1601,13 +1607,12 @@ impl Content {
 
         // Query set, one combined REQ per relay read until EOSE
         // (docs/design/nsite-updates.md §3.2):
-        //  - connected peers' mesh relays, carrying `req-ttl: 1` so the check reaches
+        //  - connected peers' mesh relays, carrying one more hop so the check reaches
         //    2 hops just like discovery (their peers' manifests come back too);
         //  - online relays, unless mesh-only is on.
         let mesh_filter = serde_json::json!({
             "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
             "authors": authors,
-            "req-ttl": 1,
         });
         let online_filter = serde_json::json!({
             "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
@@ -1940,19 +1945,19 @@ impl Content {
     }
 
     /// Fan a manifest to connected Circle peers over the push plane (carrying a
-    /// decremented `event-ttl`), split-horizon. `exclude` is the peer it came from.
+    /// decremented hop budget), split-horizon. `exclude` is the peer it came from.
     fn forward_manifest(&self, manifest: &Event, out_ttl: u8, exclude: Option<IpAddr>) {
-        let mut ev_json = match serde_json::to_value(manifest) {
+        let ev_json = match serde_json::to_value(manifest) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, "manifest gossip: serialize failed");
                 return;
             }
         };
-        if let Some(obj) = ev_json.as_object_mut() {
-            obj.insert("event-ttl".to_string(), serde_json::json!(out_ttl));
-        }
-        let frame = serde_json::json!(["EVENT", ev_json]).to_string();
+        let frame = crate::mesh_wire::wrap(
+            &crate::mesh_wire::MeshMeta::push(out_ttl),
+            serde_json::json!(["EVENT", ev_json]),
+        );
         for npub in self.circle_npubs() {
             let ip = match fips::PeerIdentity::from_npub(&npub) {
                 Ok(p) => IpAddr::V6(p.address().to_ipv6()),
