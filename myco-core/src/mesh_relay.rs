@@ -18,7 +18,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -185,7 +184,7 @@ impl SeenSet {
     /// Record an id, returning `true` if this is the **first** time we have seen
     /// it — the caller's signal to fan out.
     fn insert(&self, event: &Event) -> bool {
-        let now = now_secs();
+        let now = crate::content::now_secs();
         // Remember an expiring event until it expires everywhere; a manifest (no
         // expiry) for a fixed window. Either way at least the floor, so an event
         // that arrives already stale cannot be re-forwarded on every hop.
@@ -270,14 +269,6 @@ impl SeenQueries {
         order.push_back(qid.to_string());
         true
     }
-}
-
-/// Seconds since the Unix epoch.
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Shared per-relay state: the store, a broadcast bus that fans newly-stored

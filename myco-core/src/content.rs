@@ -853,15 +853,6 @@ impl Content {
         Ok(outcome)
     }
 
-    /// Import from in-memory artifacts (the IP-sync mirror path / tests).
-    pub async fn import_event_blobs(
-        &self,
-        event: nostr::Event,
-        blobs: &[(String, Vec<u8>)],
-    ) -> anyhow::Result<SyncOutcome> {
-        sync::import_site(self.relay.as_ref(), self.blobs.as_ref(), event, blobs).await
-    }
-
     // --- library ---
 
     pub fn add_to_library(&self, addr: &SiteAddr, title: Option<&str>, added_at: u64) {
@@ -1039,19 +1030,15 @@ impl Content {
             .collect()
     }
 
-    /// Whether `ip` is the mesh ULA of a **current** Circle member. The relay +
-    /// Blossom access gates call this per request, so adding/removing a peer at
-    /// runtime takes effect immediately (no cached set). A peer's ULA is
-    /// `fd…+node_addr[0..15]` — `PeerIdentity::from_npub(npub).address()` — which is
-    /// exactly the source address the mesh sockets see.
-    pub fn is_paired_ip(&self, ip: IpAddr) -> bool {
-        self.perms_for_ip(ip).is_some()
-    }
-
     /// The permissions granted to the peer at `ip`, or `None` if `ip` is not a
     /// current Circle member. One lookup answers both "are they paired" and "what
     /// may they do", so the access checks never consult two sources that could
     /// disagree. See `reference/thinning-custom-relay.md` (D10).
+    ///
+    /// Consulted per request, so adding a peer, removing one, or changing a
+    /// permission takes effect immediately — there is no cached set. A peer's ULA
+    /// is `fd…+node_addr[0..15]` (`PeerIdentity::from_npub(npub).address()`),
+    /// which is exactly the source address the mesh sockets see.
     pub fn perms_for_ip(&self, ip: IpAddr) -> Option<PeerPerms> {
         let IpAddr::V6(v6) = ip else { return None };
         self.circle

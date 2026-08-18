@@ -668,7 +668,7 @@ impl AppRuntime {
             NativeAppAction::AddToLibrary { link } => {
                 if let (Some(content), Some(addr)) = (&self.content, nsite_deck::parse_link(&link))
                 {
-                    content.add_to_library(&addr, None, now_secs());
+                    content.add_to_library(&addr, None, crate::content::now_secs());
                 }
                 self.rev += 1;
             }
@@ -1493,20 +1493,12 @@ fn seed_default_sites(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) {
             tracing::warn!(link, "default site link did not parse; skipping seed");
             continue;
         };
-        content.add_to_library(&addr, None, now_secs());
+        content.add_to_library(&addr, None, crate::content::now_secs());
         rt.spawn(content.clone().open_site(addr, None));
     }
     if let Err(e) = std::fs::write(&marker, b"1\n") {
         tracing::warn!(error = %e, "could not write default-seed marker");
     }
-}
-
-/// Seconds since the Unix epoch (Library `added_at` timestamps).
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Milliseconds since the Unix epoch, passed to `merge_peers` (reserved for
