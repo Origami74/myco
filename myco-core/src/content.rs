@@ -2561,6 +2561,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// An nsite actually renders with its manifest on a relay we do not own.
+    ///
+    /// The seam test above proves publish and slot-read work. This proves the
+    /// thing a user would notice: manifest on the remote relay, blobs local,
+    /// and the gateway serving the page. That split is the normal shape when
+    /// only the relay is swapped, so it is worth pinning rather than assuming.
+    #[tokio::test]
+    async fn the_gateway_serves_a_site_whose_manifest_lives_on_a_custom_relay() {
+        let theirs = Arc::new(myco_relay::RelayStore::in_memory());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(crate::mesh_relay::serve_on(theirs.clone(), listener));
+
+        let dir = tmp("custom-relay-gateway");
+        let _ = std::fs::remove_dir_all(&dir);
+        let backend = Arc::new(crate::remote_backend::RemoteBackend::new(format!(
+            "ws://{addr}"
+        )));
+        let content = Content::open_with_relay(&dir, Some(backend)).unwrap();
+
+        // Import the usual way: blobs to the local store, manifest to the relay
+        // — which now happens to be someone else's.
+        let site = build_test_site(&[("/index.html", b"<h1>remote</h1>")], None, None);
+        nsite_deck::import_site(
+            content.relay().as_ref(),
+            content.blobs().as_ref(),
+            site.manifest.clone(),
+            &site.blobs,
+        )
+        .await
+        .expect("import");
+        assert_eq!(theirs.count(), 1, "the manifest went to the custom relay");
+
+        let host = format!("{}.nsite", site.author.to_bech32().unwrap());
+        let resp = nsite_deck::serve(
+            &content.active_backend(),
+            content.blobs().as_ref(),
+            &host,
+            "/",
+            None,
+        )
+        .await;
+
+        assert_eq!(resp.status, 200, "the page must render");
+        assert_eq!(resp.body, b"<h1>remote</h1>");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The content ports have no exceptions left.
     ///
     /// Pairing kinds used to be the one thing an unpaired peer could publish to
