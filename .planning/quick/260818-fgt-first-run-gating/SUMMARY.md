@@ -55,3 +55,28 @@ open.
 
 `:app:testDebugUnitTest`, `:app:assembleDebug` — pass. Installed on both
 attached devices. First-run behaviour not yet re-verified from a clean install.
+
+## Follow-up: the first-run name question
+
+The chips alone were not enough — they only lived in Settings and the Circle
+rename dialog, so a clean install silently adopted the phone's own name without
+ever showing it. `FirstRunNameDialog` now asks once, between the intro and the
+radios: the phone name prefilled, both suggestions as chips, free text if
+neither fits. Gated on its own `name_chosen` pref rather than `intro_seen`, so
+replaying the intro doesn't re-ask and an upgrade from a build that never asked
+still gets it once.
+
+Order is deliberate — name first, lanes second. The permission dialogs would
+otherwise stack on top of it, and the name is what every pair request carries,
+so it should be settled before anything can send one.
+
+### Verified on a clean install (tablet, DC_1)
+
+- `Displayed` at 17:20:12, no services and no dialogs until the intro was
+  tapped — the gate holds.
+- Name dialog appeared with `DC-1` prefilled; answering it wrote
+  `device_name=DC-1` and `name_chosen=true`.
+- Only then: notifications + nearby-devices prompts, VPN consent, then
+  `BleService` and `MycoVpnService`, 6 peers.
+- `NEARBY_WIFI_DEVICES` came out `granted=false` — the Aware lane was left
+  without its permission on this run. Not investigated.

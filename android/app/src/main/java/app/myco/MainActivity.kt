@@ -57,6 +57,7 @@ import app.myco.share.NsiteShare
 import app.myco.share.PendingDeepLinks
 import app.myco.ui.MycoApp
 import app.myco.ui.intro.IntroMode
+import app.myco.ui.FirstRunNameDialog
 import app.myco.ui.intro.IntroScreen
 import app.myco.ui.theme.MycoTheme
 import app.myco.vpn.MycoVpnService
@@ -160,6 +161,16 @@ class MainActivity : ComponentActivity() {
                 // without being able to read it. Modifier.blur is a no-op
                 // below API 31, where the wash carries it alone.
                 var frost by remember { mutableFloatStateOf(if (introShowing) 1f else 0f) }
+                // The name question, asked exactly once. Raised here rather than
+                // only from the intro's completion so an upgrade from a build
+                // that never asked still gets it on its next launch, with the
+                // intro already behind it.
+                var askName by rememberSaveable {
+                    mutableStateOf(
+                        !prefs.getBoolean(PREF_NAME_CHOSEN, false) &&
+                            prefs.getBoolean(PREF_INTRO_SEEN, false),
+                    )
+                }
 
                 Box(Modifier.fillMaxSize()) {
                     Box(Modifier.blur(14.dp * frost)) {
@@ -184,6 +195,23 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
+                    // Sits above the app and below nothing: the intro is gone
+                    // by the time this can show.
+                    if (askName && !introShowing) {
+                        // Read once, not on every keystroke — state() crosses
+                        // JNI and takes the core's locks.
+                        val npub = remember { core.state().ownNpub }
+                        FirstRunNameDialog(ownNpub = npub) { picked ->
+                            DeviceName.set(this@MainActivity, picked)
+                            core.dispatch(NativeActions.setDeviceName(picked))
+                            prefs.edit().putBoolean(PREF_NAME_CHOSEN, true).apply()
+                            askName = false
+                            // Deferred from the intro on a first run; a no-op
+                            // when the lanes are already up.
+                            startEnabledLanes()
+                        }
+                    }
+
                     if (introShowing) {
                         IntroScreen(
                             mode = introMode,
@@ -193,13 +221,20 @@ class MainActivity : ComponentActivity() {
                                 val firstRun = !prefs.getBoolean(PREF_INTRO_SEEN, false)
                                 prefs.edit().putBoolean(PREF_INTRO_SEEN, true).apply()
                                 // First run: onCreate deliberately started
-                                // nothing, so this is where the radios come up
-                                // and the permission prompts are allowed to
-                                // appear. A replayed intro clears the flag too
-                                // and so takes this branch as well, which is a
-                                // no-op — every call in there is idempotent and
-                                // the lanes are already running.
-                                if (firstRun) startEnabledLanes()
+                                // nothing. Ask the name before the radios come
+                                // up rather than after — the permission dialogs
+                                // would sit on top of this one, and the name is
+                                // what every later pair request carries, so it
+                                // should be settled before anything can send
+                                // one. A replayed intro has already answered it
+                                // and falls through to starting the lanes,
+                                // which is a no-op there since every call in
+                                // startEnabledLanes is idempotent.
+                                if (firstRun && !prefs.getBoolean(PREF_NAME_CHOSEN, false)) {
+                                    askName = true
+                                } else if (firstRun) {
+                                    startEnabledLanes()
+                                }
                             },
                         )
                     }
@@ -826,5 +861,10 @@ class MainActivity : ComponentActivity() {
         const val PREF_EXIT_PROXY = "exit_proxy"
         /** Set once the intro has played all the way through. */
         const val PREF_INTRO_SEEN = "intro_seen"
+
+        /** Set once the first-run name question has been answered. Separate from
+         *  [PREF_INTRO_SEEN] so replaying the intro doesn't re-ask it, and so an
+         *  upgrade from a build that never asked still gets the question once. */
+        private const val PREF_NAME_CHOSEN = "name_chosen"
     }
 }
