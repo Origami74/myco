@@ -88,6 +88,67 @@ pub struct CircleContact {
     /// A human label for the contact (from the share QR; a placeholder for now).
     pub name: String,
     pub added_at: u64,
+    /// What this peer may do to us. Not exposed in the UI yet — every peer gets
+    /// the defaults — but stored per peer so turning a knob later is a UI change
+    /// rather than a storage migration.
+    #[serde(default)]
+    pub perms: PeerPerms,
+}
+
+/// Per-peer permissions: what a **paired** peer is allowed to do against this
+/// node. Pairing itself is not covered here — that is the auth plane's job, and
+/// it happens before any of these apply.
+///
+/// Read every flag as a grant *we* make to *them*. "Multihop" is ambiguous on
+/// its own, so it means specifically whether their traffic travels further
+/// through us — not anything we send them. Both multihop flags are expressed as
+/// per-peer ttl clamps rather than a separate check, so they reuse the machinery
+/// the push and pull planes already have. See
+/// `reference/thinning-custom-relay.md` (D10).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerPerms {
+    /// May open a `REQ` and receive our stored events.
+    #[serde(default = "yes")]
+    pub relay_read: bool,
+    /// Their `REQ` may be forwarded to our other peers (`req-ttl` clamp).
+    #[serde(default = "yes")]
+    pub relay_read_multihop: bool,
+    /// May publish events to us.
+    #[serde(default = "yes")]
+    pub relay_write: bool,
+    /// Events from them may be forwarded onward by us (`event-ttl` clamp).
+    #[serde(default = "yes")]
+    pub relay_write_multihop: bool,
+    /// May `GET` / `HEAD` blobs from us.
+    #[serde(default = "yes")]
+    pub blossom_read: bool,
+    /// May `PUT /upload` to us. **Off by default** — this is the one that costs
+    /// us disk, and nothing in normal operation needs it: propagation is
+    /// pull-based, so peers fetch blobs from the holder rather than pushing them.
+    /// The dev-menu speedtest is the only caller, and it reports the refusal.
+    #[serde(default = "no")]
+    pub blossom_write: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+fn no() -> bool {
+    false
+}
+
+impl Default for PeerPerms {
+    fn default() -> Self {
+        Self {
+            relay_read: yes(),
+            relay_read_multihop: yes(),
+            relay_write: yes(),
+            relay_write_multihop: yes(),
+            blossom_read: yes(),
+            blossom_write: no(),
+        }
+    }
 }
 
 /// An nsite **discovered** on a Circle peer's mesh relay ("nsites around me").
@@ -202,9 +263,14 @@ const PAIR_DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_sec
 const MANIFEST_EVENT_TTL: u8 = 3;
 
 /// The mesh access gate backing the relay + Blossom servers: content (reads, chat,
-/// manifests, blobs) is restricted to **paired** (Circle) peers, but *anyone* may
-/// publish the pairing handshake so a first-time pair request can bootstrap. Holds
-/// the [`Content`] so the live Circle is consulted per request (`docs/design`).
+/// manifests, blobs) is restricted to **paired** (Circle) peers, and what a paired
+/// peer may do is its own [`PeerPerms`] record. The one remaining exception is the
+/// pairing handshake, which anyone may publish so a first-time request can
+/// bootstrap — that exception goes away when pairing moves to its own auth
+/// service (`reference/thinning-custom-relay.md`, D6).
+///
+/// Holds the [`Content`] so the live Circle is consulted per request: adding a
+/// peer, removing one, or changing a permission takes effect immediately.
 pub struct CircleGate {
     content: Arc<Content>,
 }
@@ -217,16 +283,23 @@ impl CircleGate {
 
 impl crate::mesh_relay::PeerGate for CircleGate {
     fn may_read(&self, ip: IpAddr) -> bool {
-        self.content.is_paired_ip(ip)
+        self.content.perms_for_ip(ip).is_some_and(|p| p.relay_read)
     }
 
     fn may_publish(&self, ip: IpAddr, kind: u16) -> bool {
-        // Pairing handshake is allowed from anyone (it's how a peer becomes paired);
-        // all other kinds require an established Circle membership.
-        kind == KIND_PAIR_REQUEST
-            || kind == KIND_PAIR_ACCEPT
-            || kind == KIND_PAIR_REMOVE
-            || self.content.is_paired_ip(ip)
+        // Pairing handshake is allowed from anyone (it's how a peer becomes
+        // paired); everything else needs membership *and* the write grant.
+        if kind == KIND_PAIR_REQUEST || kind == KIND_PAIR_ACCEPT || kind == KIND_PAIR_REMOVE {
+            return true;
+        }
+        self.content.perms_for_ip(ip).is_some_and(|p| p.relay_write)
+    }
+
+    fn max_req_ttl(&self, ip: IpAddr) -> u8 {
+        match self.content.perms_for_ip(ip) {
+            Some(p) if p.relay_read_multihop => crate::mesh_relay::MAX_REQ_TTL,
+            _ => 0,
+        }
     }
 }
 
@@ -898,6 +971,7 @@ impl Content {
                 npub: npub.to_string(),
                 name: name.to_string(),
                 added_at: now_secs(),
+                perms: PeerPerms::default(),
             });
         }
         let snapshot = circle.clone();
@@ -955,12 +1029,45 @@ impl Content {
     /// `fd…+node_addr[0..15]` — `PeerIdentity::from_npub(npub).address()` — which is
     /// exactly the source address the mesh sockets see.
     pub fn is_paired_ip(&self, ip: IpAddr) -> bool {
-        let IpAddr::V6(v6) = ip else { return false };
-        self.circle.lock().unwrap().iter().any(|c| {
-            fips::PeerIdentity::from_npub(&c.npub)
-                .map(|p| p.address().to_ipv6() == v6)
-                .unwrap_or(false)
-        })
+        self.perms_for_ip(ip).is_some()
+    }
+
+    /// The permissions granted to the peer at `ip`, or `None` if `ip` is not a
+    /// current Circle member. One lookup answers both "are they paired" and "what
+    /// may they do", so the access checks never consult two sources that could
+    /// disagree. See `reference/thinning-custom-relay.md` (D10).
+    pub fn perms_for_ip(&self, ip: IpAddr) -> Option<PeerPerms> {
+        let IpAddr::V6(v6) = ip else { return None };
+        self.circle
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|c| {
+                fips::PeerIdentity::from_npub(&c.npub)
+                    .map(|p| p.address().to_ipv6() == v6)
+                    .unwrap_or(false)
+            })
+            .map(|c| c.perms.clone())
+    }
+
+    /// Whether events arriving from the peer at `ip` may be forwarded onward by
+    /// us. Without the grant their events are still stored and shown locally —
+    /// they simply stop here (`reference/thinning-custom-relay.md`, D10).
+    pub fn may_forward_from(&self, ip: IpAddr) -> bool {
+        self.perms_for_ip(ip)
+            .is_some_and(|p| p.relay_write_multihop)
+    }
+
+    /// Whether the peer at `ip` may upload blobs to our Blossom. Off by default:
+    /// propagation is pull-based, so nothing in normal operation pushes blobs to
+    /// a peer, and an upload costs us disk.
+    pub fn may_upload_blobs(&self, ip: IpAddr) -> bool {
+        self.perms_for_ip(ip).is_some_and(|p| p.blossom_write)
+    }
+
+    /// Whether the peer at `ip` may read blobs from our Blossom.
+    pub fn may_read_blobs(&self, ip: IpAddr) -> bool {
+        self.perms_for_ip(ip).is_some_and(|p| p.blossom_read)
     }
 
     /// Library sites worth (re)trying right now: not yet `ready`, and not already
@@ -2211,6 +2318,37 @@ mod tests {
     use super::*;
     use nostr::nips::nip19::ToBech32;
     use nsite_deck::testing::build_test_site;
+
+    /// A `circle.json` written before per-peer permissions existed must load with
+    /// the defaults — and crucially with `blossom.write` **off**. A missing field
+    /// must never read as a grant, so serde's default has to be `false` rather
+    /// than `bool::default()` by accident (`reference/thinning-custom-relay.md`,
+    /// D10).
+    #[test]
+    fn a_pre_permissions_circle_loads_with_upload_denied() {
+        let legacy = r#"[{"npub":"npub1abc","name":"Old Phone","addedAt":1}]"#;
+        let loaded: Vec<CircleContact> = serde_json::from_str(legacy).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        let p = &loaded[0].perms;
+        assert!(!p.blossom_write, "upload must not be granted by omission");
+        assert!(p.blossom_read, "reads stay on for an existing peer");
+        assert!(p.relay_read && p.relay_write);
+        assert!(p.relay_read_multihop && p.relay_write_multihop);
+    }
+
+    /// The defaults are the whole permission model until the UI exposes them, so
+    /// pin them rather than trusting the struct to stay as written.
+    #[test]
+    fn default_permissions_are_open_except_uploads() {
+        let p = PeerPerms::default();
+        assert!(p.relay_read);
+        assert!(p.relay_read_multihop);
+        assert!(p.relay_write);
+        assert!(p.relay_write_multihop);
+        assert!(p.blossom_read);
+        assert!(!p.blossom_write);
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("myco-content-test-{}-{}", std::process::id(), tag))

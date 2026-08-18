@@ -114,11 +114,23 @@ pub trait PeerGate: Send + Sync {
     /// the pairing kinds from anyone (bootstrap) and everything else only when
     /// `ip` is a paired peer.
     fn may_publish(&self, ip: IpAddr, kind: u16) -> bool;
+
+    /// How far a `REQ` from `ip` may be forwarded on. `0` means answer from our
+    /// own store only. Per-peer, so revoking multihop reads is a clamp on the
+    /// budget the pull plane already carries rather than a separate branch
+    /// (`reference/thinning-custom-relay.md`, D10).
+    ///
+    /// The push-side counterpart lives in the gossiper, which holds the same
+    /// permission record and applies it where the hop budget is computed.
+    fn max_req_ttl(&self, _ip: IpAddr) -> u8 {
+        MAX_REQ_TTL
+    }
 }
 
-/// Clamp on the `req-ttl` we'll honour, so a peer can't turn us into an
-/// unbounded query amplifier (mirrors `MAX_EVENT_TTL` on the push plane).
-const MAX_REQ_TTL: u8 = 2;
+/// Default clamp on the `req-ttl` we'll honour, so a peer can't turn us into an
+/// unbounded query amplifier (mirrors `MAX_EVENT_TTL` on the push plane). A gate
+/// may lower it per peer — see [`PeerGate::max_req_ttl`].
+pub(crate) const MAX_REQ_TTL: u8 = 2;
 
 /// How long a non-expiring event's id is remembered as seen. A push wave lives
 /// for seconds, so this only has to outlast retries and a slow multi-hop path.
@@ -473,12 +485,20 @@ async fn handle_client_frame(
             // affects local matching.
             let req_ttl = match origin {
                 Origin::Local => 0,
-                Origin::Mesh => raw_filters
-                    .iter()
-                    .filter_map(|f| f.get("req-ttl").and_then(|v| v.as_u64()))
-                    .max()
-                    .map(|n| n.min(MAX_REQ_TTL as u64) as u8)
-                    .unwrap_or(0),
+                Origin::Mesh => {
+                    // The clamp is this peer's own, so a peer without the
+                    // multihop grant is answered from our store alone.
+                    let cap = hub
+                        .gate
+                        .as_ref()
+                        .map_or(MAX_REQ_TTL, |g| g.max_req_ttl(peer_ip));
+                    raw_filters
+                        .iter()
+                        .filter_map(|f| f.get("req-ttl").and_then(|v| v.as_u64()))
+                        .max()
+                        .map(|n| n.min(cap as u64) as u8)
+                        .unwrap_or(0)
+                }
             };
             let filters: Vec<ManifestFilter> =
                 raw_filters.iter().filter_map(parse_filter).collect();

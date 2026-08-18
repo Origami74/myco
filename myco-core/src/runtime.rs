@@ -309,8 +309,15 @@ impl AppRuntime {
                     // current Circle member (loopback bypasses). Pairing never
                     // touches Blossom, so there's no handshake exception here.
                     let content_for_blob = content.clone();
-                    let access: myco_blossom::server::AccessFn =
-                        Arc::new(move |ip| content_for_blob.is_paired_ip(ip));
+                    // Reads are granted to every paired peer; uploads are not, so
+                    // the two are answered from different flags on the peer's own
+                    // permission record (D10).
+                    let access: myco_blossom::server::AccessFn = Arc::new(move |ip, op| match op {
+                        myco_blossom::server::BlobOp::Read => content_for_blob.may_read_blobs(ip),
+                        myco_blossom::server::BlobOp::Write => {
+                            content_for_blob.may_upload_blobs(ip)
+                        }
+                    });
                     rt.spawn(async move {
                         if let Err(e) =
                             myco_blossom::server::serve_on_guarded(blobs, listener, access).await

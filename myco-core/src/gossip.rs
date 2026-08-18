@@ -94,7 +94,14 @@ impl Gossiper for MeshGossiper {
             Origin::Local => DEFAULT_EVENT_TTL,
             Origin::Mesh => inbound.event_ttl.unwrap_or(0),
         };
-        let fwd = effective.min(MAX_EVENT_TTL);
+        // A peer we have not granted multihop writes still gets its events
+        // stored and shown here; they simply travel no further through us. A
+        // clamp of 0 is how that is expressed (D10).
+        let peer_cap = match inbound.sender {
+            Some(ip) if !self.content.may_forward_from(ip) => 0,
+            _ => MAX_EVENT_TTL,
+        };
+        let fwd = effective.min(MAX_EVENT_TTL).min(peer_cap);
         if fwd == 0 {
             return;
         }

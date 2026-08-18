@@ -196,6 +196,13 @@ async fn speedtest_blossom(
         .body(payload)
         .send()
         .await?;
+    if resp.status() == reqwest::StatusCode::FORBIDDEN {
+        // The speedtest is the only thing that pushes blobs to a peer, and blob
+        // upload is off by default (`reference/thinning-custom-relay.md`, D10).
+        // Say so plainly — this is a permission the peer has to grant, not a
+        // network fault to retry.
+        anyhow::bail!("peer does not allow uploads (blob write permission is off on their device)");
+    }
     if !resp.status().is_success() {
         anyhow::bail!("upload rejected ({})", resp.status());
     }
