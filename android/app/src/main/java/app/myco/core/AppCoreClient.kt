@@ -50,6 +50,10 @@ data class CacheStatus(
     val relayEvents: Long,
     val blobCount: Long,
     val usedBytes: Long,
+    /** A custom relay is configured, so the built-in event store is not serving. */
+    val externalRelay: Boolean = false,
+    /** A custom Blossom is configured, so the built-in blob store is not serving. */
+    val externalBlobs: Boolean = false,
 )
 
 /** A Circle contact: a paired peer we pull nsites from over the mesh. */
@@ -280,6 +284,8 @@ data class AppState(
                 relayEvents = cacheJson.optLong("relayEvents"),
                 blobCount = cacheJson.optLong("blobCount"),
                 usedBytes = cacheJson.optLong("usedBytes"),
+                externalRelay = cacheJson.optBoolean("externalRelay"),
+                externalBlobs = cacheJson.optBoolean("externalBlobs"),
             )
             val circleJson = o.optJSONArray("circle")
             val circle = buildList {

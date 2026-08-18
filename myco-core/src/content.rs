@@ -196,12 +196,26 @@ fn dedup_by_host(found: Vec<DiscoveredNsite>) -> Vec<DiscoveredNsite> {
 }
 
 /// Cache/store counts for the UI.
+///
+/// These always describe the **embedded** store and blob directory, which is
+/// what occupies space on this device. Configuring a custom relay or Blossom
+/// does not change these numbers — it means they stop describing what is
+/// actually serving, because a remote store's size is not something NIP-01 or
+/// BUD-01 can report. The `external_*` flags let the screen note that the
+/// built-in store is no longer in use rather than quietly showing a figure for
+/// the wrong thing. See `reference/thinning-custom-relay.md` (D4).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheView {
     pub relay_events: u64,
     pub blob_count: u64,
     pub used_bytes: u64,
+    /// A custom relay is configured, so the embedded event store is not serving.
+    pub external_relay: bool,
+    /// A custom Blossom is configured, so the embedded blob store is not
+    /// serving. Separate from the relay flag because one can be swapped without
+    /// the other.
+    pub external_blobs: bool,
 }
 
 impl CacheView {
@@ -211,6 +225,8 @@ impl CacheView {
             relay_events: 0,
             blob_count: 0,
             used_bytes: 0,
+            external_relay: false,
+            external_blobs: false,
         }
     }
 }
@@ -2123,10 +2139,15 @@ impl Content {
     }
 
     pub fn cache_view(&self) -> CacheView {
+        // Always the embedded store's own figures — that is what takes up space
+        // here. Nothing external is configurable yet, so neither flag is set;
+        // they follow the configured backend once that lands.
         CacheView {
             relay_events: self.relay.count() as u64,
             blob_count: self.blobs.count() as u64,
             used_bytes: self.blobs.total_bytes(),
+            external_relay: false,
+            external_blobs: false,
         }
     }
 

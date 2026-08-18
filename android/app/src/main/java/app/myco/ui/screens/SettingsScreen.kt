@@ -358,6 +358,9 @@ private fun IdentitySettings(state: AppState, client: AppCoreClient, onBack: () 
 private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -> Unit) {
     var confirmCache by remember { mutableStateOf(false) }
     var confirmAll by remember { mutableStateOf(false) }
+    // The rows below are laid out but not wired: the store cannot be swapped yet.
+    // Better to say so on tap than to look functional and do nothing.
+    var notYet by remember { mutableStateOf<String?>(null) }
 
     val used = state.cache.usedBytes
     val fraction = (used.toDouble() / STORAGE_CAP_BYTES).coerceIn(0.0, 1.0).toFloat()
@@ -388,7 +391,54 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
+                // These figures are always the built-in store's. With a custom
+                // relay or Blossom configured they still describe what is taking
+                // up room here, but no longer what is serving — say so, rather
+                // than letting the bar read as the whole picture.
+                val notInUse = when {
+                    state.cache.externalRelay && state.cache.externalBlobs ->
+                        "Not in use — a custom relay and Blossom are configured below."
+                    state.cache.externalRelay ->
+                        "Events not in use — a custom relay is configured below."
+                    state.cache.externalBlobs ->
+                        "Blobs not in use — a custom Blossom is configured below."
+                    else -> null
+                }
+                if (notInUse != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        notInUse,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        GroupLabel("ADVANCED")
+        SectionCard {
+            SettingRow(
+                icon = null,
+                title = "Custom relay",
+                subtitle = if (state.cache.externalRelay) {
+                    "Events are stored on a relay you chose"
+                } else {
+                    "Use another Nostr relay instead of the built-in one"
+                },
+                onClick = { notYet = "relay" },
+            )
+            RowDivider()
+            SettingRow(
+                icon = null,
+                title = "Custom Blossom",
+                subtitle = if (state.cache.externalBlobs) {
+                    "Blobs are stored on a server you chose"
+                } else {
+                    "Use another Blossom server instead of the built-in one"
+                },
+                onClick = { notYet = "Blossom" },
+            )
         }
 
         Spacer(Modifier.height(8.dp))
@@ -412,6 +462,19 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
         }
     }
 
+    notYet?.let { what ->
+        AlertDialog(
+            onDismissRequest = { notYet = null },
+            confirmButton = { TextButton(onClick = { notYet = null }) { Text("OK") } },
+            title = { Text("Not available yet") },
+            text = {
+                Text(
+                    "Pointing Myco at your own $what is still being built. " +
+                        "Everything is stored on this device for now.",
+                )
+            },
+        )
+    }
     if (confirmCache) {
         ConfirmDialog(
             title = "Delete cache?",
