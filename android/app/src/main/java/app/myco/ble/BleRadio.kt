@@ -343,6 +343,15 @@ class BleRadio(context: Context) {
             }, DIAL_WATCHDOG_MS, TimeUnit.MILLISECONDS)
         }.getOrNull()
 
+    /** The first [bytes] bytes of a hex string, as bytes. Null if it is too
+     *  short or not hex — never a partially-decoded prefix. */
+    private fun hexPrefix(hex: String, bytes: Int): ByteArray? {
+        if (hex.length < bytes * 2) return null
+        return runCatching {
+            ByteArray(bytes) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+        }.getOrNull()
+    }
+
     /** `s` as UTF-8, cut to at most [max] bytes on a character boundary. */
     private fun truncateUtf8(s: String, max: Int): ByteArray {
         var text = s
@@ -388,19 +397,33 @@ class BleRadio(context: Context) {
         // unchanged. Null when no name has been pushed yet — advertise nothing
         // rather than an empty string, so a scanner can tell "chose no name"
         // from "advertised a blank one".
+        // <6-byte node_addr prefix><UTF-8 name>. Both or neither: a name with
+        // nobody attached to it is unattributable, and an address with no name
+        // says nothing the peer row did not already know.
+        val nodePrefix = localNodeAddrHex?.let { hexPrefix(it, NODE_PREFIX_BYTES) }
         val nameBytes = localName?.let { truncateUtf8(it, MAX_NAME_BYTES) }
-        val scanResponse = nameBytes?.let {
+        val scanResponse = if (nodePrefix != null && nameBytes != null) {
             AdvertiseData.Builder()
                 .setIncludeDeviceName(false)
-                .addServiceData(NAME_SD_PARCEL_UUID, it)
+                .addServiceData(NAME_SD_PARCEL_UUID, nodePrefix + nameBytes)
                 .build()
+        } else {
+            null
         }
         val cb = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
                 advertiseRetries = 0
                 BleHealth.advertiserExhausted = false
+                // Reports what actually went out, not what was configured: the
+                // scan response is only built when BOTH the name and the node
+                // address are known, and a log that claimed otherwise sent me
+                // hunting on the receiving device for a name never sent.
                 Log.i(TAG, "advertising PSM $psm (in primary advert)" +
-                    (localName?.let { ", name '$it' (in scan response)" } ?: ""))
+                    if (scanResponse != null) {
+                        ", name '$localName' as ${nodePrefix?.size ?: 0}B+name in scan response"
+                    } else {
+                        ", no scan response (name=$localName nodeAddr=$localNodeAddrHex)"
+                    })
                 if (bridgeHandle != 0L) NativeCore.bleDeliverAdvertisingState(bridgeHandle, true)
             }
             override fun onStartFailure(errorCode: Int) {
@@ -545,15 +568,19 @@ class BleRadio(context: Context) {
             // — a scan response can simply not arrive — and pushing nothing is
             // how the display layer keeps showing the npub-derived name.
             result.scanRecord?.getServiceData(NAME_SD_PARCEL_UUID)
-                ?.takeIf { it.isNotEmpty() }
-                ?.let { bytes ->
-                    val advertised = String(bytes, Charsets.UTF_8)
-                    NativeCore.bleDeliverAdvertName(addr, advertised)
+                ?.takeIf { it.size > NODE_PREFIX_BYTES }
+                ?.let { blob ->
+                    val nodePrefix = blob.take(NODE_PREFIX_BYTES)
+                        .joinToString("") { "%02x".format(it) }
+                    val advertised = String(
+                        blob, NODE_PREFIX_BYTES, blob.size - NODE_PREFIX_BYTES, Charsets.UTF_8,
+                    )
+                    NativeCore.bleDeliverAdvertName(nodePrefix, advertised)
                     // Logged on change only. The push itself fires several
                     // times a second per peer, but a name that just appeared or
                     // just changed is the one thing worth seeing in a log.
-                    if (lastAdvertName.put(addr, advertised) != advertised) {
-                        Log.i(TAG, "$addr advertises name '$advertised'")
+                    if (lastAdvertName.put(nodePrefix, advertised) != advertised) {
+                        Log.i(TAG, "$addr ($nodePrefix…) advertises name '$advertised'")
                     }
                 }
         } else {
@@ -965,6 +992,21 @@ class BleRadio(context: Context) {
                 instance?.reAdvertiseForName()
             }
 
+        @Volatile
+        private var nodeAddrField: String? = null
+
+        /** Our own `node_addr`, hex. Advertised beside [localName] so a scanner
+         *  can attribute the name to the peer row that address keys, whatever
+         *  transport that peer is ultimately carried on. */
+        var localNodeAddrHex: String?
+            get() = nodeAddrField
+            set(value) {
+                val next = value?.trim()?.ifBlank { null }
+                if (next == nodeAddrField) return
+                nodeAddrField = next
+                instance?.reAdvertiseForName()
+            }
+
         /** FIPS service UUID — must match fips-core. */
         val FIPS_UUID: UUID = UUID.fromString("9c90b790-2cc5-42c0-9f87-c9cc40648f4c")
         val FIPS_PARCEL_UUID = ParcelUuid(FIPS_UUID)
@@ -975,17 +1017,28 @@ class BleRadio(context: Context) {
          *  128-bit FIPS UUID inside one 31-byte legacy advert. */
         val PSM_SD_PARCEL_UUID = ParcelUuid.fromString("00009c90-0000-1000-8000-00805f9b34fb")
 
-        /** Compact 16-bit service-data UUID carrying this device's chosen display
-         *  name in the SCAN RESPONSE (0x9C91 — the PSM key's neighbour). It rides
-         *  the scan response precisely because the PSM must not: a scan response
-         *  needs an active-scan round-trip that drops asymmetrically, which is
-         *  fatal for the PSM but merely cosmetic for a name. A name that never
-         *  arrives just leaves the peer showing its npub-derived one. */
+        /** Compact 16-bit service-data UUID carrying this device's identity-plus-
+         *  name blob in the SCAN RESPONSE (0x9C91 — the PSM key's neighbour). It
+         *  rides the scan response precisely because the PSM must not: a scan
+         *  response needs an active-scan round-trip that drops asymmetrically,
+         *  which is fatal for the PSM but merely cosmetic for a name. A name that
+         *  never arrives just leaves the peer showing its npub-derived one. */
         val NAME_SD_PARCEL_UUID = ParcelUuid.fromString("00009c91-0000-1000-8000-00805f9b34fb")
 
+        /** Leading bytes of our own `node_addr` prefixed to the advertised name.
+         *
+         *  The name has to say *whose* it is. Keying it on the BLE MAC instead
+         *  only works for a peer currently carried over BLE — but a device is
+         *  routinely discovered by advert and then connected over the LAN lane,
+         *  and its row is keyed by node address, not by MAC. Six bytes is 48 bits
+         *  of node address: ample against accidental collision in a room, and
+         *  cheap enough to leave the name most of the payload. */
+        const val NODE_PREFIX_BYTES = 6
+
         /** Longest name that fits the 31-byte scan response beside its 4-byte
-         *  service-data header. Cut on a UTF-8 boundary, never mid-character. */
-        private const val MAX_NAME_BYTES = 27
+         *  service-data header and the node-address prefix. Cut on a UTF-8
+         *  boundary, never mid-character. */
+        private const val MAX_NAME_BYTES = 31 - 4 - NODE_PREFIX_BYTES
     }
 }
 

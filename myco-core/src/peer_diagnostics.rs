@@ -85,11 +85,12 @@ fn short(s: &str) -> String {
 /// link-local vs. routable) — that would be exactly the sort of
 /// inference-presented-as-observation this phase prohibits.
 ///
-/// `advert_names` is BLE-address-keyed self-advertised display names, read out
-/// of peers' scan responses. It is joined on after adverts have been attributed
-/// to rows, so a row only carries one if a scan actually saw that address. The
-/// value is unauthenticated (see [`crate::advert_names`]) and is therefore only
-/// ever surfaced as a fallback below the Circle/pairing names.
+/// `advert_names` is self-advertised display names read out of peers' scan
+/// responses, keyed by the node-address prefix each advertiser puts beside its
+/// name. Joining on the node address rather than the BLE address is what lets a
+/// peer discovered over BLE but *carried* over the LAN lane still show the name
+/// it chose. The value is unauthenticated (see [`crate::advert_names`]) and is
+/// therefore only ever surfaced as a fallback below the Circle/pairing names.
 ///
 /// `ble_attempts` is the per-peer BLE connect-attempt log, keyed by BLE
 /// address. It supplies three things: the role/discovery/outcome history joined
@@ -329,17 +330,25 @@ pub fn merge_peers(
         };
     }
 
-    // Step 5b: join self-advertised names on by BLE address. Runs after step 2
-    // has attributed adverts to rows, so `ble_addr` is populated wherever a
-    // scan actually saw the device. Nothing is written for a row we never saw
-    // an advert for — the absence of a broadcast name is a fact, and inventing
-    // one from the npub here would rob the display layer of the distinction.
-    for row in rows.iter_mut() {
-        if row.ble_addr.is_empty() {
-            continue;
-        }
-        if let Some(name) = advert_names.get(&row.ble_addr) {
-            row.advertised_name = name.clone();
+    // Step 5b: join self-advertised names on by node-address prefix. Works for
+    // any row that has a resolved node address, whatever transport now carries
+    // it — a device heard over BLE and then connected over the LAN lane is the
+    // common case, and an address-keyed join missed exactly those. Nothing is
+    // written for a row we never heard a name from: the absence of a broadcast
+    // name is a fact, and filling it from the npub here would rob the display
+    // layer of the distinction.
+    if !advert_names.is_empty() {
+        for row in rows.iter_mut() {
+            if row.node_addr_hex.is_empty() {
+                continue;
+            }
+            let node = row.node_addr_hex.to_ascii_lowercase();
+            if let Some((_, name)) = advert_names
+                .iter()
+                .find(|(prefix, _)| !prefix.is_empty() && node.starts_with(prefix.as_str()))
+            {
+                row.advertised_name = name.clone();
+            }
         }
     }
 
@@ -461,9 +470,8 @@ mod tests {
 
     /// An inbound BLE peer — one we never dialled, so the attempt log knows
     /// nothing about it — must still be attributed its own adverts. Its link
-    /// address is what supplies that, and without it the RSSI and the
-    /// self-advertised name both go missing on exactly the peers most likely to
-    /// have connected that way.
+    /// address is what supplies that, and without it the RSSI goes missing on
+    /// exactly the peers most likely to have connected that way.
     #[test]
     fn an_inbound_ble_peer_is_keyed_by_its_link_address() {
         let mut view = pv("a1", "npub-inbound", true, 1_000, "ble");
@@ -479,10 +487,6 @@ mod tests {
             psm: 196,
             rssi: -61,
         }];
-        let names = HashMap::from([(
-            "ble0/77:B5:98:5E:D1:E6".to_string(),
-            "orchid eero".to_string(),
-        )]);
         let out = merge_peers(
             &[view, ip],
             &peers,
@@ -492,7 +496,7 @@ mod tests {
             &[],
             &[],
             &HashMap::new(),
-            &names,
+            &HashMap::new(),
             // Deliberately empty: this is the no-dial-history case.
             &[],
             0,
@@ -501,59 +505,52 @@ mod tests {
         let inbound = out.iter().find(|r| r.npub == "npub-inbound").expect("row");
         assert_eq!(inbound.ble_addr, "ble0/77:B5:98:5E:D1:E6");
         assert_eq!(inbound.rssi, Some(-61));
-        assert_eq!(inbound.advertised_name, "orchid eero");
         // A socket address is not a scan address and must key into nothing.
         let over_ip = out.iter().find(|r| r.npub == "npub-over-ip").expect("row");
         assert_eq!(over_ip.ble_addr, "");
-        assert_eq!(over_ip.advertised_name, "");
     }
 
-    /// A self-advertised name is joined on by BLE address, and only for a row
-    /// an advert was actually attributed to. A peer seen over another lane
-    /// entirely carries none — the display layer has to be able to tell "chose
-    /// no name" from "we never heard one".
+    /// Advertised names join on the node-address prefix the advertiser puts
+    /// beside the name, **not** on the BLE address it arrived over. That is the
+    /// whole point: a device heard over BLE is routinely carried over the LAN
+    /// lane, and a MAC-keyed join missed exactly those peers.
     #[test]
-    fn an_advertised_name_lands_on_the_row_its_advert_was_attributed_to() {
+    fn an_advertised_name_joins_by_node_address_whatever_carries_the_peer() {
         let views = vec![
-            pv("a1", "npub-ble-seen", true, 1_000, "ble"),
-            pv("a2", "npub-udp-only", true, 1_000, "udp"),
+            // Heard over BLE, carried over udp — the case that was broken.
+            pv("a1b2c3d4e5f6aabb", "npub-lan-carried", true, 1_000, "udp"),
+            pv("ff00ff00ff00ff00", "npub-no-broadcast", true, 1_000, "ble"),
         ];
         let peers = vec![
-            bp("a1", "npub-ble-seen", true),
-            bp("a2", "npub-udp-only", true),
+            bp("a1b2c3d4e5f6aabb", "npub-lan-carried", true),
+            bp("ff00ff00ff00ff00", "npub-no-broadcast", true),
         ];
-        // The advert's address is learned onto the first row by the attempt log.
-        let attempts = vec![BlePeerAttempts {
-            ble_addr: "ble0/AA:01".to_string(),
-            node_addr_hex: "a1".to_string(),
-            send_failures: 0,
-            attempts: Vec::new(),
-        }];
-        let adverts = vec![BleAdvert {
-            addr: "ble0/AA:01".to_string(),
-            psm: 133,
-            rssi: -55,
-        }];
-        let names = HashMap::from([("ble0/AA:01".to_string(), "DC-1".to_string())]);
+        let names = HashMap::from([("a1b2c3d4e5f6".to_string(), "DC-1".to_string())]);
         let out = merge_peers(
             &views,
             &peers,
-            &adverts,
+            &[],
             &[],
             &[],
             &[],
             &[],
             &HashMap::new(),
             &names,
-            &attempts,
+            &[],
             0,
         );
-        let seen = out.iter().find(|r| r.npub == "npub-ble-seen").expect("row");
-        assert_eq!(seen.advertised_name, "DC-1");
-        let other = out.iter().find(|r| r.npub == "npub-udp-only").expect("row");
+        let carried = out
+            .iter()
+            .find(|r| r.npub == "npub-lan-carried")
+            .expect("row");
+        assert_eq!(carried.advertised_name, "DC-1");
+        let silent = out
+            .iter()
+            .find(|r| r.npub == "npub-no-broadcast")
+            .expect("row");
         assert_eq!(
-            other.advertised_name, "",
-            "a row with no attributed advert must not borrow another's name"
+            silent.advertised_name, "",
+            "a peer that broadcast no name must not borrow another's"
         );
     }
 

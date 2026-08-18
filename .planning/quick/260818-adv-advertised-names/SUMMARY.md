@@ -62,15 +62,36 @@ attribution for inbound peers too, which was silently missing before.
   response)` and `ble0/77:B5:98:5E:D1:E6 advertises name 'orchid eero'` — both
   directions confirmed on the wire.
 
+## Correction: the address key was the wrong key
+
+The first working build advertised and received fine and still showed nothing,
+because the join ran on the BLE address. That only ever attaches a name to a
+peer *currently carried over BLE* — and a device is routinely discovered by
+advert and then connected over the LAN lane, which is exactly what both test
+devices were doing. Its peer row is keyed by node address, not by MAC.
+
+So the advertiser now says who it is: the scan response carries a 6-byte
+`node_addr` prefix ahead of the name, and `advert_names` is keyed on that.
+48 bits is ample against accidental collision in a room and leaves 21 bytes for
+the name. No address mapping is needed at all, and the join works whatever
+transport ends up carrying the peer.
+
+The `transport_addr` work stays — it is a genuine fix for RSSI attribution on
+inbound BLE peers, which was silently missing.
+
+Confirmed on device: tablet logs `name 'DC-1' as 6B+name in scan response` and
+`ble0/7E:80:31:62:69:92 (a16d353c9f25…) advertises name 'orchid eero'`, and the
+A52's Dev peer row on the tablet now reads `advert name  orchid eero` while
+every other peer (older builds) reads `—`.
+
 ## Not verified
 
-The rendered label. Both test devices' chosen names are indistinguishable from
-what the generator produces for their npubs (the A52's *is* `orchid eero`), so
-the Nearby bubble looks identical whether the advertised name was used or not.
-Proving it on screen needs one device renamed to something the generator cannot
-emit — `DC-1` qualifies, and the tablet already advertises it, but the A52 was
-locked. Check the A52's Nearby list for `DC-1`: if it appears, the whole path
-renders.
+The rendered Nearby bubble. On the tablet the A52's chosen name is identical to
+what the generator produces for its npub (`orchid eero`), so the bubble looks
+the same either way — the `advert name` forensic row is what proves the join.
+The unambiguous direction is the A52 showing the tablet as `DC-1`, which the
+generator cannot emit; the A52 was locked and needs a relaunch on this build,
+since it pushes its name and node address from `onResume`.
 
 Also unchanged: this is BLE-only. A peer found over Wi-Fi Aware or the LAN
 still carries no advertised name.
