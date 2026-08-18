@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -88,6 +89,26 @@ class BleRadio(context: Context) {
     private var stopped = false
 
     private var serverSocket: BluetoothServerSocket? = null
+
+    /**
+     * The PSM this radio's L2CAP listener is actually bound to, or 0 if it has
+     * none. Written only by [listen] and cleared by [shutdown], so it can never
+     * name a socket that is gone.
+     *
+     * Read by [BleService] to tell a recovered lane from one that came back up
+     * scanning but undialable — a radio with no listener advertises nothing a
+     * peer can connect to, which is invisible from the outside.
+     */
+    @Volatile
+    var listenPsm: Int = 0
+        private set
+
+    // Say it once, not once per operation and not once per retry: with the
+    // adapter off, `bluetoothLeScanner` / `bluetoothLeAdvertiser` are null and
+    // `listenUsingInsecureL2capChannel` throws — three separate ways to fail,
+    // all meaning the same single thing. Per-radio, so the replacement radio
+    // built when Bluetooth returns starts with a clean slate.
+    private val adapterOffLogged = AtomicBoolean(false)
     private var advertiser: BluetoothLeAdvertiser? = null
     private var advertiseCallback: AdvertiseCallback? = null
     private var scanner: BluetoothLeScanner? = null
@@ -145,17 +166,47 @@ class BleRadio(context: Context) {
     /** Open an insecure L2CAP listener; return the OS-assigned PSM (0 on failure). */
     fun listen(): Int {
         if (stopped) return 0
-        val a = adapter ?: return 0
+        val a = adapter ?: run {
+            Log.e(TAG, "listen: no Bluetooth adapter on this device")
+            return 0
+        }
+        if (!a.isEnabled) {
+            reportAdapterOff("listen")
+            return 0
+        }
         return try {
             val ss = a.listenUsingInsecureL2capChannel()
             serverSocket = ss
             val psm = ss.psm
+            listenPsm = psm
             io.execute { acceptLoop(ss) }
             Log.i(TAG, "L2CAP listening on PSM $psm")
             psm
         } catch (e: Exception) {
             Log.e(TAG, "listen failed", e)
             0
+        }
+    }
+
+    /**
+     * Report — once per radio — that Bluetooth itself is off, so the lane
+     * cannot open.
+     *
+     * This is the line whose absence hid the off/on bug: `startScanning` used
+     * to return on a null `bluetoothLeScanner` without a word, so a process
+     * that started with Bluetooth disabled looked identical to a healthy one
+     * (`bluetooth_on=1`, transport `up`) while having never scanned once.
+     * Recovery is [BleService]'s job — it watches the adapter — so this only
+     * has to be audible, not actionable.
+     */
+    private fun reportAdapterOff(op: String) {
+        if (adapterOffLogged.compareAndSet(false, true)) {
+            Log.w(
+                TAG,
+                "$op: Bluetooth is off — this radio has no listener, no advert and " +
+                    "no scan; the lane stays down until the adapter comes back " +
+                    "(BleService rebuilds it then)",
+            )
         }
     }
 
@@ -281,7 +332,12 @@ class BleRadio(context: Context) {
         // Stop-before-start hygiene: never orphan a prior advertiser set on a
         // re-advertise (retry / radio restart), which itself burns a slot.
         stopAdvertising()
-        val adv = adapter?.bluetoothLeAdvertiser ?: return
+        // Null whenever the adapter is not ON. Returning silently here is how a
+        // radio ends up believing it advertises when it does not.
+        val adv = adapter?.bluetoothLeAdvertiser ?: run {
+            reportAdapterOff("startAdvertising")
+            return
+        }
         advertiser = adv
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
@@ -356,7 +412,12 @@ class BleRadio(context: Context) {
         // Stop-before-start hygiene: a re-arm (retry / radio restart) must not
         // orphan a prior scan callback.
         stopScanning()
-        val sc = adapter?.bluetoothLeScanner ?: return
+        // Null whenever the adapter is not ON — the silent return that made a
+        // Bluetooth off/on cycle leave this process permanently deaf.
+        val sc = adapter?.bluetoothLeScanner ?: run {
+            reportAdapterOff("startScanning")
+            return
+        }
         scanner = sc
         val filters = listOf(ScanFilter.Builder().setServiceUuid(FIPS_PARCEL_UUID).build())
         val settings = ScanSettings.Builder()
@@ -539,6 +600,9 @@ class BleRadio(context: Context) {
         stopAdvertising()
         runCatching { serverSocket?.close() }
         serverSocket = null
+        // The socket is gone, so the PSM must not outlive it: a stale non-zero
+        // value here would tell [BleService] a dead radio was healthy.
+        listenPsm = 0
         // Dials parked in connect() outlive the radio otherwise: the thread
         // pool is shut down below, but shutdownNow cannot interrupt a thread
         // blocked in the BT stack. Closing the socket is what releases it.
