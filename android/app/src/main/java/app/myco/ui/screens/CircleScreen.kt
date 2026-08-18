@@ -73,6 +73,7 @@ import app.myco.nfc.NfcStatus
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
+import app.myco.ui.NameSuggestions
 import app.myco.ui.PeersPill
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.avatarColorFor
@@ -313,6 +314,7 @@ fun CircleScreen(
     if (editing) {
         RenameDialog(
             initial = name,
+            ownNpub = state.ownNpub,
             onDismiss = { editing = false },
             onSave = {
                 DeviceName.set(context, it)
@@ -566,7 +568,12 @@ private fun PersonBubble(
 }
 
 @Composable
-private fun RenameDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+private fun RenameDialog(
+    initial: String,
+    ownNpub: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
     var value by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -575,7 +582,17 @@ private fun RenameDialog(initial: String, onDismiss: () -> Unit, onSave: (String
             Column {
                 Text("How you appear to people you pair with. Pick something you can say out loud.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(value = value, onValueChange = { value = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { value = it.take(DeviceName.MAX_LENGTH) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(10.dp))
+                // Tapping a chip fills the field rather than saving outright —
+                // in a dialog, Save is the commit and short-circuiting it would
+                // leave Cancel meaning nothing.
+                NameSuggestions(ownNpub, value) { value = it }
             }
         },
         confirmButton = { TextButton(onClick = { if (value.isNotBlank()) onSave(value.trim()) }) { Text("Save") } },

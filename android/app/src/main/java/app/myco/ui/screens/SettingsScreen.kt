@@ -60,6 +60,7 @@ import app.myco.core.AppState
 import app.myco.core.NativeActions
 import app.myco.share.DeviceName
 import app.myco.ui.GroupLabel
+import app.myco.ui.NameSuggestions
 import app.myco.ui.RadioAction
 import app.myco.ui.RadioWarning
 import app.myco.ui.ScreenHeader
@@ -322,20 +323,20 @@ private fun IdentitySettings(state: AppState, client: AppCoreClient, onBack: () 
                 )
                 OutlinedTextField(
                     value = name,
-                    onValueChange = { name = it.take(40) },
+                    onValueChange = { name = it.take(DeviceName.MAX_LENGTH) },
                     label = { Text("Name") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                // Both defaults, one tap each — picking one saves immediately,
+                // since there is nothing left to confirm about a name you chose
+                // off a list rather than typed.
+                NameSuggestions(state.ownNpub, name) { picked ->
+                    name = picked
+                    DeviceName.set(context, picked)
+                    client.dispatch(NativeActions.setDeviceName(picked))
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(
-                        onClick = {
-                            // Empty resets to the npub-derived default.
-                            DeviceName.set(context, "")
-                            name = DeviceName.generated(state.ownNpub)
-                            client.dispatch(NativeActions.setDeviceName(name))
-                        },
-                    ) { Text("Reset") }
                     Spacer(Modifier.weight(1f))
                     TextButton(
                         enabled = name.isNotBlank() && name.trim() != saved,
