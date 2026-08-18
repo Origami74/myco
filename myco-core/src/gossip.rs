@@ -22,7 +22,6 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nostr::nips::nip19::ToBech32;
 use nostr::Event;
 
 use crate::mesh_relay::{Gossiper, Inbound, Origin};
@@ -56,28 +55,6 @@ fn is_gossip_eligible(kind: u16) -> bool {
 impl Gossiper for MeshGossiper {
     async fn on_event(&self, event: Event, inbound: Inbound) {
         let kind = event.kind.as_u16();
-        // Pairing signals are point-to-point (dialed straight to the target's
-        // relay) — handle them, never gossip. Only act on mesh-delivered ones.
-        if kind == crate::content::KIND_PAIR_REQUEST
-            || kind == crate::content::KIND_PAIR_ACCEPT
-            || kind == crate::content::KIND_PAIR_REMOVE
-        {
-            if inbound.origin == Origin::Mesh {
-                self.content.handle_pair_event(&event);
-                // A peer just accepted our pair request → they're a reachable source
-                // *now*. Retry any not-yet-ready downloads from them immediately,
-                // rather than waiting for the next connected-peer poll edge.
-                if kind == crate::content::KIND_PAIR_ACCEPT {
-                    let Ok(npub) = event.pubkey.to_bech32();
-                    for addr in self.content.retriable_library_addrs() {
-                        let content = self.content.clone();
-                        let holder = npub.clone();
-                        tokio::spawn(async move { content.open_site(addr, Some(holder)).await });
-                    }
-                }
-            }
-            return;
-        }
         // nsite manifests propagate over this same push plane (the relay just stored
         // a newer one), but with an interest-aware download-then-forward policy and
         // the active-version gate. See docs/design/nsite-updates.md §4.

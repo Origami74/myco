@@ -264,10 +264,12 @@ const MANIFEST_EVENT_TTL: u8 = 3;
 
 /// The mesh access gate backing the relay + Blossom servers: content (reads, chat,
 /// manifests, blobs) is restricted to **paired** (Circle) peers, and what a paired
-/// peer may do is its own [`PeerPerms`] record. The one remaining exception is the
-/// pairing handshake, which anyone may publish so a first-time request can
-/// bootstrap — that exception goes away when pairing moves to its own auth
-/// service (`reference/thinning-custom-relay.md`, D6).
+/// peer may do is its own [`PeerPerms`] record.
+///
+/// There are **no exceptions**. Pairing used to need one — an unpaired peer had
+/// to be able to publish the handshake kinds to bootstrap — but that now happens
+/// on the auth plane (`crate::auth_service`), so the content ports can simply
+/// require membership (`reference/thinning-custom-relay.md`, D6).
 ///
 /// Holds the [`Content`] so the live Circle is consulted per request: adding a
 /// peer, removing one, or changing a permission takes effect immediately.
@@ -286,11 +288,19 @@ impl crate::mesh_relay::PeerGate for CircleGate {
         self.content.perms_for_ip(ip).is_some_and(|p| p.relay_read)
     }
 
+    fn may_connect(&self, ip: IpAddr) -> bool {
+        // Membership alone, checked before the WebSocket upgrade. A peer with a
+        // narrower permission set still gets a socket; what it may do with it is
+        // decided per message below.
+        self.content.perms_for_ip(ip).is_some()
+    }
+
     fn may_publish(&self, ip: IpAddr, kind: u16) -> bool {
-        // Pairing handshake is allowed from anyone (it's how a peer becomes
-        // paired); everything else needs membership *and* the write grant.
+        // Pairing kinds are auth-plane control traffic, not content. They are
+        // refused here from every source, paired or not, so nothing writes them
+        // into a store that may not even be ours (D6).
         if kind == KIND_PAIR_REQUEST || kind == KIND_PAIR_ACCEPT || kind == KIND_PAIR_REMOVE {
-            return true;
+            return false;
         }
         self.content.perms_for_ip(ip).is_some_and(|p| p.relay_write)
     }
@@ -1163,7 +1173,7 @@ impl Content {
     /// Route an incoming pair event (the gossiper hands us the pair kinds; they are
     /// point-to-point and never gossiped). A **request** surfaces a pop-up; an
     /// **accept** means a peer accepted *our* request → add them to the Circle.
-    pub fn handle_pair_event(&self, event: &Event) {
+    pub fn handle_pair_event(self: &Arc<Self>, event: &Event) {
         let Ok(from) = event.pubkey.to_bech32();
         let name = tag_value(event, "n").unwrap_or_else(|| short_name(&from));
         match event.kind.as_u16() {
@@ -1186,6 +1196,14 @@ impl Content {
                     .lock()
                     .unwrap()
                     .retain(|p| p.npub != from);
+                // They are a reachable source *now*, so retry anything still
+                // waiting on a holder rather than idling until the next
+                // connected-peer poll edge.
+                for addr in self.retriable_library_addrs() {
+                    let content = self.clone();
+                    let holder = from.clone();
+                    tokio::spawn(async move { content.open_site(addr, Some(holder)).await });
+                }
             }
             KIND_PAIR_REMOVE => {
                 tracing::info!(from = %from, "pair: peer unpaired — removing from circle");
@@ -1280,13 +1298,20 @@ impl Content {
         self.dial_pair_event(npub, KIND_PAIR_REMOVE, "").await;
     }
 
-    /// Build + sign a pair event and publish it to the target's mesh relay,
-    /// **retrying** until the relay acks or we give up. A freshly-paired BLE session
-    /// is flaky (handshake collisions, "connection not ready"), so a single
+    /// Build + sign a pair event and POST it to the target's **auth service**,
+    /// **retrying** until it acks or we give up. A freshly-paired BLE session is
+    /// flaky (handshake collisions, "connection not ready"), so a single
     /// fire-and-forget dial often misses — leaving the Circles asymmetric, which the
     /// access gate then turns into a hard "can't see their apps" failure. Each
     /// attempt rebuilds (re-signs) the event so its NIP-40 expiration stays fresh
     /// across the retry window.
+    ///
+    /// This goes to `:4871`, not the relay: pairing creates the circle that gates
+    /// the content ports, so it does not travel on them
+    /// (`reference/thinning-custom-relay.md`, D6). Unlike a relay `OK`, the
+    /// response distinguishes *delivered and waiting on them* from *never reached
+    /// them*, so a pending request stops the retry loop instead of burning the
+    /// whole window on a peer who already has it.
     async fn dial_pair_event(&self, target_npub: &str, kind: u16, secret: &str) {
         let Some(keys) = self.device_keys.lock().unwrap().clone() else {
             tracing::warn!("pairing: device keys not set");
@@ -1301,7 +1326,7 @@ impl Content {
                 return;
             }
         };
-        let url = crate::ip_source::mesh_relay_url(target_npub);
+        let url = crate::ip_source::mesh_auth_url(target_npub);
         for attempt in 0..PAIR_DIAL_ATTEMPTS {
             if attempt > 0 {
                 tokio::time::sleep(PAIR_DIAL_RETRY_DELAY).await;
@@ -1310,13 +1335,28 @@ impl Content {
                 tracing::warn!(target_npub, "pairing: could not build event");
                 return;
             };
-            if crate::ip_source::publish_event(&url, &event, 0, std::time::Duration::from_secs(10))
-                .await
+            match crate::ip_source::post_pair_event(
+                &url,
+                &event,
+                std::time::Duration::from_secs(10),
+            )
+            .await
             {
-                tracing::info!(target = %target_npub, kind, attempt, "pair: dial delivered");
-                return;
+                crate::ip_source::PairDelivery::Accepted(status) => {
+                    tracing::info!(target = %target_npub, kind, attempt, status, "pair: delivered");
+                    return;
+                }
+                // They answered and said no. Retrying cannot change that, and
+                // hammering a peer that already refused is exactly what the
+                // retry loop must not do.
+                crate::ip_source::PairDelivery::Refused(status) => {
+                    tracing::warn!(target = %target_npub, kind, status, "pair: refused by peer");
+                    return;
+                }
+                crate::ip_source::PairDelivery::Unreachable => {
+                    tracing::debug!(target = %target_npub, kind, attempt, "pair: not delivered, retrying");
+                }
             }
-            tracing::debug!(target = %target_npub, kind, attempt, "pair: dial not delivered, retrying");
         }
         tracing::warn!(
             target = %target_npub,
@@ -2230,7 +2270,7 @@ fn library_addr(item: &LibraryItem) -> Option<SiteAddr> {
 }
 
 /// Seconds since the Unix epoch (Library `added_at`).
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -2262,7 +2302,7 @@ fn short_name(npub: &str) -> String {
 /// Build + sign a pair-request/accept event (device key), addressed to
 /// `target_npub` via a `p` tag, carrying our `n` name, the one-time `secret`
 /// (request only), and a short NIP-40 expiration.
-fn build_pair_event(
+pub(crate) fn build_pair_event(
     keys: &Keys,
     kind: u16,
     target_npub: &str,
@@ -2335,6 +2375,56 @@ mod tests {
         assert!(p.blossom_read, "reads stay on for an existing peer");
         assert!(p.relay_read && p.relay_write);
         assert!(p.relay_read_multihop && p.relay_write_multihop);
+    }
+
+    /// The content ports have no exceptions left.
+    ///
+    /// Pairing kinds used to be the one thing an unpaired peer could publish to
+    /// the relay, and the event landed in the store as a side effect. Both are
+    /// now refused: the handshake belongs to the auth plane, so a stranger has no
+    /// write path into a store that may not even be ours
+    /// (`reference/thinning-custom-relay.md`, D6).
+    #[test]
+    fn the_relay_gate_refuses_pairing_kinds_from_everyone() {
+        use crate::mesh_relay::PeerGate;
+
+        let dir = tmp("gate-no-exceptions");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+
+        // A paired peer, so this is not simply "unpaired is refused".
+        let peer = Keys::generate();
+        let peer_npub = peer.public_key().to_bech32().unwrap();
+        content.add_to_circle(&peer_npub, "Peer");
+        let ip = IpAddr::V6(
+            fips::PeerIdentity::from_npub(&peer_npub)
+                .unwrap()
+                .address()
+                .to_ipv6(),
+        );
+
+        let gate = CircleGate::new(content.clone());
+        assert!(gate.may_publish(ip, 9), "ordinary content still flows");
+        for kind in [KIND_PAIR_REQUEST, KIND_PAIR_ACCEPT, KIND_PAIR_REMOVE] {
+            assert!(
+                !gate.may_publish(ip, kind),
+                "kind {kind} is auth-plane traffic and must not reach the relay"
+            );
+        }
+
+        // And an unpaired stranger gets nothing at all.
+        let stranger = Keys::generate().public_key().to_bech32().unwrap();
+        let stranger_ip = IpAddr::V6(
+            fips::PeerIdentity::from_npub(&stranger)
+                .unwrap()
+                .address()
+                .to_ipv6(),
+        );
+        assert!(!gate.may_read(stranger_ip));
+        assert!(!gate.may_publish(stranger_ip, KIND_PAIR_REQUEST));
+        assert!(!gate.may_publish(stranger_ip, 9));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The defaults are the whole permission model until the UI exposes them, so
@@ -2630,6 +2720,7 @@ mod tests {
 
         let peer = Keys::generate();
         let peer_npub = peer.public_key().to_bech32().unwrap();
+        let content = Arc::new(content);
         content.add_to_circle(&peer_npub, "Peer");
         assert_eq!(content.circle_snapshot().len(), 1);
 

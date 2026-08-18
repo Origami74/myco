@@ -23,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
@@ -101,18 +101,35 @@ pub trait Gossiper: Send + Sync {
     fn on_local_unsubscribe(&self, _key: &str) {}
 }
 
-/// Access policy for **mesh** connections: only paired (Circle) peers may read or
-/// publish content. Loopback (the in-app WebView) bypasses this entirely. The one
-/// exception is the pairing handshake — an as-yet-unpaired peer must be able to
-/// publish a pair request to bootstrap, so [`may_publish`](PeerGate::may_publish)
-/// is consulted per event kind. The implementor (`myco-core`) backs this with the
-/// Circle; a hub with no gate is open (the local/test default).
+/// Access policy for **mesh** connections: only paired (Circle) peers reach the
+/// content plane at all, and what an admitted peer may do comes from its own
+/// permission record. Loopback (the in-app WebView) bypasses this entirely.
+///
+/// There are no exceptions. Pairing used to need one, but the handshake now has
+/// its own service (`crate::auth_service`), so nothing unpaired gets a socket.
+/// The implementor (`myco-core`) backs this with the Circle; a hub with no gate
+/// is open (the local/test default).
 pub trait PeerGate: Send + Sync {
+    /// May the mesh peer at `ip` open a connection at all?
+    ///
+    /// Checked **before the WebSocket upgrade**, so an unpaired peer is refused
+    /// at the door rather than handed a socket and then told "no" per frame. That
+    /// is cheaper over BLE — a stranger no longer costs an upgrade and a round of
+    /// frames — and it means the content plane has one admission rule with no
+    /// exceptions (`reference/thinning-custom-relay.md`, D6).
+    ///
+    /// Membership only. What an admitted peer may then do is [`may_read`] and
+    /// [`may_publish`], from its own permission record.
+    ///
+    /// [`may_read`]: Self::may_read
+    /// [`may_publish`]: Self::may_publish
+    fn may_connect(&self, ip: IpAddr) -> bool;
+
     /// May the mesh peer at `ip` open a `REQ` (read events from us)?
     fn may_read(&self, ip: IpAddr) -> bool;
-    /// May the mesh peer at `ip` publish an `EVENT` of `kind`? Implementors allow
-    /// the pairing kinds from anyone (bootstrap) and everything else only when
-    /// `ip` is a paired peer.
+    /// May the mesh peer at `ip` publish an `EVENT` of `kind`? Implementors
+    /// refuse the pairing kinds outright — those belong to the auth plane — and
+    /// allow the rest per the peer's write grant.
     fn may_publish(&self, ip: IpAddr, kind: u16) -> bool;
 
     /// How far a `REQ` from `ip` may be forwarded on. `0` means answer from our
@@ -321,7 +338,10 @@ pub async fn serve_on_hub(
     hub: Arc<RelayHub>,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
-    let app = Router::new().route("/", get(root)).with_state(hub);
+    let app = Router::new()
+        .route("/", get(root))
+        .layer(axum::middleware::from_fn_with_state(hub.clone(), admit))
+        .with_state(hub);
     // Connect-info gives each socket's peer address, so the handler can tell a
     // loopback (WebView) connection from a mesh peer.
     axum::serve(
@@ -341,6 +361,34 @@ async fn root(
 ) -> Response {
     let peer = addr.ip();
     ws.on_upgrade(move |socket| handle_ws(socket, hub, peer))
+}
+
+/// Admission, applied as a layer so it runs **before** the WebSocket upgrade is
+/// even parsed: an unpaired mesh peer gets a plain 403 and no socket.
+///
+/// A stranger costs us a TCP accept and one small response, rather than an
+/// upgrade plus a round of frames it was never allowed to send — which matters
+/// on a BLE link. Loopback (the in-app WebView) always bypasses.
+async fn admit(
+    State(hub): State<Arc<RelayHub>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let peer = addr.ip();
+    if !peer.is_loopback() {
+        if let Some(gate) = &hub.gate {
+            if !gate.may_connect(peer) {
+                tracing::debug!(peer = %peer, "relay: refused an unpaired connection");
+                return (
+                    axum::http::StatusCode::FORBIDDEN,
+                    "restricted: pair to access",
+                )
+                    .into_response();
+            }
+        }
+    }
+    next.run(req).await
 }
 
 /// One client connection: serve `REQ` backlog + keep the subscription live, accept
@@ -900,6 +948,58 @@ mod tests {
             store.count(),
             1,
             "still stored again — publishing is idempotent, only the fan-out is suppressed"
+        );
+    }
+
+    /// An unpaired peer never gets a socket at all.
+    ///
+    /// Refusing per frame would still hand a stranger a WebSocket upgrade and a
+    /// round of frames, which over BLE is real cost for a connection that can
+    /// never do anything. Admission is a membership check before the upgrade, so
+    /// the handshake itself fails (`reference/thinning-custom-relay.md`, D6).
+    #[tokio::test]
+    async fn an_unpaired_peer_is_refused_before_the_upgrade() {
+        struct NoOne;
+        impl PeerGate for NoOne {
+            fn may_connect(&self, _ip: IpAddr) -> bool {
+                false
+            }
+            fn may_read(&self, _ip: IpAddr) -> bool {
+                false
+            }
+            fn may_publish(&self, _ip: IpAddr, _kind: u16) -> bool {
+                false
+            }
+        }
+
+        use tower::ServiceExt;
+
+        let store = Arc::new(RelayStore::in_memory());
+        let hub = RelayHub::with_gate(store, None, Some(Arc::new(NoOne)));
+        let app = Router::new()
+            .route("/", get(root))
+            .layer(axum::middleware::from_fn_with_state(hub.clone(), admit))
+            .with_state(hub);
+
+        // A real socket here could only ever be loopback, which bypasses the gate
+        // by design, so drive the route with a synthetic mesh address instead.
+        let mesh_peer: SocketAddr = "[fd00::1]:9999".parse().unwrap();
+        let mut req = axum::http::Request::builder()
+            .uri("/")
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(mesh_peer));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::FORBIDDEN,
+            "an unpaired peer must be refused at the door, not upgraded and then \
+             told no per frame"
         );
     }
 

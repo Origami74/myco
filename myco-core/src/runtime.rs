@@ -303,6 +303,38 @@ impl AppRuntime {
                     ));
                 }
             }
+            // The auth plane: the one port open to peers we have never met, and
+            // the only way into the Circle. It has to bind before the content
+            // servers matter — without it a stranger cannot pair at all, and the
+            // relay and Blossom gates below have no exceptions to let them in.
+            // See `reference/thinning-custom-relay.md` (D6).
+            match crate::auth_service::bind(
+                format!("[::]:{}", crate::auth_service::AUTH_PORT)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+            ) {
+                Ok(listener) => {
+                    let content_for_auth = content.clone();
+                    rt.spawn(async move {
+                        if let Err(e) =
+                            crate::auth_service::serve_on(content_for_auth, listener).await
+                        {
+                            tracing::error!(error = %e, "auth service exited");
+                        }
+                    });
+                }
+                Err(e) => {
+                    if !mesh_warning.is_empty() {
+                        mesh_warning.push_str("; ");
+                    }
+                    mesh_warning.push_str(&format!(
+                        "Another app is using port {} — Myco can't accept pairing \
+                         requests, so new peers won't be able to pair with this \
+                         device. ({e})",
+                        crate::auth_service::AUTH_PORT
+                    ));
+                }
+            }
             match myco_blossom::server::bind("[::]:24243".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
                     // Same paired-only gate for blobs: a mesh source must be a

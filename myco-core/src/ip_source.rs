@@ -125,6 +125,59 @@ pub(crate) fn mesh_blossom_url(npub: &str) -> String {
     format!("http://{npub}.fips:24243")
 }
 
+/// A peer's **auth service** endpoint, by name — the only port an unpaired peer
+/// can reach. See [`mesh_relay_url`] for why this is addressed by npub.
+pub(crate) fn mesh_auth_url(npub: &str) -> String {
+    format!("http://{npub}.fips:{}/pair", crate::auth_service::AUTH_PORT)
+}
+
+/// What came back from a peer's auth service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairDelivery {
+    /// They took it: paired, unpaired, or pending a human. Carries the reported
+    /// status so the caller can log which.
+    Accepted(&'static str),
+    /// They answered and said no — a bad signature, an expired event, or a rate
+    /// limit. Retrying will not change it.
+    Refused(&'static str),
+    /// Never got an answer. The mesh session is probably still coming up, so
+    /// this is the case worth retrying.
+    Unreachable,
+}
+
+/// POST a signed pair event to a peer's auth service.
+///
+/// Unlike a relay `OK`, the reply distinguishes "they have it and a human is
+/// deciding" from "we never reached them", which is what lets the pairing retry
+/// loop stop early instead of re-sending to a peer that already answered.
+pub(crate) async fn post_pair_event(
+    url: &str,
+    event: &nostr::Event,
+    timeout: Duration,
+) -> PairDelivery {
+    let Ok(client) = reqwest::Client::builder().timeout(timeout).build() else {
+        return PairDelivery::Unreachable;
+    };
+    let body = match serde_json::to_string(event) {
+        Ok(b) => b,
+        Err(_) => return PairDelivery::Unreachable,
+    };
+    match client.post(url).body(body).send().await {
+        Ok(resp) if resp.status().is_success() => PairDelivery::Accepted("paired"),
+        Ok(resp) if resp.status() == reqwest::StatusCode::ACCEPTED => {
+            PairDelivery::Accepted("pending")
+        }
+        Ok(resp) if resp.status() == reqwest::StatusCode::FORBIDDEN => {
+            PairDelivery::Refused("declined")
+        }
+        Ok(resp) if resp.status() == reqwest::StatusCode::BAD_REQUEST => {
+            PairDelivery::Refused("rejected")
+        }
+        // 429 / 503 are "not now" rather than "no" — worth another attempt.
+        Ok(_) | Err(_) => PairDelivery::Unreachable,
+    }
+}
+
 /// Blossom over the FIPS mesh, addressed by the holder's npub — see
 /// [`mesh_relay_url`]. Requires the app-owned TUN to be up so the socket routes
 /// over the mesh. A longer timeout than the IP source absorbs BLE latency +

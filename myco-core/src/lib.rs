@@ -11,6 +11,10 @@
 
 mod action;
 mod attempt_store;
+// The auth plane: the only port an unpaired peer can reach. Bound by the Android
+// runtime, so it reads as dead on the host outside its own tests.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod auth_service;
 // Myco-owned BLE connect-attempt vocabulary. These used to be fips types read
 // out of a transport-global log; the restacked fips counts outcomes into
 // `BleStats` instead. Nothing produces these yet — see the module doc's

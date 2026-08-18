@@ -35,6 +35,9 @@ socket2 = { workspace = true }
 simple-dns = "0.11.2"
 
 [dev-dependencies]
+# Drive the axum routers directly in tests, so a handler can be exercised with a
+# synthetic peer address (a real socket can only ever be loopback here).
+tower = { version = "0.5", features = ["util"] }
 nsite-deck = { path = "../nsite-deck", features = ["testing"] }
 tokio-tungstenite = { workspace = true }
 
