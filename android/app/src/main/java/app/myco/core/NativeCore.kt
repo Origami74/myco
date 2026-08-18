@@ -101,13 +101,26 @@ internal object NativeCore {
      *  nothing but mesh names. */
     external fun setUpstreamDns(servers: String)
 
-    /** Raw fd of the node's UDP transport socket, once it has opened. Blocks
-     *  up to `timeoutMs`; returns -1 on timeout. Sent once per node lifetime —
-     *  poll this once at startup, then bind it to whichever local-only
-     *  network (Wi-Fi Aware NDP, the `!FIPS` AP) is carrying a
-     *  platform-pushed peer via `Network.bindSocket`, so handshake replies
-     *  aren't lost to a competing validated default network (e.g. cellular). */
-    external fun nextUdpTransportFd(timeoutMs: Int): Int
+    /** Raw fd of the UDP transport socket carrying `lane` (`"aware"` or
+     *  `"udp"`), if the core has announced one newer than `sinceVersion`.
+     *  Blocks up to `timeoutMs`.
+     *
+     *  The node binds **one socket per lane** and the core labels each fd with
+     *  the lane it belongs to, so a radio can only ever receive its own — never
+     *  the other lane's, which it would then pin to the wrong [android.net.Network]
+     *  and black-hole. Bind what comes back with `Network.bindSocket`: a
+     *  local-only network (a Wi-Fi Aware NDP, the `!FIPS` AP) otherwise loses
+     *  handshake replies to a competing validated default network (e.g.
+     *  cellular), and a socket marked with one network cannot reach the other
+     *  lane's peers at all.
+     *
+     *  Returns `(version shl 32) or fd` — JNI has no tuple, and two calls could
+     *  not be made atomic. Use [UdpSocketAnnouncement.of]. `fd` is -1 when
+     *  nothing newer arrived; otherwise pass the returned version back next
+     *  time. Poll in a slow loop: the latest socket per lane is retained, so a
+     *  radio started after the node still learns it, and a node restart bumps
+     *  the version even if the kernel reuses the fd number. */
+    external fun nextUdpTransportFd(lane: String, sinceVersion: Long, timeoutMs: Int): Long
 
     // --- TUN packet bridge (the app-owned TUN; the VpnService pumps these) ---
     /** Kotlin → Rust: route an IPv6 packet read from the TUN fd into the mesh. */

@@ -25,7 +25,7 @@
 //! acceptable either way — platform discovery re-fires periodically.
 //!
 //! There is no withdrawal counterpart, deliberately. Myco's old `peer_lost`
-//! call was a no-op (it named the `udp` transport, which does not override
+//! call was a no-op (the UDP transport does not override
 //! `close_connection`), and the control socket's `disconnect` keys on npub
 //! alone and does a full peer teardown — so a routine Aware NDP drop would
 //! kill a live BLE session to the same peer and suppress its reconnect.
@@ -71,7 +71,10 @@ pub struct PlatformPeer {
     /// A fully-formatted socket address. Link-locals carry a *numeric* scope
     /// (`"[fe80::x%3]:4871"`); interface-name scopes do not parse.
     pub address: String,
-    /// The fips transport type that will carry it. Both lanes ride plain UDP.
+    /// The fips transport that will carry it, qualified with the instance
+    /// name of the lane's own UDP socket (`"udp/aware"`, `"udp/lan"`). Both
+    /// lanes ride UDP, but each has its own socket pinned to its own
+    /// `android.net.Network`, and a dial down the wrong one is unroutable.
     pub transport: String,
 }
 

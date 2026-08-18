@@ -23,6 +23,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import app.myco.core.NativeCore
+import app.myco.core.UdpSocketPin
 import java.net.Inet6Address
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,8 +34,16 @@ import kotlinx.coroutines.flow.asStateFlow
  * The Wi-Fi Aware (NAN) bulk-lane radio. Control-plane only: it discovers
  * peers, brings up a data path (NDP), and pushes "peer reachable / lost" into
  * the core ([NativeCore.awarePeerFound]/[NativeCore.awarePeerLost]). The bytes
- * ride the ordinary fips UDP transport over the `aware_dataN` interface — this
- * class never touches a payload byte. See docs/design/wifi-aware-interop.md.
+ * ride a fips UDP transport over the `aware_dataN` interface — this class never
+ * touches a payload byte. See docs/design/wifi-aware-interop.md.
+ *
+ * That transport is **this lane's own** UDP socket, and this class pins it to
+ * the NDP's [Network] ([udpPin]). Both halves matter. An NDP is a network of
+ * its own with its own routing table, so a socket marked with any other
+ * network — infrastructure Wi-Fi, as the AP lane marks it — cannot reach an
+ * Aware peer at all: the address is well-formed, the send reports success, and
+ * nothing arrives. That was the whole of the "Aware discovers everything and
+ * peers with nothing" fault. See [UdpSocketPin].
  *
  * Flow, per peer:
  *  1. publish + subscribe the Myco service (symmetric, no group owner).
@@ -49,6 +58,9 @@ import kotlinx.coroutines.flow.asStateFlow
  * The listener port is a fixed app constant carried in the state
  * ([app.myco.core.AppState.wifiAwarePort]); both peers bind it, so there is no
  * PSM-style discovery problem and no need for `setPort()` on a secured NDP.
+ * It is **not** the LAN lane's port — the two lanes bind different ports as
+ * well as different sockets — so two phones must run matching builds to peer
+ * over Aware at all. See `runtime.rs`'s `AWARE_UDP_PORT`.
  * The NDP is left **open** (no PSK) — fips authenticates with Noise IK.
  */
 class AwareRadio(
@@ -65,6 +77,12 @@ class AwareRadio(
 
     private val thread = HandlerThread("myco-aware").apply { start() }
     private val handler = Handler(thread.looper)
+
+    /** Pins this lane's UDP transport socket to the NDP [Network] — see the
+     *  class doc, and [UdpSocketPin] for why the lane needs a socket of its
+     *  own. Asks for [LANE] by name, so it can only ever receive the Aware
+     *  lane's socket, never the AP lane's. */
+    private val udpPin = UdpSocketPin(LANE, handler, TAG)
 
     private var session: WifiAwareSession? = null
     private var publishSession: PublishDiscoverySession? = null
@@ -99,6 +117,7 @@ class AwareRadio(
             return
         }
         running = true
+        udpPin.start()
         registerAvailability(mgr)
         if (mgr.isAvailable) {
             attach(mgr)
@@ -191,6 +210,11 @@ class AwareRadio(
         availabilityReceiver?.let { runCatching { context.unregisterReceiver(it) } }
         availabilityReceiver = null
         closeSessions()
+        // On the handler thread, where the pin's state lives. Releases our dup
+        // of the socket; the core's own descriptor, and its binding, are
+        // untouched — a stale mark on a network that has gone away is harmless,
+        // and the next NDP re-pins.
+        handler.post { udpPin.stop() }
     }
 
     fun shutdown() {
@@ -303,12 +327,25 @@ class AwareRadio(
                 val info = caps.transportInfo as? WifiAwareNetworkInfo ?: return
                 val addr = formatPeerAddr(info.peerIpv6Addr) ?: return
                 Log.i(TAG, "Aware NDP up to ${short(peerNpub)} at $addr")
+                // Pin BEFORE announcing the peer: the core dials as soon as it
+                // is told, and a dial from an unpinned (or wrong-network)
+                // socket is what used to time out. This callback repeats for
+                // the life of the NDP, so the re-pin is idempotent and cheap.
+                //
+                // One socket, one mark: with several concurrent NDPs the most
+                // recent one wins. Each NDP is a separate Network, so a single
+                // socket cannot serve them all — the pair this milestone has to
+                // get right is two phones, and a fan-out (a socket per NDP)
+                // would need a transport instance per peer, which fips has no
+                // way to configure at runtime.
+                udpPin.bindTo(network)
                 setLink(peerNpub, addr, up = true)
                 NativeCore.awarePeerFound(peerNpub, addr, LANE)
             }
 
             override fun onLost(network: Network) {
                 Log.i(TAG, "Aware NDP lost to ${short(peerNpub)}")
+                udpPin.clearTarget(network)
                 NativeCore.awarePeerLost(peerNpub, LANE)
                 releaseNdp(peerNpub)
             }
@@ -413,9 +450,13 @@ class AwareRadio(
         /** The Myco Wi-Fi Aware service name (the analog of the FIPS service UUID). */
         private const val SERVICE_NAME = "myco.fips.v1"
 
-        /** The lane label pushed to [NativeCore.awarePeerFound]/[NativeCore.awarePeerLost]
-         *  — distinguishes this radio from [app.myco.ap.ApRadio], which pushes "udp"
-         *  through the same seam even though both ride fips's UDP transport. */
+        /** The lane label pushed to [NativeCore.awarePeerFound]/[NativeCore.awarePeerLost],
+         *  and asked of [NativeCore.nextUdpTransportFd] — distinguishes this radio from
+         *  [app.myco.ap.ApRadio], which pushes "udp" through the same seams. Both ride
+         *  UDP, but each lane is its own transport instance with its own socket, and
+         *  this label is what selects between them. The core turns it into the
+         *  qualified transport `"udp/aware"`, which is what makes fips dial this
+         *  lane's socket rather than the LAN lane's. */
         private const val LANE = "aware"
 
         /** Message id for the npub-exchange `sendMessage`. */

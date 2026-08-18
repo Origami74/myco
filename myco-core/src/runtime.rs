@@ -14,13 +14,58 @@ use crate::state::{
     AppState, BleAdvert, BlePeer, BleStatus, IdentityView, NodeStatus, WifiAwareStatus,
 };
 
+/// The node runs **two** UDP transport instances, not one, and everything
+/// below names them.
+///
+/// One socket cannot serve both lanes. Android routes by the network a socket
+/// is *marked* with, not by destination alone: `Network.bindSocket` pins a
+/// descriptor to one `android.net.Network`, and a socket pinned to
+/// infrastructure Wi-Fi cannot reach a Wi-Fi Aware peer, whose NDP is a
+/// separate `Network` with its own routing table. With a single shared socket
+/// the AP lane's bind won, so Aware discovery worked end to end (match, npub
+/// exchange, NDP up) and then every dial over it timed out in the handshake.
+///
+/// So: one instance per lane, each pinned by its own Kotlin radio (see
+/// [`crate::udp_fd_bridge`]), and peer addresses qualified with the instance
+/// name (`"udp/lan"`, `"udp/aware"`) so fips dials down the lane the peer was
+/// actually observed on rather than whichever transport id sorted lowest.
+const LAN_UDP_INSTANCE: &str = "lan";
+const AWARE_UDP_INSTANCE: &str = "aware";
+
+/// UDP port for the LAN / `!FIPS` AP lane. Unchanged at 4871: this lane talks
+/// to desktop fips nodes today and works, and desktop peers are discovered by
+/// mDNS advert, so moving it would break a working lane for nothing.
+const LAN_UDP_PORT: u16 = 4871;
+
 /// UDP port for the Wi-Fi Aware bulk lane. Both peers bind it on the NDP
 /// interface and exchange over it — symmetric, no listener/dialer roles. A
 /// fixed app constant (we bind our own port), so there is no PSM-style
 /// discovery problem. UDP is fips's native transport and the LAN-discovery
 /// path (which this reuses) is already UDP + scoped link-local IPv6.
 /// See docs/design/wifi-aware-interop.md.
-const WIFI_AWARE_PORT: u16 = 4871;
+///
+/// **This is a flag day between phones.** The port is embedded in the address
+/// each phone advertises over Aware (`AwareRadio` formats
+/// `"[fe80::x%ifindex]:port"` from `AppState.wifi_aware.port`), so two phones
+/// on either side of this change will not peer over Aware until both are
+/// flashed. Nothing else is affected — the Aware lane carried no traffic
+/// before this change, and desktop LAN peers stay on [`LAN_UDP_PORT`].
+const AWARE_UDP_PORT: u16 = 4872;
+
+/// Which UDP transport instance a Kotlin radio's lane rides.
+///
+/// `lane` is the label the radio itself pushes (`AwareRadio` sends `"aware"`,
+/// `ApRadio` sends `"udp"`); this is the single place it is turned into a fips
+/// instance name, so the name a socket is pinned by and the name a dial is
+/// routed by cannot drift apart. Anything unrecognised is the AP lane, which
+/// is the one that behaves as UDP always has.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn udp_instance_for_lane(lane: &str) -> &'static str {
+    match lane {
+        "aware" => AWARE_UDP_INSTANCE,
+        _ => LAN_UDP_INSTANCE,
+    }
+}
 
 /// Consecutive failed `show_peers` queries before the peer feed is reported as
 /// broken in [`AppState::error`].
@@ -456,24 +501,32 @@ impl AppRuntime {
                     ..Default::default()
                 });
         }
-        // The Wi-Fi Aware bulk lane: a UDP transport bound `[::]:4871`. UDP is
+        // Two UDP transports, one per lane — see the instance constants at the
+        // top of this file for why one socket cannot serve both. UDP is
         // symmetric (no listener/dialer), fips-native, and reuses the proven
         // scoped-link-local path. Peers are supplied only by the platform peer
-        // queue (`fips::discovery::platform`) — UDP is not advertised on Nostr
-        // and no peer config points here — so `offline_only` semantics survive.
+        // queue — UDP is not advertised on Nostr and no peer config points
+        // here — so `offline_only` semantics survive.
         //
-        // It is configured UNCONDITIONALLY on Android (like the BLE transport
-        // above), not gated on the Aware toggle: the toggle then controls only
-        // the Kotlin radio (whether peers get pushed), never the node's
-        // transport set — so flipping Wi-Fi Aware never restarts the node and
-        // never disrupts an active BLE link. `wifi_aware` still adds it on the
-        // host for the LAN-based dev/test stand-in.
+        // Both are configured UNCONDITIONALLY on Android (like the BLE
+        // transport above), not gated on the Aware toggle: the toggle then
+        // controls only the Kotlin radio (whether peers get pushed), never the
+        // node's transport set — so flipping Wi-Fi Aware never restarts the
+        // node and never disrupts an active BLE link. `wifi_aware` still adds
+        // them on the host for the LAN-based dev/test stand-in.
         if wifi_aware || cfg!(target_os = "android") {
-            config.transports.udp =
-                fips::config::TransportInstances::Single(fips::config::UdpConfig {
-                    bind_addr: Some(format!("[::]:{WIFI_AWARE_PORT}")),
-                    ..Default::default()
-                });
+            let udp = |port: u16| fips::config::UdpConfig {
+                bind_addr: Some(format!("[::]:{port}")),
+                ..Default::default()
+            };
+            config.transports.udp = fips::config::TransportInstances::Named(
+                [
+                    (LAN_UDP_INSTANCE.to_string(), udp(LAN_UDP_PORT)),
+                    (AWARE_UDP_INSTANCE.to_string(), udp(AWARE_UDP_PORT)),
+                ]
+                .into_iter()
+                .collect(),
+            );
         }
         fips::Node::new(config).map_err(|e| anyhow::anyhow!("fips Node::new failed: {e}"))
     }
@@ -881,11 +934,14 @@ impl AppRuntime {
             let max_mss = node.effective_ipv6_mtu().saturating_sub(60);
             let (tun_outbound_tx, tun_inbound_rx) = node.enable_app_owned_tun();
             crate::tun_bridge::install(tun_outbound_tx, tun_inbound_rx, max_mss);
-            // Let Android learn the UDP transport's raw fd once it opens, so it
-            // can pin the socket to whichever local-only network (Wi-Fi Aware
-            // NDP, the `!FIPS` AP) carries a platform-pushed peer — otherwise
-            // handshake replies can be lost to a competing validated default
-            // network (e.g. cellular).
+            // Let Android learn each UDP transport's raw fd once it opens, so
+            // every lane can pin its own socket to its own local-only network
+            // (the Wi-Fi Aware NDP, the `!FIPS` AP) — otherwise handshake
+            // replies are lost to a competing validated default network (e.g.
+            // cellular), and worse, a socket pinned to one lane's network
+            // cannot reach the other lane's peers at all. Deliveries are
+            // labelled with the instance name, so a radio can only ever be
+            // handed its own descriptor.
             crate::udp_fd_bridge::install(node.enable_app_owned_udp_fd());
             // Hand this node's BLE radio slot to the JNI bridge. The radio
             // itself belongs to `BleService` and may already be running (it
@@ -1216,7 +1272,7 @@ impl AppRuntime {
                 WifiAwareStatus {
                     enabled: self.wifi_aware_enabled,
                     port: if self.wifi_aware_enabled {
-                        WIFI_AWARE_PORT
+                        AWARE_UDP_PORT
                     } else {
                         0
                     },

@@ -2,8 +2,10 @@
 //!
 //! Unlike the BLE bridge, this is *control-plane only*: there is no byte
 //! bridge and no `AndroidRadio` trait to implement. A Wi-Fi Aware data path
-//! terminates in a kernel network interface, so the bytes ride the ordinary
-//! UDP transport (bound at `runtime::WIFI_AWARE_PORT` on the NDP interface).
+//! terminates in a kernel network interface, so the bytes ride an ordinary
+//! UDP transport — the node's `"aware"` instance, bound at
+//! `runtime::AWARE_UDP_PORT` and pinned by `AwareRadio` to the NDP's
+//! `android.net.Network`.
 //! The Kotlin `AwareRadio` runs discovery autonomously and only pushes
 //! "peer reachable" events into Myco's own bounded queue
 //! ([`crate::platform_peers`]), which a tokio task drains onto the node's
@@ -21,10 +23,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use jni::objects::{JClass, JString};
-use jni::sys::{jboolean, jint};
+use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
-
-const TRANSPORT_TYPE: &str = "udp";
 
 fn jstring(env: &mut JNIEnv, s: &JString) -> Option<String> {
     env.get_string(s).ok().map(Into::into)
@@ -36,10 +36,17 @@ fn jstring(env: &mut JNIEnv, s: &JString) -> Option<String> {
 /// a routing hint.
 ///
 /// `lane` is `"aware"` or `"udp"` — which Kotlin radio (Wi-Fi Aware vs. the
-/// LAN/AP lane) observed this peer. Both ride fips's plain UDP transport, so
-/// `TRANSPORT_TYPE` below is unchanged and still `"udp"` for both; `lane` is
-/// recorded separately, in [`crate::lane_observation`], for `merge_peers()`'s
-/// `lane_by_npub` override and never reaches fips.
+/// LAN/AP lane) observed this peer. Each lane is its own UDP transport
+/// instance with its own socket, pinned to its own `android.net.Network`, so
+/// the address is qualified with that instance's name (`"udp/aware"`,
+/// `"udp/lan"`). fips's `TransportSpec` routes the dial to the matching socket
+/// and, crucially, refuses rather than substituting the other one — dialing an
+/// Aware peer from the Wi-Fi-pinned socket is unroutable and was the reason
+/// Aware never carried a handshake.
+///
+/// `lane` is *also* recorded, separately, in [`crate::lane_observation`], for
+/// `merge_peers()`'s `lane_by_npub` override; that record is Myco-owned and
+/// never reaches fips.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_awarePeerFound(
     mut env: JNIEnv,
@@ -56,20 +63,21 @@ pub extern "system" fn Java_app_myco_core_NativeCore_awarePeerFound(
         return;
     };
     crate::lane_observation::set_lane(&npub, &lane);
-    crate::platform_peers::push(&npub, &addr, TRANSPORT_TYPE);
+    let transport = format!("udp/{}", crate::runtime::udp_instance_for_lane(&lane));
+    crate::platform_peers::push(&npub, &addr, &transport);
 }
 
 /// Kotlin observed the Wi-Fi Aware data path to `npub` go away.
 ///
 /// **Nothing is told to the node, deliberately.** This used to call fips's
 /// `platform_peer_lost`, which resolved the peer and asked the named transport
-/// to close its connection — but the name pushed here is always `"udp"` for
-/// both lanes, and the UDP transport does not override `close_connection`; it
-/// falls through to the connectionless no-op default. So the call has never
-/// had any effect, and the premise it was written on ("the node closes the
-/// pooled UDP session so the dead socket is not re-used") was wrong: a
-/// connectionless transport has no pooled socket. Falling back to BLE was
-/// always the node's ordinary liveness machinery doing its job.
+/// to close its connection — but the UDP transport does not override
+/// `close_connection`; it falls through to the connectionless no-op default.
+/// So the call has never had any effect, and the premise it was written on
+/// ("the node closes the pooled UDP session so the dead socket is not
+/// re-used") was wrong: a connectionless transport has no pooled socket.
+/// Falling back to BLE was always the node's ordinary liveness machinery doing
+/// its job.
 ///
 /// The control socket's `disconnect` is not a replacement. It keys on npub
 /// alone, with no transport parameter, and does a full teardown — notify the
@@ -165,20 +173,45 @@ pub extern "system" fn Java_app_myco_core_NativeCore_setUpstreamDns(
     crate::dns_intercept::set_upstream(parsed);
 }
 
-/// Rust → Kotlin: the UDP transport's raw socket fd, once it has opened.
-/// Blocks up to `timeout_ms`; returns `-1` on timeout (no transport, or it
-/// hasn't started yet). The fd is sent once per node lifetime (see
-/// [`crate::udp_fd_bridge`]) — callers poll this once at startup, not in a
-/// loop, then use the fd with `android.net.Network.bindSocket` to pin the
-/// socket to whichever local-only network (Wi-Fi Aware NDP, the `!FIPS` AP)
-/// currently carries the platform-pushed peer, so replies aren't lost to a
-/// competing validated default network (e.g. cellular).
+/// Rust → Kotlin: the raw socket fd of the UDP transport carrying `lane`, once
+/// it has opened and if it is newer than `since_version`. Blocks up to
+/// `timeout_ms`.
+///
+/// `lane` is the caller's own label (`"aware"` or `"udp"`), mapped to a fips
+/// instance name by [`crate::runtime::udp_instance_for_lane`]. The node binds
+/// one socket per lane and fips labels each fd with the instance it belongs to,
+/// so a radio can only ever be handed *its* descriptor — never the other
+/// lane's, which it would then pin to the wrong `android.net.Network` and
+/// black-hole. A lane whose socket did not bind is told nothing instead.
+///
+/// The result packs `(version << 32) | fd`, because JNI has no tuple and two
+/// calls could not be made atomic. `fd` is `-1` when nothing newer arrived; the
+/// caller passes the returned version back on the next call, and 0 on the
+/// first. Versioning rather than plain edge-triggering because a radio is
+/// created and destroyed with its lane's toggle while the node keeps running,
+/// so it must be able to learn a socket announced before it existed — and
+/// because a node restart's replacement socket can reuse the same fd number,
+/// which still needs re-binding.
+///
+/// What the caller does with the fd: `android.net.Network.bindSocket`, pinning
+/// it to the local-only network carrying that lane's peers (a Wi-Fi Aware NDP,
+/// the `!FIPS` AP). Without it, replies are lost to a competing validated
+/// default network (e.g. cellular).
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_nextUdpTransportFd(
-    _env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
+    lane: JString,
+    since_version: jlong,
     timeout_ms: jint,
-) -> jint {
-    crate::udp_fd_bridge::next_fd(std::time::Duration::from_millis(timeout_ms.max(0) as u64))
-        as jint
+) -> jlong {
+    let Some(lane) = jstring(&mut env, &lane) else {
+        return -1i32 as u32 as jlong;
+    };
+    let (version, fd) = crate::udp_fd_bridge::next_fd(
+        crate::runtime::udp_instance_for_lane(&lane),
+        since_version.max(0) as u64,
+        std::time::Duration::from_millis(timeout_ms.max(0) as u64),
+    );
+    ((version << 32) | (fd as u32 as u64)) as jlong
 }

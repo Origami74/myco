@@ -51,8 +51,9 @@ mod tun_bridge;
 // System-wide `.fips` DNS interception; driven by the TUN pump on Android.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod dns_intercept;
-// Surfaces the UDP transport's raw fd so Android can pin it to a specific
-// `Network` (Wi-Fi Aware / the AP lane). Android-only consumer.
+// Surfaces each UDP transport instance's raw fd, keyed by instance name, so
+// Android can pin the right socket to the right `Network` (the Aware NDP vs.
+// the AP/LAN lane). Android-only consumer.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod udp_fd_bridge;
 
