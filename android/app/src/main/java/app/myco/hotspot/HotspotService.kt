@@ -231,18 +231,45 @@ class HotspotService : Service() {
         // Several survivors would be pathological; prefer a softap-ish name.
         val pick = candidates.minByOrNull { (name, _) ->
             if (AP_IFACE_PREFIXES.any(name::startsWith)) 0 else 1
-        } ?: return null
+        } ?: run {
+            // DIAG: which side failed — enumeration or the known-set exclusion?
+            val all = runCatching {
+                NetworkInterface.getNetworkInterfaces().toList()
+                    .filter { runCatching { it.isUp }.getOrDefault(false) }
+                    .flatMap { i -> i.inetAddresses.toList().filterIsInstance<Inet4Address>().map { "${i.name}=${it.hostAddress}" } }
+            }.getOrElse { listOf("enum threw: $it") }
+            Log.i(TAG, "DIAG no candidate; ifaces=$all known=$known")
+            return null
+        }
         Log.i(TAG, "hotspot address ${pick.second.hostAddress} on ${pick.first}")
         return pick.second.hostAddress
     }
 
-    /** IPv4 addresses of every Network the app can see (see [hotspotIpv4]). */
+    /**
+     * IPv4 addresses of every Network that is positively NOT the hotspot:
+     * anything that may reach the internet (client Wi-Fi — capability, not
+     * validation, so an offline `!FIPS` AP still counts), cellular, or a VPN
+     * (the mesh TUN). Networks outside those classes are left OUT of the set
+     * on purpose: some Android builds surface the local-only hotspot itself
+     * as a Network to its owner (seen on this Pixel once a guest joined), and
+     * excluding by "any known network" then swallowed the AP address.
+     */
     private fun knownNetworkV4(): Set<String> {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
         @Suppress("DEPRECATION") // enumerating all networks is exactly the point
         return cm.allNetworks.flatMap { n ->
-            cm.getLinkProperties(n)?.linkAddresses.orEmpty()
-                .mapNotNull { (it.address as? Inet4Address)?.hostAddress }
+            val caps = cm.getNetworkCapabilities(n)
+            val notHotspot = caps != null && (
+                caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
+                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                    caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+                )
+            if (!notHotspot) {
+                emptyList()
+            } else {
+                cm.getLinkProperties(n)?.linkAddresses.orEmpty()
+                    .mapNotNull { (it.address as? Inet4Address)?.hostAddress }
+            }
         }.toSet()
     }
 
