@@ -26,8 +26,8 @@ use nsite_deck::seams::{BlobStore, ManifestFilter, PeerSource, RelayBackend};
 use nsite_deck::{sync, GatewayResponse, SiteAddr, SyncOutcome};
 use serde::{Deserialize, Serialize};
 
-use myco_blossom::FsBlobStore;
 use crate::mesh_relay::{Inbound, Origin};
+use myco_blossom::FsBlobStore;
 use myco_relay::RelayStore;
 
 /// Per-site sync/readiness, mirroring the FFI `SiteStatus` shape.
@@ -1262,7 +1262,8 @@ impl Content {
                 .request(npub, &url, filters, std::time::Duration::from_secs(15))
                 .await;
             for ev in events {
-                if ev.verify().is_ok() && self.relay.store_event(ev).await.unwrap_or(false) {
+                // Signatures were checked by the pool at ingress.
+                if self.relay.store_event(ev).await.unwrap_or(false) {
                     stored += 1;
                 }
             }
@@ -1363,12 +1364,7 @@ impl Content {
             })
         });
 
-        join_all(queries)
-            .await
-            .into_iter()
-            .flatten()
-            .filter(|e: &Event| e.verify().is_ok())
-            .collect()
+        join_all(queries).await.into_iter().flatten().collect()
     }
 
     // --- discovery ("nsites around me") ---
@@ -1402,7 +1398,6 @@ impl Content {
                 .await;
             events
                 .into_iter()
-                .filter(|e| e.verify().is_ok())
                 .filter_map(|ev| nsite_deck::Manifest::from_event(ev).ok())
                 .map(|m| {
                     let addr = SiteAddr {
@@ -1532,9 +1527,6 @@ impl Content {
             for ev in batch {
                 let kind = ev.kind.as_u16();
                 if kind != nsite_deck::KIND_ROOT && kind != nsite_deck::KIND_NAMED {
-                    continue;
-                }
-                if ev.verify().is_err() {
                     continue;
                 }
                 let key = manifest_key(kind, &ev.pubkey, event_d_tag(&ev).as_deref());

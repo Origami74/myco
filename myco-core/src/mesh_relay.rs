@@ -557,9 +557,7 @@ mod tests {
             "REQ", "s1",
             { "kinds": [KIND_ROOT], "authors": [hex::encode(keys.public_key().to_bytes())] }
         ]);
-        ws.send(WsMessage::Text(req.to_string().into()))
-            .await
-            .unwrap();
+        ws.send(WsMessage::Text(req.to_string())).await.unwrap();
 
         let mut got_event = false;
         let mut got_eose = false;
@@ -596,9 +594,7 @@ mod tests {
             .await
             .unwrap();
         ws.send(WsMessage::Text(
-            serde_json::json!(["EVENT", site.manifest])
-                .to_string()
-                .into(),
+            serde_json::json!(["EVENT", site.manifest]).to_string(),
         ))
         .await
         .unwrap();
@@ -625,9 +621,7 @@ mod tests {
             .await
             .unwrap();
         let req = serde_json::json!(["REQ", "s1", { "kinds": [9], "#d": ["mesh"] }]);
-        sub.send(WsMessage::Text(req.to_string().into()))
-            .await
-            .unwrap();
+        sub.send(WsMessage::Text(req.to_string())).await.unwrap();
         // Drain until EOSE so we know the live subscription is registered.
         loop {
             if let Some(Ok(WsMessage::Text(txt))) = sub.next().await {
@@ -644,7 +638,7 @@ mod tests {
             .unwrap();
         let msg = chat_event(&keys, "mesh", "live hello");
         pubr.send(WsMessage::Text(
-            serde_json::json!(["EVENT", msg]).to_string().into(),
+            serde_json::json!(["EVENT", msg]).to_string(),
         ))
         .await
         .unwrap();
@@ -693,7 +687,7 @@ mod tests {
             .await
             .unwrap();
         ws.send(WsMessage::Text(
-            serde_json::json!(["EVENT", msg]).to_string().into(),
+            serde_json::json!(["EVENT", msg]).to_string(),
         ))
         .await
         .unwrap();
@@ -746,7 +740,7 @@ mod tests {
             .unwrap();
         let filter = serde_json::json!({ "kinds": [9], "#d": ["mesh"] });
         ws.send(WsMessage::Text(
-            serde_json::json!(["REQ", "s1", filter]).to_string().into(),
+            serde_json::json!(["REQ", "s1", filter]).to_string(),
         ))
         .await
         .unwrap();
@@ -771,7 +765,7 @@ mod tests {
         );
 
         ws.send(WsMessage::Text(
-            serde_json::json!(["CLOSE", "s1"]).to_string().into(),
+            serde_json::json!(["CLOSE", "s1"]).to_string(),
         ))
         .await
         .unwrap();

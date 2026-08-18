@@ -42,6 +42,16 @@ use tokio_tungstenite::tungstenite::Message;
 /// over BLE. The runtime's keepwarm loop respawns the dropped task promptly.
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Drop any event whose signature does not check out.
+///
+/// One place, at the point remote events enter the process, rather than a check
+/// each call site has to remember — a missed one is a silent forgery hole. A
+/// forged manifest is the sharp case: the gateway would stage and serve it as
+/// the named publisher's site. See `reference/thinning-custom-relay.md` (D7).
+pub(crate) fn verified(events: Vec<Event>) -> Vec<Event> {
+    events.into_iter().filter(|e| e.verify().is_ok()).collect()
+}
+
 /// Cap on the WS connect itself. Without this, a TCP connect into a wedged FSP
 /// session hangs on SYN retransmits for the OS horizon (~2min) — and every
 /// retransmit rides the session, refreshing its activity clock so the node's
@@ -254,7 +264,13 @@ impl PeerRelayPool {
             }
         } // release the lock before awaiting the reply
         match tokio::time::timeout(timeout, reply_rx).await {
-            Ok(Ok(events)) => events,
+            // Signature check at the boundary: this is where a peer's events cross
+            // into the process, so callers downstream can treat what they get as
+            // authentic. Transport authenticity is not authorship — a peer relays
+            // events signed by third parties it has never met, so an honest peer
+            // still cannot vouch for them. See `reference/thinning-custom-relay.md`
+            // (D7).
+            Ok(Ok(events)) => verified(events),
             // Timed out, or the actor died before EOSE (connection dropped).
             _ => Vec::new(),
         }
@@ -450,6 +466,29 @@ fn handle_inbound(txt: &str, pending: &mut HashMap<String, Pending>) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ingress verification is the only signature check on the pull path — the
+    /// call sites downstream were removed in favour of this one, so a regression
+    /// here would let a peer hand us a forged event (a forged manifest is served
+    /// by the gateway as the named publisher's site). Pin it.
+    #[test]
+    fn ingress_drops_forged_signatures() {
+        let keys = nostr::Keys::generate();
+        let good = nostr::EventBuilder::new(nostr::Kind::from(9u16), "real")
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        // Tamper with the content after signing: id and sig no longer match, but
+        // it still deserializes as an Event, which is exactly what a hostile peer
+        // would send.
+        let mut raw = serde_json::to_value(&good).unwrap();
+        raw["content"] = serde_json::json!("forged");
+        let forged: Event = serde_json::from_value(raw).unwrap();
+
+        let out = verified(vec![good.clone(), forged]);
+        assert_eq!(out.len(), 1, "only the untampered event survives");
+        assert_eq!(out[0].id, good.id);
+    }
 
     /// The classifier reads OS error text, so pin the three cases: mistaking a
     /// startup race for a peer failure holds a good peer off for minutes.

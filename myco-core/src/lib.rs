@@ -27,14 +27,14 @@ mod control_client;
 // the host it is exercised only by its own tests, so it reads as dead there.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod gossip;
+mod identity_store;
+mod ip_source;
 // The NIP-01 front door: live subscriptions, the mesh fan-out hook, and the
 // access gate. Bound to its sockets only by the Android runtime, so on the host
 // it reads as dead outside its own tests (and the tests that use it as a plain
 // relay). See `reference/thinning-custom-relay.md`.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod mesh_relay;
-mod identity_store;
-mod ip_source;
 // npub -> observed lane record (Wi-Fi Aware vs. LAN/AP), pushed by the
 // Android Aware JNI bridge and consumed by `AppRuntime::state()`'s
 // lane_by_npub override. Plain, non-JNI logic so it is unit-testable on the

@@ -257,11 +257,8 @@ impl AppRuntime {
             // push content. Loopback (the in-app WebView) always bypasses the gate.
             let gate: Arc<dyn crate::mesh_relay::PeerGate> =
                 Arc::new(crate::content::CircleGate::new(content.clone()));
-            let hub = crate::mesh_relay::RelayHub::with_gate(
-                content.relay(),
-                Some(gossiper),
-                Some(gate),
-            );
+            let hub =
+                crate::mesh_relay::RelayHub::with_gate(content.relay(), Some(gossiper), Some(gate));
 
             // Mesh socket: IPV6_V6ONLY `[::]:4870` so it doesn't collide with the
             // loopback bind and is reachable by peers at `ws://<npub>.fips:4870`.

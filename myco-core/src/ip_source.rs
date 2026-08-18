@@ -292,7 +292,13 @@ pub async fn query_relay(url: &str, filter: serde_json::Value) -> anyhow::Result
                     Some("EVENT") => {
                         if let Some(ev) = val.get(2) {
                             if let Ok(event) = serde_json::from_value::<Event>(ev.clone()) {
-                                events.push(event);
+                                // Verified here, at the point a public relay's
+                                // events enter the process, so callers downstream
+                                // do not each have to remember to check. See
+                                // `reference/thinning-custom-relay.md` (D7).
+                                if event.verify().is_ok() {
+                                    events.push(event);
+                                }
                             }
                         }
                     }
@@ -343,7 +349,8 @@ impl PeerSource for IpPeerSource {
             join_all(queries).await
         };
 
-        // Pick the newest event that verifies and matches the requested slot.
+        // Pick the newest event matching the requested slot. Signatures were
+        // already checked at ingress (the pool, or `query_relay`).
         let mut newest: Option<Event> = None;
         for events in results.into_iter() {
             for ev in events {
@@ -351,9 +358,6 @@ impl PeerSource for IpPeerSource {
                     continue;
                 }
                 if d_tag.is_some() && event_d_tag(&ev).as_deref() != d_tag {
-                    continue;
-                }
-                if ev.verify().is_err() {
                     continue;
                 }
                 if newest.as_ref().is_none_or(|n| ev.created_at > n.created_at) {
