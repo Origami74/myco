@@ -52,6 +52,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import kotlin.system.exitProcess
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -360,6 +361,11 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
     var confirmAll by remember { mutableStateOf(false) }
     var editRelay by remember { mutableStateOf(false) }
     var editBlossom by remember { mutableStateOf(false) }
+    // Both settings are read when the core starts, so a save only takes hold on
+    // the next launch. Offer the restart rather than leaving the user to guess
+    // why nothing changed.
+    var restartPrompt by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     val used = state.cache.usedBytes
     val fraction = (used.toDouble() / STORAGE_CAP_BYTES).coerceIn(0.0, 1.0).toFloat()
@@ -476,6 +482,7 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
             onSave = { url ->
                 client.dispatch(NativeActions.setCustomRelay(url))
                 editRelay = false
+                restartPrompt = true
             },
             onDismiss = { editRelay = false },
         )
@@ -486,8 +493,27 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
             onSave = { url ->
                 client.dispatch(NativeActions.setCustomBlossom(url))
                 editBlossom = false
+                restartPrompt = true
             },
             onDismiss = { editBlossom = false },
+        )
+    }
+    if (restartPrompt) {
+        AlertDialog(
+            onDismissRequest = { restartPrompt = false },
+            confirmButton = {
+                TextButton(onClick = { restartApp(context) }) { Text("Restart now") }
+            },
+            dismissButton = {
+                TextButton(onClick = { restartPrompt = false }) { Text("Later") }
+            },
+            title = { Text("Saved") },
+            text = {
+                Text(
+                    "Myco needs to restart to use the new setting. Until then it keeps " +
+                        "using the current store.",
+                )
+            },
         )
     }
     if (confirmCache) {
@@ -734,6 +760,26 @@ private fun RadioWarningCard(warning: RadioWarning, onClick: () -> Unit) {
 /** Warning shown when the OS denied our BLE advertiser (TOO_MANY_ADVERTISERS):
  *  other apps hold every advertising slot, so peers can't discover this device.
  *  The radio keeps retrying on a backoff; this tells the user how to free a slot. */
+/**
+ * Relaunch the app, process and all.
+ *
+ * Restarting the activity is not enough: the settings are read once when the
+ * native core is constructed, so the process itself has to go. `makeRestartActivityTask`
+ * queues a fresh launch first, so exiting hands control straight back to a new
+ * process rather than dropping the user to the launcher.
+ */
+private fun restartApp(context: android.content.Context) {
+    val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+    val component = launch?.component
+    if (component == null) {
+        // Nothing sane left to do but stop; the next manual launch picks up the
+        // setting anyway.
+        exitProcess(0)
+    }
+    context.startActivity(android.content.Intent.makeRestartActivityTask(component))
+    exitProcess(0)
+}
+
 @Composable
 private fun BackendUnreachableCard(title: String, detail: String) {
     Column(
