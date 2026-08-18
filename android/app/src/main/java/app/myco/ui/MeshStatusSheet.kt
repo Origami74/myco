@@ -1,5 +1,6 @@
 package app.myco.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +24,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import app.myco.ap.ApRadio
 import app.myco.aware.AwareRadio
 import app.myco.core.AppState
+import app.myco.core.CircleContact
 import app.myco.core.PeerDiagnostic
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
@@ -101,33 +104,101 @@ fun MeshStatusSheet(state: AppState, meshEnabled: Boolean, onDismiss: () -> Unit
 
 // ----- Circle -----
 
-/** Who you're paired with, and whether the mesh can reach them right now. */
+/**
+ * Who you're paired with, online first.
+ *
+ * Ordering is reachable-then-name, never last-heard: a Circle of five phones in
+ * one room re-ranks on every poll if the order carries any live measurement,
+ * and a list that reshuffles under your thumb is unreadable. Two buckets and an
+ * alphabetical sort inside each is stable for as long as reachability is.
+ *
+ * Nothing spells out "reachable" or "offline" — the dot's colour is the whole
+ * status, and repeating it in words on every row was noise. Offline members
+ * collapse behind one line, because the answer they give ("still paired, not
+ * here") is the same for all of them and does not need five rows.
+ */
 @Composable
 private fun CircleSection(state: AppState, nowMs: Long) {
-    val reachable = state.circle.count { it.npub in state.reachableNpubs }
-    GroupLabel("CIRCLE — $reachable/${state.circle.size} REACHABLE")
+    val (online, offline) = state.circle
+        .sortedBy { it.name.ifEmpty { it.npub }.lowercase() }
+        .partition { it.npub in state.reachableNpubs }
+    GroupLabel("CIRCLE — ${online.size}/${state.circle.size} REACHABLE")
     if (state.circle.isEmpty()) {
         Hint("Nobody paired yet. Pair a device from the Circle tab.")
         return
     }
+    // Survives the 1Hz tick — this is a list you open and then read.
+    var showOffline by rememberSaveable { mutableStateOf(false) }
     SectionCard {
-        state.circle.forEachIndexed { i, member ->
+        online.forEachIndexed { i, member ->
             if (i > 0) Divider()
-            // Reachability is the Circle's own fact (a live mesh relay at any
-            // hop count); the peer row, when there is one, is what supplies the
-            // link numbers. A member reachable over several hops has no direct
-            // peer row at all, and that is not a fault.
-            val peer = state.peers.firstOrNull { it.npub == member.npub && it.npub.isNotEmpty() }
-            PeerLine(
-                name = member.name.ifEmpty { "a device" },
-                transport = peer?.transport.orEmpty(),
-                dot = if (member.npub in state.reachableNpubs) StatusReachable else StatusAlone,
-                status = if (member.npub in state.reachableNpubs) "reachable" else "offline",
-                peer = peer,
-                nowMs = nowMs,
+            CircleLine(state, member, StatusReachable, nowMs)
+        }
+        if (offline.isEmpty()) {
+            if (online.isEmpty()) EmptyRow("nobody reachable right now")
+            return@SectionCard
+        }
+        if (online.isNotEmpty()) Divider()
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { showOffline = !showOffline }
+                .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                StatusDot(StatusAlone, size = 8)
+                Text(
+                    "${offline.size} offline",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                if (showOffline) "\u2303" else "\u2304",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
             )
         }
+        if (showOffline) {
+            offline.forEach { member ->
+                Divider()
+                CircleLine(state, member, StatusAlone, nowMs)
+            }
+        }
     }
+}
+
+/**
+ * One Circle member. Reachability is the Circle's own fact (a live mesh relay
+ * at any hop count); the peer row, when there is one, supplies the link
+ * numbers. A member reachable over several hops has no direct peer row at all,
+ * and that is not a fault — the row simply carries no numbers.
+ */
+@Composable
+private fun CircleLine(state: AppState, member: CircleContact, dot: Color, nowMs: Long) {
+    val peer = state.peers.firstOrNull { it.npub == member.npub && it.npub.isNotEmpty() }
+    PeerLine(
+        name = member.name.ifEmpty { "a device" },
+        transport = peer?.transport.orEmpty(),
+        dot = dot,
+        peer = peer,
+        nowMs = nowMs,
+    )
+}
+
+@Composable
+private fun EmptyRow(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 14.dp, top = 8.dp, bottom = 8.dp),
+    )
 }
 
 // ----- Mesh -----
@@ -162,20 +233,24 @@ private fun MeshSection(
             peers = connected.filter { it.transport == "ble" },
             nowMs = nowMs,
         )
-        Divider()
-        LaneBlock(
-            transport = "aware",
-            label = "Wi-Fi Aware",
-            scanning = when {
-                !meshEnabled || !state.wifiAwareEnabled -> false
-                state.wifiAwareScanningKnown -> state.wifiAwareScanning
-                else -> null
-            },
-            off = !meshEnabled || !state.wifiAwareEnabled || !awareSupported,
-            offLabel = if (!awareSupported) "unsupported" else "off",
-            peers = connected.filter { it.transport == "aware" },
-            nowMs = nowMs,
-        )
+        // A radio this phone does not have is not a lane you can act on, so it
+        // gets no row at all — an "unsupported" line is a permanent dead entry
+        // on every device that lacks Aware, which is most of them.
+        if (awareSupported) {
+            Divider()
+            LaneBlock(
+                transport = "aware",
+                label = "Wi-Fi Aware",
+                scanning = when {
+                    !meshEnabled || !state.wifiAwareEnabled -> false
+                    state.wifiAwareScanningKnown -> state.wifiAwareScanning
+                    else -> null
+                },
+                off = !meshEnabled || !state.wifiAwareEnabled,
+                peers = connected.filter { it.transport == "aware" },
+                nowMs = nowMs,
+            )
+        }
         Divider()
         LaneBlock(
             transport = "udp",
@@ -231,7 +306,7 @@ private fun LaneBlock(
         }
         if (peers.isEmpty()) {
             Text(
-                "no peers on this lane",
+                "no peers",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 44.dp, top = 4.dp),
@@ -242,7 +317,6 @@ private fun LaneBlock(
                     name = p.name.ifEmpty { p.npub.ifEmpty { p.nodeAddrHex.ifEmpty { p.bleAddr } } },
                     transport = "",
                     dot = StatusConnected,
-                    status = null,
                     peer = p,
                     nowMs = nowMs,
                     indent = 44,
@@ -257,6 +331,9 @@ private fun LaneBlock(
 /**
  * A peer as this panel states it: who, then the three link numbers.
  *
+ * The dot is the status — there is no status word. Green/teal/red across a
+ * short list reads faster than the same three labels repeated down it.
+ *
  * `peer` being null (a Circle member reachable over relay with no direct row)
  * collapses to the identity line alone — the numbers are link facts and there
  * is no link to state them about.
@@ -266,33 +343,18 @@ private fun PeerLine(
     name: String,
     transport: String,
     dot: Color,
-    status: String?,
     peer: PeerDiagnostic?,
     nowMs: Long,
     indent: Int = 14,
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(start = indent.dp, end = 14.dp, top = 6.dp, bottom = 6.dp)) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.weight(1f, fill = false),
-            ) {
-                StatusDot(dot, size = 8)
-                if (transport.isNotEmpty()) TransportIcon(transport, size = 18)
-                Text(shortLabel(name), style = MaterialTheme.typography.bodyMedium)
-            }
-            if (status != null) {
-                Text(
-                    status,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            StatusDot(dot, size = 8)
+            if (transport.isNotEmpty()) TransportIcon(transport, size = 18)
+            Text(shortLabel(name), style = MaterialTheme.typography.bodyMedium)
         }
         if (peer != null) {
             Text(
