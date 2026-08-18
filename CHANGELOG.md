@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Wi-Fi Aware carries mesh traffic for the first time. The fast lane had been
+  negotiating a data path with nearby phones for months and never moving a
+  byte over it: the mesh node had one UDP socket, and the LAN lane pinned it to
+  the Wi-Fi network, after which nothing addressed to an Aware link could be
+  routed. Aware now has its own socket, pinned to its own network, and two
+  phones in a room peer over it directly — no access point, no router, no
+  internet. On the bench it becomes the busiest link between them, ahead of
+  Bluetooth and ahead of the LAN.
+- A lost Aware link comes back in seconds rather than minutes. It used to wait
+  for the next discovery sweep; it now asks for the path again as soon as it
+  drops, backing off if the peer has genuinely gone.
+- Settings says so when Bluetooth scanning is deaf because location services
+  are off. Some phones refuse to report nearby devices without location even
+  when an app asks not to use it for location, and the symptom is an empty peer
+  list with nothing to explain it — on one tablet, hours of it. The warning
+  appears only once scanning has actually been silent for a while, so a phone
+  that scans perfectly well with location off is never nagged, and tapping it
+  goes straight to the setting.
+- Each peer on the Dev tab now shows which radio carried it, as an icon down
+  the left edge: the Bluetooth rune, the Wi-Fi Aware arcs, or a globe for
+  anything routed. A peer with no link yet shows nothing rather than a guess.
+- Peer rows carry how long the session has been up beside how long ago it was
+  heard from. Those answer different questions, and only the second was
+  visible: a link re-establishing every few seconds looks perfectly healthy if
+  all you can see is that it was heard from a moment ago.
+
+### Changed
+
+- The mesh node is rebuilt on current FIPS. The version Myco had been building
+  against had drifted a long way behind, and the gap included fixes to path
+  MTU, framing, peer identity and the control plane. Everything Myco needs from
+  the node is now carried as focused changes on top of that current base rather
+  than as a private fork: Bluetooth as a first-class transport on Android,
+  per-instance transport addressing, an app-owned socket seam, and two
+  control-plane bug fixes. Peer state, peer discovery and `.fips` name
+  resolution all moved onto interfaces the node already ships.
+- Dev tab peer rows are legibly expandable — a caret says a row opens before
+  you tap it — and the screen now leads with your own identity, then peers,
+  then the radio self-check, which is the order you read them in.
+
+### Fixed
+
+- Bluetooth works again after being switched off and on. Turning the radio off
+  and back on — or leaving and returning from airplane mode — left the app
+  permanently unable to see any Bluetooth peer until it was force-stopped,
+  because nothing was watching the adapter. The lane is now rebuilt when the
+  radio returns, including the case where the app started with Bluetooth
+  already off.
+- Failed Bluetooth dials no longer accumulate until nothing can connect. Every
+  attempt that timed out abandoned a socket holding a connection slot, and once
+  enough had leaked every later attempt hung for its full timeout and failed —
+  recoverable only by force-stopping the app, which is exactly the workaround
+  this behaviour had been trained into people for months.
+- A phone could advertise a Bluetooth port nothing was listening on, which made
+  it permanently impossible to dial while looking perfectly healthy from the
+  outside. It now advertises the port it actually bound, and re-advertises when
+  that changes.
+- An unreachable peer is no longer redialled every thirty seconds forever. One
+  dead address could absorb most of the connection attempts and block every
+  other peer queued behind it; attempts now back off per address.
+- Turning the mesh off and on left the previous node running. Two nodes then
+  shared one radio, and the one answering questions about peers was not the one
+  doing the work — so the app could report no peers while a connection was live.
+- The Dev tab reported Bluetooth scanning and advertising as `unknown` on a
+  radio that was plainly working, and kept saying `active` after the radio had
+  been shut down.
+- Scan reports no longer flood the log. A busy room produced thousands of
+  lines and pushed anything useful out of the buffer within seconds; a phone
+  whose scanner returns nothing at all now says so once per window instead of
+  saying nothing.
+
 ## [0.5.0] - 2026-08-09
 
 ### Added

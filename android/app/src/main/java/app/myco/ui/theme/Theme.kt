@@ -21,6 +21,14 @@ val Indigo = Color(0xFF6366F1)
 val IndigoSoft = Color(0xFFE0E7FF)
 val IndigoInk = Color(0xFF3730A3)
 val StatusConnected = Color(0xFF22C55E)
+
+/// Transport identity colours for the Dev tab's per-peer icon. Bluetooth keeps
+/// its own brand blue because that glyph is universally recognised in it; the
+/// routed lane takes the app's emerald. Wi-Fi Aware deliberately has no colour
+/// here — it renders in `onSurface` so it reads as "the plain radio" against
+/// both themes.
+val TransportBluetooth = Color(0xFF0082FC)
+val TransportNetwork = Color(0xFF059669)
 val StatusReachable = Color(0xFF14B8A6)
 /// One peer: the mesh works but has no redundancy — lose that peer and you are
 /// alone, so it reads as a caution rather than a fault.

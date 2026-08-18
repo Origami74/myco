@@ -11,7 +11,18 @@
 
 mod action;
 mod attempt_store;
+// Myco-owned BLE connect-attempt vocabulary. These used to be fips types read
+// out of a transport-global log; the restacked fips counts outcomes into
+// `BleStats` instead. Nothing produces these yet — see the module doc's
+// TODO(stage 2).
+mod ble_diag;
 mod content;
+// Client for the fips node's Unix-domain control socket — the only way to read
+// peer state or push a platform-discovered peer into a node whose `run_rx_loop`
+// has borrowed it. Polled only by the Android peer-state tick and the platform
+// peer drainer, so it reads as dead on the host build (its own tests aside).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod control_client;
 // The mesh gossiper is wired only into the Android relay server (runtime.rs); on
 // the host it is exercised only by its own tests, so it reads as dead there.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -27,6 +38,10 @@ mod lane_observation;
 mod peer_diagnostics;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod peer_relay;
+// Bounded queue + drainer between the Kotlin radios' callback threads and the
+// node's control socket, where pushing a platform-discovered peer now lives.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod platform_peers;
 mod runtime;
 mod state;
 // The bridge is pumped only by the Android VpnService (via tun_bridge_jni) and
@@ -36,8 +51,9 @@ mod tun_bridge;
 // System-wide `.fips` DNS interception; driven by the TUN pump on Android.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod dns_intercept;
-// Surfaces the UDP transport's raw fd so Android can pin it to a specific
-// `Network` (Wi-Fi Aware / the AP lane). Android-only consumer.
+// Surfaces each UDP transport instance's raw fd, keyed by instance name, so
+// Android can pin the right socket to the right `Network` (the Aware NDP vs.
+// the AP/LAN lane). Android-only consumer.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod udp_fd_bridge;
 

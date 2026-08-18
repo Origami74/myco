@@ -67,13 +67,10 @@ pub fn install(
 /// into the mesh. Returns `false` if no TUN is installed or the queue is full.
 pub fn send_packet(mut packet: Vec<u8>) -> bool {
     // System-wide `.fips` DNS: a query to the sentinel resolver is ours —
-    // answered here for `.fips`, or forwarded upstream (the reply arrives
-    // later via `push_local`). Either way it must not go to the mesh.
+    // sent to the node's own responder for `.fips`, or to a real resolver
+    // otherwise. Either way the reply arrives later via `push_local`, and
+    // either way the query itself must not go to the mesh.
     match crate::dns_intercept::handle_query(&packet) {
-        crate::dns_intercept::Dns::Answered(reply) => {
-            local().lock().unwrap().push_back(reply);
-            return true;
-        }
         crate::dns_intercept::Dns::Forwarded => return true,
         crate::dns_intercept::Dns::NotOurs => {}
     }

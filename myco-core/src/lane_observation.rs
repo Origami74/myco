@@ -1,10 +1,10 @@
 //! npub → observed lane record — the lane disambiguation seam for D-19's
 //! merged peer diagnostics row (01-02).
 //!
-//! Wi-Fi Aware and the LAN/AP lane both ride fips's plain UDP transport and
-//! share one JNI push site (`aware_bridge_jni.rs`'s `TRANSPORT_TYPE =
-//! "udp"`), so fips itself structurally cannot tell them apart — only the
-//! Kotlin radio that observed a given peer knows which lane carried it. This
+//! Wi-Fi Aware and the LAN/AP lane both ride UDP and share one JNI push site,
+//! and while each now dials down its own named UDP instance, fips reports a
+//! peer's transport by *type* — so a peer row still cannot say which radio
+//! found it. Only the Kotlin radio that observed a given peer knows that. This
 //! module holds that record: plain lock-based state with no JNI or Android
 //! dependency, so it is unit-testable on the host even though
 //! `aware_bridge_jni.rs` (Android-only) is its sole real caller, pushing on

@@ -247,6 +247,13 @@ private fun RootSettings(
                             ),
                         )
                     }
+                    RadioAction.ENABLE_LOCATION -> runCatching {
+                        context.startActivity(
+                            android.content.Intent(
+                                android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS,
+                            ),
+                        )
+                    }
                 }
             }
         }
@@ -581,8 +588,16 @@ private fun ConfirmDialog(
     )
 }
 
-/** An actionable radio/VPN misconfiguration (see [radioWarnings]): same visual
- *  language as [BleExhaustedCard], but tappable to jump to the fix. */
+/**
+ * An actionable radio/VPN misconfiguration (see [radioWarnings]): same visual
+ * language as [BleExhaustedCard], but tappable to jump to the fix.
+ *
+ * The trailing chevron is what carries that difference. Without it the two
+ * cards are pixel-for-pixel the same object — one that takes you to the fix and
+ * one that cannot be tapped at all — and the only hint that this one is
+ * interactive was a "Tap to…" sentence buried at the end of the detail text.
+ * The same chevron marks every other navigating row on this screen.
+ */
 @Composable
 private fun RadioWarningCard(warning: RadioWarning, onClick: () -> Unit) {
     Column(
@@ -592,7 +607,21 @@ private fun RadioWarningCard(warning: RadioWarning, onClick: () -> Unit) {
                 MaterialTheme.colorScheme.errorContainer,
                 RoundedCornerShape(14.dp),
             )
-            .clickable(onClick = onClick)
+            // Labelled as a button rather than left as an anonymous clickable:
+            // a screen reader otherwise announces the warning text with no
+            // indication that acting on it is possible from here.
+            //
+            // The label names the *action* only. `clickable` merges the
+            // semantics of its descendants, so both the title and the detail
+            // are already announced as this node's description — the title
+            // alone is thin ("Location is off" says nothing about the
+            // consequence), but the detail that follows it carries that, and
+            // repeating either one here would only say it twice.
+            .clickable(
+                onClickLabel = "fix",
+                role = androidx.compose.ui.semantics.Role.Button,
+                onClick = onClick,
+            )
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -609,6 +638,13 @@ private fun RadioWarningCard(warning: RadioWarning, onClick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onErrorContainer,
                 fontWeight = FontWeight.SemiBold,
                 style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(20.dp),
             )
         }
         Text(

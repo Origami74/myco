@@ -8,10 +8,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -28,6 +31,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -47,10 +51,14 @@ import app.myco.ui.KeyVal
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
 import app.myco.ui.StatusDot
+import app.myco.ui.locationServicesEnabled
+import app.myco.R
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.StatusReachable
 import app.myco.ui.theme.StatusThin
+import app.myco.ui.theme.TransportBluetooth
+import app.myco.ui.theme.TransportNetwork
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
@@ -83,11 +91,16 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
     // recording either way, so history is complete when the screen returns.
     var devState by remember { mutableStateOf(state) }
     var firstReadLanded by remember { mutableStateOf(false) }
+    // Re-read on the same tick as the core state rather than once at
+    // composition: this is the row you watch while flipping the setting in
+    // another app, so a value frozen at screen entry would be a lie.
+    var locationOn by remember { mutableStateOf(locationServicesEnabled(context)) }
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(Unit) {
         lifecycleOwner.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
                 devState = withContext(Dispatchers.IO) { client.state() }
+                locationOn = withContext(Dispatchers.IO) { locationServicesEnabled(context) }
                 firstReadLanded = true
                 delay(1000)
             }
@@ -98,18 +111,28 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        ScreenHeader("Dev", devState, subtitle = "Technical details — myco-core state.")
+        // The own npub leads the screen: it is the first thing needed when
+        // comparing two devices side by side, and the identity card carrying it
+        // sits several cards down.
+        ScreenHeader(
+            "Dev",
+            devState,
+            subtitle = devState.ownNpub.takeIf { it.isNotEmpty() }
+                ?.let { "you: ${short(it)}" }
+                ?: "Technical details — myco-core state.",
+        )
 
-        // D-07: the radio self-check leads, because "no peers" is the actual
-        // field complaint and this card is what answers "is it me or is it
-        // them" without a second screen.
-        RadioSelfCheckCard(devState, awareSupported, awareAvailable)
+        // Who am I, then who can I see, then why. Identity leads because it is
+        // what a second device is compared against; the self-check sits under
+        // the peer list rather than over it, since it is the follow-up question
+        // once the list is empty or short, not the first thing read.
+        IdentityCard(devState)
 
         PeersOverviewCard(devState, firstReadLanded)
 
-        PendingPairingsCard(devState, firstReadLanded)
+        RadioSelfCheckCard(devState, awareSupported, awareAvailable, locationOn)
 
-        IdentityCard(devState)
+        PendingPairingsCard(devState, firstReadLanded)
 
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -174,7 +197,7 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
 }
 
 /**
- * **The first card, always** (D-07). Six observed radio facts in a fixed order
+ * **The first card, always** (D-07). Seven observed radio facts in a fixed order
  * that never varies with data, so the person holding the phone can answer "is it
  * me or is it them" before scrolling.
  *
@@ -185,7 +208,12 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
  * and never blocks the screen.
  */
 @Composable
-private fun RadioSelfCheckCard(state: AppState, awareSupported: Boolean, awareAvailable: Boolean) {
+private fun RadioSelfCheckCard(
+    state: AppState,
+    awareSupported: Boolean,
+    awareAvailable: Boolean,
+    locationOn: Boolean,
+) {
     DevCard("RADIO SELF-CHECK") {
         KeyValTri("ble enabled", state.bleEnabled, "on", "off")
         KeyValTri(
@@ -200,6 +228,14 @@ private fun RadioSelfCheckCard(state: AppState, awareSupported: Boolean, awareAv
             "active",
             "idle",
         )
+        // Sits with the BLE rows because that is what it explains. Some vendor
+        // stacks gate BLE scan callbacks on the location master switch even
+        // though Myco declares `neverForLocation` and asks for no location
+        // permission at all; the device then advertises and accepts inbound
+        // connections normally while receiving nothing, which reads as
+        // "ble scanning: active" and an empty peer list. Off here, with the
+        // rows above green, is the whole answer.
+        KeyValTri("location services", locationOn, "on", "off")
         KeyValTri("aware supported", awareSupported, "yes", "no")
         KeyValTri("aware available", awareAvailable, "yes", "no")
         KeyValTri(
@@ -403,7 +439,16 @@ private fun PeersOverviewCard(state: AppState, firstReadLanded: Boolean) {
                 )
             }
         }
-        for (p in state.peers) {
+        // Ruled between rows, not merely spaced: a two-line row against a
+        // two-line neighbour reads as one four-line block without them, and the
+        // expanded body makes that worse.
+        state.peers.forEachIndexed { i, p ->
+            if (i > 0) {
+                HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(start = 16.dp),
+                )
+            }
             val isOpen = p.key in expanded
             PeerDiagnosticRow(p, isOpen) {
                 if (isOpen) expanded.remove(p.key) else expanded.add(p.key)
@@ -420,10 +465,19 @@ private fun PeersOverviewCard(state: AppState, firstReadLanded: Boolean) {
 }
 
 /**
- * One merged peer diagnostics row: state dot + monospace identity on the
- * left, carrying transport + exact-seconds last-heard counter (D-18) on the
- * right, in monospace. `lastSeenMs == 0L` and an empty transport both render
- * as an em-dash rather than a false "0s"/blank value.
+ * One merged peer diagnostics row, over two lines: state dot + monospace
+ * identity with the expand caret on the first, transport and the two link
+ * clocks on the second.
+ *
+ * "seen" is the exact-seconds last-heard counter (D-18); "up" is the FMP
+ * session age. They answer different questions — a link heard from a second
+ * ago that is only ever a few seconds "up" is re-establishing, which reads as
+ * healthy if only the last-heard value is shown. The session survives rekeys
+ * (`receiver_idx` rotates roughly every 120s), so a long "up" means the link
+ * has held rather than that a handshake went stale.
+ *
+ * `lastSeenMs == 0L`, `authenticatedAtMs == 0L` and an empty transport all
+ * render as an em-dash rather than a false "0s"/blank value.
  */
 @Composable
 private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle: () -> Unit) {
@@ -444,7 +498,19 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
     }
     Column(modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle)) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        ) {
+        // Which radio carried this peer, read at a glance down the left edge.
+        // Deliberately larger than the text beside it: scanning the column for
+        // "which of these is on Bluetooth" is the common question, and it
+        // should not require reading a word on the second line.
+        TransportIcon(peer.transport, Modifier.padding(start = 14.dp, end = 2.dp))
+        Column(modifier = Modifier.weight(1f)) {
+        // Line 1: who. The caret is the affordance — a row that opens has to
+        // look like one before it is tapped, and the dot alone never said so.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 2.dp, end = 16.dp, top = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         ) {
@@ -460,15 +526,72 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
                 )
             }
             Text(
-                "${peer.transport.ifEmpty { "—" }} · ${elapsedExact(peer.lastSeenMs)}",
+                if (expanded) "⌃" else "⌄",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        // Line 2: the link, at a glance. Session age rides here rather than
+        // only in the expanded body — it is the number that separates a link
+        // that keeps re-establishing from one that is simply holding, and that
+        // is worth seeing without opening every row.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 1.dp, bottom = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                peer.transport.ifEmpty { "—" },
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Text(
+                "seen ${elapsedExact(peer.lastSeenMs)} · up ${elapsedExact(peer.authenticatedAtMs)}",
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        }
         }
         if (expanded) {
             PeerForensics(peer)
         }
     }
+}
+
+/**
+ * The transport a peer is reachable over, as an icon.
+ *
+ * Three lanes, three glyphs: the Bluetooth rune, the Wi-Fi Aware arcs, and a
+ * globe for anything routed (LAN, the `!FIPS` AP, mDNS). An unknown or absent
+ * transport draws nothing rather than guessing — a peer with no resolved link
+ * is a real state and a wrong icon would assert a link that does not exist.
+ *
+ * Bluetooth keeps its brand blue and the routed lane the app's emerald;
+ * Aware follows `onSurface`, so it reads as the plain radio in either theme.
+ */
+@Composable
+private fun TransportIcon(transport: String, modifier: Modifier = Modifier) {
+    val (res, tint, label) = when (transport) {
+        "ble" -> Triple(R.drawable.ic_transport_bluetooth, TransportBluetooth, "Bluetooth")
+        "aware" -> Triple(
+            R.drawable.ic_transport_wifi_aware,
+            MaterialTheme.colorScheme.onSurface,
+            "Wi-Fi Aware",
+        )
+        "" -> Triple(0, MaterialTheme.colorScheme.onSurfaceVariant, "")
+        // udp, tcp and anything else routed: it reached us over IP.
+        else -> Triple(R.drawable.ic_transport_network, TransportNetwork, "Network")
+    }
+    if (res == 0) {
+        Spacer(modifier.size(26.dp))
+        return
+    }
+    Icon(
+        painter = painterResource(res),
+        contentDescription = label,
+        tint = tint,
+        modifier = modifier.size(26.dp),
+    )
 }
 
 /**

@@ -105,6 +105,10 @@ data class PeerDiagnostic(
     val alsoReachableVia: List<String> = emptyList(),
     /** 0 when never heard from — renders as an em-dash, never "0s". */
     val lastSeenMs: Long,
+    /** Epoch ms the FMP session authenticated; 0 when there is no session.
+     *  The age from this is the session's, not the current FMP index's — the
+     *  index rotates on every rekey (~120s) while the session survives. */
+    val authenticatedAtMs: Long = 0L,
     val rssi: Int?,
     val psm: Int,
     /** "" | "incoming-waiting" | "outbound-waiting" | "paired". */
@@ -355,6 +359,7 @@ data class AppState(
                                 transport = p.optString("transport"),
                                 alsoReachableVia = alsoReachableVia,
                                 lastSeenMs = p.optLong("lastSeenMs"),
+                                authenticatedAtMs = p.optLong("authenticatedAtMs"),
                                 rssi = if (p.isNull("rssi")) null else p.optInt("rssi"),
                                 psm = p.optInt("psm"),
                                 pairState = p.optString("pairState"),

@@ -13,6 +13,7 @@
 //! Compiled only on Android (the host build drives `AppRuntime` directly and the
 //! fips bridge logic is unit-tested with a mock radio in fips itself).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -22,7 +23,7 @@ use jni::sys::{jboolean, jint, jlong};
 use jni::{JNIEnv, JavaVM};
 
 use fips::transport::ble::addr::BleAddr;
-use fips::transport::ble::android_io::{set_android_ble_bridge, AndroidBleBridge, AndroidRadio};
+use fips::transport::ble::android_io::{AndroidBleBridge, AndroidRadio, BleRadioSlot};
 
 /// Process-wide JavaVM, captured in `initializeAndroidContext`. Needed to attach
 /// tokio worker threads to the JVM before issuing control upcalls.
@@ -121,6 +122,100 @@ impl AndroidRadio for KotlinRadio {
 }
 
 // ============================================================================
+// Radio installation — matching two independent lifecycles
+// ============================================================================
+
+/// The node's radio slot, once a node has been built, and the bridge Kotlin
+/// last created. Either can arrive first, so both are kept and re-married
+/// whenever one of them changes.
+///
+/// The slot used to be a fips process-global (`set_android_ble_bridge`); it is
+/// node-scoped now, handed out by `Node::enable_app_owned_ble_radio`. That is a
+/// better shape but it does not, on its own, span the two lifecycles Myco has
+/// to reconcile:
+///
+/// - The **node** is rebuilt on a BLE off→on cycle, because `run_rx_loop`
+///   consumes it. Each rebuild yields a fresh slot, which must be re-populated
+///   with the radio that is already running.
+/// - The **radio** belongs to `BleService`, which deliberately does *not*
+///   bounce the node when it starts a fresh one (bouncing tore down every peer
+///   and session). `bleBridgeNew` also runs on the Android service thread,
+///   before `StartNode` — so a bridge routinely exists before any slot does.
+///
+/// Keeping both here, in a static rather than on `AppRuntime`, is the same
+/// pattern the TUN and UDP-fd bridges use: the JNI exports have no
+/// `AppRuntime` handle, and a JVM thread must never take the reducer lock.
+struct Installation {
+    slot: Option<Arc<BleRadioSlot>>,
+    bridge: Option<Arc<AndroidBleBridge>>,
+}
+
+static INSTALLATION: OnceLock<std::sync::Mutex<Installation>> = OnceLock::new();
+
+fn installation() -> &'static std::sync::Mutex<Installation> {
+    INSTALLATION.get_or_init(|| {
+        std::sync::Mutex::new(Installation {
+            slot: None,
+            bridge: None,
+        })
+    })
+}
+
+/// Hand this node's radio slot over, replacing any prior node's.
+///
+/// Called from `AppRuntime::start_node` while it still holds `&mut Node`. If
+/// Kotlin already created a radio, it is installed into the new slot
+/// immediately — the whole point of the slot being resolvable per operation is
+/// that this can happen under a node that is already running.
+pub(crate) fn set_radio_slot(slot: Arc<BleRadioSlot>) {
+    let mut install = installation().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(bridge) = install.bridge.as_ref() {
+        slot.install(Arc::clone(bridge));
+    }
+    install.slot = Some(slot);
+}
+
+/// Record the radio Kotlin just built and install it into the current slot, if
+/// there is one. Replaces any prior radio.
+fn set_radio_bridge(bridge: Arc<AndroidBleBridge>) {
+    let mut install = installation().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(slot) = install.slot.as_ref() {
+        slot.install(Arc::clone(&bridge));
+    }
+    install.bridge = Some(bridge);
+}
+
+/// Retract a radio Kotlin has shut down, clearing it out of the node's slot.
+///
+/// Without this the installation kept holding a dead radio, and the next
+/// [`set_radio_slot`] — which a mesh toggle reaches, because rebuilding the
+/// node yields a fresh slot — installed that dead radio into the new slot.
+/// The transport's `listen` and `start_advertising` then ran against closed
+/// sockets until Kotlin's next `bleBridgeNew` replaced it, about a second
+/// later. Benign in that window, but it is the same shape as the stale-PSM
+/// bug: state that outlives the thing it describes. An empty slot parks the
+/// backend until a live radio arrives, which is the correct degradation.
+///
+/// Retracts only the radio it was handed. `bleBridgeNew` may already have
+/// installed a newer one — a stop racing a start must not take that one down.
+fn clear_radio_bridge(bridge: &Arc<AndroidBleBridge>) {
+    let mut install = installation().lock().unwrap_or_else(|e| e.into_inner());
+    if !install
+        .bridge
+        .as_ref()
+        .is_some_and(|held| Arc::ptr_eq(held, bridge))
+    {
+        return;
+    }
+    install.bridge = None;
+    if let Some(slot) = install.slot.as_ref() {
+        if slot.current().is_some_and(|c| Arc::ptr_eq(&c, bridge)) {
+            slot.clear();
+        }
+    }
+}
+
+// ============================================================================
 // Bridge handle + helpers
 // ============================================================================
 
@@ -142,9 +237,11 @@ fn jstring_to_addr(env: &mut JNIEnv, s: &JString) -> Option<BleAddr> {
 // JNI exports (called by the Kotlin BleRadio / BleService)
 // ============================================================================
 
-/// Create the bridge over a Kotlin `BleRadio`, inject it into fips so the node's
-/// BLE transport picks it up at start, and return an opaque handle. Must be
-/// called before dispatching StartNode.
+/// Create the bridge over a Kotlin `BleRadio`, install it into the node's radio
+/// slot (or hold it until a node hands one over), and return an opaque handle.
+///
+/// No longer has to precede `StartNode`: the transport resolves the slot per
+/// operation, so a radio that appears later is picked up without a rebuild.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_bleBridgeNew(
     env: JNIEnv,
@@ -157,10 +254,31 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleBridgeNew(
         Err(_) => return 0,
     };
     let bridge = AndroidBleBridge::new(Arc::new(KotlinRadio { radio: global }));
-    // Inject (replacing any prior bridge) so the node — fresh or rebuilt after a
-    // BLE off/on cycle — picks up this radio.
-    set_android_ble_bridge(Arc::clone(&bridge));
+    // Install (replacing any prior radio) so the node — fresh, rebuilt after a
+    // BLE off/on cycle, or not yet built — ends up driving this one.
+    set_radio_bridge(Arc::clone(&bridge));
     Box::into_raw(Box::new(bridge)) as jlong
+}
+
+/// Retract the radio behind `handle` from the node's slot.
+///
+/// Called by `BleService.stopBle` after it shuts the radio down. Does *not*
+/// free the handle — the radio's I/O threads may still be winding down through
+/// it — it only stops the core from driving a radio that is gone.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_bleBridgeClear(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: borrows, without reclaiming, the Box that `bleBridgeNew`
+    // leaked. Kotlin holds the handle for the life of its radio and passes it
+    // back exactly once, before any `bleBridgeFree`.
+    let bridge = unsafe { &*(handle as *const Arc<AndroidBleBridge>) };
+    clear_radio_bridge(bridge);
 }
 
 #[no_mangle]
@@ -170,8 +288,9 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleBridgeFree(
     handle: jlong,
 ) {
     if handle != 0 {
-        // SAFETY: reclaims the Box from bleBridgeNew. The fips global keeps its
-        // own Arc clone, so the bridge itself lives as long as the node does.
+        // SAFETY: reclaims the Box from bleBridgeNew. The radio slot and the
+        // installation record keep their own Arc clones, so the bridge itself
+        // outlives this handle.
         unsafe { drop(Box::from_raw(handle as *mut Arc<AndroidBleBridge>)) };
     }
 }
@@ -237,38 +356,85 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverScan(
         return;
     };
     if let Some(ble_addr) = jstring_to_addr(&mut env, &addr) {
-        bridge.deliver_scan(ble_addr, psm.max(0) as u16, rssi);
+        bridge.deliver_scan(ble_addr, psm.max(0) as u16, rssi_from_jint(rssi));
+    }
+}
+
+/// Android's `ScanResult.rssi` in dBm, as an optional signal strength.
+///
+/// `127` is the platform's "RSSI unknown" sentinel and is not a real reading,
+/// so it maps to `None` rather than to an implausibly strong signal. Anything
+/// outside `i16` cannot come from the radio and is treated the same way.
+fn rssi_from_jint(rssi: jint) -> Option<i16> {
+    match rssi {
+        127 => None,
+        v => i16::try_from(v).ok(),
+    }
+}
+
+/// Whether Kotlin has ever pushed a scanning state — until it has, the value is
+/// unknown, never a guessed false.
+static BLE_SCANNING_KNOWN: AtomicBool = AtomicBool::new(false);
+/// The last-pushed scanning value, meaningful only once `BLE_SCANNING_KNOWN`.
+static BLE_SCANNING: AtomicBool = AtomicBool::new(false);
+/// Whether Kotlin has ever pushed an advertising state.
+static BLE_ADVERTISING_KNOWN: AtomicBool = AtomicBool::new(false);
+/// The last-pushed advertising value, meaningful only once
+/// `BLE_ADVERTISING_KNOWN`.
+static BLE_ADVERTISING: AtomicBool = AtomicBool::new(false);
+
+/// The last-observed scanning state, or `None` if Kotlin has never pushed one
+/// (radio never started, or a non-Android build) — the caller must render
+/// unknown rather than guessing false.
+pub(crate) fn ble_scanning() -> Option<bool> {
+    if BLE_SCANNING_KNOWN.load(Ordering::Relaxed) {
+        Some(BLE_SCANNING.load(Ordering::Relaxed))
+    } else {
+        None
+    }
+}
+
+/// The last-observed advertising state, or `None` if Kotlin has never pushed
+/// one.
+pub(crate) fn ble_advertising() -> Option<bool> {
+    if BLE_ADVERTISING_KNOWN.load(Ordering::Relaxed) {
+        Some(BLE_ADVERTISING.load(Ordering::Relaxed))
+    } else {
+        None
     }
 }
 
 /// Kotlin reports whether its BLE scan loop is live right now, pushed from the
-/// scan callback's own start/stop/retry-failure sites. Observed radio state for
-/// the developer diagnostics UI only — a zero or stale handle is a no-op.
+/// scan callback's own start/stop/retry-failure sites.
+///
+/// Kept in a Myco-owned atomic rather than read back off fips's
+/// `AndroidBleBridge`, which is where it used to live: the flag was only ever
+/// Kotlin's own push bouncing off a struct in the wrong crate. Same shape as
+/// the Aware lane's `set_aware_discovering`. Diagnostic only — nothing
+/// functional reads it.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverScanningState(
     _env: JNIEnv,
     _class: JClass,
-    handle: jlong,
+    _handle: jlong,
     on: jboolean,
 ) {
-    if let Some(bridge) = unsafe { bridge_ref(handle) } {
-        bridge.set_scanning(on != 0);
-    }
+    BLE_SCANNING.store(on != 0, Ordering::Relaxed);
+    BLE_SCANNING_KNOWN.store(true, Ordering::Relaxed);
 }
 
 /// Kotlin reports whether its BLE advertiser is live right now, pushed from the
-/// advertise callback's own install/clear sites. Observed radio state for the
-/// developer diagnostics UI only — a zero or stale handle is a no-op.
+/// advertise callback's own install/clear sites. Same ownership rationale as
+/// [`Java_app_myco_core_NativeCore_bleDeliverScanningState`].
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverAdvertisingState(
     _env: JNIEnv,
     _class: JClass,
-    handle: jlong,
+    _handle: jlong,
     on: jboolean,
 ) {
-    if let Some(bridge) = unsafe { bridge_ref(handle) } {
-        bridge.set_advertising(on != 0);
-    }
+    BLE_ADVERTISING.store(on != 0, Ordering::Relaxed);
+    BLE_ADVERTISING_KNOWN.store(true, Ordering::Relaxed);
 }
 
 /// Kotlin read one L2CAP packet. Returns 1 if delivered, 0 if the channel is gone.

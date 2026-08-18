@@ -94,6 +94,14 @@ pub struct PeerDiagnosticView {
     /// Milliseconds-since-epoch this row was last heard from; `0` when never
     /// heard from (renders as an em-dash, never "0s").
     pub last_seen_ms: u64,
+    /// Milliseconds-since-epoch the FMP session with this peer authenticated;
+    /// `0` when there is no session (renders as an em-dash, never "0s").
+    ///
+    /// The age derived from this is the session's, not the current FMP index's:
+    /// `receiver_idx` rotates on every rekey (default 120s) while the session
+    /// itself survives, so a long age means the link has held, not that a
+    /// handshake is stale.
+    pub authenticated_at_ms: u64,
     /// Signal strength from the most recent scan advert attributed to this
     /// row, dBm; `None` when no advert has been attributed.
     pub rssi: Option<i32>,

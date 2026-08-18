@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use fips::transport::ble::attempts::{BleAttempt, BlePeerAttempts, MAX_ATTEMPTS_PER_PEER};
+use crate::ble_diag::{BleAttempt, BlePeerAttempts, MAX_ATTEMPTS_PER_PEER};
 
 /// File name under the app-private data dir.
 const FILE_NAME: &str = "ble-attempts.jsonl";
@@ -52,7 +52,7 @@ const EVICT_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 /// changes meaningfully, so this keeps the disk quiet.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// One attempt as persisted. Mirrors the fips record shape; carries no
+/// One attempt as persisted. Mirrors [`BleAttempt`]; carries no
 /// peer-supplied free text, only locally generated values (T-03-03).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,7 +72,7 @@ pub struct PersistedAttempt {
 }
 
 impl PersistedAttempt {
-    fn from_fips(a: &BleAttempt) -> Self {
+    fn from_live(a: &BleAttempt) -> Self {
         Self {
             at_ms: a.at_ms,
             ble_addr: a.ble_addr.clone(),
@@ -217,7 +217,7 @@ impl AttemptStore {
                 {
                     continue;
                 }
-                ring.push_back(PersistedAttempt::from_fips(attempt));
+                ring.push_back(PersistedAttempt::from_live(attempt));
                 ring.make_contiguous().sort_by_key(|r| r.at_ms);
                 while ring.len() > MAX_ATTEMPTS_PER_PEER {
                     ring.pop_front();
@@ -247,7 +247,7 @@ impl AttemptStore {
                 attempts: inner
                     .by_addr
                     .get(addr)
-                    .map(|ring| ring.iter().map(to_fips).collect())
+                    .map(|ring| ring.iter().map(to_live).collect())
                     .unwrap_or_default(),
             })
             .collect()
@@ -319,11 +319,11 @@ impl AttemptStore {
     }
 }
 
-/// Rebuild the fips-side record from a persisted one. Unknown role/outcome
+/// Rebuild the live record from a persisted one. Unknown role/outcome
 /// labels from a hand-edited or future-version file are carried through as
 /// recorded rather than being coerced into a wrong enum value.
-fn to_fips(rec: &PersistedAttempt) -> BleAttempt {
-    use fips::transport::ble::attempts::{BleAttemptOutcome, BleRole};
+fn to_live(rec: &PersistedAttempt) -> BleAttempt {
+    use crate::ble_diag::{BleAttemptOutcome, BleRole};
     BleAttempt {
         at_ms: rec.at_ms,
         ble_addr: rec.ble_addr.clone(),
@@ -348,7 +348,7 @@ fn to_fips(rec: &PersistedAttempt) -> BleAttempt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fips::transport::ble::attempts::{BleAttemptOutcome, BleRole};
+    use crate::ble_diag::{BleAttemptOutcome, BleRole};
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let d =

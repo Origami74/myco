@@ -26,7 +26,10 @@ import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The Android BLE radio. Kotlin owns the radio; the Rust core (fips `AndroidIo`)
@@ -57,6 +60,11 @@ class BleRadio(context: Context) {
     private var bridgeHandle: Long = 0
     private val io = Executors.newCachedThreadPool()
     private val channels = ConcurrentHashMap<Long, BluetoothSocket>()
+    // Dials parked inside BluetoothSocket.connect(), by device MAC. Android's
+    // connect blocks well past the core's probe timeout, so without this the
+    // core's re-dials stack up: several sockets per device, each holding an LE
+    // connect slot, none of them closed. See [connect].
+    private val dialing = ConcurrentHashMap<String, BluetoothSocket>()
     // A parallel GATT per channel, used only to request a low connection interval
     // (L2CAP CoC exposes no priority API). Bumps mesh throughput ~2-4x.
     private val gatts = ConcurrentHashMap<Long, GattPrio>()
@@ -81,6 +89,26 @@ class BleRadio(context: Context) {
     private var stopped = false
 
     private var serverSocket: BluetoothServerSocket? = null
+
+    /**
+     * The PSM this radio's L2CAP listener is actually bound to, or 0 if it has
+     * none. Written only by [listen] and cleared by [shutdown], so it can never
+     * name a socket that is gone.
+     *
+     * Read by [BleService] to tell a recovered lane from one that came back up
+     * scanning but undialable — a radio with no listener advertises nothing a
+     * peer can connect to, which is invisible from the outside.
+     */
+    @Volatile
+    var listenPsm: Int = 0
+        private set
+
+    // Say it once, not once per operation and not once per retry: with the
+    // adapter off, `bluetoothLeScanner` / `bluetoothLeAdvertiser` are null and
+    // `listenUsingInsecureL2capChannel` throws — three separate ways to fail,
+    // all meaning the same single thing. Per-radio, so the replacement radio
+    // built when Bluetooth returns starts with a clean slate.
+    private val adapterOffLogged = AtomicBoolean(false)
     private var advertiser: BluetoothLeAdvertiser? = null
     private var advertiseCallback: AdvertiseCallback? = null
     private var scanner: BluetoothLeScanner? = null
@@ -96,6 +124,19 @@ class BleRadio(context: Context) {
     // SCAN_FAILED_SCANNING_TOO_FREQUENTLY) used to be logged and abandoned, which
     // permanently killed peer discovery until the mesh was toggled. We re-arm it.
     private var scanRetries = 0
+
+    // Scan-report accounting, summarised on a timer instead of logged per
+    // result. Per-result logging emitted several lines a second on a busy
+    // radio and rotated every other MycoBleRadio line out of the buffer within
+    // seconds. The timer fires whether or not anything was seen, because a
+    // scanner producing *nothing* is as much of a symptom as one producing
+    // adverts with no PSM — a device in that state is inbound-only, and under
+    // a log-only-when-there-is-something scheme it would look healthy.
+    private val scanWithPsm = AtomicInteger()
+    private val scanWithoutPsm = AtomicInteger()
+    private val scanPsmAddrs = ConcurrentHashMap.newKeySet<String>()
+    private val scanNoPsmAddrs = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var scanSummaryTask: ScheduledFuture<*>? = null
 
     // Background mode (set from the service via ProcessLifecycleOwner): while the
     // app is not visible, discovery drops from LOW_LATENCY (~100% RX duty) to
@@ -125,11 +166,19 @@ class BleRadio(context: Context) {
     /** Open an insecure L2CAP listener; return the OS-assigned PSM (0 on failure). */
     fun listen(): Int {
         if (stopped) return 0
-        val a = adapter ?: return 0
+        val a = adapter ?: run {
+            Log.e(TAG, "listen: no Bluetooth adapter on this device")
+            return 0
+        }
+        if (!a.isEnabled) {
+            reportAdapterOff("listen")
+            return 0
+        }
         return try {
             val ss = a.listenUsingInsecureL2capChannel()
             serverSocket = ss
             val psm = ss.psm
+            listenPsm = psm
             io.execute { acceptLoop(ss) }
             Log.i(TAG, "L2CAP listening on PSM $psm")
             psm
@@ -139,28 +188,143 @@ class BleRadio(context: Context) {
         }
     }
 
-    /** Dial a peer; deliver the result (and, on success, start the channel). */
-    fun connect(connectId: Long, addr: String, psm: Int) {
-        if (stopped) return
-        runCatching {
-        io.execute {
-            val mac = addr.substringAfter('/', addr)
-            try {
-                val device = adapter?.getRemoteDevice(mac)
-                    ?: throw IOException("no adapter / bad addr $addr")
-                val sock = device.createInsecureL2capChannel(psm)
-                sock.connect()
-                val chId = NativeCore.bleDeliverConnectResult(
-                    bridgeHandle, connectId, true, addr, sendMtu(sock), recvMtu(sock),
-                )
-                if (chId > 0) startChannel(chId, sock) else closeQuietly(sock)
-            } catch (e: Exception) {
-                Log.w(TAG, "connect $addr psm $psm failed: ${e.message}")
-                NativeCore.bleDeliverConnectResult(bridgeHandle, connectId, false, addr, 0, 0)
-            }
-        }
+    /**
+     * Report — once per radio — that Bluetooth itself is off, so the lane
+     * cannot open.
+     *
+     * This is the line whose absence hid the off/on bug: `startScanning` used
+     * to return on a null `bluetoothLeScanner` without a word, so a process
+     * that started with Bluetooth disabled looked identical to a healthy one
+     * (`bluetooth_on=1`, transport `up`) while having never scanned once.
+     * Recovery is [BleService]'s job — it watches the adapter — so this only
+     * has to be audible, not actionable.
+     */
+    private fun reportAdapterOff(op: String) {
+        if (adapterOffLogged.compareAndSet(false, true)) {
+            Log.w(
+                TAG,
+                "$op: Bluetooth is off — this radio has no listener, no advert and " +
+                    "no scan; the lane stays down until the adapter comes back " +
+                    "(BleService rebuilds it then)",
+            )
         }
     }
+
+    /**
+     * Dial a peer; deliver the result (and, on success, start the channel).
+     *
+     * Every exit closes the socket unless the core adopted it. A
+     * [BluetoothSocket] whose `connect()` threw is *not* self-closing, and an
+     * abandoned one keeps its slot in the BT stack's LE connect table: leak
+     * enough of them and every later dial hangs for its full timeout and then
+     * fails, with nothing in the app's own state to explain it. Only killing
+     * the process gets them back.
+     *
+     * The dial is also bounded twice over, because `connect()` blocks for far
+     * longer than the core is willing to wait — the core gives up at its
+     * probe timeout and re-dials while this thread is still parked inside
+     * Android:
+     *
+     * - one in-flight dial per device ([dialing]): a fresh dial to the same
+     *   MAC closes the previous socket, which unblocks it promptly;
+     * - [DIAL_WATCHDOG_MS] as a backstop, for the peer the core discovers
+     *   once and never probes again.
+     *
+     * So the socket is closed on every exit that is not an adoption — a
+     * `connect()` that threw, a success the core declined to take, the
+     * watchdog, and [shutdown] — and the core is answered on every exit
+     * including the two that never reach a socket at all (already stopped,
+     * and a thread pool that refuses the work).
+     */
+    fun connect(connectId: Long, addr: String, psm: Int) {
+        // Every return from here answers the core, one way or another. A dial
+        // that is silently dropped costs the probe loop its full 10s timeout
+        // waiting for an attempt that was never made.
+        if (stopped) {
+            failDial(connectId, addr)
+            return
+        }
+        val submitted = runCatching { io.execute { dial(connectId, addr, psm) } }
+        if (submitted.isFailure) {
+            // The pool was shut down underneath this call, so the dial will
+            // never run.
+            failDial(connectId, addr)
+        }
+    }
+
+    /** Tell the core a dial did not produce a channel. Safe at any point,
+     *  including after [shutdown]: the bridge handle outlives the radio (see
+     *  [BleService.stopBle]), and an answer for a dial the core already gave up
+     *  on is discarded there rather than allocating anything. */
+    private fun failDial(connectId: Long, addr: String) {
+        runCatching {
+            NativeCore.bleDeliverConnectResult(bridgeHandle, connectId, false, addr, 0, 0)
+        }
+    }
+
+    /** The dial itself, on an [io] thread. See [connect] for why it is bounded. */
+    private fun dial(connectId: Long, addr: String, psm: Int) {
+        val mac = addr.substringAfter('/', addr)
+        var sock: BluetoothSocket? = null
+        var adopted = false
+        var watchdog: ScheduledFuture<*>? = null
+        try {
+            val device = adapter?.getRemoteDevice(mac)
+                ?: throw IOException("no adapter / bad addr $addr")
+            val s = device.createInsecureL2capChannel(psm)
+            sock = s
+            // Supersede any dial to this device still parked in connect():
+            // the core only re-dials once it has given up on the last one,
+            // so the old socket is dead weight holding an LE connect slot.
+            dialing.put(mac, s)?.let { closeQuietly(it) }
+            // Re-checked here, and in this order. [shutdown] sets `stopped`
+            // and only then drains [dialing], so registering before checking
+            // is what makes the race unloseable: either the drain sees our
+            // socket and closes it, or we see `stopped` and close it
+            // ourselves. Checking first and registering after would let a
+            // dial slip between the two and outlive the radio, parked in the
+            // BT stack where `shutdownNow` cannot reach it.
+            if (stopped) throw IOException("radio stopped")
+            watchdog = armDialWatchdog(mac, s)
+            s.connect()
+            val chId = NativeCore.bleDeliverConnectResult(
+                bridgeHandle, connectId, true, addr, sendMtu(s), recvMtu(s),
+            )
+            // Adopted *before* the channel is started, not after: from this
+            // point the socket belongs to [channels]. A throw out of
+            // startChannel must not close it underneath the core, nor report
+            // this dial failed after it has already been reported succeeded.
+            if (chId > 0) {
+                adopted = true
+                startChannel(chId, s)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "connect $addr psm $psm failed: ${e.message}")
+            if (!adopted) failDial(connectId, addr)
+        } finally {
+            // Nothing left to watch: dropping it keeps a resolved dial's socket
+            // out of the shared scheduler's queue for the next 15s.
+            watchdog?.cancel(false)
+            // Only clear the entry if it is still ours — a superseding dial
+            // owns it now, and closing its socket would kill a live attempt.
+            sock?.let { dialing.remove(mac, it) }
+            if (!adopted) sock?.let { closeQuietly(it) }
+        }
+    }
+
+    /** Close a dial still unresolved after [DIAL_WATCHDOG_MS], so a connect
+     *  Android never answers cannot hold an LE connect slot indefinitely.
+     *  Closing makes the parked `connect()` throw, and the dial's own `finally`
+     *  does the rest. */
+    private fun armDialWatchdog(mac: String, sock: BluetoothSocket): ScheduledFuture<*>? =
+        runCatching {
+            retryExec.schedule({
+                if (dialing.remove(mac, sock)) {
+                    Log.w(TAG, "dial $mac still unresolved after ${DIAL_WATCHDOG_MS}ms — closing")
+                    closeQuietly(sock)
+                }
+            }, DIAL_WATCHDOG_MS, TimeUnit.MILLISECONDS)
+        }.getOrNull()
 
     fun startAdvertising(psm: Int) {
         if (stopped) return
@@ -168,7 +332,12 @@ class BleRadio(context: Context) {
         // Stop-before-start hygiene: never orphan a prior advertiser set on a
         // re-advertise (retry / radio restart), which itself burns a slot.
         stopAdvertising()
-        val adv = adapter?.bluetoothLeAdvertiser ?: return
+        // Null whenever the adapter is not ON. Returning silently here is how a
+        // radio ends up believing it advertises when it does not.
+        val adv = adapter?.bluetoothLeAdvertiser ?: run {
+            reportAdapterOff("startAdvertising")
+            return
+        }
         advertiser = adv
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
@@ -243,7 +412,12 @@ class BleRadio(context: Context) {
         // Stop-before-start hygiene: a re-arm (retry / radio restart) must not
         // orphan a prior scan callback.
         stopScanning()
-        val sc = adapter?.bluetoothLeScanner ?: return
+        // Null whenever the adapter is not ON — the silent return that made a
+        // Bluetooth off/on cycle leave this process permanently deaf.
+        val sc = adapter?.bluetoothLeScanner ?: run {
+            reportAdapterOff("startScanning")
+            return
+        }
         scanner = sc
         val filters = listOf(ScanFilter.Builder().setServiceUuid(FIPS_PARCEL_UUID).build())
         val settings = ScanSettings.Builder()
@@ -282,6 +456,20 @@ class BleRadio(context: Context) {
             sc.startScan(filters, settings, cb)
             Log.i(TAG, "scanning for FIPS peers (${if (backgroundMode) "low-power" else "low-latency"})")
             if (bridgeHandle != 0L) NativeCore.bleDeliverScanningState(bridgeHandle, true)
+            // A scanner that has only just started has not been silent yet, so
+            // the streak restarts here — this is what keeps the warning off
+            // screen in the first moments after the mesh is switched on. The
+            // *verdict* ([BleHealth.scannerConfirmedSilent]) deliberately does
+            // not restart with it: see that field.
+            BleHealth.emptyScanWindows = 0
+            scanSummaryTask = runCatching {
+                retryExec.scheduleWithFixedDelay(
+                    { if (!stopped) runCatching { logScanSummary() } },
+                    SCAN_SUMMARY_SECS,
+                    SCAN_SUMMARY_SECS,
+                    TimeUnit.SECONDS,
+                )
+            }.getOrNull()
         } catch (e: Exception) {
             Log.e(TAG, "startScanning failed", e)
             scheduleScanRetry(-1)
@@ -305,10 +493,53 @@ class BleRadio(context: Context) {
         // core fall back to the legacy default PSM (0x0085) and dial the
         // wrong L2CAP port, which the peer rejects every time.
         if (psm > 0) {
+            scanWithPsm.incrementAndGet()
+            scanPsmAddrs.add(addr)
             NativeCore.bleDeliverScan(bridgeHandle, addr, psm, result.rssi)
         } else {
-            Log.d(TAG, "scan $addr: PSM not in advert yet (awaiting scan response)")
+            // Counted, not logged: this fires several times a second per peer
+            // while a scan response is outstanding. [logScanSummary] reports
+            // the addresses that never produced one, which is the real signal.
+            scanWithoutPsm.incrementAndGet()
+            scanNoPsmAddrs.add(addr)
         }
+    }
+
+    /** Summarise the last window of scan reports; scheduled from [startScanning]. */
+    private fun logScanSummary() {
+        val withPsm = scanWithPsm.getAndSet(0)
+        val withoutPsm = scanWithoutPsm.getAndSet(0)
+        val silent = scanNoPsmAddrs.minus(scanPsmAddrs)
+        scanPsmAddrs.clear()
+        scanNoPsmAddrs.clear()
+        val secs = SCAN_SUMMARY_SECS
+        if (withPsm == 0 && withoutPsm == 0) {
+            // Loud on purpose. A radio that advertises and listens but scans
+            // nothing is inbound-only: it can never learn a peer's PSM, so
+            // every dial it makes falls back to the configured default and
+            // fails. That is invisible unless it is said out loud.
+            val empty = BleHealth.emptyScanWindows + 1
+            BleHealth.emptyScanWindows = empty
+            if (empty >= SILENT_WINDOWS_BEFORE_ALARM) BleHealth.scannerConfirmedSilent = true
+            Log.w(TAG, "scan summary: 0 adverts in ${secs}s — scanner produced nothing (window $empty)")
+            return
+        }
+        // One advert of any kind proves the scanner is delivering, so both the
+        // streak and the verdict are over. This is the *only* place the
+        // verdict is cleared: nothing short of a real advert counts as the
+        // radio having recovered.
+        BleHealth.emptyScanWindows = 0
+        BleHealth.scannerConfirmedSilent = false
+        val tail = if (silent.isEmpty()) {
+            ""
+        } else {
+            ", no PSM from ${silent.size}: ${silent.joinToString(" ")}"
+        }
+        Log.i(
+            TAG,
+            "scan summary: ${withPsm + withoutPsm} adverts in ${secs}s " +
+                "($withPsm with psm, $withoutPsm awaiting scan response$tail)",
+        )
     }
 
     /** Re-arm scanning after a failure, so a transient throttle/error doesn't
@@ -341,6 +572,14 @@ class BleRadio(context: Context) {
     fun stopScanning() {
         scanCallback?.let { runCatching { scanner?.stopScan(it) } }
         scanCallback = null
+        // No scan, nothing to summarise — otherwise the timer would report
+        // "0 adverts" against a scanner nobody asked to be running.
+        scanSummaryTask?.cancel(false)
+        scanSummaryTask = null
+        // Silence only means something while we are listening. A stopped
+        // scanner has heard nothing by definition, and leaving the streak
+        // standing would accuse the phone of a fault while the mesh is off.
+        BleHealth.emptyScanWindows = 0
         if (bridgeHandle != 0L) NativeCore.bleDeliverScanningState(bridgeHandle, false)
     }
 
@@ -352,10 +591,23 @@ class BleRadio(context: Context) {
     /** Tear everything down (called when the service stops). */
     fun shutdown() {
         stopped = true
+        // The radio is being destroyed — on a mesh toggle a fresh one is built
+        // in its place, and it must start with no verdict against it. This is
+        // the one thing other than a real advert that clears the latch, and it
+        // is not a shortcut: there is no scanner left to be deaf.
+        BleHealth.scannerConfirmedSilent = false
         stopScanning()
         stopAdvertising()
         runCatching { serverSocket?.close() }
         serverSocket = null
+        // The socket is gone, so the PSM must not outlive it: a stale non-zero
+        // value here would tell [BleService] a dead radio was healthy.
+        listenPsm = 0
+        // Dials parked in connect() outlive the radio otherwise: the thread
+        // pool is shut down below, but shutdownNow cannot interrupt a thread
+        // blocked in the BT stack. Closing the socket is what releases it.
+        dialing.values.toList().forEach { closeQuietly(it) }
+        dialing.clear()
         channels.keys.toList().forEach { closeChannel(it) }
         gatts.keys.toList().forEach { dropGatt(it) }
         io.shutdownNow()
@@ -586,6 +838,22 @@ class BleRadio(context: Context) {
         private const val MAX_PACKET = 8192
         private const val SEND_TIMEOUT_MS = 1000
 
+        /** Backstop for a dial Android never resolves. Comfortably above the
+         *  core's probe timeout (10s) so a dial that is merely slow is left
+         *  alone, and well below the ~30s+ this has been seen to block for. */
+        private const val DIAL_WATCHDOG_MS = 15_000L
+
+        /** How often the scanner reports what it has seen. Long enough that the
+         *  summary costs one line a window instead of several a second, short
+         *  enough that a scanner going silent shows up while you are watching. */
+        private const val SCAN_SUMMARY_SECS = 30L
+
+        /** Consecutive empty [SCAN_SUMMARY_SECS] windows before the radio is
+         *  called deaf ([BleHealth.scannerConfirmedSilent]). Two, not one: a
+         *  full minute of listening, so a scanner merely slow to deliver its
+         *  first result is never accused. */
+        private const val SILENT_WINDOWS_BEFORE_ALARM = 2
+
         /** Background scan: batched delivery window (controller-offloaded). */
         private const val BACKGROUND_BATCH_MS = 5000L
 
@@ -629,4 +897,36 @@ object BleHealth {
      *  Cleared automatically once advertising succeeds on a retry. */
     @Volatile
     var advertiserExhausted: Boolean = false
+
+    /**
+     * How many consecutive scan-summary windows have produced **no advert at
+     * all** — the count behind `scan summary: 0 adverts in 30s`. Restarts at
+     * zero every time the scanner starts, which is what keeps a freshly
+     * enabled mesh from being accused before it has had time to hear anything.
+     */
+    @Volatile
+    var emptyScanWindows: Int = 0
+
+    /**
+     * **The verdict**: this radio has been listening and heard nothing for
+     * long enough that it is not merely quiet, it is deaf.
+     *
+     * This is the observable half of the vendor-stack bug that cost a day of
+     * diagnosis: a device whose scan callback never fires is inbound-only — it
+     * advertises, accepts connections, and can never learn a peer's PSM, so it
+     * never dials anyone. `startScan` reports success throughout. Only the
+     * absence of results says so.
+     *
+     * Kept separate from [emptyScanWindows] because the streak is far too
+     * fragile to drive a warning off directly. The scanner re-arms on every
+     * fore/background flip, and tapping the warning to open location settings
+     * is itself such a flip — so the streak-only version hid the warning the
+     * moment the user acted on it, then stayed hidden for another minute with
+     * nothing fixed. A conclusion once reached is held until something
+     * disproves it, and the only thing that disproves it is a real advert (see
+     * [BleRadio.logScanSummary]) or the radio ceasing to exist (see
+     * [BleRadio.shutdown]).
+     */
+    @Volatile
+    var scannerConfirmedSilent: Boolean = false
 }
