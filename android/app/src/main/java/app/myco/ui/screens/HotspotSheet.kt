@@ -164,7 +164,8 @@ private fun HotspotOn(
         Mono(view.url, big = true)
         Spacer(Modifier.height(4.dp))
         Text(
-            "…or bump the phones — the page opens in their browser.",
+            "…or bump the phones — the page opens in their browser. " +
+                "While the hotspot is on, bumping shares this page instead of pairing.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
             textAlign = TextAlign.Center,
