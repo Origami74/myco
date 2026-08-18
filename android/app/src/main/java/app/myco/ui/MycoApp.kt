@@ -42,6 +42,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,6 +69,7 @@ import app.myco.ui.radioWarnings
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
+import app.myco.hotspot.TransferGate
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.PairSecrets
@@ -304,6 +306,49 @@ fun MycoApp(
     }
     justConnected?.let { name ->
         PairConnectedDialog(theirName = name, onDone = { justConnected = null })
+    }
+
+    // A hotspot guest started a transfer — pop the AirDrop-style accept/reject
+    // dialog wherever in the app you are (their browser is blocked on this
+    // answer; unanswered requests deny themselves after 90s). One at a time,
+    // oldest first; deciding it reveals the next.
+    val pendingTransfers by TransferGate.pending.collectAsState()
+    pendingTransfers.firstOrNull()?.let { req ->
+        val size = if (req.size > 0) " (${formatSize(req.size)})" else ""
+        AlertDialog(
+            // No outside-tap/back dismissal: an accidental swipe must not
+            // silently deny (or leave a guest hanging) — the buttons decide.
+            onDismissRequest = {},
+            title = {
+                Text(
+                    when (req.direction) {
+                        TransferGate.Direction.UPLOAD -> "Incoming file"
+                        TransferGate.Direction.DOWNLOAD -> "Share this file?"
+                    },
+                )
+            },
+            text = {
+                Text(
+                    when (req.direction) {
+                        TransferGate.Direction.UPLOAD ->
+                            "The other phone wants to send you “${req.name}”$size. " +
+                                "Accepted files land in Download/Myco."
+                        TransferGate.Direction.DOWNLOAD ->
+                            "The other phone asks to download “${req.name}”$size."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { TransferGate.decide(req.id, true) }) {
+                    Text(if (req.direction == TransferGate.Direction.UPLOAD) "Accept" else "Send")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { TransferGate.decide(req.id, false) }) {
+                    Text("Decline", color = MaterialTheme.colorScheme.error)
+                }
+            },
+        )
     }
 
     // A request only auto-accepts while you're on the Circle tab (presenting). If
@@ -585,4 +630,11 @@ fun KeyVal(label: String, value: String, valueColor: Color = MaterialTheme.color
             style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
         )
     }
+}
+
+/** Human file size for the transfer-consent dialog. */
+private fun formatSize(bytes: Long): String = when {
+    bytes >= 1L shl 20 -> "%.1f MB".format(bytes.toDouble() / (1L shl 20))
+    bytes >= 1L shl 10 -> "%.0f kB".format(bytes.toDouble() / (1L shl 10))
+    else -> "$bytes B"
 }

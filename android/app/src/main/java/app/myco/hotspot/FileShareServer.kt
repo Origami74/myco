@@ -6,20 +6,25 @@ import java.io.FileInputStream
 import java.io.InputStream
 import java.net.URLDecoder
 import java.net.URLEncoder
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * The web page a hotspot guest lands on: a plain-HTML file list with download
  * links and an upload form. Served on every interface (the guest reaches it
  * via the hotspot's gateway address); state lives in [SharedFiles].
  *
- * Framework-free HTML with one inline script: the form submits each picked
+ * Framework-free HTML with two inline scripts: the form submits each picked
  * file as a raw `PUT /upload/<urlencoded-name>`, because NanoHTTPD 2.3.1's
  * multipart parser surfaces only the first of several same-named file parts
- * and mangles non-ASCII filenames (it decodes part headers as ASCII). The
- * multipart POST stays as the no-JS fallback.
+ * and mangles non-ASCII filenames (it decodes part headers as ASCII) — the
+ * multipart POST stays as the no-JS fallback. The second script polls
+ * `/offers` for files the phone is pushing ([Outbox]) and pops an
+ * accept/decline dialog per offer, AirDrop-style.
  */
 class FileShareServer(
     private val files: SharedFiles,
+    private val outbox: Outbox,
     port: Int,
 ) : NanoHTTPD(port) {
 
@@ -34,6 +39,14 @@ class FileShareServer(
             session.method == Method.PUT && session.uri.startsWith(UPLOAD_PREFIX) ->
                 uploadPut(session)
             session.method == Method.POST && session.uri == "/upload" -> upload(session)
+            // The push half: the guest's page polls /offers, then accepts
+            // (GET, streams the file) or declines (POST) one by id.
+            session.method == Method.GET && session.uri == "/offers" -> offersJson()
+            session.method == Method.POST && session.uri.startsWith(OFFER_PREFIX) &&
+                session.uri.endsWith("/decline") ->
+                declineOffer(session.uri.removePrefix(OFFER_PREFIX).removeSuffix("/decline"))
+            session.method == Method.GET && session.uri.startsWith(OFFER_PREFIX) ->
+                sendOffer(session.uri.removePrefix(OFFER_PREFIX))
             else -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found\n")
         }
     } catch (e: Exception) {
@@ -56,14 +69,18 @@ class FileShareServer(
         } else {
             newChunkedResponse(Response.Status.OK, SharedFiles.mimeFor(entry.name), stream)
         }
-        // RFC 5987 filename* so non-ASCII names survive; quoted fallback for
-        // browsers that ignore it.
-        val encoded = URLEncoder.encode(entry.name, "UTF-8").replace("+", "%20")
+        attachAs(resp, entry.name)
+        return resp
+    }
+
+    /** RFC 5987 filename* so non-ASCII names survive; quoted fallback for
+     *  browsers that ignore it. */
+    private fun attachAs(resp: Response, name: String) {
+        val encoded = URLEncoder.encode(name, "UTF-8").replace("+", "%20")
         resp.addHeader(
             "Content-Disposition",
-            "attachment; filename=\"${entry.name.replace("\"", "_")}\"; filename*=UTF-8''$encoded",
+            "attachment; filename=\"${name.replace("\"", "_")}\"; filename*=UTF-8''$encoded",
         )
-        return resp
     }
 
     /** The primary upload path: one raw body per file, its name in the URL. */
@@ -141,6 +158,12 @@ class FileShareServer(
               .empty { color: #777; }
               form { margin-top: .6rem; }
               button { margin-top: .6rem; padding: .45rem 1rem; }
+              .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: center; justify-content: center; }
+              .overlay.show { display: flex; }
+              .dialog { background: #fff; color: #111; border-radius: .8rem; padding: 1.2rem; max-width: 20rem; margin: 1rem; box-shadow: 0 8px 30px rgba(0,0,0,.25); }
+              .dialog h2 { margin: 0 0 .5rem; }
+              .dialog .actions { display: flex; gap: .8rem; justify-content: flex-end; margin-top: 1rem; }
+              .dialog button { margin-top: 0; }
             </style>
             <h1>Myco file share</h1>
             <p class="empty">Every transfer waits for an OK on this phone — give it a moment.</p>
@@ -172,11 +195,103 @@ class FileShareServer(
               location.href = '/?sent=' + sent;
             });
             </script>
+            <div class="overlay" id="offerOverlay">
+              <div class="dialog">
+                <h2>Incoming file</h2>
+                <p id="offerText"></p>
+                <div class="actions">
+                  <button id="offerDecline">Decline</button>
+                  <button id="offerAccept">Accept</button>
+                </div>
+              </div>
+            </div>
+            <script>
+            // AirDrop-style receive: poll the phone for files it is offering;
+            // each one pops this accept/decline dialog. Accepting navigates to
+            // the offer URL, which the browser saves as a normal download.
+            const overlay = document.getElementById('offerOverlay');
+            const offerText = document.getElementById('offerText');
+            let current = null;
+            const handled = new Set();
+            function humanSize(b) {
+              if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+              if (b >= 1024) return Math.round(b / 1024) + ' kB';
+              return b > 0 ? b + ' B' : '';
+            }
+            function settle(accepted) {
+              if (!current) return;
+              handled.add(current.id);
+              if (accepted) {
+                window.location.href = '/offer/' + current.id;
+              } else {
+                fetch('/offer/' + current.id + '/decline', {method: 'POST'});
+              }
+              overlay.classList.remove('show');
+              current = null;
+            }
+            document.getElementById('offerAccept').addEventListener('click', () => settle(true));
+            document.getElementById('offerDecline').addEventListener('click', () => settle(false));
+            async function pollOffers() {
+              try {
+                const r = await fetch('/offers');
+                const data = await r.json();
+                const next = data.offers.find(o => !handled.has(o.id));
+                if (next && !current) {
+                  current = next;
+                  const size = humanSize(next.size);
+                  offerText.textContent = 'The phone wants to send you "' + next.name + '"' +
+                    (size ? ' (' + size + ')' : '') + '.';
+                  overlay.classList.add('show');
+                }
+              } catch (e) {}
+              setTimeout(pollOffers, 2000);
+            }
+            pollOffers();
+            </script>
             </html>
         """.trimIndent()
         val resp = newFixedLengthResponse(Response.Status.OK, MIME_HTML, html)
         resp.addHeader("Cache-Control", "no-store")
         return resp
+    }
+
+    // --- host -> guest offers ---
+
+    private fun offersJson(): Response {
+        val arr = JSONArray()
+        outbox.waiting().forEach { o ->
+            arr.put(JSONObject().put("id", o.id).put("name", o.name).put("size", o.size))
+        }
+        val resp = newFixedLengthResponse(
+            Response.Status.OK, "application/json", JSONObject().put("offers", arr).toString(),
+        )
+        resp.addHeader("Cache-Control", "no-store")
+        return resp
+    }
+
+    /** The guest tapped Accept: stream the offered document. No [TransferGate]
+     *  here — the owner's consent *was* offering the file. */
+    private fun sendOffer(idStr: String): Response {
+        val id = idStr.toLongOrNull()
+            ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "gone\n")
+        val (offer, stream) = outbox.accept(id)
+            ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "gone\n")
+        Log.i(TAG, "offer '${offer.name}' accepted by the guest")
+        val resp = if (offer.size > 0) {
+            newFixedLengthResponse(Response.Status.OK, SharedFiles.mimeFor(offer.name), stream, offer.size)
+        } else {
+            newChunkedResponse(Response.Status.OK, SharedFiles.mimeFor(offer.name), stream)
+        }
+        attachAs(resp, offer.name)
+        return resp
+    }
+
+    private fun declineOffer(idStr: String): Response {
+        idStr.toLongOrNull()?.let {
+            Log.i(TAG, "offer #$it declined by the guest")
+            outbox.decline(it)
+        }
+        return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "ok\n")
     }
 
     private fun denied(): Response = newFixedLengthResponse(
@@ -199,6 +314,7 @@ class FileShareServer(
         private const val TAG = "MycoFileShare"
         private const val FILE_PREFIX = "/files/"
         private const val UPLOAD_PREFIX = "/upload/"
+        private const val OFFER_PREFIX = "/offer/"
     }
 }
 

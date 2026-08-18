@@ -176,7 +176,7 @@ class HotspotService : Service() {
     /** Bind the file page, walking a few ports in case one is taken. */
     private fun startServer(): FileShareServer? {
         for (port in BASE_PORT until BASE_PORT + PORT_TRIES) {
-            val srv = FileShareServer(SharedFiles.get(this), port)
+            val srv = FileShareServer(SharedFiles.get(this), Outbox.get(this), port)
             try {
                 srv.start(SOCKET_READ_TIMEOUT_MS, false)
                 return srv
@@ -273,6 +273,8 @@ class HotspotService : Service() {
         // Fail waiting transfers first, so their server threads unblock and the
         // server's stop() isn't held up by sockets mid-approval.
         TransferGate.denyAll()
+        // The session's outgoing offers die with it.
+        Outbox.get(this).clear()
         server?.let { runCatching { it.stop() } }
         server = null
         reservation?.let { runCatching { it.close() } }
