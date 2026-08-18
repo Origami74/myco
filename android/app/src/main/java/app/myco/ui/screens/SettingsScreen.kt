@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -72,6 +73,21 @@ import app.myco.ui.radioWarnings
 
 /** The Settings surfaces: the root list and its three drill-in sub-pages. */
 private enum class SettingsPage { Root, Identity, Storage, Developer }
+
+/**
+ * Stores the user pointed us at that cannot be reached, as (title, detail).
+ *
+ * One definition so the tab badge, the row dot, and the cards cannot drift
+ * apart — they are three views of the same fact.
+ */
+fun backendErrors(state: AppState): List<Pair<String, String>> = buildList {
+    if (state.relayBackend.error.isNotEmpty()) {
+        add("Can't reach your relay" to state.relayBackend.error)
+    }
+    if (state.blobBackend.error.isNotEmpty()) {
+        add("Can't reach your blob store" to state.blobBackend.error)
+    }
+}
 
 /** Cap used for the storage gauge (matches the LRU target in the core). */
 private const val STORAGE_CAP_BYTES = 2_000_000_000.0
@@ -158,6 +174,7 @@ private fun RootSettings(
     val used = state.cache.usedBytes.toDouble()
     val pct = (used / STORAGE_CAP_BYTES * 100).coerceIn(0.0, 100.0)
     val free = (STORAGE_CAP_BYTES - used).coerceAtLeast(0.0).toLong()
+    val backendErrors = backendErrors(state)
 
     SettingsColumn {
         ScreenHeader("Settings", state)
@@ -176,6 +193,7 @@ private fun RootSettings(
                 icon = Icons.Filled.Storage,
                 title = "Storage",
                 subtitle = "${"%.0f".format(pct)}% used · ${humanBytes(free)} free",
+                alert = backendErrors.isNotEmpty(),
                 onClick = onOpenStorage,
             )
         }
@@ -221,6 +239,15 @@ private fun RootSettings(
                 title = "Internet",
                 subtitle = "Mesh over the internet",
             )
+        }
+
+        // A store the user pointed us at that has gone away. Surfaced here as
+        // well as inside Storage, because the symptom — apps that will not load
+        // — gives no hint that a setting is the cause, and the user has no
+        // reason to open Storage looking for it.
+        backendErrors.forEach { (title, detail) ->
+            Spacer(Modifier.height(8.dp))
+            BackendUnreachableCard(title, detail)
         }
 
         // Radio/VPN misconfigurations that silently break peering — recomputed
@@ -370,6 +397,7 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
     val used = state.cache.usedBytes
     val fraction = (used.toDouble() / STORAGE_CAP_BYTES).coerceIn(0.0, 1.0).toFloat()
     val free = (STORAGE_CAP_BYTES - used).coerceAtLeast(0.0).toLong()
+    val backendErrors = backendErrors(state)
 
     SettingsColumn {
         SubHeader("Storage", onBack)
@@ -425,12 +453,8 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
         // A backend that has gone away otherwise looks like an app with no
         // content: every site missing, no explanation. Warn the way the radio
         // warnings do, since the cause is equally invisible from the app.
-        if (state.relayBackend.error.isNotEmpty()) {
-            BackendUnreachableCard("Can't reach your relay", state.relayBackend.error)
-            Spacer(Modifier.height(8.dp))
-        }
-        if (state.blobBackend.error.isNotEmpty()) {
-            BackendUnreachableCard("Can't reach your blob store", state.blobBackend.error)
+        backendErrors(state).forEach { (title, detail) ->
+            BackendUnreachableCard(title, detail)
             Spacer(Modifier.height(8.dp))
         }
         SectionCard {
@@ -954,6 +978,8 @@ private fun SettingRow(
     title: String,
     subtitle: String,
     titleColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
+    /** Show a red dot: something inside this page needs attention. */
+    alert: Boolean = false,
     onClick: () -> Unit,
 ) {
     Row(
@@ -967,6 +993,14 @@ private fun SettingRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(title, color = titleColor, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
             Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        }
+        if (alert) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(MaterialTheme.colorScheme.error, CircleShape),
+            )
+            Spacer(Modifier.size(10.dp))
         }
         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
