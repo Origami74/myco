@@ -20,9 +20,9 @@ use futures_util::future::join_all;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nostr::nips::nip19::{FromBech32, ToBech32};
-use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag};
+use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag};
 use nsite_deck::gateway::{self, Readiness};
-use nsite_deck::seams::{BlobStore, ManifestFilter, PeerSource, RelayBackend};
+use nsite_deck::seams::{BlobStore, PeerSource, RelayBackend};
 use nsite_deck::{sync, GatewayResponse, SiteAddr, SyncOutcome};
 use serde::{Deserialize, Serialize};
 
@@ -404,24 +404,31 @@ impl RelayBackend for ActiveBackend<'_> {
     async fn publish(&self, event: Event) -> anyhow::Result<()> {
         self.relay.publish(event).await
     }
-    async fn get_manifest(
-        &self,
-        kind: u16,
-        author: &PublicKey,
-        d_tag: Option<&str>,
-    ) -> anyhow::Result<Option<Event>> {
-        let key = manifest_key(kind, author, d_tag);
-        let pinned = self.active.lock().unwrap().get(&key).cloned();
-        if pinned.is_some() {
-            return Ok(pinned);
+    /// Serve the **pinned** version of any site that has one, rather than the
+    /// newest the store holds.
+    ///
+    /// The substitution happens here, on the way out, because the seam no longer
+    /// has a slot-shaped read to override — everything goes through `query` now.
+    /// A pinned event shares its slot with the one it replaces (same kind,
+    /// author, and `d` tag), so anything that matched the newer one matches it.
+    async fn query(&self, filters: &[Filter]) -> anyhow::Result<Vec<Event>> {
+        let mut out = self.relay.query(filters).await?;
+        let active = self.active.lock().unwrap().clone();
+        if active.is_empty() {
+            return Ok(out);
         }
-        self.relay.get_manifest(kind, author, d_tag).await
-    }
-    async fn query(&self, filter: &ManifestFilter) -> anyhow::Result<Vec<Event>> {
-        self.relay.query(filter).await
-    }
-    async fn wipe(&self) -> anyhow::Result<()> {
-        self.relay.wipe().await
+        for event in out.iter_mut() {
+            let key = manifest_key(
+                event.kind.as_u16(),
+                &event.pubkey,
+                event_d_tag(event).as_deref(),
+            );
+            if let Some(pinned) = active.get(&key) {
+                *event = pinned.clone();
+            }
+        }
+        out.dedup_by(|a, b| a.id == b.id);
+        Ok(out)
     }
 }
 
@@ -778,10 +785,13 @@ impl Content {
                         // newest) — pull it back to make it the active version.
                         None => {
                             let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-                            if let Ok(Some(ev)) = self
-                                .relay
-                                .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-                                .await
+                            if let Ok(Some(ev)) = nsite_deck::seams::newest_in_slot(
+                                self.relay.as_ref(),
+                                kind,
+                                &addr.author,
+                                addr.d_tag.as_deref(),
+                            )
+                            .await
                             {
                                 self.set_active(&ev);
                             }
@@ -1693,14 +1703,17 @@ impl Content {
             };
             // Compare against the version we actually serve (the active pointer),
             // not merely the relay's newest.
-            let active_ts = self
-                .active_backend()
-                .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-                .await
-                .ok()
-                .flatten()
-                .map(|e| e.created_at.as_secs())
-                .unwrap_or(0);
+            let active_ts = nsite_deck::seams::newest_in_slot(
+                &self.active_backend(),
+                kind,
+                &addr.author,
+                addr.d_tag.as_deref(),
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.created_at.as_secs())
+            .unwrap_or(0);
             if cand.created_at.as_secs() > active_ts {
                 candidates.push((addr, cand.clone()));
             }
@@ -1760,14 +1773,17 @@ impl Content {
     /// blobs). Returns whether it activated.
     async fn stage_update(self: Arc<Self>, addr: SiteAddr, candidate: Event) -> bool {
         let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-        let active_ts = self
-            .active_backend()
-            .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-            .await
-            .ok()
-            .flatten()
-            .map(|e| e.created_at.as_secs())
-            .unwrap_or(0);
+        let active_ts = nsite_deck::seams::newest_in_slot(
+            &self.active_backend(),
+            kind,
+            &addr.author,
+            addr.d_tag.as_deref(),
+        )
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.created_at.as_secs())
+        .unwrap_or(0);
         if candidate.created_at.as_secs() <= active_ts {
             return false;
         }
@@ -1977,7 +1993,7 @@ impl Content {
     /// Clear the local relay + Blossom + Library + status (the `WipeStores` dev
     /// action). Content-only; identity is untouched.
     pub async fn wipe(&self) -> anyhow::Result<()> {
-        self.relay.wipe().await?;
+        nsite_deck::seams::AdminBackend::wipe(self.relay.as_ref()).await?;
         self.blobs.wipe().await?;
         self.library.lock().unwrap().clear();
         self.sites.lock().unwrap().clear();
@@ -2016,9 +2032,13 @@ impl Content {
                 continue;
             };
             let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-            if let Ok(Some(ev)) = backend
-                .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-                .await
+            if let Ok(Some(ev)) = nsite_deck::seams::newest_in_slot(
+                &backend,
+                kind,
+                &addr.author,
+                addr.d_tag.as_deref(),
+            )
+            .await
             {
                 keep_events.insert(ev.id.to_bytes());
                 if let Ok(m) = nsite_deck::Manifest::from_event(ev) {
@@ -2130,20 +2150,26 @@ impl Content {
 
     async fn lookup_title(&self, addr: &SiteAddr) -> Option<String> {
         let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-        let event = self
-            .relay
-            .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-            .await
-            .ok()??;
+        let event = nsite_deck::seams::newest_in_slot(
+            self.relay.as_ref(),
+            kind,
+            &addr.author,
+            addr.d_tag.as_deref(),
+        )
+        .await
+        .ok()??;
         nsite_deck::Manifest::from_event(event).ok()?.title
     }
 
     async fn manifest_file_count(&self, addr: &SiteAddr) -> u64 {
         let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-        match self
-            .relay
-            .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-            .await
+        match nsite_deck::seams::newest_in_slot(
+            self.relay.as_ref(),
+            kind,
+            &addr.author,
+            addr.d_tag.as_deref(),
+        )
+        .await
         {
             Ok(Some(event)) => nsite_deck::Manifest::from_event(event)
                 .map(|m| m.paths.len() as u64)

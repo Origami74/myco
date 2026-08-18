@@ -1,7 +1,14 @@
 # nsite updates: staged activation + mesh propagation
 
-> Status: DESIGN / proposal for a not-yet-built feature. Voice is "the app
-> will…". Open questions are marked **TBD / open**.
+> Status: PARTLY BUILT. Discovery (§3), staging (§2), mesh propagation (§4) and
+> auto-activation ship today. Open-instance gating (§5.2) and version
+> history/pinning/revert (§6) are still proposals. Open questions are marked
+> **TBD / open**.
+>
+> **Wire note.** Mesh hop state travels in a `MESH` envelope *beside* the NIP-01
+> message, never inside the event or a filter. Two links stay plain NIP-01: the
+> nsite ↔ `localhost:4870` link and the proxy ↔ backing-relay link. See
+> [event-gossip.md §0 and §2](./event-gossip.md).
 
 An nsite is a set of author-signed manifest events (kinds 15128/35128) plus
 content-addressed blobs ([nsite-layer.md](./nsite-layer.md),
@@ -103,13 +110,13 @@ pipeline (§2) and treated identically once a candidate is in hand:
 
 - **Pull (we poll).** A bounded subscription we initiate — manual or background
   (§3.1–3.2).
-- **Push (a peer tells us).** Because manifests propagate over the *same*
-  `event-ttl` push plane as chat (§4), a peer can gossip a newer manifest to us
-  **unsolicited, up to 3 hops** away — we don't have to ask. It arrives over the
-  EVENT socket, our relay stores it (NIP-01) and re-propagates it, and core
-  notices it exactly as it would a polled candidate (§4.2). So a device often
-  learns of an update from a nearby peer before it ever runs a check — and even
-  fully offline.
+- **Push (a peer tells us).** Because manifests propagate over the *same* push
+  plane as chat (§4), a peer can gossip a newer manifest to us **unsolicited, up
+  to 3 hops** away — we don't have to ask. It arrives as a `MESH`-wrapped `EVENT`
+  on the mesh socket, the proxy stores the canonical event and re-propagates it,
+  and core notices it exactly as it would a polled candidate (§4.2). So a device
+  often learns of an update from a nearby peer before it ever runs a check — and
+  even fully offline.
 
 The rest of §3 covers the pull channel; the push channel is §4.
 
@@ -142,18 +149,28 @@ the union of:
 single connection. For each unique relay, send **one** filter union'd across all
 sites — `{ kinds: [15128, 35128], authors: [...all site authors...], "#d":
 [...all named d-tags...] }` — then read events until **EOSE** and close. (One
-combined REQ, not one per site; the relay returns each slot's newest. This is the
-read/pull shape from [event-gossip.md §7](./event-gossip.md), bounded by EOSE
-rather than kept live.)
+combined REQ, not one per site; the relay returns each slot's newest.)
+
+**The check is core-driven, not client-driven.** It goes straight to the
+peer-relay pool rather than through the loopback relay socket, which is the same
+route discovery takes. That split is deliberate: a `REQ` from an nsite never fans
+out to peers, so multi-hop reads only ever happen where the core asks for them
+([event-gossip.md §7](./event-gossip.md)).
 
 A returned manifest is a candidate iff `candidate.created_at > active.created_at`
 for its slot (and newer than any already-staged candidate). Each such candidate is
-**stored into our own relay** (`store_event`) — which (a) keeps us NIP-01-faithful
-so peers REQ-ing us get the newest, (b) propagates it onward via the normal
-gossip path (§4), and (c) lets core notice it and open a `PendingUpdate` to stage
-its blobs (preferring the manifest's `["server", …]` hints, then
+**published into our own relay** — which (a) keeps us NIP-01-faithful so peers
+REQ-ing us get the newest, (b) propagates it onward via the normal gossip path
+(§4), and (c) lets core notice it and open a `PendingUpdate` to stage its blobs
+(preferring the manifest's `["server", …]` hints, then
 `default_blossom_servers()` when online, or the mesh peer that surfaced it). The
 active pointer does not move until staging completes (§5).
+
+> **Known gap.** Discovery sends its mesh `REQ` inside a `MESH` envelope with
+> `ttl: 1`, so it reaches two hops. The update check currently sends a **plain**
+> `REQ` to each peer and therefore reaches **one** hop, even though the code
+> comment beside it still claims parity with discovery. Either the check should
+> carry the same envelope or the comment should go; as written the two disagree.
 
 > **TBD / open:** where a manifest's relay hints live (NIP-65 author relay list
 > vs. tags on the manifest event) and the fallback when a manifest lists none
@@ -176,8 +193,8 @@ long-press sheet offers "Update now" (a no-op nudge if it'll auto-apply on close
 
 > **Rule:** **storing** a newer manifest is always immediate and
 > protocol-faithful — it enters our relay at once and is answerable to peers'
-> REQs; we never withhold a version. **Forwarding** (the active `event-ttl` push to
-> peers) is *interest-aware*:
+> REQs; we never withhold a version. **Forwarding** (the active hop-bounded push
+> to peers) is *interest-aware*:
 > - **Not interested** (we don't have this nsite in our Library): forward
 >   **immediately** — a pure relay passthrough; we won't download the blobs, so
 >   there's nothing to wait for.
@@ -192,25 +209,27 @@ long-press sheet offers "Update now" (a no-op nudge if it'll auto-apply on close
 
 ### 4.1 Manifests gossip like any event — with an interest check on forward
 
-The relay change is just making manifest kinds **gossip-eligible**
-([`is_gossip_eligible`](../../myco-core/src/gossip.rs)); the relay still merely
-**stores** the newer manifest and hands it to the gossiper, exactly as for chat
-(no interceptor, no deferral in the relay). The *forward policy* lives in core's
-gossiper, which branches on interest:
+The proxy treats manifest kinds like any other event: it stores the canonical
+event and hands it to the gossiper, exactly as for chat (no interceptor, no
+deferral in the proxy). The *forward policy* lives in core's gossiper, which
+routes manifest kinds to their own handler and branches on interest:
 
-- **Not interested** → build `["EVENT", { …manifest, "event-ttl": n }]` and fan to
-  connected circle peers immediately, split-horizon, `event-ttl` decremented
-  ([event-gossip.md §2–3](./event-gossip.md)).
+- **Not interested** → build `["MESH", {"ttl": n}, ["EVENT", <manifest>]]` and fan
+  to connected circle peers immediately, split-horizon, with the hop budget
+  decremented ([event-gossip.md §2–3](./event-gossip.md)). The manifest event
+  itself is canonical NIP-01 — nothing is added to it and nothing has to be
+  stripped before storing.
 - **Interested** → open a `PendingUpdate { source: Mesh(sender_ip) }`, download
   the blobs (best-effort, from the peer that sent it), and fan out when the
   download completes **or** a bound elapses — whichever first. Then activate (§5)
   if/when complete.
 
-The loop guard is the same as chat: only a *newly-stored* (newer-than-known)
-manifest is handed to the gossiper, so duplicates and older versions die on
-arrival and `event-ttl` bounds the wave. Locally-originated candidates (an online
-check, §3.2) are "interested" by definition — we checked because we run the site —
-so they follow the download-then-forward path.
+The loop guard is the same as chat: the proxy's **seen-set** decides novelty, so
+only a first sighting is handed to the gossiper and a copy arriving by a second
+path is stored but never re-forwarded. The hop budget then bounds the wave's
+reach ([event-gossip.md §4](./event-gossip.md)). Locally-originated candidates
+(an online check, §3.2) are "interested" by definition — we checked because we run
+the site — so they follow the download-then-forward path.
 
 ### 4.2 Blob availability is the natural gate
 
@@ -229,11 +248,11 @@ the next hop usually succeeds against us instead of falling back.
 
 ### 4.3 Why reuse the push plane
 
-Manifests *are* just events. Reusing `event-ttl` push + neighbour pull means an
-offline cluster gets author updates the same way it gets chat: whoever next meets a
-peer that holds the newer manifest gets it and re-spreads it, then each device
-downloads the blobs and activates on its own schedule. No separate
-update-distribution protocol, and no special-casing in the relay.
+Manifests *are* just events. Reusing the hop-bounded push plane plus neighbour
+pull means an offline cluster gets author updates the same way it gets chat:
+whoever next meets a peer that holds the newer manifest gets it and re-spreads
+it, then each device downloads the blobs and activates on its own schedule. No
+separate update-distribution protocol, and no special-casing in the store.
 
 ---
 

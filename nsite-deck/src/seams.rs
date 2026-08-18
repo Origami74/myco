@@ -8,25 +8,16 @@
 //!   P3 no-op stub here.
 
 use async_trait::async_trait;
-use nostr::{Event, PublicKey};
+use nostr::{Event, Filter, Kind, PublicKey};
 
-/// A basic event filter — the entire query surface Myco's gateway and discovery
-/// use (`{kinds, authors, #d, limit}`, `docs/design/nsite-layer.md` §2.1). No
-/// general tag/`since`/`until` filtering: manifests are tiny and addressed by
-/// `(kind, author, d-tag)`.
-#[derive(Debug, Clone, Default)]
-pub struct ManifestFilter {
-    pub kinds: Vec<u16>,
-    pub authors: Vec<PublicKey>,
-    pub d_tags: Vec<String>,
-    pub limit: Option<usize>,
-}
-
-/// Stores and queries manifest events (a plain NIP-01 store). The default is the
-/// embedded `myco-relay`; an alternate impl could forward to a local relay app
-/// (e.g. Citrine). Replaceable semantics — keep only the newest event per
-/// `(kind, author)` for 15128 and per `(kind, author, d-tag)` for 35128 — are
-/// the backend's responsibility.
+/// Stores and queries events (a plain NIP-01 relay). The default is the embedded
+/// `myco-relay`; an alternate impl forwards to any other relay — Citrine on the
+/// same device, a strfry on the LAN — which is the whole point of keeping this
+/// surface to verbs every relay already speaks.
+///
+/// Replaceable semantics (newest per `(kind, author)` for 15128, per
+/// `(kind, author, d-tag)` for 35128) are the backend's responsibility, because
+/// they are NIP-01's, not ours.
 #[async_trait]
 pub trait RelayBackend: Send + Sync {
     /// Store an already-signed, already-verified event.
@@ -38,21 +29,64 @@ pub trait RelayBackend: Send + Sync {
     /// nothing should depend on it (`reference/thinning-custom-relay.md`, D2).
     async fn publish(&self, event: Event) -> anyhow::Result<()>;
 
-    /// The newest manifest for a replaceable slot: `kind` + `author`, plus the
-    /// `d-tag` for parameterized-replaceable (35128). `d_tag = None` selects the
-    /// root (15128) slot.
-    async fn get_manifest(
-        &self,
-        kind: u16,
-        author: &PublicKey,
-        d_tag: Option<&str>,
-    ) -> anyhow::Result<Option<Event>>;
+    /// Events matching any of `filters` — a `REQ` read to `EOSE`.
+    ///
+    /// Takes real [`nostr::Filter`]s rather than a hand-rolled subset, so the
+    /// query surface is exactly NIP-01's: `since`, `until`, ids, and general tag
+    /// matching all work, and a remote backend needs no translation layer.
+    async fn query(&self, filters: &[Filter]) -> anyhow::Result<Vec<Event>>;
+}
 
-    /// Events matching the basic filter — used by discovery ("nsites around me").
-    async fn query(&self, filter: &ManifestFilter) -> anyhow::Result<Vec<Event>>;
-
+/// Operations with no NIP-01 expression, which therefore cannot be required of
+/// an arbitrary backend.
+///
+/// The embedded store implements this; a remote relay generally will not. Where
+/// it is absent the UI reports the operation as unavailable rather than silently
+/// doing nothing (`reference/thinning-custom-relay.md`, D4).
+#[async_trait]
+pub trait AdminBackend: Send + Sync {
     /// Drop every stored event (the dev/test wipe; `WipeStores`).
     async fn wipe(&self) -> anyhow::Result<()>;
+}
+
+/// The newest event in a replaceable slot: `kind` + `author`, plus the `d-tag`
+/// for parameterized-replaceable (35128). `d_tag = None` selects the root (15128)
+/// slot.
+///
+/// A helper over [`RelayBackend::query`] rather than a backend method: it is an
+/// ordinary filter, and every relay can already answer it.
+pub async fn newest_in_slot(
+    relay: &dyn RelayBackend,
+    kind: u16,
+    author: &PublicKey,
+    d_tag: Option<&str>,
+) -> anyhow::Result<Option<Event>> {
+    let mut filter = Filter::new()
+        .kind(Kind::from(kind))
+        .author(*author)
+        .limit(1);
+    if let Some(d) = d_tag {
+        filter = filter.identifier(d);
+    }
+    let mut found = relay.query(&[filter]).await?;
+    // A backend is free to return more than `limit` suggests, and ordering is not
+    // guaranteed, so pick the newest here rather than trusting the first row.
+    found.sort_by_key(|e| std::cmp::Reverse(e.created_at));
+    // `identifier()` matches a `#d` tag, which for a root manifest is absent
+    // entirely — filter that out, or a named site could answer for the root slot.
+    Ok(found
+        .into_iter()
+        .find(|e| event_d_tag(e).as_deref() == d_tag))
+}
+
+/// The `d` tag value of an event, if it has one.
+fn event_d_tag(event: &Event) -> Option<String> {
+    event.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        (s.first().map(String::as_str) == Some("d"))
+            .then(|| s.get(1).cloned())
+            .flatten()
+    })
 }
 
 /// A content-addressed blob store keyed by lowercase-hex sha256. Blobs are

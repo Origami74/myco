@@ -26,8 +26,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, PublicKey};
-use nsite_deck::seams::{ManifestFilter, RelayBackend};
+use nostr::Event;
+use nostr::Filter;
+use nsite_deck::seams::RelayBackend;
 use tokio::sync::broadcast;
 
 use myco_relay::{matches_filter, RelayStore};
@@ -450,7 +451,7 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut live = hub.live.subscribe();
     // Active subscriptions on this connection: sub_id -> its filters.
-    let mut subs: HashMap<String, Vec<ManifestFilter>> = HashMap::new();
+    let mut subs: HashMap<String, Vec<Filter>> = HashMap::new();
 
     'conn: loop {
         tokio::select! {
@@ -517,7 +518,7 @@ fn finish_conn(
     hub: &Arc<RelayHub>,
     origin: Origin,
     conn_id: u64,
-    subs: &HashMap<String, Vec<ManifestFilter>>,
+    subs: &HashMap<String, Vec<Filter>>,
 ) {
     if origin != Origin::Local {
         return;
@@ -544,7 +545,7 @@ async fn handle_client_frame(
     origin: Origin,
     peer_ip: IpAddr,
     conn_id: u64,
-    subs: &mut HashMap<String, Vec<ManifestFilter>>,
+    subs: &mut HashMap<String, Vec<Filter>>,
 ) -> Vec<String> {
     let Ok(frame) = serde_json::from_str::<serde_json::Value>(text) else {
         return Vec::new();
@@ -613,16 +614,15 @@ async fn handle_client_frame(
                 .qid
                 .as_deref()
                 .is_some_and(|qid| !hub.seen_queries.insert_query(qid));
-            let filters: Vec<ManifestFilter> =
-                raw_filters.iter().filter_map(parse_filter).collect();
+            // Parsed by the `nostr` crate, so the whole NIP-01 filter surface
+            // works rather than a hand-rolled subset of it.
+            let filters: Vec<Filter> = raw_filters
+                .iter()
+                .filter_map(|f| serde_json::from_value::<Filter>(f.clone()).ok())
+                .collect();
 
             // Stored backlog: any-match across the REQ's filters, newest first.
-            let mut events: Vec<Event> = Vec::new();
-            for filter in &filters {
-                if let Ok(mut matched) = hub.store.query(filter).await {
-                    events.append(&mut matched);
-                }
-            }
+            let mut events: Vec<Event> = hub.store.query(&filters).await.unwrap_or_default();
 
             // Forwarding half of the pull plane: a peer asked with hops left, so
             // fold in our own peers' matching events before answering. Only a mesh
@@ -740,36 +740,6 @@ async fn handle_client_frame(
         }
         _ => Vec::new(),
     }
-}
-
-/// Parse a NIP-01 filter object into the basic [`ManifestFilter`].
-fn parse_filter(value: &serde_json::Value) -> Option<ManifestFilter> {
-    let obj = value.as_object()?;
-    let mut filter = ManifestFilter::default();
-    if let Some(kinds) = obj.get("kinds").and_then(|v| v.as_array()) {
-        filter.kinds = kinds
-            .iter()
-            .filter_map(|k| k.as_u64().map(|k| k as u16))
-            .collect();
-    }
-    if let Some(authors) = obj.get("authors").and_then(|v| v.as_array()) {
-        filter.authors = authors
-            .iter()
-            .filter_map(|a| a.as_str())
-            .filter_map(|hex| PublicKey::parse(hex).ok())
-            .collect();
-    }
-    if let Some(d_tags) = obj.get("#d").and_then(|v| v.as_array()) {
-        filter.d_tags = d_tags
-            .iter()
-            .filter_map(|d| d.as_str().map(str::to_string))
-            .collect();
-    }
-    filter.limit = obj
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
-    Some(filter)
 }
 
 #[cfg(test)]
@@ -1000,7 +970,9 @@ mod tests {
         assert_eq!(*count.0.lock().unwrap(), 1, "first sighting fans out");
 
         // Empty the store, standing in for expiry GC or a backend that forgot.
-        store.wipe().await.unwrap();
+        nsite_deck::seams::AdminBackend::wipe(store.as_ref())
+            .await
+            .unwrap();
         assert_eq!(store.count(), 0);
 
         publish(frame).await;
@@ -1189,10 +1161,7 @@ mod tests {
         // The backend link: what actually landed in the store is a canonical
         // event, with no mesh state smuggled into it.
         let stored = store
-            .query(&ManifestFilter {
-                kinds: vec![9],
-                ..Default::default()
-            })
+            .query(&[Filter::new().kind(Kind::from(9u16))])
             .await
             .unwrap();
         assert_eq!(stored.len(), 1);

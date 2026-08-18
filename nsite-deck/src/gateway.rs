@@ -60,9 +60,8 @@ pub async fn readiness(
     addr: &SiteAddr,
 ) -> anyhow::Result<Readiness> {
     let kind = kind_for(addr.d_tag.as_deref());
-    let event = relay
-        .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-        .await?;
+    let event =
+        crate::seams::newest_in_slot(relay, kind, &addr.author, addr.d_tag.as_deref()).await?;
     let Some(event) = event else {
         return Ok(Readiness::ManifestMissing);
     };
