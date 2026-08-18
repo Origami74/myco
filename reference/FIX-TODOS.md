@@ -18,7 +18,7 @@ CRUCIAL:
     pinned every app. gatewayGet gained an allowSync flag: WebView loads keep the
     self-healing sync, icon probes serve local-only and never sync.
 
-
+- source of entropy for fips key generation?
 
 GENERAL:
 

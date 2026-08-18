@@ -1,14 +1,13 @@
 //! Settings that have to survive a restart, in `settings.json`.
 //!
-//! Only one lives here so far: the custom relay URL. It has to be persisted
-//! rather than held in memory like `offline_only`, because it decides how the
-//! content layer is *constructed* — the backend is chosen before anything else
-//! opens, so the answer must already be on disk at startup.
+//! Both values here — the custom relay and the custom Blossom — have to be
+//! persisted rather than held in memory like `offline_only`, because they decide
+//! how the content layer is *constructed*. The backends are chosen before
+//! anything else opens, so the answers must already be on disk at startup.
 //!
-//! Deliberately a plain file rather than a settings framework. There is one
-//! value, it is read once per launch, and a missing or corrupt file means "use
-//! the defaults" — which is the behaviour we want anyway, since a broken
-//! settings file must never stop the app opening its own store.
+//! Deliberately a plain file rather than a settings framework. A missing or
+//! corrupt file means "use the defaults", which is the behaviour we want anyway:
+//! a broken settings file must never stop the app opening its own store.
 
 use std::path::{Path, PathBuf};
 
@@ -25,18 +24,32 @@ pub struct Settings {
     /// because NIP-01 makes signature checking the relay's job
     /// (`reference/thinning-custom-relay.md`, D7).
     pub custom_relay_url: Option<String>,
+
+    /// A Blossom server to store blobs on instead of the embedded one.
+    ///
+    /// Sharper trade-off than the relay: blobs are the bulk of an nsite, so
+    /// pointing this at an internet server means a peer pulling an app from us
+    /// needs *our* connection (`reference/thinning-custom-relay.md`, D9).
+    pub custom_blossom_url: Option<String>,
 }
 
 impl Settings {
     /// The configured relay, ignoring an empty value. Trimmed, because a URL
     /// pasted on a phone routinely arrives with whitespace attached.
     pub fn relay_url(&self) -> Option<String> {
-        self.custom_relay_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|u| !u.is_empty())
-            .map(str::to_string)
+        trimmed(self.custom_relay_url.as_deref())
     }
+
+    /// The configured Blossom, ignoring an empty value.
+    pub fn blossom_url(&self) -> Option<String> {
+        trimmed(self.custom_blossom_url.as_deref())
+    }
+}
+
+fn trimmed(v: Option<&str>) -> Option<String> {
+    v.map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
 }
 
 fn path_in(data_dir: &Path) -> PathBuf {
@@ -111,6 +124,7 @@ mod tests {
             &dir,
             &Settings {
                 custom_relay_url: Some("  ws://10.0.0.5:4869  ".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -125,6 +139,7 @@ mod tests {
             &dir,
             &Settings {
                 custom_relay_url: Some(String::new()),
+                ..Default::default()
             },
         )
         .unwrap();

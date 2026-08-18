@@ -110,6 +110,11 @@ pub enum NativeAppAction {
     /// rather than pretending the change is immediate.
     SetCustomRelay { url: String },
 
+    /// Point the blob store at a **custom Blossom server**, or back at the
+    /// built-in one with an empty `url`. Persisted and applied on the next
+    /// launch, like [`NativeAppAction::SetCustomRelay`].
+    SetCustomBlossom { url: String },
+
     /// Set this device's human label (memorable name). Stamped on outgoing pair
     /// request/accept events so peers show the name the user chose. The Android
     /// app owns the value (persisted there) and re-applies it on launch.

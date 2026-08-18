@@ -47,6 +47,9 @@ mod mesh_wire;
 // Not wired to settings yet, so it reads as dead outside its own tests.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod remote_backend;
+// The blob half of the same idea: a BlobStore over someone else's Blossom.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod remote_blobs;
 // Settings that must survive a restart, because they decide how the content
 // layer is constructed rather than how it behaves.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]

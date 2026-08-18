@@ -212,6 +212,10 @@ data class AppState(
     val relayBackend: RelayBackendHealth = RelayBackendHealth(),
     /** The custom relay URL as last saved; may differ from the one in use until restart. */
     val pendingRelayUrl: String = "",
+    /** The configured custom Blossom and whether it can be reached. */
+    val blobBackend: RelayBackendHealth = RelayBackendHealth(),
+    /** The custom Blossom URL as last saved. */
+    val pendingBlossomUrl: String = "",
     val updateCheck: UpdateCheck = UpdateCheck(),
     val speedtest: SpeedtestStatus = SpeedtestStatus(),
     /** Merged per-identity peer diagnostics rows (DIAG-01/03/04/06). Built once
@@ -463,6 +467,13 @@ data class AppState(
                     )
                 },
                 pendingRelayUrl = o.optString("pendingRelayUrl"),
+                blobBackend = o.optJSONObject("blobBackend").let { bb ->
+                    RelayBackendHealth(
+                        url = bb?.optString("url").orEmpty(),
+                        error = bb?.optString("error").orEmpty(),
+                    )
+                },
+                pendingBlossomUrl = o.optString("pendingBlossomUrl"),
                 speedtest = o.optJSONObject("speedtest")?.let { s ->
                     SpeedtestStatus(
                         running = s.optBoolean("running"),
@@ -664,15 +675,22 @@ object NativeActions {
     /** Discover nsites on connected Circle peers' relays ("nsites around me"). */
     fun searchNsites(): JSONObject = JSONObject().put("type", "search_nsites")
 
-    /** Toggle mesh-only: when enabled, don't use the public IP relay/Blossom fallback. */
     /**
      * Point the event store at [url], or back at the built-in store with an
      * empty string. Applied on the next launch — the backend is chosen when the
      * content layer is built.
      */
     fun setCustomRelay(url: String): JSONObject =
-        JSONObject().put("type", "SetCustomRelay").put("url", url)
+        JSONObject().put("type", "set_custom_relay").put("url", url)
 
+    /**
+     * Point the blob store at [url], or back at the built-in one with an empty
+     * string. Applied on the next launch, like [setCustomRelay].
+     */
+    fun setCustomBlossom(url: String): JSONObject =
+        JSONObject().put("type", "set_custom_blossom").put("url", url)
+
+    /** Toggle mesh-only: when enabled, don't use the public IP relay/Blossom fallback. */
     fun setOfflineOnly(enabled: Boolean): JSONObject =
         JSONObject().put("type", "set_offline_only").put("enabled", enabled)
 

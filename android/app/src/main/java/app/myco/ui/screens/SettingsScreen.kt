@@ -359,8 +359,7 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
     var confirmCache by remember { mutableStateOf(false) }
     var confirmAll by remember { mutableStateOf(false) }
     var editRelay by remember { mutableStateOf(false) }
-    // Blossom has no backend to point at yet, so that row still says so.
-    var notYet by remember { mutableStateOf<String?>(null) }
+    var editBlossom by remember { mutableStateOf(false) }
 
     val used = state.cache.usedBytes
     val fraction = (used.toDouble() / STORAGE_CAP_BYTES).coerceIn(0.0, 1.0).toFloat()
@@ -421,7 +420,11 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
         // content: every site missing, no explanation. Warn the way the radio
         // warnings do, since the cause is equally invisible from the app.
         if (state.relayBackend.error.isNotEmpty()) {
-            BackendUnreachableCard(state.relayBackend.error)
+            BackendUnreachableCard("Can't reach your relay", state.relayBackend.error)
+            Spacer(Modifier.height(8.dp))
+        }
+        if (state.blobBackend.error.isNotEmpty()) {
+            BackendUnreachableCard("Can't reach your blob store", state.blobBackend.error)
             Spacer(Modifier.height(8.dp))
         }
         SectionCard {
@@ -438,12 +441,11 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
             SettingRow(
                 icon = null,
                 title = "Custom Blossom",
-                subtitle = if (state.cache.externalBlobs) {
-                    "Blobs are stored on a server you chose"
-                } else {
-                    "Use another Blossom server instead of the built-in one"
+                subtitle = when {
+                    state.pendingBlossomUrl.isNotEmpty() -> state.pendingBlossomUrl
+                    else -> "Use another Blossom server instead of the built-in one"
                 },
-                onClick = { notYet = "Blossom" },
+                onClick = { editBlossom = true },
             )
         }
 
@@ -478,17 +480,14 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
             onDismiss = { editRelay = false },
         )
     }
-    notYet?.let { what ->
-        AlertDialog(
-            onDismissRequest = { notYet = null },
-            confirmButton = { TextButton(onClick = { notYet = null }) { Text("OK") } },
-            title = { Text("Not available yet") },
-            text = {
-                Text(
-                    "Pointing Myco at your own $what is still being built. " +
-                        "Everything is stored on this device for now.",
-                )
+    if (editBlossom) {
+        CustomBlossomDialog(
+            current = state.pendingBlossomUrl,
+            onSave = { url ->
+                client.dispatch(NativeActions.setCustomBlossom(url))
+                editBlossom = false
             },
+            onDismiss = { editBlossom = false },
         )
     }
     if (confirmCache) {
@@ -736,7 +735,7 @@ private fun RadioWarningCard(warning: RadioWarning, onClick: () -> Unit) {
  *  other apps hold every advertising slot, so peers can't discover this device.
  *  The radio keeps retrying on a backoff; this tells the user how to free a slot. */
 @Composable
-private fun BackendUnreachableCard(detail: String) {
+private fun BackendUnreachableCard(title: String, detail: String) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -756,16 +755,16 @@ private fun BackendUnreachableCard(detail: String) {
             )
             Spacer(Modifier.size(10.dp))
             Text(
-                "Can't reach your relay",
+                title,
                 color = MaterialTheme.colorScheme.onErrorContainer,
                 fontWeight = FontWeight.SemiBold,
                 style = MaterialTheme.typography.titleMedium,
             )
         }
         Text(
-            "$detail\n\nYour apps and messages are stored there, so they won't load " +
-                "until it's reachable again. Check that it's running and on the same " +
-                "network, or clear the setting below to go back to the built-in store.",
+            "$detail\n\nYour apps are stored there, so they won't load until it's " +
+                "reachable again. Check that it's running and on the same network, " +
+                "or clear the setting below to go back to the built-in store.",
             color = MaterialTheme.colorScheme.onErrorContainer,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -804,6 +803,53 @@ private fun CustomRelayDialog(
                     "Your apps and messages will be stored on this relay instead of on " +
                         "this device. Myco trusts it to check signatures, so whoever runs " +
                         "it decides what this device believes — only use one you control.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "Leave it empty to go back to the built-in store. Either way it takes " +
+                        "effect the next time Myco starts.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+/**
+ * Enter (or clear) the custom Blossom URL.
+ *
+ * Carries a blunter warning than the relay's. Blobs are the bulk of an nsite, so
+ * moving them off the device means a peer pulling an app from you needs your
+ * connection to the server — which is the opposite of what the mesh is for.
+ */
+@Composable
+private fun CustomBlossomDialog(
+    current: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var url by remember { mutableStateOf(current) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = { onSave(url.trim()) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        title = { Text("Custom Blossom") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    singleLine = true,
+                    label = { Text("Blossom URL") },
+                    placeholder = { Text("http://192.168.1.10:24242") },
+                )
+                Text(
+                    "App files will be stored on this server instead of on this device. " +
+                        "If it's not on your own network, sharing an app with someone " +
+                        "nearby will need your internet connection — Myco won't work " +
+                        "offline the way it does now.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

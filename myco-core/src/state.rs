@@ -56,6 +56,10 @@ pub struct AppState {
     /// The custom relay URL as last saved, which may differ from the one in use
     /// until the app restarts.
     pub pending_relay_url: String,
+    /// The configured custom Blossom and whether it can be reached.
+    pub blob_backend: crate::remote_backend::BackendHealth,
+    /// The custom Blossom URL as last saved.
+    pub pending_blossom_url: String,
     /// Status of the latest nsite update check (feedback for "Check for updates").
     pub update_check: crate::content::UpdateCheckView,
     /// Result of the dev-menu peer speedtest (a Blossom upload+download round-trip).

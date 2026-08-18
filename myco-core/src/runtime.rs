@@ -123,6 +123,8 @@ pub struct AppRuntime {
     /// should show, even though the running store is still the previous one
     /// until the app is restarted.
     pending_relay_url: String,
+    /// The custom Blossom URL as last saved, for the same reason.
+    pending_blossom_url: String,
     identity: IdentityView,
     ble_enabled: bool,
     wifi_aware_enabled: bool,
@@ -212,7 +214,18 @@ impl AppRuntime {
             tracing::info!(url, "content: using a custom relay");
             Arc::new(crate::remote_backend::RemoteBackend::new(url))
         });
-        let content = Arc::new(Content::open_with_relay(Path::new(data_dir), custom_relay)?);
+        let custom_blobs = settings.blossom_url().map(|url| {
+            tracing::info!(url, "content: using a custom blob store");
+            Arc::new(crate::remote_blobs::RemoteBlobStore::new(
+                url,
+                Arc::new(std::sync::Mutex::new(None)),
+            ))
+        });
+        let content = Arc::new(Content::open_with_backends(
+            Path::new(data_dir),
+            custom_relay,
+            custom_blobs,
+        )?);
 
         // The device keypair (same nsec the node uses) is the pairing identity —
         // pair request/accept events are signed with it.
@@ -255,7 +268,11 @@ impl AppRuntime {
         {
             use std::net::SocketAddr;
             let _guard = rt.enter(); // runtime context for TcpListener::from_std
-            let blobs = content.blobs();
+                                     // The mesh Blossom serves *our own* blobs to peers, so it needs the
+                                     // embedded store. With a custom server configured there is nothing
+                                     // local to serve — peers reach that server by its own URL, not
+                                     // through us — so the listener is simply not bound.
+            let blobs = content.blobs_local();
 
             // One shared relay hub backs both the mesh socket and a loopback socket,
             // so a chat event a peer pushes over `.fips` reaches the in-app nsite's
@@ -347,8 +364,14 @@ impl AppRuntime {
                     ));
                 }
             }
-            match myco_blossom::server::bind("[::]:24243".parse::<SocketAddr>().unwrap()) {
-                Ok(listener) => {
+            match (
+                blobs.clone(),
+                myco_blossom::server::bind("[::]:24243".parse::<SocketAddr>().unwrap()),
+            ) {
+                (None, _) => {
+                    tracing::info!("blossom: not serving, a custom blob store is configured");
+                }
+                (Some(blobs), Ok(listener)) => {
                     // Same paired-only gate for blobs: a mesh source must be a
                     // current Circle member (loopback bypasses). Pairing never
                     // touches Blossom, so there's no handshake exception here.
@@ -370,7 +393,7 @@ impl AppRuntime {
                         }
                     });
                 }
-                Err(e) => {
+                (Some(_), Err(e)) => {
                     if !mesh_warning.is_empty() {
                         mesh_warning.push_str("; ");
                     }
@@ -465,6 +488,7 @@ impl AppRuntime {
             app_version: app_version.to_string(),
             data_dir: data_dir.to_string(),
             pending_relay_url: settings.relay_url().unwrap_or_default(),
+            pending_blossom_url: settings.blossom_url().unwrap_or_default(),
             rev: 0,
             error: mesh_warning,
             identity,
@@ -614,6 +638,7 @@ impl AppRuntime {
             rev: 0,
             error: msg.to_string(),
             pending_relay_url: String::new(),
+            pending_blossom_url: String::new(),
             identity: IdentityView::default(),
             ble_enabled: false,
             wifi_aware_enabled: false,
@@ -770,9 +795,8 @@ impl AppRuntime {
                 self.rev += 1;
             }
             NativeAppAction::SetCustomRelay { url } => {
-                let settings = crate::settings_store::Settings {
-                    custom_relay_url: Some(url.clone()),
-                };
+                let mut settings = crate::settings_store::load(Path::new(&self.data_dir));
+                settings.custom_relay_url = Some(url.clone());
                 match crate::settings_store::save(Path::new(&self.data_dir), &settings) {
                     // Takes effect at the next launch; the store in use right now
                     // does not change under the running content layer.
@@ -783,6 +807,23 @@ impl AppRuntime {
                     Err(e) => {
                         tracing::warn!(error = %e, "settings: could not save the custom relay");
                         self.error = format!("Could not save the relay setting: {e}");
+                    }
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SetCustomBlossom { url } => {
+                // Read-modify-write: the two settings share a file, so writing
+                // one from a stale struct would silently clear the other.
+                let mut settings = crate::settings_store::load(Path::new(&self.data_dir));
+                settings.custom_blossom_url = Some(url.clone());
+                match crate::settings_store::save(Path::new(&self.data_dir), &settings) {
+                    Ok(()) => {
+                        self.pending_blossom_url = settings.blossom_url().unwrap_or_default();
+                        tracing::info!(url, "settings: custom blossom saved");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "settings: could not save the custom blossom");
+                        self.error = format!("Could not save the blob store setting: {e}");
                     }
                 }
                 self.rev += 1;
@@ -1383,6 +1424,12 @@ impl AppRuntime {
                 .map(|c| c.relay_health())
                 .unwrap_or_default(),
             pending_relay_url: self.pending_relay_url.clone(),
+            blob_backend: self
+                .content
+                .as_ref()
+                .map(|c| c.blobs_health())
+                .unwrap_or_default(),
+            pending_blossom_url: self.pending_blossom_url.clone(),
             update_check: self
                 .content
                 .as_ref()
@@ -1562,6 +1609,52 @@ mod tests {
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("myco-test-{}-{}", std::process::id(), tag))
+    }
+
+    /// The action tag the app sends has to be the one the reducer accepts.
+    ///
+    /// It was not: the helper sent `"SetCustomRelay"` while the enum is tagged
+    /// snake_case, so every save was rejected as an unparseable action and the
+    /// setting silently never persisted. Nothing in Rust or Kotlin catches that
+    /// on its own — the two halves only meet at this string.
+    #[test]
+    fn saving_a_custom_relay_persists_it() {
+        let dir = temp_dir("set-custom-relay");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "test");
+
+        // Exactly the JSON `NativeActions.setCustomRelay` builds.
+        let state = rt.dispatch_json(r#"{"type":"set_custom_relay","url":"ws://10.0.0.5:4869"}"#);
+        assert!(
+            !state.contains("invalid action JSON"),
+            "the app's tag must deserialize: {state}"
+        );
+        assert_eq!(
+            crate::settings_store::load(&dir).relay_url().as_deref(),
+            Some("ws://10.0.0.5:4869"),
+            "the URL must reach settings.json"
+        );
+
+        // And an empty URL clears it, which is how the dialog goes back to the
+        // built-in store.
+        // The Blossom setting shares the file, so saving one must not clear the
+        // other — a read-modify-write, not a fresh struct.
+        rt.dispatch_json(r#"{"type":"set_custom_blossom","url":"http://10.0.0.5:24242"}"#);
+        let both = crate::settings_store::load(&dir);
+        assert_eq!(both.relay_url().as_deref(), Some("ws://10.0.0.5:4869"));
+        assert_eq!(both.blossom_url().as_deref(), Some("http://10.0.0.5:24242"));
+
+        rt.dispatch_json(r#"{"type":"set_custom_relay","url":""}"#);
+        let after = crate::settings_store::load(&dir);
+        assert!(after.relay_url().is_none());
+        assert_eq!(
+            after.blossom_url().as_deref(),
+            Some("http://10.0.0.5:24242"),
+            "clearing the relay must leave the blob store alone"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

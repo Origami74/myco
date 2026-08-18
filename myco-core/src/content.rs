@@ -359,7 +359,14 @@ pub struct Content {
     /// shows, and the selective retain the cache wipe needs. `None` once a
     /// custom relay is configured, which is exactly what the screen reports.
     relay_store: Option<Arc<RelayStore>>,
-    blobs: Arc<FsBlobStore>,
+    /// The blob store, through the seam — embedded or someone else's Blossom.
+    blobs: Arc<dyn BlobStore>,
+    /// The custom Blossom, when one is configured, so its reachability can be
+    /// reported the same way the relay's is.
+    blobs_remote: Option<Arc<crate::remote_blobs::RemoteBlobStore>>,
+    /// The embedded blob store, when that is what `blobs` points at. Holds the
+    /// usage counts and the selective retain, neither of which is BUD-01.
+    blobs_local: Option<Arc<FsBlobStore>>,
     /// The pull source for not-yet-present sites. `None` in P2 M2 (local only);
     /// set to the IP online-fallback source in M3, the FIPS source in P3.
     source: Mutex<Option<Arc<dyn PeerSource>>>,
@@ -383,7 +390,9 @@ pub struct Content {
     sites: Mutex<HashMap<String, SiteStatusView>>,
     /// The device's Nostr keypair (the pairing identity), used to sign pair
     /// request/accept events. Set once at startup from the persisted nsec.
-    device_keys: Mutex<Option<Keys>>,
+    /// The device keypair. Behind an `Arc` because a remote blob store needs it
+    /// to sign BUD-01 upload authorizations, and it is set after construction.
+    device_keys: Arc<Mutex<Option<Keys>>>,
     /// User-chosen device label (memorable name). Set by the app on launch and on
     /// rename; stamped on outgoing pair events so peers show the chosen name.
     /// Falls back to a name derived from the npub when unset.
@@ -526,6 +535,27 @@ impl Content {
         data_dir: &Path,
         custom: Option<Arc<crate::remote_backend::RemoteBackend>>,
     ) -> anyhow::Result<Self> {
+        Self::open_with_backends(data_dir, custom, None)
+    }
+
+    /// Open with either store — or both — pointed at something we do not own.
+    ///
+    /// The embedded relay and blob directory are still opened and still occupy
+    /// disk; they simply stop serving, which is what the Storage screen reports.
+    /// The two are independent: swapping the relay leaves blobs local, and vice
+    /// versa (`reference/thinning-custom-relay.md`, D3 and D9).
+    pub fn open_with_backends(
+        data_dir: &Path,
+        custom: Option<Arc<crate::remote_backend::RemoteBackend>>,
+        custom_blobs: Option<Arc<crate::remote_blobs::RemoteBlobStore>>,
+    ) -> anyhow::Result<Self> {
+        // A remote blob store signs its uploads with the device key, and the key
+        // is loaded after construction — so share one holder rather than keeping
+        // two copies that could fall out of step.
+        let device_keys: Arc<Mutex<Option<Keys>>> = custom_blobs
+            .as_ref()
+            .map(|b| b.keys())
+            .unwrap_or_else(|| Arc::new(Mutex::new(None)));
         let embedded = Arc::new(RelayStore::open(data_dir.join("relay"))?);
         let using_custom = custom.is_some();
         let relay: Arc<dyn RelayBackend> = match &custom {
@@ -535,7 +565,13 @@ impl Content {
         // Kept only while it is the thing serving: the usage counts and the
         // selective retain it backs describe our store, not someone else's.
         let relay_store = (!using_custom).then_some(embedded);
-        let blobs = Arc::new(FsBlobStore::open(data_dir.join("blossom"))?);
+
+        let embedded_blobs = Arc::new(FsBlobStore::open(data_dir.join("blossom"))?);
+        let blobs: Arc<dyn BlobStore> = match &custom_blobs {
+            Some(remote) => remote.clone(),
+            None => embedded_blobs.clone(),
+        };
+        let blobs_local = custom_blobs.is_none().then_some(embedded_blobs);
         let library_path = data_dir.join("library.json");
         let library = load_library(&library_path);
         let circle_path = data_dir.join("circle.json");
@@ -546,6 +582,8 @@ impl Content {
             relay,
             relay_remote: custom,
             relay_store,
+            blobs_remote: custom_blobs,
+            blobs_local,
             blobs,
             source: Mutex::new(None),
             offline_only: AtomicBool::new(false),
@@ -556,7 +594,7 @@ impl Content {
             connected_peers: Mutex::new(Vec::new()),
             discovered: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
-            device_keys: Mutex::new(None),
+            device_keys: device_keys.clone(),
             device_name_override: Mutex::new(None),
             pending_pairs: Mutex::new(Vec::new()),
             outbound_pairs: Mutex::new(Vec::new()),
@@ -605,9 +643,25 @@ impl Content {
         self.relay_store.clone()
     }
 
-    /// The blob store (shared), for the mesh Blossom server.
-    pub fn blobs(&self) -> Arc<FsBlobStore> {
+    /// The blob store (shared), through the seam.
+    pub fn blobs(&self) -> Arc<dyn BlobStore> {
         self.blobs.clone()
+    }
+
+    /// The embedded blob store, if that is what we are using. The mesh Blossom
+    /// server needs the concrete one: it serves our own blobs to peers, and a
+    /// custom server is reached by its own URL rather than proxied through us.
+    pub fn blobs_local(&self) -> Option<Arc<FsBlobStore>> {
+        self.blobs_local.clone()
+    }
+
+    /// What to tell the user about a configured Blossom: its URL, and why it is
+    /// unreachable if it is.
+    pub fn blobs_health(&self) -> crate::remote_backend::BackendHealth {
+        self.blobs_remote
+            .as_ref()
+            .map(|b| b.health())
+            .unwrap_or_default()
     }
 
     // --- active version (what the gateway serves; docs/design/nsite-updates.md §1) ---
@@ -2146,7 +2200,9 @@ impl Content {
         if let Some(store) = &self.relay_store {
             store.retain_events(&keep_events);
         }
-        self.blobs.retain_blobs(&keep_blobs);
+        if let Some(store) = &self.blobs_local {
+            store.retain_blobs(&keep_blobs);
+        }
 
         // Drop unpinned Library entries and the live status of anything unpinned.
         let pinned_hosts: HashSet<String> = pinned.iter().map(|i| i.url_host.clone()).collect();
@@ -2204,10 +2260,10 @@ impl Content {
             // The embedded store's own count, or nothing to count when a custom
             // relay has taken over — which the flag tells the screen to say.
             relay_events: self.relay_store.as_ref().map_or(0, |s| s.count() as u64),
-            blob_count: self.blobs.count() as u64,
-            used_bytes: self.blobs.total_bytes(),
+            blob_count: self.blobs_local.as_ref().map_or(0, |b| b.count() as u64),
+            used_bytes: self.blobs_local.as_ref().map_or(0, |b| b.total_bytes()),
             external_relay: self.relay_store.is_none(),
-            external_blobs: false,
+            external_blobs: self.blobs_local.is_none(),
         }
     }
 
