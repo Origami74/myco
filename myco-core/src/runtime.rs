@@ -71,7 +71,7 @@ const LAN_UDP_PORT: u16 = 4871;
 /// `aware0…aware3` listen on 4872–4875. Both peers bind their own and exchange
 /// over the NDP — symmetric, no listener/dialer roles. UDP is fips's native
 /// transport and the LAN-discovery path (which this reuses) is already UDP +
-/// scoped link-local IPv6. See docs/design/wifi-aware-interop.md.
+/// scoped link-local IPv6. See docs/design/fips/wifi-aware-interop.md.
 ///
 /// **The port is per peer, and that is what makes the pool work.** A phone
 /// advertises, in the Aware identity exchange, the port of the socket it has
@@ -378,7 +378,7 @@ impl AppRuntime {
             // so a chat event a peer pushes over `.fips` reaches the in-app nsite's
             // live subscription on localhost (shared store + live bus + gossiper).
             // The gossiper fans this device's own nsite events out to Circle peers
-            // (docs/design/event-gossip.md).
+            // (docs/design/core/event-gossip.md).
             let gossiper: Arc<dyn crate::mesh_relay::Gossiper> =
                 Arc::new(crate::gossip::MeshGossiper::new(content.clone()));
             // Restrict mesh access to paired (Circle) peers — only the pairing
@@ -622,7 +622,7 @@ impl AppRuntime {
     /// node, so re-enabling needs a new one).
     ///
     /// `wifi_aware` adds a UDP transport instance bound on the NDP interface —
-    /// the Wi-Fi Aware bulk lane's data plane (docs/design/wifi-aware-interop.md).
+    /// the Wi-Fi Aware bulk lane's data plane (docs/design/fips/wifi-aware-interop.md).
     /// Deliberately not Android-gated: the identical UDP path is the lane's
     /// dev/test stand-in on a plain LAN.
     fn build_node(data_dir: &str, wifi_aware: bool, aware_slots: u8) -> anyhow::Result<fips::Node> {

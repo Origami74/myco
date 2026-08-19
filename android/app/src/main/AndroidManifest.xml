@@ -13,7 +13,7 @@
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <!-- Wi-Fi Aware bulk lane (docs/design/wifi-aware-interop.md). Runtime
+    <!-- Wi-Fi Aware bulk lane (docs/design/fips/wifi-aware-interop.md). Runtime
          permission on API 33+; declares it never derives location. -->
     <uses-permission
         android:name="android.permission.NEARBY_WIFI_DEVICES"

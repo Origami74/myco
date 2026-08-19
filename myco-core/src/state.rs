@@ -267,7 +267,7 @@ pub struct BleStatus {
 /// Wi-Fi Aware bulk-lane status — the control/observation plane. The radio
 /// (attach/publish/subscribe/NDP) lives in the Android foreground service;
 /// the byte plane is the ordinary UDP transport over the NDP interface. See
-/// `docs/design/wifi-aware-interop.md`.
+/// `docs/design/fips/wifi-aware-interop.md`.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WifiAwareStatus {

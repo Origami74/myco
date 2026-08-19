@@ -8,7 +8,7 @@ commit: 7458e2bb783950f6996ac948cf4e887325afaab9
 
 # Summary
 
-`docs/design/napplet-runtime.md` (524 lines) is checked in and linked from the design-doc
+`docs/design/napplet/napplet-runtime.md` (524 lines) is checked in and linked from the design-doc
 table in `docs/README.md`.
 
 ## What changed from the scratch plan

@@ -1,5 +1,5 @@
 //! Host / link resolution: turn a `<host>.nsite` label (or a pasted link) into a
-//! `(author pubkey, d-tag)` site address. See `docs/design/nsite-layer.md` §3.2.
+//! `(author pubkey, d-tag)` site address. See `docs/design/nsite/nsite-layer.md` §3.2.
 //!
 //! - **Root** site: the label is an `npub1…` (NIP-19 bech32 of the author).
 //! - **Named** site: the label is `<pubkeyB36><dTag>` (base36 50-char pubkey +
@@ -119,7 +119,7 @@ fn strip_suffix(host: &str) -> Option<&str> {
     // The in-app WebView serves nsites under `<label>.localhost` (not `.nsite`):
     // Chromium classifies `*.localhost` as loopback + a secure context, so the
     // page can open `ws://localhost:4870` to the embedded relay without tripping
-    // Private/Local Network Access (see docs/design/nsite-layer.md host suffix).
+    // Private/Local Network Access (see docs/design/nsite/nsite-layer.md host suffix).
     if let Some(idx) = lower.rfind(".localhost") {
         if idx + ".localhost".len() == lower.len() {
             return Some(&host[..idx]);

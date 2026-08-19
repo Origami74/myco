@@ -13,11 +13,11 @@ window, no chrome. What differs is the trust model. An nsite is a document Myco 
 napplet is a program Myco *hosts*, and hosting means mediating — every capability it uses
 is one Myco decided to grant, implemented by Myco, on the napplet's behalf.
 
-Related docs: [./nsite-layer.md](./nsite-layer.md) (the content layer this builds on),
-[./app-shell.md](./app-shell.md) (the per-app window model),
-[./deep-links.md](./deep-links.md) (the existing `myco://app/…` link),
-[./identity-pairing.md](./identity-pairing.md) (the device key this deliberately does not
-reuse), [../reference/nostr-kinds.md](../reference/nostr-kinds.md) (event kinds).
+Related docs: [./nsite-layer.md](../nsite/nsite-layer.md) (the content layer this builds on),
+[./app-shell.md](../core/app-shell.md) (the per-app window model),
+[./deep-links.md](../core/deep-links.md) (the existing `myco://app/…` link),
+[./identity-pairing.md](../core/identity-pairing.md) (the device key this deliberately does not
+reuse), [../reference/nostr-kinds.md](../../reference/nostr-kinds.md) (event kinds).
 
 ---
 

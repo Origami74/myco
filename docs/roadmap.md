@@ -85,9 +85,9 @@ arm64 / minSdk 29 APK; the app launches, generates and persists an nsec, and
 shows its own npub; the macOS core build also compiles; none of the stripped
 net/roster/exit features remain.
 
-**Design docs.** [architecture.md](./design/architecture.md) (reused-vs-net-new) ·
-[concepts.md](./design/concepts.md) (what we dropped vs keep) ·
-[identity-pairing.md](./design/identity-pairing.md) (identity storage) ·
+**Design docs.** [architecture.md](./design/core/architecture.md) (reused-vs-net-new) ·
+[concepts.md](./design/core/concepts.md) (what we dropped vs keep) ·
+[identity-pairing.md](./design/core/identity-pairing.md) (identity storage) ·
 [config.md](./reference/config.md) (what is stripped from the config) ·
 [ffi-surface.md](./reference/ffi-surface.md) (the reducer + build path) ·
 [build.md](./how-to/build.md) (toolchain, local-fips wiring).
@@ -118,7 +118,7 @@ offline, form a FIPS BLE link via universal per-peer PSM discovery, and each
 shows the other connected in the developer UI (the peer's `node_addr`, then its
 `npub` once Noise completes).
 
-**Design docs.** [ble-interop.md](./design/ble-interop.md) (the BLE backends, the
+**Design docs.** [ble-interop.md](./design/fips/ble-interop.md) (the BLE backends, the
 PSM problem, per-peer PSM discovery) ·
 [ffi-surface.md](./reference/ffi-surface.md) (the BLE byte-bridge, `ble` /
 `blePeers` state, the developer UI) ·
@@ -162,7 +162,7 @@ as a fullscreen `NsiteActivity` (its own task) and loads end-to-end from
 local relay + Blossom with hash verification — no htdocs cache, no network
 involved.
 
-**Design docs.** [nsite-layer.md](./design/nsite-layer.md) (the whole content
+**Design docs.** [nsite-layer.md](./design/nsite/nsite-layer.md) (the whole content
 layer) · [nostr-kinds.md](./reference/nostr-kinds.md) (manifest kinds + tags) ·
 [ports.md](./reference/ports.md) (localhost ports, the `:80` gateway,
 `*.nsite → 127.0.0.1`) · [build.md § 4c](./how-to/build.md) (the app-owned TUN
@@ -184,7 +184,7 @@ toward P5. The ambitious original scope is retained below as the target.
 re-pointed at the `myco://pair/<base64>` payload, which now carries JSON
 `{ npub, name, pairSecret }`. **Pairing is handshake-mandatory and always
 mutual:** scanning initiates the **invite-pairing handshake**
-([identity-pairing.md § 6.1](./design/identity-pairing.md)) against the inviter's
+([identity-pairing.md § 6.1](./design/core/identity-pairing.md)) against the inviter's
 on-device `<npub>.fips` endpoint — the scanner echoes `pairSecret` back over that
 already Noise-encrypted channel, the inviter matches it and the user taps OK.
 `pairSecret` is a long, single-use random string that proves the peer scanned this
@@ -205,8 +205,8 @@ background so pinned apps stay current and offline-ready before next open. Blobs
 stay pull-only. **Pull a basic negentropy (NIP-77) reconcile into this phase
 too**, so a (re)connecting peer efficiently catches up on missing manifests
 (`NEG-OPEN` on a manifest filter → fetch the diff), not by live forwarding alone
-— events only. See [nsite-layer.md § 2.1, § 2.4](./design/nsite-layer.md) and
-[propagation.md § 2, § 5](./design/propagation.md).
+— events only. See [nsite-layer.md § 2.1, § 2.4](./design/nsite/nsite-layer.md) and
+[propagation.md § 2, § 5](./design/nsite/propagation.md).
 
 **Exit criterion.** Device B scans A's invite and completes the mandatory
 secret-echo handshake (both now mutual sources); over the BLE link from P1 (or an IP-based
@@ -217,12 +217,12 @@ re-echoed); **a peer that missed events catches up via a basic negentropy
 (NIP-77) reconcile** rather than re-pulling the full set; **and a newer manifest
 for a Library-pinned site triggers an automatic background blob pull**.
 
-**Design docs.** [identity-pairing.md § 6.1](./design/identity-pairing.md) (the
+**Design docs.** [identity-pairing.md § 6.1](./design/core/identity-pairing.md) (the
 invite-pairing handshake, `pairSecret`, peer-as-source) ·
-[nsite-layer.md](./design/nsite-layer.md) (§5 sync over FIPS) ·
-[propagation.md](./design/propagation.md) (the propagator, fanout, eager
+[nsite-layer.md](./design/nsite/nsite-layer.md) (§5 sync over FIPS) ·
+[propagation.md](./design/nsite/propagation.md) (the propagator, fanout, eager
 pinned-refresh) · [ports.md](./reference/ports.md) (`.fips` vs `.nsite`, FSP
-port-mux) · [security.md](./design/security.md) (scan-and-confirm pairing,
+port-mux) · [security.md](./design/core/security.md) (scan-and-confirm pairing,
 self-authenticating data) ·
 [diagrams/02-pairing-transitive-discovery.svg](./design/diagrams/02-pairing-transitive-discovery.svg).
 
@@ -242,7 +242,7 @@ scanned QR or Discovery), open it, and manage their Library + Circle — without
 ever reading a raw npub or cache counter. (Specifics filled in as the UX is
 scoped.)
 
-**Design docs.** [app-shell.md](./design/app-shell.md) (screens + navigation) ·
+**Design docs.** [app-shell.md](./design/core/app-shell.md) (screens + navigation) ·
 [ffi-surface.md](./reference/ffi-surface.md) (the state the UI renders — unchanged).
 
 ## P4 — Full offline browse demo (the v1 headline)
@@ -260,8 +260,8 @@ interceptor. This is the
 [run-two-device-demo.md](./how-to/run-two-device-demo.md) success condition.
 
 **Design docs.** [run-two-device-demo.md](./how-to/run-two-device-demo.md) (the
-runbook) · [ble-interop.md](./design/ble-interop.md) (the BLE transport under
-load) · [nsite-layer.md](./design/nsite-layer.md) (sync + serve over BLE) ·
+runbook) · [ble-interop.md](./design/fips/ble-interop.md) (the BLE transport under
+load) · [nsite-layer.md](./design/nsite/nsite-layer.md) (sync + serve over BLE) ·
 [ffi-surface.md](./reference/ffi-surface.md) (`siteStatus` / sync-state copy) ·
 [diagrams/01-system-layering.svg](./design/diagrams/01-system-layering.svg).
 
@@ -283,10 +283,10 @@ a node (B) that only cached it earlier — verified by signature/hash — and a
 node receives flooded manifests for, and pulls from, a peer it never directly
 paired with.
 
-**Design docs.** [propagation.md](./design/propagation.md) (the whole phase) ·
+**Design docs.** [propagation.md](./design/nsite/propagation.md) (the whole phase) ·
 [nostr-kinds.md](./reference/nostr-kinds.md) (manifest kinds 15128/35128) ·
-[identity-pairing.md](./design/identity-pairing.md) (§6 transitive authorization) ·
-[security.md](./design/security.md) (why any source is trustworthy; propagation
+[identity-pairing.md](./design/core/identity-pairing.md) (§6 transitive authorization) ·
+[security.md](./design/core/security.md) (why any source is trustworthy; propagation
 privacy) ·
 [diagrams/03-offline-propagation.svg](./design/diagrams/03-offline-propagation.svg).
 
@@ -308,7 +308,7 @@ case. The per-peer PSM patch (advertise own PSM + read peer's PSM into
 per-peer PSM advertising form a FIPS BLE link (each reads the other's advertised
 PSM), and the Android browses an nsite hosted on the Linux peer (or vice-versa).
 
-**Design docs.** [ble-interop.md](./design/ble-interop.md) (Android↔Linux via
+**Design docs.** [ble-interop.md](./design/fips/ble-interop.md) (Android↔Linux via
 per-peer PSM discovery) ·
 [build.md § 4c](./how-to/build.md) (the per-peer PSM patch, all backends).
 
@@ -324,18 +324,18 @@ Out of scope for v1; each is its own milestone with its own design pass.
   `<path> → sha256 →` blob per request. The content-addressed Blossom blob store
   stays the retained store-and-forward source (and what the LRU 2 GB cap governs);
   htdocs is a derived, path-named cache layered on top, not needed for v0 —
-  [nsite-layer.md](./design/nsite-layer.md).
+  [nsite-layer.md](./design/nsite/nsite-layer.md).
 - **Home-screen pinning + app-shortcuts.** Offer "Add to home screen" for an
   nsite via `ShortcutManager.requestPinShortcut()` (always user-confirmed — Android
   shows a system dialog per pin; Myco cannot silently pin), plus dynamic
   app-shortcuts. Knowing whether an nsite is pinned is best-effort only
   (`getPinnedShortcuts()` is a soft hint; removal is under-reported and has no
   callback), so the Library stays the source of truth for "installed" —
-  [nsite-layer.md](./design/nsite-layer.md),
-  [identity-pairing.md](./design/identity-pairing.md).
+  [nsite-layer.md](./design/nsite/nsite-layer.md),
+  [identity-pairing.md](./design/core/identity-pairing.md).
 - **Wi-Fi Aware bulk-lane transport.** A higher-throughput offline lane raised
   beside BLE for larger nsites (measured BLE ceiling ~22 KB/s). Design in
-  [wifi-aware-interop.md](./design/wifi-aware-interop.md) — Wi-Fi Direct, this
+  [wifi-aware-interop.md](./design/fips/wifi-aware-interop.md) — Wi-Fi Direct, this
   bullet's original name, is demoted to fallback there.
 - **Public-node peering via Nostr discovery.** The online path: find and
   rendezvous with peers over the internet using FIPS discovery kinds (37195
@@ -346,30 +346,30 @@ Out of scope for v1; each is its own milestone with its own design pass.
 - **nsite capability API.** Give nsite JavaScript a scoped capability surface
   (e.g. query peers) beyond v1's pure-static content. A large trust escalation
   needing a per-capability permission model — see
-  [security.md](./design/security.md) (§5) and
-  [nsite-layer.md](./design/nsite-layer.md) (§7).
+  [security.md](./design/core/security.md) (§5) and
+  [nsite-layer.md](./design/nsite/nsite-layer.md) (§7).
 - **Open `*.nsite` / `*.nsite.lol` links in Myco.** Register intent filters for
   nsite hostnames (the `.nsite` TLD and public gateways like `nsite.lol`) so tapping
   such a link anywhere opens it in Myco — **downloading the nsite if not already
-  held** (source order in [nsite-layer.md](./design/nsite-layer.md) §5) — instead of
+  held** (source order in [nsite-layer.md](./design/nsite/nsite-layer.md) §5) — instead of
   a browser. Cross-nsite links open each site as its own task
-  ([app-shell.md](./design/app-shell.md) §4).
+  ([app-shell.md](./design/core/app-shell.md) §4).
 - **NAT46 for external browsers.** Let a browser *outside* the app (system
   Chrome, etc.) reach mesh-hosted content, bridging the IPv4/IPv6 split beyond
   the localhost gateway each `NsiteActivity` WebView uses —
   [ports.md](./reference/ports.md),
-  [concepts.md](./design/concepts.md) (`.fips` vs `.nsite`).
+  [concepts.md](./design/core/concepts.md) (`.fips` vs `.nsite`).
 - **Multi-persona identity.** More than one keypair per device (independent
-  node_addr / ULA / Library) — [identity-pairing.md](./design/identity-pairing.md)
+  node_addr / ULA / Library) — [identity-pairing.md](./design/core/identity-pairing.md)
   (§3).
 - **Relay / Blossom read-auth.** v0 is **open-read** — any connected peer can
   `REQ` your relay and `GET` any blob, which lets a peer enumerate your manifest
   set (what you hold / installed). Restrict it with NIP-42 `AUTH` on the relay,
   per-peer read-scoping, and **unlisted/private nsites** + selective replication.
   All additive (NIP-42 is non-breaking on the wire) —
-  [security.md](./design/security.md) (§3).
+  [security.md](./design/core/security.md) (§3).
 - **Re-surfacing the FIPS peer ACL** as a "block this peer" control —
-  [security.md](./design/security.md) (§3).
+  [security.md](./design/core/security.md) (§3).
 
 ---
 

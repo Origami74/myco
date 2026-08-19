@@ -1,7 +1,7 @@
 //! Sync + import: pull a manifest + its blobs from a [`PeerSource`], verify every
 //! blob's sha256, and mirror them into the local relay + Blossom so the gateway
 //! can serve direct. Mirrors the §5.2 pull sequence in
-//! `docs/design/nsite-layer.md`; v0 has no version dirs / atomic swap.
+//! `docs/design/nsite/nsite-layer.md`; v0 has no version dirs / atomic swap.
 //!
 //! The push/propagator half (`FanoutSink`) is P3 — not driven here.
 
@@ -124,7 +124,7 @@ pub async fn sync_site(
 
 /// Download (fetch + verify + store) every blob a **known, already-verified**
 /// manifest references, *without* storing the manifest — the "download" half of an
-/// update stage (`docs/design/nsite-updates.md` §2). Activation (storing the
+/// update stage (`docs/design/nsite/nsite-updates.md` §2). Activation (storing the
 /// manifest so the gateway serves it) is the caller's separate step, run only once
 /// this returns [`SyncOutcome::Ready`]. The active version is untouched meanwhile.
 pub async fn stage_blobs(

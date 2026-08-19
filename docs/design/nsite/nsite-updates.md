@@ -8,7 +8,7 @@
 > **Wire note.** Mesh hop state travels in a `MESH` envelope *beside* the NIP-01
 > message, never inside the event or a filter. Two links stay plain NIP-01: the
 > nsite ↔ `localhost:4870` link and the proxy ↔ backing-relay link. See
-> [event-gossip.md §0 and §2](./event-gossip.md).
+> [event-gossip.md §0 and §2](../core/event-gossip.md).
 
 An nsite is a set of author-signed manifest events (kinds 15128/35128) plus
 content-addressed blobs ([nsite-layer.md](./nsite-layer.md),
@@ -22,7 +22,7 @@ specifies how an installed device:
    version until *every* blob of the new version is local,
 3. **activates** it atomically, respecting open instances (no mid-session swap),
 4. **propagates** it to mesh peers using the *same* push plane as ordinary app
-   events ([event-gossip.md](./event-gossip.md)).
+   events ([event-gossip.md](../core/event-gossip.md)).
 
 > **Scope.** Core/native work in `myco-core` + `myco-relay`, plus a small
 > lifecycle signal from the Android shell. The WebView is unaware any of this
@@ -33,9 +33,9 @@ specifies how an installed device:
 ## 1. The load-bearing conflict
 
 The embedded relay collapses replaceable manifests to **newest-by-`created_at`**
-([`admit`/`slot_of`](../../myco-relay/src/lib.rs)), and today the gateway serves
+([`admit`/`slot_of`](../../../myco-relay/src/lib.rs)), and today the gateway serves
 whatever manifest is newest in the store
-([`gateway::readiness` → `get_manifest`](../../nsite-deck/src/gateway.rs)). If we
+([`gateway::readiness` → `get_manifest`](../../../nsite-deck/src/gateway.rs)). If we
 left that coupling in place, a newer manifest landing in the store would
 **activate instantly**: its blobs aren't local yet, so `readiness()` returns
 `Incomplete` and the gateway flips a *working* app to its 503 loading page — and
@@ -60,7 +60,7 @@ views over a site's manifests:
   instance is open (R4); the user can also pin/revert it (§6).
 
 The gateway reads the **active pointer**, not relay-newest — implemented as a thin
-[`RelayBackend`](../../nsite-deck/src/seams.rs) wrapper whose `get_manifest`
+[`RelayBackend`](../../../nsite-deck/src/seams.rs) wrapper whose `get_manifest`
 returns core's active manifest for the slot (its blobs are, by construction, all
 present). Everything else about the relay is untouched. A happy consequence:
 **revert and pin become pure pointer moves** — no relay write, no force-set, the
@@ -95,7 +95,7 @@ any shared blob is already present (free dedup). The active pointer keeps the
 gateway serving the working version with zero disruption until the download
 completes.
 
-Staging reuses the blob-fetch half of [`sync.rs`](../../nsite-deck/src/sync.rs);
+Staging reuses the blob-fetch half of [`sync.rs`](../../../nsite-deck/src/sync.rs);
 the only change there is to **split "fetch + verify all blobs" from "store the
 manifest"** so callers can drive the two independently (today `sync_site` does
 both; we add a `stage_blobs(manifest, source)` that just fetches blobs, leaving
@@ -155,7 +155,7 @@ combined REQ, not one per site; the relay returns each slot's newest.)
 peer-relay pool rather than through the loopback relay socket, which is the same
 route discovery takes. That split is deliberate: a `REQ` from an nsite never fans
 out to peers, so multi-hop reads only ever happen where the core asks for them
-([event-gossip.md §7](./event-gossip.md)).
+([event-gossip.md §7](../core/event-gossip.md)).
 
 A returned manifest is a candidate iff `candidate.created_at > active.created_at`
 for its slot (and newer than any already-staged candidate). Each such candidate is
@@ -216,7 +216,7 @@ routes manifest kinds to their own handler and branches on interest:
 
 - **Not interested** → build `["MESH", {"ttl": n}, ["EVENT", <manifest>]]` and fan
   to connected circle peers immediately, split-horizon, with the hop budget
-  decremented ([event-gossip.md §2–3](./event-gossip.md)). The manifest event
+  decremented ([event-gossip.md §2–3](../core/event-gossip.md)). The manifest event
   itself is canonical NIP-01 — nothing is added to it and nothing has to be
   stripped before storing.
 - **Interested** → open a `PendingUpdate { source: Mesh(sender_ip) }`, download
@@ -227,7 +227,7 @@ routes manifest kinds to their own handler and branches on interest:
 The loop guard is the same as chat: the proxy's **seen-set** decides novelty, so
 only a first sighting is handed to the gossiper and a copy arriving by a second
 path is stored but never re-forwarded. The hop budget then bounds the wave's
-reach ([event-gossip.md §4](./event-gossip.md)). Locally-originated candidates
+reach ([event-gossip.md §4](../core/event-gossip.md)). Locally-originated candidates
 (an online check, §3.2) are "interested" by definition — we checked because we run
 the site — so they follow the download-then-forward path.
 
@@ -240,7 +240,7 @@ different channels, so even the immediate (not-interested) forward is safe:
 - The **blobs** are only ever served from our Blossom *if we actually hold them*.
   A peer pulling a blob we don't have simply gets a 404 from us and falls back to
   its other sources — the manifest's `["server", …]` hints, or another peer who
-  has it ([sync.rs](../../nsite-deck/src/sync.rs) already tries sources in order).
+  has it ([sync.rs](../../../nsite-deck/src/sync.rs) already tries sources in order).
 
 The interested-path download-first (§4.1) is therefore an **optimisation**, not a
 correctness requirement: it makes us a ready blob source for the sites we run, so
@@ -351,7 +351,7 @@ per-device choice; the author's newest is still what spreads).
 ### 6.4 UI — the per-app settings window
 
 Today the long-press app sheet's **Info** row is a no-op
-([AppsScreen.kt](../../android/app/src/main/java/app/myco/ui/screens/AppsScreen.kt)).
+([AppsScreen.kt](../../../android/app/src/main/java/app/myco/ui/screens/AppsScreen.kt)).
 It becomes **"App settings"** — a per-app window that hosts:
 
 - the site identity (host / npub) Info used to show,

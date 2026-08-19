@@ -43,11 +43,11 @@ FIPS, BLE, and the Android shell.
 
 Full design docs are in **[docs/](docs/README.md)**:
 
-- [Concepts & glossary](docs/design/concepts.md) — start here
-- [Architecture](docs/design/architecture.md)
-- [The nsite layer](docs/design/nsite-layer.md) · [Propagation](docs/design/propagation.md) · [BLE interop](docs/design/ble-interop.md)
-- [Identity & pairing](docs/design/identity-pairing.md) · [Security](docs/design/security.md)
-- [Deep links](docs/design/deep-links.md) — linking to a place inside an app, and what happens when that app isn't installed yet
+- [Concepts & glossary](docs/design/core/concepts.md) — start here
+- [Architecture](docs/design/core/architecture.md)
+- [The nsite layer](docs/design/nsite/nsite-layer.md) · [Propagation](docs/design/nsite/propagation.md) · [BLE interop](docs/design/fips/ble-interop.md)
+- [Identity & pairing](docs/design/core/identity-pairing.md) · [Security](docs/design/core/security.md)
+- [Deep links](docs/design/core/deep-links.md) — linking to a place inside an app, and what happens when that app isn't installed yet
 - [Roadmap](docs/roadmap.md)
 
 ## Status

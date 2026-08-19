@@ -12,7 +12,7 @@ implementation itself (the `BleRadio` Android backend and the `reference/fips`
 transport). This doc is the *why*.
 
 The offline propagation picture this transport feeds is sketched in
-[diagrams/03-offline-propagation.svg](./diagrams/03-offline-propagation.svg):
+[diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg):
 BLE is the bottom-most hop, the "crappy link" that data crosses one device at
 a time.
 
@@ -20,11 +20,11 @@ a time.
 
 FIPS already abstracts its BLE transport behind a single platform trait,
 `BleIo`, with the BlueZ-backed `BluerIo` as the Linux implementation
-([../../reference/fips/src/transport/ble/io.rs](../../reference/fips/src/transport/ble/io.rs)).
+([../../reference/fips/src/transport/ble/io.rs](../../../reference/fips/src/transport/ble/io.rs)).
 Everything above that trait — the connection pool, the scan/probe loop, the
 cross-probe tiebreaker, the Noise IK link handshake, reconnect, MTU
 accounting — is medium-agnostic Rust in
-[../../reference/fips/src/transport/ble/mod.rs](../../reference/fips/src/transport/ble/mod.rs).
+[../../reference/fips/src/transport/ble/mod.rs](../../../reference/fips/src/transport/ble/mod.rs).
 The trait is the *only* seam between that logic and the radio.
 
 **Option A**: implement `BleIo` natively for Android. Kotlin owns the radio
@@ -61,13 +61,13 @@ universal PSM discovery alongside Android.
 core, so Android↔Mac becomes a buildable, debuggable test pair for the BLE
 link without two physical Android handsets. (Like the app-owned TUN change,
 it's a test-oriented patch in the four-patch local-fips set — see
-[build.md §4c](./build.md).)
+[build.md §4c](../../how-to/build.md).)
 
 ## The BleIo trait surface
 
 FIPS owns everything above this line. `AndroidBleIo` must provide exactly
 these eight methods plus three small associated types. Verbatim from
-[../../reference/fips/src/transport/ble/io.rs](../../reference/fips/src/transport/ble/io.rs):
+[../../reference/fips/src/transport/ble/io.rs](../../../reference/fips/src/transport/ble/io.rs):
 
 | Method | Signature (async unless noted) | Android responsibility |
 | --- | --- | --- |
@@ -149,7 +149,7 @@ from the OS:
 - **Linux/BlueZ** — the outlier. It *can* bind a fixed PSM, which is why
   FIPS's Linux backend hard-codes `DEFAULT_PSM = 0x0085` (133) as its L2CAP
   listener and dials that same number
-  ([../../reference/fips/src/transport/ble/mod.rs](../../reference/fips/src/transport/ble/mod.rs#L49)).
+  ([../../reference/fips/src/transport/ble/mod.rs](../../../reference/fips/src/transport/ble/mod.rs#L49)).
 
 So the fixed-PSM assumption baked into FIPS is a *BlueZ* assumption. The
 moment either end is Android or Apple, "everyone agrees on 133" breaks: that
@@ -157,7 +157,7 @@ listener is on *some* OS-assigned PSM, and a peer that blindly dials 133 will
 not reach it.
 
 Compounding it, the adverts don't carry the PSM. FIPS adverts are **UUID-only**
-([../../reference/fips/src/transport/ble/discovery.rs](../../reference/fips/src/transport/ble/discovery.rs))
+([../../reference/fips/src/transport/ble/discovery.rs](../../../reference/fips/src/transport/ble/discovery.rs))
 — deliberately, so no identity or routing material leaks before the Noise
 handshake. A scanner learns "a FIPS peer is at this BLE address," nothing
 more. There is currently no channel for "…and its listener PSM is N."
@@ -252,7 +252,7 @@ exchanged over the connected L2CAP channel, *after* the address has already
 served its only purpose (dialing the socket).
 
 Concretely, in
-[../../reference/fips/src/transport/ble/mod.rs](../../reference/fips/src/transport/ble/mod.rs)
+[../../reference/fips/src/transport/ble/mod.rs](../../../reference/fips/src/transport/ble/mod.rs)
 the flow is: scan yields a `BleAddr` → dial it → `pubkey_exchange` returns the
 peer's `XOnlyPublicKey` → *that* drives the pool, the tiebreaker, and the
 Noise IK handshake. The `BleAddr` is a transient dialing handle, discarded
@@ -310,8 +310,8 @@ wire incompatibility:
 - **bitchat is GATT-only.** It advertises service UUID
   `F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C` and moves data through GATT
   characteristic writes/notifies
-  ([../../reference/bitchat-android/app/src/main/java/com/bitchat/android/util/AppConstants.kt](../../reference/bitchat-android/app/src/main/java/com/bitchat/android/util/AppConstants.kt),
-  [.../mesh/BluetoothMeshService.kt](../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/BluetoothMeshService.kt)).
+  ([../../reference/bitchat-android/app/src/main/java/com/bitchat/android/util/AppConstants.kt](../../../reference/bitchat-android/app/src/main/java/com/bitchat/android/util/AppConstants.kt),
+  [.../mesh/BluetoothMeshService.kt](../../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/BluetoothMeshService.kt)).
 - **FIPS is L2CAP-only.** It advertises UUID
   `9c90b790-2cc5-42c0-9f87-c9cc40648f4c` and moves data through L2CAP CoC
   SeqPacket sockets.
@@ -334,13 +334,13 @@ above the transport, in the nsite/relay store-and-re-serve layer:
 - **Set-reconciliation sync** (bitchat's GCS `REQUEST_SYNC`, 16-byte packet IDs)
   → an efficient "what events do you have that I don't" exchange; Myco implements
   this as **negentropy / NIP-77** (events only — blobs stay pull-by-sha256). See
-  [propagation.md §5](propagation.md).
+  [propagation.md §5](../nsite/propagation.md).
 - **TTL-bounded flood with probabilistic relay** → the manifest-flood
   propagation TTL (proposed default 5 hops; author-signed manifests flood via
   relay-mesh fanout, blobs stay pull-only).
 
 These belong to the offline-propagation design
-([diagrams/03-offline-propagation.svg](./diagrams/03-offline-propagation.svg)),
+([diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg)),
 not to BLE transport. The transport's job ends at "FIPS bytes crossed the
 link"; bitchat's lessons begin one layer up.
 

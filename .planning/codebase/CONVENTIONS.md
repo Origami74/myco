@@ -145,7 +145,7 @@ Example from `runtime.rs`:
 /// fixed app constant (we bind our own port), so there is no PSM-style
 /// discovery problem. UDP is fips's native transport and the LAN-discovery
 /// path (which this reuses) is already UDP + scoped link-local IPv6.
-/// See docs/design/wifi-aware-interop.md.
+/// See docs/design/fips/wifi-aware-interop.md.
 const WIFI_AWARE_PORT: u16 = 4871;
 ```
 

@@ -5,7 +5,7 @@
 //! This is the only Myco-specific code on the content path. It keeps **live
 //! subscriptions** (a `REQ` stays open; newly-stored events that match are pushed
 //! as they arrive), which is what makes nearby chat feel live, and it drives both
-//! mesh planes: a [`Gossiper`] for fan-out (`docs/design/event-gossip.md`) and a
+//! mesh planes: a [`Gossiper`] for fan-out (`docs/design/core/event-gossip.md`) and a
 //! [`PeerGate`] for access, each keyed off the connection's [`Origin`] (loopback =
 //! the local WebView, else a mesh peer).
 //!
@@ -63,7 +63,7 @@ pub struct Inbound {
 /// **first time** — its own seen-set is the loop guard, not the store's dedup, so
 /// an id the store has since forgotten is still not re-flooded (D2). The
 /// implementor (`myco-core`) decides whether and how far to push it to
-/// circle peers using the [`Inbound`] context (see `docs/design/event-gossip.md`).
+/// circle peers using the [`Inbound`] context (see `docs/design/core/event-gossip.md`).
 /// The default does nothing — the relay never fans out on its own.
 #[async_trait]
 pub trait Gossiper: Send + Sync {
@@ -78,7 +78,7 @@ pub trait Gossiper: Send + Sync {
     /// Only ever called for a **mesh-origin** `REQ`. A loopback client cannot
     /// reach this, so its `EOSE` never waits on a peer; the core drives multi-hop
     /// pull itself, through the peer pool. The default does nothing, so a relay
-    /// with no gossiper stays single-hop. See `docs/design/event-gossip.md`
+    /// with no gossiper stays single-hop. See `docs/design/core/event-gossip.md`
     /// and `reference/thinning-custom-relay.md` (D8).
     async fn on_req(
         &self,
@@ -172,7 +172,7 @@ const SEEN_CAPACITY: usize = 4096;
 /// store-triggered fan-out would start a fresh wave for an old message every
 /// time someone new comes into range. Novelty is a property of this node's
 /// history, so this node keeps it. See `reference/thinning-custom-relay.md` (D2)
-/// and `docs/design/event-gossip.md` §4.
+/// and `docs/design/core/event-gossip.md` §4.
 #[derive(Default)]
 struct SeenSet {
     inner: Mutex<SeenInner>,

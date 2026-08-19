@@ -13,8 +13,8 @@ content-addressed blobs they reference. Two families:
    peering over the internet (kinds `37195`, `21059`, `10050`). Not needed for
    the offline BLE demo; documented here so the surface is complete.
 
-Design context: [../design/nsite-layer.md](../design/nsite-layer.md),
-[../design/propagation.md](../design/propagation.md). Protocol sources are
+Design context: [../design/nsite/nsite-layer.md](../design/nsite/nsite-layer.md),
+[../design/nsite/propagation.md](../design/nsite/propagation.md). Protocol sources are
 cited inline.
 
 ---
@@ -125,14 +125,14 @@ not-found page is the blob mapped at `/404.html`.
 
 These run against the **local** relay first (fast path) and, on a miss, against
 the source peer's relay over `.fips` (`ws://<npub>.fips:4870`). See
-[../design/nsite-layer.md §5](../design/nsite-layer.md).
+[../design/nsite/nsite-layer.md §5](../design/nsite/nsite-layer.md).
 
 > **Set reconciliation.** Between two connected relays, Myco reconciles the
 > manifest **event** set with **negentropy ([NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md))**
 > run over these same filters (`NEG-OPEN` → `NEG-MSG` rounds → the missing ids),
 > then pulls only the diff. Blobs are never reconciled — they stay content-addressed
-> pull-by-sha256. See [../design/propagation.md §5](../design/propagation.md) and
-> [../design/nsite-layer.md §2.4](../design/nsite-layer.md).
+> pull-by-sha256. See [../design/nsite/propagation.md §5](../design/nsite/propagation.md) and
+> [../design/nsite/nsite-layer.md §2.4](../design/nsite/nsite-layer.md).
 
 ### Kind 34128 — legacy, NOT used
 
@@ -180,7 +180,7 @@ catch-up between connected relays uses **negentropy (NIP-77)** reconciliation so
 peer offers only manifests you lack (events only; blobs stay pull-by-sha256). TTL=5,
 that dedup story, transitive peer discovery, and the privacy question of *which
 manifests you choose to replicate* are all detailed in
-[../design/propagation.md](../design/propagation.md).
+[../design/nsite/propagation.md](../design/nsite/propagation.md).
 
 ---
 
@@ -225,9 +225,9 @@ and `../../reference/fips/docs/design/fips-nostr-discovery.md`.
 
 ## See also
 
-- [../design/nsite-layer.md](../design/nsite-layer.md) — how the manifest kinds
+- [../design/nsite/nsite-layer.md](../design/nsite/nsite-layer.md) — how the manifest kinds
   are fetched, verified, and served.
-- [../design/propagation.md](../design/propagation.md) — flooding the
+- [../design/nsite/propagation.md](../design/nsite/propagation.md) — flooding the
   author-signed manifests and device-to-device hopping.
 - [./ports.md](./ports.md) — the localhost ports the relay/Blossom listen on.
 - [../../reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)

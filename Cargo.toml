@@ -37,7 +37,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "
 # Schnorr signature verification, and NIP-19 (npub) — the cryptographic /
 # serialization primitives. The relay STORE and the WS/REQ surface are
 # hand-rolled (the query surface Myco uses is tiny; no relay framework, and
-# negentropy/NIP-77 is not needed until P3). See docs/design/nsite-layer.md §2.1.
+# negentropy/NIP-77 is not needed until P3). See docs/design/nsite/nsite-layer.md §2.1.
 nostr = { version = "0.44", default-features = false, features = ["std", "nip44", "nip59"] }
 async-trait = "0.1"
 sha2 = "0.10"

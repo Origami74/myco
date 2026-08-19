@@ -3,13 +3,13 @@
 This is the canonical concept and terminology doc for **Myco**. Other design
 docs build on the vocabulary fixed here. For the system structure that realizes
 these concepts, see [architecture.md](./architecture.md). For the underlying mesh,
-see the upstream FIPS docs: [fips-concepts.md](../../reference/fips/docs/design/fips-concepts.md)
-and [fips-architecture.md](../../reference/fips/docs/design/fips-architecture.md).
+see the upstream FIPS docs: [fips-concepts.md](../../../reference/fips/docs/design/fips-concepts.md)
+and [fips-architecture.md](../../../reference/fips/docs/design/fips-architecture.md).
 
 Myco is a peer-to-peer **app-sharing network**: a phone app for exchanging, browsing,
 and propagating websites ("nsites") over a FIPS mesh — including fully offline
 over Bluetooth. The visual companion to this doc is
-[diagrams/01-system-layering.svg](./diagrams/01-system-layering.svg).
+[diagrams/01-system-layering.svg](../diagrams/01-system-layering.svg).
 
 > These are design docs for a not-yet-built app. They are written in
 > proposal voice. Open questions are marked **TBD / open**.
@@ -49,8 +49,8 @@ identity of either endpoint — an observer who already knows a pubkey can verif
 traffic. The **fd00:: IPv6** address is a ULA overlay address that lets ordinary
 IPv6 software reach a mesh node through the TUN.
 
-(See [fips-architecture.md § Identity System](../../reference/fips/docs/design/fips-architecture.md)
-and the upstream [fips-ipv6-adapter.md](../../reference/fips/docs/design/fips-ipv6-adapter.md).)
+(See [fips-architecture.md § Identity System](../../../reference/fips/docs/design/fips-architecture.md)
+and the upstream [fips-ipv6-adapter.md](../../../reference/fips/docs/design/fips-ipv6-adapter.md).)
 
 ---
 
@@ -96,7 +96,7 @@ Queries that are *not* `.fips` are **REFUSED**, so the system falls through to
 normal DNS for everything else. Myco only ever speaks `.fips` for
 relay/blossom **sync** traffic — never for page loads.
 
-(See [fips-ipv6-adapter.md](../../reference/fips/docs/design/fips-ipv6-adapter.md).)
+(See [fips-ipv6-adapter.md](../../../reference/fips/docs/design/fips-ipv6-adapter.md).)
 
 ### `.nsite` — the local gateway (IPv4/localhost)
 
@@ -114,7 +114,7 @@ The `<host>` label follows the nsite URL convention:
   base36 encoding of the raw 32-byte pubkey and `dTag` is the site identifier
   appended directly after it (no separator).
 
-(See [reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md).)
+(See [reference/site-deck/docs/nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md).)
 
 **Why the split exists in one sentence:** `.fips` is the transport namespace
 (IPv6, mesh, sync-only); `.nsite` is the presentation namespace (IPv4,
@@ -143,7 +143,7 @@ There are two manifest kinds:
 | **35128** | named site (parameterized-replaceable) | required | `<pubkeyB36><dTag>` |
 
 (Kind `34128`, legacy per-file events, may be supported for backward
-compatibility. See [nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md).)
+compatibility. See [nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md).)
 
 **Nsites as apps.** Each nsite is presented as its **own fullscreen "app"**,
 launched *by* Myco, not as a web page in a tabbed browser. **Myco itself is the
@@ -160,7 +160,7 @@ capability API (query peers, manage the cache) is a later milestone. The full
 shell and launch model — separate-task launch, deep links (`myco://app/<host>`),
 home-screen pinning, per-nsite origin isolation — is in
 [app-shell.md](./app-shell.md); the browse lifecycle is in
-[diagrams/04-nsite-browse-flow.svg](./diagrams/04-nsite-browse-flow.svg).
+[diagrams/04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg).
 
 ---
 
@@ -174,7 +174,7 @@ No external services are required.
   It does **not** fan out on its own — a separate **nsite-deck propagator** does the
   forwarding, by subscribing to the relevant relays (local + connected peers) and
   publishing those events on to peer relays (events only, source-excluded; see
-  [propagation.md](./propagation.md)).
+  [propagation.md](../nsite/propagation.md)).
 - **Embedded Blossom server** — default `http://localhost:24243`. Stores and
   serves the sha256-addressed blobs (Blossom BUD-01).
 
@@ -193,9 +193,9 @@ peer reaches your relay at `<npub_device>.fips:4870` and your Blossom at
 That address is *this device's* (the holder's) address; the nsites it serves are
 filtered by their own author keys, which are unrelated to it.
 
-(See [fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md),
-[fips-ipv6-adapter.md](../../reference/fips/docs/design/fips-ipv6-adapter.md),
-and [reference/site-deck](../../reference/site-deck/).)
+(See [fips-session-layer.md](../../../reference/fips/docs/design/fips-session-layer.md),
+[fips-ipv6-adapter.md](../../../reference/fips/docs/design/fips-ipv6-adapter.md),
+and [reference/site-deck](../../../reference/site-deck/).)
 
 ---
 
@@ -212,9 +212,9 @@ Security is two layers of Noise: **IK hop-by-hop** (every link is encrypted) and
 intermediate nodes route on the destination node_addr but cannot read the
 payload. Crucially, FIPS routing is **live-path only** — it is a best-effort
 datagram service with no store-and-forward in the transport. (See
-[fips-spanning-tree.md](../../reference/fips/docs/design/fips-spanning-tree.md),
-[fips-mesh-layer.md](../../reference/fips/docs/design/fips-mesh-layer.md),
-[fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md).)
+[fips-spanning-tree.md](../../../reference/fips/docs/design/fips-spanning-tree.md),
+[fips-mesh-layer.md](../../../reference/fips/docs/design/fips-mesh-layer.md),
+[fips-session-layer.md](../../../reference/fips/docs/design/fips-session-layer.md).)
 
 ---
 
@@ -249,7 +249,7 @@ membership-gated network. There is no admin and no roster.
   two-layer Noise crypto, transports.
 - **The embedding pattern**: link the upstream `fips` crate in-process via
   `Node::new(Config)` (nostr-vpn's `FipsEndpoint::builder().without_system_tun()`
-  is a fork-only abstraction — see [build.md § 4c](../how-to/build.md)). The app
+  is a fork-only abstraction — see [build.md § 4c](../../how-to/build.md)). The app
   owns the TUN and hands FIPS only packet bytes; that app-owned-TUN mode is itself
   an upstream-`fips` capability Myco adds.
 - **QR pairing** (CameraX + ML Kit), reused and re-pointed at the Myco
@@ -291,7 +291,7 @@ signature: the propagator forwards the author's manifest verbatim. "Announce wid
 large **blobs** only when a site is opened. Discovery ("nsites around me") is just
 the manifests you have received via flood or queried from reachable relays. This split — FIPS for the live hop, the
 nsite layer for survival across partition — is drawn in
-[diagrams/03-offline-propagation.svg](./diagrams/03-offline-propagation.svg).
+[diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg).
 
 ---
 

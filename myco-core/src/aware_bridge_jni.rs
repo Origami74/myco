@@ -16,7 +16,7 @@
 //! Kotlin passes the peer's link-local address already formatted with a
 //! *numeric* scope (`"[fe80::x%3]:4871"`, ifindex resolved from
 //! `LinkProperties`) — interface-name scopes do not parse (see
-//! docs/design/wifi-aware-interop.md § "Dialing a link-local peer").
+//! docs/design/fips/wifi-aware-interop.md § "Dialing a link-local peer").
 //!
 //! Compiled only on Android; the host build exercises the same seam directly
 //! through [`crate::platform_peers`].

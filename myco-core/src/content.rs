@@ -8,7 +8,7 @@
 //!
 //! Sync is **spawn-not-block**: `open_site` runs on the Tokio runtime and writes
 //! status into `sites`; the reducer never blocks on it (Kotlin polls `siteStatus`
-//! via `Tick`). See `docs/design/nsite-layer.md` and the FFI contract.
+//! via `Tick`). See `docs/design/nsite/nsite-layer.md` and the FFI contract.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
@@ -51,14 +51,14 @@ pub struct SiteStatusView {
     /// update auto-applies, so this is only briefly true.
     pub update_available: bool,
     /// Download progress of a staging update (0/0 when none). See
-    /// `docs/design/nsite-updates.md` §3.3.
+    /// `docs/design/nsite/nsite-updates.md` §3.3.
     pub update_pulled: u64,
     pub update_total: u64,
 }
 
 /// Status of the most recent "check for updates" run, so the UI can give the user
 /// feedback (checking → result). `generation` bumps each time a check **finishes**,
-/// letting the UI fire a one-shot toast. See `docs/design/nsite-updates.md` §3.3.
+/// letting the UI fire a one-shot toast. See `docs/design/nsite/nsite-updates.md` §3.3.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCheckView {
@@ -271,7 +271,7 @@ const INVITE_VALID_SECS: u64 = 7 * 24 * 60 * 60;
 /// service** at `:4873` (never gossiped, and never stored — the relay refuses
 /// these kinds from every source). Signed by the **device** key, which is the
 /// pairing identity, and carrying a NIP-40 expiry the auth service checks on
-/// receipt. See `docs/design/identity-pairing.md`.
+/// receipt. See `docs/design/core/identity-pairing.md`.
 pub const KIND_PAIR_REQUEST: u16 = 9101;
 pub const KIND_PAIR_ACCEPT: u16 = 9102;
 /// Sent when a peer forgets you, so both sides drop the pairing symmetrically.
@@ -424,7 +424,7 @@ pub struct Content {
     /// keepwarm tick to spot the absent→present (reappeared) edge.
     prev_pool_connected: Mutex<HashSet<String>>,
     /// host_label -> a newer version being staged (downloaded) before activation.
-    /// See `docs/design/nsite-updates.md` §2. P-U1: staged outside the relay store;
+    /// See `docs/design/nsite/nsite-updates.md` §2. P-U1: staged outside the relay store;
     /// activation stores the manifest (making it the served version).
     pending_updates: Mutex<HashMap<String, PendingUpdate>>,
     /// Status of the latest update check, for UI feedback (checking → result).
@@ -450,7 +450,7 @@ pub struct Content {
     /// relay's newest, so a newer (received/checked) manifest can sit in the relay
     /// store (NIP-01-faithful, propagated to peers) while we keep serving the fully
     /// downloaded version until its replacement is staged. See
-    /// `docs/design/nsite-updates.md` §1. Persisted to `active.json`.
+    /// `docs/design/nsite/nsite-updates.md` §1. Persisted to `active.json`.
     active_manifests: Mutex<HashMap<String, Event>>,
     active_path: PathBuf,
 }
@@ -459,7 +459,7 @@ pub struct Content {
 /// **active** manifest for a slot (a version whose blobs are all local), falling
 /// back to the relay's newest when we haven't pinned one. Every other call passes
 /// straight through to the relay. This is what keeps a working app serving while a
-/// newer manifest is still downloading. See `docs/design/nsite-updates.md` §1.
+/// newer manifest is still downloading. See `docs/design/nsite/nsite-updates.md` §1.
 struct ActiveBackend<'a> {
     relay: &'a dyn RelayBackend,
     active: &'a Mutex<HashMap<String, Event>>,
@@ -520,7 +520,7 @@ fn save_active(path: &Path, events: &[Event]) {
 
 /// A newer manifest version being downloaded in the background. Until its blobs
 /// are all local it is **not** stored in the relay, so the gateway keeps serving
-/// the active version (`docs/design/nsite-updates.md` §2/§5).
+/// the active version (`docs/design/nsite/nsite-updates.md` §2/§5).
 struct PendingUpdate {
     manifest: Event,
     total: u32,
@@ -707,7 +707,7 @@ impl Content {
             .unwrap_or_default()
     }
 
-    // --- active version (what the gateway serves; docs/design/nsite-updates.md §1) ---
+    // --- active version (what the gateway serves; docs/design/nsite/nsite-updates.md §1) ---
 
     /// The backend the gateway reads: serves the active (fully-downloaded) version,
     /// not necessarily the relay's newest.
@@ -820,7 +820,7 @@ impl Content {
     // --- site entry ---
 
     /// Ensure a site is present, syncing if needed, updating its `siteStatus`.
-    /// Source order (`docs/design/nsite-layer.md` §5): local → the **holder**'s
+    /// Source order (`docs/design/nsite/nsite-layer.md` §5): local → the **holder**'s
     /// relay/Blossom over the mesh (whoever shared it) → the public IP fallback.
     /// `holder` is the sharer's device npub from a share QR (`None` for a pasted
     /// link). Safe to call repeatedly; meant to be `spawn`ed, never awaited under
@@ -1200,7 +1200,7 @@ impl Content {
     /// so a routed `ws://<npub>.fips:4870` dial reaches any of them. A member
     /// who is genuinely offline costs one bounded dial (the callers time out)
     /// and is then held off by the per-peer backoff in [`crate::peer_relay`].
-    /// See `docs/design/event-gossip.md`.
+    /// See `docs/design/core/event-gossip.md`.
     pub fn circle_npubs(&self) -> Vec<String> {
         self.circle
             .lock()
@@ -2895,7 +2895,7 @@ impl Content {
         self.discovered.lock().unwrap().clone()
     }
 
-    // --- nsite updates (docs/design/nsite-updates.md) ---
+    // --- nsite updates (docs/design/nsite/nsite-updates.md) ---
 
     /// P-U1 manual update check (online). Polls online relays for newer manifests
     /// of every Library site in **one combined REQ per relay** (deduplicated, read
@@ -2922,7 +2922,7 @@ impl Content {
         };
 
         // Query set, one combined REQ per relay read until EOSE
-        // (docs/design/nsite-updates.md §3.2):
+        // (docs/design/nsite/nsite-updates.md §3.2):
         //  - connected peers' mesh relays, carrying one more hop so the check reaches
         //    2 hops just like discovery (their peers' manifests come back too),
         //    which rides the envelope rather than the filter;
@@ -3220,7 +3220,7 @@ impl Content {
     }
 
     /// A manifest landed in our relay over the mesh (a peer's push, forwarded by
-    /// the gossiper). Propagate it like any event (`docs/design/nsite-updates.md`
+    /// the gossiper). Propagate it like any event (`docs/design/nsite/nsite-updates.md`
     /// §4); if it's one of our installed sites, download its blobs from the sender
     /// and activate. Forwarding never waits on the download for sites we don't run.
     pub async fn on_manifest_event(self: Arc<Self>, event: Event, inbound: Inbound) {

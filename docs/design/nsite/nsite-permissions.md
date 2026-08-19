@@ -8,7 +8,7 @@
 
 An nsite is a static web app served from the local gateway
 ([nsite-layer.md](./nsite-layer.md)). Most just render; some want to do more —
-publish into the mesh ([event-gossip.md](./event-gossip.md)), read location, hold
+publish into the mesh ([event-gossip.md](../core/event-gossip.md)), read location, hold
 blobs.
 
 There are two different permission questions here, and conflating them is the
@@ -24,7 +24,7 @@ a kind an app is not allowed to publish, and a fully-trusted app still cannot ge
 data out of a peer that has revoked our reads.
 
 > **Scope.** Enforcement is native, in the **mesh relay proxy**
-> ([`myco-core/src/mesh_relay.rs`](../../myco-core/src/mesh_relay.rs)) and the
+> ([`myco-core/src/mesh_relay.rs`](../../../myco-core/src/mesh_relay.rs)) and the
 > Blossom server. The WebView/nsite JS is untrusted, so a capability can never
 > live in JS — only be *requested* from there.
 
@@ -44,7 +44,7 @@ takes an access function from `myco-core`, so it stays free of circle knowledge.
 
 Pairing itself is enforced nowhere on the content path, because it does not travel
 there any more — it has its own service on `:4873`
-([identity-pairing.md](./identity-pairing.md)).
+([identity-pairing.md](../core/identity-pairing.md)).
 
 ---
 
@@ -84,7 +84,7 @@ connections that are already open, rather than only blocking the next one.
 
 Neither multihop flag is a separate check. They are per-peer values for the hop
 budgets the push and pull planes already carry
-([event-gossip.md §3, §7](./event-gossip.md)):
+([event-gossip.md §3, §7](../core/event-gossip.md)):
 
 - `relayWriteMultihop` off → an inbound event's budget is treated as **0**: store
   it, show it, never pass it on.
@@ -135,13 +135,13 @@ simply trusted. This is where it is added.
 | Capability | v1 default | Meaning | Enforced at |
 | --- | --- | --- | --- |
 | `gossip-kinds` | **all kinds** | which event kinds may be fanned out to the mesh | proxy fan-out path, keyed by `Origin` |
-| `event-hops` | **3** | max reach for this app's pushed events — a per-app version of `MAX_EVENT_TTL` ([event-gossip.md §3](./event-gossip.md)) | proxy fan-out path |
+| `event-hops` | **3** | max reach for this app's pushed events — a per-app version of `MAX_EVENT_TTL` ([event-gossip.md §3](../core/event-gossip.md)) | proxy fan-out path |
 | `rate` | lenient (§5) | publish / subscribe rate caps | proxy ingress, per `Origin` |
 | `location` | *(future)* | geolocation, granted at a **chosen accuracy** (coarse → fine), e.g. for geohash rooms | WebView geolocation bridge (Kotlin) |
 | `blob-quota` | *(future)* | Blossom storage budget for app-authored blobs | Blossom `PUT` path |
 
 The hop default matches the protocol default in
-[event-gossip.md](./event-gossip.md); here it is the **per-app clamp**, so a
+[event-gossip.md](../core/event-gossip.md); here it is the **per-app clamp**, so a
 single app cannot exceed it even if its client asks for more.
 
 **There is no per-app pull-hop capability.** An nsite's `REQ` never fans out to
@@ -182,7 +182,7 @@ than reject), so a chatty moment degrades gracefully instead of dropping message
 
 The auth service on `:4873` follows the same lenient spirit with its own limits,
 since it is the only port an unpaired device can reach
-([identity-pairing.md](./identity-pairing.md)).
+([identity-pairing.md](../core/identity-pairing.md)).
 
 ---
 
@@ -213,7 +213,7 @@ they probably want separate screens.
   from "all" to an allow-list for apps the user hasn't explicitly trusted.
   **TBD / open.**
 - **Trust tiers** — should a paired-circle app get a more generous record than a
-  freshly-installed one? Ties into [security.md](./security.md). **TBD / open.**
+  freshly-installed one? Ties into [security.md](../core/security.md). **TBD / open.**
 - **Surfacing per-peer flags** — which of the six are worth showing a user at all,
   and what a sensible preset ("read-only peer", "no relaying") looks like.
   **TBD / open.**
@@ -222,12 +222,12 @@ they probably want separate screens.
 
 ## See also
 
-- [./event-gossip.md](./event-gossip.md) — the push and pull planes these clamp,
+- [./event-gossip.md](../core/event-gossip.md) — the push and pull planes these clamp,
   and the `MESH` envelope the hop budgets travel in.
 - [./nsite-layer.md](./nsite-layer.md) — the gateway, `siteKey` resolution, and
   the JS sandbox / capability open question (§7) this answers.
-- [./identity-pairing.md](./identity-pairing.md) — the auth service that creates
+- [./identity-pairing.md](../core/identity-pairing.md) — the auth service that creates
   the circle these per-peer grants attach to.
-- [./security.md](./security.md) — the trust model both layers sit inside.
-- [../../reference/thinning-custom-relay.md](../../reference/thinning-custom-relay.md) —
+- [./security.md](../core/security.md) — the trust model both layers sit inside.
+- [../../reference/thinning-custom-relay.md](../../../reference/thinning-custom-relay.md) —
   D10, where the per-peer flags were decided.

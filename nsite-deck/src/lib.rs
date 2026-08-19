@@ -5,7 +5,7 @@
 //! names no concrete relay, blob store, or radio.
 //!
 //! P2 lands the gateway + sync; the propagator (`FanoutSink`) is a P3 no-op stub.
-//! See `docs/design/nsite-layer.md`.
+//! See `docs/design/nsite/nsite-layer.md`.
 //!
 //! [`RelayBackend`]: seams::RelayBackend
 //! [`BlobStore`]: seams::BlobStore

@@ -31,13 +31,13 @@ who handed them to you:
 - **Nostr events** (the relay layer). nsite manifests are signed Nostr events:
   kind `15128` (root site) and `35128` (named site), whose tags map paths to
   blob hashes, e.g. `["path","/index.html","<sha256>"]`
-  ([../../reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)).
+  ([../../reference/site-deck/docs/nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md)).
   Every event carries a secp256k1 Schnorr signature over its content and an
   author pubkey. The receiver verifies the signature before trusting the event.
   A forged or tampered manifest fails verification and is discarded.
 - **Blossom blobs** (the content layer). Blobs are content-addressed by
   SHA-256 (Blossom BUD-01;
-  [../../reference/site-deck](../../reference/site-deck)). The manifest names a
+  [../../reference/site-deck](../../../reference/site-deck)). The manifest names a
   blob by its hash; the receiver hashes the bytes it got and checks them against
   that name. A substituted or corrupted blob has a different hash and is
   rejected.
@@ -54,7 +54,7 @@ model:
 This is what makes the offline-propagation design safe. When your local relay +
 Blossom server caches Alice's signed events and content-addressed blobs and
 later re-serves them to Carl while Alice is unreachable
-([diagrams/03-offline-propagation.svg](diagrams/03-offline-propagation.svg)),
+([diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg)),
 Carl is not trusting *you* — he is verifying Alice's signature and the blob
 hashes himself. A new source is as good as the original source. This is the
 property that lets relays and blobs hop across "crappy links in all directions"
@@ -82,7 +82,7 @@ Events read back **out** of our own store are not re-verified. NIP-01 already
 makes signature checking mandatory for a relay accepting an `EVENT`, so paying
 Schnorr again per event on a phone buys nothing. That trade is worth restating if
 Myco is ever pointed at a relay it does not own — see
-[nsite-layer.md §2.1](./nsite-layer.md), where that is a planned setting with a
+[nsite-layer.md §2.1](../nsite/nsite-layer.md), where that is a planned setting with a
 warning attached.
 
 What self-authentication does **not** give you:
@@ -107,30 +107,30 @@ What self-authentication does **not** give you:
 Myco does not invent transport security; it inherits the FIPS two-layer
 crypto wholesale by embedding the upstream `fips` crate in-process (the
 same embedding nostr-vpn uses,
-[../../reference/nostr-vpn/crates/nostr-vpn-cli/src/fips_private_mesh/runtime_send.rs](../../reference/nostr-vpn/crates/nostr-vpn-cli/src/fips_private_mesh/runtime_send.rs)).
+[../../reference/nostr-vpn/crates/nostr-vpn-cli/src/fips_private_mesh/runtime_send.rs](../../../reference/nostr-vpn/crates/nostr-vpn-cli/src/fips_private_mesh/runtime_send.rs)).
 
 - **End-to-end (session layer, FSP): Noise XK.**
   `Noise_XK_secp256k1_ChaChaPoly_SHA256`. The two session endpoints (the two
   npubs actually talking) authenticate each other and encrypt the payload
   end-to-end. Intermediate mesh nodes route on the destination `node_addr` but
   **cannot read the payload**
-  ([../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md)).
+  ([../../reference/fips/docs/design/fips-session-layer.md](../../../reference/fips/docs/design/fips-session-layer.md)).
 - **Per-hop (link layer, FMP): Noise IK.**
   `Noise_IK_secp256k1_ChaChaPoly_SHA256`. Each direct link between adjacent
   nodes is independently authenticated and encrypted. A peer you forward
   through sees ciphertext and routing headers, not content
-  ([../../reference/fips/docs/design/fips-mesh-layer.md](../../reference/fips/docs/design/fips-mesh-layer.md)).
+  ([../../reference/fips/docs/design/fips-mesh-layer.md](../../../reference/fips/docs/design/fips-mesh-layer.md)).
 - **Both layers** use ChaCha20-Poly1305 AEAD, SHA-256 transcript hashing,
   HKDF-SHA256 key schedule, counter-based nonces with a 2048-entry sliding
   replay window, and periodic rekey
-  ([../../reference/fips/docs/reference/security.md](../../reference/fips/docs/reference/security.md)).
+  ([../../reference/fips/docs/reference/security.md](../../../reference/fips/docs/reference/security.md)).
 
 **BLE links are pubkey-authenticated.** On the offline BLE path
-([diagrams/01-system-layering.svg](diagrams/01-system-layering.svg)), after the
+([diagrams/01-system-layering.svg](../diagrams/01-system-layering.svg)), after the
 L2CAP CoC connect, the peers exchange a pre-handshake pubkey frame
 (`[0x00][pubkey:32]` = 33 bytes) and then run Noise IK to authenticate the link
-([../../reference/fips/src/transport/ble/io.rs](../../reference/fips/src/transport/ble/io.rs),
-[../../reference/fips/src/transport/ble/mod.rs](../../reference/fips/src/transport/ble/mod.rs)).
+([../../reference/fips/src/transport/ble/io.rs](../../../reference/fips/src/transport/ble/io.rs),
+[../../reference/fips/src/transport/ble/mod.rs](../../../reference/fips/src/transport/ble/mod.rs)).
 Identity is the **pubkey**, never the MAC address — so Android MAC
 randomization is harmless, and a spoofed MAC gains nothing because it cannot
 complete the Noise handshake. BLE adverts are UUID-only and carry no identity
@@ -141,7 +141,7 @@ The crucial inherited principle, carried over verbatim from FIPS:
 > **Identity is authenticated; identity is *not* authorization.** Knowing
 > cryptographically who sent a packet does not by itself decide whether you
 > should act on it
-> ([../../reference/fips/docs/design/fips-security.md](../../reference/fips/docs/design/fips-security.md)).
+> ([../../reference/fips/docs/design/fips-security.md](../../../reference/fips/docs/design/fips-security.md)).
 
 ## 3. Dropping the roster: no membership gate
 
@@ -178,7 +178,7 @@ What this changes:
 
 **The FIPS optional peer ACL still exists upstream** (`peers.allow` /
 `peers.deny`, evaluated at the Noise IK handshake;
-[../../reference/fips/docs/reference/security.md](../../reference/fips/docs/reference/security.md)).
+[../../reference/fips/docs/reference/security.md](../../../reference/fips/docs/reference/security.md)).
 Myco's v1 stance is *default-allow* — pairing is the gesture, and we do not
 ship a roster-like allowlist UI. Re-exposing the ACL as a "block this peer"
 control is a candidate later feature (TBD / open).
@@ -187,7 +187,7 @@ control is a candidate later feature (TBD / open).
 
 FIPS FSP port-multiplexing delivers mesh datagrams to localhost ports, so a peer
 can reach your services over `.fips`
-([../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md)).
+([../../reference/fips/docs/design/fips-session-layer.md](../../../reference/fips/docs/design/fips-session-layer.md)).
 On Linux, FIPS recommends a default-deny nftables baseline to bound this surface;
 **on Android there is no nftables equivalent the app controls.** The app's
 mitigation is to expose *only* its own ports over the mesh — the VpnService/TUN
@@ -235,7 +235,7 @@ effect immediately.
 Paired is no longer all-or-nothing. Each circle contact carries six flags —
 relay read, relay read-multihop, relay write, relay write-multihop, Blossom read,
 Blossom write — all on by default **except Blossom write**, which is off. Full
-table and rationale: [nsite-permissions.md §2](./nsite-permissions.md).
+table and rationale: [nsite-permissions.md §2](../nsite/nsite-permissions.md).
 
 Two consequences worth stating here:
 
@@ -258,7 +258,7 @@ read your relay/Blossom to become a new source, and the data is public-by-design
 The honest exposure is **metadata, not confidentiality**: a member can issue a
 broad `REQ` and **enumerate your whole manifest set**, learning *which sites you
 hold, installed, or cached for others*. That is the same privacy signal as *which
-manifests you choose to replicate* (see [propagation.md](./propagation.md)), not a
+manifests you choose to replicate* (see [propagation.md](../nsite/propagation.md)), not a
 content leak. Narrower read scoping — unlisted/private nsites, selective
 replication, filtering by kind per peer — remains **additive and deferred**. The
 coarse knobs today are unpairing, the per-peer read flag, and the FIPS peer ACL
@@ -274,10 +274,10 @@ Pairing is the one moment a human asserts "this is who I think it is."
   single-use, that the scanning peer echoes back to complete the handshake. There
   is still no MAC and no PSM in the payload (those are
   learned later over BLE adverts; see
-  [diagrams/02-pairing-transitive-discovery.svg](diagrams/02-pairing-transitive-discovery.svg)).
+  [diagrams/02-pairing-transitive-discovery.svg](../diagrams/02-pairing-transitive-discovery.svg)).
   Myco reuses nostr-vpn's existing QR machinery (CameraX + ML Kit
   BarcodeScanning, payload-prefix check, deep-link intent filter;
-  [../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)).
+  [../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)).
 - **The trust model is scan-and-confirm over an already-encrypted channel, not
   bare TOFU.** Scanning the QR does not merely bind an npub on faith — it initiates
   the mandatory **invite-pairing handshake** against the inviter's on-device auth
@@ -330,7 +330,7 @@ Pairing is the one moment a human asserts "this is who I think it is."
 An nsite is served to the in-app WebView from **localhost** via the nsite
 gateway: `*.nsite` resolves to `127.0.0.1`, the WebView loads `npub.nsite`, and
 the bytes come from the local Blossom store after manifest+hash verification
-([diagrams/04-nsite-browse-flow.svg](diagrams/04-nsite-browse-flow.svg)).
+([diagrams/04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg)).
 
 **v1: pure-static (proposed default).** In v1 an nsite is *just signed static
 files* — HTML, CSS, JS, images — authored elsewhere by an external nsite author,
@@ -375,7 +375,7 @@ deferred; v1 sidesteps it entirely by shipping pure-static.
 One concrete instance of this is propagation.md's open question on
 **nsite-scoped propagation (capability-gated)** — whether a loaded nsite could
 influence what the propagator gossips onward (see
-[propagation.md](./propagation.md)). That is exactly the kind of affordance that
+[propagation.md](../nsite/propagation.md)). That is exactly the kind of affordance that
 is **not** free expansion of an untrusted nsite: any such hook is a **bounded,
 permissioned capability** subject to the per-capability permission model above
 (user-in-the-loop, per-nsite scoping), never an implicit power the WebView
@@ -398,7 +398,7 @@ capability.
 | **Malicious nsite content** | Untrusted JS in the WebView | Pure-static v1, no capability API; per-nsite origin isolation + CSP; WebView never resolves `.fips` (§5). |
 | **Capability-API abuse** (future) | nsite JS reaches host affordances (query peers, write blobs) | Out of scope for v1; the app never signs/publishes events, so no `sign()` capability exists; needs explicit permission model if any capability is ever introduced (§5). |
 | **Propagation-privacy leak** | Observers learn what you host / re-serve | See below — partial mitigation only (open). |
-| **Metadata / traffic analysis** | A forwarding peer sees who-talks-to-whom | FIPS routes on `node_addr`, payload is end-to-end encrypted; FIPS rejects onion routing, so traffic-graph metadata is visible to forwarders by design ([../../reference/fips/docs/design/fips-mesh-operation.md](../../reference/fips/docs/design/fips-mesh-operation.md)). |
+| **Metadata / traffic analysis** | A forwarding peer sees who-talks-to-whom | FIPS routes on `node_addr`, payload is end-to-end encrypted; FIPS rejects onion routing, so traffic-graph metadata is visible to forwarders by design ([../../reference/fips/docs/design/fips-mesh-operation.md](../../../reference/fips/docs/design/fips-mesh-operation.md)). |
 
 ### Propagation privacy — "what am I hosting / re-serving?"
 
@@ -455,20 +455,20 @@ everything cached, or only Library-pinned sites?
 
 ## See also
 
-- [../../reference/fips/docs/design/fips-security.md](../../reference/fips/docs/design/fips-security.md)
+- [../../reference/fips/docs/design/fips-security.md](../../../reference/fips/docs/design/fips-security.md)
   — FIPS mesh-interface threat model (identity ≠ authorization, inbound
   exposure on a flat L3 segment).
-- [../../reference/fips/docs/reference/security.md](../../reference/fips/docs/reference/security.md)
+- [../../reference/fips/docs/reference/security.md](../../../reference/fips/docs/reference/security.md)
   — FIPS cryptographic primitives, rekey/replay defaults, peer ACL format,
   per-transport default exposures.
-- [../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md)
+- [../../reference/fips/docs/design/fips-session-layer.md](../../../reference/fips/docs/design/fips-session-layer.md)
   — Noise XK end-to-end session layer and FSP port-multiplexing.
-- [../../reference/fips/src/transport/ble/io.rs](../../reference/fips/src/transport/ble/io.rs)
+- [../../reference/fips/src/transport/ble/io.rs](../../../reference/fips/src/transport/ble/io.rs)
   — BLE pubkey pre-handshake and the `BleIo` surface Myco implements.
-- [../../reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)
+- [../../reference/site-deck/docs/nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md)
   — nsite manifest event format (signed events, path→hash tags).
 - Diagrams:
-  [01-system-layering.svg](diagrams/01-system-layering.svg) ·
-  [02-pairing-transitive-discovery.svg](diagrams/02-pairing-transitive-discovery.svg) ·
-  [03-offline-propagation.svg](diagrams/03-offline-propagation.svg) ·
-  [04-nsite-browse-flow.svg](diagrams/04-nsite-browse-flow.svg).
+  [01-system-layering.svg](../diagrams/01-system-layering.svg) ·
+  [02-pairing-transitive-discovery.svg](../diagrams/02-pairing-transitive-discovery.svg) ·
+  [03-offline-propagation.svg](../diagrams/03-offline-propagation.svg) ·
+  [04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg).

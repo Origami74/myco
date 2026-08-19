@@ -38,7 +38,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * peers, brings up a data path (NDP), and pushes "peer reachable / lost" into
  * the core ([NativeCore.awarePeerFound]/[NativeCore.awarePeerLost]). The bytes
  * ride a fips UDP transport over the `aware_dataN` interface — this class never
- * touches a payload byte. See docs/design/wifi-aware-interop.md.
+ * touches a payload byte. See docs/design/fips/wifi-aware-interop.md.
  *
  * That transport is **this lane's own** UDP socket, and this class pins it to
  * the NDP's [Network] ([pins]). Both halves matter. An NDP is a network of

@@ -8,8 +8,8 @@ the app straddles:
 - **`.fips` / IPv6 mesh** — what the *native* sync engine talks to, to pull a
   peer's content. Never the WebView.
 
-Design context: [../design/nsite-layer.md](../design/nsite-layer.md) (§5,
-sync-over-FIPS), [../design/nsite-layer.md §3.2](../design/nsite-layer.md)
+Design context: [../design/nsite/nsite-layer.md](../design/nsite/nsite-layer.md) (§5,
+sync-over-FIPS), [../design/nsite/nsite-layer.md §3.2](../design/nsite/nsite-layer.md)
 (URL scheme). Established facts cited inline.
 
 ---
@@ -60,7 +60,7 @@ unchanged.
   identified by the **author** npub (the URL host); the peer you fetch it from is
   identified by the **holder's device** npub (the mesh address) — different keys.
   See
-  [../design/nsite-layer.md §5.2](../design/nsite-layer.md).
+  [../design/nsite/nsite-layer.md §5.2](../design/nsite/nsite-layer.md).
 
 ## 1a. Auth service — `4873`
 
@@ -89,7 +89,7 @@ different things in one codebase is a trap for whoever next reads a packet
 capture or a `netstat`. It is a Myco constant rather than something negotiated;
 peers agree by running the same version.
 
-See [../design/identity-pairing.md](../design/identity-pairing.md) and
+See [../design/core/identity-pairing.md](../design/core/identity-pairing.md) and
 [../../reference/thinning-custom-relay.md](../../reference/thinning-custom-relay.md) (D6).
 
 ## 2. Embedded Blossom server — `24243`
@@ -211,10 +211,10 @@ delivering `curl http://<npub>.fips:port/` end to end
 
 ## See also
 
-- [../design/nsite-layer.md](../design/nsite-layer.md) — the relay/Blossom/
+- [../design/nsite/nsite-layer.md](../design/nsite/nsite-layer.md) — the relay/Blossom/
   gateway design and the sync-over-FIPS flow.
 - [./nostr-kinds.md](./nostr-kinds.md) — the manifest kinds queried on port 4870.
-- [../design/propagation.md](../design/propagation.md) — propagation policy over
+- [../design/nsite/propagation.md](../design/nsite/propagation.md) — propagation policy over
   these channels.
 - [../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md),
   [../../reference/fips/docs/design/fips-ipv6-adapter.md](../../reference/fips/docs/design/fips-ipv6-adapter.md)

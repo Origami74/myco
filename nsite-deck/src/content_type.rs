@@ -1,7 +1,7 @@
 //! Content-type inference from a path extension.
 //!
 //! The manifest maps `path -> sha256` only — there is no stored MIME type, so the
-//! extension is the type signal (`docs/design/nsite-layer.md` §4.2 step 4). This
+//! extension is the type signal (`docs/design/nsite/nsite-layer.md` §4.2 step 4). This
 //! is a small hand-rolled table (no `mime_guess` dependency) covering the file
 //! kinds a static nsite serves; anything unknown falls back to
 //! `application/octet-stream`.

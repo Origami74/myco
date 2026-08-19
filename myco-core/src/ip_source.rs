@@ -1,6 +1,6 @@
 //! `IpPeerSource` — the **online fallback** [`PeerSource`]: fetch an externally-
 //! authored nsite from **public** relays + Blossom over normal IP. This is the
-//! tier-3 source in `docs/design/nsite-layer.md` §5 and, in P2, the way content
+//! tier-3 source in `docs/design/nsite/nsite-layer.md` §5 and, in P2, the way content
 //! enters the device: a user pastes `<npub>.nsite.lol` (or a bare npub) and Myco
 //! downloads the signed manifest + blobs, verifies, and mirrors them locally so
 //! the site then serves offline forever. The FIPS-peer source (P3) implements the

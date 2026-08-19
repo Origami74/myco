@@ -4,7 +4,7 @@
 //! localhost `:80` HTTP handler for external browsers (P3) — call [`serve`].
 //!
 //! v0 serves **direct** from the local relay + Blossom: no version dirs, no
-//! atomic swap, no htdocs cache (`docs/design/nsite-layer.md` §4). A site is only
+//! atomic swap, no htdocs cache (`docs/design/nsite/nsite-layer.md` §4). A site is only
 //! served once **all** its referenced blobs are present; until then the gateway
 //! returns a small loading page (HTTP 503) so a half-synced site never renders.
 
@@ -170,7 +170,7 @@ fn resolve_hash<'a>(
 }
 
 /// Normalize a request path to a manifest path: index.html fallback for the
-/// root, directory, and extensionless cases (`docs/design/nsite-layer.md` §4.1).
+/// root, directory, and extensionless cases (`docs/design/nsite/nsite-layer.md` §4.1).
 pub fn normalize_path(path: &str) -> String {
     // Drop any query/fragment defensively, ensure a leading slash.
     let path = path.split(['?', '#']).next().unwrap_or(path);

@@ -490,7 +490,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   be enabled on the router's fips node. The Developer screen gains a
   **Wi-Fi AP** panel (Wi-Fi/SSID state, mDNS browse state, discovered nodes),
   and the Wi-Fi Aware panel now lists live data paths. See
-  [docs/design/ap-lane.md](docs/design/ap-lane.md).
+  [docs/design/fips/ap-lane.md](docs/design/fips/ap-lane.md).
 
 ### Fixed
 

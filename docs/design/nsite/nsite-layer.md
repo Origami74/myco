@@ -11,16 +11,16 @@ over FIPS the first time, then serving it from a local cache forever after —
 including fully offline.
 
 It mirrors the nsite-deck model (see
-[../../reference/site-deck/docs/sync-architecture.md](../../reference/site-deck/docs/sync-architecture.md)
-and [../../reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)),
+[../../reference/site-deck/docs/sync-architecture.md](../../../reference/site-deck/docs/sync-architecture.md)
+and [../../reference/site-deck/docs/nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md)),
 re-implemented in Rust and re-pointed at FIPS peers instead of public relays.
 
-See the component view ([diagrams/05-nsite-layer-architecture.svg](diagrams/05-nsite-layer-architecture.svg))
-and the browse-request lifecycle ([diagrams/04-nsite-browse-flow.svg](diagrams/04-nsite-browse-flow.svg)).
+See the component view ([diagrams/05-nsite-layer-architecture.svg](../diagrams/05-nsite-layer-architecture.svg))
+and the browse-request lifecycle ([diagrams/04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg)).
 
 Related docs: [./propagation.md](./propagation.md) (how a cached site becomes a
-new source and hops device-to-device), [../reference/nostr-kinds.md](../reference/nostr-kinds.md)
-(event kinds), [../reference/ports.md](../reference/ports.md) (localhost ports
+new source and hops device-to-device), [../reference/nostr-kinds.md](../../reference/nostr-kinds.md)
+(event kinds), [../reference/ports.md](../../reference/ports.md) (localhost ports
 and how each is exposed over FIPS).
 
 ---
@@ -94,8 +94,8 @@ instantiates `myco-relay` + `myco-blossom`, hands them to `nsite-deck` as the
 binds the relay/Blossom ports into the mesh (`<npub>.fips:4870` / `:24243`). All
 four crates cross-compile into the single `libmyco_core.so`. Kotlin owns the radio
 and the TUN; Rust owns the content layer and the mesh. See
-[diagrams/01-system-layering.svg](diagrams/01-system-layering.svg) and
-[diagrams/05-nsite-layer-architecture.svg](diagrams/05-nsite-layer-architecture.svg).
+[diagrams/01-system-layering.svg](../diagrams/01-system-layering.svg) and
+[diagrams/05-nsite-layer-architecture.svg](../diagrams/05-nsite-layer-architecture.svg).
 
 > **Why relay + Blossom are their own crates.** A Nostr relay and a Blossom
 > server are generic primitives — nothing about them is nsite-specific — so
@@ -128,14 +128,14 @@ and the TUN; Rust owns the content layer and the mesh. See
 
 Two components, deliberately separated.
 
-**The mesh relay proxy** ([`myco-core/src/mesh_relay.rs`](../../myco-core/src/mesh_relay.rs))
+**The mesh relay proxy** ([`myco-core/src/mesh_relay.rs`](../../../myco-core/src/mesh_relay.rs))
 is the NIP-01 WebSocket front door. It serves the in-app WebView on
 `ws://localhost:4870` and mesh peers on `ws://[fd00::self]:4870`, and it is the
 only Myco-specific code on the content path: origin classification, the gossip
 seen-set, hop-budget stamping and clamping, split-horizon, pull fan-out, live
 subscription mirroring, and the circle access gate all live here.
 
-**The store** ([`myco-relay`](../../myco-relay/src/lib.rs)) is a plain NIP-01
+**The store** ([`myco-relay`](../../../myco-relay/src/lib.rs)) is a plain NIP-01
 event store behind it. It holds **no Myco concepts** — no mesh, no ttl, no
 circles — and it has no socket of its own. It is the default backend, not "our
 relay".
@@ -146,7 +146,7 @@ relay".
 | --- | --- |
 | nsite ↔ `ws://localhost:4870` | Plain NIP-01. No Myco verb, no Myco key, ever. |
 | proxy ↔ backing store | Plain NIP-01. This is what lets any relay sit there. |
-| proxy ↔ proxy over `.fips` | Plain NIP-01 or a `MESH` envelope ([event-gossip.md §2](./event-gossip.md)) |
+| proxy ↔ proxy over `.fips` | Plain NIP-01 or a `MESH` envelope ([event-gossip.md §2](../core/event-gossip.md)) |
 
 Concentrating the Myco-specific behaviour on the one link nobody else listens on
 is what makes the store replaceable. A `MESH` frame arriving on the loopback
@@ -154,7 +154,7 @@ socket is refused with a `NOTICE`.
 
 #### The backend seam
 
-`nsite-deck`'s [`RelayBackend`](../../nsite-deck/src/seams.rs) is the seam, and it
+`nsite-deck`'s [`RelayBackend`](../../../nsite-deck/src/seams.rs) is the seam, and it
 is cut around the verbs every relay already speaks: `publish`, and `query` over
 real `nostr::Filter`s. Using real filters rather than a hand-rolled subset means
 `since`, `until`, ids, and general tag matching all work, and a remote backend
@@ -168,7 +168,7 @@ screen says so: with a custom store configured, Delete states that it clears thi
 device only and leaves the custom store alone. Claiming otherwise would be a lie
 about a destructive action.
 
-**Built.** [`RemoteBackend`](../../myco-core/src/remote_backend.rs) speaks
+**Built.** [`RemoteBackend`](../../../myco-core/src/remote_backend.rs) speaks
 WebSocket to a configured relay URL — [Citrine](https://github.com/greenart7c3/Citrine)
 on the same device, a `strfry` or `nostr-rs-relay` on the LAN. It holds one
 connection open and multiplexes publishes and queries over it by subscription id;
@@ -191,7 +191,7 @@ Two things the settings screen says when a custom backend is configured:
 
 The Go reference uses [Khatru](https://github.com/fiatjaf/khatru) over a BoltDB
 event store and advertises NIPs 1, 9, 11, 12, 15, 16, 20, 33
-([embedded.go](../../reference/site-deck/internal/relay/embedded.go)). Still
+([embedded.go](../../../reference/site-deck/internal/relay/embedded.go)). Still
 wanted, net-new vs. the Go reference: **negentropy
 ([NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md))**
 (`NEG-OPEN` / `NEG-MSG` / `NEG-CLOSE`) for set reconciliation (§2.4), which for an
@@ -214,7 +214,7 @@ assume.
 pubkey); kind `35128` is parameterized-replaceable (one per `(pubkey, d-tag)`).
 The store MUST keep only the newest event per slot, matching the dedup the Go
 sync does by `(kind, d-tag)`
-([service.go `deduplicateManifests`](../../reference/site-deck/internal/sync/service.go)).
+([service.go `deduplicateManifests`](../../../reference/site-deck/internal/sync/service.go)).
 
 **Fanout to connected peers.** The store never fans out. Fanout is the proxy's
 gossiper: when an event is accepted for the first time, it is published onward to
@@ -231,13 +231,13 @@ orchestrate (see [./propagation.md §2](./propagation.md)). Constraints:
   id, plus a hop budget (default 3) prevents echoing an event back to its sender
   or re-flooding one already forwarded. The seen-set is the proxy's, **not** the
   store's, so an id the store GCs at expiry does not look new again
-  ([event-gossip.md §4](./event-gossip.md)).
+  ([event-gossip.md §4](../core/event-gossip.md)).
 - **Re-emitted unmodified.** Forwarded events keep the author's signature intact
   and are byte-for-byte canonical NIP-01; the hop budget rides beside them in the
   envelope. Forwarding an already-signed event is normal publish behaviour, not
   authoring.
 
-See [diagrams/07-relay-mesh-fanout.svg](diagrams/07-relay-mesh-fanout.svg).
+See [diagrams/07-relay-mesh-fanout.svg](../diagrams/07-relay-mesh-fanout.svg).
 
 ### 2.2 Blossom: the same layering, one implementation so far
 
@@ -264,7 +264,7 @@ from uploads, so `myco-blossom` stays a generic store that knows nothing about
 circles.
 
 **Two implementations.** The filesystem store described here is the default;
-[`RemoteBlobStore`](../../myco-core/src/remote_blobs.rs) reads through to an
+[`RemoteBlobStore`](../../../myco-core/src/remote_blobs.rs) reads through to an
 external Blossom server over BUD-01, with kind-24242 upload authorization signed
 by the device key and **hash verification on every read** (the embedded store can
 skip re-hashing because the only way bytes get in is a verified write; a shared
@@ -287,7 +287,7 @@ screen carries two warnings sharper than the relay's:
 
 The Go reference stores blobs as files named by their hash under a `blobs/` dir,
 with a BoltDB metadata index, and **disables auth** for the local server
-([embedded.go](../../reference/site-deck/internal/blossom/embedded.go)). The Rust
+([embedded.go](../../../reference/site-deck/internal/blossom/embedded.go)). The Rust
 port keeps the storage shape: blobs on the filesystem keyed by sha256, no auth on
 localhost. Blobs are immutable and self-authenticating (the hash *is* the
 identity), so the store needs no per-blob signature check — only a
@@ -298,7 +298,7 @@ identity), so the store needs no per-blob signature check — only a
 An HTTP server on localhost that the WebView talks to. It does host resolution,
 the cache hit/miss decision, the loading page, and (on miss) drives the sync
 engine. This is the Go `gateway` package
-([handlers.go](../../reference/site-deck/internal/gateway/handlers.go)),
+([handlers.go](../../../reference/site-deck/internal/gateway/handlers.go)),
 re-implemented in Rust. The request lifecycle is §4.
 
 ### 2.4 The sync engine
@@ -306,7 +306,7 @@ re-implemented in Rust. The request lifecycle is §4.
 Pulls a manifest + its blobs from a source, verifies every blob's sha256, and
 mirrors them into the **local Blossom + relay** so the gateway can serve them
 direct (§4). The Go reference is
-[service.go](../../reference/site-deck/internal/sync/service.go); two Myco
+[service.go](../../../reference/site-deck/internal/sync/service.go); two Myco
 changes: **the source** is a reachable FIPS peer instead of public
 relays/Blossom (§5), and v0 **does not** build version directories or do an
 atomic swap — it serves direct from the content-addressed store, deferring the
@@ -352,9 +352,9 @@ these in favour of peer Blossom, see §5), `["title", …]`, `["description", �
 `["source", "<repo-url>"]`. The site icon is whatever the manifest maps at
 `/favicon.ico`.
 
-Full tag layout and a worked example: [../reference/nostr-kinds.md](../reference/nostr-kinds.md).
-The site → manifest → blobs data model is drawn in [diagrams/06-nsite-data-model.svg](diagrams/06-nsite-data-model.svg).
-Protocol source: [../../reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md).
+Full tag layout and a worked example: [../reference/nostr-kinds.md](../../reference/nostr-kinds.md).
+The site → manifest → blobs data model is drawn in [diagrams/06-nsite-data-model.svg](../diagrams/06-nsite-data-model.svg).
+Protocol source: [../../reference/site-deck/docs/nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md).
 
 ### 3.2 URL scheme — host is the identity
 
@@ -370,7 +370,7 @@ component behaves like any static host.
 characters; `dTag` matches `^[a-z0-9-]{1,13}$` and must not end with `-`. The
 50+13 fits inside a single 63-char DNS label, avoiding wildcard-cert and
 multi-level-subdomain problems. The Go encoder/decoder and the matching regex
-are in [base36.go](../../reference/site-deck/internal/gateway/base36.go); the
+are in [base36.go](../../../reference/site-deck/internal/gateway/base36.go); the
 Rust port reproduces them exactly.
 
 **Host suffix.** Like nsite-deck, Myco serves under `<host>.nsite` — an A
@@ -378,15 +378,15 @@ record to `127.0.0.1` provided by the DNS interceptor (`*.nsite → 127.0.0.1`).
 The browser reaches the localhost gateway over IPv4 — which is why it works in
 **any** WebView including Chromium, where IPv6-only `.fips` resolution is
 suppressed. The browser **never** resolves `.fips`; only the native sync engine
-does (§5, and [../reference/ports.md](../reference/ports.md)).
+does (§5, and [../reference/ports.md](../../reference/ports.md)).
 
 **Resolution into a `siteKey`.** The gateway strips the host suffix and resolves
 the leading label(s) into `(npub, identifier)`, then forms a cache key —
 `"npub"` for root sites, `"npub:identifier"` for named sites (the same
 `npub:dTag` convention used for the manifest slot in
-[../reference/nostr-kinds.md](../reference/nostr-kinds.md)). The Go
+[../reference/nostr-kinds.md](../../reference/nostr-kinds.md)). The Go
 `resolveStem` walks alias chains and canonical named-site labels with a depth
-bound ([handlers.go](../../reference/site-deck/internal/gateway/handlers.go));
+bound ([handlers.go](../../../reference/site-deck/internal/gateway/handlers.go));
 the Rust port keeps the same logic. An unresolvable host bounces the browser to
 the Library UI's "not in your Library" page rather than surfacing a raw error.
 
@@ -400,7 +400,7 @@ the Library UI's "not in your Library" page rather than surfacing a raw error.
 ## 4. The gateway flow: resolve → manifest → blob → serve
 
 The browse-request lifecycle, per
-[diagrams/04-nsite-browse-flow.svg](diagrams/04-nsite-browse-flow.svg).
+[diagrams/04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg).
 
 > **v0 serves DIRECT from the local relay + Blossom.** There are no version
 > directories, no `current/` pointer, and no atomic swap in v0. Each request
@@ -456,7 +456,7 @@ late requests join the in-flight one), then:
   the `writeLoadingPage` / `handleLoadingStatus` pair in the reference.
 
 The status endpoint returns the FFI `siteStatus` shape (`{ state, filesPulled,
-filesTotal, message }`, see [../reference/ffi-surface.md](../reference/ffi-surface.md)).
+filesTotal, message }`, see [../reference/ffi-surface.md](../../reference/ffi-surface.md)).
 The loading/error page renders one row per state, with the exact user-facing copy
 and action:
 
@@ -489,8 +489,8 @@ directly from the reference and are a **proposed default** (tunable).
 >
 > The reference builds this with a version dir swapped atomically over
 > `current` — a symlink rename
-> ([sync-architecture.md](../../reference/site-deck/docs/sync-architecture.md),
-> `activateVersion` in [service.go](../../reference/site-deck/internal/sync/service.go)).
+> ([sync-architecture.md](../../../reference/site-deck/docs/sync-architecture.md),
+> `activateVersion` in [service.go](../../../reference/site-deck/internal/sync/service.go)).
 > This htdocs cache is **derived** from the Blossom blob store (§6), never the
 > source of truth, and is purely a serving-speed optimization. When/if it lands,
 > the Android atomic-swap mechanism (symlink-rename vs an atomically-written
@@ -516,7 +516,7 @@ this order, stopping at the first hit:
    plus the author's NIP-65 `10002` relay list / BUD-03 `10063` Blossom servers.
    This is the **online fallback** (needs IP internet), so it is the **last resort**
    — and a Settings toggle (`[sync] offline_only`, see
-   [config.md](../reference/config.md)) disables it entirely so Myco never reaches
+   [config.md](../../reference/config.md)) disables it entirely so Myco never reaches
    the IP internet (tiers 1–2 only).
 
 ### 5.1 Reaching the holder's services over `.fips`
@@ -548,11 +548,11 @@ re-serves.
 
 No separate gateway port is needed on a reachable path — the localhost services
 *are* the mesh endpoints. Sources:
-[../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md)
-and [../../reference/fips/docs/design/fips-ipv6-adapter.md](../../reference/fips/docs/design/fips-ipv6-adapter.md).
+[../../reference/fips/docs/design/fips-session-layer.md](../../../reference/fips/docs/design/fips-session-layer.md)
+and [../../reference/fips/docs/design/fips-ipv6-adapter.md](../../../reference/fips/docs/design/fips-ipv6-adapter.md).
 
 > **Note.** The *sync engine* (native Rust) is what dials `<npub>.fips`. The
-> WebView never does. See [../reference/ports.md](../reference/ports.md) for the
+> WebView never does. See [../reference/ports.md](../../reference/ports.md) for the
 > exact `.fips` vs `.nsite` split.
 
 ### 5.2 The pull sequence
@@ -589,7 +589,7 @@ is detailed in [./propagation.md](./propagation.md)):
    author's signature stays valid.
 
 Steps 1–6 mirror `Sync` in
-[service.go](../../reference/site-deck/internal/sync/service.go), with public
+[service.go](../../../reference/site-deck/internal/sync/service.go), with public
 relays/Blossom replaced by the single peer's `.fips` endpoints. The manifest's own
 `["server", …]` hints (public Blossom URLs) are **tier 3** of the source-resolution
 order above — the online fallback, used only when reachable and only if
@@ -646,7 +646,7 @@ store and never needs the network again:
   range, the retry succeeds.
 
 This is the offline guarantee in
-[sync-architecture.md](../../reference/site-deck/docs/sync-architecture.md): all
+[sync-architecture.md](../../../reference/site-deck/docs/sync-architecture.md): all
 cached nsites work without network; only first-time/uncached sites need a
 reachable source.
 
@@ -661,7 +661,7 @@ plus their collected peers — see [./propagation.md](./propagation.md) for
 transitive reach) for kinds **15128 / 35128**. Present them **newest-first,
 de-duplicated by `(author, dTag)`**. Selecting one runs the normal §4 sync/serve
 flow (fetching the large blobs on demand). This is exposed as a `SearchNsites`
-FFI action ([../reference/ffi-surface.md](../reference/ffi-surface.md)); ranking
+FFI action ([../reference/ffi-surface.md](../../reference/ffi-surface.md)); ranking
 beyond recency is **TBD / open**.
 
 ### Storage and eviction
@@ -677,8 +677,8 @@ below governs the **Blossom blob store**.
 - **LRU cache, default cap 2 GB** (proposed default), over the Blossom blob
   store. Oldest-accessed sites are evicted first when over cap, using a small
   SQLite index of `(siteKey, size, last_accessed)`
-  ([cache/database.go](../../reference/site-deck/internal/cache/database.go),
-  [cache/manager.go](../../reference/site-deck/internal/cache/manager.go)).
+  ([cache/database.go](../../../reference/site-deck/internal/cache/database.go),
+  [cache/manager.go](../../../reference/site-deck/internal/cache/manager.go)).
 - **Pinned sites are exempt.** A site the user adds to their Library is pinned and
   never evicted.
 - **Blob dedup.** Because the local Blossom is content-addressed, a blob shared
@@ -694,7 +694,7 @@ below governs the **Blossom blob store**.
 - **JS sandbox / capability API.** v1 nsites are **pure static content**. What
   an nsite's JavaScript may call back into (e.g. query reachable peers, trigger
   a sync) is a later milestone and an explicit open design question (called out
-  on [diagram 04](diagrams/04-nsite-browse-flow.svg)). The per-application
+  on [diagram 04](../diagrams/04-nsite-browse-flow.svg)). The per-application
   capability model — gossip-kinds, TTL clamps, rate, location — is now sketched in
   [nsite-permissions.md](./nsite-permissions.md) (v1 default-allow, enforced via
   the WebSocket `Origin`). **TBD / open.**
@@ -719,10 +719,10 @@ below governs the **Blossom blob store**.
 
 - [./propagation.md](./propagation.md) — manifest flooding, source discovery,
   device-to-device hopping, the store-and-forward layer.
-- [../reference/nostr-kinds.md](../reference/nostr-kinds.md) — kind 15128 /
+- [../reference/nostr-kinds.md](../../reference/nostr-kinds.md) — kind 15128 /
   35128 tag layout, FIPS discovery kinds.
-- [../reference/ports.md](../reference/ports.md) — localhost ports and how each
+- [../reference/ports.md](../../reference/ports.md) — localhost ports and how each
   is (or is not) exposed over FIPS.
-- [diagrams/04-nsite-browse-flow.svg](diagrams/04-nsite-browse-flow.svg),
-  [diagrams/03-offline-propagation.svg](diagrams/03-offline-propagation.svg),
-  [diagrams/01-system-layering.svg](diagrams/01-system-layering.svg).
+- [diagrams/04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg),
+  [diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg),
+  [diagrams/01-system-layering.svg](../diagrams/01-system-layering.svg).

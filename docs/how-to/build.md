@@ -11,7 +11,7 @@ Channels, and `BluetoothDevice.createL2capChannel(psm)` /
 `listenUsingInsecureL2capChannel()` only exist on **API 29+**.
 
 For the system this build produces, see
-[../design/concepts.md](../design/concepts.md) and
+[../design/core/concepts.md](../design/core/concepts.md) and
 [diagrams/01-system-layering.svg](../design/diagrams/01-system-layering.svg).
 
 > These are design docs for a not-yet-built app. Commands below are modelled on
@@ -206,14 +206,14 @@ just install      # build + adb install -r
 ## 4. Wiring in the LOCAL `reference/fips` checkout
 
 Myco depends on the **canonical upstream `fips` crate** — not a nostr-vpn fork of
-it (a LOCKED decision; see [architecture.md § Crate workspace](../design/architecture.md)).
+it (a LOCKED decision; see [architecture.md § Crate workspace](../design/core/architecture.md)).
 It builds against a **local** FIPS source tree so we can carry **four local patches
 for seams upstream `fips` does not yet expose** — (1) an **app-owned TUN** (the
 `VpnService` owns the fd; FIPS exchanges packet bytes over a channel instead of
 calling `tun::create`), (2) **custom `BleIo` injection** (plug in `AndroidBleIo`
 instead of the hardwired Linux `BluerIo`), (3) **per-peer PSM advertise/discover**
 (every backend advertises its OS-assigned L2CAP PSM and dials the peer's learned PSM,
-replacing the fixed `0x0085` — see [ble-interop.md](../design/ble-interop.md)), and
+replacing the fixed `0x0085` — see [ble-interop.md](../design/fips/ble-interop.md)), and
 (4) a **reused/fixed macOS `BleIo`** (the `bluest` CoreBluetooth backend, for the
 Android↔Mac dev/test pair) — all detailed in §4c. The mechanism is borrowed directly from nostr-vpn:
 [reference/nostr-vpn/android/app/build.gradle.kts](../../reference/nostr-vpn/android/app/build.gradle.kts)
@@ -291,7 +291,7 @@ cargo ndk -t arm64-v8a --platform 29 build -p myco-core --release \
 >    learned PSM** — symmetric per-peer discovery that **intentionally drops fixed-`0x0085`
 >    wire compat**. `BleIo::connect(addr, psm)` already takes a per-call PSM and config
 >    `psm()` is `self.psm.unwrap_or(DEFAULT_BLE_PSM)`, so the change is the advert carrier
->    plus discovery capture. See [ble-interop.md](../design/ble-interop.md).
+>    plus discovery capture. See [ble-interop.md](../design/fips/ble-interop.md).
 > 4. **Reused/fixed macOS `BleIo` (test-only).** A CoreBluetooth backend (`BluestIo`, the
 >    `bluest` crate) already exists on the fips branch **`macos-ble-rebased`** (commit
 >    `0ae9e01`, `ble-macos` cargo feature, 2-byte length-prefix L2CAP framing). It was

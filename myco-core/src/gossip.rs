@@ -1,5 +1,5 @@
 //! `MeshGossiper` — the [`Gossiper`] hook that fans an nsite's events out to the
-//! mesh, implementing the **push** plane of `docs/design/event-gossip.md`.
+//! mesh, implementing the **push** plane of `docs/design/core/event-gossip.md`.
 //!
 //! **P2 — multi-hop flood.** An event is pushed to the whole Circle's relays
 //! (`ws://<npub>.fips:4870`) — every member, not just direct neighbours, so a
@@ -14,10 +14,10 @@
 //! The loop guard is the proxy's own seen-set: the gossiper is only ever called
 //! the first time this device sees an id, so a copy arriving via a second path is
 //! never re-forwarded — and unlike the store's dedup, that holds even after the
-//! event has been GC'd (`docs/design/event-gossip.md` §3–4). Manifest kinds
+//! event has been GC'd (`docs/design/core/event-gossip.md` §3–4). Manifest kinds
 //! (15128/35128) are excluded — they have their own path
-//! (`docs/design/nsite-layer.md` §2.1); everything else is gossip-eligible by
-//! default (`docs/design/nsite-permissions.md`).
+//! (`docs/design/nsite/nsite-layer.md` §2.1); everything else is gossip-eligible by
+//! default (`docs/design/nsite/nsite-permissions.md`).
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ impl MeshGossiper {
 }
 
 /// v1 gossip eligibility: everything except nsite manifests (which propagate via
-/// their own path). See `docs/design/nsite-permissions.md` (`gossip-kinds`).
+/// their own path). See `docs/design/nsite/nsite-permissions.md` (`gossip-kinds`).
 fn is_gossip_eligible(kind: u16) -> bool {
     kind != nsite_deck::KIND_ROOT && kind != nsite_deck::KIND_NAMED
 }
@@ -56,7 +56,7 @@ impl Gossiper for MeshGossiper {
         self.content.handle_file_event(&event).await;
         // nsite manifests propagate over this same push plane (the relay just stored
         // a newer one), but with an interest-aware download-then-forward policy and
-        // the active-version gate. See docs/design/nsite-updates.md §4.
+        // the active-version gate. See docs/design/nsite/nsite-updates.md §4.
         if kind == nsite_deck::KIND_ROOT || kind == nsite_deck::KIND_NAMED {
             self.content.clone().on_manifest_event(event, inbound).await;
             return;
@@ -102,7 +102,7 @@ impl Gossiper for MeshGossiper {
         // per-message connect), skipping the peer it came from (split-horizon). Not
         // just direct neighbours: a Circle peer reachable only multi-hop (you've
         // moved apart) must still get the message — the routed dial handles it, an
-        // offline member's connect fails fast. See `docs/design/event-gossip.md`.
+        // offline member's connect fails fast. See `docs/design/core/event-gossip.md`.
         for npub in self.content.circle_npubs() {
             let ip = match fips::PeerIdentity::from_npub(&npub) {
                 Ok(p) => IpAddr::V6(p.address().to_ipv6()),

@@ -18,10 +18,10 @@ State flows one way (Rust → Kotlin as a JSON state snapshot); intent flows the
 other way as a single `dispatch(actionJson) -> stateJson` reducer. A monotonic
 `rev` counter lets the UI skip no-op redraws.
 
-For the data model behind these fields see [concepts.md](../design/concepts.md);
+For the data model behind these fields see [concepts.md](../design/core/concepts.md);
 for the BLE plumbing the radio actions drive, see
-[identity-pairing.md](../design/identity-pairing.md) and
-[propagation.md](../design/propagation.md).
+[identity-pairing.md](../design/core/identity-pairing.md) and
+[propagation.md](../design/nsite/propagation.md).
 
 ---
 
@@ -138,7 +138,7 @@ pub enum NativeAppAction {
     // --- BLE radio ---
     SetBleEnabled { enabled: bool },        // master switch for the L2CAP transport
 
-    // --- Wi-Fi Aware bulk lane (docs/design/wifi-aware-interop.md) ---
+    // --- Wi-Fi Aware bulk lane (docs/design/fips/wifi-aware-interop.md) ---
     SetWifiAwareEnabled { enabled: bool },  // master switch; adds/removes the UDP lane
 
     // --- settings (single patch action, cf. UpdateSettings) ---
@@ -151,7 +151,7 @@ Notes:
 - `dTag` distinguishes a **named** site (kind 35128, parameterized-replaceable)
   from a **root** site (kind 15128, `dTag = None`). Library identity is
   `author + dTag` (matches the search dedup key). See
-  [concepts.md](../design/concepts.md).
+  [concepts.md](../design/core/concepts.md).
 - The app **never authors nsites** — it never signs or publishes events on an
   author's behalf. A site enters a device only by **syncing** it (`OpenNsite` /
   `AddNsite` pull the author-signed manifest + blobs from peers/relays) or, for
@@ -182,11 +182,11 @@ Notes:
   `pairSecret` (a long random string) back over the Noise-encrypted channel, the peer
   matches it and confirms. `PairedPeer.pairing` tracks it
   (`pending` → `complete`/`failed`). There is no one-way fetch-only pairing. See
-  [identity-pairing.md § 6.1](../design/identity-pairing.md).
+  [identity-pairing.md § 6.1](../design/core/identity-pairing.md).
 - BLE **role is symmetric** — every node both advertises its OS-assigned PSM
   (peripheral) and dials the peer's learned PSM (central); it is **not** fixed to
   central (see [config.md § `[ble]`](./config.md#ble) and
-  [ble-interop.md](../design/ble-interop.md)). There is no role action in v1.
+  [ble-interop.md](../design/fips/ble-interop.md)). There is no role action in v1.
 - A Kotlin `NativeActions` helper object builds these JSON objects (cf.
   nostr-vpn `NativeActions`), e.g.
   `NativeActions.pair(npub, name) = action("pair", "npub" to npub, "name" to name)`.
@@ -341,7 +341,7 @@ pub struct CacheStatus {
 
 `ble_peers` is identified by `node_addr` from the in-band pubkey exchange, never
 by MAC — Android MAC randomization is therefore harmless (see
-[identity-pairing.md](../design/identity-pairing.md) and fips-core's BLE
+[identity-pairing.md](../design/core/identity-pairing.md) and fips-core's BLE
 discovery [`../../reference/fips/src/transport/ble/discovery.rs`](../../reference/fips/src/transport/ble/discovery.rs)).
 
 ---
@@ -382,7 +382,7 @@ The node drains that queue each tick (`poll_platform_discovery`) and dials over
 the UDP transport; Noise IK authenticates, so the pushed npub is only a hint.
 `SetWifiAwareEnabled` and the `wifiAware` state are the control/observation
 plane; there is no `awareChannel*` extern family, because there are no channels
-to pump. See [../design/wifi-aware-interop.md](../design/wifi-aware-interop.md).
+to pump. See [../design/fips/wifi-aware-interop.md](../design/fips/wifi-aware-interop.md).
 
 ---
 

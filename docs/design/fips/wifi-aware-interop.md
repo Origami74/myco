@@ -44,7 +44,7 @@ timeouts — will live in the implementation, as the BLE equivalents now do in
 
 BLE stays what it is: the always-on discovery and control plane, the
 bottom-most "crappy link" of
-[diagrams/03-offline-propagation.svg](./diagrams/03-offline-propagation.svg).
+[diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg).
 Aware is the **bulk lane** — raised beside an existing BLE peering when both
 phones have the hardware, used for blob sync, released when idle. (Google's
 Nearby Connections is precedent for exactly this split: BLE for control,
@@ -54,7 +54,7 @@ Wi-Fi radios for bulk — we borrow the architecture, not the stack.)
 
 FIPS already carries all its mesh traffic over a native UDP transport with a
 per-peer session model, connect-on-demand dialing, and per-peer receive loops:
-[../../reference/fips/src/transport/udp/mod.rs](../../reference/fips/src/transport/udp/mod.rs).
+[../../reference/fips/src/transport/udp/mod.rs](../../../reference/fips/src/transport/udp/mod.rs).
 It is connectionless and unreliable on its own — FMP/FSP/Noise above it supply
 framing, ordering, retransmit, and the encrypted session (the 4-byte FMP common
 prefix `[ver+phase][flags][payload_len:2 LE]` frames each packet). Because UDP
@@ -135,11 +135,11 @@ What fips-core does *above* that hand-over, and what Kotlin must therefore
 The FFI surface follows the BLE naming: a `set_wifi_aware_enabled` master
 switch beside `set_ble_enabled`, a `wifiAware` status block beside `ble`, and
 a `wifiAwarePeers` list beside `blePeers`
-([ffi-surface.md](../reference/ffi-surface.md)). But where BLE needed the
+([ffi-surface.md](../../reference/ffi-surface.md)). But where BLE needed the
 whole `ble*` byte-bridge extern family, Aware needs only the control pushes —
 there is no `awareChannelNextSend`, because there are no channels to pump.
 Config mirrors the `[ble]` precedent: a `[wifi_aware]` table whose only field
-is `enabled` ([config.md](../reference/config.md)), with the port
+is `enabled` ([config.md](../../reference/config.md)), with the port
 living where it already belongs — the fips UDP transport's `bind_addr` —
 surfaced as a Myco config knob (proposed default port, vetoable, settled at
 implementation). Both reference docs gain their matching `wifi_aware` entries
@@ -172,7 +172,7 @@ The exchanged pubkey then serves two purposes:
 
 - It becomes the `pubkey_hint` the core's discovery drain requires
   (`poll_transport_discovery` silently skips hintless peers —
-  [../../reference/fips/src/node/lifecycle.rs](../../reference/fips/src/node/lifecycle.rs)).
+  [../../reference/fips/src/node/lifecycle.rs](../../../reference/fips/src/node/lifecycle.rs)).
 - It lets *Kotlin* apply the **cross-probe tiebreaker before spending an
   NDP**: both phones discover each other, but data-path slots are scarce
   (chipset-limited; query `getAvailableAwareResources()`), so only the
@@ -214,7 +214,7 @@ explicitly permits **open (unencrypted) data paths** when no security setter
 is called, and open is what we want: FIPS authenticates with Noise IK, not
 with WPA3, precisely as the BLE strategy chose *insecure* L2CAP over
 Bluetooth bonding. Same trust model, new radio:
-[security.md](./security.md).
+[security.md](../core/security.md).
 
 ### One socket per peer
 
@@ -268,7 +268,7 @@ interfaces, but also home Wi-Fi, the hotel LAN — and the port is broadcast in
 the Aware announcement. What holds the line is the same thing that holds it
 on the open NDP: **an unauthenticated dialer gets nothing.** The Noise IK
 responder handshake gates every inbound peer; failing it yields no
-identity, no data, no relay access ([security.md](./security.md)). The
+identity, no data, no relay access ([security.md](../core/security.md)). The
 residual surface is honest but small: session-slot and battery burn from
 junk dials (bounded by the transport's inbound limits — worth keeping
 conservative on a phone), and the port doubling as a "this device
@@ -294,7 +294,7 @@ with a scope — *which* interface to send from. Two facts make this workable:
 - fips-core already does exactly this for LAN mDNS discovery: the discovery
   path builds a `SocketAddrV6` with an explicit `scope_id` and refuses
   scope-less link-locals
-  ([../../reference/fips/src/discovery/lan/mod.rs](../../reference/fips/src/discovery/lan/mod.rs))
+  ([../../reference/fips/src/discovery/lan/mod.rs](../../../reference/fips/src/discovery/lan/mod.rs))
   — the pattern is proven in-tree on the very same UDP transport.
 
 One honest caveat: Google's documented dial pattern goes through the Android

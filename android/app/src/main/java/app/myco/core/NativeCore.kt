@@ -76,7 +76,7 @@ internal object NativeCore {
     /** Rust → Kotlin pull (blocks up to timeoutMs): >0 len, 0 timeout, -1 closed. */
     external fun bleChannelNextSend(bridgeHandle: Long, chId: Long, out: ByteArray, timeoutMs: Int): Int
 
-    // --- Wi-Fi Aware control bridge (see docs/design/wifi-aware-interop.md) ---
+    // --- Wi-Fi Aware control bridge (see docs/design/fips/wifi-aware-interop.md) ---
     // Control-plane only: no byte bridge. The AwareRadio drives discovery
     // itself and pushes peer reachability into the core's platform peer queue;
     // the bytes ride the ordinary UDP transport over the Aware data-path

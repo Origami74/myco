@@ -7,10 +7,10 @@ a provenance breakdown of what is reused versus net-new. For terminology
 "Pillars of Propagation"), read [concepts.md](./concepts.md) first.
 
 The companion diagram for this doc is
-[diagrams/01-system-layering.svg](./diagrams/01-system-layering.svg). Related
-flows: pairing in [diagrams/02-pairing-transitive-discovery.svg](./diagrams/02-pairing-transitive-discovery.svg),
-offline propagation in [diagrams/03-offline-propagation.svg](./diagrams/03-offline-propagation.svg),
-and the browse lifecycle in [diagrams/04-nsite-browse-flow.svg](./diagrams/04-nsite-browse-flow.svg).
+[diagrams/01-system-layering.svg](../diagrams/01-system-layering.svg). Related
+flows: pairing in [diagrams/02-pairing-transitive-discovery.svg](../diagrams/02-pairing-transitive-discovery.svg),
+offline propagation in [diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg),
+and the browse lifecycle in [diagrams/04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg).
 
 > Design doc for a not-yet-built app, written in proposal voice. Open questions
 > are marked **TBD / open**. Where this doc and the diagram disagree, this doc is
@@ -159,7 +159,7 @@ So v0 is per-request: manifest → `sha256` → blob → serve, with **no versio
 dirs, no atomic swap, and no sha→name file writing**. The htdocs serving cache
 (writing blobs out as path-named files under a `current/` dir for fast static
 serving) is **deferred to the roadmap** — a speed optimization, not needed for
-v0. See [nsite-layer.md](./nsite-layer.md).
+v0. See [nsite-layer.md](../nsite/nsite-layer.md).
 
 Because `.nsite` is IPv4/localhost, this works in any browser, including
 Chromium. Only the relay+Blossom **sync** in step 4 ever touches `.fips`.
@@ -201,7 +201,7 @@ They sit **outside** the `nsite-deck` crate, which consumes them only through
 those traits, so each is independently reusable (Citrine-forward is just an
 alternate `RelayBackend`; there is no good Android Blossom app, which is exactly
 why a standalone `myco-blossom` is worth having). See
-[nsite-layer.md § The crate workspace](./nsite-layer.md). (The diagram tags this
+[nsite-layer.md § The crate workspace](../nsite/nsite-layer.md). (The diagram tags this
 band "PORT · lang TBD"; the language is now **locked to Rust** — treat that label
 as stale.)
 
@@ -235,7 +235,7 @@ does not exist upstream. The "app owns the TUN, FIPS gets only packet bytes" con
 and custom-`BleIo` injection are two capabilities **not yet in upstream `fips`**; Myco
 contributes them upstream (nostr-vpn's fork is the reference for what they do) and
 carries them as a minimal local patch until merged. See
-[build.md § 4c](../how-to/build.md) for the two gaps and the local-FIPS wiring.
+[build.md § 4c](../../how-to/build.md) for the two gaps and the local-FIPS wiring.
 
 #### The FFI contract (JNI / JSON reducer)
 
@@ -251,14 +251,14 @@ nostr-vpn's Android path):
 
 (See nostr-vpn `crates/nostr-vpn-app-core/src/c_abi.rs`, and the Kotlin side
 `NativeCore.kt` / `AppCoreClient.kt` under
-[reference/nostr-vpn/android](../../reference/nostr-vpn/android/).)
+[reference/nostr-vpn/android](../../../reference/nostr-vpn/android/).)
 
 Two things cross the boundary *outside* the JSON reducer, because they are
 byte/­radio paths Kotlin must own:
 
 - **TUN packets** — Kotlin reads/writes the `VpnService` fd; raw IPv6 packet
   bytes pass to/from Rust (the **app-owned-TUN** contract — an upstream-`fips`
-  capability Myco adds; see [build.md § 4c](../how-to/build.md)).
+  capability Myco adds; see [build.md § 4c](../../how-to/build.md)).
 - **BLE bytes** — Android's BLE APIs are Java-only, so Kotlin owns the radio and
   hands raw L2CAP bytes to Rust's `AndroidBleIo` (see layer 6 / BLE).
 
@@ -287,7 +287,7 @@ the v1 transport and the one net-new transport piece:
   "bluest" CoreBluetooth crate, reusing the fips `macos-ble-rebased` branch under a
   `ble-macos` cargo feature; framed as the **dev/test** backend). Caveat: upstream
   `Node::new` currently **hardwires `BluerIo`**, so injecting a custom `BleIo` is one
-  of the upstream-`fips` changes Myco needs (see [build.md § 4c](../how-to/build.md)).
+  of the upstream-`fips` changes Myco needs (see [build.md § 4c](../../how-to/build.md)).
   FIPS owns all connection tracking, the pool, the tiebreaker, Noise, and reconnect —
   **bitchat is not used as a transport.**
 - **Universal per-peer PSM discovery.** Dynamic listener-PSM assignment is the general
@@ -307,12 +307,12 @@ backends (it breaks the fixed `0x0085` default). bitchat-android is a
 **pattern reference only** for the propagation layer — its transport (GATT-only,
 wire-incompatible with FIPS L2CAP) and crypto are *not* used.
 
-(See [reference/fips/src/transport/ble/](../../reference/fips/src/transport/ble/)
+(See [reference/fips/src/transport/ble/](../../../reference/fips/src/transport/ble/)
 — `mod.rs`, `io.rs`, `discovery.rs`, `addr.rs` — and the upstream
-[fips-architecture.md](../../reference/fips/docs/design/fips-architecture.md).)
+[fips-architecture.md](../../../reference/fips/docs/design/fips-architecture.md).)
 
 > Diagram note: band 6 of
-> [01-system-layering.svg](./diagrams/01-system-layering.svg) says "lift
+> [01-system-layering.svg](../diagrams/01-system-layering.svg) says "lift
 > bitchat's GATT/connection/power managers as the Android BLE substrate." That
 > reflects an earlier option and is **superseded**: the locked decision is
 > option A (native `AndroidBleIo` over L2CAP), with bitchat as pattern reference
@@ -334,7 +334,7 @@ sharply. It is **not** a tunnel-all-internet VPN.
 - The app **owns** the TUN and hands FIPS only packet bytes; the TUN fd is
   read/written in Kotlin. This **app-owned-TUN** mode is a capability Myco adds to
   upstream `fips` (it always creates its own system TUN today) — nostr-vpn's
-  `.without_system_tun()` is the reference; see [build.md § 4c](../how-to/build.md).
+  `.without_system_tun()` is the reference; see [build.md § 4c](../../how-to/build.md).
 
 System-wide `.fips`/`.nsite` resolution is the entire reason the TUN survives the
 strip: it is what makes "every app on the phone can resolve a mesh name" true,
@@ -347,7 +347,7 @@ roster-gated routing, `.nvpn` MagicDNS — not the TUN itself.
 ## Reused vs net-new
 
 Provenance for each band, matching the legend in
-[01-system-layering.svg](./diagrams/01-system-layering.svg).
+[01-system-layering.svg](../diagrams/01-system-layering.svg).
 
 | Layer / component | Provenance | Notes |
 | --- | --- | --- |
@@ -361,7 +361,7 @@ Provenance for each band, matching the legend in
 | nsite sync (fetch + verify + retain over `.fips`) | **net-new** | runs in **`nsite-deck`**; v0 serves direct from relay + Blossom |
 | htdocs serving cache (path-named files under `current/`) | **deferred** | nsite-deck speed optimization; not needed for v0 |
 | FFI: JNI/JSON reducer, cdylib via cargo-ndk | **reuse (nostr-vpn)** | `dispatch→state(rev)`; opaque `jlong` over Tokio |
-| FIPS embedding (`Node::new(Config)` on upstream `fips`) | **reuse + upstream work** | app-owned TUN + custom `BleIo` injection are upstream gaps Myco adds (nostr-vpn's `.without_system_tun()` fork is the reference); see [§ 4c](../how-to/build.md) |
+| FIPS embedding (`Node::new(Config)` on upstream `fips`) | **reuse + upstream work** | app-owned TUN + custom `BleIo` injection are upstream gaps Myco adds (nostr-vpn's `.without_system_tun()` fork is the reference); see [§ 4c](../../how-to/build.md) |
 | `VpnService`/TUN | **reuse (nostr-vpn), narrowed** | routes `fd00::/8` only; intercepts `.fips`/`.nsite`; no tunnel-all |
 | FIPS core (identity, routing, Noise IK/XK, FSP port-mux) | **reuse (fips-core)** | unchanged |
 | Transports UDP / TCP / Tor | **reuse (fips-core)** | unchanged |
@@ -374,8 +374,8 @@ Provenance for each band, matching the legend in
 ## Related docs
 
 - [concepts.md](./concepts.md) — terminology and the conceptual model.
-- [diagrams/01-system-layering.svg](./diagrams/01-system-layering.svg) — this stack, visually.
-- [diagrams/02-pairing-transitive-discovery.svg](./diagrams/02-pairing-transitive-discovery.svg) — QR pairing and transitive discovery.
-- [diagrams/03-offline-propagation.svg](./diagrams/03-offline-propagation.svg) — live-routing vs store-and-forward.
-- [diagrams/04-nsite-browse-flow.svg](./diagrams/04-nsite-browse-flow.svg) — the browse request lifecycle.
-- Upstream FIPS: [fips-concepts.md](../../reference/fips/docs/design/fips-concepts.md), [fips-architecture.md](../../reference/fips/docs/design/fips-architecture.md).
+- [diagrams/01-system-layering.svg](../diagrams/01-system-layering.svg) — this stack, visually.
+- [diagrams/02-pairing-transitive-discovery.svg](../diagrams/02-pairing-transitive-discovery.svg) — QR pairing and transitive discovery.
+- [diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg) — live-routing vs store-and-forward.
+- [diagrams/04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg) — the browse request lifecycle.
+- Upstream FIPS: [fips-concepts.md](../../../reference/fips/docs/design/fips-concepts.md), [fips-architecture.md](../../../reference/fips/docs/design/fips-architecture.md).

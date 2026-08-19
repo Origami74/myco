@@ -2,7 +2,7 @@
 //! relays — **one socket per peer**, shared by both propagation planes:
 //!
 //! - **push** ([`PeerRelayPool::send`]): fan an `["EVENT", …]` frame to a peer
-//!   (fire-and-forget) — the multi-hop flood of `docs/design/event-gossip.md`.
+//!   (fire-and-forget) — the multi-hop flood of `docs/design/core/event-gossip.md`.
 //! - **pull** ([`PeerRelayPool::request`]): open a `REQ`, collect the peer's
 //!   matching events until `EOSE`/`CLOSED`, then close the subscription.
 //!
