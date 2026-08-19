@@ -40,6 +40,12 @@ prefix.
 
 Inbound connections, advertising and scanning are untouched.
 
+## See also
+
+[aware-multipeer-limit.md](./aware-multipeer-limit.md) — why only one peer is
+carried at a time. Different question, different cause: this document is about a
+single data path dying, that one is about the other paths never being requested.
+
 ## Remaining issues
 
 ### 1. Startup churn (the live one)
