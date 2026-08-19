@@ -26,7 +26,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -35,10 +34,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.platform.LocalContext
 import app.myco.hotspot.HotspotPhase
 import app.myco.hotspot.HotspotView
-import app.myco.hotspot.Outbox
 import app.myco.hotspot.SharedFiles
 import app.myco.hotspot.WifiQr
 import app.myco.share.NsiteShare
@@ -60,7 +57,6 @@ fun HotspotSheet(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onAddFiles: () -> Unit,
-    onSendFiles: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -113,7 +109,7 @@ fun HotspotSheet(
                     Text("Starting the hotspot…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
 
-                HotspotPhase.ON -> HotspotOn(view, shared, onStop, onAddFiles, onSendFiles)
+                HotspotPhase.ON -> HotspotOn(view, shared, onStop, onAddFiles)
             }
         }
     }
@@ -125,7 +121,6 @@ private fun HotspotOn(
     shared: List<SharedFiles.Entry>,
     onStop: () -> Unit,
     onAddFiles: () -> Unit,
-    onSendFiles: () -> Unit,
 ) {
     val ssid = view.ssid.orEmpty()
     val pass = view.passphrase.orEmpty()
@@ -179,30 +174,6 @@ private fun HotspotOn(
     }
 
     Spacer(Modifier.height(18.dp))
-    StepLabel("SEND TO THE OTHER PHONE")
-    Spacer(Modifier.height(6.dp))
-    // Push a file AirDrop-style: it pops an accept/decline dialog on their page.
-    val offers by Outbox.get(LocalContext.current).offers.collectAsState()
-    offers.forEach { offer ->
-        Text(
-            offer.name + sizeSuffix(offer.size) + when (offer.status) {
-                Outbox.Status.WAITING -> " — waiting for them…"
-                Outbox.Status.SENT -> " — sent ✓"
-                Outbox.Status.DECLINED -> " — they declined"
-            },
-            color = when (offer.status) {
-                Outbox.Status.DECLINED -> MaterialTheme.colorScheme.error
-                else -> MaterialTheme.colorScheme.onSurfaceVariant
-            },
-            style = MaterialTheme.typography.bodySmall,
-            maxLines = 1,
-        )
-    }
-    if (offers.isNotEmpty()) Spacer(Modifier.height(6.dp))
-    Button(onClick = onSendFiles) {
-        Text("Send a file")
-    }
-
     Spacer(Modifier.height(18.dp))
     StepLabel("SHARED FROM THIS PHONE")
     Spacer(Modifier.height(6.dp))
@@ -227,13 +198,6 @@ private fun HotspotOn(
             Text("Stop hotspot", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
         }
     }
-}
-
-private fun sizeSuffix(bytes: Long): String = when {
-    bytes >= 1L shl 20 -> " · %.1f MB".format(bytes.toDouble() / (1L shl 20))
-    bytes >= 1L shl 10 -> " · %.0f kB".format(bytes.toDouble() / (1L shl 10))
-    bytes > 0 -> " · $bytes B"
-    else -> ""
 }
 
 @Composable
