@@ -33,7 +33,9 @@
 //! [NIP-5D]: https://github.com/nostr-protocol/nips/pull/2303
 //! [NIP-5A]: https://github.com/nostr-protocol/nips/blob/master/5A.md
 
+pub mod artifact;
 pub mod error;
+pub mod host;
 pub mod manifest;
 pub mod resolve;
 pub mod seams;
@@ -41,7 +43,9 @@ pub mod seams;
 #[cfg(feature = "testing")]
 pub mod testing;
 
+pub use artifact::{assemble, CspPolicy, Injection};
 pub use error::{NappletError, NappletErrorCode, Result};
+pub use host::{is_shell_host, shell_host, shell_label, shell_origin, SHELL_SUFFIX};
 pub use manifest::{
     is_napplet_kind, Archetype, NappletManifest, KINDS, KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT,
 };
