@@ -76,6 +76,7 @@ import app.myco.core.CircleContact
 import app.myco.core.NativeActions
 import app.myco.hotspot.HotspotPhase
 import app.myco.hotspot.HotspotService
+import app.myco.hotspot.Outbox
 import app.myco.hotspot.SharedFiles
 import app.myco.nfc.NfcState
 import app.myco.nfc.NfcStatus
@@ -130,7 +131,7 @@ fun CircleScreen(
     val pickShareFiles = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
-        if (uris.isNotEmpty()) SharedFiles.get(context).addUris(uris)
+        if (uris.isNotEmpty()) Outbox.get(context).add(uris)
     }
     // NFC availability, re-checked on resume (e.g. back from NFC settings).
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -374,7 +375,7 @@ fun CircleScreen(
                 else hotspotPerms.launch(needed.toTypedArray())
             },
             onStop = { HotspotService.stop(context) },
-            onAddFiles = { pickShareFiles.launch(arrayOf("*/*")) },
+            onShareFiles = { pickShareFiles.launch(arrayOf("*/*")) },
             onDismiss = { hotspotSheet = false },
         )
     }

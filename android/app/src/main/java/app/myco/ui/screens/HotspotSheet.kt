@@ -13,7 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.WifiTethering
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -26,6 +26,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -33,9 +34,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import app.myco.hotspot.HotspotPhase
 import app.myco.hotspot.HotspotView
+import app.myco.hotspot.Outbox
 import app.myco.hotspot.SharedFiles
 import app.myco.hotspot.WifiQr
 import app.myco.share.NsiteShare
@@ -56,7 +59,7 @@ fun HotspotSheet(
     shared: List<SharedFiles.Entry>,
     onStart: () -> Unit,
     onStop: () -> Unit,
-    onAddFiles: () -> Unit,
+    onShareFiles: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -109,7 +112,7 @@ fun HotspotSheet(
                     Text("Starting the hotspot…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
 
-                HotspotPhase.ON -> HotspotOn(view, shared, onStop, onAddFiles)
+                HotspotPhase.ON -> HotspotOn(view, shared, onStop, onShareFiles)
             }
         }
     }
@@ -120,11 +123,12 @@ private fun HotspotOn(
     view: HotspotView,
     shared: List<SharedFiles.Entry>,
     onStop: () -> Unit,
-    onAddFiles: () -> Unit,
+    onShareFiles: () -> Unit,
 ) {
     val ssid = view.ssid.orEmpty()
     val pass = view.passphrase.orEmpty()
     val wifiQr = remember(ssid, pass) { NsiteShare.qrBitmap(WifiQr.payload(ssid, pass)) }
+    val offers by Outbox.get(LocalContext.current).offers.collectAsState()
 
     StepLabel("1 · JOIN THIS PHONE'S WI-FI")
     Spacer(Modifier.height(10.dp))
@@ -174,12 +178,31 @@ private fun HotspotOn(
     }
 
     Spacer(Modifier.height(18.dp))
-    Spacer(Modifier.height(18.dp))
-    StepLabel("SHARED FROM THIS PHONE")
+    StepLabel("SHARED WITH THE OTHER PHONE")
     Spacer(Modifier.height(6.dp))
     Text(
         when {
-            shared.isEmpty() -> "Nothing shared yet — files sent to you land in Download/Myco."
+            offers.isEmpty() -> "Choose files to offer to the other phone."
+            else -> offers.joinToString(", ") { offer ->
+                val status = when (offer.status) {
+                    Outbox.Status.WAITING -> "waiting for acceptance"
+                    Outbox.Status.SENT -> "sent"
+                    Outbox.Status.DECLINED -> "declined"
+                }
+                "${offer.name} — $status"
+            }
+        },
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.bodySmall,
+        textAlign = TextAlign.Center,
+        maxLines = 3,
+    )
+    Spacer(Modifier.height(14.dp))
+    StepLabel("RECEIVED FROM THE OTHER PHONE")
+    Spacer(Modifier.height(6.dp))
+    Text(
+        when {
+            shared.isEmpty() -> "Files sent to this phone land in Download/Myco."
             else -> shared.joinToString(", ") { it.name }
         },
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -189,10 +212,10 @@ private fun HotspotOn(
     )
     Spacer(Modifier.height(10.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        OutlinedButton(onClick = onAddFiles) {
-            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+        OutlinedButton(onClick = onShareFiles) {
+            Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(6.dp))
-            Text("Add files")
+            Text("Share files")
         }
         TextButton(onClick = onStop) {
             Text("Stop hotspot", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
