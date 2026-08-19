@@ -1,6 +1,12 @@
 //! `myco-napplet-runtime` — a [NIP-5D] napplet runtime: transport-agnostic,
 //! Android-free, and testable with no device in the loop.
 //!
+//! Myco **never authors, signs, or publishes** a napplet. It loads napplets
+//! built and published elsewhere, exactly as it does nsites — so every rule
+//! here is one an externally-built manifest is *judged against*, never one Myco
+//! can arrange to satisfy. When a napplet is refused, the fix is upstream of
+//! this device; the runtime's job is to say clearly what was wrong.
+//!
 //! Where an nsite is a document Myco *serves*, a napplet is a program Myco
 //! *hosts* — and hosting means mediating. Every capability a napplet uses is
 //! one Myco decided to grant, implemented by Myco, on the napplet's behalf. The

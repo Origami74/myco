@@ -162,21 +162,37 @@ async fn a_missing_aggregate_tag_still_resolves_to_the_same_identity() {
     assert_eq!(resolved.aggregate, with_tag.aggregate);
 }
 
-/// A multi-file manifest is refused at load rather than partially rendered or
-/// inlined — inlining would assemble bytes the author never signed as a unit.
+/// NIP-5D: "A napplet is a single self-contained /index.html". A manifest
+/// listing more than one file is not a napplet, so it is refused at parse —
+/// before any blob is fetched, and never inlined, which would assemble bytes
+/// the author never signed as a unit.
 #[tokio::test]
 async fn rejects_a_multi_file_bundle() {
     let napplet = NappletBuilder::new()
         .file("/app.js", b"console.log('hi')")
         .build();
     let blobs = store_for(&napplet).await;
-    let err = resolve(napplet.manifest, &blobs).await.unwrap_err();
+    let err = resolve(napplet.manifest.clone(), &blobs).await.unwrap_err();
     assert_eq!(err.code, NappletErrorCode::MultiFile);
-    // The error has to name the files, or an author cannot act on it.
+
+    // Rejected by the manifest layer, not by the resolve pipeline — so the same
+    // refusal happens everywhere a manifest is parsed, not only on the load path.
+    let parsed = NappletManifest::from_event(napplet.manifest).unwrap_err();
+    assert_eq!(parsed.code, NappletErrorCode::MultiFile);
+
+    // The error names the offending files, and cites the rule rather than
+    // restating a Myco preference.
     assert!(err.message.contains("/app.js"), "unhelpful error: {err}");
     assert!(
-        err.message.contains("single-file"),
+        err.message.contains("single self-contained"),
         "unhelpful error: {err}"
+    );
+    // Myco loads napplets, it never builds them. The person who sees this did
+    // not publish the napplet and cannot rebuild it, so the message says what
+    // the publisher did — it does not hand out build instructions.
+    assert!(
+        !err.message.to_lowercase().contains("rebuild"),
+        "error tells our user to rebuild someone else's napplet: {err}"
     );
 }
 

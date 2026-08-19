@@ -129,8 +129,9 @@ impl NappletManifest {
             return Err(NappletError::new(
                 NappletErrorCode::MultiFile,
                 format!(
-                    "a napplet is a single self-contained /index.html, but this manifest \
-                     lists {} files ({}). Rebuild it with the napplet plugin's single-file mode.",
+                    "a napplet is a single self-contained /index.html (NIP-5D), but this \
+                     manifest lists {} files ({}) — its author published a bundle no srcdoc \
+                     runtime can load",
                     listed.len(),
                     listed.join(", ")
                 ),
