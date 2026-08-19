@@ -19,8 +19,8 @@ pub enum NappletErrorCode {
     BlobUnavailable,
     /// The manifest lists no `/index.html`.
     MissingIndex,
-    /// The manifest describes more than one file. Napplets are single-file;
-    /// see [`crate::resolve`] for why.
+    /// The manifest describes more than one file. NIP-5D: "A napplet is a
+    /// single self-contained `/index.html`" — see [`crate::manifest`].
     MultiFile,
 }
 

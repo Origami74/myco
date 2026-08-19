@@ -91,8 +91,8 @@ removed by a re-signing intermediary.
 Myco verifies it in `nsite_deck::aggregate`. A manifest whose aggregate
 disagrees with its own `path` tags never imports, syncs, or serves. A manifest
 with **no** aggregate tag is accepted: most published nsites predate the tag and
-every blob is individually hash-verified anyway. Napplets are stricter — see
-below.
+every blob is individually hash-verified anyway. Napplets treat it the same way,
+but use the recomputed value as identity — see below.
 
 The site icon is conventionally the blob mapped at `/favicon.ico`. A custom
 not-found page is the blob mapped at `/404.html`.
@@ -190,7 +190,7 @@ layout — at three different kinds:
 
 | Tag | Required | Meaning |
 | --- | --- | --- |
-| `["x", "<hex>", "aggregate"]` | **yes** | The napplet's identity, not merely an integrity check. A napplet without it is rejected. |
+| `["x", "<hex>", "aggregate"]` | no | Corroborates the aggregate. The runtime **recomputes** the napplet's identity from the `path` tags either way; when the tag is present it must match. |
 | `["requires", "<domain>"]` | no | A NAP capability domain the napplet needs (`relay`, `identity`, `storage`). Shown on the install review screen; grants are recorded per library entry. |
 | `["archetype", "<slug>", "<convention>"]` | no | A role the napplet can be invoked as. The convention is a queryless `napplet:<archetype>/<intent>` identity — NAP-INTENT routes on exact equality over it. |
 | `["config", "<json-schema>"]` | no | Declarative per-napplet configuration. |
@@ -203,13 +203,16 @@ napplet in existence.
 
 A napplet's identity is the `(dTag, aggregateHash)` tuple **computed** by the
 runtime from verified bytes. The napplet never asserts it, and no host or
-gateway supplies it.
+gateway supplies it. An `x` tag, when carried, is checked against the computed
+value; it is not the source of it.
 
-Napplets are **single-file**. The build tooling inlines everything into one
-`/index.html`, because the runtime injects those bytes as `iframe.srcdoc` and an
-opaque origin has nowhere to resolve a relative subresource to. A manifest
-listing more than one file is rejected at load rather than inlined at runtime —
-inlining would assemble bytes the author never signed as a unit.
+Napplets are **single-file** — NIP-5D: *"A napplet is a single self-contained
+`/index.html`."* The runtime injects those bytes as `iframe.srcdoc` under
+`sandbox="allow-scripts"` with no `allow-same-origin`, so the document has an
+opaque origin with nowhere to resolve a relative subresource to. A manifest
+listing more than one file is not a napplet and is rejected at parse, rather than
+inlined at runtime — inlining would assemble bytes the author never signed as a
+unit.
 
 ---
 

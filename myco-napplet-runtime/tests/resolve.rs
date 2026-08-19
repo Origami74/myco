@@ -70,17 +70,21 @@ async fn the_fixture_aggregate_matches_the_reference_implementation() {
         "ae61a6e95ad666d2294f88e69769961148aa933ca1fdf59a7f31cf0d2c97c1cb"
     );
 
-    // And with a second file, so the sort-then-concatenate step is pinned too,
-    // not just the single-line case where sorting is a no-op.
-    let multi = NappletManifest::from_event(
-        NappletBuilder::new()
-            .file("/app.js", b"console.log(\'hi\')")
-            .build()
-            .manifest,
-    )
-    .unwrap();
+    // And a second, two-file vector, so the sort-then-concatenate step is
+    // pinned too and not just the single-line case where sorting is a no-op.
+    // Computed directly: a two-file *napplet* is refused at parse, but the
+    // aggregate algorithm underneath it still has to match the reference.
     assert_eq!(
-        multi.aggregate,
+        compute_aggregate_hash(&[
+            PathEntry {
+                path: "/index.html".into(),
+                sha256: sha256_hex(FIXTURE_INDEX_HTML.as_bytes()),
+            },
+            PathEntry {
+                path: "/app.js".into(),
+                sha256: sha256_hex(b"console.log('hi')"),
+            },
+        ]),
         "d33c30b3f7ad101e27f2ed4fae460edc51139e41454d66d8c08760d0f561f168"
     );
 }
@@ -140,17 +144,22 @@ async fn rejects_an_aggregate_mismatch() {
     .await;
 }
 
-/// nsites tolerate a missing aggregate; napplets cannot, because the aggregate
-/// *is* the identity. A napplet with no `x` tag has nothing to be.
+/// The `x` tag is corroboration, not the source. NIP-5D Identity step 3 says
+/// the runtime recomputes the aggregate from the `path` tags and that the tag,
+/// *if carried*, must match — so a napplet without one still has an identity,
+/// and it is the same one it would have had with the tag present.
 #[tokio::test]
-async fn rejects_a_missing_aggregate() {
-    expect_rejection(
-        NappletBuilder::new()
-            .aggregate(FixtureAggregate::Omitted)
-            .build(),
-        NappletErrorCode::InvalidManifest,
-    )
-    .await;
+async fn a_missing_aggregate_tag_still_resolves_to_the_same_identity() {
+    let declared = build_test_napplet();
+    let undeclared = NappletBuilder::new()
+        .aggregate(FixtureAggregate::Omitted)
+        .build();
+
+    let blobs = store_for(&undeclared).await;
+    let resolved = resolve(undeclared.manifest, &blobs).await.unwrap();
+
+    let with_tag = NappletManifest::from_event(declared.manifest).unwrap();
+    assert_eq!(resolved.aggregate, with_tag.aggregate);
 }
 
 /// A multi-file manifest is refused at load rather than partially rendered or
