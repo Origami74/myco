@@ -313,6 +313,26 @@ pull-only (fetched only when a site is opened).
 
 ### 6.2 Where the handshake lands: the auth service on `:4873`
 
+#### Two checks before anything is acted on
+
+A valid signature proves **who wrote** an event. It says nothing about who the
+event was *for*, and nothing about whether we wanted it. Both gaps are checked
+explicitly:
+
+- **Addressed to us.** Every pair event names its target in a `p` tag. An event
+  addressed to a third device verifies perfectly when replayed at us, so one
+  captured off the wire would otherwise be usable against anyone.
+- **An accept answers an invite.** A `pair-accept` is only honoured while a
+  matching invite from us is outstanding, and an invite is spent once answered.
+  Without this, anyone could sign an accept and add themselves to the Circle
+  unprompted — which grants relay read/write, blob reads, and multihop
+  forwarding by default.
+
+Invites are persisted, so an accept that arrives after a restart is still
+honoured, and expire after a week so an unanswered one does not remain a
+standing authorisation. A refused event is answered `403`.
+
+
 The handshake events and their signatures are unchanged. What changed is where
 they stop.
 

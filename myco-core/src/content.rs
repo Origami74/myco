@@ -249,7 +249,7 @@ pub struct PairRequestView {
 /// not met on the mesh is the normal case. Recording it means we can say
 /// "waiting" instead of silently dropping it, and refuse to send a second one
 /// for the same peer.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboundPairView {
     pub npub: String,
@@ -257,6 +257,13 @@ pub struct OutboundPairView {
     /// Unix seconds when we first tried, so the UI can age it.
     pub since: u64,
 }
+
+/// How long an invite stays valid as proof that we asked to pair.
+///
+/// An accept is only honoured while the matching invite is outstanding, so this
+/// bounds how long a captured accept could be replayed back at us — and stops
+/// invites nobody ever answered accumulating as standing authorisations.
+const INVITE_VALID_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// Mutual-pairing handshake events, POSTed point-to-point to a peer's **auth
 /// service** at `:4873` (never gossiped, and never stored — the relay refuses
@@ -396,7 +403,11 @@ pub struct Content {
     /// Incoming pair requests awaiting the user's accept/decline (UI pop-up).
     pending_pairs: Mutex<Vec<PairRequestView>>,
     /// Invites we sent that are still unanswered (see [`OutboundPairView`]).
+    /// Invites we have sent and not yet had answered. **Persisted**, because an
+    /// accept is only honoured against one of these — an in-memory-only record
+    /// would refuse a legitimate accept that arrives after a restart.
     outbound_pairs: Mutex<Vec<OutboundPairView>>,
+    outbound_pairs_path: PathBuf,
     /// Persistent WS connections to peers' relays, so chat fan-out and manifest
     /// fetches don't pay a fresh connect per message (slow over BLE). `Arc` so a
     /// mesh `PeerSource` can borrow the same pool for its manifest REQs.
@@ -570,6 +581,8 @@ impl Content {
         let blobs_local = custom_blobs.is_none().then_some(embedded_blobs);
         let library_path = data_dir.join("library.json");
         let library = load_library(&library_path);
+        let outbound_pairs_path = data_dir.join("outbound_pairs.json");
+        let outbound_pairs = load_outbound_pairs(&outbound_pairs_path);
         let circle_path = data_dir.join("circle.json");
         let circle = load_circle(&circle_path);
         let active_path = data_dir.join("active.json");
@@ -593,7 +606,8 @@ impl Content {
             device_keys: device_keys.clone(),
             device_name_override: Mutex::new(None),
             pending_pairs: Mutex::new(Vec::new()),
-            outbound_pairs: Mutex::new(Vec::new()),
+            outbound_pairs: Mutex::new(outbound_pairs),
+            outbound_pairs_path,
             peer_relays: Arc::new(crate::peer_relay::PeerRelayPool::new()),
             active_local_subs: Mutex::new(HashMap::new()),
             prev_pool_connected: Mutex::new(HashSet::new()),
@@ -1098,11 +1112,9 @@ impl Content {
             return;
         }
         // Whether they accepted ours or we accepted theirs, any invite we were
-        // holding for this peer is answered.
-        self.outbound_pairs
-            .lock()
-            .unwrap()
-            .retain(|p| p.npub != npub);
+        // holding for this peer is answered — and spent, so it stops being an
+        // authorisation for a second accept.
+        self.drop_invite(npub);
         let mut circle = self.circle.lock().unwrap();
         if let Some(c) = circle.iter_mut().find(|c| c.npub == npub) {
             if !name.is_empty() {
@@ -1301,9 +1313,21 @@ impl Content {
     /// Route an incoming pair event (the gossiper hands us the pair kinds; they are
     /// point-to-point and never gossiped). A **request** surfaces a pop-up; an
     /// **accept** means a peer accepted *our* request → add them to the Circle.
-    pub fn handle_pair_event(self: &Arc<Self>, event: &Event) {
+    /// Returns whether the event was acted on. `false` means it was refused —
+    /// the caller answers the sender accordingly.
+    pub fn handle_pair_event(self: &Arc<Self>, event: &Event) -> bool {
         let Ok(from) = event.pubkey.to_bech32();
         let name = tag_value(event, "n").unwrap_or_else(|| short_name(&from));
+
+        // Addressed to us? Every pair event names its target in a `p` tag, and
+        // the signature covers it. Without this check an event addressed to
+        // someone else can be captured and replayed at us, and it verifies
+        // perfectly — the signature says who wrote it, never who it was for.
+        if !self.is_addressed_to_us(event) {
+            tracing::warn!(from = %from, "pair: refused, not addressed to this device");
+            return false;
+        }
+
         match event.kind.as_u16() {
             KIND_PAIR_REQUEST => {
                 tracing::info!(from = %from, "pair: request received (awaiting accept)");
@@ -1318,6 +1342,18 @@ impl Content {
                 }
             }
             KIND_PAIR_ACCEPT => {
+                // An accept is only meaningful as the answer to an invite we
+                // sent. Without this, anyone could sign one and add themselves
+                // to the Circle unprompted — which grants relay read/write,
+                // blob reads, and multihop forwarding. The signature proves who
+                // sent it, not that we ever asked.
+                if !self.has_outstanding_invite(&from) {
+                    tracing::warn!(
+                        from = %from,
+                        "pair: refused an accept we never invited"
+                    );
+                    return false;
+                }
                 tracing::info!(from = %from, "pair: our request accepted — added to circle");
                 self.add_to_circle(&from, &name);
                 self.pending_pairs
@@ -1341,8 +1377,32 @@ impl Content {
                     .unwrap()
                     .retain(|p| p.npub != from);
             }
-            _ => {}
+            _ => return false,
         }
+        true
+    }
+
+    /// Does this pair event name **us** in its `p` tag?
+    ///
+    /// `false` when the device key is not loaded yet: we cannot tell, and
+    /// guessing in the permissive direction is what this check exists to stop.
+    fn is_addressed_to_us(&self, event: &Event) -> bool {
+        let Some(keys) = self.device_keys.lock().unwrap().clone() else {
+            return false;
+        };
+        tag_value(event, "p").is_some_and(|target| target == keys.public_key().to_hex())
+    }
+
+    /// Is there an invite to `npub` still outstanding — and recent enough to
+    /// still count? Invites are persisted, so this survives a restart between
+    /// sending the request and the peer answering it.
+    fn has_outstanding_invite(&self, npub: &str) -> bool {
+        let now = now_secs();
+        self.outbound_pairs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.npub == npub && now.saturating_sub(p.since) <= INVITE_VALID_SECS)
     }
 
     /// Scanned a peer's QR: send a signed pair request to their mesh relay. We do
@@ -1375,6 +1435,11 @@ impl Content {
                 name: name.to_string(),
                 since: now_secs(),
             });
+            let snapshot = outbound.clone();
+            drop(outbound);
+            // Persisted before the dial: the accept can arrive after a restart,
+            // and it is only honoured against a recorded invite.
+            save_outbound_pairs(&self.outbound_pairs_path, &snapshot);
         }
         self.dial_pair_event(target_npub, KIND_PAIR_REQUEST, secret)
             .await;
@@ -1387,10 +1452,18 @@ impl Content {
 
     /// Drop a waiting invite — the user withdrew it, or it is being retried.
     pub fn forget_outbound_pair(&self, npub: &str) {
-        self.outbound_pairs
-            .lock()
-            .unwrap()
-            .retain(|p| p.npub != npub);
+        self.drop_invite(npub);
+    }
+
+    /// Forget an invite, on disk as well as in memory. One place, so an invite
+    /// cannot survive on disk as a standing authorisation after being answered.
+    fn drop_invite(&self, npub: &str) {
+        let snapshot = {
+            let mut outbound = self.outbound_pairs.lock().unwrap();
+            outbound.retain(|p| p.npub != npub);
+            outbound.clone()
+        };
+        save_outbound_pairs(&self.outbound_pairs_path, &snapshot);
     }
 
     fn is_in_circle(&self, npub: &str) -> bool {
@@ -2521,6 +2594,20 @@ fn save_library(path: &Path, items: &[LibraryItem]) {
     }
 }
 
+fn load_outbound_pairs(path: &Path) -> Vec<OutboundPairView> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_outbound_pairs(path: &Path, items: &[OutboundPairView]) {
+    if let Ok(json) = serde_json::to_vec(items) {
+        let tmp = path.with_extension("json.tmp");
+        let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
+    }
+}
+
 fn load_circle(path: &Path) -> Vec<CircleContact> {
     std::fs::read(path)
         .ok()
@@ -3057,16 +3144,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let content = Content::open(&dir).unwrap();
 
+        // This device's own identity: a pair event is only honoured if it names
+        // us, so the test has to have one.
+        let us = Keys::generate();
+        content.set_device_keys(&us.secret_key().to_bech32().unwrap());
+        let us_npub = us.public_key().to_bech32().unwrap();
+
         let peer = Keys::generate();
         let peer_npub = peer.public_key().to_bech32().unwrap();
         let content = Arc::new(content);
         content.add_to_circle(&peer_npub, "Peer");
         assert_eq!(content.circle_snapshot().len(), 1);
 
-        // The peer signs a PAIR_REMOVE; handling it drops them from our Circle.
-        let event = build_pair_event(&peer, KIND_PAIR_REMOVE, &peer_npub, "Peer", "")
+        // The peer signs a PAIR_REMOVE addressed to us; handling it drops them.
+        let event = build_pair_event(&peer, KIND_PAIR_REMOVE, &us_npub, "Peer", "")
             .expect("build pair-remove event");
-        content.handle_pair_event(&event);
+        assert!(content.handle_pair_event(&event));
         assert!(
             content.circle_snapshot().is_empty(),
             "peer removed on unpair"

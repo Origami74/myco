@@ -125,6 +125,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Someone can no longer add themselves to your Circle uninvited. A pairing
+  acceptance is only acted on if it answers an invitation you actually sent, and
+  if it was addressed to your device — a signed acceptance meant for somebody
+  else could otherwise be captured and replayed at you. Being in a Circle grants
+  access to your relay and files, so this was worth closing properly.
 - Wi-Fi Aware links stop dying about once a minute. A data path would come up,
   carry traffic, and be torn down by the phone's firmware on a startlingly
   regular 64-second cycle. Radio coexistence was the obvious suspect and turned

@@ -224,7 +224,17 @@ async fn pair(
 
     // Membership is committed **before** we reply, so a peer that dials the relay
     // the instant it sees a 200 is already admitted by the gate.
-    st.content.handle_pair_event(&event);
+    //
+    // A refusal here is an authorisation failure, not a malformed request: the
+    // event was signed and fresh, but it was addressed to someone else, or it
+    // is an accept for an invite we never sent.
+    if !st.content.handle_pair_event(&event) {
+        tracing::warn!(peer = %ip, kind, "auth: pair event refused");
+        return json(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({ "status": "declined", "reason": "not authorised" }),
+        );
+    }
 
     let status = match kind {
         crate::content::KIND_PAIR_ACCEPT => (StatusCode::OK, "paired"),
@@ -303,9 +313,13 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(serve_on(content.clone(), listener));
 
+        // This device's identity — a pair event is only honoured if it names us.
+        let us_keys = nostr::Keys::generate();
+        content.set_device_keys(&us_keys.secret_key().to_bech32().unwrap());
+        let us = us_keys.public_key().to_bech32().unwrap();
+
         // A device we have never seen asks to pair.
         let stranger = nostr::Keys::generate();
-        let us = nostr::Keys::generate().public_key().to_bech32().unwrap();
         let event = crate::content::build_pair_event(
             &stranger,
             crate::content::KIND_PAIR_REQUEST,
@@ -345,6 +359,126 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **An accept nobody asked for must not join the Circle.**
+    ///
+    /// A signature proves who wrote an event, never that we wanted it. Without
+    /// this check anyone could sign a kind-9102, POST it to the one port open to
+    /// strangers, and be admitted — which by default grants relay read/write,
+    /// blob reads, and multihop forwarding. The accept is only honoured against
+    /// an invite we actually sent.
+    #[tokio::test]
+    async fn an_accept_we_never_invited_is_refused() {
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = std::env::temp_dir().join(format!("myco-auth-unsol-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let us_keys = nostr::Keys::generate();
+        content.set_device_keys(&us_keys.secret_key().to_bech32().unwrap());
+        let us = us_keys.public_key().to_bech32().unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on(content.clone(), listener));
+
+        let stranger = nostr::Keys::generate();
+        let accept = crate::content::build_pair_event(
+            &stranger,
+            crate::content::KIND_PAIR_ACCEPT,
+            &us,
+            "Stranger",
+            "",
+        )
+        .unwrap();
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/pair"))
+            .body(serde_json::to_string(&accept).unwrap())
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+        assert!(
+            content.circle_snapshot().is_empty(),
+            "an uninvited accept must not put anyone in the circle"
+        );
+
+        // The same accept *is* honoured once we have actually invited them. The
+        // invite is recorded before the dial, and the dial retries for a minute
+        // against a peer that is not there, so let it run in the background and
+        // wait for the record rather than the delivery.
+        let inviting = content.clone();
+        let target = stranger.public_key().to_bech32().unwrap();
+        tokio::spawn(async move { inviting.send_pair_request(&target, "Stranger", "").await });
+        for _ in 0..50 {
+            if !content.outbound_pairs_snapshot().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !content.outbound_pairs_snapshot().is_empty(),
+            "the invite was recorded"
+        );
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/pair"))
+            .body(serde_json::to_string(&accept).unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(content.circle_snapshot().len(), 1, "the invited peer joins");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pair event addressed to somebody else must not be usable against us.
+    ///
+    /// The signature covers the `p` tag but says nothing about who the event was
+    /// *for*, so one captured off the wire verifies perfectly when replayed at a
+    /// third party.
+    #[tokio::test]
+    async fn a_pair_event_for_someone_else_is_refused() {
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = std::env::temp_dir().join(format!("myco-auth-replay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        content.set_device_keys(&nostr::Keys::generate().secret_key().to_bech32().unwrap());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on(content.clone(), listener));
+
+        // Addressed to a third device, not to us.
+        let stranger = nostr::Keys::generate();
+        let someone_else = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        let event = crate::content::build_pair_event(
+            &stranger,
+            crate::content::KIND_PAIR_REQUEST,
+            &someone_else,
+            "Stranger",
+            "s3cret",
+        )
+        .unwrap();
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/pair"))
+            .body(serde_json::to_string(&event).unwrap())
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+        assert!(
+            content.pending_pairs_snapshot().is_empty(),
+            "a replayed request must not raise a prompt here"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A tampered pair event must be refused. The signature is the only thing
     /// tying a request to an npub, so this is the door itself.
     #[tokio::test]
@@ -359,8 +493,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(serve_on(content.clone(), listener));
 
+        let us_keys = nostr::Keys::generate();
+        content.set_device_keys(&us_keys.secret_key().to_bech32().unwrap());
+        let us = us_keys.public_key().to_bech32().unwrap();
+
         let stranger = nostr::Keys::generate();
-        let us = nostr::Keys::generate().public_key().to_bech32().unwrap();
         let event = crate::content::build_pair_event(
             &stranger,
             crate::content::KIND_PAIR_ACCEPT,
