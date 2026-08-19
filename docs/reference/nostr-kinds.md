@@ -3,13 +3,16 @@
 The Nostr event kinds Myco reads, stores, serves, and replicates. Myco
 **never authors, signs, or publishes** nsite events — it holds and re-emits
 events authored *elsewhere* (by external nsite tooling) and the
-content-addressed blobs they reference. Two families:
+content-addressed blobs they reference. Three families:
 
 1. **nsite content kinds** — the author-signed site manifests the
    gateway/relay/Blossom layer serves and propagates (kinds `15128`, `35128`).
    These are *established facts*, verified from the nsite protocol and the
    reference implementation.
-2. **FIPS discovery kinds** — used by `fips-core` for *future* public-node
+2. **napplet manifest kinds** — the same manifest shape at kinds `5129` /
+   `15129` / `35129` under NIP-5D, plus the tags that make a napplet a program
+   rather than a document. Read by `myco-napplet-runtime`.
+3. **FIPS discovery kinds** — used by `fips-core` for *future* public-node
    peering over the internet (kinds `37195`, `21059`, `10050`). Not needed for
    the offline BLE demo; documented here so the surface is complete.
 
@@ -26,6 +29,9 @@ cited inline.
 | `15128` | nsite root-site manifest | Replaceable | nsite content | **Used** |
 | `35128` | nsite named-site manifest | Param-replaceable (`d`) | nsite content | **Used** |
 | `34128` | legacy per-file nsite event | Param-replaceable (`d`) | nsite content | **Not used** (legacy) |
+| `5129` | napplet snapshot manifest | Regular | napplet | **Used** |
+| `15129` | napplet root manifest | Replaceable | napplet | **Used** |
+| `35129` | napplet named manifest | Param-replaceable (`d`) | napplet | **Used** |
 | `10002` | NIP-65 relay list | Replaceable | discovery hint | Online fallback only |
 | `10063` | BUD-03 user Blossom servers | Replaceable | discovery hint | Online fallback only |
 | `37195` | FIPS overlay advert | Param-replaceable (`d`) | FIPS discovery | Future public peering |
@@ -71,6 +77,22 @@ and [../../reference/site-deck/internal/gateway/handlers.go](../../reference/sit
 | `["title", "<text>"]` | no | Human-readable site title (shown in Library / loading page). |
 | `["description", "<text>"]` | no | Short site description. |
 | `["source", "<http-url>"]` | no | Link to the site's source repo/archive. |
+| `["x", "<hex>", "aggregate"]` | no | The NIP-5A **aggregate hash** over the `path` tags — one content address for the whole file set. |
+
+#### The aggregate hash
+
+`sha256` of the `path` tags rendered as `"<sha256> <abs-path>\n"` lines, sorted
+ascending and concatenated as UTF-8, lowercase hex. Only `path` tags feed it.
+
+Hash-checking each blob proves no file is corrupt. Only the aggregate proves the
+set is *whole* — that what is served is the site its author signed, with nothing
+removed by a re-signing intermediary.
+
+Myco verifies it in `nsite_deck::aggregate`. A manifest whose aggregate
+disagrees with its own `path` tags never imports, syncs, or serves. A manifest
+with **no** aggregate tag is accepted: most published nsites predate the tag and
+every blob is individually hash-verified anyway. Napplets are stricter — see
+below.
 
 The site icon is conventionally the blob mapped at `/favicon.ico`. A custom
 not-found page is the blob mapped at `/404.html`.
@@ -141,6 +163,55 @@ in a `d` tag and the sha256 in an `x` tag. Myco does **not** read or write
 it — Myco is manifest-based (one `15128`/`35128` event maps all paths).
 Documented only so old `34128` events seen on a relay are recognized and
 ignored. (Source: NIP-5A "Legacy Support".)
+
+---
+
+## napplet manifest kinds
+
+Source of truth: [NIP-5D](https://github.com/nostr-protocol/nips/pull/2303) and
+the [NAP registry](https://github.com/napplet/naps). Design:
+[../design/napplet/napplet-runtime.md](../design/napplet/napplet-runtime.md).
+
+A napplet manifest is a NIP-5A manifest — same `path` / `server` / `title` / `d`
+layout — at three different kinds:
+
+| Kind | Class | Meaning |
+| ---- | ----- | ------- |
+| `5129` | Regular | Snapshot: an immutable point-in-time release. |
+| `15129` | Replaceable | Root: an author's latest unnamed napplet. No `d` tag. |
+| `35129` | Param-replaceable | Named: carries a `d` tag identifier. |
+
+> **Not 35128.** The NAP registry README calls a napplet "a NIP-5A manifest, a
+> Nostr event, kind 35128". That names the parent spec and the parent's kind.
+> `35128` is Myco's **nsite** kind; napplets are `5129` / `15129` / `35129`.
+> Worth a one-line correction upstream.
+
+### Added tags
+
+| Tag | Required | Meaning |
+| --- | --- | --- |
+| `["x", "<hex>", "aggregate"]` | **yes** | The napplet's identity, not merely an integrity check. A napplet without it is rejected. |
+| `["requires", "<domain>"]` | no | A NAP capability domain the napplet needs (`relay`, `identity`, `storage`). Shown on the install review screen; grants are recorded per library entry. |
+| `["archetype", "<slug>", "<convention>"]` | no | A role the napplet can be invoked as. The convention is a queryless `napplet:<archetype>/<intent>` identity — NAP-INTENT routes on exact equality over it. |
+| `["config", "<json-schema>"]` | no | Declarative per-napplet configuration. |
+
+**None of the added tags feed the aggregate.** Only `path` tags do. A runtime
+that hashed `requires`, `archetype` or `config` would reject every conformant
+napplet in existence.
+
+### Identity and the single-file rule
+
+A napplet's identity is the `(dTag, aggregateHash)` tuple **computed** by the
+runtime from verified bytes. The napplet never asserts it, and no host or
+gateway supplies it.
+
+Napplets are **single-file**. The build tooling inlines everything into one
+`/index.html`, because the runtime injects those bytes as `iframe.srcdoc` and an
+opaque origin has nowhere to resolve a relative subresource to. A manifest
+listing more than one file is rejected at load rather than inlined at runtime —
+inlining would assemble bytes the author never signed as a unit.
+
+---
 
 > **Note on online-fallback kinds.** When *online*, the sync engine may consult
 > the author's `10002` (NIP-65 relay list) and `10063`
