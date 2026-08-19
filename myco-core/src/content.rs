@@ -259,7 +259,7 @@ pub struct OutboundPairView {
 }
 
 /// Mutual-pairing handshake events, POSTed point-to-point to a peer's **auth
-/// service** at `:4871` (never gossiped, and never stored — the relay refuses
+/// service** at `:4873` (never gossiped, and never stored — the relay refuses
 /// these kinds from every source). Signed by the **device** key, which is the
 /// pairing identity, and carrying a NIP-40 expiry the auth service checks on
 /// receipt. See `docs/design/identity-pairing.md`.
@@ -1434,7 +1434,7 @@ impl Content {
     /// attempt rebuilds (re-signs) the event so its NIP-40 expiration stays fresh
     /// across the retry window.
     ///
-    /// This goes to `:4871`, not the relay: pairing creates the circle that gates
+    /// This goes to `:4873`, not the relay: pairing creates the circle that gates
     /// the content ports, so it does not travel on them
     /// (`reference/thinning-custom-relay.md`, D6). Unlike a relay `OK`, the
     /// response distinguishes *delivered and waiting on them* from *never reached

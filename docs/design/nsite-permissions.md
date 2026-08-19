@@ -43,7 +43,7 @@ The blob plane is the same shape: `myco-blossom` is a generic BUD-01 store and
 takes an access function from `myco-core`, so it stays free of circle knowledge.
 
 Pairing itself is enforced nowhere on the content path, because it does not travel
-there any more — it has its own service on `:4871`
+there any more — it has its own service on `:4873`
 ([identity-pairing.md](./identity-pairing.md)).
 
 ---
@@ -180,7 +180,7 @@ Rate limits aim to stop a runaway or malicious app from saturating a BLE link,
 Over-limit is **slow-down, not hard-fail** where possible (queue/delay rather
 than reject), so a chatty moment degrades gracefully instead of dropping messages.
 
-The auth service on `:4871` follows the same lenient spirit with its own limits,
+The auth service on `:4873` follows the same lenient spirit with its own limits,
 since it is the only port an unpaired device can reach
 ([identity-pairing.md](./identity-pairing.md)).
 

@@ -1,4 +1,4 @@
-//! The **auth plane**: a small HTTP service on `:4871` whose only job is the
+//! The **auth plane**: a small HTTP service on `:4873` whose only job is the
 //! pairing handshake.
 //!
 //! Pairing is what *creates* the circle, and the circle is what gates everything
@@ -46,9 +46,15 @@ use nostr::Event;
 use crate::content::Content;
 
 /// The auth plane's port. A Myco constant, not negotiated: peers agree by running
-/// the same version, which is fine pre-1.0. Chosen just past the relay's 4870 and
-/// clear of 4869, which public Nostr relays commonly take.
-pub const AUTH_PORT: u16 = 4871;
+/// the same version, which is fine pre-1.0.
+///
+/// Clear of every number already spoken for: 4869 is what public Nostr relays
+/// commonly take, 4870 is our relay, 4871 is the LAN/AP lane (and where
+/// pre-4872 Wi-Fi Aware peers still listen), and 4872 is the Aware lane. Those
+/// are UDP and this is TCP, so an overlap would not have collided — but a number
+/// that means two things in one codebase is a trap for whoever next reads a
+/// packet capture.
+pub const AUTH_PORT: u16 = 4873;
 
 /// A signed pair event is a few hundred bytes; anything larger is not one.
 const MAX_BODY: usize = 8 * 1024;

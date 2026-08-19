@@ -17,7 +17,7 @@ content source and how that reach goes transitive), [security.md](./security.md)
 does not authorize).
 
 > **Where pairing lives now.** Pairing is **not** relay traffic. It has its own
-> service, `POST /pair` on `:4871` (§6.2), and it is the only port an unpaired
+> service, `POST /pair` on `:4873` (§6.2), and it is the only port an unpaired
 > device can reach. The content ports — `:4870` relay, `:24243` Blossom — require
 > circle membership with no exceptions. The handshake events and their signatures
 > are unchanged; only where they land changed.
@@ -206,7 +206,7 @@ When you scan a peer's `myco://pair/<base64>` (or open the deep link), the app:
 1. Decodes and validates the npub, memorable name, and `pairSecret`.
 2. Derives `node_addr` and the `fd00::` ULA from the npub (§1) — no network call.
 3. **Initiates the mandatory handshake** against the inviter's on-device pairing
-   endpoint — `POST http://<npub>.fips:4871/pair` (§6.1): echoes `pairSecret` back
+   endpoint — `POST http://<npub>.fips:4873/pair` (§6.1): echoes `pairSecret` back
    over that Noise-encrypted channel, the inviter matches it and confirms.
 4. On a completed handshake, adds two sources to your source set, addressed
    deterministically:
@@ -263,7 +263,7 @@ mesh), so no public relay is required.
    The `pairSecret` is a **long random string** (≈256 bits), **single-use**, and
    optionally **TTL-bounded**.
 2. **B scans once** and posts to **A's pairing endpoint at
-   `http://<npub_A>.fips:4871/pair`** — an **on-device** service, no third party
+   `http://<npub_A>.fips:4873/pair`** — an **on-device** service, no third party
    (§6.2). That channel is already **Noise-XK encrypted and authenticated to A's
    device key** (§1), so B is talking to the real A in confidence. B simply
    **echoes the `pairSecret` back** over it, along with `{npub_B, name}`. No
@@ -311,7 +311,7 @@ pulled eagerly or on demand are propagation concerns — see
 15128 / 35128) flood with a default budget of 3 hops, while the large blobs stay
 pull-only (fetched only when a site is opened).
 
-### 6.2 Where the handshake lands: the auth service on `:4871`
+### 6.2 Where the handshake lands: the auth service on `:4873`
 
 The handshake events and their signatures are unchanged. What changed is where
 they stop.
@@ -325,7 +325,7 @@ Storing it was incidental — nothing ever read those kinds back.
 **Now.** Pairing terminates at its own small HTTP service:
 
 ```
-POST http://<npub>.fips:4871/pair    body: a signed pair event (9101 / 9102 / 9103)
+POST http://<npub>.fips:4873/pair    body: a signed pair event (9101 / 9102 / 9103)
   → 200 {"status":"paired"}      an accept, processed — they are in our circle
   → 200 {"status":"unpaired"}    a remove, processed
   → 202 {"status":"pending"}     a request, waiting on the user
@@ -342,7 +342,7 @@ signed Nostr event because the **signature is the pairing identity proof**.
 | --- | --- |
 | **No stranger writes into the store** | Pairing events are never stored now. With a swappable relay behind us, an incidental write would have handed a stranger a write path into a store we do not own. |
 | **The content ports have no exceptions** | `:4870` and `:24243` require circle membership, checked **before** the WebSocket upgrade. The relay refuses the pairing kinds from *every* source, paired or not. |
-| **One unauthenticated surface** | `:4871` is the only port an unpaired device can reach, so hardening and rate limiting have a single address. |
+| **One unauthenticated surface** | `:4873` is the only port an unpaired device can reach, so hardening and rate limiting have a single address. |
 | **Bootstrap survives a broken content plane** | Relay port taken, backend down or misconfigured — two phones can still pair, which is the one operation that could repair the situation. |
 | **Honest acknowledgements** | HTTP status separates *delivered, waiting on them* from *never reached them*. The old retry loop re-sent 15 times because a relay `OK true` only meant "received"; a `202` now stops it. |
 
@@ -377,7 +377,7 @@ ban that costs a mesh peer anything to replace.
 
 #### Port
 
-`:4871` is a Myco constant, not negotiated: peers agree by running the same
+`:4873` is a Myco constant, not negotiated: peers agree by running the same
 version. That is fine pre-1.0, where a change here is a version bump rather than
 a compatibility problem.
 
@@ -438,7 +438,7 @@ held to the phone is read but ignored, never opened.
 **Where the secret lives.** §6.1 framed the `pairSecret` as echoed back inside the
 Noise-encrypted channel to `<npub_A>.fips`. The implementation keeps that property:
 the scanner/tapper posts a signed pair **request** (kind 9101) to
-`<npub_A>.fips:4871/pair` — already Noise-XK encrypted and authenticated to A —
+`<npub_A>.fips:4873/pair` — already Noise-XK encrypted and authenticated to A —
 carrying the secret. What differs from the doc is *who matches it*: A enforces
 single-use locally, via a small persisted ledger of the secrets it has issued. Each
 presented code mints a fresh secret; it is consumed on first accept and the

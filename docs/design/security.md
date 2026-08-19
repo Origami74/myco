@@ -200,7 +200,7 @@ Three ports are exposed, and only one of them answers a stranger.
 | --- | --- | --- |
 | `4870` | Relay (the mesh proxy's NIP-01 socket) | Circle members only |
 | `24243` | Blossom blob store | Circle members only |
-| `4871` | Auth service — `POST /pair`, nothing else | **Anyone** |
+| `4873` | Auth service — `POST /pair`, nothing else | **Anyone** |
 
 **Open question:** confirm that no other localhost service on the phone is
 inadvertently reachable via FSP port-multiplexing on a paired path, and whether
@@ -222,7 +222,7 @@ Pairing now terminates at its own service ([identity-pairing.md
   which matters on a BLE link.
 - **The relay refuses the pairing kinds from every source**, paired or not.
   Nothing writes control traffic into the event store.
-- **`:4871` is the only unauthenticated surface in the app**, so hardening and
+- **`:4873` is the only unauthenticated surface in the app**, so hardening and
   rate limiting have a single address instead of emerging from a whitelist.
 
 **Revocation closes live connections.** Because admission is checked once, at the
@@ -281,7 +281,7 @@ Pairing is the one moment a human asserts "this is who I think it is."
 - **The trust model is scan-and-confirm over an already-encrypted channel, not
   bare TOFU.** Scanning the QR does not merely bind an npub on faith — it initiates
   the mandatory **invite-pairing handshake** against the inviter's on-device auth
-  service at `<npub>.fips:4871`. That channel is already **Noise-XK authenticated and
+  service at `<npub>.fips:4873`. That channel is already **Noise-XK authenticated and
   encrypted** to the inviter's device key, so the scanner just **echoes the
   `pairSecret` back** inside it; the inviter matches the (single-use) secret and the
   human taps **OK** to confirm the memorable name
@@ -295,7 +295,7 @@ Pairing is the one moment a human asserts "this is who I think it is."
   man-in-the-middle without the private key cannot impersonate the paired peer on
   subsequent connections.
 - **The handshake closes the relay-MITM / malicious-QR gap by default.** Three
-  things stack up: the channel to `<npub>.fips:4871` is Noise-authenticated to the
+  things stack up: the channel to `<npub>.fips:4873` is Noise-authenticated to the
   inviter's key (a passive relay between the two devices learns nothing and cannot
   impersonate either end), the `pairSecret` is a single-use, unguessable random
   string echoed *inside* that encrypted channel (a captured or relayed invite cannot
@@ -391,8 +391,8 @@ capability.
 | **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | Only circle members reach the content ports at all, and **blob upload is off by default per peer** (§3.3), so a peer cannot push bytes onto your disk unless you grant it. Plus: LRU cache (default cap **2 GB**); Library sites are **pinned** (exempt from eviction); per-source relay rate limits (TBD). Junk that fails verification is never stored (§1). |
 | **Identity / link spoofing** | Pretends to be a paired peer | Noise IK/XK over secp256k1; identity is pubkey not MAC; spoof cannot complete handshake (§2). |
 | **Replay** | Re-injects captured datagrams | 2048-entry sliding replay window at both FMP and FSP layers (§2). |
-| **Malicious / relayed QR at pairing** | Tries to bind the attacker's npub as your paired peer | Scan-and-confirm over Noise: the single-use, unguessable `pairSecret` is echoed back inside the Noise-authenticated channel to the inviter's `<npub>.fips:4871` and confirmed by the inviter's OK prompt, so a captured/relayed invite cannot bind (§4). Optional out-of-band safety-string check on top is an open proposal (§4). |
-| **DoS on the auth port** | Floods `:4871`, the one port open to strangers, to burn a BLE radio | Per-source token bucket (1/s, burst 5), a global in-flight ceiling of 8, and an 8 KiB body cap. Over-limit is a delay, not a ban — there is no identity to ban that costs a mesh peer anything to replace (§3.2, [identity-pairing.md §6.2](./identity-pairing.md)). |
+| **Malicious / relayed QR at pairing** | Tries to bind the attacker's npub as your paired peer | Scan-and-confirm over Noise: the single-use, unguessable `pairSecret` is echoed back inside the Noise-authenticated channel to the inviter's `<npub>.fips:4873` and confirmed by the inviter's OK prompt, so a captured/relayed invite cannot bind (§4). Optional out-of-band safety-string check on top is an open proposal (§4). |
+| **DoS on the auth port** | Floods `:4873`, the one port open to strangers, to burn a BLE radio | Per-source token bucket (1/s, burst 5), a global in-flight ceiling of 8, and an 8 KiB body cap. Over-limit is a delay, not a ban — there is no identity to ban that costs a mesh peer anything to replace (§3.2, [identity-pairing.md §6.2](./identity-pairing.md)). |
 | **Stranger writing to your event store** | Gets data into a store you may not own | Pairing kinds are refused on the relay from every source; the handshake never touches the store. Unpaired peers are refused before the WebSocket upgrade (§3.2). |
 | **Revoked peer keeps reading** | An unpaired peer's open subscription keeps streaming | Membership is re-checked on delivery and the connection is dropped, so revocation reaches connections that already exist (§3.2). |
 | **Malicious nsite content** | Untrusted JS in the WebView | Pure-static v1, no capability API; per-nsite origin isolation + CSP; WebView never resolves `.fips` (§5). |
