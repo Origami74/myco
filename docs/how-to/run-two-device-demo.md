@@ -16,9 +16,9 @@ Companion diagrams:
 [03-offline-propagation.svg](../design/diagrams/03-offline-propagation.svg),
 [04-nsite-browse-flow.svg](../design/diagrams/04-nsite-browse-flow.svg).
 For the concepts behind identity, `.fips`/`.nsite`, and the relay+Blossom store,
-see [../design/concepts.md](../design/concepts.md),
-[../design/identity-pairing.md](../design/identity-pairing.md), and
-[../design/propagation.md](../design/propagation.md).
+see [../design/core/concepts.md](../design/core/concepts.md),
+[../design/core/identity-pairing.md](../design/core/identity-pairing.md), and
+[../design/nsite/propagation.md](../design/nsite/propagation.md).
 
 > Design doc for a not-yet-built app. Commands are modelled on the reference
 > checkouts and adapted. Unverifiable specifics are marked **TBD / open**.
@@ -53,7 +53,7 @@ well-known PSM and no "one side is forced to be central" constraint. FIPS
 identifies peers by the in-band pubkey exchange (`[0x00][pubkey:32]`, 33 bytes),
 **not** by MAC, so Android MAC randomization is harmless. (See
 [../../reference/fips/src/transport/ble/io.rs](../../reference/fips/src/transport/ble/io.rs)
-and the BLE specifics in [../design/identity-pairing.md](../design/identity-pairing.md).)
+and the BLE specifics in [../design/core/identity-pairing.md](../design/core/identity-pairing.md).)
 
 For a two-device demo this means **each side reads the other's advertised PSM
 and dials it**. The cross-probe tiebreaker (smaller `node_addr`'s outbound
@@ -97,7 +97,7 @@ restarts. (Persisting the identity in `filesDir` and deriving the FIPS address
 deterministically from the public key are standard FIPS-node behaviour — our
 base nostr-vpn does the same; see
 [reference/nostr-vpn/README.md](../../reference/nostr-vpn/README.md) and
-[../design/concepts.md](../design/concepts.md) "One identity, three derived
+[../design/core/concepts.md](../design/core/concepts.md) "One identity, three derived
 forms".)
 
 No account, no server, no sign-up. Confirm each device shows its own `npub` in
@@ -131,7 +131,7 @@ The intended procedure:
    blob hashes, e.g. `["path","/index.html","<sha256>"]`. A stores and serves
    that signed event unmodified; it does not author or re-sign it.
    (See [reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)
-   and [../design/concepts.md](../design/concepts.md).)
+   and [../design/core/concepts.md](../design/core/concepts.md).)
 2. The site is now reachable on A locally at its nsite host —
    `<npub_author>.nsite` for a root site (resolving to `127.0.0.1`, an A record),
    served by the embedded gateway from the relay (`ws://localhost:4870`) + Blossom
@@ -152,7 +152,7 @@ adb -s <serialA> shell am start -a android.intent.action.VIEW -d "http://<npub_a
 (Launching the site as a fullscreen `NsiteActivity` is the real target; the
 `am start` above is just a loopback smoke test. The WebView never resolves
 `.fips` — only relay/Blossom **sync** traffic uses `.fips`. See
-[../design/concepts.md](../design/concepts.md) "`.fips` vs `.nsite`".)
+[../design/core/concepts.md](../design/core/concepts.md) "`.fips` vs `.nsite`".)
 
 ---
 
@@ -168,7 +168,7 @@ over the mesh. Myco reuses nostr-vpn's QR machinery (CameraX + ML Kit
    payload `myco://pair/<base64>` — **`{ npub, name, pairSecret }`**, where
    `pairSecret` is a long, single-use random string (≈256 bits). It carries
    **no MAC and no PSM**; those are learned later over BLE adverts.
-   (See [../design/identity-pairing.md](../design/identity-pairing.md).)
+   (See [../design/core/identity-pairing.md](../design/core/identity-pairing.md).)
 2. On **B**, open **Scan to pair** and point the camera at A's code. B validates
    the `myco://pair/` prefix, decodes A's npub, then **completes the mandatory
    handshake** against A's on-device `<npubA>.fips` pairing endpoint: B echoes
@@ -176,7 +176,7 @@ over the mesh. Myco reuses nostr-vpn's QR machinery (CameraX + ML Kit
    A acks, and the two are now **mutually paired** — each holds the other, so
    `<npubA>.fips` / `<aliasA>.fips` resolves on B and vice-versa.
 3. Pairing is always this single handshake — there is **no one-way fetch-only
-   scan**. See [../design/identity-pairing.md § 6.1](../design/identity-pairing.md).
+   scan**. See [../design/core/identity-pairing.md § 6.1](../design/core/identity-pairing.md).
 
 Because the handshake is a live round-trip, the two phones must be **reachable when
 B scans** — so in this offline demo bring up the BLE link (Step 6) first, or pair
@@ -246,7 +246,7 @@ to a third device later, even if A is gone. Re-emitting an author-signed manifes
 relay-to-relay is normal relay behaviour, not authoring — B never signs anything.
 Data is self-authenticating (author-signed events, sha256 blobs), so any holder
 is a trustworthy source.
-(See [../design/propagation.md](../design/propagation.md) and
+(See [../design/nsite/propagation.md](../design/nsite/propagation.md) and
 [03-offline-propagation.svg](../design/diagrams/03-offline-propagation.svg).)
 
 ---

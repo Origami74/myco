@@ -4,10 +4,10 @@
 > proxy-owned seen-set and query ids are all in the tree. Remaining open items
 > are marked **TBD / open**.
 
-[Propagation](./propagation.md) specifies how author-signed **nsite manifests**
+[Propagation](../nsite/propagation.md) specifies how author-signed **nsite manifests**
 (kinds 15128/35128) + content-addressed blobs spread and survive partitions. This
 document covers the sibling problem: how an **in-app Nostr client** (e.g.
-[`myco-bitchat`](../../myco-bitchat/README.md)) gets *arbitrary* app events — a
+[`myco-bitchat`](../../../myco-bitchat/README.md)) gets *arbitrary* app events — a
 chat message, a reaction — to the people physically around it, when the only
 relay it can reach is the device's own embedded relay (`ws://localhost:4870`).
 
@@ -35,9 +35,9 @@ one link that is ours to shape.
 | proxy ↔ proxy over `.fips` | Plain NIP-01 **or** a `MESH` envelope (§2) | Nobody else is listening on it |
 
 The Myco-specific code lives in one place: the **mesh relay proxy**
-([`myco-core/src/mesh_relay.rs`](../../myco-core/src/mesh_relay.rs)), which
+([`myco-core/src/mesh_relay.rs`](../../../myco-core/src/mesh_relay.rs)), which
 serves both the loopback socket and the mesh socket and holds the store behind
-it. The store ([`myco-relay`](../../myco-relay/src/lib.rs)) has no mesh, ttl, or
+it. The store ([`myco-relay`](../../../myco-relay/src/lib.rs)) has no mesh, ttl, or
 circle concepts in it at all.
 
 A `MESH` frame arriving on the **loopback** socket is refused with a `NOTICE`.
@@ -46,7 +46,7 @@ which an nsite could otherwise have asked for extra hops.
 
 If a future change wants to put something Myco-shaped on the loopback socket or
 on the backend link, that is not a tweak to this design — it is a reversal of it.
-Background: [`reference/thinning-custom-relay.md`](../../reference/thinning-custom-relay.md).
+Background: [`reference/thinning-custom-relay.md`](../../../reference/thinning-custom-relay.md).
 
 ---
 
@@ -108,7 +108,7 @@ The wrapper is **verb-agnostic**. `["MESH", meta, <anything NIP-01>]` carries
 they are, and it is one grep to find every mesh frame in a log.
 
 The shape lives in
-[`myco-core/src/mesh_wire.rs`](../../myco-core/src/mesh_wire.rs).
+[`myco-core/src/mesh_wire.rs`](../../../myco-core/src/mesh_wire.rs).
 
 ### 2.2 What the metadata carries
 
@@ -173,7 +173,7 @@ Two other shapes were rejected:
 
 A local nsite sets nothing, and **cannot** set anything: it may not send a `MESH`
 frame, so its publishes always originate at the gossiper's default (**3**,
-`DEFAULT_EVENT_TTL` in [`gossip.rs`](../../myco-core/src/gossip.rs)). A single
+`DEFAULT_EVENT_TTL` in [`gossip.rs`](../../../myco-core/src/gossip.rs)). A single
 message key must never change a message's cost by orders of magnitude, so
 per-message reach is not a client-facing knob.
 
@@ -199,7 +199,7 @@ plain `["EVENT", …]` with no envelope, which arrives with no budget.
 | --- | --- | --- |
 | Originating ttl | **3** | How far *my own* events travel. The originator stamps it. |
 | `MAX_EVENT_TTL` | **3** | Clamp on forwarding, so a peer sending `ttl: 255` cannot turn this device into an amplifier. Set to the originate default so own-origin waves aren't clamped by neighbours. |
-| `relay_write_multihop` | per peer, default **on** | A per-peer clamp. Off means an inbound event's budget is treated as 0: store it, show it, never pass it on. See [nsite-permissions.md](./nsite-permissions.md). |
+| `relay_write_multihop` | per peer, default **on** | A per-peer clamp. Off means an inbound event's budget is treated as 0: store it, show it, never pass it on. See [nsite-permissions.md](../nsite/nsite-permissions.md). |
 
 ### Loop safety is the seen-set, not the hop budget
 
@@ -270,7 +270,7 @@ history, so this node keeps it.
 Manifest kinds (15128/35128) travel this same push plane, but with an
 interest-aware download-then-forward policy and an active-version gate rather
 than the plain forward rule above. See
-[nsite-updates.md §4](./nsite-updates.md).
+[nsite-updates.md §4](../nsite/nsite-updates.md).
 
 ---
 
@@ -304,7 +304,7 @@ and NIP-40 GC is not something an arbitrary backend guarantees.
 
 Still to come: **Plane B backlog reconcile on peer contact** as a first-class
 step (`{kinds, since}`, or piggybacking the negentropy reconcile planned for
-manifests, [nsite-layer.md §2.4](./nsite-layer.md)). Today a reappearing peer is
+manifests, [nsite-layer.md §2.4](../nsite/nsite-layer.md)). Today a reappearing peer is
 caught up by replaying open local subscriptions against it, which covers the
 common case but is not the same as a reconcile.
 
@@ -380,14 +380,14 @@ Which kinds an nsite may fan out is a **per-application permission**, to be
 enforced by mapping the WebSocket `Origin` → siteKey → permission record. **v1
 default: all kinds**, with the protocol hop budgets as per-app clamps and lenient
 rate limits — default-allow, no prompts. The Android-style request/grant flow
-comes later. Full model: [nsite-permissions.md](./nsite-permissions.md), which is
+comes later. Full model: [nsite-permissions.md](../nsite/nsite-permissions.md), which is
 still a proposal: the per-app record and the `Origin` mapping are not built yet.
 
 ### Decided — rate limits start lenient
 
 Sane per-`Origin` caps that stop a runaway app from saturating a BLE link without
 throttling normal chat; slow-down over hard-fail. Starting numbers in
-[nsite-permissions.md §5](./nsite-permissions.md).
+[nsite-permissions.md §5](../nsite/nsite-permissions.md).
 
 ### Still open
 
@@ -399,28 +399,28 @@ throttling normal chat; slow-down over hard-fail. Starting numbers in
 - **Negentropy reconcile.** [NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md)
   would settle "what do you have that I don't" in ~log bandwidth, replacing blind
   re-pulls on the pull plane and in manifest sync
-  ([nsite-layer.md §2.4](./nsite-layer.md)). Not implemented, and an external
+  ([nsite-layer.md §2.4](../nsite/nsite-layer.md)). Not implemented, and an external
   relay backend may or may not support it — capability detection is a future
   step. **TBD / open.**
 - **Closest / fastest source selection.** When several reachable peers hold the
   wanted events, prefer the nearer / faster one (and possibly pull different
   slices from different holders in parallel — the data is content-addressed /
   self-authenticating, so any holder will do). Overlaps the multi-source open
-  question in [nsite-layer.md §5.2](./nsite-layer.md). **TBD / open.**
+  question in [nsite-layer.md §5.2](../nsite/nsite-layer.md). **TBD / open.**
 
 ---
 
 ## See also
 
-- [./propagation.md](./propagation.md) — manifest + blob propagation, the
+- [./propagation.md](../nsite/propagation.md) — manifest + blob propagation, the
   store-and-forward layer, source discovery.
-- [./nsite-layer.md](./nsite-layer.md) — the relay/blob backends, gateway, and
+- [./nsite-layer.md](../nsite/nsite-layer.md) — the relay/blob backends, gateway, and
   the negentropy reconcile this would use (§2.1, §2.2, §2.4).
-- [./nsite-permissions.md](./nsite-permissions.md) — the per-peer permissions
+- [./nsite-permissions.md](../nsite/nsite-permissions.md) — the per-peer permissions
   that clamp these planes, and the proposed per-application capability model.
 - [./identity-pairing.md](./identity-pairing.md) — pairing, which no longer
   travels on this plane at all.
-- [../../reference/thinning-custom-relay.md](../../reference/thinning-custom-relay.md) —
+- [../../reference/thinning-custom-relay.md](../../../reference/thinning-custom-relay.md) —
   why the envelope, the seen-set, and the auth plane are shaped this way.
-- [../../myco-bitchat/README.md](../../myco-bitchat/README.md) — the in-app Nostr
+- [../../myco-bitchat/README.md](../../../myco-bitchat/README.md) — the in-app Nostr
   chat client that consumes this.

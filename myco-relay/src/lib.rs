@@ -1,6 +1,6 @@
 //! `myco-relay` — a generic embedded **Nostr relay**: a NIP-01 event store
 //! implementing `nsite-deck`'s [`RelayBackend`] seam. See
-//! `docs/design/nsite-layer.md` §2.1 and `docs/design/event-gossip.md`.
+//! `docs/design/nsite/nsite-layer.md` §2.1 and `docs/design/core/event-gossip.md`.
 //!
 //! This crate holds no Myco concepts — no mesh, no ttl, no circles. The
 //! WebSocket front door that applies those is `myco-core::mesh_relay`, which
@@ -14,7 +14,7 @@
 //!   `(kind, author)` for replaceable and `(kind, author, d-tag)` for addressable.
 //! - **Regular** (e.g. kind 9 chat) — kept **by event id** (many per author), so a
 //!   second message does not overwrite the first. These are typically ephemeral
-//!   (a NIP-40 `expiration` tag, `docs/design/event-gossip.md` §5): they are GC'd
+//!   (a NIP-40 `expiration` tag, `docs/design/core/event-gossip.md` §5): they are GC'd
 //!   on expiry and **not persisted** — chat is memory-only by design.
 //!
 //! The query surface Myco uses is tiny (`{kinds, authors, #d, limit}`), so this is

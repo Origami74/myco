@@ -90,7 +90,7 @@ Vite + React + TS, same shape as `myco-ics` (no applesauce — no relay use).
 
 ### T7 — Docs
 
-`docs/design/deep-links.md`: the URL grammar, why it carries no secrets, the deferred
+`docs/design/core/deep-links.md`: the URL grammar, why it carries no secrets, the deferred
 open state machine, and the gateway fallback rule.
 
 ## Verification

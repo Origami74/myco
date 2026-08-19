@@ -11,7 +11,7 @@ Carl — who has never met that holder — still gets a verified copy of Alice's
 site, because Ben carried it across in between. The app never authors, signs, or
 publishes nsites; it only **stores, serves, and replicates** other people's
 already-signed events and content-addressed blobs. See
-[diagrams/03-offline-propagation.svg](diagrams/03-offline-propagation.svg).
+[diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg).
 
 This document specifies how that works. The single most important boundary it
 draws: **FIPS transport does not do this.** Offline propagation is net-new and
@@ -28,9 +28,9 @@ spanning tree, but only between nodes that have a *live* path at the moment of
 sending. Intermediate nodes route on the destination `node_addr` and cannot read
 the payload (Noise XK end-to-end over FSP, Noise IK hop-by-hop over FMP).
 Crucially, routing is **live-path only — there is no store-and-forward in the
-transport** ([../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md),
-[fips-mesh-layer.md](../../reference/fips/docs/design/fips-mesh-layer.md),
-[fips-spanning-tree.md](../../reference/fips/docs/design/fips-spanning-tree.md)).
+transport** ([../../reference/fips/docs/design/fips-session-layer.md](../../../reference/fips/docs/design/fips-session-layer.md),
+[fips-mesh-layer.md](../../../reference/fips/docs/design/fips-mesh-layer.md),
+[fips-spanning-tree.md](../../../reference/fips/docs/design/fips-spanning-tree.md)).
 
 If Alice is offline or out of range, FIPS cannot reach her, full stop. It will
 not queue your request and deliver it when she reappears. By itself, Layer A
@@ -41,7 +41,7 @@ does not let data survive a partition.
 The behaviour "cache Alice's site and re-serve it to Carl later, offline" is
 **net-new** and is implemented at the nsite/relay layer. The embedded relay
 (`myco-relay`, a plain NIP-01 store + socket) and Blossom server
-([../../reference/site-deck](../../reference/site-deck)) retain peers' signed
+([../../reference/site-deck](../../../reference/site-deck)) retain peers' signed
 events and content-addressed blobs and thereby **become a new source**. When
 Ben's device caches Alice's site, Ben can serve it to Carl over a fresh BLE hop
 even though Alice's original holder is nowhere in sight. The re-emission of
@@ -65,9 +65,9 @@ Blossom blobs instead of bitchat packets.
 The boundary is load-bearing: every time this doc says "propagate", "announce",
 or "pull", it means Layer B riding *on top of* whatever live links Layer A
 happens to provide right now. The two BLE hops in
-[diagrams/03-offline-propagation.svg](diagrams/03-offline-propagation.svg) (Alice→Ben
+[diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg) (Alice→Ben
 at t1, Ben→Carl at t2) need never overlap in time. The two layers are drawn
-side by side in [diagrams/08-two-layer-propagation.svg](diagrams/08-two-layer-propagation.svg).
+side by side in [diagrams/08-two-layer-propagation.svg](../diagrams/08-two-layer-propagation.svg).
 
 ## 2. Hybrid announce / pull design
 
@@ -80,7 +80,7 @@ heavy part (the referenced blobs) lazy and demand-driven.
 
 The unit that propagates is the **author-signed nsite manifest event itself**
 (nsite kinds `15128` root / `35128` named;
-[../../reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)) —
+[../../reference/site-deck/docs/nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md)) —
 small, self-authenticating, and keyed by the *author's* pubkey plus, for named
 sites, the `d` tag. There is **no separate availability-announcement event and no
 new event kind**: a holder that wants to "announce" a site simply re-emits the
@@ -90,7 +90,7 @@ is normal relay behaviour, not authoring, and requires no holder signature.
 - Manifests flood outward with a hop budget. **Proposed default TTL = 5 hops**;
   each forwarder decrements, and TTL=0 is not forwarded (the decrement-and-drop
   discipline mirrors bitchat's `PacketRelayManager`,
-  [../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt](../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt)).
+  [../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt](../../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt)).
 - **Only manifests propagate multi-hop. Blobs stay pull-only** — there is no
   TTL-flood of blobs.
 
@@ -122,7 +122,7 @@ constant chatter, both **strictly neighbour-local (never relayed)**: (1) **eager
 reconcile on a new link** — fire a one-shot reconcile the moment a peer connects
 (bitchat sends a unicast sync ~5 s after a new neighbour appears); and (2) a slow
 **periodic neighbour reconcile** (bitchat ~30 s, bounded to ~100 recent items). See
-§5 for the negentropy mechanics and [../reference/config.md](../reference/config.md)
+§5 for the negentropy mechanics and [../reference/config.md](../../reference/config.md)
 `[propagation]` for the cadence knobs.
 
 ### Pull (fetch content on demand)
@@ -140,7 +140,7 @@ offline-ready before the user next opens them (see
 is pulled from is a *different* key, reached at `<npub_holder>.fips`. A holder's
 relay is queried with `{kinds:[15128 or 35128], authors:[<author_pubkey>]}`. The
 browse lifecycle is detailed in
-[diagrams/04-nsite-browse-flow.svg](diagrams/04-nsite-browse-flow.svg); from
+[diagrams/04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg); from
 propagation's point of view the key facts are: pulls are point-to-point Layer-A
 fetches against a holder, and every pulled object is verified before it is cached
 (§4) — so the pull source need not be the original author or its first holder.
@@ -153,7 +153,7 @@ user actually needs, when they need it.
 
 How does Alice come to receive manifests from nodes she never paired with? Via
 transitive discovery, authorized by a **mutual pairing**. See
-[diagrams/02-pairing-transitive-discovery.svg](diagrams/02-pairing-transitive-discovery.svg).
+[diagrams/02-pairing-transitive-discovery.svg](../diagrams/02-pairing-transitive-discovery.svg).
 
 - **Pairing.** Pairing is **handshake-mandatory and always mutual**. Scanning a
   `myco://pair/<base64>` card (carrying `{ npub, name, pairSecret }`; no MAC/PSM —
@@ -164,7 +164,7 @@ transitive discovery, authorized by a **mutual pairing**. See
   devices a source for the other. The one-time `pairSecret` (a long random string)
   authenticates the handshake but grants no membership or admin authority. A device's npub *is* its FIPS address, so once
   paired Alice can reach Ben's relay (`:4870`) and Blossom (`:24243`) over the
-  mesh. This invite-pairing handshake ([identity-pairing.md § 6.1](./identity-pairing.md))
+  mesh. This invite-pairing handshake ([identity-pairing.md § 6.1](../core/identity-pairing.md))
   is the **only** pairing path. (The device key is only ever a mesh/relay address;
   never an nsite author key.)
 - **Mutual pairing = authorization.** A mutual pairing authorizes Alice to **poll
@@ -175,7 +175,7 @@ transitive discovery, authorized by a **mutual pairing**. See
   just the radio neighbourhood.
 
 This is the social analogue of bitchat's neighbour-gossip TLV
-([../../reference/bitchat-android/docs/ANNOUNCEMENT_GOSSIP.md](../../reference/bitchat-android/docs/ANNOUNCEMENT_GOSSIP.md)),
+([../../reference/bitchat-android/docs/ANNOUNCEMENT_GOSSIP.md](../../../reference/bitchat-android/docs/ANNOUNCEMENT_GOSSIP.md)),
 where a node advertises which peers it is directly connected to. Myco adapts
 the idea to *authorized* polling of a curated peer list rather than unsolicited
 topology gossip — pairing is the consent gate.
@@ -205,7 +205,7 @@ self-authenticating** and integrity is independent of the path it took:
 
 So Carl can verify Alice's site is authentic *even though it arrived via Ben* —
 exactly the property the bottom band of
-[diagrams/03-offline-propagation.svg](diagrams/03-offline-propagation.svg)
+[diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg)
 states: "the data carries its own integrity, independent of the path it took."
 This is what makes "become a new source" sound: any cache is as trustworthy as
 the origin, because trust is in the keys and the hashes, not in the relay.
@@ -227,7 +227,7 @@ Each flooded manifest carries a hop budget (TTL=5, §2). Forwarders decrement an
 drop at zero. As in bitchat's `PacketRelayManager`, relay can be *probabilistic*
 on larger meshes (relay with probability < 1 to thin out redundant copies) while
 small meshes always relay to preserve connectivity
-([../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt](../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt)).
+([../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt](../../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt)).
 A node never relays its own packets and never relays a packet already addressed
 to it.
 
@@ -242,7 +242,7 @@ bandwidth, then each pulls only its missing manifests. It is strictly local
 (neighbour-to-neighbour, not relayed), so it converges content between directly
 connected nodes without wide-area flooding. We pick the Nostr-native NIP-77 over
 bitchat's `REQUEST_SYNC` **Golomb-Coded Set** digest (the conceptual reference,
-[../../reference/bitchat-android/docs/sync.md](../../reference/bitchat-android/docs/sync.md))
+[../../reference/bitchat-android/docs/sync.md](../../../reference/bitchat-android/docs/sync.md))
 because Myco's units are Nostr events and the `negentropy` Rust crate already ships
 in the rust-nostr stack — we are not bitchat-wire-compatible anyway. **Blobs are not
 reconciled**: they stay content-addressed pull-by-sha256.
@@ -294,7 +294,7 @@ propagation policy. Proposed defaults (vetoable):
   node; it can be re-pulled later from any other source that still has it.
 - **Retention horizon for forwarded metadata.** bitchat's store-and-forward uses
   a 12h cache for relayed messages and ages out stale records
-  ([../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/StoreForwardManager.kt](../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/StoreForwardManager.kt)).
+  ([../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/StoreForwardManager.kt](../../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/StoreForwardManager.kt)).
   Myco's analogue: a node stops re-emitting a manifest it no longer holds,
   and re-flood of a given manifest is soft-state; cached *content* lifetime is
   governed by LRU + pinning above, not by a fixed timeout.
@@ -353,6 +353,6 @@ and a cache is a first-class source.
   an open door. The propagator's subscribed kinds/filters are the natural control
   point: **default-deny**, with explicit limits on kinds, rate, storage, and scope,
   gated behind user consent. **TBD / open:** the capability's exact shape and
-  enforcement. See [security.md § 5](./security.md),
+  enforcement. See [security.md § 5](../core/security.md),
   [nsite-layer.md § 7](./nsite-layer.md), and the roadmap "nsite capability API"
   item.

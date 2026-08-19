@@ -56,7 +56,7 @@ it mutual, so apps flow in both directions.
 
 ## For developers
 
-Under the hood, an **app is an [nsite](./design/concepts.md)** — a static web app
+Under the hood, an **app is an [nsite](./design/core/concepts.md)** — a static web app
 published on Nostr. **Installing** an app means syncing and caching its
 author-signed files so it runs offline; **passing it on** is your device
 re-serving those same signed files to the next person. Because your embedded
@@ -110,22 +110,52 @@ plan and [getting started](./getting-started.md) for orientation.
 
 ### Design
 
-The conceptual model, system structure, and the reasoning behind each locked
-decision.
+Design docs are grouped by what they describe: `core/` for the system and its
+identity model, `nsite/` for the content layer, `napplet/` for the app runtime,
+and `fips/` for the transport lanes. Diagrams and UI mockups are shared.
+
+#### `core/` — the system
 
 | Doc | Description |
 | --- | --- |
-| [concepts.md](./design/concepts.md) | Canonical terminology and glossary: device vs nsite-author identity (and the device key's three derived forms), `.fips` vs `.nsite`, what an nsite is, the embedded relay+Blossom, and the Pillars-of-Propagation framing. Read this first. |
-| [architecture.md](./design/architecture.md) | The six-layer single-device stack, the Kotlin↔Rust FFI boundary, the role of the kept TUN, and a per-component reused-vs-net-new provenance table. |
-| [app-shell.md](./design/app-shell.md) | The app/launch model: Myco as the manager app (Library, Pair, Discover, Settings) versus each nsite as its own fullscreen `NsiteActivity` task; `myco://app/<host>` intents, Recents cards via `TaskDescription`, pinned home-screen shortcuts, and per-nsite origin isolation. |
-| [identity-pairing.md](./design/identity-pairing.md) | How a device establishes its identity and how two devices become peers: identity storage, the `myco://pair/<base64>` QR payload, peer-as-data-source, and transitive authorization via invite-pairing — the mandatory, always-mutual handshake (echo a one-time long-random secret over Noise + confirm; v1). |
-| [nsite-layer.md](./design/nsite-layer.md) | The content layer: the embedded relay, Blossom, and localhost gateway; the manifest/URL scheme; the resolve→cache→serve flow; and sync-over-FIPS that pulls a peer's manifest + blobs. |
-| [napplet-runtime.md](./design/napplet-runtime.md) | The app runtime: napplets as NIP-5D manifests over the same NIP-5A shape nsites use, verified resolve into a sandboxed `srcdoc` iframe, the NAP capability seam and its origin-scoped transport, the shared Android-Intent/NAP-INTENT resolver, and `<npub>.fips` relay URLs that make the outbox model work over the mesh. |
-| [propagation.md](./design/propagation.md) | Offline propagation: the live-path (FIPS) vs store-and-forward (nsite) split, the hybrid model (flood the author-signed manifest events, pull blobs on demand), transitive discovery, dedup/anti-loop, and cache retention. |
-| [ble-interop.md](./design/ble-interop.md) | BLE transport strategy: native `AndroidBleIo` (and a macOS `BluestIo` test backend) over fips-core's `BleIo` trait, why L2CAP not GATT, the PSM problem and universal per-peer PSM discovery, MAC randomization, and the foreground-service requirement. |
-| [wifi-aware-interop.md](./design/wifi-aware-interop.md) | Wi-Fi Aware (NAN) bulk-lane strategy: Kotlin raises the data path, fips-core's existing UDP transport dials the link-local address; the two fips-core patches (discovery injection, BLE↔Aware link policy), socket exposure, and why not Wi-Fi Direct. |
-| [security.md](./design/security.md) | Trust model: self-authenticating data, inherited FIPS Noise crypto, dropping the membership roster, scan-and-confirm (handshake-mandatory) pairing, the nsite sandbox, and a threats/mitigations table. |
-| [diagrams/](./design/diagrams/README.md) | The four design diagrams (system layering, pairing & transitive discovery, offline propagation, nsite browse flow) and the established facts baked into them. |
+| [concepts.md](./design/core/concepts.md) | Canonical terminology and glossary: device vs nsite-author identity (and the device key's three derived forms), `.fips` vs `.nsite`, what an nsite is, the embedded relay+Blossom, and the Pillars-of-Propagation framing. Read this first. |
+| [architecture.md](./design/core/architecture.md) | The six-layer single-device stack, the Kotlin↔Rust FFI boundary, the role of the kept TUN, and a per-component reused-vs-net-new provenance table. |
+| [app-shell.md](./design/core/app-shell.md) | The app/launch model: Myco as the manager app (Library, Pair, Discover, Settings) versus each nsite as its own fullscreen `NsiteActivity` task; `myco://app/<host>` intents, Recents cards via `TaskDescription`, pinned home-screen shortcuts, and per-nsite origin isolation. |
+| [deep-links.md](./design/core/deep-links.md) | `myco://app/<host>/<path>`: a link that names an app *and* a place inside it, carries no secrets, and works whether or not the receiving phone has the app yet. |
+| [identity-pairing.md](./design/core/identity-pairing.md) | How a device establishes its identity and how two devices become peers: identity storage, the `myco://pair/<base64>` QR payload, peer-as-data-source, and transitive authorization via invite-pairing — the mandatory, always-mutual handshake (echo a one-time long-random secret over Noise + confirm; v1). |
+| [event-gossip.md](./design/core/event-gossip.md) | Live event gossip: the push and pull planes that get an in-app Nostr client arbitrary app events over the mesh, the `MESH` envelope, the proxy-owned seen-set, and query ids. |
+| [security.md](./design/core/security.md) | Trust model: self-authenticating data, inherited FIPS Noise crypto, dropping the membership roster, scan-and-confirm (handshake-mandatory) pairing, the nsite sandbox, and a threats/mitigations table. |
+
+#### `nsite/` — the content layer
+
+| Doc | Description |
+| --- | --- |
+| [nsite-layer.md](./design/nsite/nsite-layer.md) | The embedded relay, Blossom, and localhost gateway; the manifest/URL scheme; the resolve→cache→serve flow; and sync-over-FIPS that pulls a peer's manifest + blobs. |
+| [propagation.md](./design/nsite/propagation.md) | Offline propagation: the live-path (FIPS) vs store-and-forward (nsite) split, the hybrid model (flood the author-signed manifest events, pull blobs on demand), transitive discovery, dedup/anti-loop, and cache retention. |
+| [nsite-updates.md](./design/nsite/nsite-updates.md) | How a site gets a new version: discovery, staged download, activation, and mesh propagation of the update. |
+| [nsite-permissions.md](./design/nsite/nsite-permissions.md) | Per-peer grants (built) and per-application capabilities (proposed): what a paired peer may do to this node, and what a served nsite may ask for. |
+
+#### `napplet/` — the app runtime
+
+| Doc | Description |
+| --- | --- |
+| [napplet-runtime.md](./design/napplet/napplet-runtime.md) | Napplets as NIP-5D manifests over the same NIP-5A shape nsites use, verified resolve into a sandboxed `srcdoc` iframe, the NAP capability seam and its origin-scoped transport, the shared Android-Intent/NAP-INTENT resolver, and `<npub>.fips` relay URLs that make the outbox model work over the mesh. |
+
+#### `fips/` — transport lanes
+
+| Doc | Description |
+| --- | --- |
+| [ble-interop.md](./design/fips/ble-interop.md) | BLE transport strategy: native `AndroidBleIo` (and a macOS `BluestIo` test backend) over fips-core's `BleIo` trait, why L2CAP not GATT, the PSM problem and universal per-peer PSM discovery, MAC randomization, and the foreground-service requirement. |
+| [wifi-aware-interop.md](./design/fips/wifi-aware-interop.md) | Wi-Fi Aware (NAN) bulk-lane strategy: Kotlin raises the data path, fips-core's existing UDP transport dials the link-local address; the two fips-core patches (discovery injection, BLE↔Aware link policy), socket exposure, and why not Wi-Fi Direct. |
+| [ap-lane.md](./design/fips/ap-lane.md) | The `!FIPS` open access SSID: joining a router's mesh over ordinary UDP when the phone is on such a network. |
+| [usb-transport.md](./design/fips/usb-transport.md) | Proposed, not started: USB/AOA as a high-throughput phone-to-phone transport for seeding large sites. |
+
+#### Shared assets
+
+| Doc | Description |
+| --- | --- |
+| [diagrams/](./design/diagrams/README.md) | The design diagrams (system layering, pairing & transitive discovery, offline propagation, nsite browse flow) and the established facts baked into them. |
+| [mockups/](./design/mockups/) | UI mockups for the Apps drawer, Circle, Settings, Dev screen, QR scan, and the get-an-app flow. |
 
 ### Reference
 
@@ -153,7 +183,7 @@ Task-oriented runbooks for building and demoing the app.
 ## Where to start
 
 - New here? Read [getting-started.md](./getting-started.md), then
-  [concepts.md](./design/concepts.md).
+  [concepts.md](./design/core/concepts.md).
 - Want the build/run plan? See the [roadmap](./roadmap.md).
 - Building it? [how-to/build.md](./how-to/build.md) →
   [how-to/run-two-device-demo.md](./how-to/run-two-device-demo.md).

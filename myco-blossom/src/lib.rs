@@ -1,6 +1,6 @@
 //! `myco-blossom` — a generic embedded **Blossom blob store**: a content-
 //! addressed filesystem store keyed by sha256, implementing `nsite-deck`'s
-//! [`BlobStore`] seam. See `docs/design/nsite-layer.md` §2.2.
+//! [`BlobStore`] seam. See `docs/design/nsite/nsite-layer.md` §2.2.
 //!
 //! This is currently the **only** implementation of that seam, and the default.
 //! A second one that reads through to an external Blossom server is planned but

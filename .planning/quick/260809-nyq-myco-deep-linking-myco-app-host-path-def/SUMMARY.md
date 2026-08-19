@@ -26,7 +26,7 @@ long that takes, across process death and reboots.
 | Deep path + already-open nav | `android/…/NsiteActivity.kt` (`EXTRA_PATH`, `onNewIntent`) |
 | Routing + reconciler | `android/…/MainActivity.kt` |
 | Test app | `myco-dumplings/` (standalone repo) |
-| Design doc | `docs/design/deep-links.md` |
+| Design doc | `docs/design/core/deep-links.md` |
 
 ## Decisions taken during execution
 
@@ -80,4 +80,4 @@ Needs Dumplings deployed to a real nsite host (`npm run deploy`) and two phones.
 **Myco itself not installed.** `myco://` has no handler, so the tap does nothing. Needs
 an `https://` App Link landing page plus clipboard hand-off (sideload/zapstore
 distribution rules out the Play Install Referrer). Rationale for deferring in
-`docs/design/deep-links.md` §5.
+`docs/design/core/deep-links.md` §5.

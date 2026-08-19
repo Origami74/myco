@@ -2,16 +2,16 @@
 
 This doc covers how Myco establishes a device identity and how two devices
 become peers. The central simplification over the upstream
-[nostr-vpn](../../reference/nostr-vpn) design is that Myco has **no network,
+[nostr-vpn](../../../reference/nostr-vpn) design is that Myco has **no network,
 no roster, and no admin**. A "pairing" is not a membership grant — it is just
 the act of learning another peer's npub and treating their relay + Blossom as a
 data source. Everything downstream (mesh address, where to fetch, who to poll)
 is derived deterministically from that one npub.
 
-See [diagram 09 — the two identities (device vs nsite author)](diagrams/09-identity-model.svg)
-and [diagram 02 — Pairing & transitive peer discovery](diagrams/02-pairing-transitive-discovery.svg).
+See [diagram 09 — the two identities (device vs nsite author)](../diagrams/09-identity-model.svg)
+and [diagram 02 — Pairing & transitive peer discovery](../diagrams/02-pairing-transitive-discovery.svg).
 
-Related: [propagation.md](./propagation.md) (how a learned peer becomes a
+Related: [propagation.md](../nsite/propagation.md) (how a learned peer becomes a
 content source and how that reach goes transitive), [security.md](./security.md)
 (key storage threat model, self-authenticating data, what a mutual pairing does and
 does not authorize).
@@ -42,14 +42,14 @@ an author's secret key and never signs on an author's behalf.
 | **ULA IPv6** (`fd00::/8`) | `fd` ‖ `node_addr[0:15]` | what `<npub>.fips` resolves to (AAAA) |
 
 This chain is established in
-[fips-architecture.md](../../reference/fips/docs/design/fips-architecture.md) and
-[fips-ipv6-adapter.md](../../reference/fips/docs/design/fips-ipv6-adapter.md).
+[fips-architecture.md](../../../reference/fips/docs/design/fips-architecture.md) and
+[fips-ipv6-adapter.md](../../../reference/fips/docs/design/fips-ipv6-adapter.md).
 The load-bearing consequence for pairing: **once you have a peer's device npub,
 you can compute where they live on the mesh with no further exchange.** No
 directory, no lookup, no signed announcement. Scanning a QR that carries a device
 npub is sufficient to address that peer's services at `<npub>.fips:4870` (relay)
 and `<npub>.fips:24243` (Blossom), via the local DNS interceptor
-([fips-ipv6-adapter.md](../../reference/fips/docs/design/fips-ipv6-adapter.md)).
+([fips-ipv6-adapter.md](../../../reference/fips/docs/design/fips-ipv6-adapter.md)).
 
 ### 1.1 Device identity vs. nsite author identity (do not conflate)
 
@@ -79,7 +79,7 @@ the app's private `filesDir` (`Context.getFilesDir()`), owned by the Rust core
 - **Generation:** on first run the core generates a fresh keypair if no key file
   exists, mirroring how the nostr-vpn core seeds its data dir on first launch
   (the Android side hands the core a data-dir path —
-  [MainActivity.kt:50–55](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt) —
+  [MainActivity.kt:50–55](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt) —
   and the core is responsible for what lives there).
 - **Scope:** `filesDir` is app-private storage on Android, not world-readable.
   Whether to additionally wrap the key with the Android Keystore / a
@@ -101,7 +101,7 @@ account picker; the single on-disk key *is* the user.
 - Simplifies the FIPS endpoint (one node_addr, one ULA, one advertised service
   UUID), the QR (one npub to show), and the BLE handshake (one pubkey to send in
   the `[0x00][pubkey:32]` pre-handshake exchange —
-  [ble/io.rs](../../reference/fips/src/transport/ble/io.rs)).
+  [ble/io.rs](../../../reference/fips/src/transport/ble/io.rs)).
 - **Multi-persona is a later milestone.** When added, each persona is an
   independent keypair → independent node_addr/ULA → independent Library and source
   set. Personas would not share collected peers by default. Open question:
@@ -118,18 +118,18 @@ change.
 
 - **Camera scanner.** The CameraX + ML Kit `BarcodeScanning` dialog is reused
   as-is:
-  [QrScannerDialog.kt](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt).
+  [QrScannerDialog.kt](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt).
   It is a self-contained Compose component — back-camera preview, QR-only
-  barcode options ([:137–142](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)),
+  barcode options ([:137–142](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)),
   single-emit guard, and an `onScanned: (String) -> String?` callback that
   returns an error string to keep scanning or `null` to accept
-  ([:204–208](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)).
+  ([:204–208](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)).
   Myco changes only what that callback validates (see below).
 - **Deep-link intent.** nostr-vpn already wires a deep-link path: the activity
   reads `intent.dataString` and, if it matches the scheme, dispatches an import
-  action ([MainActivity.kt:274–279](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt),
+  action ([MainActivity.kt:274–279](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt),
   with the same handling in `onNewIntent`,
-  [:389–397](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt)).
+  [:389–397](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt)).
   Myco reuses this structure with its own scheme, so a `myco://` link
   opened from anywhere (a chat, an NFC tag, another app) reaches the same
   add-peer code path as a scanned QR.
@@ -162,25 +162,25 @@ a membership or authorization token. Its unguessable length is the whole defence
 there is no key-exchange ceremony, just **echo-and-match** over the already-encrypted
 mesh channel (§6.1). The `base64`
 is URL-safe, unpadded — matching the encoding nostr-vpn uses for its own payloads
-([invite.rs:10](../../reference/nostr-vpn/crates/nostr-vpn-core/src/invite.rs)).
+([invite.rs:10](../../../reference/nostr-vpn/crates/nostr-vpn-core/src/invite.rs)).
 
 Crucially, the payload carries **no MAC and no PSM**. Those are radio-layer
 details that are (a) volatile (Android MAC randomization) and (b) not needed for
 addressing — FIPS identifies a peer by the pubkey it sends during the BLE
 pre-handshake, not by MAC, and the listener PSM is learned from BLE adverts at
-connect time (see BLE doc / [propagation.md](./propagation.md)). The QR is a
+connect time (see BLE doc / [propagation.md](../nsite/propagation.md)). The QR is a
 *stable, transport-independent* identity; the radio details come over the air.
 
 Validation in the `onScanned` callback is a prefix check, exactly paralleling
 nostr-vpn's `if (!invite.startsWith("nvpn://invite/", …))` guard
-([MainActivity.kt:375–382](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt)) —
+([MainActivity.kt:375–382](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt)) —
 ours checks `myco://pair/` and rejects anything else with "Not a Myco
 peer code."
 
 ### 4.3 Contrast: what we drop from `nvpn://invite/`
 
 nostr-vpn's QR is a **network invite**, not a peer card. Its decoded shape
-([NetworkInvite in invite.rs:19–40](../../reference/nostr-vpn/crates/nostr-vpn-core/src/invite.rs))
+([NetworkInvite in invite.rs:19–40](../../../reference/nostr-vpn/crates/nostr-vpn-core/src/invite.rs))
 carries a versioned, multi-field membership document:
 
 | nvpn://invite/ field | Why Myco drops it |
@@ -192,7 +192,7 @@ carries a versioned, multi-field membership document:
 | `inviterEndpoints[]`, `relays[]` | endpoints derive from npub via `<npub>.fips`; no relay hints needed |
 
 The upstream parser even *requires* an admin to exist
-([invite.rs:89–110](../../reference/nostr-vpn/crates/nostr-vpn-core/src/invite.rs)) —
+([invite.rs:89–110](../../../reference/nostr-vpn/crates/nostr-vpn-core/src/invite.rs)) —
 an invite with no admin is an error. Myco has no such concept. We keep the
 prefix-and-base64 *envelope* shape and the URL-safe-no-pad encoding, and throw
 away the entire membership document inside it. Our envelope decodes to three
@@ -220,12 +220,12 @@ local act — it initiates the secret-echo handshake against the inviter's on-de
 holds the other; see §6). **Both devices must be reachable at pairing time** —
 they're physically together when the QR is scanned, so the BLE link is up.
 Whether anything is actually reachable later is a liveness question resolved over
-FIPS (live-path only; see [propagation.md](./propagation.md)).
+FIPS (live-path only; see [propagation.md](../nsite/propagation.md)).
 
 Why this is safe without authorization: all content the peer serves is
 **self-authenticating** — Nostr events are signed by their (external) author and
 Blossom blobs are content-addressed by SHA-256
-([nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)). A
+([nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md)). A
 malicious or impersonating source cannot forge an nsite whose *author* key it
 doesn't hold, and cannot substitute blob content without changing the hash.
 Re-serving an author's already-signed events is normal relay behaviour and does
@@ -243,7 +243,7 @@ trust cost; verification happens at fetch/serve time, covered in
 Every pairing is **mutual** (§5): completing the handshake makes each side a
 source for the other and additionally authorizes each side to **poll the other
 for their collected peer list**, transitively widening reach (the right half of
-[diagram 02](diagrams/02-pairing-transitive-discovery.svg)).
+[diagram 02](../diagrams/02-pairing-transitive-discovery.svg)).
 
 A mutual pairing is formed by **invite-pairing with a one-time secret** (§6.1) —
 **not** by both parties scanning each other. A single scan plus a
@@ -307,7 +307,7 @@ Once mutually paired:
 
 How the poll is carried, how often, scope/TTL, and whether Carl's content is
 pulled eagerly or on demand are propagation concerns — see
-[propagation.md](./propagation.md). Author-signed manifest events (kinds
+[propagation.md](../nsite/propagation.md). Author-signed manifest events (kinds
 15128 / 35128) flood with a default budget of 3 hops, while the large blobs stay
 pull-only (fetched only when a site is opened).
 
@@ -382,7 +382,7 @@ not identity-bound. Worth noting; not worth building for.
 #### Limits
 
 An open port on a BLE-constrained radio needs its own bounds. In the lenient
-spirit of [nsite-permissions.md](./nsite-permissions.md) — slow down rather than
+spirit of [nsite-permissions.md](../nsite/nsite-permissions.md) — slow down rather than
 hard-fail:
 
 | Limit | Value |

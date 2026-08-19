@@ -219,11 +219,11 @@ with the decisions above:
 - `android/app/src/main/java/app/myco/ui/theme/Theme.kt` — the peer-state colours
 
 ### Design docs
-- `docs/design/ble-interop.md` — BLE role and PSM discovery behaviour, the subject of
+- `docs/design/fips/ble-interop.md` — BLE role and PSM discovery behaviour, the subject of
   the role-decision instrumentation
-- `docs/design/wifi-aware-interop.md` — the Wi-Fi Aware bulk lane (`WIFI_AWARE_PORT`
+- `docs/design/fips/wifi-aware-interop.md` — the Wi-Fi Aware bulk lane (`WIFI_AWARE_PORT`
   4871) and why it is symmetric with no listener/dialer roles
-- `docs/design/identity-pairing.md` — pairing handshake and Circle semantics,
+- `docs/design/core/identity-pairing.md` — pairing handshake and Circle semantics,
   relevant to DIAG-06 and DIAG-07
 - `reference/FIX-TODOS.md` — field-reported TODOs (gitignored path dependency)
 

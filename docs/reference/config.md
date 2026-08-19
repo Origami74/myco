@@ -11,9 +11,9 @@ rosters, join-requests, admin membership, exit-node / WireGuard upstream,
 > **TBD / open**.
 
 For the vocabulary used here (npub / node_addr / fd00::, `.fips` vs `.nsite`,
-Library, nsite) see [concepts.md](../design/concepts.md). For identity and pairing
-see [identity-pairing.md](../design/identity-pairing.md); for the manifest-flood
-TTL and pull-on-demand model see [propagation.md](../design/propagation.md).
+Library, nsite) see [concepts.md](../design/core/concepts.md). For identity and pairing
+see [identity-pairing.md](../design/core/identity-pairing.md); for the manifest-flood
+TTL and pull-on-demand model see [propagation.md](../design/nsite/propagation.md).
 
 ---
 
@@ -32,7 +32,7 @@ secure storage / the Keystore-backed keyfile and the TOML carries only the
 `npub`. The sketch below shows `nsec` inline **only to document the field** —
 mark this **TBD / open**: exact at-rest secret handling is a security decision
 deferred to the identity milestone (see
-[identity-pairing.md](../design/identity-pairing.md)).
+[identity-pairing.md](../design/core/identity-pairing.md)).
 
 Most fields are also exposed as a runtime **settings patch** over the FFI (see
 [ffi-surface.md § Settings patch](./ffi-surface.md#settings-patch)); the TOML is
@@ -130,7 +130,7 @@ enabled = true             # master switch for the L2CAP CoC transport
 
 # ---------------------------------------------------------------------------
 # [wifi_aware] — offline BULK lane, raised beside BLE when both phones have the
-# hardware (docs/design/wifi-aware-interop.md). No new transport type: Kotlin
+# hardware (docs/design/fips/wifi-aware-interop.md). No new transport type: Kotlin
 # raises the Wi-Fi Aware data path and pushes the peer's link-local address,
 # and the ordinary UDP transport dials it. We bind our own port (no
 # PSM-style discovery problem) and leave the data path OPEN (Noise IK is the
@@ -232,7 +232,7 @@ Embedding is the default and earliest path. **Blossom is not pluggable** — it 
 
 These services are exposed to mesh peers over FIPS FSP port-multiplexing at
 `<npub>.fips:4870` and `<npub>.fips:24243` — no separate gateway on a reachable
-path (see [concepts.md](../design/concepts.md) and upstream
+path (see [concepts.md](../design/core/concepts.md) and upstream
 [fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md)).
 The WebView never resolves `.fips`; it loads `npub.nsite` via the localhost
 gateway.
@@ -248,7 +248,7 @@ gateway.
 Self-authenticating data (signed events, content-addressed blobs) means any
 retained item is trustworthy regardless of who served it, so the cache can
 become a new source for later, offline peers
-(see [propagation.md](../design/propagation.md)).
+(see [propagation.md](../design/nsite/propagation.md)).
 
 The **htdocs** serving cache — a derived, path-named cache written on top of the
 blob store for fast static serving (nsite-deck's `current/` optimization) — is
@@ -268,7 +268,7 @@ admin/membership/join-request semantics.
 
 Pairing seeds an entry (QR carries npub + memorable name per the locked QR
 payload `myco://pair/<base64>`; MAC/PSM arrive later over BLE adverts). See
-[identity-pairing.md](../design/identity-pairing.md) and
+[identity-pairing.md](../design/core/identity-pairing.md) and
 [diagram 02](../design/diagrams/02-pairing-transitive-discovery.svg).
 
 ### `[ble]`
@@ -280,7 +280,7 @@ payload `myco://pair/<base64>`; MAC/PSM arrive later over BLE adverts). See
 There is **no `role` or `default_psm` key**: BLE is symmetric per-peer PSM discovery
 — every node both advertises its own OS-assigned PSM and dials the peer's learned PSM
 (`0x0085` survives only as a legacy default). See
-[../design/ble-interop.md](../design/ble-interop.md).
+[../design/fips/ble-interop.md](../design/fips/ble-interop.md).
 
 Android requires API 29+ for L2CAP. The `addr -> PSM` map learned from adverts is
 runtime-only and not persisted. FIPS identifies peers by the in-band pubkey
@@ -343,7 +343,7 @@ Stripped relative to nostr-vpn, per locked decisions:
 - **BLE role.** Resolved in design: every node is **both** peripheral (advertises
   its OS-assigned PSM) and central (dials the peer's learned PSM) — symmetric
   per-peer PSM discovery, with no Linux-central requirement (see
-  [../design/ble-interop.md](../design/ble-interop.md)). What remains open is
+  [../design/fips/ble-interop.md](../design/fips/ble-interop.md)). What remains open is
   per-stack concurrency: whether a given Android radio can advertise, scan, and hold
   L2CAP channels simultaneously. **TBD/open.**
 - **Per-peer trust / blocklist.** Whether `[[peers]]` needs a `blocked` flag or

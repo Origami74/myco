@@ -12,7 +12,7 @@ scratch) into a checked-in design document that reads like the rest of `docs/des
 
 ## Scope
 
-1. Write `docs/design/napplet-runtime.md`, matching the house style of
+1. Write `docs/design/napplet/napplet-runtime.md`, matching the house style of
    `nsite-layer.md` / `deep-links.md`: `# Title`, prose lead, related-doc links, `---`,
    numbered `## N.` sections. No frontmatter.
 2. Carry over in full: the 12 decisions, the resolution pipeline, the architecture
@@ -35,5 +35,5 @@ No code. No `.planning/` roadmap or phases — that is a separate decision.
 
 ## Done when
 
-`docs/design/napplet-runtime.md` exists, is internally consistent, is linked from
+`docs/design/napplet/napplet-runtime.md` exists, is internally consistent, is linked from
 `docs/README.md`, and is committed on `next`.

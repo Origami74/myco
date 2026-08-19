@@ -1,7 +1,7 @@
 # Getting Started
 
 A short orientation to **Myco**. For the full conceptual model read
-[design/concepts.md](./design/concepts.md); for the documentation map see the
+[design/core/concepts.md](./design/core/concepts.md); for the documentation map see the
 [index](./README.md).
 
 > Design doc for a not-yet-built app, written in proposal voice. Open questions
@@ -33,8 +33,8 @@ becomes a new holder** for that site and can re-serve it to others later, even
 fully offline (re-emitting author-signed events relay-to-relay is normal relay
 behaviour, not authorship). The data is self-authenticating (signed events,
 sha256 blobs), so any source is trustworthy regardless of who relayed it. See
-[design/nsite-layer.md](./design/nsite-layer.md) and
-[design/propagation.md](./design/propagation.md).
+[design/nsite/nsite-layer.md](./design/nsite/nsite-layer.md) and
+[design/nsite/propagation.md](./design/nsite/propagation.md).
 
 ## The device identity model
 
@@ -64,8 +64,8 @@ npub plus a one-time `pairSecret` to bootstrap the handshake. Note this device
 npub is a *holder* address: the site
 you fetch from a peer is identified by its own *author* npub, a different key.
 There is one device identity per device in v1; multi-persona is a later
-milestone. See [design/concepts.md](./design/concepts.md) and
-[design/identity-pairing.md](./design/identity-pairing.md).
+milestone. See [design/core/concepts.md](./design/core/concepts.md) and
+[design/core/identity-pairing.md](./design/core/identity-pairing.md).
 
 ## The v1 demo in three sentences
 
@@ -88,5 +88,5 @@ device even if A is gone.
   — the full two-phone, offline, BLE browse runbook.
 - **The phased plan:** [roadmap.md](./roadmap.md) — phases P0–P5 and what comes
   later.
-- **Go deeper:** [design/concepts.md](./design/concepts.md) (terminology) and
-  [design/architecture.md](./design/architecture.md) (the stack).
+- **Go deeper:** [design/core/concepts.md](./design/core/concepts.md) (terminology) and
+  [design/core/architecture.md](./design/core/architecture.md) (the stack).

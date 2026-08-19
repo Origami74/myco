@@ -1,7 +1,7 @@
 //! The four trait seams `nsite-deck` reaches everything else through. It names no
 //! concrete relay, blob store, or transport — these are the boundaries the host
 //! app (`myco-core`) plugs `myco-relay` / `myco-blossom` / a FIPS-or-IP source
-//! into. See `docs/design/nsite-layer.md` §1.
+//! into. See `docs/design/nsite/nsite-layer.md` §1.
 //!
 //! - **storage:** [`RelayBackend`] (manifest events) + [`BlobStore`] (blobs by sha256).
 //! - **transport:** [`PeerSource`] (pull) + [`FanoutSink`] (push) — the latter is a

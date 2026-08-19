@@ -27,7 +27,7 @@ pub enum NativeAppAction {
     /// carries a UDP transport instance (bound socket) for platform-pushed
     /// peers; the Aware radio itself lives in the Android foreground service.
     /// Flipping it while the node runs restarts the node so the transport set
-    /// matches the switch. See docs/design/wifi-aware-interop.md.
+    /// matches the switch. See docs/design/fips/wifi-aware-interop.md.
     SetWifiAwareEnabled { enabled: bool },
 
     // --- site entry / Library (P2) ---
@@ -53,7 +53,7 @@ pub enum NativeAppAction {
     /// Forget a single nsite: remove it from the Library and the Apps grid.
     ForgetNsite { link: String },
     /// Check online relays for newer versions of installed nsites and stage/apply
-    /// them (`docs/design/nsite-updates.md`). Spawn-not-block.
+    /// them (`docs/design/nsite/nsite-updates.md`). Spawn-not-block.
     CheckNsiteUpdates,
     /// Discover nsites on connected Circle peers' relays ("nsites around me"):
     /// query each reachable member's mesh relay for kind 15128/35128 manifests.

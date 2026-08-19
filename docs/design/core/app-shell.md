@@ -7,7 +7,7 @@ vocabulary it builds on (nsite, author vs device key, `.nsite` vs `.fips`, the
 embedded relay + Blossom, the Library), read [concepts.md](./concepts.md) first;
 for where the shell sits in the layer stack, see
 [architecture.md](./architecture.md); for what the WebView actually loads, see
-[nsite-layer.md](./nsite-layer.md); for the trust boundary around nsite content,
+[nsite-layer.md](../nsite/nsite-layer.md); for the trust boundary around nsite content,
 see [security.md](./security.md).
 
 > Design doc for a not-yet-built app, written in proposal voice. Open questions
@@ -159,7 +159,7 @@ app, but Myco **cannot** silently place icons.
 
 Because each nsite is served under its own host (`<host>.nsite`, where `<host>`
 is the author npub or `<pubkeyB36><dTag>` — see [concepts.md](./concepts.md) and
-[nsite-layer.md §3.2](./nsite-layer.md)), each nsite is its **own web origin**.
+[nsite-layer.md §3.2](../nsite/nsite-layer.md)), each nsite is its **own web origin**.
 The WebView therefore **partitions storage, cookies, and `localStorage` per
 nsite automatically** — one nsite's data is isolated from another's by the
 browser's same-origin policy, with no extra bookkeeping in the shell.
@@ -175,7 +175,7 @@ the whole sandbox.
 
 ## 7. How the shell relates to the gateway
 
-The shell launches tasks; the **gateway** (see [nsite-layer.md](./nsite-layer.md))
+The shell launches tasks; the **gateway** (see [nsite-layer.md](../nsite/nsite-layer.md))
 makes them resolvable. The seam between them is one URL:
 
 - `NsiteActivity` resolves its intent (`myco://app/<host>`) to a host
@@ -212,7 +212,7 @@ the Circle:
   Blossom + Library + status wholesale, pinned apps included.
 
 The keep-set is derived through the same **active-manifest** pointer the gateway
-serves from (see [nsite-updates.md §1](./nsite-updates.md)), so a cache wipe
+serves from (see [nsite-updates.md §1](../nsite/nsite-updates.md)), so a cache wipe
 preserves exactly the version currently served, not whatever newest manifest the
 relay happens to hold. A general size-based eviction pass (P5) is still open;
 until then these two explicit actions are the only reclamation path.
@@ -241,7 +241,7 @@ until then these two explicit actions are the only reclamation path.
 - [concepts.md](./concepts.md) — terminology, the Library, `.nsite` vs `.fips`,
   the embedded relay + Blossom.
 - [architecture.md](./architecture.md) — the six-layer stack the shell sits atop.
-- [nsite-layer.md](./nsite-layer.md) — the gateway that serves `http://<host>.nsite`.
+- [nsite-layer.md](../nsite/nsite-layer.md) — the gateway that serves `http://<host>.nsite`.
 - [security.md](./security.md) — nsite sandbox, origin isolation, the
   impersonation/capability trust boundary.
 - [identity-pairing.md](./identity-pairing.md) — QR pairing (`myco://pair/…`),
