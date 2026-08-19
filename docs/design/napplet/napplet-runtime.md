@@ -106,9 +106,13 @@ not a gateway, not a host, and least of all the napplet.
    verify its signature.
 2. Fetch each `path` tag's blob from Blossom by sha256, and verify that
    `sha256(blob)` equals the tag's hash.
-3. Recompute the NIP-5A aggregate over the `path` tags alone, and assert it equals the
-   `["x", "<hex>", "aggregate"]` tag. Only `path` tags feed the aggregate — `config`,
-   `requires` and `archetype` do not.
+3. Recompute the NIP-5A aggregate over the `path` tags alone. Only `path` tags feed it —
+   `config`, `requires` and `archetype` do not. The `["x", "<hex>", "aggregate"]` tag is
+   *corroboration, not the source*: NIP-5D says the runtime recomputes the aggregate and
+   that the tag, **if carried**, must match. A napplet without one still has an identity,
+   and it is the same identity it would have had with the tag present. Requiring the tag
+   would reject conformant napplets for nothing — the author's signature already covers
+   the `path` tags, and every blob is hash-checked against them.
 4. Assemble the verified `/index.html` and inject it as `iframe.srcdoc`, carrying the
    `connect-src` policy as a `<meta http-equiv="Content-Security-Policy">` so it survives
    into the iframe's opaque origin.
@@ -117,11 +121,14 @@ The napplet's identity is the `(dTag, aggregateHash)` tuple **computed** from th
 verified bytes. The runtime assigns it; the napplet never asserts it. Any verification
 failure rejects the load outright — no iframe is ever created from unverified bytes.
 
-**Napplets are single-file.** An opaque origin has nowhere to resolve a relative
-subresource to, which is why the napplet build tooling inlines everything into one
-`index.html`. A manifest describing a multi-file bundle is rejected at load with a clear
-error, rather than rendered partially. The runtime does not inline at load time: that
-would mean assembling bytes the author never signed as a unit.
+**Napplets are single-file.** Not a Myco restriction — NIP-5D's Manifest section says it
+outright: *"A napplet is a single self-contained `/index.html`."* An opaque origin has
+nowhere to resolve a relative subresource to, which is why the build tooling's single-file
+mode inlines everything into one `index.html`. A manifest describing a multi-file bundle is
+therefore not a napplet, and is rejected where the manifest is parsed — before a blob is
+fetched, with an error naming the offending files. The runtime does not inline at load time
+to compensate: that would mean assembling bytes the author never signed as a unit, with the
+aggregate attesting to a file set nobody ever ran.
 
 ### 4.1 Aggregate verification for nsites too
 
@@ -500,7 +507,7 @@ the same revision keeps the two implementations comparable.
 
 Also recorded, and re-audited on change:
 
-- NIP-5D — `nostr-protocol/nips` PR #2303 (living),
+- NIP-5D — `nostr-protocol/nips` PR #2303 (living), read 2026-08-19 at blob `2e8fcc4657`,
 - NIP-5A — `nostr-protocol/nips` master,
 - Kehto's runtime specification — read as a reference implementation, not as authority.
 

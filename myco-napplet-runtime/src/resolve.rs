@@ -6,9 +6,10 @@
 //! failure rejects the load outright — there is no partial render, and no path
 //! from a failed resolve to an iframe.
 //!
-//! The order matters. Signature first, because an unsigned manifest's tags are
-//! whatever an attacker wrote. Aggregate before fetching, because it is free
-//! and it decides identity. Blobs last, because they are the expensive part.
+//! The order matters, and it is NIP-5D's. Signature first, because an unsigned
+//! manifest's tags are whatever an attacker wrote. Then the manifest's own
+//! conformance, including the aggregate — free, and it decides identity. Blobs
+//! last, because they are the expensive part.
 
 use nsite_deck::sync::sha256_hex;
 
@@ -49,30 +50,10 @@ pub async fn resolve(event: nostr::Event, blobs: &dyn BlobStore) -> Result<Resol
         )
     })?;
 
-    // Parses the tags and verifies the aggregate; an aggregate that disagrees
-    // with the path tags never gets as far as a fetch.
+    // Parses and validates the manifest against NIP-5D: the kind, the
+    // single-file rule, the added tags, and the aggregate. Nothing that fails
+    // there gets as far as a fetch.
     let manifest = NappletManifest::from_event(event)?;
-
-    // Napplets are single-file, and this is where that is enforced.
-    //
-    // `srcdoc` gives the iframe an opaque origin, which has nowhere to resolve a
-    // relative subresource to — so a multi-file napplet cannot work, and the
-    // build tooling inlines everything into one `index.html` for exactly this
-    // reason. The runtime does not inline at load time to compensate: that would
-    // assemble bytes the author never signed as a unit, and the aggregate would
-    // be attesting to a file set nobody ever ran.
-    if manifest.paths.len() > 1 {
-        let listed: Vec<&str> = manifest.paths.iter().map(|e| e.path.as_str()).collect();
-        return Err(NappletError::new(
-            NappletErrorCode::MultiFile,
-            format!(
-                "napplets are single-file, but this manifest lists {} files ({}). \
-                 Rebuild it with the napplet plugin's single-file mode.",
-                listed.len(),
-                listed.join(", ")
-            ),
-        ));
-    }
 
     let index = manifest.index_entry().ok_or_else(|| {
         NappletError::new(

@@ -18,11 +18,13 @@
 //! Note what is *not* here: `requires` / `archetype` / `config` do not feed the
 //! aggregate. Only `path` tags do — see [`nsite_deck::aggregate`].
 //!
-//! This layer parses and validates. It does not decide whether a manifest may
-//! *load*: the single-file rule and the `/index.html` requirement are load-time
-//! policy and live in [`crate::resolve`], so that a conformant multi-file
-//! manifest still parses (and can be reported honestly) rather than looking
-//! malformed.
+//! Everything here is conformance, not Myco policy. NIP-5D's Manifest section
+//! says outright: *"A napplet is a single self-contained `/index.html`"* — so a
+//! manifest listing anything else is not a napplet, and this is where that is
+//! settled, before a single blob is fetched.
+//!
+//! Pinned against NIP-5D as of `nostr-protocol/nips` PR #2303, blob
+//! `2e8fcc4657`, read 2026-08-19. Re-audit deliberately on change (design §8).
 
 use nostr::{Event, PublicKey};
 use nsite_deck::aggregate::{aggregate_tag_value, path_entries_of, PathEntry};
@@ -73,9 +75,10 @@ pub struct NappletManifest {
     pub d_tag: Option<String>,
     /// File entries in tag order, exactly as the `path` tags spell them.
     pub paths: Vec<PathEntry>,
-    /// The verified aggregate hash. With [`NappletManifest::d_tag`] this is the
-    /// napplet's identity — assigned by the runtime from verified bytes, never
-    /// asserted by the napplet.
+    /// The aggregate hash, **recomputed** from the `path` tags. With
+    /// [`NappletManifest::d_tag`] this is the napplet's identity — assigned by
+    /// the runtime, never asserted by the napplet or a host. An `x` tag, when
+    /// the manifest carries one, has been checked against this and agreed.
     pub aggregate: String,
     /// `["server", <blossom-url>]` hints, for the online-fetch path.
     pub servers: Vec<String>,
@@ -94,8 +97,10 @@ impl NappletManifest {
     /// Parse and validate a NIP-5D manifest event.
     ///
     /// Does **not** verify the event's signature — [`crate::resolve`] does that
-    /// first, before anything else. Does verify the aggregate, because an
-    /// unverifiable identity is not an identity.
+    /// first, before anything else. Does enforce everything the manifest can be
+    /// judged on by itself: the kind, the kind/`d`-tag invariant, the
+    /// single-file rule, the added tags' shapes, and the aggregate `x` tag when
+    /// one is present.
     pub fn from_event(event: Event) -> Result<Self> {
         let kind = event.kind.as_u16();
         if !is_napplet_kind(kind) {
@@ -107,6 +112,29 @@ impl NappletManifest {
         let paths = path_entries_of(&event);
         if paths.is_empty() {
             return Err(NappletError::invalid_manifest("manifest has no path tags"));
+        }
+
+        // "A napplet is a single self-contained /index.html" — NIP-5D, Manifest.
+        //
+        // Not a Myco restriction: the runtime injects those bytes as
+        // `iframe.srcdoc` under `sandbox="allow-scripts"` with no
+        // `allow-same-origin`, so the document has an opaque origin with nowhere
+        // to resolve a relative subresource to. A multi-file napplet cannot run
+        // anywhere, which is why the build tooling's single-file mode inlines
+        // everything. The runtime does not inline at load to compensate: that
+        // would assemble bytes the author never signed as a unit, and the
+        // aggregate would attest to a file set nobody ever ran.
+        if paths.len() > 1 {
+            let listed: Vec<&str> = paths.iter().map(|e| e.path.as_str()).collect();
+            return Err(NappletError::new(
+                NappletErrorCode::MultiFile,
+                format!(
+                    "a napplet is a single self-contained /index.html, but this manifest \
+                     lists {} files ({}). Rebuild it with the napplet plugin's single-file mode.",
+                    listed.len(),
+                    listed.join(", ")
+                ),
+            ));
         }
 
         let mut d_tag = None;
@@ -172,16 +200,21 @@ impl NappletManifest {
             _ => {}
         }
 
-        // NIP-5A tolerates a missing aggregate; NIP-5D cannot, because the
-        // aggregate *is* the napplet's identity.
-        let declared = aggregate_tag_value(event.tags.iter().map(|t| t.as_slice()))
-            .ok_or_else(|| NappletError::invalid_manifest("manifest has no aggregate x tag"))?;
+        // NIP-5D Identity, step 3: recompute the aggregate from the path tags,
+        // and "if the manifest carries an `x` tag it MUST match". So the tag is
+        // corroboration, not the source — the identity is what the runtime
+        // computes, exactly as it is for a manifest carrying no tag at all.
+        // Requiring the tag would reject conformant napplets for no gain: the
+        // author's signature already covers the path tags, and every blob is
+        // hash-checked against them.
         let computed = nsite_deck::aggregate::compute_aggregate_hash(&paths);
-        if !computed.eq_ignore_ascii_case(&declared) {
-            return Err(NappletError::new(
-                NappletErrorCode::AggregateMismatch,
-                format!("recomputed aggregate {computed} != manifest {declared}"),
-            ));
+        if let Some(declared) = aggregate_tag_value(event.tags.iter().map(|t| t.as_slice())) {
+            if !computed.eq_ignore_ascii_case(&declared) {
+                return Err(NappletError::new(
+                    NappletErrorCode::AggregateMismatch,
+                    format!("recomputed aggregate {computed} != manifest {declared}"),
+                ));
+            }
         }
 
         let author = event.pubkey;
