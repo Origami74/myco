@@ -1,9 +1,9 @@
 # Nostr Event Kinds Reference
 
 The Nostr event kinds Myco reads, stores, serves, and replicates. Myco
-**never authors, signs, or publishes** nsite events — it holds and re-emits
-events authored *elsewhere* (by external nsite tooling) and the
-content-addressed blobs they reference. Three families:
+**never authors, signs, or publishes** nsite or napplet events — it holds and
+re-emits events authored *elsewhere* (by external nsite and napplet tooling) and
+the content-addressed blobs they reference. Three families:
 
 1. **nsite content kinds** — the author-signed site manifests the
    gateway/relay/Blossom layer serves and propagates (kinds `15128`, `35128`).
