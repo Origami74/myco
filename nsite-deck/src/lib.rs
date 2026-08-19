@@ -12,6 +12,7 @@
 //! [`PeerSource`]: seams::PeerSource
 //! [`FanoutSink`]: seams::FanoutSink
 
+pub mod aggregate;
 pub mod base36;
 pub mod content_type;
 pub mod gateway;
@@ -23,6 +24,10 @@ pub mod sync;
 #[cfg(feature = "testing")]
 pub mod testing;
 
+pub use aggregate::{
+    aggregate_tag_value, check_aggregate, compute_aggregate_hash, path_entries, path_entries_of,
+    AggregateCheck, PathEntry,
+};
 pub use gateway::{serve, GatewayResponse, Readiness};
 pub use host::{parse_link, resolve_host, SiteAddr};
 pub use model::{kind_for, site_key, Manifest, KIND_NAMED, KIND_ROOT};
@@ -33,7 +38,9 @@ pub use sync::{import_site, sha256_hex, sync_site, verify_and_store_event, SyncO
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{build_test_site, MemBlobs, MemRelay};
+    use super::testing::{
+        build_test_site, build_test_site_full, MemBlobs, MemRelay, TestAggregate,
+    };
     use super::*;
 
     fn host_for(author: &nostr::PublicKey) -> String {
@@ -136,6 +143,87 @@ mod tests {
             1,
             "an equal-timestamp duplicate does not stack"
         );
+    }
+
+    /// A manifest whose aggregate `x` tag disagrees with its own `path` tags is
+    /// rejected at parse — so it never imports and never serves. This is the
+    /// case per-blob hashing cannot catch: every listed file is intact, but the
+    /// *set* is not the one the author signed.
+    #[tokio::test]
+    async fn corrupt_aggregate_never_imports_or_serves() {
+        let relay = MemRelay::new();
+        let blobs = MemBlobs::new();
+        let site = build_test_site_full(
+            &nostr::Keys::generate(),
+            &[("/index.html", b"<h1>hi</h1>")],
+            None,
+            None,
+            TestAggregate::Corrupt,
+        );
+        let host = host_for(&site.author);
+
+        let err = import_site(&relay, &blobs, site.manifest.clone(), &site.blobs)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("aggregate mismatch"),
+            "unexpected error: {err}"
+        );
+
+        // Even if the manifest reaches the store by another route (a peer's
+        // gossip, say), the gateway refuses to serve it.
+        verify_and_store_event(&relay, site.manifest.clone())
+            .await
+            .unwrap();
+        blobs.put(b"<h1>hi</h1>").await.unwrap();
+        let resp = serve(&relay, &blobs, &host, "/index.html", None).await;
+        assert_ne!(resp.status, 200, "a mismatched aggregate must not serve");
+    }
+
+    /// Lenient the other way: most published nsites predate the aggregate tag.
+    /// Omitting it is not an error — every blob is still hash-verified — so
+    /// those sites keep serving.
+    #[tokio::test]
+    async fn a_missing_aggregate_still_serves() {
+        let relay = MemRelay::new();
+        let blobs = MemBlobs::new();
+        let site = build_test_site_full(
+            &nostr::Keys::generate(),
+            &[("/index.html", b"legacy")],
+            None,
+            None,
+            TestAggregate::Omitted,
+        );
+        let host = host_for(&site.author);
+
+        import_site(&relay, &blobs, site.manifest.clone(), &site.blobs)
+            .await
+            .unwrap();
+        let resp = serve(&relay, &blobs, &host, "/index.html", None).await;
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"legacy");
+
+        let manifest = Manifest::from_event(site.manifest).unwrap();
+        assert_eq!(manifest.aggregate, None);
+    }
+
+    /// A valid site records its verified aggregate — the primitive NIP-5D
+    /// promotes to being a napplet's identity.
+    #[tokio::test]
+    async fn a_valid_aggregate_is_recorded() {
+        let site = build_test_site(&[("/index.html", b"hi"), ("/app.js", b"x")], None, None);
+        let manifest = Manifest::from_event(site.manifest).unwrap();
+        let expected = compute_aggregate_hash(&[
+            PathEntry {
+                path: "/index.html".into(),
+                sha256: sha256_hex(b"hi"),
+            },
+            PathEntry {
+                path: "/app.js".into(),
+                sha256: sha256_hex(b"x"),
+            },
+        ]);
+        assert_eq!(manifest.aggregate.as_deref(), Some(expected.as_str()));
     }
 
     #[tokio::test]
