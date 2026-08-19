@@ -79,7 +79,13 @@ an unpaired peer is refused before the WebSocket upgrade, and the relay rejects
 the pairing kinds from every source so they never reach the event store.
 
 `4871` sits just past the relay's `4870` and clear of `4869`, which public Nostr
-relays commonly take. It is a Myco constant rather than something negotiated;
+relays commonly take.
+
+**Note the overlap.** `4871/udp` is [`LEGACY_UDP_PORT`](../../android/app/src/main/java/app/myco/aware/AwareRadio.kt),
+where pre-`4872` Wi-Fi Aware peers still listen, so the number appears twice in
+this codebase for unrelated reasons. There is no bind conflict — TCP and UDP have
+separate port spaces, and the auth service is TCP — but anyone reading a packet
+capture or a `netstat` should know both exist before concluding one is the other. It is a Myco constant rather than something negotiated;
 peers agree by running the same version.
 
 See [../design/identity-pairing.md](../design/identity-pairing.md) and
