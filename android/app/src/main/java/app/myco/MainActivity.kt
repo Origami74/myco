@@ -13,6 +13,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.drawable.Icon
+import android.net.Uri
 import android.net.VpnService
 import android.nfc.NfcAdapter
 import android.nfc.Tag
@@ -48,11 +49,13 @@ import app.myco.ble.BleRadio
 import app.myco.ble.BleService
 import app.myco.BuildConfig
 import app.myco.core.AppCoreClient
+import app.myco.core.CircleContact
 import app.myco.core.MycoCore
 import app.myco.core.NativeActions
 import app.myco.nfc.NfcReader
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
+import app.myco.share.ExternalShare
 import app.myco.share.MycoLink
 import app.myco.share.NsiteShare
 import app.myco.share.PendingDeepLinks
@@ -78,6 +81,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var core: AppCoreClient
     private val prefs by lazy { getSharedPreferences("myco_prefs", MODE_PRIVATE) }
     private val nfcAdapter by lazy { NfcAdapter.getDefaultAdapter(this) }
+    private val externalShareUris = mutableStateOf<List<Uri>>(emptyList())
 
     /** Hosts with a live [watchPendingLink] coroutine, so resumes don't stack them. */
     private val pendingWatchers = mutableSetOf<String>()
@@ -122,6 +126,7 @@ class MainActivity : ComponentActivity() {
         // system icons legible when the AMOLED scheme is active.
         enableEdgeToEdge()
         core = MycoCore.client(this)
+        captureExternalShare(intent)
         // Restore the mesh-only (no IP fallback) preference into the core.
         core.dispatch(NativeActions.setOfflineOnly(prefs.getBoolean(PREF_OFFLINE_ONLY, false)))
         // (Device name is asserted in onResume, which also covers identity not yet
@@ -194,6 +199,9 @@ class MainActivity : ComponentActivity() {
                             onReplayIntro = {
                                 prefs.edit().putBoolean(PREF_INTRO_SEEN, false).apply()
                             },
+                            externalShareUris = externalShareUris.value,
+                            onExternalShareDismissed = { externalShareUris.value = emptyList() },
+                            onShareToPeer = { uris, peer -> preparePeerShare(uris, peer) },
                         )
                     }
 
@@ -392,7 +400,31 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        captureExternalShare(intent)
         handleDeepLink(intent)
+    }
+
+    /** Receive a photo from another app's Sharesheet without copying it yet. */
+    private fun captureExternalShare(intent: Intent?) {
+        val uris = ExternalShare.uris(intent)
+        if (uris.isEmpty()) return
+        ExternalShare.retainReadAccess(this, intent, uris)
+        externalShareUris.value = uris
+    }
+
+    /**
+     * UX seam for the next transport slice. The current Myco branch has a
+     * hotspot browser transfer, but not yet a native arbitrary-file protocol
+     * over the paired FIPS peer relay, so do not claim that bytes were sent.
+     */
+    private fun preparePeerShare(uris: List<Uri>, peer: CircleContact) {
+        val name = peer.name.ifBlank { "this peer" }
+        val count = if (uris.size == 1) "photo" else "${uris.size} photos"
+        Toast.makeText(
+            this,
+            "Ready to share $count with $name — native peer transfer is the next step",
+            Toast.LENGTH_LONG,
+        ).show()
     }
 
     // --- NFC tap-to-pair (numo-style: we are the card; the other phone reads) ---

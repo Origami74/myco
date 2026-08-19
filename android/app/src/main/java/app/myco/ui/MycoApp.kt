@@ -1,5 +1,6 @@
 package app.myco.ui
 
+import android.net.Uri
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -68,6 +69,7 @@ import androidx.compose.ui.platform.LocalContext
 import app.myco.ui.radioWarnings
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
+import app.myco.core.CircleContact
 import app.myco.core.NativeActions
 import app.myco.hotspot.TransferGate
 import app.myco.nfc.PairPresent
@@ -75,6 +77,7 @@ import app.myco.share.DeviceName
 import app.myco.share.PairSecrets
 import app.myco.ui.screens.PairConnectedDialog
 import app.myco.ui.screens.PairPendingDialog
+import app.myco.ui.screens.PeerShareSheet
 import app.myco.ui.screens.AppsScreen
 import app.myco.ui.screens.CircleScreen
 import app.myco.ui.screens.DevScreen
@@ -124,6 +127,11 @@ fun MycoApp(
     onExitProxyChange: (String) -> Unit = {},
     /** Clears the intro's "already seen" flag so it plays in full again. */
     onReplayIntro: () -> Unit = {},
+    /** Documents received from Android's system Sharesheet. */
+    externalShareUris: List<Uri> = emptyList(),
+    onExternalShareDismissed: () -> Unit = {},
+    /** Selected peer hand-off; the native file transport will plug in here. */
+    onShareToPeer: (List<Uri>, CircleContact) -> Unit = { _, _ -> },
 ) {
     var state by remember { mutableStateOf(client.state()) }
     // Mesh toggle is hoisted here so it survives tab switches.
@@ -349,6 +357,26 @@ fun MycoApp(
                 TextButton(onClick = { TransferGate.decide(req.id, false) }) {
                     Text("Decline", color = MaterialTheme.colorScheme.error)
                 }
+            },
+        )
+    }
+
+    var peerShareVisible by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(externalShareUris) {
+        if (externalShareUris.isNotEmpty()) peerShareVisible = true
+    }
+    if (peerShareVisible && externalShareUris.isNotEmpty()) {
+        PeerShareSheet(
+            state = state,
+            uris = externalShareUris,
+            onDismiss = {
+                peerShareVisible = false
+                onExternalShareDismissed()
+            },
+            onShare = { peer ->
+                peerShareVisible = false
+                onShareToPeer(externalShareUris, peer)
+                onExternalShareDismissed()
             },
         )
     }
