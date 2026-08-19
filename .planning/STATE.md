@@ -89,6 +89,7 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 | 260818-adv | Broadcast the chosen device name in the BLE scan response so Nearby shows it before pairing; fixed inbound-BLE advert attribution via transport_addr | 2026-08-18 | `feat/status-pill-panel` | `.planning/quick/260818-adv-advertised-names/SUMMARY.md` |
 | 260821-cib | CI clones the fips `fix/platform-ble` branch instead of `integration/platform` (same mobile seams, rebased onto fips master, plus BLE PSM/dial-backoff fixes) | 2026-08-21 | `chore/ci-fips-platform-ble` | `.planning/quick/260821-cib-ci-fips-ref-platform-ble/SUMMARY.md` |
 | 260819-nn0 | Napplet runtime design doc: NIP-5D runtime inside Myco, promoted from working notes into `docs/design/` | 2026-08-19 | `next` | `.planning/quick/260819-nn0-promote-napplet-runtime-design-doc/SUMMARY.md` |
+| 260819-nti | Design docs grouped by area: `core/`, `nsite/`, `napplet/`, `fips/`, with every inbound link rewritten | 2026-08-19 | `next` | `.planning/quick/260819-nti-design-docs-by-area/SUMMARY.md` |
 
 ## Deferred Items
 
