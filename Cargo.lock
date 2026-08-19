@@ -2237,6 +2237,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "myco-napplet-runtime"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "myco-napplet-runtime",
+ "nostr",
+ "nsite-deck",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "myco-relay"
 version = "0.0.1"
 dependencies = [
