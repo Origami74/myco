@@ -155,25 +155,25 @@ mod tests {
         }
     }
 
-    /// The algorithm, pinned to a literal: sha256 of the sorted
-    /// `"<sha256> <path>\n"` lines. If this vector ever changes, every published
-    /// napplet and nsite aggregate stops matching — so it is written out rather
-    /// than recomputed by the same code it is testing.
+    /// The algorithm, pinned to the hex the **reference JS implementation**
+    /// produces for the same two files. Recomputing the expected value with the
+    /// same code under test would only prove self-consistency; this constant is
+    /// what proves a manifest published by other tooling verifies here.
+    ///
+    /// Cross-checked against `@kehto/nip/5a`'s `computeAggregateHash`. If it
+    /// ever fails, this implementation diverged from the reference and every
+    /// published aggregate stops matching — do not "fix" it by updating the
+    /// constant.
     #[test]
     fn known_vector() {
-        let a = sha256_hex(b"a");
-        let b = sha256_hex(b"b");
-        let expected = sha256_hex(
-            {
-                let mut lines = vec![format!("{b} /b.txt\n"), format!("{a} /a.txt\n")];
-                lines.sort();
-                lines.concat()
-            }
-            .as_bytes(),
+        let got = compute_aggregate_hash(&[
+            entry("/a.txt", &sha256_hex(b"a")),
+            entry("/b.txt", &sha256_hex(b"b")),
+        ]);
+        assert_eq!(
+            got,
+            "f2ea60d3bfc0af7fb6c6a6107bcbd86ba73c6c35310cfcaca28a58dd1da39411"
         );
-        let got = compute_aggregate_hash(&[entry("/a.txt", &a), entry("/b.txt", &b)]);
-        assert_eq!(got, expected);
-        assert_eq!(got.len(), 64);
     }
 
     #[test]

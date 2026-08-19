@@ -1,16 +1,17 @@
 # Myco — Cargo workspace.
 #
-# Four crates build into one native library (`libmyco_core.so`):
+# Five crates build into one native library (`libmyco_core.so`):
 #   myco-core    — app crate: device identity, embedded FIPS node, JNI/JSON FFI
 #   nsite-deck   — reusable nsite host: gateway + sync + propagator (P2/P3)
 #   myco-relay   — embedded NIP-01 relay (RelayBackend) — nostr-relay-builder (P2)
 #   myco-blossom — embedded Blossom blob store (BlobStore) (P2)
+#   myco-napplet-runtime — NIP-5D napplet runtime: manifests, resolution, seams
 #
 # `fips` is a LOCAL checkout under reference/fips (gitignored), wired as a path
 # dependency. See docs/how-to/build.md.
 [workspace]
 resolver = "2"
-members = ["myco-core", "nsite-deck", "myco-relay", "myco-blossom"]
+members = ["myco-core", "nsite-deck", "myco-relay", "myco-blossom", "myco-napplet-runtime"]
 # `reference/fips` is a path dependency that lives inside the workspace root,
 # which would make it an implicit member: `--workspace` would then lint, test
 # and format fips itself. It is upstream code with its own warnings; keep it a

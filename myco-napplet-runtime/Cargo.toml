@@ -1,0 +1,28 @@
+[package]
+name = "myco-napplet-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# NIP-5D manifests are NIP-5A manifests plus tags, so the shared primitives —
+# the aggregate hash, path-tag parsing, sha256 — come from where NIP-5A already
+# lives rather than being reimplemented here.
+nsite-deck = { path = "../nsite-deck" }
+nostr = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+# A throwaway-key signed-napplet generator for host tests. Off by default.
+testing = ["nsite-deck/testing"]
+
+[dev-dependencies]
+myco-napplet-runtime = { path = ".", features = ["testing"] }
+nsite-deck = { path = "../nsite-deck", features = ["testing"] }
+tokio = { workspace = true, features = ["rt", "macros"] }
