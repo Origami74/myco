@@ -1,114 +1,126 @@
-# Myco v0.5.0
+# Myco v0.6.0
 
-**Released**: 2026-08-09
+**Released**: 2026-08-19
 
-v0.5.0 is about two things: being able to see *why* phones fail to find each
-other, and links that carry you to a place inside an app rather than just to the
-app.
+v0.6.0 is the release where the previous one's instrumentation pays off. v0.5.0
+could tell you *that* peers were failing; this one identifies why the fastest
+lane kept collapsing and fixes it. Alongside that, Myco's data stops being locked
+inside the app: you can point it at a Nostr relay you run and keep using it
+exactly as before.
 
-The peering work in this release is deliberately diagnostic rather than curative.
-Myco could tell you a peer was unreachable but not why, which meant every fix was
-a guess. The Dev tab now reports what the radios are actually doing and what each
-connection attempt did, so the next release can fix causes instead of symptoms.
-Three real bugs fell out of building that instrumentation and are fixed here.
-
-It upgrades from v0.4.2 in place with no data loss, and changes no ports or wire
-formats.
+**This release changes the mesh wire format.** Two phones must both be on v0.6.0
+to exchange anything — an older build and this one will not pass events or pair.
+Everything on the device upgrades in place with no data loss.
 
 ## At a glance
 
-- **Deep links reach inside an app.** `myco://app/<host>/<path>` opens an app at
-  a particular place in it. If you don't have that app, Myco fetches it from
-  whoever nearby is carrying it and then opens it where the link pointed — five
-  seconds later if a peer is in the room, or after a reboot next week if nobody
-  was.
-- **Apps can have their own routes.** A path an app doesn't list as a file now
-  reaches the app's own router instead of a 404.
-- **The Dev tab answers "is it me or is it them"** before you scroll: a radio
-  self-check first, then peers you can expand in place to see why a connection
-  failed — the BLE role chosen, how long discovery took, dropped sends, signal
-  strength, and recent attempts with outcomes and timestamps.
-- **That history survives a force-stop**, so a failure you saw yesterday is still
-  there today.
-- **Distant peers are reachable again.** Anyone who was not a direct neighbour
-  had been unreachable since mesh names were introduced.
-- **Opening the Discover tab no longer installs everything in it.**
-- **Wi-Fi Aware is on out of the box** — a peering lane nobody switches on is a
-  lane that silently never carries anyone.
-- **A first-run intro**: a spark, filaments growing into the Myco mark, and a
-  pupil you fall through into the app.
+- **Wi-Fi Aware links stop dying every minute.** The fast lane was being torn
+  down by phone firmware on a 64-second cycle. It turned out to be Myco's own
+  doing, not radio interference, and teardowns are now roughly one in seven
+  minutes.
+- **Your data can live on a relay you run.** Settings → Storage → Advanced takes
+  a relay URL — [Citrine](https://github.com/greenart7c3/Citrine) on the same
+  phone, or a relay on your own network — and Myco uses it as its store. A
+  Blossom server for app files can be set the same way. Both are optional and off
+  by default.
+- **Pairing has its own door.** Devices you have not paired with can no longer
+  reach the port that serves your apps and messages at all.
+- **Nobody can add themselves to your Circle.** A pairing acceptance is only
+  acted on if it answers an invitation you actually sent.
+- **Apps open without waiting on a slow phone in the room.**
 
-## Links that survive the wait
+## The 64-second death
 
-The interesting half of a deep link is what happens when the app isn't installed.
-The link is kept — through the sync, through the app being swiped away, through
-a reboot — and spent on that app's **first** open, whether Myco opens it for you
-the moment it lands or you tap it in the Apps grid yourself a week later.
+Wi-Fi Aware is the fast lane: two phones talking directly over Wi-Fi with no
+router and no internet. It had a habit of coming up, carrying traffic for about a
+minute, and being killed by the phone's own firmware — then repeating, forever.
 
-Deep links deliberately carry **no pairing secret and no sender identity**. They
-travel through channels nobody controls — a chat message, a printed QR, someone's
-screenshot — so anything inside one is public and replayable, which is the
-opposite of what a pairing secret needs to be. Pairing keeps its own face-to-face
-carrier. Losing the sender hint costs nothing: Myco already asks every peer in
-your Circle in turn, so a link with nobody attached still finds the app through
-whoever happens to have it.
+Radio interference was the obvious suspect. Wi-Fi and Bluetooth share one chip
+and one antenna on these phones, so a Bluetooth scan drowning out a Wi-Fi data
+path is exactly the sort of thing that happens. Backing the Bluetooth scan right
+off changed nothing at all: the teardowns kept coming on the same cycle.
 
-Two things to know before you rely on them:
+The real cause was Myco arguing with itself. It kept re-establishing the same
+peer alternately over Bluetooth and over Wi-Fi Aware, and the firmware answered
+that churn by ending the data path. Myco now leaves a peer alone on Aware instead
+of also dialling it over Bluetooth — and with *both* radios scanning harder than
+before, teardowns dropped from one a minute to one in seven. That the fix works
+while Bluetooth is busiest is what rules interference out for good.
 
-- Android does not make `myco://` links tappable in most chat apps — only
-  `http`/`https` and a few others get that treatment. QR, an NFC tap, and Myco's
-  own scanner are the channels that work today.
-- If Myco itself isn't installed, a `myco://` link does nothing at all. Both need
-  an `https://` companion link, which is not in this release.
+Some churn remains in the first few minutes after launch, when Bluetooth
+legitimately connects a peer before Aware is ready.
 
-Design notes are in
-[docs/design/deep-links.md](https://github.com/Origami74/myco/blob/main/docs/design/deep-links.md).
+## Your data, your relay
 
-## Honest instruments
+Myco keeps everything in a small Nostr relay and blob store built into the app.
+That is still the default and still what most people should use. But it meant
+your apps and messages lived somewhere only Myco could reach.
 
-A fact the app genuinely cannot observe now reads `unknown` rather than guessing
-`off`, and a peer with nothing recorded says so rather than showing a fabricated
-history. That distinction matters more than it sounds: the previous release's
-peering bugs were hunted with inference, and inference is what produced the wrong
-theories.
+The reason it had to be Myco's own relay was that Myco wrote its mesh
+bookkeeping — how far a message should travel, which query it belongs to — *into*
+the messages themselves. Any relay holding that data had to understand Myco. That
+bookkeeping now travels alongside messages rather than inside them, so what gets
+stored is ordinary Nostr, and an ordinary relay can hold it.
 
-The attempt log is written one JSON record per line, so a truncated or damaged
-file costs the damaged lines and not the whole history — and a file that mostly
-fails to parse is copied aside before anything is rewritten, rather than being
-quietly replaced with a shorter one.
+Under **Settings → Storage → Advanced** you can now point Myco at a relay you
+run. It has been confirmed working with Citrine on the same phone. If the relay
+becomes unreachable, Myco says so plainly — with a warning on the Settings screen
+rather than apps that silently refuse to load.
+
+Two things are worth knowing before you switch. Myco trusts a relay you choose to
+check signatures, so only use one you control. And *Delete* only ever clears
+what is on this device; a relay you run is not Myco's to empty, and it says so.
+
+## Pairing became its own thing
+
+Pairing is what creates your Circle, and your Circle is what grants access to
+everything else. Until now it arrived on the same port that serves your apps —
+which meant that port had to stay open to strangers, and every pairing request
+was written into your event store as a side effect.
+
+Pairing now has a service of its own, and it is the only thing an unpaired device
+can reach. The ports that serve your content refuse anyone you have not paired
+with before a connection is even established.
+
+While separating it, one weakness became obvious and is fixed here: a pairing
+*acceptance* used to be taken at face value, so a device could send one unasked
+and land in your Circle. Myco now only acts on an acceptance that answers an
+invitation you actually sent, and that was addressed to your device.
 
 ## Known issues
 
-Nothing in this release fixes the following. The next one is about mesh
-reliability, and it is what the instrumentation above was built for.
-
-- **Phones still do not always connect to every peer around them.** Some devices
-  connect to none, or to one or two out of many nearby. The suspected cause is
-  handshake role selection; it is now being investigated with device evidence
-  rather than guesses.
-- **Peering can stall after a phone's Wi-Fi address rotates**, until the other
-  node's previous entry expires — about a minute. The equivalent Bluetooth case
-  is fixed in this release; the Wi-Fi side is tracked upstream as
-  [fips#130](https://github.com/jmcorgan/fips/issues/130).
-- **The interface can lag while the mesh is syncing.**
-- **The deep-link round trip is unverified across two devices.** Its parts are
-  covered by tests, but the end-to-end path — follow a link on a phone without
-  the app, wait for the mesh fetch, land on the right page — has not yet been
-  run on hardware.
+- **A phone in your pocket finds nobody.** Myco winds its radios down when it is
+  not on screen, so two idle phones in a room will not discover each other until
+  one is opened. This is the largest remaining gap between how the mesh behaves
+  in a test and how it behaves in a day.
+- **Wi-Fi Aware is shut off entirely by deep Doze** on Android 13 and later after
+  a long idle period —
+  [#30](https://github.com/Origami74/myco/issues/30), separate from the teardown
+  fixed above.
+- **Aware links still churn for the first few minutes** after launch.
+- **A custom Blossom server has not been tested against a third-party
+  implementation.** The relay side has been confirmed with Citrine; the blob side
+  has only been run against Myco's own.
+- **A relay shared with another Nostr app will not deliver its messages live.**
+  They arrive when a screen is reopened rather than as they happen. Only affects
+  a relay something else also writes to.
+- Phones still do not always connect to every peer around them.
+- The interface can lag while the mesh is syncing.
 - Exit-node mode still covers proxy-aware apps only; other apps and QUIC/UDP
   traffic keep using the phone's normal connection.
-- On macOS, an exit node's proxy needs allowing through the Application Firewall
-  before it accepts mesh connections.
 
 ## Getting it
 
 - **Android**: install the APK from the
-  [v0.5.0 release](https://github.com/Origami74/myco/releases/tag/v0.5.0),
+  [v0.6.0 release](https://github.com/Origami74/myco/releases/tag/v0.6.0),
   or via [zapstore](https://zapstore.dev/apps/app.myco).
 - **From source**: `cd android && ./gradlew assembleDebug` from a checkout of
-  the v0.5.0 tag. See
+  the v0.6.0 tag. See
   [CONTRIBUTING.md](https://github.com/Origami74/myco/blob/main/CONTRIBUTING.md)
   for build prerequisites.
+
+**Update every phone together.** The mesh wire format changed, so a v0.6.0 phone
+and an older one cannot exchange events or pair.
 
 The full per-release change history lives in
 [CHANGELOG.md](https://github.com/Origami74/myco/blob/main/CHANGELOG.md).
@@ -116,10 +128,9 @@ Issues and discussion at [github.com/Origami74/myco](https://github.com/Origami7
 
 ## Contributors
 
-Thanks to everyone who contributed testing and bug reports — the Discover
-install bug and the distant-peer failure were both found by users rather than by
-tests — and to [@Origami74](https://github.com/Origami74) for maintaining the
-project.
+Thanks to everyone running builds on real phones — the Wi-Fi Aware teardown was
+found and narrowed by watching two devices rather than by any test — and to
+[@Origami74](https://github.com/Origami74) for maintaining the project.
 
 <!--
 This file is published verbatim as the GitHub Release body by
