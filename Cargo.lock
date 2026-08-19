@@ -2136,6 +2136,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "fips",
  "futures-util",
  "hex",
@@ -2149,8 +2150,10 @@ dependencies = [
  "serde",
  "serde_json",
  "simple-dns",
+ "socket2",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2161,15 +2164,11 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "axum",
- "futures-util",
  "hex",
  "nostr",
  "nsite-deck",
  "serde_json",
- "socket2",
  "tokio",
- "tokio-tungstenite 0.24.0",
  "tracing",
 ]
 

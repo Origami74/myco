@@ -50,6 +50,18 @@ data class CacheStatus(
     val relayEvents: Long,
     val blobCount: Long,
     val usedBytes: Long,
+    /** A custom relay is configured, so the built-in event store is not serving. */
+    val externalRelay: Boolean = false,
+    /** A custom Blossom is configured, so the built-in blob store is not serving. */
+    val externalBlobs: Boolean = false,
+)
+
+/** The configured custom relay, and why it is unreachable if it is. */
+data class RelayBackendHealth(
+    /** Empty when the built-in store is in use. */
+    val url: String = "",
+    /** Empty when reachable, or when there is no custom relay. */
+    val error: String = "",
 )
 
 /** A Circle contact: a paired peer we pull nsites from over the mesh. */
@@ -196,6 +208,14 @@ data class AppState(
     /** Invites we sent that are still waiting to be accepted. */
     val outboundPairs: List<OutboundPair> = emptyList(),
     val offlineOnly: Boolean,
+    /** The configured custom relay and whether it can be reached. */
+    val relayBackend: RelayBackendHealth = RelayBackendHealth(),
+    /** The custom relay URL as last saved; may differ from the one in use until restart. */
+    val pendingRelayUrl: String = "",
+    /** The configured custom Blossom and whether it can be reached. */
+    val blobBackend: RelayBackendHealth = RelayBackendHealth(),
+    /** The custom Blossom URL as last saved. */
+    val pendingBlossomUrl: String = "",
     val updateCheck: UpdateCheck = UpdateCheck(),
     val speedtest: SpeedtestStatus = SpeedtestStatus(),
     /** Merged per-identity peer diagnostics rows (DIAG-01/03/04/06). Built once
@@ -280,6 +300,8 @@ data class AppState(
                 relayEvents = cacheJson.optLong("relayEvents"),
                 blobCount = cacheJson.optLong("blobCount"),
                 usedBytes = cacheJson.optLong("usedBytes"),
+                externalRelay = cacheJson.optBoolean("externalRelay"),
+                externalBlobs = cacheJson.optBoolean("externalBlobs"),
             )
             val circleJson = o.optJSONArray("circle")
             val circle = buildList {
@@ -438,6 +460,20 @@ data class AppState(
                 pendingPairRequests = pendingPairRequests,
                 outboundPairs = outboundPairs,
                 offlineOnly = o.optBoolean("offlineOnly"),
+                relayBackend = o.optJSONObject("relayBackend").let { rb ->
+                    RelayBackendHealth(
+                        url = rb?.optString("url").orEmpty(),
+                        error = rb?.optString("error").orEmpty(),
+                    )
+                },
+                pendingRelayUrl = o.optString("pendingRelayUrl"),
+                blobBackend = o.optJSONObject("blobBackend").let { bb ->
+                    RelayBackendHealth(
+                        url = bb?.optString("url").orEmpty(),
+                        error = bb?.optString("error").orEmpty(),
+                    )
+                },
+                pendingBlossomUrl = o.optString("pendingBlossomUrl"),
                 speedtest = o.optJSONObject("speedtest")?.let { s ->
                     SpeedtestStatus(
                         running = s.optBoolean("running"),
@@ -638,6 +674,21 @@ object NativeActions {
 
     /** Discover nsites on connected Circle peers' relays ("nsites around me"). */
     fun searchNsites(): JSONObject = JSONObject().put("type", "search_nsites")
+
+    /**
+     * Point the event store at [url], or back at the built-in store with an
+     * empty string. Applied on the next launch — the backend is chosen when the
+     * content layer is built.
+     */
+    fun setCustomRelay(url: String): JSONObject =
+        JSONObject().put("type", "set_custom_relay").put("url", url)
+
+    /**
+     * Point the blob store at [url], or back at the built-in one with an empty
+     * string. Applied on the next launch, like [setCustomRelay].
+     */
+    fun setCustomBlossom(url: String): JSONObject =
+        JSONObject().put("type", "set_custom_blossom").put("url", url)
 
     /** Toggle mesh-only: when enabled, don't use the public IP relay/Blossom fallback. */
     fun setOfflineOnly(enabled: Boolean): JSONObject =

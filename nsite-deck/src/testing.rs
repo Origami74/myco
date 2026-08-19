@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag};
 
 use crate::model::{KIND_NAMED, KIND_ROOT};
-use crate::seams::{BlobStore, ManifestFilter, RelayBackend};
+use crate::seams::{BlobStore, RelayBackend};
 use crate::sync::sha256_hex;
 
 /// A generated, signed test nsite: its manifest event and the blob bytes it
@@ -116,7 +116,7 @@ fn slot_of(event: &Event) -> Slot {
 
 #[async_trait]
 impl RelayBackend for MemRelay {
-    async fn store_event(&self, event: Event) -> anyhow::Result<bool> {
+    async fn publish(&self, event: Event) -> anyhow::Result<()> {
         let slot = slot_of(&event);
         let mut map = self.events.lock().unwrap();
         let accept = match map.get(&slot) {
@@ -126,38 +126,30 @@ impl RelayBackend for MemRelay {
         if accept {
             map.insert(slot, event);
         }
-        Ok(accept)
+        Ok(())
     }
 
-    async fn get_manifest(
-        &self,
-        kind: u16,
-        author: &PublicKey,
-        d_tag: Option<&str>,
-    ) -> anyhow::Result<Option<Event>> {
-        let slot = (kind, author.to_bytes(), d_tag.map(str::to_string));
-        Ok(self.events.lock().unwrap().get(&slot).cloned())
-    }
-
-    async fn query(&self, filter: &ManifestFilter) -> anyhow::Result<Vec<Event>> {
+    async fn query(&self, filters: &[nostr::Filter]) -> anyhow::Result<Vec<Event>> {
         let map = self.events.lock().unwrap();
         let mut out: Vec<Event> = map
             .values()
-            .filter(|e| filter.kinds.is_empty() || filter.kinds.contains(&e.kind.as_u16()))
-            .filter(|e| filter.authors.is_empty() || filter.authors.contains(&e.pubkey))
             .filter(|e| {
-                filter.d_tags.is_empty()
-                    || event_d_tag(e).is_some_and(|d| filter.d_tags.contains(&d))
+                filters
+                    .iter()
+                    .any(|f| f.match_event(e, nostr::filter::MatchEventOptions::new()))
             })
             .cloned()
             .collect();
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        if let Some(limit) = filter.limit {
+        if let Some(limit) = filters.iter().filter_map(|f| f.limit).min() {
             out.truncate(limit);
         }
         Ok(out)
     }
+}
 
+#[async_trait]
+impl crate::seams::AdminBackend for MemRelay {
     async fn wipe(&self) -> anyhow::Result<()> {
         self.events.lock().unwrap().clear();
         Ok(())

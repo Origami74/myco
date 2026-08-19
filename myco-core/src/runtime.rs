@@ -119,6 +119,12 @@ pub struct AppRuntime {
     data_dir: String,
     rev: u64,
     error: String,
+    /// The custom relay URL as last saved — which is what the settings screen
+    /// should show, even though the running store is still the previous one
+    /// until the app is restarted.
+    pending_relay_url: String,
+    /// The custom Blossom URL as last saved, for the same reason.
+    pending_blossom_url: String,
     identity: IdentityView,
     ble_enabled: bool,
     wifi_aware_enabled: bool,
@@ -200,7 +206,26 @@ impl AppRuntime {
 
         // The content layer (relay + Blossom + gateway + Library) lives for the
         // whole process; it is independent of the node's start/stop lifecycle.
-        let content = Arc::new(Content::open(Path::new(data_dir))?);
+        // The backend is chosen before anything else opens, so the setting has to
+        // come off disk first. A custom relay means the embedded store stays on
+        // disk but stops serving (`reference/thinning-custom-relay.md`, D3).
+        let settings = crate::settings_store::load(Path::new(data_dir));
+        let custom_relay = settings.relay_url().map(|url| {
+            tracing::info!(url, "content: using a custom relay");
+            Arc::new(crate::remote_backend::RemoteBackend::new(url))
+        });
+        let custom_blobs = settings.blossom_url().map(|url| {
+            tracing::info!(url, "content: using a custom blob store");
+            Arc::new(crate::remote_blobs::RemoteBlobStore::new(
+                url,
+                Arc::new(std::sync::Mutex::new(None)),
+            ))
+        });
+        let content = Arc::new(Content::open_with_backends(
+            Path::new(data_dir),
+            custom_relay,
+            custom_blobs,
+        )?);
 
         // The device keypair (same nsec the node uses) is the pairing identity —
         // pair request/accept events are signed with it.
@@ -243,33 +268,34 @@ impl AppRuntime {
         {
             use std::net::SocketAddr;
             let _guard = rt.enter(); // runtime context for TcpListener::from_std
-            let blobs = content.blobs();
+                                     // The mesh Blossom serves *our own* blobs to peers, so it needs the
+                                     // embedded store. With a custom server configured there is nothing
+                                     // local to serve — peers reach that server by its own URL, not
+                                     // through us — so the listener is simply not bound.
+            let blobs = content.blobs_local();
 
             // One shared relay hub backs both the mesh socket and a loopback socket,
             // so a chat event a peer pushes over `.fips` reaches the in-app nsite's
             // live subscription on localhost (shared store + live bus + gossiper).
             // The gossiper fans this device's own nsite events out to Circle peers
             // (docs/design/event-gossip.md).
-            let gossiper: Arc<dyn myco_relay::server::Gossiper> =
+            let gossiper: Arc<dyn crate::mesh_relay::Gossiper> =
                 Arc::new(crate::gossip::MeshGossiper::new(content.clone()));
             // Restrict mesh access to paired (Circle) peers — only the pairing
             // handshake is open, so strangers can request to pair but can't read or
             // push content. Loopback (the in-app WebView) always bypasses the gate.
-            let gate: Arc<dyn myco_relay::server::PeerGate> =
+            let gate: Arc<dyn crate::mesh_relay::PeerGate> =
                 Arc::new(crate::content::CircleGate::new(content.clone()));
-            let hub = myco_relay::server::RelayHub::with_gate(
-                content.relay(),
-                Some(gossiper),
-                Some(gate),
-            );
+            let hub =
+                crate::mesh_relay::RelayHub::with_gate(content.relay(), Some(gossiper), Some(gate));
 
             // Mesh socket: IPV6_V6ONLY `[::]:4870` so it doesn't collide with the
             // loopback bind and is reachable by peers at `ws://<npub>.fips:4870`.
-            match myco_relay::server::bind("[::]:4870".parse::<SocketAddr>().unwrap()) {
+            match crate::mesh_relay::bind("[::]:4870".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
                     let hub = hub.clone();
                     rt.spawn(async move {
-                        if let Err(e) = myco_relay::server::serve_on_hub(hub, listener).await {
+                        if let Err(e) = crate::mesh_relay::serve_on_hub(hub, listener).await {
                             tracing::error!(error = %e, "mesh relay server exited");
                         }
                     });
@@ -282,11 +308,11 @@ impl AppRuntime {
             // Loopback socket: the in-app nsite WebView talks to `ws://localhost:4870`
             // / `ws://127.0.0.1:4870`; the mesh socket is v6only, so serve loopback
             // explicitly. Connections here are classified as `Origin::Local`.
-            match myco_relay::server::bind("127.0.0.1:4870".parse::<SocketAddr>().unwrap()) {
+            match crate::mesh_relay::bind("127.0.0.1:4870".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
                     let hub = hub.clone();
                     rt.spawn(async move {
-                        if let Err(e) = myco_relay::server::serve_on_hub(hub, listener).await {
+                        if let Err(e) = crate::mesh_relay::serve_on_hub(hub, listener).await {
                             tracing::error!(error = %e, "loopback relay server exited");
                         }
                     });
@@ -306,14 +332,59 @@ impl AppRuntime {
                     ));
                 }
             }
-            match myco_blossom::server::bind("[::]:24243".parse::<SocketAddr>().unwrap()) {
+            // The auth plane: the one port open to peers we have never met, and
+            // the only way into the Circle. It has to bind before the content
+            // servers matter — without it a stranger cannot pair at all, and the
+            // relay and Blossom gates below have no exceptions to let them in.
+            // See `reference/thinning-custom-relay.md` (D6).
+            match crate::auth_service::bind(
+                format!("[::]:{}", crate::auth_service::AUTH_PORT)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+            ) {
                 Ok(listener) => {
+                    let content_for_auth = content.clone();
+                    rt.spawn(async move {
+                        if let Err(e) =
+                            crate::auth_service::serve_on(content_for_auth, listener).await
+                        {
+                            tracing::error!(error = %e, "auth service exited");
+                        }
+                    });
+                }
+                Err(e) => {
+                    if !mesh_warning.is_empty() {
+                        mesh_warning.push_str("; ");
+                    }
+                    mesh_warning.push_str(&format!(
+                        "Another app is using port {} — Myco can't accept pairing \
+                         requests, so new peers won't be able to pair with this \
+                         device. ({e})",
+                        crate::auth_service::AUTH_PORT
+                    ));
+                }
+            }
+            match (
+                blobs.clone(),
+                myco_blossom::server::bind("[::]:24243".parse::<SocketAddr>().unwrap()),
+            ) {
+                (None, _) => {
+                    tracing::info!("blossom: not serving, a custom blob store is configured");
+                }
+                (Some(blobs), Ok(listener)) => {
                     // Same paired-only gate for blobs: a mesh source must be a
                     // current Circle member (loopback bypasses). Pairing never
                     // touches Blossom, so there's no handshake exception here.
                     let content_for_blob = content.clone();
-                    let access: myco_blossom::server::AccessFn =
-                        Arc::new(move |ip| content_for_blob.is_paired_ip(ip));
+                    // Reads are granted to every paired peer; uploads are not, so
+                    // the two are answered from different flags on the peer's own
+                    // permission record (D10).
+                    let access: myco_blossom::server::AccessFn = Arc::new(move |ip, op| match op {
+                        myco_blossom::server::BlobOp::Read => content_for_blob.may_read_blobs(ip),
+                        myco_blossom::server::BlobOp::Write => {
+                            content_for_blob.may_upload_blobs(ip)
+                        }
+                    });
                     rt.spawn(async move {
                         if let Err(e) =
                             myco_blossom::server::serve_on_guarded(blobs, listener, access).await
@@ -322,7 +393,7 @@ impl AppRuntime {
                         }
                     });
                 }
-                Err(e) => {
+                (Some(_), Err(e)) => {
                     if !mesh_warning.is_empty() {
                         mesh_warning.push_str("; ");
                     }
@@ -416,6 +487,8 @@ impl AppRuntime {
         Ok(Self {
             app_version: app_version.to_string(),
             data_dir: data_dir.to_string(),
+            pending_relay_url: settings.relay_url().unwrap_or_default(),
+            pending_blossom_url: settings.blossom_url().unwrap_or_default(),
             rev: 0,
             error: mesh_warning,
             identity,
@@ -564,6 +637,8 @@ impl AppRuntime {
             data_dir: String::new(),
             rev: 0,
             error: msg.to_string(),
+            pending_relay_url: String::new(),
+            pending_blossom_url: String::new(),
             identity: IdentityView::default(),
             ble_enabled: false,
             wifi_aware_enabled: false,
@@ -632,7 +707,7 @@ impl AppRuntime {
             NativeAppAction::AddToLibrary { link } => {
                 if let (Some(content), Some(addr)) = (&self.content, nsite_deck::parse_link(&link))
                 {
-                    content.add_to_library(&addr, None, now_secs());
+                    content.add_to_library(&addr, None, crate::content::now_secs());
                 }
                 self.rev += 1;
             }
@@ -716,6 +791,40 @@ impl AppRuntime {
             NativeAppAction::SetOfflineOnly { enabled } => {
                 if let Some(content) = &self.content {
                     content.set_offline_only(enabled);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SetCustomRelay { url } => {
+                let mut settings = crate::settings_store::load(Path::new(&self.data_dir));
+                settings.custom_relay_url = Some(url.clone());
+                match crate::settings_store::save(Path::new(&self.data_dir), &settings) {
+                    // Takes effect at the next launch; the store in use right now
+                    // does not change under the running content layer.
+                    Ok(()) => {
+                        self.pending_relay_url = settings.relay_url().unwrap_or_default();
+                        tracing::info!(url, "settings: custom relay saved");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "settings: could not save the custom relay");
+                        self.error = format!("Could not save the relay setting: {e}");
+                    }
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SetCustomBlossom { url } => {
+                // Read-modify-write: the two settings share a file, so writing
+                // one from a stale struct would silently clear the other.
+                let mut settings = crate::settings_store::load(Path::new(&self.data_dir));
+                settings.custom_blossom_url = Some(url.clone());
+                match crate::settings_store::save(Path::new(&self.data_dir), &settings) {
+                    Ok(()) => {
+                        self.pending_blossom_url = settings.blossom_url().unwrap_or_default();
+                        tracing::info!(url, "settings: custom blossom saved");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "settings: could not save the custom blossom");
+                        self.error = format!("Could not save the blob store setting: {e}");
+                    }
                 }
                 self.rev += 1;
             }
@@ -1309,6 +1418,18 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.is_offline_only())
                 .unwrap_or(false),
+            relay_backend: self
+                .content
+                .as_ref()
+                .map(|c| c.relay_health())
+                .unwrap_or_default(),
+            pending_relay_url: self.pending_relay_url.clone(),
+            blob_backend: self
+                .content
+                .as_ref()
+                .map(|c| c.blobs_health())
+                .unwrap_or_default(),
+            pending_blossom_url: self.pending_blossom_url.clone(),
             update_check: self
                 .content
                 .as_ref()
@@ -1457,20 +1578,12 @@ fn seed_default_sites(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) {
             tracing::warn!(link, "default site link did not parse; skipping seed");
             continue;
         };
-        content.add_to_library(&addr, None, now_secs());
+        content.add_to_library(&addr, None, crate::content::now_secs());
         rt.spawn(content.clone().open_site(addr, None));
     }
     if let Err(e) = std::fs::write(&marker, b"1\n") {
         tracing::warn!(error = %e, "could not write default-seed marker");
     }
-}
-
-/// Seconds since the Unix epoch (Library `added_at` timestamps).
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Milliseconds since the Unix epoch, passed to `merge_peers` (reserved for
@@ -1496,6 +1609,52 @@ mod tests {
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("myco-test-{}-{}", std::process::id(), tag))
+    }
+
+    /// The action tag the app sends has to be the one the reducer accepts.
+    ///
+    /// It was not: the helper sent `"SetCustomRelay"` while the enum is tagged
+    /// snake_case, so every save was rejected as an unparseable action and the
+    /// setting silently never persisted. Nothing in Rust or Kotlin catches that
+    /// on its own — the two halves only meet at this string.
+    #[test]
+    fn saving_a_custom_relay_persists_it() {
+        let dir = temp_dir("set-custom-relay");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "test");
+
+        // Exactly the JSON `NativeActions.setCustomRelay` builds.
+        let state = rt.dispatch_json(r#"{"type":"set_custom_relay","url":"ws://10.0.0.5:4869"}"#);
+        assert!(
+            !state.contains("invalid action JSON"),
+            "the app's tag must deserialize: {state}"
+        );
+        assert_eq!(
+            crate::settings_store::load(&dir).relay_url().as_deref(),
+            Some("ws://10.0.0.5:4869"),
+            "the URL must reach settings.json"
+        );
+
+        // And an empty URL clears it, which is how the dialog goes back to the
+        // built-in store.
+        // The Blossom setting shares the file, so saving one must not clear the
+        // other — a read-modify-write, not a fresh struct.
+        rt.dispatch_json(r#"{"type":"set_custom_blossom","url":"http://10.0.0.5:24242"}"#);
+        let both = crate::settings_store::load(&dir);
+        assert_eq!(both.relay_url().as_deref(), Some("ws://10.0.0.5:4869"));
+        assert_eq!(both.blossom_url().as_deref(), Some("http://10.0.0.5:24242"));
+
+        rt.dispatch_json(r#"{"type":"set_custom_relay","url":""}"#);
+        let after = crate::settings_store::load(&dir);
+        assert!(after.relay_url().is_none());
+        assert_eq!(
+            after.blossom_url().as_deref(),
+            Some("http://10.0.0.5:24242"),
+            "clearing the relay must leave the blob store alone"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -16,6 +16,12 @@ content source and how that reach goes transitive), [security.md](./security.md)
 (key storage threat model, self-authenticating data, what a mutual pairing does and
 does not authorize).
 
+> **Where pairing lives now.** Pairing is **not** relay traffic. It has its own
+> service, `POST /pair` on `:4873` (§6.2), and it is the only port an unpaired
+> device can reach. The content ports — `:4870` relay, `:24243` Blossom — require
+> circle membership with no exceptions. The handshake events and their signatures
+> are unchanged; only where they land changed.
+
 ## 1. One device identity = three derived forms
 
 Myco reuses the FIPS unification: a single Nostr keypair is the **device
@@ -200,8 +206,8 @@ When you scan a peer's `myco://pair/<base64>` (or open the deep link), the app:
 1. Decodes and validates the npub, memorable name, and `pairSecret`.
 2. Derives `node_addr` and the `fd00::` ULA from the npub (§1) — no network call.
 3. **Initiates the mandatory handshake** against the inviter's on-device pairing
-   endpoint at `<npub>.fips` (§6.1): echoes `pairSecret` back over that
-   Noise-encrypted channel, the inviter matches it and confirms.
+   endpoint — `POST http://<npub>.fips:4873/pair` (§6.1): echoes `pairSecret` back
+   over that Noise-encrypted channel, the inviter matches it and confirms.
 4. On a completed handshake, adds two sources to your source set, addressed
    deterministically:
    - relay at `<npub>.fips:4870`
@@ -256,14 +262,14 @@ mesh), so no public relay is required.
    `<npub_A>.fips` is derivable from `npub_A` (§1), so the token carries no address.
    The `pairSecret` is a **long random string** (≈256 bits), **single-use**, and
    optionally **TTL-bounded**.
-2. **B scans once** and opens a connection to **A's pairing endpoint at
-   `<npub_A>.fips`** — an **on-device** endpoint (an FSP port or a channel on the
-   embedded relay; no third party). That channel is already **Noise-XK encrypted and
-   authenticated to A's device key** (§1), so B is talking to the real A in
-   confidence. B simply **echoes the `pairSecret` back** over it, along with
-   `{npub_B, name}`. No key-exchange protocol is needed: because the secret is a long
-   random string, echoing it *inside the encrypted channel* reveals nothing to anyone
-   else and cannot be guessed.
+2. **B scans once** and posts to **A's pairing endpoint at
+   `http://<npub_A>.fips:4873/pair`** — an **on-device** service, no third party
+   (§6.2). That channel is already **Noise-XK encrypted and authenticated to A's
+   device key** (§1), so B is talking to the real A in confidence. B simply
+   **echoes the `pairSecret` back** over it, along with `{npub_B, name}`. No
+   key-exchange protocol is needed: because the secret is a long random string,
+   echoing it *inside the encrypted channel* reveals nothing to anyone else and
+   cannot be guessed.
 3. **A matches the secret** against the one it generated (single-use, not yet
    redeemed) and shows a **confirm prompt** — B's npub + memorable name — that A's
    user taps **OK** to accept. A then **acks** (+ A's memorable name), marks the
@@ -302,8 +308,98 @@ Once mutually paired:
 How the poll is carried, how often, scope/TTL, and whether Carl's content is
 pulled eagerly or on demand are propagation concerns — see
 [propagation.md](./propagation.md). Author-signed manifest events (kinds
-15128 / 35128) flood with a default TTL of 5 hops, while the large blobs stay
+15128 / 35128) flood with a default budget of 3 hops, while the large blobs stay
 pull-only (fetched only when a site is opened).
+
+### 6.2 Where the handshake lands: the auth service on `:4873`
+
+#### Two checks before anything is acted on
+
+A valid signature proves **who wrote** an event. It says nothing about who the
+event was *for*, and nothing about whether we wanted it. Both gaps are checked
+explicitly:
+
+- **Addressed to us.** Every pair event names its target in a `p` tag. An event
+  addressed to a third device verifies perfectly when replayed at us, so one
+  captured off the wire would otherwise be usable against anyone.
+- **An accept answers an invite.** A `pair-accept` is only honoured while a
+  matching invite from us is outstanding, and an invite is spent once answered.
+  Without this, anyone could sign an accept and add themselves to the Circle
+  unprompted — which grants relay read/write, blob reads, and multihop
+  forwarding by default.
+
+Invites are persisted, so an accept that arrives after a restart is still
+honoured, and expire after a week so an unanswered one does not remain a
+standing authorisation. A refused event is answered `403`.
+
+
+The handshake events and their signatures are unchanged. What changed is where
+they stop.
+
+**Before.** The three pairing kinds were published to the peer's **relay** port
+as ordinary Nostr events. The relay's access gate whitelisted exactly those kinds
+so an unpaired stranger could publish them and only them, and the event was
+verified, written into the event store, and then handed to the pairing handler.
+Storing it was incidental — nothing ever read those kinds back.
+
+**Now.** Pairing terminates at its own small HTTP service:
+
+```
+POST http://<npub>.fips:4873/pair    body: a signed pair event (9101 / 9102 / 9103)
+  → 200 {"status":"paired"}      an accept, processed — they are in our circle
+  → 200 {"status":"unpaired"}    a remove, processed
+  → 202 {"status":"pending"}     a request, waiting on the user
+  → 403 {"status":"declined"}    bad signature, expired, or not a pairing event
+  → 429 / 503                    rate limited or at capacity
+```
+
+One route, not three: the kind is already in the event. The payload stays a
+signed Nostr event because the **signature is the pairing identity proof**.
+
+#### What this buys
+
+| | |
+| --- | --- |
+| **No stranger writes into the store** | Pairing events are never stored now. With a swappable relay behind us, an incidental write would have handed a stranger a write path into a store we do not own. |
+| **The content ports have no exceptions** | `:4870` and `:24243` require circle membership, checked **before** the WebSocket upgrade. The relay refuses the pairing kinds from *every* source, paired or not. |
+| **One unauthenticated surface** | `:4873` is the only port an unpaired device can reach, so hardening and rate limiting have a single address. |
+| **Bootstrap survives a broken content plane** | Relay port taken, backend down or misconfigured — two phones can still pair, which is the one operation that could repair the situation. |
+| **Honest acknowledgements** | HTTP status separates *delivered, waiting on them* from *never reached them*. The old retry loop re-sent 15 times because a relay `OK true` only meant "received"; a `202` now stops it. |
+
+#### No tokens, no sessions
+
+FIPS addresses are identity-derived and Noise-IK authenticated, so the mesh
+address already **is** the authenticated npub. The service's only output is a
+circle membership commit, which is exactly what the content gates read. A session
+credential would be redundant crypto over an already-authenticated channel.
+
+Membership is committed **before** the reply is sent, so a peer that dials the
+relay the instant it sees a `200` is already admitted.
+
+That reasoning stops holding if Myco ever gates a transport whose addresses are
+not identity-bound. Worth noting; not worth building for.
+
+#### Limits
+
+An open port on a BLE-constrained radio needs its own bounds. In the lenient
+spirit of [nsite-permissions.md](./nsite-permissions.md) — slow down rather than
+hard-fail:
+
+| Limit | Value |
+| --- | --- |
+| Per-source token bucket | 1/s sustained, burst 5 |
+| Global in-flight pair requests | 8 |
+| Body size | 8 KiB |
+
+Failed attempts cost the same as successful ones, with no escalating penalty. A
+source that empties its bucket is delayed, not banned — there is no identity to
+ban that costs a mesh peer anything to replace.
+
+#### Port
+
+`:4873` is a Myco constant, not negotiated: peers agree by running the same
+version. That is fine pre-1.0, where a change here is a version bump rather than
+a compatibility problem.
 
 ### Open questions
 
@@ -361,12 +457,12 @@ held to the phone is read but ignored, never opened.
 
 **Where the secret lives.** §6.1 framed the `pairSecret` as echoed back inside the
 Noise-encrypted channel to `<npub_A>.fips`. The implementation keeps that property:
-the scanner/tapper sends a signed pair **request** (kind 9101) to
-`<npub_A>.fips:4870` — already Noise-XK encrypted and authenticated to A — carrying
-the secret. What differs from the doc is *who matches it*: A enforces single-use
-locally, via a small persisted ledger of the secrets it has issued. Each presented
-code mints a fresh secret; it is consumed on first accept and the presented payload
-rotates, so a captured QR/tag can't pair twice.
+the scanner/tapper posts a signed pair **request** (kind 9101) to
+`<npub_A>.fips:4873/pair` — already Noise-XK encrypted and authenticated to A —
+carrying the secret. What differs from the doc is *who matches it*: A enforces
+single-use locally, via a small persisted ledger of the secrets it has issued. Each
+presented code mints a fresh secret; it is consumed on first accept and the
+presented payload rotates, so a captured QR/tag can't pair twice.
 
 **Auto-accept scope.** A request auto-accepts only while A is actively presenting
 (on the Circle tab) and the secret matches a live issued one. A request that
@@ -374,11 +470,16 @@ arrives otherwise — A on another screen, or Myco launched by the tap — surfa
 accept/ignore prompt instead, keeping the §6.1 human-in-the-loop confirmation.
 
 **Unpairing (partially answers the open question above).** Forgetting a peer now
-sends a signed **pair-remove** event (kind 9103) to their relay; on receipt they
-drop the sender from their Circle, so the two sides stay symmetric. It is
-best-effort and fire-once — an offline peer is not retried, so their Circle keeps a
-stale entry until they forget us or we re-pair. A durable (queue + ack) handshake
-is left open.
+posts a signed **pair-remove** event (kind 9103) to their auth service; on receipt
+they drop the sender from their Circle, so the two sides stay symmetric. Delivery
+is retried on the same schedule as a request (about a minute), and a `403` from
+the peer stops the loop rather than burning the whole window. A peer that stays
+offline for the whole window keeps a stale entry until they forget us or we
+re-pair. A durable (queue + ack) handshake is left open.
+
+**Revocation reaches open connections.** Because admission to the content ports is
+checked once, at the WebSocket upgrade, dropping a peer also **closes connections
+they already hold** rather than only blocking the next one.
 
 **NFC exposure.** While presenting, the emulated tag answers *any* NFC reader, not
 just another Myco device, with `{npub, name, pairSecret}`. This is acceptable: the

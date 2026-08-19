@@ -42,6 +42,16 @@ use tokio_tungstenite::tungstenite::Message;
 /// over BLE. The runtime's keepwarm loop respawns the dropped task promptly.
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Drop any event whose signature does not check out.
+///
+/// One place, at the point remote events enter the process, rather than a check
+/// each call site has to remember — a missed one is a silent forgery hole. A
+/// forged manifest is the sharp case: the gateway would stage and serve it as
+/// the named publisher's site. See `reference/thinning-custom-relay.md` (D7).
+pub(crate) fn verified(events: Vec<Event>) -> Vec<Event> {
+    events.into_iter().filter(|e| e.verify().is_ok()).collect()
+}
+
 /// Cap on the WS connect itself. Without this, a TCP connect into a wedged FSP
 /// session hangs on SYN retransmits for the OS horizon (~2min) — and every
 /// retransmit rides the session, refreshing its activity clock so the node's
@@ -117,6 +127,9 @@ enum Command {
     /// then reply once with the batch and close the subscription (the pull plane).
     Request {
         filters: Vec<serde_json::Value>,
+        /// Mesh state for this pull, carried in the envelope around the `REQ`.
+        /// `None` sends a plain NIP-01 `REQ`: single hop, no query id.
+        meta: Option<crate::mesh_wire::MeshMeta>,
         reply: oneshot::Sender<Vec<Event>>,
     },
 }
@@ -235,6 +248,20 @@ impl PeerRelayPool {
         filters: Vec<serde_json::Value>,
         timeout: Duration,
     ) -> Vec<Event> {
+        self.request_with(npub, url, filters, None, timeout).await
+    }
+
+    /// As [`request`](Self::request), but carrying mesh state — a hop budget,
+    /// query id, and time budget — in the envelope around the `REQ`. Used by the
+    /// core-driven multi-hop pulls (discovery, update checks).
+    pub async fn request_with(
+        &self,
+        npub: &str,
+        url: &str,
+        filters: Vec<serde_json::Value>,
+        meta: Option<crate::mesh_wire::MeshMeta>,
+        timeout: Duration,
+    ) -> Vec<Event> {
         let (reply_tx, reply_rx) = oneshot::channel();
         {
             let mut peers = self.peers.lock().unwrap();
@@ -245,6 +272,7 @@ impl PeerRelayPool {
             if tx
                 .send(Command::Request {
                     filters,
+                    meta,
                     reply: reply_tx,
                 })
                 .is_err()
@@ -254,7 +282,13 @@ impl PeerRelayPool {
             }
         } // release the lock before awaiting the reply
         match tokio::time::timeout(timeout, reply_rx).await {
-            Ok(Ok(events)) => events,
+            // Signature check at the boundary: this is where a peer's events cross
+            // into the process, so callers downstream can treat what they get as
+            // authentic. Transport authenticity is not authorship — a peer relays
+            // events signed by third parties it has never met, so an honest peer
+            // still cannot vouch for them. See `reference/thinning-custom-relay.md`
+            // (D7).
+            Ok(Ok(events)) => verified(events),
             // Timed out, or the actor died before EOSE (connection dropped).
             _ => Vec::new(),
         }
@@ -352,14 +386,20 @@ async fn run(
                         break;
                     }
                 }
-                Some(Command::Request { filters, reply }) => {
+                Some(Command::Request { filters, meta, reply }) => {
                     let sub_id = format!("r{next_sub}");
                     next_sub += 1;
                     let mut req: Vec<serde_json::Value> = Vec::with_capacity(filters.len() + 2);
                     req.push(serde_json::Value::from("REQ"));
                     req.push(serde_json::Value::from(sub_id.clone()));
                     req.extend(filters);
-                    let frame = serde_json::Value::Array(req).to_string();
+                    let req = serde_json::Value::Array(req);
+                    // The filters stay canonical NIP-01; anything mesh-specific
+                    // rides the envelope around them.
+                    let frame = match &meta {
+                        Some(meta) => crate::mesh_wire::wrap(meta, req),
+                        None => req.to_string(),
+                    };
                     if sink.send(Message::Text(frame)).await.is_err() {
                         let _ = reply.send(Vec::new());
                         reason = "write failed (request)";
@@ -451,6 +491,29 @@ fn handle_inbound(txt: &str, pending: &mut HashMap<String, Pending>) -> Option<S
 mod tests {
     use super::*;
 
+    /// Ingress verification is the only signature check on the pull path — the
+    /// call sites downstream were removed in favour of this one, so a regression
+    /// here would let a peer hand us a forged event (a forged manifest is served
+    /// by the gateway as the named publisher's site). Pin it.
+    #[test]
+    fn ingress_drops_forged_signatures() {
+        let keys = nostr::Keys::generate();
+        let good = nostr::EventBuilder::new(nostr::Kind::from(9u16), "real")
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        // Tamper with the content after signing: id and sig no longer match, but
+        // it still deserializes as an Event, which is exactly what a hostile peer
+        // would send.
+        let mut raw = serde_json::to_value(&good).unwrap();
+        raw["content"] = serde_json::json!("forged");
+        let forged: Event = serde_json::from_value(raw).unwrap();
+
+        let out = verified(vec![good.clone(), forged]);
+        assert_eq!(out.len(), 1, "only the untampered event survives");
+        assert_eq!(out[0].id, good.id);
+    }
+
     /// The classifier reads OS error text, so pin the three cases: mistaking a
     /// startup race for a peer failure holds a good peer off for minutes.
     #[test]
@@ -474,7 +537,7 @@ mod tests {
         ));
     }
 
-    use myco_relay::server::serve_on;
+    use crate::mesh_relay::serve_on;
     use myco_relay::RelayStore;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use std::sync::Arc;

@@ -1,7 +1,12 @@
 //! `myco-blossom` — a generic embedded **Blossom blob store**: a content-
 //! addressed filesystem store keyed by sha256, implementing `nsite-deck`'s
-//! [`BlobStore`] seam. **Always embedded** (there is no good Android Blossom app
-//! to forward to). See `docs/design/nsite-layer.md` §2.2.
+//! [`BlobStore`] seam. See `docs/design/nsite-layer.md` §2.2.
+//!
+//! This is currently the **only** implementation of that seam, and the default.
+//! A second one that reads through to an external Blossom server is planned but
+//! **not built** (`reference/thinning-custom-relay.md`, D9); the read fast path
+//! below is written on the assumption that this store owns its own directory,
+//! and that assumption is what a shared store would break.
 //!
 //! Storage shape (matching the Go reference's `blobs/` dir): each blob is a file
 //! named by its lowercase-hex sha256 under `root/`. Blobs are immutable and

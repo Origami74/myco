@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -52,6 +53,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import kotlin.system.exitProcess
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -71,6 +73,21 @@ import app.myco.ui.radioWarnings
 
 /** The Settings surfaces: the root list and its three drill-in sub-pages. */
 private enum class SettingsPage { Root, Identity, Storage, Developer }
+
+/**
+ * Stores the user pointed us at that cannot be reached, as (title, detail).
+ *
+ * One definition so the tab badge, the row dot, and the cards cannot drift
+ * apart — they are three views of the same fact.
+ */
+fun backendErrors(state: AppState): List<Pair<String, String>> = buildList {
+    if (state.relayBackend.error.isNotEmpty()) {
+        add("Can't reach your relay" to state.relayBackend.error)
+    }
+    if (state.blobBackend.error.isNotEmpty()) {
+        add("Can't reach your blob store" to state.blobBackend.error)
+    }
+}
 
 /** Cap used for the storage gauge (matches the LRU target in the core). */
 private const val STORAGE_CAP_BYTES = 2_000_000_000.0
@@ -157,6 +174,7 @@ private fun RootSettings(
     val used = state.cache.usedBytes.toDouble()
     val pct = (used / STORAGE_CAP_BYTES * 100).coerceIn(0.0, 100.0)
     val free = (STORAGE_CAP_BYTES - used).coerceAtLeast(0.0).toLong()
+    val backendErrors = backendErrors(state)
 
     SettingsColumn {
         ScreenHeader("Settings", state)
@@ -175,6 +193,7 @@ private fun RootSettings(
                 icon = Icons.Filled.Storage,
                 title = "Storage",
                 subtitle = "${"%.0f".format(pct)}% used · ${humanBytes(free)} free",
+                alert = backendErrors.isNotEmpty(),
                 onClick = onOpenStorage,
             )
         }
@@ -220,6 +239,15 @@ private fun RootSettings(
                 title = "Internet",
                 subtitle = "Mesh over the internet",
             )
+        }
+
+        // A store the user pointed us at that has gone away. Surfaced here as
+        // well as inside Storage, because the symptom — apps that will not load
+        // — gives no hint that a setting is the cause, and the user has no
+        // reason to open Storage looking for it.
+        backendErrors.forEach { (title, detail) ->
+            Spacer(Modifier.height(8.dp))
+            BackendUnreachableCard(title, detail)
         }
 
         // Radio/VPN misconfigurations that silently break peering — recomputed
@@ -358,10 +386,21 @@ private fun IdentitySettings(state: AppState, client: AppCoreClient, onBack: () 
 private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -> Unit) {
     var confirmCache by remember { mutableStateOf(false) }
     var confirmAll by remember { mutableStateOf(false) }
+    var editRelay by remember { mutableStateOf(false) }
+    var editBlossom by remember { mutableStateOf(false) }
+    // Both settings are read when the core starts, so a save only takes hold on
+    // the next launch. Offer the restart rather than leaving the user to guess
+    // why nothing changed.
+    var restartPrompt by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    // Deleting only ever clears the built-in stores. Saying otherwise would be a
+    // lie about a destructive action, which is the one place it matters most.
+    val external = state.cache.externalRelay || state.cache.externalBlobs
 
     val used = state.cache.usedBytes
     val fraction = (used.toDouble() / STORAGE_CAP_BYTES).coerceIn(0.0, 1.0).toFloat()
     val free = (STORAGE_CAP_BYTES - used).coerceAtLeast(0.0).toLong()
+    val backendErrors = backendErrors(state)
 
     SettingsColumn {
         SubHeader("Storage", onBack)
@@ -388,7 +427,59 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
+                // These figures are always the built-in store's. With a custom
+                // relay or Blossom configured they still describe what is taking
+                // up room here, but no longer what is serving — say so, rather
+                // than letting the bar read as the whole picture.
+                val notInUse = when {
+                    state.cache.externalRelay && state.cache.externalBlobs ->
+                        "Not in use — a custom relay and Blossom are configured below."
+                    state.cache.externalRelay ->
+                        "Events not in use — a custom relay is configured below."
+                    state.cache.externalBlobs ->
+                        "Blobs not in use — a custom Blossom is configured below."
+                    else -> null
+                }
+                if (notInUse != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        notInUse,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        GroupLabel("ADVANCED")
+        // A backend that has gone away otherwise looks like an app with no
+        // content: every site missing, no explanation. Warn the way the radio
+        // warnings do, since the cause is equally invisible from the app.
+        backendErrors(state).forEach { (title, detail) ->
+            BackendUnreachableCard(title, detail)
+            Spacer(Modifier.height(8.dp))
+        }
+        SectionCard {
+            SettingRow(
+                icon = null,
+                title = "Custom relay",
+                subtitle = when {
+                    state.pendingRelayUrl.isNotEmpty() -> state.pendingRelayUrl
+                    else -> "Use another Nostr relay instead of the built-in one"
+                },
+                onClick = { editRelay = true },
+            )
+            RowDivider()
+            SettingRow(
+                icon = null,
+                title = "Custom Blossom",
+                subtitle = when {
+                    state.pendingBlossomUrl.isNotEmpty() -> state.pendingBlossomUrl
+                    else -> "Use another Blossom server instead of the built-in one"
+                },
+                onClick = { editBlossom = true },
+            )
         }
 
         Spacer(Modifier.height(8.dp))
@@ -397,7 +488,11 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
             SettingRow(
                 icon = null,
                 title = "Delete cache",
-                subtitle = "Free up space — keeps your pinned apps, clears everything else",
+                subtitle = if (external) {
+                    "Frees space on this device — your custom store is untouched"
+                } else {
+                    "Free up space — keeps your pinned apps, clears everything else"
+                },
                 titleColor = MaterialTheme.colorScheme.error,
                 onClick = { confirmCache = true },
             )
@@ -405,18 +500,68 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
             SettingRow(
                 icon = null,
                 title = "Delete all data, including apps",
-                subtitle = "Wipe entirely (keeps identity & Circle)",
+                subtitle = if (external) {
+                    "Wipes this device only (keeps identity & Circle)"
+                } else {
+                    "Wipe entirely (keeps identity & Circle)"
+                },
                 titleColor = MaterialTheme.colorScheme.error,
                 onClick = { confirmAll = true },
             )
         }
     }
 
+    if (editRelay) {
+        CustomRelayDialog(
+            current = state.pendingRelayUrl,
+            onSave = { url ->
+                client.dispatch(NativeActions.setCustomRelay(url))
+                editRelay = false
+                restartPrompt = true
+            },
+            onDismiss = { editRelay = false },
+        )
+    }
+    if (editBlossom) {
+        CustomBlossomDialog(
+            current = state.pendingBlossomUrl,
+            onSave = { url ->
+                client.dispatch(NativeActions.setCustomBlossom(url))
+                editBlossom = false
+                restartPrompt = true
+            },
+            onDismiss = { editBlossom = false },
+        )
+    }
+    if (restartPrompt) {
+        AlertDialog(
+            onDismissRequest = { restartPrompt = false },
+            confirmButton = {
+                TextButton(onClick = { restartApp(context) }) { Text("Restart now") }
+            },
+            dismissButton = {
+                TextButton(onClick = { restartPrompt = false }) { Text("Later") }
+            },
+            title = { Text("Saved") },
+            text = {
+                Text(
+                    "Myco needs to restart to use the new setting. Until then it keeps " +
+                        "using the current store.",
+                )
+            },
+        )
+    }
     if (confirmCache) {
         ConfirmDialog(
             title = "Delete cache?",
-            body = "Clears all downloaded relay events and blobs except your pinned apps, " +
-                "which keep working offline.",
+            body = if (external) {
+                "Clears what's stored on this device, except your pinned apps. " +
+                    "Anything on your custom relay or Blossom stays where it is — " +
+                    "it isn't ours to delete."
+            } else {
+                "Clears all downloaded relay events and blobs except your pinned apps, " +
+                    "which keep working offline."
+            },
             confirmLabel = "Delete cache",
             onConfirm = { client.dispatch(NativeActions.wipeCache()); confirmCache = false },
             onDismiss = { confirmCache = false },
@@ -425,8 +570,14 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
     if (confirmAll) {
         ConfirmDialog(
             title = "Delete all data?",
-            body = "Removes every downloaded nsite, including pinned apps (relay events + blobs). " +
-                "Your identity and Circle stay.",
+            body = if (external) {
+                "Removes every downloaded nsite stored on this device, including pinned " +
+                    "apps. Anything on your custom relay or Blossom stays where it is — " +
+                    "it isn't ours to delete. Your identity and Circle stay."
+            } else {
+                "Removes every downloaded nsite, including pinned apps (relay events + blobs). " +
+                    "Your identity and Circle stay."
+            },
             confirmLabel = "Delete all",
             onConfirm = { client.dispatch(NativeActions.wipeStores()); confirmAll = false },
             onDismiss = { confirmAll = false },
@@ -656,6 +807,156 @@ private fun RadioWarningCard(warning: RadioWarning, onClick: () -> Unit) {
 /** Warning shown when the OS denied our BLE advertiser (TOO_MANY_ADVERTISERS):
  *  other apps hold every advertising slot, so peers can't discover this device.
  *  The radio keeps retrying on a backoff; this tells the user how to free a slot. */
+/**
+ * Relaunch the app, process and all.
+ *
+ * Restarting the activity is not enough: the settings are read once when the
+ * native core is constructed, so the process itself has to go. `makeRestartActivityTask`
+ * queues a fresh launch first, so exiting hands control straight back to a new
+ * process rather than dropping the user to the launcher.
+ */
+private fun restartApp(context: android.content.Context) {
+    val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+    val component = launch?.component
+    if (component == null) {
+        // Nothing sane left to do but stop; the next manual launch picks up the
+        // setting anyway.
+        exitProcess(0)
+    }
+    context.startActivity(android.content.Intent.makeRestartActivityTask(component))
+    exitProcess(0)
+}
+
+@Composable
+private fun BackendUnreachableCard(title: String, detail: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                MaterialTheme.colorScheme.errorContainer,
+                RoundedCornerShape(14.dp),
+            )
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.size(10.dp))
+            Text(
+                title,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleMedium,
+            )
+        }
+        Text(
+            "$detail\n\nYour apps are stored there, so they won't load until it's " +
+                "reachable again. Check that it's running and on the same network, " +
+                "or clear the setting below to go back to the built-in store.",
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
+/**
+ * Enter (or clear) the custom relay URL.
+ *
+ * Carries the trust warning at the point of the decision rather than in a help
+ * page: reads are not re-verified, so whoever runs the relay decides what this
+ * device believes.
+ */
+@Composable
+private fun CustomRelayDialog(
+    current: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var url by remember { mutableStateOf(current) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = { onSave(url.trim()) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        title = { Text("Custom relay") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    singleLine = true,
+                    label = { Text("Relay URL") },
+                    placeholder = { Text("ws://192.168.1.10:4869") },
+                )
+                Text(
+                    "Your apps and messages will be stored on this relay instead of on " +
+                        "this device. Myco trusts it to check signatures, so whoever runs " +
+                        "it decides what this device believes — only use one you control.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "Leave it empty to go back to the built-in store. Either way it takes " +
+                        "effect the next time Myco starts.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+/**
+ * Enter (or clear) the custom Blossom URL.
+ *
+ * Carries a blunter warning than the relay's. Blobs are the bulk of an nsite, so
+ * moving them off the device means a peer pulling an app from you needs your
+ * connection to the server — which is the opposite of what the mesh is for.
+ */
+@Composable
+private fun CustomBlossomDialog(
+    current: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var url by remember { mutableStateOf(current) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = { onSave(url.trim()) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        title = { Text("Custom Blossom") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    singleLine = true,
+                    label = { Text("Blossom URL") },
+                    placeholder = { Text("http://192.168.1.10:24242") },
+                )
+                Text(
+                    "App files will be stored on this server instead of on this device. " +
+                        "If it's not on your own network, sharing an app with someone " +
+                        "nearby will need your internet connection — Myco won't work " +
+                        "offline the way it does now.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "Leave it empty to go back to the built-in store. Either way it takes " +
+                        "effect the next time Myco starts.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
 @Composable
 private fun BleExhaustedCard() {
     Column(
@@ -700,6 +1001,8 @@ private fun SettingRow(
     title: String,
     subtitle: String,
     titleColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
+    /** Show a red dot: something inside this page needs attention. */
+    alert: Boolean = false,
     onClick: () -> Unit,
 ) {
     Row(
@@ -713,6 +1016,14 @@ private fun SettingRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(title, color = titleColor, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)
             Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        }
+        if (alert) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(MaterialTheme.colorScheme.error, CircleShape),
+            )
+            Spacer(Modifier.size(10.dp))
         }
         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }

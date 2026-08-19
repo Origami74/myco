@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Myco can store its data on a relay you run instead of on the phone. Settings →
+  Storage → Advanced takes a relay URL — Citrine on the same device, or a relay
+  on your own network — and everything Myco keeps in its event store lives there
+  instead. A Blossom server for the app files themselves can be set the same way.
+  Both are off by default and neither is needed to use Myco; the built-in stores
+  remain the normal case. Confirmed working against Citrine.
+- Settings warns when a store you configured cannot be reached, with a red dot on
+  the Settings tab and on Storage. Without it the symptom is apps that will not
+  load and nothing to explain why — the same class of invisible failure the radio
+  warnings already cover. Changing either store offers to restart, since the
+  setting is read when Myco starts.
+- Storage says when the built-in store is no longer the one being used, rather
+  than showing a usage bar for data nothing reads. Delete now says plainly that
+  it clears this device only: a store you run is not Myco's to empty, and
+  claiming otherwise about a destructive action is worse than saying nothing.
+
 - The status pill opens. Tapping the counts brings up a panel with the two
   questions people actually have — can I reach my Circle, and what are the
   radios doing. Circle members are listed reachable-first (alphabetically
@@ -63,6 +79,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Devices must be on the same version to exchange messages.** Mesh state — how
+  far a message travels, which query it belongs to — used to be written into the
+  messages themselves, which meant any relay carrying Myco traffic had to
+  understand Myco. It now travels alongside them, so the events and queries Myco
+  stores are ordinary Nostr and an ordinary relay can hold them. The cost is a
+  clean break: a phone on an older build and a phone on this one will not pass
+  events to each other.
+- Pairing has its own door. It used to arrive on the same port that serves your
+  apps and messages, which meant that port had to stay open to strangers and
+  every pairing request was written into your event store as a side effect.
+  Pairing now has a service of its own — the only thing an unpaired device can
+  reach — and the content ports are closed to anyone you have not paired with,
+  refused before a connection is established rather than after.
+- A peer you have paired with can no longer upload files to your device by
+  default. Nothing in normal use needs it: sharing an app works by the other side
+  fetching it from you. The developer speedtest is the only thing that did, and
+  it now says the peer declined rather than failing obscurely.
 - Nothing starts and nothing is asked for until the intro has played. A cold
   install used to bring up the LAN browse and then stack the Bluetooth prompt,
   the Wi-Fi Aware prompt and the system's "Myco wants to set up a VPN
@@ -92,6 +125,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Someone can no longer add themselves to your Circle uninvited. A pairing
+  acceptance is only acted on if it answers an invitation you actually sent, and
+  if it was addressed to your device — a signed acceptance meant for somebody
+  else could otherwise be captured and replayed at you. Being in a Circle grants
+  access to your relay and files, so this was worth closing properly.
+- Wi-Fi Aware links stop dying about once a minute. A data path would come up,
+  carry traffic, and be torn down by the phone's firmware on a startlingly
+  regular 64-second cycle. Radio coexistence was the obvious suspect and turned
+  out to be wrong — backing the Bluetooth scan off changed nothing at all. The
+  cause was Myco itself, re-establishing the same peer alternately over Bluetooth
+  and Aware; it now leaves a peer alone on Aware instead of also dialling it over
+  Bluetooth. Teardowns go from one a minute to one in seven, with both radios
+  scanning harder than before. Some churn remains in the first few minutes after
+  launch, when Bluetooth legitimately connects first.
+- Opening a chat or an app list no longer waits on a slow peer before showing
+  anything. A request from an app was answered only once every peer had replied
+  or timed out, so a single unreachable phone made the app look hung. What is on
+  this device now appears immediately, and anything a peer adds arrives as it
+  comes.
+- An old message is no longer re-broadcast to everyone each time someone new
+  comes into range. Whether a message counted as new was decided by whether the
+  store still held it, so a message that had expired and was fetched again looked
+  new and started a fresh wave.
+- Removing someone from your Circle now closes the connection they already have,
+  instead of only refusing the next one. They could otherwise keep receiving
+  everything they were already subscribed to.
 - Renaming your device changes what goes out over the air. The rename wrote the
   preference and told the mesh node but never told the radio, so the old name
   kept being broadcast until the app was next brought to the foreground — which

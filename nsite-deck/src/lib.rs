@@ -26,7 +26,9 @@ pub mod testing;
 pub use gateway::{serve, GatewayResponse, Readiness};
 pub use host::{parse_link, resolve_host, SiteAddr};
 pub use model::{kind_for, site_key, Manifest, KIND_NAMED, KIND_ROOT};
-pub use seams::{BlobStore, FanoutSink, ManifestFilter, NoopFanout, PeerSource, RelayBackend};
+pub use seams::{
+    newest_in_slot, AdminBackend, BlobStore, FanoutSink, NoopFanout, PeerSource, RelayBackend,
+};
 pub use sync::{import_site, sha256_hex, sync_site, verify_and_store_event, SyncOutcome};
 
 #[cfg(test)]
@@ -125,9 +127,15 @@ mod tests {
             .unwrap();
         assert_eq!(relay.len(), 1);
 
-        let accepted = relay.store_event(site.manifest).await.unwrap();
-        assert!(!accepted, "an equal-timestamp duplicate is not re-accepted");
-        assert_eq!(relay.len(), 1);
+        // Publishing is idempotent: re-storing the same manifest is a no-op
+        // rather than a second entry in the slot. The seam reports nothing back,
+        // so the store's own size is what pins the behaviour.
+        relay.publish(site.manifest).await.unwrap();
+        assert_eq!(
+            relay.len(),
+            1,
+            "an equal-timestamp duplicate does not stack"
+        );
     }
 
     #[tokio::test]

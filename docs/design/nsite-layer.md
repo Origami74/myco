@@ -118,47 +118,97 @@ and the TUN; Rust owns the content layer and the mesh. See
 
 ---
 
-## 2. Proposed Rust implementation
+## 2. The Rust implementation
 
-> Everything in this section is **proposed**, not chosen. Crate names are
-> candidates; the load-bearing requirement is the *behaviour*, not the
+> §2.1 and §2.2 describe what is built. Items marked **planned** or **not built**
+> are still proposals; the load-bearing requirement is the *behaviour*, not the
 > dependency.
 
-### 2.1 Embedded relay
+### 2.1 The relay: a proxy in front of a swappable store
 
-A NIP-01 relay with a local event store, listening on `ws://localhost:4870` — the
-**`myco-relay`** crate, which implements `nsite-deck`'s `RelayBackend` seam.
+Two components, deliberately separated.
+
+**The mesh relay proxy** ([`myco-core/src/mesh_relay.rs`](../../myco-core/src/mesh_relay.rs))
+is the NIP-01 WebSocket front door. It serves the in-app WebView on
+`ws://localhost:4870` and mesh peers on `ws://[fd00::self]:4870`, and it is the
+only Myco-specific code on the content path: origin classification, the gossip
+seen-set, hop-budget stamping and clamping, split-horizon, pull fan-out, live
+subscription mirroring, and the circle access gate all live here.
+
+**The store** ([`myco-relay`](../../myco-relay/src/lib.rs)) is a plain NIP-01
+event store behind it. It holds **no Myco concepts** — no mesh, no ttl, no
+circles — and it has no socket of its own. It is the default backend, not "our
+relay".
+
+#### The two boundaries
+
+| Link | Protocol |
+| --- | --- |
+| nsite ↔ `ws://localhost:4870` | Plain NIP-01. No Myco verb, no Myco key, ever. |
+| proxy ↔ backing store | Plain NIP-01. This is what lets any relay sit there. |
+| proxy ↔ proxy over `.fips` | Plain NIP-01 or a `MESH` envelope ([event-gossip.md §2](./event-gossip.md)) |
+
+Concentrating the Myco-specific behaviour on the one link nobody else listens on
+is what makes the store replaceable. A `MESH` frame arriving on the loopback
+socket is refused with a `NOTICE`.
+
+#### The backend seam
+
+`nsite-deck`'s [`RelayBackend`](../../nsite-deck/src/seams.rs) is the seam, and it
+is cut around the verbs every relay already speaks: `publish`, and `query` over
+real `nostr::Filter`s. Using real filters rather than a hand-rolled subset means
+`since`, `until`, ids, and general tag matching all work, and a remote backend
+needs no translation layer. "Newest event in a replaceable slot" is a helper over
+`query`, not a backend method, because it is an ordinary filter.
+
+Operations with **no NIP-01 expression** — the selective cache wipe that keeps
+pinned sites — live in a separate `AdminBackend` trait that only the embedded
+store implements. Where it is absent the operation is skipped, and the Storage
+screen says so: with a custom store configured, Delete states that it clears this
+device only and leaves the custom store alone. Claiming otherwise would be a lie
+about a destructive action.
+
+**Built.** [`RemoteBackend`](../../myco-core/src/remote_backend.rs) speaks
+WebSocket to a configured relay URL — [Citrine](https://github.com/greenart7c3/Citrine)
+on the same device, a `strfry` or `nostr-rs-relay` on the LAN. It holds one
+connection open and multiplexes publishes and queries over it by subscription id;
+an unreachable relay is an error rather than an empty result, because an empty
+set would render as a missing site.
+
+The URL lives under **Settings → Storage → Advanced**, persisted in
+`settings.json` and read at startup, since the backend is chosen when the content
+layer is constructed. Changing it therefore applies on the next launch, and the
+app offers to restart. Citrine has been confirmed working as the store.
+
+Two things the settings screen says when a custom backend is configured:
+
+- **We stop verifying what comes back out.** Signatures are checked once, at
+  ingress; reads from the backend are trusted because NIP-01 already requires a
+  relay to verify what it accepts. Pointing Myco at someone else's relay means
+  trusting that relay, and any other writer it has.
+- **NIP-40 expiry is not guaranteed.** The proxy drops expired events on the way
+  out; unbounded growth inside someone else's relay is their operator's problem.
+
 The Go reference uses [Khatru](https://github.com/fiatjaf/khatru) over a BoltDB
 event store and advertises NIPs 1, 9, 11, 12, 15, 16, 20, 33
-([embedded.go](../../reference/site-deck/internal/relay/embedded.go)). The Rust
-port needs the same minimal surface: accept `EVENT`, answer `REQ` with a stored
-event set, honour `CLOSE`, and serve a NIP-11 document — plus, net-new vs. the Go
-reference, speak **negentropy ([NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md))**
-(`NEG-OPEN` / `NEG-MSG` / `NEG-CLOSE`) for set reconciliation (§2.4) and advertise
-NIP-77 in its NIP-11.
+([embedded.go](../../reference/site-deck/internal/relay/embedded.go)). Still
+wanted, net-new vs. the Go reference: **negentropy
+([NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md))**
+(`NEG-OPEN` / `NEG-MSG` / `NEG-CLOSE`) for set reconciliation (§2.4), which for an
+external backend becomes a capability to detect rather than something we can
+assume.
 
-**Embedded from day one — relay *backend* is a pluggable seam.** The relay and
-Blossom are both **bundled and in-process from day one**; they are simple enough
-that there is no "forward to an external relay first, embed later" phase. The
-relay *backend*, however, is a **pluggable seam** (the `RelayBackend` trait): the **default** is the
-embedded store described here; an **optional** backend **forwards to a local
-relay app on the device — e.g. [Citrine](https://github.com/greenart7c3/Citrine)** —
-for developers who already run one. The embedded backend is the default and the
-earliest path; forwarding is a configuration choice on top of it, not a
-prerequisite. (Blossom has no such seam — see §2.2.)
+**Patterns in use:**
 
-**Proposed candidates / patterns:**
-
-- An `nostr-rs-relay`-style store: a SQLite (or redb) backed event store with a
-  filter index over `kind`, `authors`, and `#d`. The query surface the gateway
-  and sync engine actually use is tiny — `{kinds, authors, #d, limit}` — so a
-  hand-rolled store over `rusqlite` is viable and avoids pulling a full relay
-  framework.
-- The [`nostr` / `nostr-sdk`](https://github.com/rust-nostr/nostr) crates for
-  event types, signature verification, NIP-19 (`npub`) encode/decode, and the
-  relay-message wire format.
-- An `axum` (or `tower`) WebSocket handler for the relay socket and the Blossom
-  HTTP routes, sharing one Tokio runtime with the FIPS endpoint.
+- A hand-rolled store over the [`nostr`](https://github.com/rust-nostr/nostr)
+  crate's `Event` type, keyed by event id, with replaceable/addressable slot
+  dedup, NIP-40 expiry GC, and JSON persistence of the non-expiring (manifest)
+  set. Ephemeral chat is memory-only by design. A SQLite- or redb-backed index is
+  the obvious upgrade if the store ever outgrows this.
+- The same `nostr` crate for signature verification, NIP-19 (`npub`)
+  encode/decode, and the relay-message wire format.
+- `axum` handlers for the proxy's WebSocket sockets, the Blossom HTTP routes, and
+  the auth service, all sharing one Tokio runtime with the FIPS endpoint.
 
 **Replaceable-event semantics matter.** Kind `15128` is replaceable (one per
 pubkey); kind `35128` is parameterized-replaceable (one per `(pubkey, d-tag)`).
@@ -166,41 +216,34 @@ The store MUST keep only the newest event per slot, matching the dedup the Go
 sync does by `(kind, d-tag)`
 ([service.go `deduplicateManifests`](../../reference/site-deck/internal/sync/service.go)).
 
-**Propagator fanout (multiplex to connected peers).** The embedded relay is a
-**plain NIP-01 store + socket** — it never fans out. Fanout is done by a separate
-**propagator process inside `nsite-deck`**: it **subscribes** to the relevant
-relays (the local relay plus every connected peer's relay) and, when a new Nostr
-manifest arrives — whether pushed in by a peer or pulled in by the sync engine —
-it **publishes that event to every other connected peer** (an `["EVENT", …]` to
-each `<peer>.fips:4870`), excluding the peer it came from. This is what makes the
-"announce widely" half of propagation push-based and automatic instead of a
-flood the app has to orchestrate (see [./propagation.md §2](./propagation.md)).
-Constraints:
+**Fanout to connected peers.** The store never fans out. Fanout is the proxy's
+gossiper: when an event is accepted for the first time, it is published onward to
+every circle peer except the one it came from, as a `MESH`-wrapped `["EVENT", …]`
+to each `<peer>.fips:4870`. This is what makes the "announce widely" half of
+propagation push-based and automatic instead of a flood the app has to
+orchestrate (see [./propagation.md §2](./propagation.md)). Constraints:
 
 - **Events fan out; blobs do not.** Only Nostr events (in practice the small,
   self-authenticating manifests) are multiplexed. Blossom blobs are *not* events
   and stay **pull-only** — fanning megabytes to N peers would saturate a BLE
   link.
-- **Source-excluded + de-duplicated.** A seen-set keyed by the 16-byte
-  SHA-256 event id (and a hop budget, default TTL 5) prevents echoing an event
-  back to its sender or re-flooding one already forwarded. Same dedup the
-  propagation layer uses ([./propagation.md §5](./propagation.md)).
-- **Re-emitted unmodified.** Forwarded events keep the author's signature intact;
-  the propagator never re-signs. Forwarding an already-signed event is normal
-  publish behaviour, not authoring.
+- **Source-excluded + de-duplicated.** The proxy's own seen-set, keyed by event
+  id, plus a hop budget (default 3) prevents echoing an event back to its sender
+  or re-flooding one already forwarded. The seen-set is the proxy's, **not** the
+  store's, so an id the store GCs at expiry does not look new again
+  ([event-gossip.md §4](./event-gossip.md)).
+- **Re-emitted unmodified.** Forwarded events keep the author's signature intact
+  and are byte-for-byte canonical NIP-01; the hop budget rides beside them in the
+  envelope. Forwarding an already-signed event is normal publish behaviour, not
+  authoring.
 
-This is wanted **early** (roadmap P3 — see [../reference/config.md](../reference/config.md)
-`[propagation] fanout`), so two connected nodes gossip events both ways as soon
-as a FIPS link exists, with the heavier transitive-discovery and scale-dedup
-machinery layered on later (P5). See [diagrams/07-relay-mesh-fanout.svg](diagrams/07-relay-mesh-fanout.svg).
+See [diagrams/07-relay-mesh-fanout.svg](diagrams/07-relay-mesh-fanout.svg).
 
-### 2.2 Embedded Blossom
+### 2.2 Blossom: the same layering, one implementation so far
 
-A content-addressed blob server on `http://localhost:24243` — the **`myco-blossom`**
-crate, implementing the `BlobStore` seam — **always embedded**
-— unlike the relay, Blossom has **no pluggable forward-to-an-app backend**,
-because there is no good Android Blossom app to forward to, so embedding is the
-only sensible path. It implements the
+A content-addressed blob server on `http://localhost:24243` and
+`http://[fd00::self]:24243` — the **`myco-blossom`** crate, implementing
+`nsite-deck`'s `BlobStore` seam. It serves the
 [BUD-01](https://github.com/hzrd149/blossom/blob/master/buds/01.md) surface the
 gateway and sync need:
 
@@ -208,17 +251,47 @@ gateway and sync need:
 - `PUT /upload` → store blob, key by `sha256(body)`.
 - `HEAD /<sha256>` → existence check.
 
-The Go reference stores blobs as files named by their hash under a `blobs/`
-dir, with a BoltDB metadata index, and **disables auth** for the local server
-([embedded.go](../../reference/site-deck/internal/blossom/embedded.go)). The
-Rust port keeps the same shape: blobs on the filesystem keyed by sha256, a small
-metadata index, no auth on localhost.
+**No protocol fork anywhere on the blob plane.** There is no ttl, no gossip, and
+no query semantics on blobs, so nothing needs a `MESH` envelope. Peers speak
+plain BUD-01 to us and we speak plain BUD-01 to the store. This is the one plane
+where both boundaries *and* the peer link are stock protocol.
 
-**Proposed candidates / patterns:** a thin `axum` handler over a
-filesystem blob store; sha256 via `sha2`; reuse the same `rusqlite`/redb handle
-as the relay for the metadata index. Blobs are immutable and self-authenticating
-(the hash *is* the identity), so the store needs no per-blob signature check —
-only a `sha256(bytes) == name` verify on read/write.
+**Access, but no Myco knowledge in the crate.** The mesh-facing port is gated:
+loopback bypasses, and a mesh source must pass an access function supplied by
+`myco-core`, which answers from the circle and the peer's own permissions
+([nsite-permissions.md §2](./nsite-permissions.md)). The gate distinguishes reads
+from uploads, so `myco-blossom` stays a generic store that knows nothing about
+circles.
+
+**Two implementations.** The filesystem store described here is the default;
+[`RemoteBlobStore`](../../myco-core/src/remote_blobs.rs) reads through to an
+external Blossom server over BUD-01, with kind-24242 upload authorization signed
+by the device key and **hash verification on every read** (the embedded store can
+skip re-hashing because the only way bytes get in is a verified write; a shared
+store cannot, so bytes that do not match the requested hash are treated as
+absent).
+
+With a custom server configured the mesh Blossom listener on `:24243` is **not
+bound at all**: it exists to serve our own blobs to peers, and there are none —
+peers reach that server by its own URL rather than through us.
+
+Not yet exercised against a third-party Blossom implementation. The settings
+screen carries two warnings sharper than the relay's:
+
+- **A remote backend breaks offline-first.** Blobs are the bulk of an nsite, so
+  pointing this at an internet server means a peer pulling an app from us needs
+  *our* internet connection. A Blossom app on the same device, or one on the LAN,
+  is fine.
+- **Every gateway blob read becomes a round trip.** Today it is a file read. An
+  nsite with many assets pays that per request.
+
+The Go reference stores blobs as files named by their hash under a `blobs/` dir,
+with a BoltDB metadata index, and **disables auth** for the local server
+([embedded.go](../../reference/site-deck/internal/blossom/embedded.go)). The Rust
+port keeps the storage shape: blobs on the filesystem keyed by sha256, no auth on
+localhost. Blobs are immutable and self-authenticating (the hash *is* the
+identity), so the store needs no per-blob signature check — only a
+`sha256(bytes) == name` verify on write.
 
 ### 2.3 The gateway
 

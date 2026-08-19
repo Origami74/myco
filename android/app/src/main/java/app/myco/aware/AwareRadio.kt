@@ -26,6 +26,7 @@ import android.os.SystemClock
 import android.util.Log
 import app.myco.core.NativeCore
 import app.myco.core.UdpSocketPin
+import app.myco.ble.BleRadio
 import java.net.Inet6Address
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -223,6 +224,7 @@ class AwareRadio(
         for ((_, st) in retries) st.pending?.let { handler.removeCallbacks(it) }
         retries.clear()
         liveNdps.clear()
+        publishCoexState()
         ndpTargets.clear()
         peerIdentities.clear()
         _links.value = emptyList()
@@ -413,6 +415,7 @@ class AwareRadio(
                 val addr = formatPeerAddr(info.peerIpv6Addr, remote.port) ?: return
                 Log.i(TAG, "Aware NDP up to ${short(peerNpub)} at $addr")
                 liveNdps.add(peerNpub)
+                publishCoexState()
                 // The link is good: hand the peer a fresh retry budget.
                 if (retries.containsKey(peerNpub)) handler.post { clearRetry(peerNpub) }
                 // Pin BEFORE announcing the peer: the core dials as soon as it
@@ -634,8 +637,58 @@ class AwareRadio(
     }
 
     /** Unregister and forget a peer's NDP request, freeing its data-path slot. */
+    /** Publish the node_addr prefixes of peers Aware is carrying, so the BLE
+     *  radio can refuse to dial them. The core otherwise re-establishes one
+     *  peer alternately over both transports, and that churn tears the NAN
+     *  data path down every ~60s.
+     *
+     *  node_addr is the only identity both radios can compute: BLE reads a
+     *  prefix of it from the peer's scan response, and it is
+     *  `SHA-256(x-only pubkey)[..16]`, which is derivable from the npub here.
+     *  An npub that fails to decode is simply left out — the peer then keeps
+     *  its BLE lane, which is the pre-existing behaviour. */
+    private fun publishCoexState() {
+        BleRadio.awareNodePrefixes = liveNdps.mapNotNull { nodeAddrPrefix(it) }.toSet()
+    }
+
+    /** `SHA-256(pubkey)` truncated to the same prefix width BLE advertises,
+     *  hex-encoded. Mirrors `NodeAddr::from_pubkey` in fips. */
+    private fun nodeAddrPrefix(npub: String): String? {
+        val pubkey = decodeNpub(npub) ?: return null
+        val hash = java.security.MessageDigest.getInstance("SHA-256").digest(pubkey)
+        return hash.take(BleRadio.NODE_PREFIX_BYTES).joinToString("") { "%02x".format(it) }
+    }
+
+    /** bech32 npub -> 32-byte x-only pubkey. Checksum is not verified: these
+     *  npubs come from our own core, not from the wire. */
+    private fun decodeNpub(npub: String): ByteArray? {
+        val sep = npub.lastIndexOf('1')
+        if (sep < 0) return null
+        val data = ArrayList<Int>(npub.length - sep)
+        for (c in npub.substring(sep + 1)) {
+            val v = BECH32_CHARSET.indexOf(c)
+            if (v < 0) return null
+            data.add(v)
+        }
+        if (data.size < 7) return null
+        val payload = data.subList(0, data.size - 6) // strip checksum
+        var acc = 0
+        var bits = 0
+        val out = ArrayList<Byte>(32)
+        for (v in payload) {
+            acc = (acc shl 5) or v
+            bits += 5
+            while (bits >= 8) {
+                bits -= 8
+                out.add(((acc shr bits) and 0xff).toByte())
+            }
+        }
+        return if (out.size == 32) out.toByteArray() else null
+    }
+
     private fun releaseNdp(peerNpub: String) {
         liveNdps.remove(peerNpub)
+        publishCoexState()
         ndpCallbacks.remove(peerNpub)?.let {
             runCatching { connectivity.unregisterNetworkCallback(it) }
         }
@@ -735,6 +788,8 @@ class AwareRadio(
 
         /** Shape of a valid npub: bech32, `npub1` + 58 chars of the bech32
          *  alphabet (no `1`, `b`, `i`, `o`). Anything else is not dialled. */
+        private const val BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
         private val NPUB_RE = Regex("^npub1[023456789acdefghjklmnpqrstuvwxyz]{58}$")
 
         /** Where a peer that advertises no port listens: builds from before the

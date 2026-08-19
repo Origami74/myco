@@ -11,6 +11,10 @@
 
 mod action;
 mod attempt_store;
+// The auth plane: the only port an unpaired peer can reach. Bound by the Android
+// runtime, so it reads as dead on the host outside its own tests.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod auth_service;
 // Myco-owned BLE connect-attempt vocabulary. These used to be fips types read
 // out of a transport-global log; the restacked fips counts outcomes into
 // `BleStats` instead. Nothing produces these yet — see the module doc's
@@ -29,6 +33,27 @@ mod control_client;
 mod gossip;
 mod identity_store;
 mod ip_source;
+// The NIP-01 front door: live subscriptions, the mesh fan-out hook, and the
+// access gate. Bound to its sockets only by the Android runtime, so on the host
+// it reads as dead outside its own tests (and the tests that use it as a plain
+// relay). See `reference/thinning-custom-relay.md`.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod mesh_relay;
+// The `MESH` envelope that carries mesh state alongside — never inside — a
+// NIP-01 message on the peer link. See `reference/thinning-custom-relay.md`.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod mesh_wire;
+// A RelayBackend backed by someone else's NIP-01 relay — the point of the seam.
+// Not wired to settings yet, so it reads as dead outside its own tests.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod remote_backend;
+// The blob half of the same idea: a BlobStore over someone else's Blossom.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod remote_blobs;
+// Settings that must survive a restart, because they decide how the content
+// layer is constructed rather than how it behaves.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod settings_store;
 // npub -> observed lane record (Wi-Fi Aware vs. LAN/AP), pushed by the
 // Android Aware JNI bridge and consumed by `AppRuntime::state()`'s
 // lane_by_npub override. Plain, non-JNI logic so it is unit-testable on the

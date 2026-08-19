@@ -138,7 +138,7 @@ enabled = true             # master switch for the L2CAP CoC transport
 # ---------------------------------------------------------------------------
 [wifi_aware]
 enabled = false            # master switch for the bulk lane (adds a UDP transport)
-# The port is a fixed app constant (4871), carried where it already
+# The port is a fixed app constant (4873), carried where it already
 # belongs — the fips UDP transport's bind_addr. There is no role and no PSK.
 
 # ---------------------------------------------------------------------------

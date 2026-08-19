@@ -18,8 +18,9 @@ sync-over-FIPS), [../design/nsite-layer.md §3.2](../design/nsite-layer.md)
 
 | Service | Listen address | Default port | Reached by | Exposed over FIPS? |
 | --- | --- | --- | --- | --- |
-| Embedded Nostr relay | `127.0.0.1` (localhost) | **4870** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:4870` |
-| Embedded Blossom server | `127.0.0.1` (localhost) | **24243** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:24243` |
+| Embedded Nostr relay | `127.0.0.1` (localhost) | **4870** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:4870`, paired peers only |
+| Auth service (pairing) | `[::]` (mesh only) | **4873** | peers asking to pair | **Yes** — at `<npub>.fips:4873`, and the only port open to a peer we have never met |
+| Embedded Blossom server | `127.0.0.1` (localhost) | **24243** | local gateway + sync engine; peer sync engines | **Yes** — at `<npub>.fips:24243`, paired peers only. Not bound at all when a custom Blossom is configured |
 | Local HTTP gateway | `127.0.0.1` (localhost) | **80** | any browser on the device (system-wide `*.nsite` interception) | **No** — localhost-only, never over the mesh |
 | DNS interceptor | inside the VpnService/TUN reader (not a bound socket) | n/a | the whole device's resolver | n/a — it *produces* the addresses below |
 | FIPS IPv6 adapter | FSP port **256** (internal mesh port, not a localhost socket) | 256 | FIPS session layer | n/a — this is the mesh transport that *carries* IPv6 to `fd00::` |
@@ -60,6 +61,36 @@ unchanged.
   identified by the **holder's device** npub (the mesh address) — different keys.
   See
   [../design/nsite-layer.md §5.2](../design/nsite-layer.md).
+
+## 1a. Auth service — `4873`
+
+- **Listen:** `http://[::]:4873` on the mesh only (IPV6_V6ONLY, so it cannot
+  collide with a loopback squatter). There is no localhost listener: nothing on
+  this device needs to pair with itself.
+- **Route:** `POST /pair`, body a signed pairing event (kinds 9101 / 9102 /
+  9103). Answers `200 paired`, `202 pending` (a request waiting on the user), or
+  `403 declined`.
+- **Reached by:** any peer, paired or not. This is deliberate and it is the only
+  such port — pairing is what *creates* the circle that gates everything else,
+  so it cannot itself require membership.
+
+Because bootstrap lives here, the relay and Blossom ports have **no exceptions**:
+an unpaired peer is refused before the WebSocket upgrade, and the relay rejects
+the pairing kinds from every source so they never reach the event store.
+
+`4873` is the first number clear of everything already spoken for: `4869` is what
+public Nostr relays commonly take, `4870` is our relay, `4871` is the LAN / `!FIPS`
+AP lane (and where pre-`4872` Wi-Fi Aware peers still listen), and `4872` is the
+Aware lane.
+
+Those neighbours are all UDP and this is TCP, so sharing a number would not have
+collided at the socket level. It was moved anyway: a port number that means two
+different things in one codebase is a trap for whoever next reads a packet
+capture or a `netstat`. It is a Myco constant rather than something negotiated;
+peers agree by running the same version.
+
+See [../design/identity-pairing.md](../design/identity-pairing.md) and
+[../../reference/thinning-custom-relay.md](../../reference/thinning-custom-relay.md) (D6).
 
 ## 2. Embedded Blossom server — `24243`
 

@@ -2,9 +2,8 @@
 
 This document describes the security posture proposed for Myco: what is
 authenticated, what is authorized, who is trusted, and what is explicitly out
-of scope. It is a design document for a not-yet-built app; statements about
-behaviour are proposals ("the app will…") unless they cite verified reference
-source.
+of scope. Where a section describes something not yet built it says so;
+everything else describes the app as it stands.
 
 The short version: **Myco trusts data, not peers.** Every artifact it
 exchanges — Nostr events and Blossom blobs — is self-authenticating, so any
@@ -60,6 +59,31 @@ Carl is not trusting *you* — he is verifying Alice's signature and the blob
 hashes himself. A new source is as good as the original source. This is the
 property that lets relays and blobs hop across "crappy links in all directions"
 without a trusted intermediary.
+
+### 1.1 Where signatures are checked
+
+Transport authenticity and event authorship are different claims, and
+store-and-forward pulls them apart. FIPS Noise IK plus the identity-derived
+`fd00::` address proves **who sent the frame**. It says nothing about **who
+signed the event**, because peers routinely hand us events authored by third
+parties they have never met.
+
+Manifests are the sharp case. An nsite manifest is authored by its publisher and
+the peer relaying it is only a courier, so without verification any paired peer
+could hand us a forged manifest for anyone's nsite and we would stage and
+activate it as that publisher's site. Content-addressing does not save us: blob
+hashes are checked against the manifest, and the manifest is the forged part.
+
+So verification happens **once, at ingress** — the points where a remote event
+enters the process. It used to be a habit repeated at nine scattered call sites,
+which is a pattern where a single missed one is a silent forgery hole.
+
+Events read back **out** of our own store are not re-verified. NIP-01 already
+makes signature checking mandatory for a relay accepting an `EVENT`, so paying
+Schnorr again per event on a phone buys nothing. That trade is worth restating if
+Myco is ever pointed at a relay it does not own — see
+[nsite-layer.md §2.1](./nsite-layer.md), where that is a planned setting with a
+warning attached.
 
 What self-authentication does **not** give you:
 
@@ -132,6 +156,11 @@ What this changes:
   network is not private. Anyone you pair with (Section 4) becomes a peer and,
   by virtue of being a peer, a data source and a data sink. "Paired" is the
   only relationship.
+- **There *is* an "is this peer in my circle" check on the content ports.** That
+  is not a roster: it is a purely local list, symmetric, with no signer, no
+  admin, and no authority beyond this device. It gates who may talk to *our*
+  relay and *our* Blossom, and it changes nothing about who may be on the mesh
+  (§3.1).
 - **Authorization collapses to data semantics.** Because all data is
   self-authenticating (Section 1), there is little a peer is "authorized" to do
   beyond exchange verifiable artifacts. A peer cannot impersonate an author,
@@ -154,37 +183,86 @@ Myco's v1 stance is *default-allow* — pairing is the gesture, and we do not
 ship a roster-like allowlist UI. Re-exposing the ACL as a "block this peer"
 control is a candidate later feature (TBD / open).
 
-**Inbound surface on the mesh.** FIPS FSP port-multiplexing delivers mesh
-datagrams to localhost ports, so a paired peer can reach your services at
-`<npub>.fips:4870` (relay) and `<npub>.fips:24243` (Blossom)
-([../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md)).
-On Linux, FIPS recommends a default-deny nftables baseline to bound this
-surface; **on Android there is no nftables equivalent the app controls.** The
-app's mitigation is to expose *only* the relay and Blossom ports over the mesh
-and nothing else — the VpnService/TUN routes only `fd00::/8` and DNS-intercepts
-`*.fips`/`*.nsite`; it does **not** capture `0.0.0.0/0`, and the WebView never
-resolves `.fips`. So the only inbound app surface a peer sees is "fetch signed
-events and content-addressed blobs," which is exactly the self-authenticating
-surface from Section 1. **Open question:** confirm that no other localhost
-service on the phone is inadvertently reachable via FSP port-multiplexing on a
-paired path, and whether the app should enforce an explicit port allowlist on
-the inbound mesh side.
+### 3.1 Inbound surface on the mesh
 
-**v0: the relay and Blossom are open-read to any connected peer.** There is **no
-relay/Blossom auth in v0** — the embedded relay answers any connected peer's `REQ`
-with its stored events, and Blossom answers any `GET /<sha256>`. No NIP-42 `AUTH`,
-no per-peer read scoping. This is deliberate and aligned with propagation: a peer
-*must* be able to read your relay/Blossom to become a new source, and the data is
-public-by-design (author-signed manifests, content-addressed blobs) — so open-read
-leaks no secret. The honest exposure is **metadata, not confidentiality**: a
-connected peer can issue a broad `REQ` and **enumerate your whole manifest set** —
-learning *which sites you hold, installed, or cached for others*. That is the same
-privacy signal as *which manifests you choose to replicate* (see
-[propagation.md](./propagation.md)), not a content leak. Mitigations — NIP-42 `AUTH`
-on the relay, per-peer read-scoping, unlisted/private nsites, selective
-replication — are **additive and deferred to a later milestone** (NIP-42 is
-non-breaking on the wire). The only coarse knob today is the FIPS peer ACL ("block
-this peer", above).
+FIPS FSP port-multiplexing delivers mesh datagrams to localhost ports, so a peer
+can reach your services over `.fips`
+([../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md)).
+On Linux, FIPS recommends a default-deny nftables baseline to bound this surface;
+**on Android there is no nftables equivalent the app controls.** The app's
+mitigation is to expose *only* its own ports over the mesh — the VpnService/TUN
+routes only `fd00::/8` and DNS-intercepts `*.fips`/`*.nsite`; it does **not**
+capture `0.0.0.0/0`, and the WebView never resolves `.fips`.
+
+Three ports are exposed, and only one of them answers a stranger.
+
+| Port | Service | Who may reach it |
+| --- | --- | --- |
+| `4870` | Relay (the mesh proxy's NIP-01 socket) | Circle members only |
+| `24243` | Blossom blob store | Circle members only |
+| `4873` | Auth service — `POST /pair`, nothing else | **Anyone** |
+
+**Open question:** confirm that no other localhost service on the phone is
+inadvertently reachable via FSP port-multiplexing on a paired path, and whether
+the app should enforce an explicit port allowlist on the inbound mesh side.
+
+### 3.2 One open port, one membership predicate
+
+The content ports have **no exceptions**. Pairing used to need one — an unpaired
+peer had to be able to publish the three handshake kinds so pairing could
+bootstrap — which meant a kind whitelist inside the relay's frame handling.
+Pairing now terminates at its own service ([identity-pairing.md
+§6.2](./identity-pairing.md)), so:
+
+- **Admission is one predicate:** is this mesh address in my circle? The same
+  question answers for relay and Blossom alike.
+- **It is checked at accept, not per frame.** An unpaired peer is refused
+  **before** the WebSocket upgrade, with a plain `403`. A stranger costs a TCP
+  accept and one small response rather than an upgrade and a round of frames,
+  which matters on a BLE link.
+- **The relay refuses the pairing kinds from every source**, paired or not.
+  Nothing writes control traffic into the event store.
+- **`:4873` is the only unauthenticated surface in the app**, so hardening and
+  rate limiting have a single address instead of emerging from a whitelist.
+
+**Revocation closes live connections.** Because admission is checked once, at the
+upgrade, removing a peer also drops the connections it already holds rather than
+only blocking the next request. Membership is consulted live, so the change takes
+effect immediately.
+
+### 3.3 Per-peer permissions
+
+Paired is no longer all-or-nothing. Each circle contact carries six flags —
+relay read, relay read-multihop, relay write, relay write-multihop, Blossom read,
+Blossom write — all on by default **except Blossom write**, which is off. Full
+table and rationale: [nsite-permissions.md §2](./nsite-permissions.md).
+
+Two consequences worth stating here:
+
+- **Uploads are not granted by default.** Nothing in normal operation pushes
+  blobs to a peer (propagation is pull-based), so accepting bytes onto our disk
+  is opt-in. A missing field in an older `circle.json` cannot silently grant it.
+- **Relaying for a peer is a separate grant from talking to it.** The two
+  multihop flags are per-peer clamps on the hop budgets, so "I will hold your
+  data but not carry it further" is expressible.
+
+The flags are stored per peer today but **not exposed in the UI**; every peer gets
+the defaults.
+
+### 3.4 What a circle member can still learn
+
+Read access is deliberately broad for members, because a peer *must* be able to
+read your relay/Blossom to become a new source, and the data is public-by-design
+(author-signed manifests, content-addressed blobs) — so it leaks no secret.
+
+The honest exposure is **metadata, not confidentiality**: a member can issue a
+broad `REQ` and **enumerate your whole manifest set**, learning *which sites you
+hold, installed, or cached for others*. That is the same privacy signal as *which
+manifests you choose to replicate* (see [propagation.md](./propagation.md)), not a
+content leak. Narrower read scoping — unlisted/private nsites, selective
+replication, filtering by kind per peer — remains **additive and deferred**. The
+coarse knobs today are unpairing, the per-peer read flag, and the FIPS peer ACL
+("block this peer", above).
 
 ## 4. Pairing trust: scan-and-confirm, mutual by default
 
@@ -202,8 +280,8 @@ Pairing is the one moment a human asserts "this is who I think it is."
   [../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)).
 - **The trust model is scan-and-confirm over an already-encrypted channel, not
   bare TOFU.** Scanning the QR does not merely bind an npub on faith — it initiates
-  the mandatory **invite-pairing handshake** against the inviter's on-device
-  `<npub>.fips` endpoint. That channel is already **Noise-XK authenticated and
+  the mandatory **invite-pairing handshake** against the inviter's on-device auth
+  service at `<npub>.fips:4873`. That channel is already **Noise-XK authenticated and
   encrypted** to the inviter's device key, so the scanner just **echoes the
   `pairSecret` back** inside it; the inviter matches the (single-use) secret and the
   human taps **OK** to confirm the memorable name
@@ -217,7 +295,7 @@ Pairing is the one moment a human asserts "this is who I think it is."
   man-in-the-middle without the private key cannot impersonate the paired peer on
   subsequent connections.
 - **The handshake closes the relay-MITM / malicious-QR gap by default.** Three
-  things stack up: the channel to `<npub>.fips` is Noise-authenticated to the
+  things stack up: the channel to `<npub>.fips:4873` is Noise-authenticated to the
   inviter's key (a passive relay between the two devices learns nothing and cannot
   impersonate either end), the `pairSecret` is a single-use, unguessable random
   string echoed *inside* that encrypted channel (a captured or relayed invite cannot
@@ -232,8 +310,10 @@ Pairing is the one moment a human asserts "this is who I think it is."
   round-trip, so inviter and scanner must both be online to each other when the
   QR is scanned. In practice they are physically together, so the BLE link is up
   — the handshake runs over BLE (or IP). There is no deferred / offline pairing:
-  if the inviter's `<npub>.fips` endpoint is not reachable, pairing does not
-  complete.
+  if the inviter's auth service is not reachable, pairing does not complete. It
+  does, however, survive a broken content plane: a taken relay port or a
+  misconfigured store does not stop two phones pairing, which is the one
+  operation that could repair the situation.
 - **`pairSecret` authenticates, it does not authorize.** Holding the secret lets
   a peer complete the handshake; it confers **no membership and no admin
   authority** (there is no roster or admin to join — §3). After pairing, the
@@ -308,10 +388,13 @@ capability.
 | ------ | ---------------------- | ---------- |
 | **Malicious / forging relay or peer** | Tries to serve forged content | **Cannot forge.** Signatures + SHA-256 verified locally (§1); bad artifacts are rejected. |
 | **Withholding / availability attack** | Refuses to serve, serves stale, hides a newer event | Pull-from-many: query all reachable relays, keep newest valid event; manifests flood widely (announce-wide) while large blobs are pulled on demand. Best-effort, no freshness guarantee (§1). |
-| **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | LRU cache (default cap **2 GB**); Library sites are **pinned** (exempt from eviction); per-source caps / rate limits (TBD). Junk that fails verification is never stored (§1). |
+| **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | Only circle members reach the content ports at all, and **blob upload is off by default per peer** (§3.3), so a peer cannot push bytes onto your disk unless you grant it. Plus: LRU cache (default cap **2 GB**); Library sites are **pinned** (exempt from eviction); per-source relay rate limits (TBD). Junk that fails verification is never stored (§1). |
 | **Identity / link spoofing** | Pretends to be a paired peer | Noise IK/XK over secp256k1; identity is pubkey not MAC; spoof cannot complete handshake (§2). |
 | **Replay** | Re-injects captured datagrams | 2048-entry sliding replay window at both FMP and FSP layers (§2). |
-| **Malicious / relayed QR at pairing** | Tries to bind the attacker's npub as your paired peer | Scan-and-confirm over Noise: the single-use, unguessable `pairSecret` is echoed back inside the Noise-authenticated channel to the inviter's `<npub>.fips` and confirmed by the inviter's OK prompt, so a captured/relayed invite cannot bind (§4). Optional out-of-band safety-string check on top is an open proposal (§4). |
+| **Malicious / relayed QR at pairing** | Tries to bind the attacker's npub as your paired peer | Scan-and-confirm over Noise: the single-use, unguessable `pairSecret` is echoed back inside the Noise-authenticated channel to the inviter's `<npub>.fips:4873` and confirmed by the inviter's OK prompt, so a captured/relayed invite cannot bind (§4). Optional out-of-band safety-string check on top is an open proposal (§4). |
+| **DoS on the auth port** | Floods `:4873`, the one port open to strangers, to burn a BLE radio | Per-source token bucket (1/s, burst 5), a global in-flight ceiling of 8, and an 8 KiB body cap. Over-limit is a delay, not a ban — there is no identity to ban that costs a mesh peer anything to replace (§3.2, [identity-pairing.md §6.2](./identity-pairing.md)). |
+| **Stranger writing to your event store** | Gets data into a store you may not own | Pairing kinds are refused on the relay from every source; the handshake never touches the store. Unpaired peers are refused before the WebSocket upgrade (§3.2). |
+| **Revoked peer keeps reading** | An unpaired peer's open subscription keeps streaming | Membership is re-checked on delivery and the connection is dropped, so revocation reaches connections that already exist (§3.2). |
 | **Malicious nsite content** | Untrusted JS in the WebView | Pure-static v1, no capability API; per-nsite origin isolation + CSP; WebView never resolves `.fips` (§5). |
 | **Capability-API abuse** (future) | nsite JS reaches host affordances (query peers, write blobs) | Out of scope for v1; the app never signs/publishes events, so no `sign()` capability exists; needs explicit permission model if any capability is ever introduced (§5). |
 | **Propagation-privacy leak** | Observers learn what you host / re-serve | See below — partial mitigation only (open). |

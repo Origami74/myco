@@ -1,7 +1,11 @@
 //! `myco-relay` — a generic embedded **Nostr relay**: a NIP-01 event store
-//! implementing `nsite-deck`'s [`RelayBackend`] seam, plus a `ws://…:4870` socket
-//! ([`server`]). See `docs/design/nsite-layer.md` §2.1 and
-//! `docs/design/event-gossip.md`.
+//! implementing `nsite-deck`'s [`RelayBackend`] seam. See
+//! `docs/design/nsite-layer.md` §2.1 and `docs/design/event-gossip.md`.
+//!
+//! This crate holds no Myco concepts — no mesh, no ttl, no circles. The
+//! WebSocket front door that applies those is `myco-core::mesh_relay`, which
+//! keeps this store swappable for any other NIP-01 relay
+//! (`reference/thinning-custom-relay.md`).
 //!
 //! Two kinds of event live here:
 //!
@@ -25,10 +29,9 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use nostr::{Event, PublicKey};
-use nsite_deck::seams::{ManifestFilter, RelayBackend};
-
-pub mod server;
+use nostr::filter::MatchEventOptions;
+use nostr::{Event, Filter};
+use nsite_deck::seams::{AdminBackend, RelayBackend};
 
 /// An embedded NIP-01 event store, keyed by event id, with replaceable/addressable
 /// dedup, NIP-40 expiry, and JSON persistence of the non-expiring (manifest) set.
@@ -151,8 +154,10 @@ fn slot_of(event: &Event) -> (u16, [u8; 32], Option<String>) {
     (kind, event.pubkey.to_bytes(), d)
 }
 
-/// The NIP-40 `expiration` tag value (a unix timestamp), if present.
-fn expiration(event: &Event) -> Option<u64> {
+/// The NIP-40 `expiration` tag value (a unix timestamp), if present. Public so
+/// the proxy in front can size its seen-set to how long an event can still be
+/// circulating.
+pub fn expiration(event: &Event) -> Option<u64> {
     event.tags.iter().find_map(|t| {
         let s = t.as_slice();
         (s.first().map(String::as_str) == Some("expiration"))
@@ -167,13 +172,13 @@ pub fn is_expired(event: &Event, now: u64) -> bool {
     expiration(event).is_some_and(|exp| exp <= now)
 }
 
-/// Does an event satisfy a basic `{kinds, authors, #d}` filter? Used by both the
-/// stored `query` and the server's live-subscription forwarding.
-pub fn matches_filter(event: &Event, filter: &ManifestFilter) -> bool {
-    (filter.kinds.is_empty() || filter.kinds.contains(&event.kind.as_u16()))
-        && (filter.authors.is_empty() || filter.authors.contains(&event.pubkey))
-        && (filter.d_tags.is_empty()
-            || event_d_tag(event).is_some_and(|d| filter.d_tags.contains(&d)))
+/// Does an event satisfy a NIP-01 filter? Used by both the stored `query` and the
+/// proxy's live-subscription forwarding.
+///
+/// Delegates to the `nostr` crate rather than hand-rolling a subset, so `since`,
+/// `until`, ids, and general tag matching behave the way any other relay would.
+pub fn matches_filter(event: &Event, filter: &Filter) -> bool {
+    filter.match_event(event, MatchEventOptions::new())
 }
 
 /// Admit an event into `map`, applying replaceable/addressable dedup (newest wins)
@@ -210,9 +215,17 @@ fn admit(map: &mut HashMap<[u8; 32], Event>, event: Event, now: u64) -> bool {
     }
 }
 
-#[async_trait]
-impl RelayBackend for RelayStore {
-    async fn store_event(&self, event: Event) -> anyhow::Result<bool> {
+impl RelayStore {
+    /// Store an event, reporting whether it was **new** to this store — `false`
+    /// for a duplicate id or an event already superseded in its replaceable slot.
+    ///
+    /// This answer describes *this store*, and nothing else should be built on
+    /// it. In particular it is not a mesh loop-guard: an id GC'd at NIP-40 expiry
+    /// looks new again on a later pull, so gossip novelty is the proxy's own
+    /// seen-set instead (`reference/thinning-custom-relay.md`, D2). The
+    /// [`RelayBackend`] seam therefore does not expose it — an arbitrary NIP-01
+    /// relay could not answer it anyway.
+    pub async fn admit_event(&self, event: Event) -> anyhow::Result<bool> {
         let now = now_secs();
         let persistable = expiration(&event).is_none();
         let snapshot = {
@@ -236,42 +249,34 @@ impl RelayBackend for RelayStore {
         }
         Ok(true)
     }
+}
 
-    async fn get_manifest(
-        &self,
-        kind: u16,
-        author: &PublicKey,
-        d_tag: Option<&str>,
-    ) -> anyhow::Result<Option<Event>> {
-        let now = now_secs();
-        let map = self.events.lock().unwrap();
-        Ok(map
-            .values()
-            .filter(|e| {
-                e.kind.as_u16() == kind
-                    && e.pubkey == *author
-                    && event_d_tag(e).as_deref() == d_tag
-                    && !is_expired(e, now)
-            })
-            .max_by_key(|e| e.created_at)
-            .cloned())
+#[async_trait]
+impl RelayBackend for RelayStore {
+    async fn publish(&self, event: Event) -> anyhow::Result<()> {
+        self.admit_event(event).await.map(|_| ())
     }
 
-    async fn query(&self, filter: &ManifestFilter) -> anyhow::Result<Vec<Event>> {
+    async fn query(&self, filters: &[Filter]) -> anyhow::Result<Vec<Event>> {
         let now = now_secs();
         let map = self.events.lock().unwrap();
         let mut out: Vec<Event> = map
             .values()
-            .filter(|e| !is_expired(e, now) && matches_filter(e, filter))
+            .filter(|e| !is_expired(e, now) && filters.iter().any(|f| matches_filter(e, f)))
             .cloned()
             .collect();
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        if let Some(limit) = filter.limit {
+        // Honour the smallest limit any filter asked for, matching how a relay
+        // caps a multi-filter REQ.
+        if let Some(limit) = filters.iter().filter_map(|f| f.limit).min() {
             out.truncate(limit);
         }
         Ok(out)
     }
+}
 
+#[async_trait]
+impl AdminBackend for RelayStore {
     async fn wipe(&self) -> anyhow::Result<()> {
         self.events.lock().unwrap().clear();
         if let Some(path) = &self.path {
@@ -321,17 +326,17 @@ mod tests {
         let root = build_test_site_with_keys(&keys, &[("/index.html", b"r")], None, None);
         let named = build_test_site_with_keys(&keys, &[("/index.html", b"n")], Some("blog"), None);
 
-        assert!(store.store_event(root.manifest.clone()).await.unwrap());
-        assert!(store.store_event(named.manifest.clone()).await.unwrap());
+        assert!(store.admit_event(root.manifest.clone()).await.unwrap());
+        assert!(store.admit_event(named.manifest.clone()).await.unwrap());
 
-        let got_root = store
-            .get_manifest(KIND_ROOT, &keys.public_key(), None)
-            .await
-            .unwrap();
-        let got_named = store
-            .get_manifest(KIND_NAMED, &keys.public_key(), Some("blog"))
-            .await
-            .unwrap();
+        let got_root =
+            nsite_deck::seams::newest_in_slot(&store, KIND_ROOT, &keys.public_key(), None)
+                .await
+                .unwrap();
+        let got_named =
+            nsite_deck::seams::newest_in_slot(&store, KIND_NAMED, &keys.public_key(), Some("blog"))
+                .await
+                .unwrap();
         assert_eq!(got_root.map(|e| e.id), Some(root.manifest.id));
         assert_eq!(got_named.map(|e| e.id), Some(named.manifest.id));
         assert_eq!(store.count(), 2);
@@ -346,20 +351,70 @@ mod tests {
 
         let m1 = chat_event(&keys, "mesh", "hello", None);
         let m2 = chat_event(&keys, "mesh", "world", None);
-        assert!(store.store_event(m1.clone()).await.unwrap());
-        assert!(store.store_event(m2.clone()).await.unwrap());
+        assert!(store.admit_event(m1.clone()).await.unwrap());
+        assert!(store.admit_event(m2.clone()).await.unwrap());
 
-        let filter = ManifestFilter {
-            kinds: vec![9],
-            d_tags: vec!["mesh".to_string()],
-            ..Default::default()
-        };
-        let got = store.query(&filter).await.unwrap();
+        let filter = Filter::new().kind(Kind::from(9u16)).identifier("mesh");
+        let got = store.query(std::slice::from_ref(&filter)).await.unwrap();
         assert_eq!(got.len(), 2, "both chat messages retained");
 
         // Re-storing the same id is a no-op (dedup), not a second copy.
-        assert!(!store.store_event(m1).await.unwrap());
-        assert_eq!(store.query(&filter).await.unwrap().len(), 2);
+        assert!(!store.admit_event(m1).await.unwrap());
+        assert_eq!(
+            store
+                .query(std::slice::from_ref(&filter))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// The store answers the whole NIP-01 filter surface, not a hand-rolled
+    /// subset of it.
+    ///
+    /// The old query took `{kinds, authors, #d, limit}` and silently ignored
+    /// everything else, so a `since`/`until` window or an id lookup matched far
+    /// more than the caller asked for. A backend swapped in behind this seam
+    /// would have honoured them, so the two would have disagreed.
+    #[tokio::test]
+    async fn the_full_filter_surface_is_honoured() {
+        let store = RelayStore::in_memory();
+        let keys = Keys::generate();
+
+        let old = EventBuilder::new(Kind::from(9u16), "old")
+            .custom_created_at(nostr::Timestamp::from(1_000))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let recent = EventBuilder::new(Kind::from(9u16), "recent")
+            .custom_created_at(nostr::Timestamp::from(9_000))
+            .sign_with_keys(&keys)
+            .unwrap();
+        store.admit_event(old.clone()).await.unwrap();
+        store.admit_event(recent.clone()).await.unwrap();
+
+        // A time window: previously ignored, so both would have come back.
+        let windowed = store
+            .query(&[Filter::new().since(nostr::Timestamp::from(5_000))])
+            .await
+            .unwrap();
+        assert_eq!(windowed.len(), 1, "since must exclude the older event");
+        assert_eq!(windowed[0].id, recent.id);
+
+        // An id lookup, likewise.
+        let by_id = store.query(&[Filter::new().id(old.id)]).await.unwrap();
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0].id, old.id);
+
+        // Several filters are an any-match, the way a multi-filter REQ behaves.
+        let either = store
+            .query(&[
+                Filter::new().id(old.id),
+                Filter::new().since(nostr::Timestamp::from(5_000)),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(either.len(), 2);
     }
 
     #[tokio::test]
@@ -371,17 +426,14 @@ mod tests {
         let live = chat_event(&keys, "mesh", "fresh", Some(now + 600));
         let dead = chat_event(&keys, "mesh", "stale", Some(now.saturating_sub(10)));
 
-        assert!(store.store_event(live.clone()).await.unwrap());
+        assert!(store.admit_event(live.clone()).await.unwrap());
         assert!(
-            !store.store_event(dead).await.unwrap(),
+            !store.admit_event(dead).await.unwrap(),
             "an already-expired event is not stored"
         );
 
-        let filter = ManifestFilter {
-            kinds: vec![9],
-            ..Default::default()
-        };
-        let got = store.query(&filter).await.unwrap();
+        let filter = Filter::new().kind(Kind::from(9u16));
+        let got = store.query(std::slice::from_ref(&filter)).await.unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, live.id);
     }
@@ -396,9 +448,9 @@ mod tests {
 
         {
             let store = RelayStore::open(&dir).unwrap();
-            store.store_event(site.manifest.clone()).await.unwrap();
+            store.admit_event(site.manifest.clone()).await.unwrap();
             store
-                .store_event(chat_event(&keys, "mesh", "ephemeral", Some(now + 600)))
+                .admit_event(chat_event(&keys, "mesh", "ephemeral", Some(now + 600)))
                 .await
                 .unwrap();
             assert_eq!(store.count(), 2, "both live in memory");
@@ -407,8 +459,7 @@ mod tests {
         // written to disk.
         let store = RelayStore::open(&dir).unwrap();
         assert_eq!(store.count(), 1, "only the manifest persists");
-        let got = store
-            .get_manifest(KIND_ROOT, &keys.public_key(), None)
+        let got = nsite_deck::seams::newest_in_slot(&store, KIND_ROOT, &keys.public_key(), None)
             .await
             .unwrap();
         assert_eq!(got.map(|e| e.id), Some(site.manifest.id));
@@ -425,12 +476,11 @@ mod tests {
 
         {
             let store = RelayStore::open(&dir).unwrap();
-            store.store_event(site.manifest.clone()).await.unwrap();
+            store.admit_event(site.manifest.clone()).await.unwrap();
         }
         let store = RelayStore::open(&dir).unwrap();
         assert_eq!(store.count(), 1);
-        let got = store
-            .get_manifest(KIND_ROOT, &keys.public_key(), None)
+        let got = nsite_deck::seams::newest_in_slot(&store, KIND_ROOT, &keys.public_key(), None)
             .await
             .unwrap();
         assert_eq!(got.map(|e| e.id), Some(site.manifest.id));

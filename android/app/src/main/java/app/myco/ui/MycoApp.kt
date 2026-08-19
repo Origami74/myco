@@ -62,6 +62,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import app.myco.ble.BleHealth
+import app.myco.ui.screens.backendErrors
 import androidx.compose.ui.platform.LocalContext
 import app.myco.ui.radioWarnings
 import app.myco.core.AppCoreClient
@@ -225,7 +226,10 @@ fun MycoApp(
                                 }
                             },
                             icon = {
-                                val badged = (tab.route == "settings" && (bleExhausted || radioAlert)) ||
+                                val badged = (
+                                    tab.route == "settings" &&
+                                        (bleExhausted || radioAlert || backendErrors(state).isNotEmpty())
+                                    ) ||
                                     (tab.route == "circle" && state.pendingPairRequests.isNotEmpty())
                                 if (badged) {
                                     BadgedBox(badge = { Badge() }) {

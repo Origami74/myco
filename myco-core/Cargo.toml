@@ -26,11 +26,18 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+# The mesh relay proxy (`mesh_relay`) is an axum WebSocket server, bound
+# IPV6_V6ONLY via socket2 so `[::]:4870` does not collide with the loopback bind.
+axum = { workspace = true }
+socket2 = { workspace = true }
 # `dns_intercept` synthesises the AAAA query it sends to the node's built-in
 # `.fips` responder for route warming. Matches fips's pin.
 simple-dns = "0.11.2"
 
 [dev-dependencies]
+# Drive the axum routers directly in tests, so a handler can be exercised with a
+# synthetic peer address (a real socket can only ever be loopback here).
+tower = { version = "0.5", features = ["util"] }
 nsite-deck = { path = "../nsite-deck", features = ["testing"] }
 tokio-tungstenite = { workspace = true }
 

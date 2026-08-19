@@ -446,6 +446,7 @@ mod tests {
 
     fn circle(npub: &str, name: &str) -> CircleContact {
         CircleContact {
+            perms: Default::default(),
             npub: npub.to_string(),
             name: name.to_string(),
             added_at: 0,

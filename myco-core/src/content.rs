@@ -20,14 +20,14 @@ use futures_util::future::join_all;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nostr::nips::nip19::{FromBech32, ToBech32};
-use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag};
+use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag};
 use nsite_deck::gateway::{self, Readiness};
-use nsite_deck::seams::{BlobStore, ManifestFilter, PeerSource, RelayBackend};
+use nsite_deck::seams::{BlobStore, PeerSource, RelayBackend};
 use nsite_deck::{sync, GatewayResponse, SiteAddr, SyncOutcome};
 use serde::{Deserialize, Serialize};
 
+use crate::mesh_relay::{Inbound, Origin};
 use myco_blossom::FsBlobStore;
-use myco_relay::server::{Inbound, Origin};
 use myco_relay::RelayStore;
 
 /// Per-site sync/readiness, mirroring the FFI `SiteStatus` shape.
@@ -88,6 +88,67 @@ pub struct CircleContact {
     /// A human label for the contact (from the share QR; a placeholder for now).
     pub name: String,
     pub added_at: u64,
+    /// What this peer may do to us. Not exposed in the UI yet — every peer gets
+    /// the defaults — but stored per peer so turning a knob later is a UI change
+    /// rather than a storage migration.
+    #[serde(default)]
+    pub perms: PeerPerms,
+}
+
+/// Per-peer permissions: what a **paired** peer is allowed to do against this
+/// node. Pairing itself is not covered here — that is the auth plane's job, and
+/// it happens before any of these apply.
+///
+/// Read every flag as a grant *we* make to *them*. "Multihop" is ambiguous on
+/// its own, so it means specifically whether their traffic travels further
+/// through us — not anything we send them. Both multihop flags are expressed as
+/// per-peer ttl clamps rather than a separate check, so they reuse the machinery
+/// the push and pull planes already have. See
+/// `reference/thinning-custom-relay.md` (D10).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerPerms {
+    /// May open a `REQ` and receive our stored events.
+    #[serde(default = "yes")]
+    pub relay_read: bool,
+    /// Their `REQ` may be forwarded to our other peers (a hop-budget clamp).
+    #[serde(default = "yes")]
+    pub relay_read_multihop: bool,
+    /// May publish events to us.
+    #[serde(default = "yes")]
+    pub relay_write: bool,
+    /// Events from them may be forwarded onward by us (a hop-budget clamp).
+    #[serde(default = "yes")]
+    pub relay_write_multihop: bool,
+    /// May `GET` / `HEAD` blobs from us.
+    #[serde(default = "yes")]
+    pub blossom_read: bool,
+    /// May `PUT /upload` to us. **Off by default** — this is the one that costs
+    /// us disk, and nothing in normal operation needs it: propagation is
+    /// pull-based, so peers fetch blobs from the holder rather than pushing them.
+    /// The dev-menu speedtest is the only caller, and it reports the refusal.
+    #[serde(default = "no")]
+    pub blossom_write: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+fn no() -> bool {
+    false
+}
+
+impl Default for PeerPerms {
+    fn default() -> Self {
+        Self {
+            relay_read: yes(),
+            relay_read_multihop: yes(),
+            relay_write: yes(),
+            relay_write_multihop: yes(),
+            blossom_read: yes(),
+            blossom_write: no(),
+        }
+    }
 }
 
 /// An nsite **discovered** on a Circle peer's mesh relay ("nsites around me").
@@ -135,12 +196,26 @@ fn dedup_by_host(found: Vec<DiscoveredNsite>) -> Vec<DiscoveredNsite> {
 }
 
 /// Cache/store counts for the UI.
+///
+/// These always describe the **embedded** store and blob directory, which is
+/// what occupies space on this device. Configuring a custom relay or Blossom
+/// does not change these numbers — it means they stop describing what is
+/// actually serving, because a remote store's size is not something NIP-01 or
+/// BUD-01 can report. The `external_*` flags let the screen note that the
+/// built-in store is no longer in use rather than quietly showing a figure for
+/// the wrong thing. See `reference/thinning-custom-relay.md` (D4).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheView {
     pub relay_events: u64,
     pub blob_count: u64,
     pub used_bytes: u64,
+    /// A custom relay is configured, so the embedded event store is not serving.
+    pub external_relay: bool,
+    /// A custom Blossom is configured, so the embedded blob store is not
+    /// serving. Separate from the relay flag because one can be swapped without
+    /// the other.
+    pub external_blobs: bool,
 }
 
 impl CacheView {
@@ -150,6 +225,8 @@ impl CacheView {
             relay_events: 0,
             blob_count: 0,
             used_bytes: 0,
+            external_relay: false,
+            external_blobs: false,
         }
     }
 }
@@ -172,7 +249,7 @@ pub struct PairRequestView {
 /// not met on the mesh is the normal case. Recording it means we can say
 /// "waiting" instead of silently dropping it, and refuse to send a second one
 /// for the same peer.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboundPairView {
     pub npub: String,
@@ -181,9 +258,18 @@ pub struct OutboundPairView {
     pub since: u64,
 }
 
-/// Mutual-pairing handshake events, delivered point-to-point over a peer's mesh
-/// relay (NOT gossiped). Both are signed by the **device** key (the pairing
-/// identity) and self-destruct (NIP-40). See `docs/design/event-gossip.md`.
+/// How long an invite stays valid as proof that we asked to pair.
+///
+/// An accept is only honoured while the matching invite is outstanding, so this
+/// bounds how long a captured accept could be replayed back at us — and stops
+/// invites nobody ever answered accumulating as standing authorisations.
+const INVITE_VALID_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Mutual-pairing handshake events, POSTed point-to-point to a peer's **auth
+/// service** at `:4873` (never gossiped, and never stored — the relay refuses
+/// these kinds from every source). Signed by the **device** key, which is the
+/// pairing identity, and carrying a NIP-40 expiry the auth service checks on
+/// receipt. See `docs/design/identity-pairing.md`.
 pub const KIND_PAIR_REQUEST: u16 = 9101;
 pub const KIND_PAIR_ACCEPT: u16 = 9102;
 /// Sent when a peer forgets you, so both sides drop the pairing symmetrically.
@@ -197,14 +283,28 @@ const PAIR_TTL_SECS: u64 = 120;
 const PAIR_DIAL_ATTEMPTS: usize = 15;
 const PAIR_DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// Hop budget for manifest (update) propagation over the mesh — mirrors the chat
-/// push plane's default. See `docs/design/nsite-updates.md` §4.
-const MANIFEST_EVENT_TTL: u8 = 3;
+/// Time budget stamped on a pull this node originates. Relative, and only bounds
+/// how long a node downstream holds query state — late results are not an error,
+/// they simply arrive to whoever is still listening
+/// (`reference/thinning-custom-relay.md`, D8).
+const PULL_BUDGET_MS: u32 = 10_000;
+
+/// Longest a single forwarded hop will wait on a peer, used when no budget rode
+/// in (an older peer, or a pull that never carried one). A budget that did
+/// arrive only ever shortens this.
+const PULL_HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// The mesh access gate backing the relay + Blossom servers: content (reads, chat,
-/// manifests, blobs) is restricted to **paired** (Circle) peers, but *anyone* may
-/// publish the pairing handshake so a first-time pair request can bootstrap. Holds
-/// the [`Content`] so the live Circle is consulted per request (`docs/design`).
+/// manifests, blobs) is restricted to **paired** (Circle) peers, and what a paired
+/// peer may do is its own [`PeerPerms`] record.
+///
+/// There are **no exceptions**. Pairing used to need one — an unpaired peer had
+/// to be able to publish the handshake kinds to bootstrap — but that now happens
+/// on the auth plane (`crate::auth_service`), so the content ports can simply
+/// require membership (`reference/thinning-custom-relay.md`, D6).
+///
+/// Holds the [`Content`] so the live Circle is consulted per request: adding a
+/// peer, removing one, or changing a permission takes effect immediately.
 pub struct CircleGate {
     content: Arc<Content>,
 }
@@ -215,26 +315,61 @@ impl CircleGate {
     }
 }
 
-impl myco_relay::server::PeerGate for CircleGate {
+impl crate::mesh_relay::PeerGate for CircleGate {
     fn may_read(&self, ip: IpAddr) -> bool {
-        self.content.is_paired_ip(ip)
+        self.content.perms_for_ip(ip).is_some_and(|p| p.relay_read)
+    }
+
+    fn may_connect(&self, ip: IpAddr) -> bool {
+        // Membership alone, checked before the WebSocket upgrade. A peer with a
+        // narrower permission set still gets a socket; what it may do with it is
+        // decided per message below.
+        self.content.perms_for_ip(ip).is_some()
     }
 
     fn may_publish(&self, ip: IpAddr, kind: u16) -> bool {
-        // Pairing handshake is allowed from anyone (it's how a peer becomes paired);
-        // all other kinds require an established Circle membership.
-        kind == KIND_PAIR_REQUEST
-            || kind == KIND_PAIR_ACCEPT
-            || kind == KIND_PAIR_REMOVE
-            || self.content.is_paired_ip(ip)
+        // Pairing kinds are auth-plane control traffic, not content. They are
+        // refused here from every source, paired or not, so nothing writes them
+        // into a store that may not even be ours (D6).
+        if kind == KIND_PAIR_REQUEST || kind == KIND_PAIR_ACCEPT || kind == KIND_PAIR_REMOVE {
+            return false;
+        }
+        self.content.perms_for_ip(ip).is_some_and(|p| p.relay_write)
+    }
+
+    fn max_req_ttl(&self, ip: IpAddr) -> u8 {
+        match self.content.perms_for_ip(ip) {
+            Some(p) if p.relay_read_multihop => crate::mesh_relay::MAX_REQ_TTL,
+            _ => 0,
+        }
     }
 }
 
 /// The content layer. Cheap to `Arc`-clone; the gateway path clones one out of the
 /// `AppRuntime` mutex and serves without holding it.
 pub struct Content {
-    relay: Arc<RelayStore>,
-    blobs: Arc<FsBlobStore>,
+    /// The event store, through the seam — so it can be the embedded relay or
+    /// any other NIP-01 relay (`reference/thinning-custom-relay.md`, D3).
+    relay: Arc<dyn RelayBackend>,
+    /// The custom relay, when one is configured — kept so its reachability can
+    /// be reported. A backend that has gone away otherwise looks like an app
+    /// with no content, every site missing and no explanation.
+    relay_remote: Option<Arc<crate::remote_backend::RemoteBackend>>,
+    /// The embedded store, when that is what `relay` points at.
+    ///
+    /// Held separately because two things it answers are not NIP-01 and cannot
+    /// be asked of an arbitrary relay: the usage counts the Storage screen
+    /// shows, and the selective retain the cache wipe needs. `None` once a
+    /// custom relay is configured, which is exactly what the screen reports.
+    relay_store: Option<Arc<RelayStore>>,
+    /// The blob store, through the seam — embedded or someone else's Blossom.
+    blobs: Arc<dyn BlobStore>,
+    /// The custom Blossom, when one is configured, so its reachability can be
+    /// reported the same way the relay's is.
+    blobs_remote: Option<Arc<crate::remote_blobs::RemoteBlobStore>>,
+    /// The embedded blob store, when that is what `blobs` points at. Holds the
+    /// usage counts and the selective retain, neither of which is BUD-01.
+    blobs_local: Option<Arc<FsBlobStore>>,
     /// The pull source for not-yet-present sites. `None` in P2 M2 (local only);
     /// set to the IP online-fallback source in M3, the FIPS source in P3.
     source: Mutex<Option<Arc<dyn PeerSource>>>,
@@ -258,7 +393,9 @@ pub struct Content {
     sites: Mutex<HashMap<String, SiteStatusView>>,
     /// The device's Nostr keypair (the pairing identity), used to sign pair
     /// request/accept events. Set once at startup from the persisted nsec.
-    device_keys: Mutex<Option<Keys>>,
+    /// The device keypair. Behind an `Arc` because a remote blob store needs it
+    /// to sign BUD-01 upload authorizations, and it is set after construction.
+    device_keys: Arc<Mutex<Option<Keys>>>,
     /// User-chosen device label (memorable name). Set by the app on launch and on
     /// rename; stamped on outgoing pair events so peers show the chosen name.
     /// Falls back to a name derived from the npub when unset.
@@ -266,7 +403,11 @@ pub struct Content {
     /// Incoming pair requests awaiting the user's accept/decline (UI pop-up).
     pending_pairs: Mutex<Vec<PairRequestView>>,
     /// Invites we sent that are still unanswered (see [`OutboundPairView`]).
+    /// Invites we have sent and not yet had answered. **Persisted**, because an
+    /// accept is only honoured against one of these — an in-memory-only record
+    /// would refuse a legitimate accept that arrives after a restart.
     outbound_pairs: Mutex<Vec<OutboundPairView>>,
+    outbound_pairs_path: PathBuf,
     /// Persistent WS connections to peers' relays, so chat fan-out and manifest
     /// fetches don't pay a fresh connect per message (slow over BLE). `Arc` so a
     /// mesh `PeerSource` can borrow the same pool for its manifest REQs.
@@ -301,33 +442,40 @@ pub struct Content {
 /// straight through to the relay. This is what keeps a working app serving while a
 /// newer manifest is still downloading. See `docs/design/nsite-updates.md` §1.
 struct ActiveBackend<'a> {
-    relay: &'a RelayStore,
+    relay: &'a dyn RelayBackend,
     active: &'a Mutex<HashMap<String, Event>>,
 }
 
 #[async_trait]
 impl RelayBackend for ActiveBackend<'_> {
-    async fn store_event(&self, event: Event) -> anyhow::Result<bool> {
-        self.relay.store_event(event).await
+    async fn publish(&self, event: Event) -> anyhow::Result<()> {
+        self.relay.publish(event).await
     }
-    async fn get_manifest(
-        &self,
-        kind: u16,
-        author: &PublicKey,
-        d_tag: Option<&str>,
-    ) -> anyhow::Result<Option<Event>> {
-        let key = manifest_key(kind, author, d_tag);
-        let pinned = self.active.lock().unwrap().get(&key).cloned();
-        if pinned.is_some() {
-            return Ok(pinned);
+    /// Serve the **pinned** version of any site that has one, rather than the
+    /// newest the store holds.
+    ///
+    /// The substitution happens here, on the way out, because the seam no longer
+    /// has a slot-shaped read to override — everything goes through `query` now.
+    /// A pinned event shares its slot with the one it replaces (same kind,
+    /// author, and `d` tag), so anything that matched the newer one matches it.
+    async fn query(&self, filters: &[Filter]) -> anyhow::Result<Vec<Event>> {
+        let mut out = self.relay.query(filters).await?;
+        let active = self.active.lock().unwrap().clone();
+        if active.is_empty() {
+            return Ok(out);
         }
-        self.relay.get_manifest(kind, author, d_tag).await
-    }
-    async fn query(&self, filter: &ManifestFilter) -> anyhow::Result<Vec<Event>> {
-        self.relay.query(filter).await
-    }
-    async fn wipe(&self) -> anyhow::Result<()> {
-        self.relay.wipe().await
+        for event in out.iter_mut() {
+            let key = manifest_key(
+                event.kind.as_u16(),
+                &event.pubkey,
+                event_d_tag(event).as_deref(),
+            );
+            if let Some(pinned) = active.get(&key) {
+                *event = pinned.clone();
+            }
+        }
+        out.dedup_by(|a, b| a.id == b.id);
+        Ok(out)
     }
 }
 
@@ -381,16 +529,70 @@ fn event_d_tag(ev: &Event) -> Option<String> {
 impl Content {
     /// Open the content layer under `data_dir` (relay + blossom subdirs).
     pub fn open(data_dir: &Path) -> anyhow::Result<Self> {
-        let relay = Arc::new(RelayStore::open(data_dir.join("relay"))?);
-        let blobs = Arc::new(FsBlobStore::open(data_dir.join("blossom"))?);
+        Self::open_with_relay(data_dir, None)
+    }
+
+    /// Open with events stored on a **custom relay** instead of the embedded one.
+    ///
+    /// The embedded store is still opened and still occupies disk — it simply
+    /// stops serving, which is what the Storage screen reports. Nothing else in
+    /// the content layer changes: it reads and writes through the seam either
+    /// way (`reference/thinning-custom-relay.md`, D3).
+    pub fn open_with_relay(
+        data_dir: &Path,
+        custom: Option<Arc<crate::remote_backend::RemoteBackend>>,
+    ) -> anyhow::Result<Self> {
+        Self::open_with_backends(data_dir, custom, None)
+    }
+
+    /// Open with either store — or both — pointed at something we do not own.
+    ///
+    /// The embedded relay and blob directory are still opened and still occupy
+    /// disk; they simply stop serving, which is what the Storage screen reports.
+    /// The two are independent: swapping the relay leaves blobs local, and vice
+    /// versa (`reference/thinning-custom-relay.md`, D3 and D9).
+    pub fn open_with_backends(
+        data_dir: &Path,
+        custom: Option<Arc<crate::remote_backend::RemoteBackend>>,
+        custom_blobs: Option<Arc<crate::remote_blobs::RemoteBlobStore>>,
+    ) -> anyhow::Result<Self> {
+        // A remote blob store signs its uploads with the device key, and the key
+        // is loaded after construction — so share one holder rather than keeping
+        // two copies that could fall out of step.
+        let device_keys: Arc<Mutex<Option<Keys>>> = custom_blobs
+            .as_ref()
+            .map(|b| b.keys())
+            .unwrap_or_else(|| Arc::new(Mutex::new(None)));
+        let embedded = Arc::new(RelayStore::open(data_dir.join("relay"))?);
+        let using_custom = custom.is_some();
+        let relay: Arc<dyn RelayBackend> = match &custom {
+            Some(remote) => remote.clone(),
+            None => embedded.clone(),
+        };
+        // Kept only while it is the thing serving: the usage counts and the
+        // selective retain it backs describe our store, not someone else's.
+        let relay_store = (!using_custom).then_some(embedded);
+
+        let embedded_blobs = Arc::new(FsBlobStore::open(data_dir.join("blossom"))?);
+        let blobs: Arc<dyn BlobStore> = match &custom_blobs {
+            Some(remote) => remote.clone(),
+            None => embedded_blobs.clone(),
+        };
+        let blobs_local = custom_blobs.is_none().then_some(embedded_blobs);
         let library_path = data_dir.join("library.json");
         let library = load_library(&library_path);
+        let outbound_pairs_path = data_dir.join("outbound_pairs.json");
+        let outbound_pairs = load_outbound_pairs(&outbound_pairs_path);
         let circle_path = data_dir.join("circle.json");
         let circle = load_circle(&circle_path);
         let active_path = data_dir.join("active.json");
         let active_manifests = load_active(&active_path);
         Ok(Self {
             relay,
+            relay_remote: custom,
+            relay_store,
+            blobs_remote: custom_blobs,
+            blobs_local,
             blobs,
             source: Mutex::new(None),
             offline_only: AtomicBool::new(false),
@@ -401,10 +603,11 @@ impl Content {
             connected_peers: Mutex::new(Vec::new()),
             discovered: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
-            device_keys: Mutex::new(None),
+            device_keys: device_keys.clone(),
             device_name_override: Mutex::new(None),
             pending_pairs: Mutex::new(Vec::new()),
-            outbound_pairs: Mutex::new(Vec::new()),
+            outbound_pairs: Mutex::new(outbound_pairs),
+            outbound_pairs_path,
             peer_relays: Arc::new(crate::peer_relay::PeerRelayPool::new()),
             active_local_subs: Mutex::new(HashMap::new()),
             prev_pool_connected: Mutex::new(HashSet::new()),
@@ -429,14 +632,46 @@ impl Content {
         self.offline_only.load(Ordering::Relaxed)
     }
 
-    /// The relay store (shared), for the mesh WS server.
-    pub fn relay(&self) -> Arc<RelayStore> {
+    /// The event store (shared), for the mesh WS proxy in front of it.
+    pub fn relay(&self) -> Arc<dyn RelayBackend> {
         self.relay.clone()
     }
 
-    /// The blob store (shared), for the mesh Blossom server.
-    pub fn blobs(&self) -> Arc<FsBlobStore> {
+    /// What to tell the user about the configured relay: its URL, and why it is
+    /// unreachable if it is. Empty when the built-in store is in use.
+    pub fn relay_health(&self) -> crate::remote_backend::BackendHealth {
+        self.relay_remote
+            .as_ref()
+            .map(|r| r.health())
+            .unwrap_or_default()
+    }
+
+    /// The embedded store, if that is what we are using. `None` once a custom
+    /// relay is configured — the caller decides what an absent one means, since
+    /// nothing here can be asked of an arbitrary relay.
+    pub fn relay_store(&self) -> Option<Arc<RelayStore>> {
+        self.relay_store.clone()
+    }
+
+    /// The blob store (shared), through the seam.
+    pub fn blobs(&self) -> Arc<dyn BlobStore> {
         self.blobs.clone()
+    }
+
+    /// The embedded blob store, if that is what we are using. The mesh Blossom
+    /// server needs the concrete one: it serves our own blobs to peers, and a
+    /// custom server is reached by its own URL rather than proxied through us.
+    pub fn blobs_local(&self) -> Option<Arc<FsBlobStore>> {
+        self.blobs_local.clone()
+    }
+
+    /// What to tell the user about a configured Blossom: its URL, and why it is
+    /// unreachable if it is.
+    pub fn blobs_health(&self) -> crate::remote_backend::BackendHealth {
+        self.blobs_remote
+            .as_ref()
+            .map(|b| b.health())
+            .unwrap_or_default()
     }
 
     // --- active version (what the gateway serves; docs/design/nsite-updates.md §1) ---
@@ -667,7 +902,7 @@ impl Content {
                         // it's stored (idempotent) and pin it as the active version;
                         // title/count come straight from the manifest we held.
                         Some(m) => {
-                            let _ = self.relay.store_event(m.event.clone()).await;
+                            let _ = self.relay.publish(m.event.clone()).await;
                             self.set_active(&m.event);
                             let n = m.paths.len() as u64;
                             self.set_status_titled(
@@ -684,10 +919,13 @@ impl Content {
                         // newest) — pull it back to make it the active version.
                         None => {
                             let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-                            if let Ok(Some(ev)) = self
-                                .relay
-                                .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-                                .await
+                            if let Ok(Some(ev)) = nsite_deck::seams::newest_in_slot(
+                                self.relay.as_ref(),
+                                kind,
+                                &addr.author,
+                                addr.d_tag.as_deref(),
+                            )
+                            .await
                             {
                                 self.set_active(&ev);
                             }
@@ -762,15 +1000,6 @@ impl Content {
             }
         }
         Ok(outcome)
-    }
-
-    /// Import from in-memory artifacts (the IP-sync mirror path / tests).
-    pub async fn import_event_blobs(
-        &self,
-        event: nostr::Event,
-        blobs: &[(String, Vec<u8>)],
-    ) -> anyhow::Result<SyncOutcome> {
-        sync::import_site(self.relay.as_ref(), self.blobs.as_ref(), event, blobs).await
     }
 
     // --- library ---
@@ -883,11 +1112,9 @@ impl Content {
             return;
         }
         // Whether they accepted ours or we accepted theirs, any invite we were
-        // holding for this peer is answered.
-        self.outbound_pairs
-            .lock()
-            .unwrap()
-            .retain(|p| p.npub != npub);
+        // holding for this peer is answered — and spent, so it stops being an
+        // authorisation for a second accept.
+        self.drop_invite(npub);
         let mut circle = self.circle.lock().unwrap();
         if let Some(c) = circle.iter_mut().find(|c| c.npub == npub) {
             if !name.is_empty() {
@@ -898,6 +1125,7 @@ impl Content {
                 npub: npub.to_string(),
                 name: name.to_string(),
                 added_at: now_secs(),
+                perms: PeerPerms::default(),
             });
         }
         let snapshot = circle.clone();
@@ -949,18 +1177,47 @@ impl Content {
             .collect()
     }
 
-    /// Whether `ip` is the mesh ULA of a **current** Circle member. The relay +
-    /// Blossom access gates call this per request, so adding/removing a peer at
-    /// runtime takes effect immediately (no cached set). A peer's ULA is
-    /// `fd…+node_addr[0..15]` — `PeerIdentity::from_npub(npub).address()` — which is
-    /// exactly the source address the mesh sockets see.
-    pub fn is_paired_ip(&self, ip: IpAddr) -> bool {
-        let IpAddr::V6(v6) = ip else { return false };
-        self.circle.lock().unwrap().iter().any(|c| {
-            fips::PeerIdentity::from_npub(&c.npub)
-                .map(|p| p.address().to_ipv6() == v6)
-                .unwrap_or(false)
-        })
+    /// The permissions granted to the peer at `ip`, or `None` if `ip` is not a
+    /// current Circle member. One lookup answers both "are they paired" and "what
+    /// may they do", so the access checks never consult two sources that could
+    /// disagree. See `reference/thinning-custom-relay.md` (D10).
+    ///
+    /// Consulted per request, so adding a peer, removing one, or changing a
+    /// permission takes effect immediately — there is no cached set. A peer's ULA
+    /// is `fd…+node_addr[0..15]` (`PeerIdentity::from_npub(npub).address()`),
+    /// which is exactly the source address the mesh sockets see.
+    pub fn perms_for_ip(&self, ip: IpAddr) -> Option<PeerPerms> {
+        let IpAddr::V6(v6) = ip else { return None };
+        self.circle
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|c| {
+                fips::PeerIdentity::from_npub(&c.npub)
+                    .map(|p| p.address().to_ipv6() == v6)
+                    .unwrap_or(false)
+            })
+            .map(|c| c.perms.clone())
+    }
+
+    /// Whether events arriving from the peer at `ip` may be forwarded onward by
+    /// us. Without the grant their events are still stored and shown locally —
+    /// they simply stop here (`reference/thinning-custom-relay.md`, D10).
+    pub fn may_forward_from(&self, ip: IpAddr) -> bool {
+        self.perms_for_ip(ip)
+            .is_some_and(|p| p.relay_write_multihop)
+    }
+
+    /// Whether the peer at `ip` may upload blobs to our Blossom. Off by default:
+    /// propagation is pull-based, so nothing in normal operation pushes blobs to
+    /// a peer, and an upload costs us disk.
+    pub fn may_upload_blobs(&self, ip: IpAddr) -> bool {
+        self.perms_for_ip(ip).is_some_and(|p| p.blossom_write)
+    }
+
+    /// Whether the peer at `ip` may read blobs from our Blossom.
+    pub fn may_read_blobs(&self, ip: IpAddr) -> bool {
+        self.perms_for_ip(ip).is_some_and(|p| p.blossom_read)
     }
 
     /// Library sites worth (re)trying right now: not yet `ready`, and not already
@@ -1056,9 +1313,21 @@ impl Content {
     /// Route an incoming pair event (the gossiper hands us the pair kinds; they are
     /// point-to-point and never gossiped). A **request** surfaces a pop-up; an
     /// **accept** means a peer accepted *our* request → add them to the Circle.
-    pub fn handle_pair_event(&self, event: &Event) {
+    /// Returns whether the event was acted on. `false` means it was refused —
+    /// the caller answers the sender accordingly.
+    pub fn handle_pair_event(self: &Arc<Self>, event: &Event) -> bool {
         let Ok(from) = event.pubkey.to_bech32();
         let name = tag_value(event, "n").unwrap_or_else(|| short_name(&from));
+
+        // Addressed to us? Every pair event names its target in a `p` tag, and
+        // the signature covers it. Without this check an event addressed to
+        // someone else can be captured and replayed at us, and it verifies
+        // perfectly — the signature says who wrote it, never who it was for.
+        if !self.is_addressed_to_us(event) {
+            tracing::warn!(from = %from, "pair: refused, not addressed to this device");
+            return false;
+        }
+
         match event.kind.as_u16() {
             KIND_PAIR_REQUEST => {
                 tracing::info!(from = %from, "pair: request received (awaiting accept)");
@@ -1073,12 +1342,32 @@ impl Content {
                 }
             }
             KIND_PAIR_ACCEPT => {
+                // An accept is only meaningful as the answer to an invite we
+                // sent. Without this, anyone could sign one and add themselves
+                // to the Circle unprompted — which grants relay read/write,
+                // blob reads, and multihop forwarding. The signature proves who
+                // sent it, not that we ever asked.
+                if !self.has_outstanding_invite(&from) {
+                    tracing::warn!(
+                        from = %from,
+                        "pair: refused an accept we never invited"
+                    );
+                    return false;
+                }
                 tracing::info!(from = %from, "pair: our request accepted — added to circle");
                 self.add_to_circle(&from, &name);
                 self.pending_pairs
                     .lock()
                     .unwrap()
                     .retain(|p| p.npub != from);
+                // They are a reachable source *now*, so retry anything still
+                // waiting on a holder rather than idling until the next
+                // connected-peer poll edge.
+                for addr in self.retriable_library_addrs() {
+                    let content = self.clone();
+                    let holder = from.clone();
+                    tokio::spawn(async move { content.open_site(addr, Some(holder)).await });
+                }
             }
             KIND_PAIR_REMOVE => {
                 tracing::info!(from = %from, "pair: peer unpaired — removing from circle");
@@ -1088,8 +1377,32 @@ impl Content {
                     .unwrap()
                     .retain(|p| p.npub != from);
             }
-            _ => {}
+            _ => return false,
         }
+        true
+    }
+
+    /// Does this pair event name **us** in its `p` tag?
+    ///
+    /// `false` when the device key is not loaded yet: we cannot tell, and
+    /// guessing in the permissive direction is what this check exists to stop.
+    fn is_addressed_to_us(&self, event: &Event) -> bool {
+        let Some(keys) = self.device_keys.lock().unwrap().clone() else {
+            return false;
+        };
+        tag_value(event, "p").is_some_and(|target| target == keys.public_key().to_hex())
+    }
+
+    /// Is there an invite to `npub` still outstanding — and recent enough to
+    /// still count? Invites are persisted, so this survives a restart between
+    /// sending the request and the peer answering it.
+    fn has_outstanding_invite(&self, npub: &str) -> bool {
+        let now = now_secs();
+        self.outbound_pairs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.npub == npub && now.saturating_sub(p.since) <= INVITE_VALID_SECS)
     }
 
     /// Scanned a peer's QR: send a signed pair request to their mesh relay. We do
@@ -1122,6 +1435,11 @@ impl Content {
                 name: name.to_string(),
                 since: now_secs(),
             });
+            let snapshot = outbound.clone();
+            drop(outbound);
+            // Persisted before the dial: the accept can arrive after a restart,
+            // and it is only honoured against a recorded invite.
+            save_outbound_pairs(&self.outbound_pairs_path, &snapshot);
         }
         self.dial_pair_event(target_npub, KIND_PAIR_REQUEST, secret)
             .await;
@@ -1134,10 +1452,18 @@ impl Content {
 
     /// Drop a waiting invite — the user withdrew it, or it is being retried.
     pub fn forget_outbound_pair(&self, npub: &str) {
-        self.outbound_pairs
-            .lock()
-            .unwrap()
-            .retain(|p| p.npub != npub);
+        self.drop_invite(npub);
+    }
+
+    /// Forget an invite, on disk as well as in memory. One place, so an invite
+    /// cannot survive on disk as a standing authorisation after being answered.
+    fn drop_invite(&self, npub: &str) {
+        let snapshot = {
+            let mut outbound = self.outbound_pairs.lock().unwrap();
+            outbound.retain(|p| p.npub != npub);
+            outbound.clone()
+        };
+        save_outbound_pairs(&self.outbound_pairs_path, &snapshot);
     }
 
     fn is_in_circle(&self, npub: &str) -> bool {
@@ -1173,13 +1499,20 @@ impl Content {
         self.dial_pair_event(npub, KIND_PAIR_REMOVE, "").await;
     }
 
-    /// Build + sign a pair event and publish it to the target's mesh relay,
-    /// **retrying** until the relay acks or we give up. A freshly-paired BLE session
-    /// is flaky (handshake collisions, "connection not ready"), so a single
+    /// Build + sign a pair event and POST it to the target's **auth service**,
+    /// **retrying** until it acks or we give up. A freshly-paired BLE session is
+    /// flaky (handshake collisions, "connection not ready"), so a single
     /// fire-and-forget dial often misses — leaving the Circles asymmetric, which the
     /// access gate then turns into a hard "can't see their apps" failure. Each
     /// attempt rebuilds (re-signs) the event so its NIP-40 expiration stays fresh
     /// across the retry window.
+    ///
+    /// This goes to `:4873`, not the relay: pairing creates the circle that gates
+    /// the content ports, so it does not travel on them
+    /// (`reference/thinning-custom-relay.md`, D6). Unlike a relay `OK`, the
+    /// response distinguishes *delivered and waiting on them* from *never reached
+    /// them*, so a pending request stops the retry loop instead of burning the
+    /// whole window on a peer who already has it.
     async fn dial_pair_event(&self, target_npub: &str, kind: u16, secret: &str) {
         let Some(keys) = self.device_keys.lock().unwrap().clone() else {
             tracing::warn!("pairing: device keys not set");
@@ -1194,7 +1527,7 @@ impl Content {
                 return;
             }
         };
-        let url = crate::ip_source::mesh_relay_url(target_npub);
+        let url = crate::ip_source::mesh_auth_url(target_npub);
         for attempt in 0..PAIR_DIAL_ATTEMPTS {
             if attempt > 0 {
                 tokio::time::sleep(PAIR_DIAL_RETRY_DELAY).await;
@@ -1203,13 +1536,28 @@ impl Content {
                 tracing::warn!(target_npub, "pairing: could not build event");
                 return;
             };
-            if crate::ip_source::publish_event(&url, &event, 0, std::time::Duration::from_secs(10))
-                .await
+            match crate::ip_source::post_pair_event(
+                &url,
+                &event,
+                std::time::Duration::from_secs(10),
+            )
+            .await
             {
-                tracing::info!(target = %target_npub, kind, attempt, "pair: dial delivered");
-                return;
+                crate::ip_source::PairDelivery::Accepted(status) => {
+                    tracing::info!(target = %target_npub, kind, attempt, status, "pair: delivered");
+                    return;
+                }
+                // They answered and said no. Retrying cannot change that, and
+                // hammering a peer that already refused is exactly what the
+                // retry loop must not do.
+                crate::ip_source::PairDelivery::Refused(status) => {
+                    tracing::warn!(target = %target_npub, kind, status, "pair: refused by peer");
+                    return;
+                }
+                crate::ip_source::PairDelivery::Unreachable => {
+                    tracing::debug!(target = %target_npub, kind, attempt, "pair: not delivered, retrying");
+                }
             }
-            tracing::debug!(target = %target_npub, kind, attempt, "pair: dial not delivered, retrying");
         }
         tracing::warn!(
             target = %target_npub,
@@ -1262,7 +1610,9 @@ impl Content {
                 .request(npub, &url, filters, std::time::Duration::from_secs(15))
                 .await;
             for ev in events {
-                if ev.verify().is_ok() && self.relay.store_event(ev).await.unwrap_or(false) {
+                // Signatures were checked by the pool at ingress. Storing is
+                // idempotent, so this counts events pulled, not new arrivals.
+                if self.relay.publish(ev).await.is_ok() {
                     stored += 1;
                 }
             }
@@ -1318,32 +1668,21 @@ impl Content {
         self.peer_relays.send(npub, &url, frame);
     }
 
-    /// Pull plane (req-ttl): forward a REQ's filters to connected Circle peers and
-    /// aggregate their matching events. `req_ttl` is the remaining forward budget
-    /// *after* this hop — it is stamped back into each filter so the next relay
-    /// decrements from here (without it the peer would re-read the original value).
-    /// `exclude` is the requester's mesh address (split-horizon). Per-peer queries
-    /// run in parallel, each hard-bounded so a dead relay can't stall discovery.
+    /// Pull plane: forward a REQ's filters to connected Circle peers and
+    /// aggregate their matching events. `meta` is the incoming envelope, already
+    /// decremented, so the hop budget and query id carry onward while the filters
+    /// stay canonical NIP-01. `exclude` is the requester's mesh address
+    /// (split-horizon). Per-peer queries run in parallel, each bounded by the
+    /// budget that arrived so a dead relay can't stall discovery.
     pub async fn pull_from_peers(
         &self,
         filters: Vec<serde_json::Value>,
-        req_ttl: u8,
+        meta: crate::mesh_wire::MeshMeta,
         exclude: Option<std::net::IpAddr>,
     ) -> Vec<Event> {
-        // Re-stamp req-ttl (or strip it at the last hop) on each filter object.
-        let filters: Vec<serde_json::Value> = filters
-            .into_iter()
-            .map(|mut f| {
-                if let Some(obj) = f.as_object_mut() {
-                    if req_ttl > 0 {
-                        obj.insert("req-ttl".to_string(), serde_json::json!(req_ttl));
-                    } else {
-                        obj.remove("req-ttl");
-                    }
-                }
-                f
-            })
-            .collect();
+        // The filters go out untouched — hops, query id, and budget ride the
+        // envelope. `meta` is the *incoming* one, already decremented, so the
+        // query id survives the hop and every node downstream serves it once.
 
         // All filters ride in one REQ per peer over the shared connection (the relay
         // any-matches across them), so a pull is a single round-trip, not one socket
@@ -1357,18 +1696,19 @@ impl Content {
             }
             let url = crate::ip_source::mesh_relay_url(&npub);
             let filters = filters.clone();
+            let meta = meta.clone();
+            // Wait only as long as the budget that arrived allows, not a fresh
+            // full-length timer. Otherwise this hop's window sits *inside* the
+            // one above it, and a peer further out returns after the requester
+            // has already given up (D8).
+            let timeout = meta.hop_timeout(PULL_HOP_TIMEOUT);
             Some(async move {
-                pool.request(&npub, &url, filters, std::time::Duration::from_secs(8))
+                pool.request_with(&npub, &url, filters, Some(meta), timeout)
                     .await
             })
         });
 
-        join_all(queries)
-            .await
-            .into_iter()
-            .flatten()
-            .filter(|e: &Event| e.verify().is_ok())
-            .collect()
+        join_all(queries).await.into_iter().flatten().collect()
     }
 
     // --- discovery ("nsites around me") ---
@@ -1385,24 +1725,27 @@ impl Content {
                 return Vec::new();
             };
             let relay_url = crate::ip_source::mesh_relay_url(&npub);
-            // Manifest kinds only; `req-ttl: 1` reaches our peers' peers (2 hops),
-            // matching the old `discover_manifests` helper.
+            // Manifest kinds only. One more hop reaches our peers' peers (2 hops
+            // in total), carried in the envelope so the filter stays canonical.
             let filter = serde_json::json!({
                 "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
                 "limit": 200,
-                "req-ttl": 1,
             });
             let events = pool
-                .request(
+                .request_with(
                     &npub,
                     &relay_url,
                     vec![filter],
+                    Some(crate::mesh_wire::MeshMeta::pull(
+                        1,
+                        crate::mesh_wire::new_query_id(),
+                        PULL_BUDGET_MS,
+                    )),
                     std::time::Duration::from_secs(15),
                 )
                 .await;
             events
                 .into_iter()
-                .filter(|e| e.verify().is_ok())
                 .filter_map(|ev| nsite_deck::Manifest::from_event(ev).ok())
                 .map(|m| {
                     let addr = SiteAddr {
@@ -1458,13 +1801,13 @@ impl Content {
 
         // Query set, one combined REQ per relay read until EOSE
         // (docs/design/nsite-updates.md §3.2):
-        //  - connected peers' mesh relays, carrying `req-ttl: 1` so the check reaches
-        //    2 hops just like discovery (their peers' manifests come back too);
+        //  - connected peers' mesh relays, carrying one more hop so the check reaches
+        //    2 hops just like discovery (their peers' manifests come back too),
+        //    which rides the envelope rather than the filter;
         //  - online relays, unless mesh-only is on.
         let mesh_filter = serde_json::json!({
             "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
             "authors": authors,
-            "req-ttl": 1,
         });
         let online_filter = serde_json::json!({
             "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
@@ -1503,8 +1846,19 @@ impl Content {
         let mesh_q = mesh_peers.into_iter().map(|(npub, url)| {
             let f = mesh_filter.clone();
             async move {
-                pool.request(&npub, &url, vec![f], std::time::Duration::from_secs(15))
-                    .await
+                let meta = crate::mesh_wire::MeshMeta::pull(
+                    1,
+                    crate::mesh_wire::new_query_id(),
+                    PULL_BUDGET_MS,
+                );
+                pool.request_with(
+                    &npub,
+                    &url,
+                    vec![f],
+                    Some(meta),
+                    std::time::Duration::from_secs(15),
+                )
+                .await
             }
         });
         let online_q = online.into_iter().map(|url| {
@@ -1534,9 +1888,6 @@ impl Content {
                 if kind != nsite_deck::KIND_ROOT && kind != nsite_deck::KIND_NAMED {
                     continue;
                 }
-                if ev.verify().is_err() {
-                    continue;
-                }
                 let key = manifest_key(kind, &ev.pubkey, event_d_tag(&ev).as_deref());
                 match newest.get(&key) {
                     Some(prev) if prev.created_at >= ev.created_at => {}
@@ -1557,14 +1908,17 @@ impl Content {
             };
             // Compare against the version we actually serve (the active pointer),
             // not merely the relay's newest.
-            let active_ts = self
-                .active_backend()
-                .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-                .await
-                .ok()
-                .flatten()
-                .map(|e| e.created_at.as_secs())
-                .unwrap_or(0);
+            let active_ts = nsite_deck::seams::newest_in_slot(
+                &self.active_backend(),
+                kind,
+                &addr.author,
+                addr.d_tag.as_deref(),
+            )
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.created_at.as_secs())
+            .unwrap_or(0);
             if cand.created_at.as_secs() > active_ts {
                 candidates.push((addr, cand.clone()));
             }
@@ -1624,14 +1978,17 @@ impl Content {
     /// blobs). Returns whether it activated.
     async fn stage_update(self: Arc<Self>, addr: SiteAddr, candidate: Event) -> bool {
         let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-        let active_ts = self
-            .active_backend()
-            .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-            .await
-            .ok()
-            .flatten()
-            .map(|e| e.created_at.as_secs())
-            .unwrap_or(0);
+        let active_ts = nsite_deck::seams::newest_in_slot(
+            &self.active_backend(),
+            kind,
+            &addr.author,
+            addr.d_tag.as_deref(),
+        )
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.created_at.as_secs())
+        .unwrap_or(0);
         if candidate.created_at.as_secs() <= active_ts {
             return false;
         }
@@ -1655,7 +2012,11 @@ impl Content {
             .download_and_activate(addr, candidate.clone(), sources, true)
             .await;
         if activated {
-            self.forward_manifest(&candidate, MANIFEST_EVENT_TTL.saturating_sub(1), None);
+            self.forward_manifest(
+                &candidate,
+                crate::mesh_wire::EVENT_TTL.saturating_sub(1),
+                None,
+            );
         }
         activated
     }
@@ -1723,7 +2084,7 @@ impl Content {
                 p.pulled = p.total;
             }
             if store_in_relay {
-                let _ = self.relay.store_event(candidate.clone()).await;
+                let _ = self.relay.publish(candidate.clone()).await;
             }
             self.set_active(&candidate);
             let n = manifest.paths.len() as u64;
@@ -1749,11 +2110,20 @@ impl Content {
 
         // Forward budget (mirrors chat): originate at the default for a local
         // publish, else the ttl that rode in. Clamp so a peer can't over-extend us.
+        // The same per-peer clamp the chat push plane applies: a peer we have not
+        // granted multihop writes still gets its manifest stored and served here,
+        // it simply travels no further through us. Manifests were missing this
+        // check, so that grant was enforced on one plane but not the other (D10).
+        let peer_cap = match inbound.sender {
+            Some(ip) if !self.may_forward_from(ip) => 0,
+            _ => crate::mesh_wire::EVENT_TTL,
+        };
         let effective = match inbound.origin {
-            Origin::Local => MANIFEST_EVENT_TTL,
+            Origin::Local => crate::mesh_wire::EVENT_TTL,
             Origin::Mesh => inbound.event_ttl.unwrap_or(0),
         }
-        .min(MANIFEST_EVENT_TTL);
+        .min(crate::mesh_wire::EVENT_TTL)
+        .min(peer_cap);
         let out_ttl = effective.saturating_sub(1);
 
         if !self.is_in_library(&addr) {
@@ -1800,19 +2170,19 @@ impl Content {
     }
 
     /// Fan a manifest to connected Circle peers over the push plane (carrying a
-    /// decremented `event-ttl`), split-horizon. `exclude` is the peer it came from.
+    /// decremented hop budget), split-horizon. `exclude` is the peer it came from.
     fn forward_manifest(&self, manifest: &Event, out_ttl: u8, exclude: Option<IpAddr>) {
-        let mut ev_json = match serde_json::to_value(manifest) {
+        let ev_json = match serde_json::to_value(manifest) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, "manifest gossip: serialize failed");
                 return;
             }
         };
-        if let Some(obj) = ev_json.as_object_mut() {
-            obj.insert("event-ttl".to_string(), serde_json::json!(out_ttl));
-        }
-        let frame = serde_json::json!(["EVENT", ev_json]).to_string();
+        let frame = crate::mesh_wire::wrap(
+            &crate::mesh_wire::MeshMeta::push(out_ttl),
+            serde_json::json!(["EVENT", ev_json]),
+        );
         for npub in self.circle_npubs() {
             let ip = match fips::PeerIdentity::from_npub(&npub) {
                 Ok(p) => IpAddr::V6(p.address().to_ipv6()),
@@ -1841,7 +2211,11 @@ impl Content {
     /// Clear the local relay + Blossom + Library + status (the `WipeStores` dev
     /// action). Content-only; identity is untouched.
     pub async fn wipe(&self) -> anyhow::Result<()> {
-        self.relay.wipe().await?;
+        // Only ours to clear. A custom relay's contents belong to whoever runs
+        // it, and NIP-01 has no "delete everything" to ask for anyway.
+        if let Some(store) = &self.relay_store {
+            nsite_deck::seams::AdminBackend::wipe(store.as_ref()).await?;
+        }
         self.blobs.wipe().await?;
         self.library.lock().unwrap().clear();
         self.sites.lock().unwrap().clear();
@@ -1880,9 +2254,13 @@ impl Content {
                 continue;
             };
             let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-            if let Ok(Some(ev)) = backend
-                .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-                .await
+            if let Ok(Some(ev)) = nsite_deck::seams::newest_in_slot(
+                &backend,
+                kind,
+                &addr.author,
+                addr.d_tag.as_deref(),
+            )
+            .await
             {
                 keep_events.insert(ev.id.to_bytes());
                 if let Ok(m) = nsite_deck::Manifest::from_event(ev) {
@@ -1892,8 +2270,12 @@ impl Content {
             }
         }
 
-        self.relay.retain_events(&keep_events);
-        self.blobs.retain_blobs(&keep_blobs);
+        if let Some(store) = &self.relay_store {
+            store.retain_events(&keep_events);
+        }
+        if let Some(store) = &self.blobs_local {
+            store.retain_blobs(&keep_blobs);
+        }
 
         // Drop unpinned Library entries and the live status of anything unpinned.
         let pinned_hosts: HashSet<String> = pinned.iter().map(|i| i.url_host.clone()).collect();
@@ -1944,10 +2326,17 @@ impl Content {
     }
 
     pub fn cache_view(&self) -> CacheView {
+        // Always the embedded store's own figures — that is what takes up space
+        // here. Nothing external is configurable yet, so neither flag is set;
+        // they follow the configured backend once that lands.
         CacheView {
-            relay_events: self.relay.count() as u64,
-            blob_count: self.blobs.count() as u64,
-            used_bytes: self.blobs.total_bytes(),
+            // The embedded store's own count, or nothing to count when a custom
+            // relay has taken over — which the flag tells the screen to say.
+            relay_events: self.relay_store.as_ref().map_or(0, |s| s.count() as u64),
+            blob_count: self.blobs_local.as_ref().map_or(0, |b| b.count() as u64),
+            used_bytes: self.blobs_local.as_ref().map_or(0, |b| b.total_bytes()),
+            external_relay: self.relay_store.is_none(),
+            external_blobs: self.blobs_local.is_none(),
         }
     }
 
@@ -1994,20 +2383,26 @@ impl Content {
 
     async fn lookup_title(&self, addr: &SiteAddr) -> Option<String> {
         let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-        let event = self
-            .relay
-            .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-            .await
-            .ok()??;
+        let event = nsite_deck::seams::newest_in_slot(
+            self.relay.as_ref(),
+            kind,
+            &addr.author,
+            addr.d_tag.as_deref(),
+        )
+        .await
+        .ok()??;
         nsite_deck::Manifest::from_event(event).ok()?.title
     }
 
     async fn manifest_file_count(&self, addr: &SiteAddr) -> u64 {
         let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-        match self
-            .relay
-            .get_manifest(kind, &addr.author, addr.d_tag.as_deref())
-            .await
+        match nsite_deck::seams::newest_in_slot(
+            self.relay.as_ref(),
+            kind,
+            &addr.author,
+            addr.d_tag.as_deref(),
+        )
+        .await
         {
             Ok(Some(event)) => nsite_deck::Manifest::from_event(event)
                 .map(|m| m.paths.len() as u64)
@@ -2130,7 +2525,7 @@ fn library_addr(item: &LibraryItem) -> Option<SiteAddr> {
 }
 
 /// Seconds since the Unix epoch (Library `added_at`).
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -2162,7 +2557,7 @@ fn short_name(npub: &str) -> String {
 /// Build + sign a pair-request/accept event (device key), addressed to
 /// `target_npub` via a `p` tag, carrying our `n` name, the one-time `secret`
 /// (request only), and a short NIP-40 expiration.
-fn build_pair_event(
+pub(crate) fn build_pair_event(
     keys: &Keys,
     kind: u16,
     target_npub: &str,
@@ -2199,6 +2594,20 @@ fn save_library(path: &Path, items: &[LibraryItem]) {
     }
 }
 
+fn load_outbound_pairs(path: &Path) -> Vec<OutboundPairView> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_outbound_pairs(path: &Path, items: &[OutboundPairView]) {
+    if let Ok(json) = serde_json::to_vec(items) {
+        let tmp = path.with_extension("json.tmp");
+        let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
+    }
+}
+
 fn load_circle(path: &Path) -> Vec<CircleContact> {
     std::fs::read(path)
         .ok()
@@ -2218,6 +2627,244 @@ mod tests {
     use super::*;
     use nostr::nips::nip19::ToBech32;
     use nsite_deck::testing::build_test_site;
+
+    /// A `circle.json` written before per-peer permissions existed must load with
+    /// the defaults — and crucially with `blossom.write` **off**. A missing field
+    /// must never read as a grant, so serde's default has to be `false` rather
+    /// than `bool::default()` by accident (`reference/thinning-custom-relay.md`,
+    /// D10).
+    #[test]
+    fn a_pre_permissions_circle_loads_with_upload_denied() {
+        let legacy = r#"[{"npub":"npub1abc","name":"Old Phone","addedAt":1}]"#;
+        let loaded: Vec<CircleContact> = serde_json::from_str(legacy).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        let p = &loaded[0].perms;
+        assert!(!p.blossom_write, "upload must not be granted by omission");
+        assert!(p.blossom_read, "reads stay on for an existing peer");
+        assert!(p.relay_read && p.relay_write);
+        assert!(p.relay_read_multihop && p.relay_write_multihop);
+    }
+
+    /// The content layer works with the store swapped for a relay we do not own.
+    ///
+    /// This is what every phase before it was for: the same import, gateway read
+    /// and library behaviour, with events living on a relay Myco only reaches
+    /// over NIP-01. It also pins what the Storage screen is told — the usage
+    /// counts stop describing what serves, and say so.
+    #[tokio::test]
+    async fn content_runs_on_a_relay_it_does_not_own() {
+        // A relay that is emphatically not ours: its own store, its own socket.
+        let theirs = Arc::new(myco_relay::RelayStore::in_memory());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(crate::mesh_relay::serve_on(theirs.clone(), listener));
+
+        let dir = tmp("custom-relay");
+        let _ = std::fs::remove_dir_all(&dir);
+        let backend = Arc::new(crate::remote_backend::RemoteBackend::new(format!(
+            "ws://{addr}"
+        )));
+        let content = Content::open_with_relay(&dir, Some(backend)).unwrap();
+
+        // Publishing through the content layer lands on their relay, not ours.
+        let site = build_test_site(&[("/index.html", b"hi")], None, Some("Remote"));
+        content
+            .relay()
+            .publish(site.manifest.clone())
+            .await
+            .unwrap();
+        assert_eq!(theirs.count(), 1, "the event went to the custom relay");
+
+        // And reads come back through the seam.
+        let found = nsite_deck::seams::newest_in_slot(
+            content.relay().as_ref(),
+            nsite_deck::KIND_ROOT,
+            &site.author,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.map(|e| e.id), Some(site.manifest.id));
+
+        // The Storage screen is told the built-in store is no longer serving.
+        let cache = content.cache_view();
+        assert!(cache.external_relay, "usage must report the swap");
+        assert_eq!(cache.relay_events, 0, "our store holds nothing now");
+        assert!(content.relay_store().is_none());
+
+        // Wiping is ours only: their relay keeps its events.
+        content.wipe().await.unwrap();
+        assert_eq!(
+            theirs.count(),
+            1,
+            "a custom relay's contents are not ours to clear"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An nsite actually renders with its manifest on a relay we do not own.
+    ///
+    /// The seam test above proves publish and slot-read work. This proves the
+    /// thing a user would notice: manifest on the remote relay, blobs local,
+    /// and the gateway serving the page. That split is the normal shape when
+    /// only the relay is swapped, so it is worth pinning rather than assuming.
+    #[tokio::test]
+    async fn the_gateway_serves_a_site_whose_manifest_lives_on_a_custom_relay() {
+        let theirs = Arc::new(myco_relay::RelayStore::in_memory());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(crate::mesh_relay::serve_on(theirs.clone(), listener));
+
+        let dir = tmp("custom-relay-gateway");
+        let _ = std::fs::remove_dir_all(&dir);
+        let backend = Arc::new(crate::remote_backend::RemoteBackend::new(format!(
+            "ws://{addr}"
+        )));
+        let content = Content::open_with_relay(&dir, Some(backend)).unwrap();
+
+        // Import the usual way: blobs to the local store, manifest to the relay
+        // — which now happens to be someone else's.
+        let site = build_test_site(&[("/index.html", b"<h1>remote</h1>")], None, None);
+        nsite_deck::import_site(
+            content.relay().as_ref(),
+            content.blobs().as_ref(),
+            site.manifest.clone(),
+            &site.blobs,
+        )
+        .await
+        .expect("import");
+        assert_eq!(theirs.count(), 1, "the manifest went to the custom relay");
+
+        let host = format!("{}.nsite", site.author.to_bech32().unwrap());
+        let resp = nsite_deck::serve(
+            &content.active_backend(),
+            content.blobs().as_ref(),
+            &host,
+            "/",
+            None,
+        )
+        .await;
+
+        assert_eq!(resp.status, 200, "the page must render");
+        assert_eq!(resp.body, b"<h1>remote</h1>");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The content ports have no exceptions left.
+    ///
+    /// Pairing kinds used to be the one thing an unpaired peer could publish to
+    /// the relay, and the event landed in the store as a side effect. Both are
+    /// now refused: the handshake belongs to the auth plane, so a stranger has no
+    /// write path into a store that may not even be ours
+    /// (`reference/thinning-custom-relay.md`, D6).
+    #[test]
+    fn the_relay_gate_refuses_pairing_kinds_from_everyone() {
+        use crate::mesh_relay::PeerGate;
+
+        let dir = tmp("gate-no-exceptions");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+
+        // A paired peer, so this is not simply "unpaired is refused".
+        let peer = Keys::generate();
+        let peer_npub = peer.public_key().to_bech32().unwrap();
+        content.add_to_circle(&peer_npub, "Peer");
+        let ip = IpAddr::V6(
+            fips::PeerIdentity::from_npub(&peer_npub)
+                .unwrap()
+                .address()
+                .to_ipv6(),
+        );
+
+        let gate = CircleGate::new(content.clone());
+        assert!(gate.may_publish(ip, 9), "ordinary content still flows");
+        for kind in [KIND_PAIR_REQUEST, KIND_PAIR_ACCEPT, KIND_PAIR_REMOVE] {
+            assert!(
+                !gate.may_publish(ip, kind),
+                "kind {kind} is auth-plane traffic and must not reach the relay"
+            );
+        }
+
+        // And an unpaired stranger gets nothing at all.
+        let stranger = Keys::generate().public_key().to_bech32().unwrap();
+        let stranger_ip = IpAddr::V6(
+            fips::PeerIdentity::from_npub(&stranger)
+                .unwrap()
+                .address()
+                .to_ipv6(),
+        );
+        assert!(!gate.may_read(stranger_ip));
+        assert!(!gate.may_publish(stranger_ip, KIND_PAIR_REQUEST));
+        assert!(!gate.may_publish(stranger_ip, 9));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A peer denied multihop writes must not have its **manifests** relayed
+    /// either.
+    ///
+    /// The chat push plane consulted the grant; the manifest push plane did not,
+    /// so the same permission was enforced on one plane and ignored on the other.
+    /// Both clamps read the same record, so testing the record is what pins the
+    /// invariant (`reference/thinning-custom-relay.md`, D10).
+    #[test]
+    fn revoking_multihop_writes_covers_both_push_planes() {
+        let dir = tmp("multihop-clamp");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+
+        let peer = Keys::generate();
+        let npub = peer.public_key().to_bech32().unwrap();
+        content.add_to_circle(&npub, "Peer");
+        let ip = IpAddr::V6(
+            fips::PeerIdentity::from_npub(&npub)
+                .unwrap()
+                .address()
+                .to_ipv6(),
+        );
+
+        assert!(
+            content.may_forward_from(ip),
+            "multihop writes are granted by default"
+        );
+
+        // Revoke it the way the UI eventually will.
+        {
+            let mut circle = content.circle.lock().unwrap();
+            circle[0].perms.relay_write_multihop = false;
+        }
+        assert!(
+            !content.may_forward_from(ip),
+            "a revoked peer's events stop here, on either plane"
+        );
+        // An unknown peer is not forwarded for either.
+        let stranger = Keys::generate().public_key().to_bech32().unwrap();
+        let stranger_ip = IpAddr::V6(
+            fips::PeerIdentity::from_npub(&stranger)
+                .unwrap()
+                .address()
+                .to_ipv6(),
+        );
+        assert!(!content.may_forward_from(stranger_ip));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The defaults are the whole permission model until the UI exposes them, so
+    /// pin them rather than trusting the struct to stay as written.
+    #[test]
+    fn default_permissions_are_open_except_uploads() {
+        let p = PeerPerms::default();
+        assert!(p.relay_read);
+        assert!(p.relay_read_multihop);
+        assert!(p.relay_write);
+        assert!(p.relay_write_multihop);
+        assert!(p.blossom_read);
+        assert!(!p.blossom_write);
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("myco-content-test-{}-{}", std::process::id(), tag))
@@ -2497,15 +3144,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let content = Content::open(&dir).unwrap();
 
+        // This device's own identity: a pair event is only honoured if it names
+        // us, so the test has to have one.
+        let us = Keys::generate();
+        content.set_device_keys(&us.secret_key().to_bech32().unwrap());
+        let us_npub = us.public_key().to_bech32().unwrap();
+
         let peer = Keys::generate();
         let peer_npub = peer.public_key().to_bech32().unwrap();
+        let content = Arc::new(content);
         content.add_to_circle(&peer_npub, "Peer");
         assert_eq!(content.circle_snapshot().len(), 1);
 
-        // The peer signs a PAIR_REMOVE; handling it drops them from our Circle.
-        let event = build_pair_event(&peer, KIND_PAIR_REMOVE, &peer_npub, "Peer", "")
+        // The peer signs a PAIR_REMOVE addressed to us; handling it drops them.
+        let event = build_pair_event(&peer, KIND_PAIR_REMOVE, &us_npub, "Peer", "")
             .expect("build pair-remove event");
-        content.handle_pair_event(&event);
+        assert!(content.handle_pair_event(&event));
         assert!(
             content.circle_snapshot().is_empty(),
             "peer removed on unpair"

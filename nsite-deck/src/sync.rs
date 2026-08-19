@@ -34,17 +34,16 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Verify an event's id + signature, then store it. Returns whether it was
-/// accepted as the newest in its replaceable slot. Rejects on bad signature —
+/// Verify an event's id + signature, then store it. Rejects on bad signature —
 /// the self-authenticating guarantee is what makes any source trustworthy.
 pub async fn verify_and_store_event(
     relay: &dyn RelayBackend,
     event: nostr::Event,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<()> {
     event
         .verify()
         .map_err(|e| anyhow::anyhow!("event signature/id verification failed: {e}"))?;
-    relay.store_event(event).await
+    relay.publish(event).await
 }
 
 /// Import an already-verified, externally-authored site: store each blob (keyed
@@ -86,7 +85,7 @@ pub async fn import_site(
         present += 1;
     }
 
-    relay.store_event(manifest_event).await?;
+    relay.publish(manifest_event).await?;
     Ok(SyncOutcome::Ready)
 }
 
@@ -116,7 +115,7 @@ pub async fn sync_site(
     match fetch_blobs(blobs, source, &manifest, progress).await? {
         // All blobs verified+stored → activate by storing the signed manifest.
         SyncOutcome::Ready => {
-            relay.store_event(manifest_event).await?;
+            relay.publish(manifest_event).await?;
             Ok(SyncOutcome::Ready)
         }
         other => Ok(other),

@@ -1,6 +1,8 @@
 //! The BUD-01 Blossom HTTP server over [`FsBlobStore`], so the node can serve its
-//! blobs to mesh peers at `http://[fd00::self]:24243`. No auth on the mesh-local
-//! server (the blob hash is self-authenticating). Routes:
+//! blobs to mesh peers at `http://[fd00::self]:24243`. Blobs are
+//! self-authenticating, so there is no per-blob auth; access is decided per
+//! request by an [`AccessFn`] taking the [`BlobOp`], which is how `myco-core`
+//! grants reads to paired peers while withholding uploads. Routes:
 //!
 //! - `GET  /<sha256>` → blob bytes (`application/octet-stream`; the gateway infers
 //!   the real content-type from the manifest path, not from Blossom).
@@ -20,11 +22,23 @@ use nsite_deck::seams::BlobStore;
 
 use crate::FsBlobStore;
 
-/// Decides whether a non-loopback (mesh) source may touch our Blossom. `myco-core`
-/// backs this with the Circle so only paired peers can pull/push blobs; loopback
-/// (the in-app gateway) always bypasses it. Behind an `Arc` so the **live** Circle
-/// is consulted per request — membership changes at runtime.
-pub type AccessFn = Arc<dyn Fn(IpAddr) -> bool + Send + Sync>;
+/// What a request wants to do, so a gate can allow reads while refusing writes.
+/// Uploads cost us disk and nothing in normal operation needs them (propagation
+/// is pull-based), so the two are worth separating.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobOp {
+    /// `GET` / `HEAD` a blob.
+    Read,
+    /// `PUT /upload`.
+    Write,
+}
+
+/// Decides whether a non-loopback (mesh) source may perform `op` on our Blossom.
+/// `myco-core` backs this with the Circle and its per-peer permissions, so only
+/// paired peers can pull, and only peers granted upload can push; loopback (the
+/// in-app gateway) always bypasses it. Behind an `Arc` so the **live** Circle is
+/// consulted per request — membership and permissions change at runtime.
+pub type AccessFn = Arc<dyn Fn(IpAddr, BlobOp) -> bool + Send + Sync>;
 
 /// Shared handler state: the blob store plus an optional mesh access gate.
 #[derive(Clone)]
@@ -34,10 +48,11 @@ struct BlossomState {
 }
 
 impl BlossomState {
-    /// Loopback is always allowed; a mesh source must pass the gate (if one is set).
-    fn allows(&self, addr: SocketAddr) -> bool {
+    /// Loopback is always allowed; a mesh source must pass the gate (if one is
+    /// set) for the operation it is attempting.
+    fn allows(&self, addr: SocketAddr, op: BlobOp) -> bool {
         let ip = addr.ip();
-        ip.is_loopback() || self.access.as_ref().is_none_or(|a| a(ip))
+        ip.is_loopback() || self.access.as_ref().is_none_or(|a| a(ip, op))
     }
 }
 
@@ -132,7 +147,7 @@ async fn get_blob(
     State(st): State<BlossomState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !st.allows(addr) {
+    if !st.allows(addr, BlobOp::Read) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match st.store.get(&blob_hash(&sha256)).await {
@@ -151,7 +166,7 @@ async fn head_blob(
     State(st): State<BlossomState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> StatusCode {
-    if !st.allows(addr) {
+    if !st.allows(addr, BlobOp::Read) {
         return StatusCode::FORBIDDEN;
     }
     if st.store.has(&blob_hash(&sha256)).await {
@@ -166,7 +181,9 @@ async fn upload(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     body: Bytes,
 ) -> Response {
-    if !st.allows(addr) {
+    // Uploads are the one operation a paired peer is not granted by default:
+    // nothing in normal operation pushes blobs to a peer, and it costs us disk.
+    if !st.allows(addr, BlobOp::Write) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match st.store.put(&body).await {
