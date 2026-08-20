@@ -38,13 +38,24 @@ data class SiteStatus(
 )
 
 /** A pinned/opened Library entry. */
+/** What kind of app a Library entry is. Unknown values read as [Nsite]. */
+enum class LibraryKind { Nsite, Napplet }
+
 data class LibraryItem(
     val authorNpub: String,
     val dTag: String?,
     val title: String,
     val urlHost: String,
     val pinned: Boolean,
-)
+    /** Defaults to [LibraryKind.Nsite], so entries written before napplets read back as what they are. */
+    val kind: LibraryKind = LibraryKind.Nsite,
+    /** Capability domains install review granted. Napplets only. */
+    val granted: List<String> = emptyList(),
+) {
+    /** The pointer a napplet is opened by: `<npub>` or `<npub>:<dtag>`. */
+    val nappletPointer: String
+        get() = if (dTag.isNullOrEmpty()) authorNpub else "$authorNpub:$dTag"
+}
 
 /** Local relay/Blossom counts. */
 data class CacheStatus(
@@ -315,6 +326,17 @@ data class AppState(
                                 title = l.optString("title"),
                                 urlHost = l.optString("urlHost"),
                                 pinned = l.optBoolean("pinned"),
+                                // Anything unrecognised reads as an nsite — the
+                                // conservative default, and what every entry
+                                // written before napplets existed is.
+                                kind = if (l.optString("kind") == "napplet") {
+                                    LibraryKind.Napplet
+                                } else {
+                                    LibraryKind.Nsite
+                                },
+                                granted = l.optJSONArray("granted")?.let { g ->
+                                    (0 until g.length()).map { g.optString(it) }
+                                }.orEmpty(),
                             )
                         )
                     }
@@ -608,17 +630,12 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
     /**
      * Resolve and verify a napplet, and open a session for one window.
      *
-     * [granted] is what install review recorded on the Library entry. Nothing
-     * downstream widens it, and a napplet that fails verification returns an
-     * error rather than a session — there is no partial success to render.
+     * Grants come from the Library, read on the Rust side — not passed from
+     * here, so an intent cannot supply them. A napplet that fails verification
+     * returns an error rather than a session; there is no partial success.
      */
-    fun nappletOpen(pointer: String, granted: List<String>): NappletOpen {
-        val list = JSONArray()
-        for (domain in granted) list.put(domain)
-        return NappletOpen.parse(
-            NativeCore.nappletOpen(requireHandle(), pointer, list.toString())
-        )
-    }
+    fun nappletOpen(pointer: String): NappletOpen =
+        NappletOpen.parse(NativeCore.nappletOpen(requireHandle(), pointer))
 
     /**
      * Carry one frame from a window's shell to Rust, and return the frames to
@@ -741,6 +758,27 @@ object NativeActions {
     fun forgetNsite(link: String): JSONObject =
         JSONObject().put("type", "forget_nsite").put("link", link)
     fun checkNsiteUpdates(): JSONObject = JSONObject().put("type", "check_nsite_updates")
+
+    /**
+     * Fetch + verify a napplet without installing it. Reports what it
+     * `requires` so the review screen can ask; grants nothing on its own.
+     */
+    fun fetchNapplet(pointer: String): JSONObject =
+        JSONObject().put("type", "fetch_napplet").put("pointer", pointer)
+
+    /** Record what review granted, and pin the napplet to the Library. */
+    fun installNapplet(pointer: String, granted: List<String>): JSONObject {
+        val list = JSONArray()
+        for (domain in granted) list.put(domain)
+        return JSONObject()
+            .put("type", "install_napplet")
+            .put("pointer", pointer)
+            .put("granted", list)
+    }
+
+    /** Unpin a napplet and drop its grants. */
+    fun forgetNapplet(pointer: String): JSONObject =
+        JSONObject().put("type", "forget_napplet").put("pointer", pointer)
     fun wipeStores(): JSONObject = JSONObject().put("type", "wipe_stores")
     /** Clear cached relay/Blossom data but keep pinned nsites (Storage → "Delete cache"). */
     fun wipeCache(): JSONObject = JSONObject().put("type", "wipe_cache")

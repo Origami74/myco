@@ -86,7 +86,7 @@ class NappletActivity : ComponentActivity() {
         // Resolve and verify before anything is shown. A napplet that fails any
         // check gets no session and no window — there is no partial render to
         // fall back to, by design.
-        val opened = client.nappletOpen(pointer, grantedDomains(intent))
+        val opened = client.nappletOpen(pointer)
         if (!opened.ok) {
             Log.w(TAG, "napplet $pointer did not open: ${opened.error}")
             // TODO(S1): surface this to the user rather than closing silently.
@@ -185,31 +185,12 @@ class NappletActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    /**
-     * The capability domains this launch may use.
-     *
-     * Carried from the Library entry, where install review recorded them. An
-     * **inbound intent may open a napplet and carry a payload; it may never
-     * grant a capability** — so a launch that arrives from outside the app
-     * brings no grants of its own, and anything it claims here is ignored.
-     */
-    private fun grantedDomains(intent: android.content.Intent): List<String> {
-        if (intent.getBooleanExtra(EXTRA_EXTERNAL, false)) return emptyList()
-        return intent.getStringArrayListExtra(EXTRA_GRANTS)?.toList().orEmpty()
-    }
-
     companion object {
         private const val TAG = "NappletActivity"
 
         /** `naddr1…`, or the `<npub>:<dtag>` shorthand. */
         const val EXTRA_POINTER = "app.myco.extra.NAPPLET_POINTER"
         const val EXTRA_TITLE = "app.myco.extra.NAPPLET_TITLE"
-
-        /** Domains granted at install review, from the Library entry. */
-        const val EXTRA_GRANTS = "app.myco.extra.NAPPLET_GRANTS"
-
-        /** Set when the launch came from outside the app; grants are then ignored. */
-        const val EXTRA_EXTERNAL = "app.myco.extra.NAPPLET_EXTERNAL"
 
         /**
          * A per-napplet document URI, so re-opening one re-surfaces its task.

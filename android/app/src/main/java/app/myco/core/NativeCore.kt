@@ -35,8 +35,14 @@ internal object NativeCore {
     external fun nappletShellPage(): String
     external fun nappletRuntimeObject(): String
 
-    /** Resolve + verify a napplet and open a session. Returns a JSON result. */
-    external fun nappletOpen(handle: Long, pointer: String, grantedJson: String): String
+    /**
+     * Resolve + verify a napplet and open a session. Returns a JSON result.
+     *
+     * Takes no grant list on purpose: grants are read from the Library on the
+     * Rust side, so an intent that starts [app.myco.NappletActivity] cannot hand
+     * a napplet capabilities the user never approved.
+     */
+    external fun nappletOpen(handle: Long, pointer: String): String
 
     /** Carry one shell frame; returns a JSON array of frames to send back. */
     external fun nappletFrame(handle: Long, sessionId: String, frameJson: String): String

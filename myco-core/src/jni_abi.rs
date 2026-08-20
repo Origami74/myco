@@ -223,29 +223,24 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletRuntimeObject(
 /// Returns `{"ok":true,"sessionId":…,"shellHost":…,"title":…}`, or
 /// `{"ok":false,"error":…}`. A verification failure lands in `error` and opens
 /// no session — there is no partial success to render.
+///
+/// Takes no grant list. Grants are read from the Library on the Rust side,
+/// because the caller is an Activity and an Activity can be started by an
+/// intent — accepting them here would let an inbound intent hand a napplet
+/// capabilities nobody approved.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_nappletOpen(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
     pointer: JString,
-    granted_json: JString,
 ) -> jstring {
     let pointer = get_string(&mut env, &pointer);
-    let granted: Vec<String> =
-        serde_json::from_str(&get_string(&mut env, &granted_json)).unwrap_or_default();
 
-    let ctx = match unsafe { handle_ref(handle) } {
+    let result = match unsafe { handle_ref(handle) } {
         Some(h) => {
             let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
-            guard.napplet_context()
-        }
-        None => None,
-    };
-
-    let result = match ctx {
-        Some((host, rt_handle)) => match crate::napplet::NappletAddr::parse(&pointer) {
-            Ok(addr) => match rt_handle.block_on(host.open(&addr, granted)) {
+            match guard.open_napplet(&pointer) {
                 Ok(opened) => serde_json::json!({
                     "ok": true,
                     "sessionId": opened.session_id,
@@ -253,10 +248,9 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletOpen(
                     "title": opened.title,
                 }),
                 Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
-            },
-            Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
-        },
-        None => serde_json::json!({"ok": false, "error": "content layer is not running"}),
+            }
+        }
+        None => serde_json::json!({"ok": false, "error": "native core is closed"}),
     };
 
     jstr(&mut env, result.to_string())

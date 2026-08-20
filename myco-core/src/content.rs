@@ -67,6 +67,21 @@ pub struct UpdateCheckView {
     pub generation: u64,
 }
 
+/// What kind of app a Library entry is.
+///
+/// Defaults to [`LibraryKind::Nsite`] so every entry written before napplets
+/// existed reads back as what it is, with no migration pass over
+/// `library.json`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LibraryKind {
+    /// A static site Myco serves through the gateway (NIP-5A, 15128/35128).
+    #[default]
+    Nsite,
+    /// A program Myco hosts through the capability seam (NIP-5D, 5129/15129/35129).
+    Napplet,
+}
+
 /// A Library entry (a pinned/opened site). Persisted to `library.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +92,13 @@ pub struct LibraryItem {
     pub url_host: String,
     pub pinned: bool,
     pub added_at: u64,
+    #[serde(default)]
+    pub kind: LibraryKind,
+    /// Capability domains the user approved at install review. Napplets only,
+    /// and the **only** place a grant comes from — nothing widens this at launch,
+    /// and an inbound intent cannot add to it.
+    #[serde(default)]
+    pub granted: Vec<String>,
 }
 
 /// A **Circle** contact: a paired peer whose device we can pull nsites from over
@@ -1056,8 +1078,91 @@ impl Content {
                 url_host: addr.host_label(),
                 pinned: true,
                 added_at,
+                kind: LibraryKind::Nsite,
+                granted: Vec::new(),
             });
         }
+        let snapshot = lib.clone();
+        drop(lib);
+        save_library(&self.library_path, &snapshot);
+    }
+
+    /// Add or update a napplet's Library entry, recording what install review
+    /// granted it.
+    ///
+    /// Re-adding an already-installed napplet **replaces** its grants rather
+    /// than merging: the review screen shows the whole set the user is agreeing
+    /// to, so what they saw is what is stored. Merging would let a second
+    /// install quietly accumulate capabilities across two screens neither of
+    /// which showed the total.
+    pub fn add_napplet_to_library(
+        &self,
+        author_npub: &str,
+        d_tag: Option<&str>,
+        title: Option<&str>,
+        shell_host: &str,
+        granted: Vec<String>,
+        added_at: u64,
+    ) {
+        let mut lib = self.library.lock().unwrap();
+        if let Some(item) = lib
+            .iter_mut()
+            .find(|i| i.author_npub == author_npub && i.d_tag.as_deref() == d_tag)
+        {
+            item.pinned = true;
+            item.kind = LibraryKind::Napplet;
+            item.granted = granted;
+            item.url_host = shell_host.to_string();
+            if let Some(t) = title {
+                item.title = t.to_string();
+            }
+        } else {
+            lib.push(LibraryItem {
+                author_npub: author_npub.to_string(),
+                d_tag: d_tag.map(str::to_string),
+                title: title.unwrap_or("").to_string(),
+                url_host: shell_host.to_string(),
+                pinned: true,
+                added_at,
+                kind: LibraryKind::Napplet,
+                granted,
+            });
+        }
+        let snapshot = lib.clone();
+        drop(lib);
+        save_library(&self.library_path, &snapshot);
+    }
+
+    /// The capability domains a napplet was granted, or an empty set for one
+    /// that is not installed.
+    ///
+    /// An uninstalled napplet getting `[]` is the safe answer, not an oversight:
+    /// it still opens, and gets nothing but the mandatory handshake.
+    pub fn napplet_grants(&self, author_npub: &str, d_tag: Option<&str>) -> Vec<String> {
+        self.library
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| {
+                i.kind == LibraryKind::Napplet
+                    && i.author_npub == author_npub
+                    && i.d_tag.as_deref() == d_tag
+            })
+            .map(|i| i.granted.clone())
+            .unwrap_or_default()
+    }
+
+    /// Unpin a napplet and drop its grants.
+    ///
+    /// The grants go with the entry: a napplet re-added later must go through
+    /// review again rather than inheriting what a previous install agreed to.
+    pub fn forget_napplet(&self, author_npub: &str, d_tag: Option<&str>) {
+        let mut lib = self.library.lock().unwrap();
+        lib.retain(|i| {
+            !(i.kind == LibraryKind::Napplet
+                && i.author_npub == author_npub
+                && i.d_tag.as_deref() == d_tag)
+        });
         let snapshot = lib.clone();
         drop(lib);
         save_library(&self.library_path, &snapshot);

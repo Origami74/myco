@@ -843,6 +843,24 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
+            NativeAppAction::FetchNapplet { pointer } => {
+                self.fetch_napplet(&pointer);
+                self.rev += 1;
+            }
+            NativeAppAction::InstallNapplet { pointer, granted } => {
+                self.install_napplet(&pointer, granted);
+                self.rev += 1;
+            }
+            NativeAppAction::ForgetNapplet { pointer } => {
+                if let (Some(content), Ok(addr)) =
+                    (&self.content, crate::napplet::NappletAddr::parse(&pointer))
+                {
+                    use nostr::nips::nip19::ToBech32;
+                    let npub = addr.author.to_bech32().unwrap_or_default();
+                    content.forget_napplet(&npub, addr.d_tag.as_deref());
+                }
+                self.rev += 1;
+            }
             NativeAppAction::ForgetNsite { link } => {
                 if let (Some(content), Some(addr)) = (&self.content, nsite_deck::parse_link(&link))
                 {
@@ -1143,6 +1161,86 @@ impl AppRuntime {
     }
 
     /// Spawn a dev side-load of a bundle directory.
+    /// Resolve a napplet and open a session, with the grants **this device**
+    /// recorded for it.
+    ///
+    /// Grants are read from the Library here rather than accepted from the
+    /// caller. The caller is an Activity, and an Activity can be started by an
+    /// intent: taking a grant list across that boundary would let an inbound
+    /// intent hand a napplet capabilities the user never approved. Install
+    /// review is the only writer, and this is the only reader.
+    pub fn open_napplet(&mut self, pointer: &str) -> anyhow::Result<crate::napplet::OpenedNapplet> {
+        use nostr::nips::nip19::ToBech32;
+        let addr = crate::napplet::NappletAddr::parse(pointer)?;
+        let content = self
+            .content
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("content layer is not running"))?;
+        let npub = addr.author.to_bech32().unwrap_or_default();
+        let granted = content.napplet_grants(&npub, addr.d_tag.as_deref());
+
+        let (host, rt) = self
+            .napplet_context()
+            .ok_or_else(|| anyhow::anyhow!("content layer is not running"))?;
+        rt.block_on(host.open(&addr, granted))
+    }
+
+    /// Fetch a napplet online, verify it, and store it locally — without
+    /// installing it or granting it anything.
+    ///
+    /// Spawn-not-block, like every other sync path: the FFI returns immediately
+    /// and the result lands in state. What the napplet `requires` is what the
+    /// review screen then asks about.
+    fn fetch_napplet(&mut self, pointer: &str) {
+        let Ok(addr) = crate::napplet::NappletAddr::parse(pointer) else {
+            tracing::warn!("not a napplet pointer: {pointer}");
+            return;
+        };
+        let Some((host, rt)) = self.napplet_context() else {
+            return;
+        };
+        let Some(content) = self.content.clone() else {
+            return;
+        };
+        let pointer = pointer.to_string();
+        rt.spawn(async move {
+            // Whatever can reach it. Neither is trusted — every byte is hashed
+            // and the signature checked against the manifest before storing.
+            let relay = content.relay();
+            let blobs = content.blobs();
+            match host.ingest(&addr, relay.as_ref(), blobs.as_ref()).await {
+                Ok(ingested) => tracing::info!(
+                    "fetched napplet {pointer}: requires {:?}",
+                    ingested.requires
+                ),
+                Err(e) => tracing::warn!("could not fetch napplet {pointer}: {e}"),
+            }
+        });
+    }
+
+    /// Record what install review granted and pin the napplet to the Library.
+    fn install_napplet(&mut self, pointer: &str, granted: Vec<String>) {
+        use nostr::nips::nip19::ToBech32;
+        let Ok(addr) = crate::napplet::NappletAddr::parse(pointer) else {
+            tracing::warn!("not a napplet pointer: {pointer}");
+            return;
+        };
+        let Some(content) = self.content.clone() else {
+            return;
+        };
+        let npub = addr.author.to_bech32().unwrap_or_default();
+        let shell_host =
+            myco_napplet_runtime::host::shell_host(&addr.author.to_bytes(), addr.d_tag.as_deref());
+        content.add_napplet_to_library(
+            &npub,
+            addr.d_tag.as_deref(),
+            None,
+            &shell_host,
+            granted,
+            crate::content::now_secs(),
+        );
+    }
+
     fn import_nsite(&mut self, dir: &str) {
         let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
             return;
