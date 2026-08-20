@@ -491,6 +491,13 @@ class MainActivity : ComponentActivity() {
         // without this an unrelated URL tag would fall through to openNsite(). Raw
         // nsite links are entered via QR/paste, never NFC.
         if (uri.scheme != NsiteShare.SCHEME) return
+        // While the file-share hotspot runs, a bump's only job is handing over
+        // the page URL — reading the peer's pair tag here would start a pairing
+        // anyway, from this side. Drop exactly that; hotspot off, pairing resumes.
+        if (PairPresent.hotspotActive && NsiteShare.parsePairUri(uri.toString()) != null) {
+            android.util.Log.i("MycoNfc", "ignoring pair tag — hotspot owns NFC")
+            return
+        }
         runOnUiThread { handleScannedText(uri.toString()) }
     }
 
@@ -657,6 +664,16 @@ class MainActivity : ComponentActivity() {
     private fun handleDeepLink(intent: Intent?) {
         val data = intent?.data ?: return
         if (data.scheme != NsiteShare.SCHEME) return
+        // The passive-dispatch twin of the reader-mode gate in handleNfcTag:
+        // while the hotspot owns NFC, a peer's pair tag delivered by the OS as
+        // an NDEF intent must not start a pairing. QR-scanned and browsed
+        // myco:// links arrive with other actions and stay unaffected.
+        if (intent.action == NfcAdapter.ACTION_NDEF_DISCOVERED &&
+            PairPresent.hotspotActive && NsiteShare.parsePairUri(data.toString()) != null
+        ) {
+            android.util.Log.i("MycoNfc", "ignoring pair tap — hotspot owns NFC")
+            return
+        }
         handleScannedText(data.toString())
     }
 

@@ -78,6 +78,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heard from. Those answer different questions, and only the second was
   visible: a link re-establishing every few seconds looks perfectly healthy if
   all you can see is that it was heard from a moment ago.
+- Share files with **any** phone — no Myco on the other side. A new hotspot
+  bubble on the Circle tab (above the QR bubble) opens a local-only Wi-Fi
+  hotspot on this phone and a plain web page served from it. The other phone
+  scans one QR to join the hotspot, opens the shown address in its browser, and
+  can download the files you chose to share and upload files back to you.
+  Received files land in `Download/Myco/`, so they show up in the Files app
+  like any other download. The hotspot runs in a foreground service with a
+  Stop action, so it survives leaving the tab and is always one tap to kill.
+- While the hotspot is on, bumping the phones hands the other phone the file
+  page directly: the NFC tag Myco already emulates for pairing serves the
+  page's address instead, and the other phone's own system opens it in its
+  browser — nothing to install, nothing to type. For the whole hotspot
+  session NFC does *only* that — pairing by bump is fully disabled, in both
+  directions (this phone neither presents a pair code nor acts on one it
+  reads), and comes back the moment the hotspot stops.
+- Nothing is transferred behind your back: every download and upload a guest
+  starts pops an accept-or-decline dialog on your phone — wherever in Myco you
+  are, not just on the hotspot sheet — with the file's name and size. The
+  guest's browser simply waits for your answer; an unanswered request is
+  denied after 90 seconds, and stopping the hotspot denies everything still
+  waiting. The notification names the file that is waiting so a request can't
+  sit there unseen.
+- Sending now works like AirDrop in both directions. "Send a file" on the
+  hotspot sheet pushes any document straight at the guest: their browser pops
+  an accept-or-decline dialog with the file's name and size, accepting saves
+  it as a normal download, and the sheet shows each offer's fate — waiting,
+  sent, or declined.
+- The file page only ever offers this session's files. Starting a hotspot
+  wipes the served list; only what you pick now, or receive now, shows up for
+  the guest — files from earlier sessions stay in `Download/Myco/`, visible
+  to you alone.
 
 ### Changed
 

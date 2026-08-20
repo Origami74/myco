@@ -115,6 +115,13 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <!-- File-share hotspot: a local-only hotspot plus the file web page it
+             serves to whoever joins (started from the Circle tab). -->
+        <service
+            android:name=".hotspot.HotspotService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
         <!-- HCE for NFC tap-to-pair: emulates a tag serving this device's
              myco://pair code while the QR/present screen is open. -->
         <service
