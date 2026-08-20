@@ -6,6 +6,7 @@ import android.util.Base64
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
+import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import org.json.JSONObject
 import java.security.SecureRandom
 
@@ -118,9 +119,25 @@ object NsiteShare {
     fun deviceName(ownNpub: String): String =
         "Myco-" + ownNpub.removePrefix("npub1").take(6)
 
-    /** Encode a string as a square black-on-white QR bitmap. */
-    fun qrBitmap(content: String, size: Int = 720): Bitmap {
-        val hints = mapOf(EncodeHintType.MARGIN to 1)
+    /**
+     * Encode a string as a square black-on-white QR bitmap.
+     *
+     * [ecc] defaults to ZXing's own default (L, ~7% redundancy) so the long
+     * `myco://share/…` and `myco://pair/…` payloads stay at the lowest version
+     * that fits — denser codes scan worse on a phone screen held at arm's
+     * length. Callers that draw a badge over the middle of the code must pass
+     * [ErrorCorrectionLevel.H] (~30%), which is what makes the obscured modules
+     * recoverable.
+     */
+    fun qrBitmap(
+        content: String,
+        size: Int = 720,
+        ecc: ErrorCorrectionLevel = ErrorCorrectionLevel.L,
+    ): Bitmap {
+        val hints = mapOf(
+            EncodeHintType.MARGIN to 1,
+            EncodeHintType.ERROR_CORRECTION to ecc,
+        )
         val matrix = QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, size, size, hints)
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)
         for (x in 0 until size) {

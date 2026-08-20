@@ -67,14 +67,55 @@ internal fun SheetAction(
     }
 }
 
-/** The white, rounded QR "card" shown on the pair and share surfaces — a QR
- *  bitmap padded on white so it scans well against the soft panel behind it. */
+/**
+ * The white, rounded QR "card" shown on the pair and share surfaces — a QR
+ * bitmap padded on white so it scans well against the soft panel behind it.
+ *
+ * [badge] punches a glyph through the middle of the code, which is how a screen
+ * full of otherwise-identical black squares tells the reader what it *is* — a
+ * Wi-Fi network versus a link. Only pass one for a bitmap encoded at
+ * [com.google.zxing.qrcode.decoder.ErrorCorrectionLevel.H]: the badge covers
+ * real modules, and only H's ~30% redundancy reconstructs them. The badge sits
+ * on its own white plate so the scanner sees a clean quiet zone around the
+ * glyph rather than a glyph bleeding into the surrounding modules.
+ */
 @Composable
-internal fun QrCodeCard(bitmap: Bitmap, contentDescription: String, size: Dp = 180.dp) {
+internal fun QrCodeCard(
+    bitmap: Bitmap,
+    contentDescription: String,
+    size: Dp = 180.dp,
+    badge: ImageVector? = null,
+    onClick: (() -> Unit)? = null,
+) {
     androidx.compose.foundation.layout.Box(
-        modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(Color.White).padding(14.dp),
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .background(Color.White)
+            .padding(14.dp),
+        contentAlignment = Alignment.Center,
     ) {
         Image(bitmap.asImageBitmap(), contentDescription = contentDescription, modifier = Modifier.size(size))
+        if (badge != null) {
+            // ~22% of the code: big enough to read across a table, small enough
+            // that H-level recovery still has margin to spare.
+            val plate = size * 0.22f
+            androidx.compose.foundation.layout.Box(
+                modifier = Modifier
+                    .size(plate)
+                    .clip(RoundedCornerShape(plate * 0.28f))
+                    .background(Color.White)
+                    .padding(plate * 0.14f),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    badge,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(plate * 0.72f),
+                )
+            }
+        }
     }
 }
 
