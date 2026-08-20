@@ -329,6 +329,49 @@ impl RelayHub {
     }
 }
 
+impl RelayHub {
+    /// Accept an event this device originated, by the same route a socket
+    /// takes: novelty check, store, live subscribers, then mesh fan-out.
+    ///
+    /// Publishing straight to the store looks equivalent and is not. The store
+    /// is where an event *rests*; the hub is where one is *accepted* — and
+    /// accepting is what pushes it to this device's live subscriptions and
+    /// hands it to the gossiper. A napplet that wrote to the store would have
+    /// its event signed, saved, and invisible: nothing on this phone would
+    /// redraw, and no peer would ever hear it.
+    ///
+    /// `Origin::Local` gives the event the full hop budget, which is what makes
+    /// it travel; a mesh-received copy carries whatever budget it arrived with.
+    ///
+    /// Returns whether this was a first sighting. A duplicate is stored anyway
+    /// (storing is idempotent) but is not re-flooded, which is what stops an
+    /// event echoing around a circle of peers forever.
+    pub async fn accept_local(self: &Arc<Self>, event: Event) -> anyhow::Result<bool> {
+        // Novelty first and independent of the store, exactly as the socket
+        // path does it — see the `EVENT` handler.
+        let first_sighting = self.seen.insert(&event);
+        self.store.publish(event.clone()).await?;
+        if !first_sighting {
+            return Ok(false);
+        }
+
+        // This device's own subscriptions, including the WebView's.
+        let _ = self.live.send(event.clone());
+
+        if let Some(gossip) = self.gossip.clone() {
+            let inbound = Inbound {
+                origin: Origin::Local,
+                event_ttl: None,
+                sender: None,
+            };
+            // Spawned, so a slow or unreachable peer never holds up the
+            // napplet that published.
+            tokio::spawn(async move { gossip.on_event(event, inbound).await });
+        }
+        Ok(true)
+    }
+}
+
 /// Serve the relay on `addr` until the future is dropped/aborted (no gossiper).
 pub async fn serve(store: Arc<dyn RelayBackend>, addr: SocketAddr) -> anyhow::Result<()> {
     serve_on(store, bind(addr)?).await

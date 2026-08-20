@@ -253,6 +253,10 @@ pub struct AppRuntime {
     content: Option<Arc<Content>>,
     /// Live napplet sessions, one per open window. Built on first use.
     napplet_host: Option<Arc<crate::napplet::NappletHost>>,
+    /// The relay hub, once the content layer has stood it up. Napplet publishes
+    /// go through it so they fan out to the Circle exactly as a socket-borne
+    /// event does.
+    relay_hub: Arc<std::sync::Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
     /// A fetched napplet awaiting the user's answer on install review. Written
     /// by the fetch task, cleared when the user installs or dismisses.
     napplet_review: Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
@@ -369,6 +373,11 @@ impl AppRuntime {
         // surfaces as a warning. Android-only (the host has no TUN). ports.md.
         #[allow(unused_mut)]
         let mut mesh_warning = String::new();
+        // Filled by the content layer below (Android only, where the servers
+        // run); a napplet publish falls back to storing when it is empty.
+        let relay_hub: Arc<std::sync::Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
         #[cfg(target_os = "android")]
         {
             use std::net::SocketAddr;
@@ -393,6 +402,10 @@ impl AppRuntime {
                 Arc::new(crate::content::CircleGate::new(content.clone()));
             let hub =
                 crate::mesh_relay::RelayHub::with_gate(content.relay(), Some(gossiper), Some(gate));
+            // Kept, not only handed to the two servers: a napplet publishing
+            // through a capability has no socket to arrive on, and it must
+            // still reach this device's subscriptions and the mesh.
+            *relay_hub.lock().unwrap() = Some(hub.clone());
 
             // Mesh socket: IPV6_V6ONLY `[::]:4870` so it doesn't collide with the
             // loopback bind and is reachable by peers at `ws://<npub>.fips:4870`.
@@ -594,6 +607,7 @@ impl AppRuntime {
             data_dir: data_dir.to_string(),
             napplet_host: None,
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
+            relay_hub,
             pending_relay_url: settings.relay_url().unwrap_or_default(),
             pending_blossom_url: settings.blossom_url().unwrap_or_default(),
             aware_data_paths: settings.aware_data_paths,
@@ -763,6 +777,7 @@ impl AppRuntime {
             data_dir: String::new(),
             napplet_host: None,
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
+            relay_hub: Arc::new(std::sync::Mutex::new(None)),
             rev: 0,
             error: msg.to_string(),
             pending_relay_url: String::new(),
@@ -1443,10 +1458,16 @@ impl AppRuntime {
                 tracing::info!("generated a user key for napplets: {}", user.guest_name());
             }
 
+            let sink = Arc::new(crate::napplet::MeshEventSink::new(
+                self.relay_hub.clone(),
+                content.relay(),
+            ));
+
             self.napplet_host = Some(Arc::new(crate::napplet::NappletHost::new(
                 content.relay(),
                 content.blobs(),
                 signer,
+                sink,
             )));
         }
         Some((self.napplet_host.clone()?, handle))

@@ -59,7 +59,8 @@ pub use manifest::{
 pub use prelude::{render_for as render_prelude, PRELUDE_GLOBAL};
 pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
-    BlobStore, Envelope, NapTransport, OutboxResolver, RelayBackend, RelayLane, Signer,
+    BlobStore, Envelope, EventSink, NapTransport, OutboxResolver, RelayBackend, RelayLane, Signer,
+    StoreOnlySink,
 };
 pub use session::{NappletIdentity, Session, IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
 pub use shell_link::{ShellAction, ToRuntime, ToShell};
