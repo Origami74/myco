@@ -66,6 +66,9 @@ import app.myco.NsiteIcons
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
+import app.myco.core.LibraryItem
+import app.myco.core.LibraryKind
+import app.myco.core.NappletReview
 import app.myco.core.SiteStatus
 import app.myco.nfc.NfcReader
 import app.myco.nfc.PairPresent
@@ -87,6 +90,7 @@ fun AppsScreen(
     state: AppState,
     client: AppCoreClient,
     onLaunchNsite: (host: String, title: String) -> Unit,
+    onLaunchNapplet: (pointer: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,
 ) {
@@ -95,6 +99,7 @@ fun AppsScreen(
     var shareFor by remember { mutableStateOf<ShareTarget?>(null) }
     var confirmRemove by remember { mutableStateOf<SiteStatus?>(null) }
     var showAdd by remember { mutableStateOf(false) }
+    var confirmForgetNapplet by remember { mutableStateOf<LibraryItem?>(null) }
 
     // One-shot toast with the result of a "Check for updates" run (fires when the
     // core bumps the check generation), so the user gets explicit feedback.
@@ -109,9 +114,15 @@ fun AppsScreen(
         }
     }
 
-    val apps = state.sites.filter {
-        query.isBlank() || it.title.contains(query, true) || it.host.contains(query, true)
-    }.sortedBy { it.title.ifEmpty { it.host }.lowercase() }
+    // nsites and napplets share one grid — they arrive the same way and open the
+    // same way. What differs is the trust model, and the badge says which.
+    val napplets = state.library.filter { it.kind == LibraryKind.Napplet }
+    val apps: List<AppEntry> = buildList {
+        state.sites.forEach { add(AppEntry.Nsite(it)) }
+        napplets.forEach { add(AppEntry.Napplet(it)) }
+    }.filter {
+        query.isBlank() || it.title.contains(query, true) || it.searchKey.contains(query, true)
+    }.sortedBy { it.title.ifEmpty { it.searchKey }.lowercase() }
 
     LazyVerticalGrid(
         columns = GridCells.Fixed(4),
@@ -128,15 +139,23 @@ fun AppsScreen(
                 Spacer(Modifier.height(4.dp))
             }
         }
-        items(apps, key = { it.host }) { site ->
-            NsiteTile(
-                client = client,
-                site = site,
-                modifier = Modifier.animateItem(),
-                // Ready → open the app; still downloading → its live status page.
-                onClick = { onLaunchNsite(site.host, site.title) },
-                onLongClick = { sheetFor = site },
-            )
+        items(apps, key = { it.key }) { entry ->
+            when (entry) {
+                is AppEntry.Nsite -> NsiteTile(
+                    client = client,
+                    site = entry.site,
+                    modifier = Modifier.animateItem(),
+                    // Ready → open the app; still downloading → its live status page.
+                    onClick = { onLaunchNsite(entry.site.host, entry.site.title) },
+                    onLongClick = { sheetFor = entry.site },
+                )
+                is AppEntry.Napplet -> NappletTile(
+                    item = entry.item,
+                    modifier = Modifier.animateItem(),
+                    onClick = { onLaunchNapplet(entry.item.nappletPointer, entry.item.title) },
+                    onLongClick = { confirmForgetNapplet = entry.item },
+                )
+            }
         }
         item {
             AddTile { showAdd = true }
@@ -189,6 +208,41 @@ fun AppsScreen(
             siteCount = state.sites.size,
             onScanned = { showAdd = false; onScanned(it) },
             onDismiss = { showAdd = false },
+        )
+    }
+
+    // Review is driven by state, not by a local flag: a fetch may finish while
+    // the user is elsewhere, and the question should still be waiting.
+    state.nappletReview?.let { review ->
+        NappletReviewSheet(
+            review = review,
+            onInstall = { granted ->
+                client.dispatch(NativeActions.installNapplet(review.pointer, granted))
+            },
+            onDismiss = { client.dispatch(NativeActions.dismissNappletReview()) },
+        )
+    }
+
+    confirmForgetNapplet?.let { item ->
+        AlertDialog(
+            onDismissRequest = { confirmForgetNapplet = null },
+            confirmButton = {
+                TextButton(onClick = {
+                    client.dispatch(NativeActions.forgetNapplet(item.nappletPointer))
+                    confirmForgetNapplet = null
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmForgetNapplet = null }) { Text("Cancel") }
+            },
+            title = { Text("Remove napplet?") },
+            text = {
+                Text(
+                    "“${item.title.ifEmpty { item.dTag ?: item.authorNpub.take(12) }}” will be " +
+                        "removed, along with everything you granted it. Adding it again will " +
+                        "ask you afresh."
+                )
+            },
         )
     }
 
@@ -329,6 +383,178 @@ private fun NsiteTile(
             textAlign = TextAlign.Center,
         )
     }
+}
+
+/**
+ * One tile in the Apps grid. nsites and napplets sit side by side: they arrive
+ * the same way and open the same way, and what differs — the trust model — is
+ * what the badge says.
+ */
+private sealed interface AppEntry {
+    val title: String
+
+    /** What the search box matches besides the title. */
+    val searchKey: String
+
+    /** Stable across recomposition, and distinct between the two kinds. */
+    val key: String
+
+    data class Nsite(val site: SiteStatus) : AppEntry {
+        override val title get() = site.title
+        override val searchKey get() = site.host
+        override val key get() = "nsite:${site.host}"
+    }
+
+    data class Napplet(val item: LibraryItem) : AppEntry {
+        override val title get() = item.title
+        override val searchKey get() = item.nappletPointer
+        override val key get() = "napplet:${item.nappletPointer}"
+    }
+}
+
+/**
+ * A napplet's tile.
+ *
+ * No progress ring: a napplet is a single file that was fetched and verified
+ * before it ever reached the Library, so there is no partial state to show.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun NappletTile(
+    item: LibraryItem,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(18.dp))
+                .background(tileColorFor(item.nappletPointer)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                item.title.take(1).uppercase().ifEmpty { "N" },
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleLarge,
+            )
+            // The duck marks a napplet: a program Myco hosts, as against an
+            // nsite, which is a document Myco serves.
+            Text(
+                "\uD83E\uDD86",
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.align(Alignment.TopEnd).padding(5.dp),
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            item.title.ifEmpty { item.dTag ?: item.authorNpub.take(8) },
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/**
+ * The install-review screen: what a napplet is asking for, before it has it.
+ *
+ * This is the only place a grant is written. Fetching a napplet stores its
+ * bytes and grants nothing, so a napplet that is never reviewed can do nothing
+ * but complete the handshake.
+ *
+ * The wording matters more than usual. A granted `relay` covers publishing with
+ * no per-event prompt, which means the napplet can publish as you at will — so
+ * the screen says that in words, rather than showing a domain name and hoping.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NappletReviewSheet(
+    review: NappletReview,
+    onInstall: (List<String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
+            if (review.error.isNotEmpty()) {
+                Text("Couldn't add this napplet", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+                Text(review.error, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(20.dp))
+                TextButton(onClick = onDismiss) { Text("Close") }
+                return@Column
+            }
+
+            Text(
+                review.title.ifEmpty { "Untitled napplet" },
+                style = MaterialTheme.typography.titleMedium,
+            )
+            if (review.description.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                Text(review.description, style = MaterialTheme.typography.bodyMedium)
+            }
+            Spacer(Modifier.height(20.dp))
+
+            if (review.requires.isEmpty()) {
+                Text(
+                    "This napplet asks for nothing. It runs sealed off: no network, " +
+                        "no storage, no access to your key.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                Text("It wants to:", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(10.dp))
+                review.requires.forEach { domain ->
+                    Text("•  " + capabilityWording(domain), style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(6.dp))
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "You can take these back later from the napplet's long-press menu.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Spacer(Modifier.height(24.dp))
+            Row {
+                TextButton(onClick = onDismiss) { Text("Not now") }
+                Spacer(Modifier.weight(1f))
+                Button(onClick = { onInstall(review.requires) }) { Text("Add napplet") }
+            }
+        }
+    }
+}
+
+/**
+ * A NAP domain in words a person can act on.
+ *
+ * Unknown domains are shown verbatim rather than hidden: a napplet asking for
+ * something this build has never heard of is exactly what the user should see,
+ * and dropping it from the list would understate what is being agreed to.
+ */
+private fun capabilityWording(domain: String): String = when (domain) {
+    "relay" -> "Read and publish Nostr events as you — including posting without asking again"
+    "identity" -> "See who you are: your public key and profile"
+    "storage" -> "Keep its own data on this device"
+    "intent" -> "Open other napplets"
+    "inc" -> "Talk to other napplets you have open"
+    "outbox" -> "Choose which relays to reach on your behalf"
+    "notify" -> "Show you notifications"
+    "theme" -> "Follow your app theme"
+    "link" -> "Ask Myco to open links outside the app"
+    "resource" -> "Fetch images and files through Myco"
+    "config" -> "Offer settings you can change"
+    "shell" -> "Start up (every napplet does this)"
+    else -> "Use \"$domain\" — a capability this version of Myco does not recognise"
 }
 
 @Composable

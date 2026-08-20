@@ -133,6 +133,7 @@ fun MycoApp(
     initialLanEnabled: Boolean = true,
     onLanToggle: (Boolean) -> Unit = {},
     onLaunchNsite: (host: String, title: String) -> Unit,
+    onLaunchNapplet: (pointer: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,
     initialMeshEnabled: Boolean,
@@ -331,7 +332,14 @@ fun MycoApp(
         Surface(modifier = Modifier.padding(padding), color = MaterialTheme.colorScheme.background) {
             NavHost(navController = nav, startDestination = "apps") {
                 composable("apps") {
-                    AppsScreen(state, client, onLaunchNsite = onLaunchNsite, onPinToHome = onPinToHome, onScanned = onScanned)
+                    AppsScreen(
+                        state,
+                        client,
+                        onLaunchNsite = onLaunchNsite,
+                        onLaunchNapplet = onLaunchNapplet,
+                        onPinToHome = onPinToHome,
+                        onScanned = onScanned,
+                    )
                 }
                 composable("circle") {
                     CircleScreen(

@@ -71,6 +71,9 @@ pub enum NativeAppAction {
     },
     /// Unpin a napplet and drop its grants.
     ForgetNapplet { pointer: String },
+    /// Close the install-review screen without installing. The fetched bytes
+    /// stay cached; no grant is written, so the napplet has nothing.
+    DismissNappletReview,
     /// Check online relays for newer versions of installed nsites and stage/apply
     /// them (`docs/design/nsite/nsite-updates.md`). Spawn-not-block.
     CheckNsiteUpdates,

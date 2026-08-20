@@ -259,6 +259,24 @@ impl NappletHost {
     }
 }
 
+/// A fetched, verified napplet awaiting the user's answer on install review.
+///
+/// Carries what the napplet asked for, never what it was given. A grant exists
+/// only once the user answers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NappletReview {
+    /// How to open it again: `naddr…` or `<npub>:<dtag>`.
+    pub pointer: String,
+    pub title: String,
+    pub description: String,
+    /// The capability domains it declared with `requires` tags. What the review
+    /// screen must put in front of the user, in words a person understands.
+    pub requires: Vec<String>,
+    /// Set when the fetch failed; the screen shows this instead of asking.
+    pub error: String,
+}
+
 /// What a fetched, verified napplet declares — the input to install review.
 ///
 /// [`IngestedNapplet::requires`] is what the review screen must show, in words a
