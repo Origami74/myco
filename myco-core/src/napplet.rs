@@ -623,3 +623,57 @@ mod real_naddr {
         assert_eq!(addr.kind(), KIND_NAMED);
     }
 }
+
+#[cfg(test)]
+mod live_fetch {
+    use super::*;
+    use nsite_deck::testing::{MemBlobs, MemRelay};
+
+    /// Fetch the real napplet from the real internet, end to end.
+    ///
+    /// `#[ignore]`d because it needs the network and depends on someone else's
+    /// relays staying up — but it is the only test that answers "is this
+    /// napplet actually reachable from the relays Myco asks", which is
+    /// indistinguishable, from inside the app, from a bug in our own code.
+    ///
+    /// `cargo test -p myco-core --lib live_fetch -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn fetches_the_dingdong_napplet_from_public_relays() {
+        let naddr = "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyxhwumn8ghj7mn0wvhxcmmvqy2hwumn8ghj7un9d3shjtnyd968gmewwp6kyqqgv35kuemydahxwmmmsd2";
+        let addr = NappletAddr::parse(naddr).unwrap();
+        println!("looking for kind {} d={:?}", addr.kind(), addr.d_tag);
+
+        let source = crate::ip_source::IpPeerSource::with_defaults().with_kind(addr.kind());
+
+        // The manifest first, on its own, so a missing manifest is told apart
+        // from a manifest whose blobs are missing.
+        match source
+            .fetch_manifest(&addr.author, addr.d_tag.as_deref())
+            .await
+        {
+            Ok(Some(event)) => {
+                println!(
+                    "manifest found: kind={} id={}",
+                    event.kind.as_u16(),
+                    event.id
+                );
+                for tag in event.tags.iter() {
+                    println!("  tag {:?}", tag.as_slice());
+                }
+            }
+            Ok(None) => println!("NO MANIFEST on any default relay"),
+            Err(e) => println!("manifest fetch errored: {e}"),
+        }
+
+        // Then the whole ingest, which is what the app actually runs.
+        let host = NappletHost::new(Arc::new(MemRelay::new()), Arc::new(MemBlobs::new()));
+        match host.ingest(&addr, &source).await {
+            Ok(ingested) => println!(
+                "INGEST OK: title={:?} requires={:?}",
+                ingested.title, ingested.requires
+            ),
+            Err(e) => println!("INGEST FAILED: {e}"),
+        }
+    }
+}

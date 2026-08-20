@@ -1203,16 +1203,53 @@ impl AppRuntime {
     /// and the result lands in state. What the napplet `requires` is what the
     /// review screen then asks about.
     fn fetch_napplet(&mut self, pointer: &str) {
-        let Ok(addr) = crate::napplet::NappletAddr::parse(pointer) else {
-            tracing::warn!("not a napplet pointer: {pointer}");
+        tracing::info!("fetching napplet {pointer}");
+
+        // Every failure below ends up in front of the user. Returning quietly
+        // would leave the Add sheet looking like it did nothing, which is
+        // indistinguishable from a tap that never registered — and is exactly
+        // how a broken fetch hides.
+        let fail = |review: &Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
+                    pointer: &str,
+                    message: String| {
+            tracing::warn!("napplet {pointer}: {message}");
+            *review.lock().unwrap() = Some(crate::napplet::NappletReview {
+                pointer: pointer.to_string(),
+                title: String::new(),
+                description: String::new(),
+                requires: Vec::new(),
+                error: message,
+            });
+        };
+
+        let addr = match crate::napplet::NappletAddr::parse(pointer) {
+            Ok(addr) => addr,
+            Err(e) => {
+                fail(&self.napplet_review, pointer, e.to_string());
+                self.rev += 1;
+                return;
+            }
+        };
+        let Some(content) = self.content.clone() else {
+            fail(
+                &self.napplet_review,
+                pointer,
+                "the content layer is not running".to_string(),
+            );
+            self.rev += 1;
             return;
         };
         let Some((host, rt)) = self.napplet_context() else {
+            fail(
+                &self.napplet_review,
+                pointer,
+                "the content layer is not running".to_string(),
+            );
+            self.rev += 1;
             return;
         };
-        let Some(content) = self.content.clone() else {
-            return;
-        };
+        let _ = content;
+
         let pointer = pointer.to_string();
         let review = self.napplet_review.clone();
         rt.spawn(async move {
@@ -1221,13 +1258,19 @@ impl AppRuntime {
             // byte is hashed and the signature checked before anything is kept.
             let source = crate::ip_source::IpPeerSource::with_defaults().with_kind(addr.kind());
             let outcome = match host.ingest(&addr, &source).await {
-                Ok(ingested) => crate::napplet::NappletReview {
-                    pointer: pointer.clone(),
-                    title: ingested.title.unwrap_or_default(),
-                    description: ingested.description.unwrap_or_default(),
-                    requires: ingested.requires,
-                    error: String::new(),
-                },
+                Ok(ingested) => {
+                    tracing::info!(
+                        "fetched napplet {pointer}: requires {:?}",
+                        ingested.requires
+                    );
+                    crate::napplet::NappletReview {
+                        pointer: pointer.clone(),
+                        title: ingested.title.unwrap_or_default(),
+                        description: ingested.description.unwrap_or_default(),
+                        requires: ingested.requires,
+                        error: String::new(),
+                    }
+                }
                 Err(e) => {
                     tracing::warn!("could not fetch napplet {pointer}: {e}");
                     crate::napplet::NappletReview {
