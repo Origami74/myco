@@ -825,8 +825,11 @@ object NativeActions {
      * Fetch + verify a napplet without installing it. Reports what it
      * `requires` so the review screen can ask; grants nothing on its own.
      */
-    fun fetchNapplet(pointer: String): JSONObject =
-        JSONObject().put("type", "fetch_napplet").put("pointer", pointer)
+    fun fetchNapplet(pointer: String, holder: String? = null): JSONObject =
+        JSONObject()
+            .put("type", "fetch_napplet")
+            .put("pointer", pointer)
+            .apply { if (!holder.isNullOrEmpty()) put("holder", holder) }
 
     /** Record what review granted, and pin the napplet to the Library. */
     fun installNapplet(pointer: String, granted: List<String>): JSONObject {

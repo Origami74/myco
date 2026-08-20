@@ -1000,6 +1000,19 @@ class MainActivity : ComponentActivity() {
             // the nsite can still download from them as a holder meanwhile.
             core.dispatch(NativeActions.sendPairRequest(info.npub, info.name, info.secret))
         }
+
+        // A shared napplet is fetched and reviewed, never installed outright.
+        // Pairing and installing are separate decisions: accepting a tap from
+        // someone should not also hand their app permission to post as you.
+        if (info.isNapplet) {
+            // Their device first, then the internet — a napplet handed over in
+            // a room with no internet still has to arrive.
+            core.dispatch(NativeActions.fetchNapplet(info.nappletPointer, holder = info.npub))
+            val who = info.name.ifEmpty { "a peer" }
+            Toast.makeText(this, "Getting an app from $who…", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         core.dispatch(NativeActions.openNsite(info.nsiteHost, holder = info.npub))
         val who = info.name.ifEmpty { "a peer" }
         Toast.makeText(this, "Downloading from $who — find it in Apps", Toast.LENGTH_SHORT).show()

@@ -696,6 +696,12 @@ impl Content {
         self.offline_only.load(Ordering::Relaxed)
     }
 
+    /// The shared per-peer relay pool, for building a mesh source against a
+    /// specific holder.
+    pub fn peer_relays(&self) -> Arc<crate::peer_relay::PeerRelayPool> {
+        self.peer_relays.clone()
+    }
+
     /// The event store (shared), for the mesh WS proxy in front of it.
     pub fn relay(&self) -> Arc<dyn RelayBackend> {
         self.relay.clone()

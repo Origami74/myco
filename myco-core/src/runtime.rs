@@ -863,8 +863,8 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
-            NativeAppAction::FetchNapplet { pointer } => {
-                self.fetch_napplet(&pointer);
+            NativeAppAction::FetchNapplet { pointer, holder } => {
+                self.fetch_napplet(&pointer, holder);
                 self.rev += 1;
             }
             NativeAppAction::InstallNapplet { pointer, granted } => {
@@ -1217,7 +1217,7 @@ impl AppRuntime {
     /// Spawn-not-block, like every other sync path: the FFI returns immediately
     /// and the result lands in state. What the napplet `requires` is what the
     /// review screen then asks about.
-    fn fetch_napplet(&mut self, pointer: &str) {
+    fn fetch_napplet(&mut self, pointer: &str, holder: Option<String>) {
         tracing::info!("fetching napplet {pointer}");
 
         // Every failure below ends up in front of the user. Returning quietly
@@ -1272,6 +1272,7 @@ impl AppRuntime {
         // until it finishes reads as nothing having happened at all.
         let pointer = pointer.to_string();
         let review = self.napplet_review.clone();
+        let peer_relays = content.peer_relays();
         *review.lock().unwrap() = Some(crate::napplet::NappletReview {
             pointer: pointer.clone(),
             loading: true,
@@ -1283,6 +1284,17 @@ impl AppRuntime {
         });
 
         rt.spawn(async move {
+            // Sources in the order worth trying. The peer who handed it over
+            // comes first: they demonstrably have it, they are in the room, and
+            // a napplet shared by a tap should not need the internet to
+            // arrive. The public relays follow for everything else.
+            let mut sources: Vec<crate::ip_source::IpPeerSource> = Vec::new();
+            if let Some(npub) = holder.as_deref() {
+                match crate::ip_source::mesh_source_for(peer_relays, npub) {
+                    Ok(mesh) => sources.push(mesh.with_kind(addr.kind())),
+                    Err(e) => tracing::warn!("cannot reach the sharer {npub}: {e}"),
+                }
+            }
             // The pointer's own relay hints first, then the defaults. A napplet
             // lives where its author published it, which is often not where the
             // popular aggregators look — searching only the defaults reports a
@@ -1290,16 +1302,27 @@ impl AppRuntime {
             // the napplet kind rather than the nsite kind a `d` tag implies.
             // Untrusted: every byte is hashed and the signature checked before
             // anything is kept.
-            let source = crate::ip_source::IpPeerSource::new(
-                addr.search_relays(),
-                crate::ip_source::default_blossom_servers(),
-            )
-            .with_kind(addr.kind())
-            // Somebody is watching a spinner. One relay answering in a few
-            // hundred milliseconds should not be held up by another that will
-            // sit on the connection until the timeout.
-            .with_first_answer_grace(std::time::Duration::from_millis(600));
-            let outcome = match host.ingest(&addr, &source).await {
+            sources.push(
+                crate::ip_source::IpPeerSource::new(
+                    addr.search_relays(),
+                    crate::ip_source::default_blossom_servers(),
+                )
+                .with_kind(addr.kind())
+                // Somebody is watching a spinner. One relay answering in a few
+                // hundred milliseconds should not be held up by another that
+                // will sit on the connection until the timeout.
+                .with_first_answer_grace(std::time::Duration::from_millis(600)),
+            );
+
+            let mut ingested = Err(anyhow::anyhow!("no source had this napplet"));
+            for source in &sources {
+                ingested = host.ingest(&addr, source).await;
+                if ingested.is_ok() {
+                    break;
+                }
+            }
+
+            let outcome = match ingested {
                 Ok(ingested) => {
                     let grants = crate::napplet::effective_grants(&ingested.requires);
                     tracing::info!(
