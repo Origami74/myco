@@ -92,6 +92,7 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
     match domain {
         "shell" => Outcome::Reply(nap::shell::handle(session, message)),
         "identity" => Outcome::Reply(nap::identity::handle(ctx, message).await),
+        "relay" => Outcome::Reply(nap::relay::handle(ctx, message).await),
         // Implemented, granted, established — and still unrouted. Reaching here
         // means the implemented set grew without a handler, which is a bug in
         // this crate rather than anything the napplet did.
@@ -226,9 +227,10 @@ mod tests {
     #[tokio::test]
     async fn a_grant_for_an_unimplemented_domain_stays_silent() {
         let (ctx, _signer) = test_context();
-        let mut s = session(&["relay"]);
+        // `storage` is a real NAP domain this build has not implemented.
+        let mut s = session(&["storage"]);
         dispatch(&ctx, &mut s, &ready()).await;
-        let call = Envelope::new("relay.publish").with_id("x1");
+        let call = Envelope::new("storage.setItem").with_id("x1");
         assert_eq!(dispatch(&ctx, &mut s, &call).await, Outcome::Ignore);
     }
 
@@ -239,7 +241,7 @@ mod tests {
         let (ctx, _signer) = test_context();
         let mut s = session(&[]);
         dispatch(&ctx, &mut s, &ready()).await;
-        for msg_type in ["future.thing", "relay.publish", "nonsense", ""] {
+        for msg_type in ["future.thing", "storage.setItem", "nonsense", ""] {
             let call = Envelope::new(msg_type).with_id("x1");
             assert_eq!(
                 dispatch(&ctx, &mut s, &call).await,
