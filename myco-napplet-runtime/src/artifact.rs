@@ -1,5 +1,24 @@
 //! Assembling the bytes that go into `iframe.srcdoc`.
 //!
+//! ## The napplet always runs in an iframe
+//!
+//! Never as the WebView's top-level document. The WebView loads the **shell** —
+//! Myco's own trusted page, shipped in the APK — and the shell creates a
+//! `sandbox="allow-scripts"` iframe whose `srcdoc` is what this module builds.
+//! NIP-5D requires exactly this, and requires that `allow-same-origin` is never
+//! among the tokens.
+//!
+//! The isolation comes from that nesting. `srcdoc` without `allow-same-origin`
+//! gives the napplet an **opaque origin**: no `localStorage`, no `IndexedDB`, no
+//! cookies, no reach into the shell's DOM, and no way to read anything belonging
+//! to the shell's origin or to another napplet. Load the same bytes as the
+//! WebView's top-level document instead and every one of those protections is
+//! gone — the napplet would *be* the shell origin, inherit its storage, and (on
+//! device) sit inside the origin the capability channel is scoped to.
+//!
+//! That is why [`assemble`] returns a [`SrcdocArtifact`] rather than a `String`:
+//! the type says where the bytes are allowed to go.
+//!
 //! Two things have to reach the napplet's document that are **not** the
 //! napplet's own bytes: a Content-Security-Policy, and the `window.napplet`
 //! prelude. Both are injected here, after verification, and neither is part of
@@ -97,8 +116,30 @@ pub struct Injection<'a> {
     pub prelude_js: Option<&'a str>,
 }
 
+/// The assembled document for a verified napplet.
+///
+/// **Only ever assigned to `iframe.srcdoc`, on an iframe carrying
+/// `sandbox="allow-scripts"` and not `allow-same-origin`.** Never navigated to,
+/// never served over HTTP, never made a WebView's top-level document — each of
+/// those would hand the napplet the shell's origin and undo the isolation the
+/// sandbox exists to provide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SrcdocArtifact(String);
+
+impl SrcdocArtifact {
+    /// The document bytes, for assignment to `srcdoc`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The `sandbox` attribute the hosting iframe must carry. Fixed by NIP-5D:
+    /// `allow-scripts` and nothing else. `allow-same-origin` alongside
+    /// `allow-scripts` would let the frame reach out and clear its own sandbox.
+    pub const SANDBOX: &'static str = "allow-scripts";
+}
+
 /// Build the `srcdoc` document for a verified napplet.
-pub fn assemble(index_html: &str, injection: &Injection<'_>) -> String {
+pub fn assemble(index_html: &str, injection: &Injection<'_>) -> SrcdocArtifact {
     let body = strip_leading_doctype(index_html);
 
     let mut out = String::with_capacity(index_html.len() + 1024);
@@ -112,7 +153,7 @@ pub fn assemble(index_html: &str, injection: &Injection<'_>) -> String {
         out.push_str("</script>\n");
     }
     out.push_str(body);
-    out
+    SrcdocArtifact(out)
 }
 
 /// Drop a doctype the napplet declared, so ours is first and the document does
@@ -159,7 +200,7 @@ mod tests {
     use super::*;
 
     fn assembled(html: &str) -> String {
-        assemble(html, &Injection::default())
+        assemble(html, &Injection::default()).as_str().to_string()
     }
 
     /// The CSP has to be the first element the parser sees, or the napplet's own
@@ -198,6 +239,7 @@ mod tests {
             "  \n<!DoCtYpE html>\n<p>hi</p>",
         ] {
             let out = assemble(html, &Injection::default());
+            let out = out.as_str();
             assert_eq!(
                 out.to_lowercase().matches("<!doctype").count(),
                 1,
@@ -234,6 +276,7 @@ mod tests {
                 ..Default::default()
             },
         );
+        let out = out.as_str();
         let meta = out.find("Content-Security-Policy").unwrap();
         let prelude = out.find("window.napplet").unwrap();
         let napplet = out.find("<p>hi</p>").unwrap();
@@ -256,6 +299,7 @@ mod tests {
                 ..Default::default()
             },
         );
+        let out = out.as_str();
         let opened = out.find("<script>").unwrap();
         let closed = out.find("</script>").unwrap();
         assert!(
@@ -273,7 +317,23 @@ mod tests {
                 ..Default::default()
             },
         );
+        let out = out.as_str();
         assert!(!out.contains("<script>escaped()"));
         assert!(out.contains("&quot;"));
+    }
+}
+
+#[cfg(test)]
+mod sandbox_tests {
+    use super::*;
+
+    /// The napplet runs in an iframe, never as the top-level document, and the
+    /// sandbox is exactly `allow-scripts`. `allow-same-origin` alongside it
+    /// would let the frame reach into the shell's origin and clear its own
+    /// sandbox — every isolation guarantee here rests on its absence.
+    #[test]
+    fn the_sandbox_never_grants_same_origin() {
+        assert_eq!(SrcdocArtifact::SANDBOX, "allow-scripts");
+        assert!(!SrcdocArtifact::SANDBOX.contains("allow-same-origin"));
     }
 }
