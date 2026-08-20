@@ -27,6 +27,23 @@ internal object NativeCore {
      * (empty string if none). Blocks while the in-process gateway serves direct
      * from the local relay + Blossom.
      */
+    // --- napplets --------------------------------------------------------
+    // The shell page and the injected object name come from Rust rather than
+    // being written twice, so the page and the code that registers its channel
+    // cannot drift apart.
+
+    external fun nappletShellPage(): String
+    external fun nappletRuntimeObject(): String
+
+    /** Resolve + verify a napplet and open a session. Returns a JSON result. */
+    external fun nappletOpen(handle: Long, pointer: String, grantedJson: String): String
+
+    /** Carry one shell frame; returns a JSON array of frames to send back. */
+    external fun nappletFrame(handle: Long, sessionId: String, frameJson: String): String
+
+    /** Drop a window's session. */
+    external fun nappletClose(handle: Long, sessionId: String)
+
     external fun gatewayGet(
         handle: Long,
         host: String,
