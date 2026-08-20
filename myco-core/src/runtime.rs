@@ -1277,7 +1277,11 @@ impl AppRuntime {
                 addr.search_relays(),
                 crate::ip_source::default_blossom_servers(),
             )
-            .with_kind(addr.kind());
+            .with_kind(addr.kind())
+            // Somebody is watching a spinner. One relay answering in a few
+            // hundred milliseconds should not be held up by another that will
+            // sit on the connection until the timeout.
+            .with_first_answer_grace(std::time::Duration::from_millis(600));
             let outcome = match host.ingest(&addr, &source).await {
                 Ok(ingested) => {
                     tracing::info!(
@@ -1322,10 +1326,22 @@ impl AppRuntime {
         let npub = addr.author.to_bech32().unwrap_or_default();
         let shell_host =
             myco_napplet_runtime::host::shell_host(&addr.author.to_bytes(), addr.d_tag.as_deref());
+
+        // The title the fetch already read from the manifest. Without it the
+        // Library falls back to the `d` tag, so a napplet called "DingDong"
+        // shows up as "dingdong" — an identifier where a name should be.
+        let title = self
+            .napplet_review
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|r| r.pointer == pointer && !r.title.is_empty())
+            .map(|r| r.title.clone());
+
         content.add_napplet_to_library(
             &npub,
             addr.d_tag.as_deref(),
-            None,
+            title.as_deref(),
             &shell_host,
             granted,
             crate::content::now_secs(),

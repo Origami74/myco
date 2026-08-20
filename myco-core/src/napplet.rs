@@ -49,10 +49,17 @@ pub struct NappletAddr {
 }
 
 impl NappletAddr {
-    /// Parse `naddr1…`, or the `<npub>:<dtag>` / `<npub>` shorthand the Library
-    /// already uses for nsites.
+    /// Parse a napplet pointer.
+    ///
+    /// Accepts the official `napplet:` scheme — `napplet://<naddr>` or
+    /// `napplet:<naddr>` — as well as a bare `naddr1…`, a `nostr:` URI, and the
+    /// `<npub>:<dtag>` / `<npub>` shorthand the Library already uses for nsites.
+    ///
+    /// The scheme is stripped rather than interpreted: what identifies a napplet
+    /// is the `naddr` inside it, and a `napplet:` URI wrapping something that is
+    /// not one is not a napplet however it is spelled.
     pub fn parse(pointer: &str) -> anyhow::Result<Self> {
-        let pointer = pointer.trim();
+        let pointer = Self::strip_scheme(pointer.trim());
         if pointer.starts_with("naddr1") {
             let coordinate = nostr::nips::nip19::Nip19Coordinate::from_bech32(pointer)
                 .map_err(|e| anyhow::anyhow!("not a valid naddr: {e}"))?;
@@ -98,6 +105,19 @@ impl NappletAddr {
             }
         }
         out
+    }
+
+    /// Strip a `napplet:` or `nostr:` scheme, with or without `//`, and any
+    /// trailing slash the OS may have added.
+    fn strip_scheme(pointer: &str) -> &str {
+        let mut rest = pointer;
+        for scheme in ["napplet://", "napplet:", "nostr://", "nostr:"] {
+            if rest.len() >= scheme.len() && rest[..scheme.len()].eq_ignore_ascii_case(scheme) {
+                rest = &rest[scheme.len()..];
+                break;
+            }
+        }
+        rest.trim_end_matches('/')
     }
 
     /// The manifest kind this address resolves in.
@@ -624,6 +644,30 @@ mod tests {
         assert!(NappletAddr::parse("not-a-pointer").is_err());
     }
 
+    /// The official scheme, in the spellings the OS and other apps produce.
+    #[test]
+    fn the_napplet_scheme_is_accepted_however_it_is_spelled() {
+        let naddr = "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyxhwumn8ghj7mn0wvhxcmmvqy2hwumn8ghj7un9d3shjtnyd968gmewwp6kyqqgv35kuemydahxwmmmsd2";
+        let bare = NappletAddr::parse(naddr).unwrap();
+
+        for spelling in [
+            format!("napplet://{naddr}"),
+            format!("napplet:{naddr}"),
+            format!("NAPPLET://{naddr}"),
+            format!("napplet://{naddr}/"),
+            format!("nostr:{naddr}"),
+            format!("  napplet://{naddr}  "),
+        ] {
+            let parsed = NappletAddr::parse(&spelling)
+                .unwrap_or_else(|e| panic!("{spelling} did not parse: {e}"));
+            assert_eq!(parsed, bare, "{spelling} decoded differently");
+        }
+
+        // The scheme is stripped, not trusted: it does not make a non-napplet
+        // pointer into one.
+        assert!(NappletAddr::parse("napplet://nonsense").is_err());
+    }
+
     /// An naddr naming an nsite is not a napplet. Distinct kinds are what keep
     /// the two resolution paths apart, so the pointer has to respect them.
     #[test]
@@ -686,7 +730,14 @@ mod live_fetch {
         let addr = NappletAddr::parse(naddr).unwrap();
         println!("looking for kind {} d={:?}", addr.kind(), addr.d_tag);
 
-        let source = crate::ip_source::IpPeerSource::with_defaults().with_kind(addr.kind());
+        // Exactly what the app builds, so the timing here is the timing a
+        // person sees.
+        let source = crate::ip_source::IpPeerSource::new(
+            addr.search_relays(),
+            crate::ip_source::default_blossom_servers(),
+        )
+        .with_kind(addr.kind())
+        .with_first_answer_grace(std::time::Duration::from_millis(600));
 
         // The manifest first, on its own, so a missing manifest is told apart
         // from a manifest whose blobs are missing.
@@ -710,12 +761,15 @@ mod live_fetch {
 
         // Then the whole ingest, which is what the app actually runs.
         let host = NappletHost::new(Arc::new(MemRelay::new()), Arc::new(MemBlobs::new()));
+        let started = std::time::Instant::now();
         match host.ingest(&addr, &source).await {
             Ok(ingested) => println!(
-                "INGEST OK: title={:?} requires={:?}",
-                ingested.title, ingested.requires
+                "INGEST OK in {:.2?}: title={:?} requires={:?}",
+                started.elapsed(),
+                ingested.title,
+                ingested.requires
             ),
-            Err(e) => println!("INGEST FAILED: {e}"),
+            Err(e) => println!("INGEST FAILED in {:.2?}: {e}", started.elapsed()),
         }
     }
 }

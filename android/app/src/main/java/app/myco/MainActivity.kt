@@ -874,7 +874,13 @@ class MainActivity : ComponentActivity() {
      * with no kind in it cannot say otherwise.
      */
     private fun looksLikeNappletPointer(text: String): Boolean {
-        val t = text.trim().removePrefix("nostr:")
+        var t = text.trim()
+        for (scheme in listOf("napplet://", "napplet:", "nostr://", "nostr:")) {
+            if (t.startsWith(scheme, ignoreCase = true)) {
+                t = t.substring(scheme.length)
+                break
+            }
+        }
         return t.startsWith("naddr1", ignoreCase = true)
     }
 

@@ -63,6 +63,9 @@ pub struct IpPeerSource {
     /// Fetch manifests of this kind instead of the nsite kind implied by the
     /// `d` tag. Set for napplets — see [`IpPeerSource::with_kind`].
     kind_override: Option<u16>,
+    /// How long to keep waiting for other relays after the first answers.
+    /// `None` waits for every relay. See [`IpPeerSource::with_first_answer_grace`].
+    first_answer_grace: Option<Duration>,
 }
 
 impl IpPeerSource {
@@ -79,6 +82,7 @@ impl IpPeerSource {
             ignore_manifest_servers: false,
             peer_relay: None,
             kind_override: None,
+            first_answer_grace: None,
         }
     }
 
@@ -111,6 +115,24 @@ impl IpPeerSource {
         self
     }
 
+    /// Stop waiting for the remaining relays this long after the first one
+    /// answers.
+    ///
+    /// Without it a fetch takes as long as the *slowest* relay, because every
+    /// relay is queried in parallel and all are awaited. In practice one relay
+    /// answers in a few hundred milliseconds while another holds the connection
+    /// open until the timeout, so the user waits the full timeout for an answer
+    /// that arrived almost immediately.
+    ///
+    /// The grace period is what keeps "newest wins" meaningful: relays that
+    /// hold the event answer at similar speeds, so a short wait after the first
+    /// still collects the others, while a relay that has nothing to say no
+    /// longer sets the pace.
+    pub fn with_first_answer_grace(mut self, grace: Duration) -> Self {
+        self.first_answer_grace = Some(grace);
+        self
+    }
+
     /// Fetch manifests of an explicit kind instead of the nsite kind implied by
     /// the `d` tag.
     ///
@@ -134,6 +156,52 @@ impl IpPeerSource {
 /// work for adjacent peers, which is exactly what made this hard to spot.
 pub(crate) fn mesh_relay_url(npub: &str) -> String {
     format!("ws://{npub}.fips:4870")
+}
+
+/// Run every query concurrently, but stop `grace` after the first one comes
+/// back with something.
+///
+/// A relay with nothing to say is indistinguishable from a slow one until it
+/// answers, so waiting for all of them means paying for the worst. Waiting a
+/// little past the first real answer collects the relays that also have the
+/// event without paying for the relays that never will.
+async fn collect_with_grace<F>(
+    queries: impl IntoIterator<Item = F>,
+    grace: Duration,
+) -> Vec<Vec<Event>>
+where
+    F: std::future::Future<Output = Vec<Event>>,
+{
+    use futures_util::stream::{FuturesUnordered, StreamExt};
+
+    let mut pending: FuturesUnordered<F> = queries.into_iter().collect();
+    let mut out = Vec::new();
+    let mut deadline: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+
+    loop {
+        match deadline.as_mut() {
+            None => match pending.next().await {
+                Some(events) => {
+                    let answered = !events.is_empty();
+                    out.push(events);
+                    if answered {
+                        deadline = Some(Box::pin(tokio::time::sleep(grace)));
+                    }
+                }
+                None => break,
+            },
+            Some(sleep) => {
+                tokio::select! {
+                    next = pending.next() => match next {
+                        Some(events) => out.push(events),
+                        None => break,
+                    },
+                    _ = sleep.as_mut() => break,
+                }
+            }
+        }
+    }
+    out
 }
 
 /// A peer's mesh Blossom endpoint, by name. See [`mesh_relay_url`].
@@ -393,7 +461,10 @@ impl PeerSource for IpPeerSource {
                     _ => Vec::new(),
                 }
             });
-            join_all(queries).await
+            match self.first_answer_grace {
+                None => join_all(queries).await,
+                Some(grace) => collect_with_grace(queries, grace).await,
+            }
         };
 
         // Pick the newest event matching the requested slot. Signatures were
