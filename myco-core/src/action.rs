@@ -139,6 +139,9 @@ pub enum NativeAppAction {
     AcceptFileTransfer { transfer_id: String },
     /// Decline an incoming encrypted file offer.
     DeclineFileTransfer { transfer_id: String },
+    /// Cancel a transfer that is still in flight and tell the other phone, so
+    /// neither side is left waiting on a message that is no longer coming.
+    CancelFileTransfer { transfer_id: String },
     /// Forget a finished transfer after the Android side has safely published
     /// the received file (or after a terminal sender-side outcome).
     ForgetFileTransfer { transfer_id: String },

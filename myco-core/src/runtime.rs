@@ -874,6 +874,16 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
+            NativeAppAction::CancelFileTransfer { transfer_id } => {
+                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
+                    rt.spawn(async move {
+                        if let Err(e) = content.cancel_file_transfer(transfer_id).await {
+                            tracing::warn!(error = %e, "file share: cancel failed");
+                        }
+                    });
+                }
+                self.rev += 1;
+            }
             NativeAppAction::ForgetFileTransfer { transfer_id } => {
                 if let Some(content) = &self.content {
                     content.forget_file_transfer(&transfer_id);

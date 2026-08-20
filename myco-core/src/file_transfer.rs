@@ -7,7 +7,7 @@
 //! with NIP-44 for the recipient's device key.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use nostr::nips::nip44::{self, Version};
 use nostr::{Keys, PublicKey};
@@ -15,7 +15,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
+/// The largest encrypted package a `MAX_FILE_BYTES` plaintext can produce:
+/// the magic, the 24-byte nonce and the Poly1305 tag on top of the plaintext.
+/// The receiver refuses any blob larger than this **before** reading it, so a
+/// paired peer cannot answer a small offer with an unbounded body.
+pub const MAX_PACKAGE_BYTES: u64 = MAX_FILE_BYTES as u64 + MAGIC.len() as u64 + 24 + 16;
 pub const OFFER_TTL_SECS: u64 = 10 * 60;
+/// How many transfers this device will track at once. A Circle member that
+/// spams offers would otherwise grow `file_transfers.json` without bound; past
+/// this the oldest finished rows go first, and new offers are refused outright
+/// rather than evicting something the user still has to answer.
+pub const MAX_TRACKED_TRANSFERS: usize = 64;
 const MAGIC: &[u8] = b"MYCO-FILE-V1\0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +58,12 @@ pub(crate) struct FileTransferRecord {
     /// The random file key, kept only in the app-private transfer record until
     /// it is wrapped for the recipient in the ready message.
     pub key_b64: Option<String>,
+    /// Encrypted package size the sender declared in its ready message, used to
+    /// bound the download. Zero until a ready message arrives; records written
+    /// by an older build deserialize to zero too, which reads as "unknown" and
+    /// falls back to the absolute cap.
+    #[serde(default)]
+    pub ciphertext_size: u64,
     pub expires_at: u64,
 }
 
@@ -93,6 +109,75 @@ pub(crate) enum FileMessage {
     },
 }
 
+/// Payload types this transport refuses to carry, by MIME and by extension.
+///
+/// The receiving phone writes what arrives into **public** `Downloads/Myco` and
+/// then offers "open with", so an installable package delivered under an
+/// innocent-looking name is one tap away from a sideload — and the accept
+/// prompt shows a filename, not a type. Nothing about sharing a file between
+/// two paired phones needs to move app packages, so they are refused at the
+/// boundary instead of being surfaced with a warning nobody reads.
+const BLOCKED_MIME: &[&str] = &[
+    "application/vnd.android.package-archive",
+    "application/vnd.android.dex",
+    "application/java-archive",
+    "application/x-executable",
+    "application/x-sharedlib",
+];
+const BLOCKED_EXTENSIONS: &[&str] = &[
+    "apk", "apks", "apex", "aab", "xapk", "dex", "dm", "jar", "so",
+];
+
+/// `Some(reason)` when this file may not cross the transport in either
+/// direction. Checked on the way out *and* on the way in: a peer running a
+/// patched build does not get to skip the sender-side half.
+pub(crate) fn rejected_payload(filename: &str, mime: &str) -> Option<String> {
+    let claimed = mime.trim().to_ascii_lowercase();
+    if BLOCKED_MIME.iter().any(|m| claimed == *m) {
+        return Some("app packages cannot be shared over Myco".to_string());
+    }
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match ext {
+        Some(e) if BLOCKED_EXTENSIONS.contains(&e.as_str()) => {
+            Some(format!(".{e} files cannot be shared over Myco"))
+        }
+        _ => None,
+    }
+}
+
+/// Whether an id that arrived over the wire is one we will act on.
+///
+/// Locally generated ids are exactly 32 hex characters. Anything else is
+/// **refused rather than sanitised** — there is no legitimate sender that
+/// produces another shape, and the id is used as a path component when the
+/// received file is staged, so an unchecked one is a directory traversal.
+pub(crate) fn valid_transfer_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A sha256 as Blossom names it: 64 lowercase hex characters. Checked before
+/// the hash is pasted into a URL path.
+pub(crate) fn valid_blob_hash(hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+impl FileMessage {
+    pub(crate) fn transfer_id(&self) -> &str {
+        match self {
+            FileMessage::Offer { transfer_id, .. }
+            | FileMessage::Response { transfer_id, .. }
+            | FileMessage::Ready { transfer_id, .. }
+            | FileMessage::Complete { transfer_id, .. } => transfer_id,
+        }
+    }
+}
+
 pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -101,8 +186,8 @@ pub(crate) fn now_secs() -> u64 {
 }
 
 pub(crate) fn new_transfer_id() -> String {
-    // The id is a correlation handle, not a secret. The file key below uses
-    // getrandom directly and is the security-sensitive random value.
+    // The id is a correlation handle, not a secret. The file key below comes
+    // from the AEAD's OsRng and is the security-sensitive random value.
     hex::encode(crate::ip_source::random_bytes(16))
 }
 
@@ -115,15 +200,17 @@ pub(crate) fn encrypt_file(
     if plaintext.len() > MAX_FILE_BYTES {
         anyhow::bail!("file is larger than the 64 MiB native transfer limit");
     }
-    let mut key_bytes = vec![0u8; 32];
-    getrandom::getrandom(&mut key_bytes)?;
-    let mut nonce = [0u8; 24];
-    getrandom::getrandom(&mut nonce)?;
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(&key_bytes));
+    // The AEAD's own CSPRNG (`getrandom` under the hood) for both values —
+    // never `ip_source::random_bytes`, which is a clock-seeded xorshift and is
+    // only ever safe for non-secret correlation handles.
+    let key = XChaCha20Poly1305::generate_key(&mut OsRng);
+    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let key_bytes = key.to_vec();
+    let cipher = XChaCha20Poly1305::new(&key);
     let aad = aad(transfer_id, recipient_npub, filename);
     let ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&nonce),
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad: &aad,
@@ -185,7 +272,7 @@ pub(crate) fn wrap_key(sender: &Keys, recipient: &PublicKey, key: &[u8]) -> anyh
     Ok(nip44::encrypt(
         sender.secret_key(),
         recipient,
-        &encode_key(key),
+        encode_key(key),
         Version::default(),
     )?)
 }
@@ -245,6 +332,37 @@ mod tests {
         let (mut package, key) = encrypt_file(b"secret", "transfer-1", "npub-b", "a.txt").unwrap();
         *package.last_mut().unwrap() ^= 1;
         assert!(decrypt_file(&package, &key, "transfer-1", "npub-b", "a.txt").is_err());
+    }
+
+    /// The id is a path component when the received file is staged, so a sender
+    /// does not get to choose its shape.
+    #[test]
+    fn transfer_ids_from_the_wire_must_be_plain_hex() {
+        assert!(valid_transfer_id(&new_transfer_id()));
+        assert!(!valid_transfer_id(
+            "../../../../data/data/app.myco/files/evil"
+        ));
+        assert!(!valid_transfer_id(""));
+        assert!(!valid_transfer_id("nothex00000000000000000000000000"));
+        assert!(!valid_transfer_id("abcdef"));
+        assert!(!valid_blob_hash("../secret"));
+        assert!(!valid_blob_hash(&"A".repeat(64)));
+        assert!(valid_blob_hash(&"a1".repeat(32)));
+    }
+
+    /// The name and the type are checked independently, because the attack is
+    /// precisely that they disagree — an app package called `holiday.jpg`, or a
+    /// `.apk` politely typed as an image.
+    #[test]
+    fn app_packages_cannot_be_shared_under_any_name() {
+        assert!(rejected_payload("photo.jpg", "image/jpeg").is_none());
+        assert!(rejected_payload("notes.pdf", "application/pdf").is_none());
+        assert!(
+            rejected_payload("holiday.jpg", "application/vnd.android.package-archive").is_some()
+        );
+        assert!(rejected_payload("evil.apk", "image/jpeg").is_some());
+        assert!(rejected_payload("EVIL.APK", "image/jpeg").is_some());
+        assert!(rejected_payload("evil.apk", "IMAGE/JPEG").is_some());
     }
 
     #[test]
