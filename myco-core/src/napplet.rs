@@ -30,12 +30,22 @@ use myco_napplet_runtime::resolve::resolve;
 use myco_napplet_runtime::session::{NappletIdentity, Session};
 use myco_napplet_runtime::shell_link::{ShellAction, ToRuntime, ToShell};
 
-/// Where a napplet manifest lives: an author, and a `d` tag for a named one.
+/// Where a napplet manifest lives: an author, a `d` tag for a named one, and
+/// the relays the pointer itself named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NappletAddr {
     pub author: PublicKey,
     /// `None` for a root (`15129`) napplet.
     pub d_tag: Option<String>,
+    /// Relay hints carried in the `naddr`.
+    ///
+    /// Not decoration. A napplet lives wherever its author published it, which
+    /// is frequently nowhere near the popular aggregators — of Myco's five
+    /// default relays, one carried the napplet this was first tested against,
+    /// while both relays the pointer named did. Dropping the hints turns "the
+    /// author told us where this is" into "we guessed and missed", which the
+    /// user sees as a napplet that does not exist.
+    pub relays: Vec<String>,
 }
 
 impl NappletAddr {
@@ -55,6 +65,7 @@ impl NappletAddr {
             return Ok(Self {
                 author: coordinate.coordinate.public_key,
                 d_tag: (!identifier.is_empty()).then_some(identifier),
+                relays: coordinate.relays.iter().map(|r| r.to_string()).collect(),
             });
         }
 
@@ -64,7 +75,29 @@ impl NappletAddr {
         };
         let author = PublicKey::from_bech32(npub)
             .map_err(|e| anyhow::anyhow!("not a valid npub or naddr: {e}"))?;
-        Ok(Self { author, d_tag })
+        Ok(Self {
+            author,
+            d_tag,
+            relays: Vec::new(),
+        })
+    }
+
+    /// Relays to search, the pointer's own hints first.
+    ///
+    /// The author's hints lead because they are the only ones that know where
+    /// the napplet actually is; the defaults follow as a fallback for a pointer
+    /// that carried none.
+    pub fn search_relays(&self) -> Vec<String> {
+        let mut out = self.relays.clone();
+        for relay in crate::ip_source::default_relays() {
+            if !out
+                .iter()
+                .any(|r| r.trim_end_matches('/') == relay.trim_end_matches('/'))
+            {
+                out.push(relay);
+            }
+        }
+        out
     }
 
     /// The manifest kind this address resolves in.
@@ -305,6 +338,10 @@ impl BlobStore for SourceBlobs<'_> {
 pub struct NappletReview {
     /// How to open it again: `naddr…` or `<npub>:<dtag>`.
     pub pointer: String,
+    /// The fetch is still running. Set the moment the user asks, so the screen
+    /// opens immediately and says so, rather than leaving them watching a grid
+    /// that has not changed while several relays are tried.
+    pub loading: bool,
     pub title: String,
     pub description: String,
     /// The capability domains it declared with `requires` tags. What the review
@@ -374,6 +411,7 @@ mod tests {
         let addr = NappletAddr {
             author: napplet.author,
             d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
         };
         (NappletHost::new(relay, blobs), addr)
     }
@@ -471,6 +509,7 @@ mod tests {
         let addr = NappletAddr {
             author: napplet.author,
             d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
         };
         assert!(host.open(&addr, vec![]).await.is_err());
         assert_eq!(host.open_count(), 0);
@@ -482,6 +521,7 @@ mod tests {
         let stranger = NappletAddr {
             author: nostr::Keys::generate().public_key(),
             d_tag: Some("nope".to_string()),
+            relays: Vec::new(),
         };
         assert!(host.open(&stranger, vec![]).await.is_err());
     }
@@ -515,6 +555,7 @@ mod tests {
         let addr = NappletAddr {
             author: napplet.author,
             d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
         };
 
         let ingested = host.ingest(&addr, &source).await.unwrap();
@@ -552,6 +593,7 @@ mod tests {
         let addr = NappletAddr {
             author: napplet.author,
             d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
         };
 
         assert!(host.ingest(&addr, &source).await.is_err());
@@ -674,6 +716,48 @@ mod live_fetch {
                 ingested.title, ingested.requires
             ),
             Err(e) => println!("INGEST FAILED: {e}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod relay_probe {
+    use super::*;
+
+    const NADDR: &str = "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyxhwumn8ghj7mn0wvhxcmmvqy2hwumn8ghj7un9d3shjtnyd968gmewwp6kyqqgv35kuemydahxwmmmsd2";
+
+    /// Which relays actually carry this napplet, and how fast — plus the relay
+    /// hints the `naddr` itself names, which the pointer parser currently drops.
+    ///
+    /// `cargo test -p myco-core --lib relay_probe -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn which_relays_have_it() {
+        use nostr::nips::nip19::FromBech32;
+        let coordinate = nostr::nips::nip19::Nip19Coordinate::from_bech32(NADDR).unwrap();
+        println!("naddr relay hints: {:?}", coordinate.relays);
+
+        let addr = NappletAddr::parse(NADDR).unwrap();
+
+        let mut candidates: Vec<String> = crate::ip_source::default_relays();
+        for relay in &coordinate.relays {
+            candidates.push(relay.to_string());
+        }
+
+        for relay in candidates {
+            let source = crate::ip_source::IpPeerSource::new(vec![relay.clone()], Vec::new())
+                .with_kind(addr.kind());
+            let started = std::time::Instant::now();
+            let found = source
+                .fetch_manifest(&addr.author, addr.d_tag.as_deref())
+                .await;
+            let elapsed = started.elapsed();
+            let verdict = match found {
+                Ok(Some(_)) => "HAS IT",
+                Ok(None) => "nothing",
+                Err(_) => "error",
+            };
+            println!("{elapsed:>8.2?}  {verdict:<8} {relay}");
         }
     }
 }
