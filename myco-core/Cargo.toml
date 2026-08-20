@@ -13,6 +13,7 @@ crate-type = ["lib", "cdylib"]
 [dependencies]
 fips = { workspace = true }
 nsite-deck = { path = "../nsite-deck" }
+myco-napplet-runtime = { path = "../myco-napplet-runtime" }
 myco-relay = { path = "../myco-relay" }
 myco-blossom = { path = "../myco-blossom" }
 nostr = { workspace = true }
@@ -42,6 +43,7 @@ simple-dns = "0.11.2"
 # synthetic peer address (a real socket can only ever be loopback here).
 tower = { version = "0.5", features = ["util"] }
 nsite-deck = { path = "../nsite-deck", features = ["testing"] }
+myco-napplet-runtime = { path = "../myco-napplet-runtime", features = ["testing"] }
 tokio-tungstenite = { workspace = true }
 
 # The JNI surface only exists on Android. Host (macOS/Linux) builds skip it and

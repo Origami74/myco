@@ -190,3 +190,123 @@ pub extern "system" fn Java_app_myco_core_NativeCore_gatewayGet(
         .map(|a| a.into_raw())
         .unwrap_or(std::ptr::null_mut())
 }
+
+// --- napplets ------------------------------------------------------------
+//
+// Three calls, mirroring `gatewayGet`'s shape: the lock is held only long
+// enough to clone out the host and a Tokio handle, so a slow resolve does not
+// block the rest of the FFI.
+//
+// The shell page is static, so it needs no handle at all.
+
+/// The napplet shell page — trusted HTML compiled into the runtime.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletShellPage(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    jstr(&mut env, myco_napplet_runtime::shell_page().to_string())
+}
+
+/// The name the capability channel must be injected under, so Kotlin and the
+/// shell page cannot disagree about it.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletRuntimeObject(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    jstr(&mut env, myco_napplet_runtime::RUNTIME_OBJECT.to_string())
+}
+
+/// Resolve a napplet and open a session for one window.
+///
+/// Returns `{"ok":true,"sessionId":…,"shellHost":…,"title":…}`, or
+/// `{"ok":false,"error":…}`. A verification failure lands in `error` and opens
+/// no session — there is no partial success to render.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletOpen(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    pointer: JString,
+    granted_json: JString,
+) -> jstring {
+    let pointer = get_string(&mut env, &pointer);
+    let granted: Vec<String> =
+        serde_json::from_str(&get_string(&mut env, &granted_json)).unwrap_or_default();
+
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.napplet_context()
+        }
+        None => None,
+    };
+
+    let result = match ctx {
+        Some((host, rt_handle)) => match crate::napplet::NappletAddr::parse(&pointer) {
+            Ok(addr) => match rt_handle.block_on(host.open(&addr, granted)) {
+                Ok(opened) => serde_json::json!({
+                    "ok": true,
+                    "sessionId": opened.session_id,
+                    "shellHost": opened.shell_host,
+                    "title": opened.title,
+                }),
+                Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+            },
+            Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        },
+        None => serde_json::json!({"ok": false, "error": "content layer is not running"}),
+    };
+
+    jstr(&mut env, result.to_string())
+}
+
+/// Carry one frame from a window's shell; returns a JSON array of frames to
+/// send back (possibly empty).
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletFrame(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_id: JString,
+    frame_json: JString,
+) -> jstring {
+    let session_id = get_string(&mut env, &session_id);
+    let frame_json = get_string(&mut env, &frame_json);
+
+    let host = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.napplet_context().map(|(host, _)| host)
+        }
+        None => None,
+    };
+
+    let out = match host {
+        Some(host) => host.frame(&session_id, &frame_json),
+        None => Vec::new(),
+    };
+
+    jstr(
+        &mut env,
+        serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()),
+    )
+}
+
+/// Drop a window's session. Every later frame for it is ignored.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_id: JString,
+) {
+    let session_id = get_string(&mut env, &session_id);
+    if let Some(h) = unsafe { handle_ref(handle) } {
+        let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((host, _)) = guard.napplet_context() {
+            host.close(&session_id);
+        }
+    }
+}

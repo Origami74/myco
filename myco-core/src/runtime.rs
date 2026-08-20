@@ -251,6 +251,8 @@ pub struct AppRuntime {
     /// The content layer (embedded relay + Blossom + gateway + Library). `None`
     /// only on a startup error (no valid data dir).
     content: Option<Arc<Content>>,
+    /// Live napplet sessions, one per open window. Built on first use.
+    napplet_host: Option<Arc<crate::napplet::NappletHost>>,
     /// Latest dev-menu peer speedtest result; written by the spawned run task and
     /// read back into `state()`. Shared so the async task can update it in place.
     speedtest: Arc<std::sync::Mutex<crate::state::SpeedtestView>>,
@@ -587,6 +589,7 @@ impl AppRuntime {
         Ok(Self {
             app_version: app_version.to_string(),
             data_dir: data_dir.to_string(),
+            napplet_host: None,
             pending_relay_url: settings.relay_url().unwrap_or_default(),
             pending_blossom_url: settings.blossom_url().unwrap_or_default(),
             aware_data_paths: settings.aware_data_paths,
@@ -754,6 +757,7 @@ impl AppRuntime {
         Self {
             app_version: app_version.to_string(),
             data_dir: String::new(),
+            napplet_host: None,
             rev: 0,
             error: msg.to_string(),
             pending_relay_url: String::new(),
@@ -1181,6 +1185,26 @@ impl AppRuntime {
         let content = self.content.clone()?;
         let handle = self.rt.as_ref()?.handle().clone();
         Some((content, handle))
+    }
+
+    /// The napplet host, over this device's relay and Blossom store, plus the
+    /// Tokio handle to resolve on.
+    ///
+    /// Built on first use rather than at startup: a device that never opens a
+    /// napplet never pays for one, and the host holds nothing but the two seams
+    /// and its open sessions.
+    pub fn napplet_context(
+        &mut self,
+    ) -> Option<(Arc<crate::napplet::NappletHost>, tokio::runtime::Handle)> {
+        let handle = self.rt.as_ref()?.handle().clone();
+        if self.napplet_host.is_none() {
+            let content = self.content.as_ref()?;
+            self.napplet_host = Some(Arc::new(crate::napplet::NappletHost::new(
+                content.relay(),
+                content.blobs(),
+            )));
+        }
+        Some((self.napplet_host.clone()?, handle))
     }
 
     fn start_node(&mut self) {
