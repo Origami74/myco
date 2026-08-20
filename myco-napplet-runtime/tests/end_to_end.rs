@@ -13,6 +13,7 @@ use myco_napplet_runtime::resolve::resolve;
 use myco_napplet_runtime::seams::Envelope;
 use myco_napplet_runtime::session::{NappletIdentity, Session};
 use myco_napplet_runtime::shell_link::{ShellAction, ToRuntime, ToShell};
+use myco_napplet_runtime::testing::test_context;
 use myco_napplet_runtime::testing::{build_test_napplet, FIXTURE_INDEX_HTML};
 use nsite_deck::seams::BlobStore;
 use nsite_deck::testing::MemBlobs;
@@ -36,6 +37,7 @@ async fn a_verified_napplet_reaches_the_shell_and_completes_the_handshake() {
     assert_eq!(identity.d_tag, "fixture");
     assert_eq!(identity.aggregate, resolved.aggregate);
     let mut session = Session::new(identity.clone(), ["shell"]);
+    let (ctx, _signer) = test_context();
 
     // --- assemble ------------------------------------------------------
     let prelude = render_for(&session);
@@ -85,13 +87,17 @@ async fn a_verified_napplet_reaches_the_shell_and_completes_the_handshake() {
         panic!("expected a relayed napplet message");
     };
 
-    let replies = dispatch(&mut session, &message).envelopes().to_vec();
+    let replies = dispatch(&ctx, &mut session, &message)
+        .await
+        .envelopes()
+        .to_vec();
     assert_eq!(replies.len(), 1);
     assert_eq!(
         serde_json::to_value(&replies[0]).unwrap(),
         json!({
             "type": "shell.init",
-            "capabilities": {"domains": ["shell"]},
+            // Everything Myco implements, not what this napplet was granted.
+            "capabilities": {"domains": session.available_domains()},
             "services": []
         })
     );
@@ -103,10 +109,16 @@ async fn a_verified_napplet_reaches_the_shell_and_completes_the_handshake() {
     // supports() check and its actual namespace disagree.
     let advertised = replies[0].field("capabilities").unwrap()["domains"].clone();
     assert_eq!(advertised, json!(session.available_domains()));
-    assert!(prelude.contains(r#"{"domains":["shell"]}"#));
+    assert!(prelude.contains(&format!(
+        r#"{{"domains":{}}}"#,
+        serde_json::to_string(&session.available_domains()).unwrap()
+    )));
 
     // --- and the session never re-establishes ---------------------------
-    assert!(dispatch(&mut session, &message).envelopes().is_empty());
+    assert!(dispatch(&ctx, &mut session, &message)
+        .await
+        .envelopes()
+        .is_empty());
     assert_eq!(session.identity(), &identity);
 }
 
@@ -136,13 +148,14 @@ async fn a_tampered_napplet_never_becomes_an_artifact() {
 /// "this runtime will never do relay", a refused call reads as "not right now".
 #[tokio::test]
 async fn the_namespace_is_not_the_enforcement() {
+    let (ctx, _signer) = test_context();
     let mut session = Session::with_implemented(
         NappletIdentity::new("chat", "aggregate"),
         // Granted nothing beyond the mandatory shell domain...
         Vec::<String>::new(),
         ["shell", "relay"],
     );
-    dispatch(&mut session, &Envelope::new("shell.ready"));
+    dispatch(&ctx, &mut session, &Envelope::new("shell.ready")).await;
 
     // ...and relay is installed anyway.
     let prelude = render_for(&session);
@@ -154,7 +167,10 @@ async fn the_namespace_is_not_the_enforcement() {
 
     // The call is what gets refused.
     let call = Envelope::new("relay.publish").with_id("x1");
-    let replies = dispatch(&mut session, &call).envelopes().to_vec();
+    let replies = dispatch(&ctx, &mut session, &call)
+        .await
+        .envelopes()
+        .to_vec();
     assert_eq!(replies.len(), 1);
     assert!(replies[0].field("error").is_some());
 }

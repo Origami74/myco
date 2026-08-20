@@ -269,16 +269,18 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletFrame(
     let session_id = get_string(&mut env, &session_id);
     let frame_json = get_string(&mut env, &frame_json);
 
-    let host = match unsafe { handle_ref(handle) } {
+    let ctx = match unsafe { handle_ref(handle) } {
         Some(h) => {
             let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
-            guard.napplet_context().map(|(host, _)| host)
+            guard.napplet_context()
         }
         None => None,
     };
 
-    let out = match host {
-        Some(host) => host.frame(&session_id, &frame_json),
+    // Capability calls are async (a relay read now, a publish later), so the
+    // frame is driven on the Tokio runtime. The lock is already released.
+    let out = match ctx {
+        Some((host, rt_handle)) => rt_handle.block_on(host.frame(&session_id, &frame_json)),
         None => Vec::new(),
     };
 

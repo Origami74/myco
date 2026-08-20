@@ -50,7 +50,7 @@ pub mod shell_page;
 pub mod testing;
 
 pub use artifact::{assemble, CspPolicy, Injection, SrcdocArtifact};
-pub use dispatch::{dispatch, Outcome};
+pub use dispatch::{dispatch, NapContext, Outcome};
 pub use error::{NappletError, NappletErrorCode, Result};
 pub use host::{is_shell_host, shell_host, shell_label, shell_origin, SHELL_SUFFIX};
 pub use manifest::{

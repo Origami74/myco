@@ -1404,9 +1404,43 @@ impl AppRuntime {
         let handle = self.rt.as_ref()?.handle().clone();
         if self.napplet_host.is_none() {
             let content = self.content.as_ref()?;
+            // The user key is generated here, on first napplet use — not at
+            // install. A device that never opens a napplet never gets a social
+            // identity, and existing installs need no migration.
+            let data_dir = Path::new(&self.data_dir);
+            let first_use = !crate::user_key::exists(data_dir);
+            let user = crate::user_key::load_or_generate(data_dir).ok()?;
+            let signer = Arc::new(crate::user_key::UserSigner::new(user.keys.clone()));
+
+            if first_use {
+                // A new user is never a bare pubkey. Published to the local
+                // relay only, and never in the way of opening a napplet — a
+                // profile that failed to publish is cosmetic, and a launch that
+                // waited on the network would not be.
+                let relay = content.relay();
+                let profile = nostr::EventBuilder::new(
+                    nostr::Kind::Metadata,
+                    crate::user_key::guest_profile_json(&user),
+                )
+                .sign_with_keys(&user.keys);
+                match profile {
+                    Ok(event) => {
+                        let rt = handle.clone();
+                        rt.spawn(async move {
+                            if let Err(e) = relay.publish(event).await {
+                                tracing::warn!("could not publish the guest profile: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => tracing::warn!("could not sign the guest profile: {e}"),
+                }
+                tracing::info!("generated a user key for napplets: {}", user.guest_name());
+            }
+
             self.napplet_host = Some(Arc::new(crate::napplet::NappletHost::new(
                 content.relay(),
                 content.blobs(),
+                signer,
             )));
         }
         Some((self.napplet_host.clone()?, handle))

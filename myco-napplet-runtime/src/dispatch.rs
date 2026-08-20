@@ -16,9 +16,25 @@
 //!   domains, so a call here means it went around its own namespace. It already
 //!   knows its grants from `shell.init`, so saying so leaks nothing.
 
+use std::sync::Arc;
+
 use crate::nap;
-use crate::seams::Envelope;
+use crate::seams::{Envelope, RelayBackend, Signer};
 use crate::session::Session;
+
+/// What the capabilities reach the world through.
+///
+/// Held once and shared by every session: the seams are per-device, not
+/// per-napplet. What differs per napplet is the session — its identity and its
+/// grants — which is why they are separate arguments and not one object.
+#[derive(Clone)]
+pub struct NapContext {
+    /// Signs on the user's behalf. A napplet describes an event and gets one
+    /// back; it never sees a key.
+    pub signer: Arc<dyn Signer>,
+    /// Where events are read from and written to.
+    pub relay: Arc<dyn RelayBackend>,
+}
 
 /// What to do with an inbound message.
 #[derive(Debug, Clone, PartialEq)]
@@ -41,7 +57,7 @@ impl Outcome {
 }
 
 /// Route one inbound message for one napplet's session.
-pub fn dispatch(session: &mut Session, message: &Envelope) -> Outcome {
+pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelope) -> Outcome {
     // Results travel runtime -> napplet. One arriving the other way is either a
     // confused napplet or a reflected message; either way there is nothing to
     // service.
@@ -75,6 +91,7 @@ pub fn dispatch(session: &mut Session, message: &Envelope) -> Outcome {
 
     match domain {
         "shell" => Outcome::Reply(nap::shell::handle(session, message)),
+        "identity" => Outcome::Reply(nap::identity::handle(ctx, message).await),
         // Implemented, granted, established — and still unrouted. Reaching here
         // means the implemented set grew without a handler, which is a bug in
         // this crate rather than anything the napplet did.
@@ -86,6 +103,7 @@ pub fn dispatch(session: &mut Session, message: &Envelope) -> Outcome {
 mod tests {
     use super::*;
     use crate::session::NappletIdentity;
+    use crate::testing::test_context;
     use serde_json::json;
 
     fn session(granted: &[&str]) -> Session {
@@ -107,17 +125,20 @@ mod tests {
     }
 
     /// The whole handshake, against the JSON in NAP-SHELL.
-    #[test]
-    fn the_handshake_answers_ready_with_init() {
+    #[tokio::test]
+    async fn the_handshake_answers_ready_with_init() {
+        let (ctx, _signer) = test_context();
         let mut s = session(&[]);
-        let out = dispatch(&mut s, &ready());
+        let out = dispatch(&ctx, &mut s, &ready()).await;
         let sent = out.envelopes();
         assert_eq!(sent.len(), 1);
         assert_eq!(
             serde_json::to_value(&sent[0]).unwrap(),
             json!({
                 "type": "shell.init",
-                "capabilities": {"domains": ["shell"]},
+                // Everything this build implements, sorted — not what the
+                // napplet was granted. See `Session::available_domains`.
+                "capabilities": {"domains": s.available_domains()},
                 "services": []
             })
         );
@@ -125,13 +146,17 @@ mod tests {
     }
 
     /// "The runtime MUST send shell.init exactly once per napplet lifecycle."
-    #[test]
-    fn init_is_sent_exactly_once_however_often_ready_arrives() {
+    #[tokio::test]
+    async fn init_is_sent_exactly_once_however_often_ready_arrives() {
+        let (ctx, _signer) = test_context();
         let mut s = session(&[]);
-        assert_eq!(dispatch(&mut s, &ready()).envelopes().len(), 1);
+        assert_eq!(dispatch(&ctx, &mut s, &ready()).await.envelopes().len(), 1);
         for _ in 0..5 {
             assert!(
-                dispatch(&mut s, &ready()).envelopes().is_empty(),
+                dispatch(&ctx, &mut s, &ready())
+                    .await
+                    .envelopes()
+                    .is_empty(),
                 "a duplicate shell.ready resent the environment"
             );
         }
@@ -139,11 +164,12 @@ mod tests {
 
     /// "MUST NOT service capability calls for a napplet whose session has not
     /// been established by the handshake."
-    #[test]
-    fn a_capability_call_before_the_handshake_is_refused() {
+    #[tokio::test]
+    async fn a_capability_call_before_the_handshake_is_refused() {
+        let (ctx, _signer) = test_context();
         let mut s = session_with_relay(&["relay"]);
         let call = Envelope::new("relay.publish").with_id("x1");
-        let out = dispatch(&mut s, &call);
+        let out = dispatch(&ctx, &mut s, &call).await;
 
         let sent = out.envelopes();
         assert_eq!(sent.len(), 1);
@@ -159,13 +185,14 @@ mod tests {
     /// The permission boundary. The API is in the napplet's namespace and
     /// `supports()` says so, and the call is still refused — which is the whole
     /// point of moving the check behind the call.
-    #[test]
-    fn an_ungranted_capability_is_refused_after_the_handshake() {
+    #[tokio::test]
+    async fn an_ungranted_capability_is_refused_after_the_handshake() {
+        let (ctx, _signer) = test_context();
         let mut s = session_with_relay(&[]);
-        dispatch(&mut s, &ready());
+        dispatch(&ctx, &mut s, &ready()).await;
 
         let call = Envelope::new("relay.publish").with_id("x1");
-        let sent = dispatch(&mut s, &call).envelopes().to_vec();
+        let sent = dispatch(&ctx, &mut s, &call).await.envelopes().to_vec();
         assert_eq!(sent.len(), 1);
         let error = sent[0].field("error").unwrap().as_str().unwrap();
         assert!(error.contains("relay"), "unhelpful error: {error}");
@@ -181,13 +208,14 @@ mod tests {
     /// A granted, implemented domain with no handler is this crate's bug, not
     /// the napplet's — but it must still fail closed rather than fall through.
     /// (`relay` has no handler yet, so a granted call lands on that path.)
-    #[test]
-    fn an_unwired_capability_fails_closed() {
+    #[tokio::test]
+    async fn an_unwired_capability_fails_closed() {
+        let (ctx, _signer) = test_context();
         let mut s = session_with_relay(&["relay"]);
-        dispatch(&mut s, &ready());
+        dispatch(&ctx, &mut s, &ready()).await;
 
         let call = Envelope::new("relay.publish").with_id("x1");
-        let sent = dispatch(&mut s, &call).envelopes().to_vec();
+        let sent = dispatch(&ctx, &mut s, &call).await.envelopes().to_vec();
         assert_eq!(sent.len(), 1);
         assert!(sent[0].field("error").is_some());
     }
@@ -195,24 +223,26 @@ mod tests {
     /// A grant the runtime does not implement is invisible: the environment
     /// never advertises it, so a call is an unrecognized type rather than a
     /// refusal that would confirm the domain exists.
-    #[test]
-    fn a_grant_for_an_unimplemented_domain_stays_silent() {
+    #[tokio::test]
+    async fn a_grant_for_an_unimplemented_domain_stays_silent() {
+        let (ctx, _signer) = test_context();
         let mut s = session(&["relay"]);
-        dispatch(&mut s, &ready());
+        dispatch(&ctx, &mut s, &ready()).await;
         let call = Envelope::new("relay.publish").with_id("x1");
-        assert_eq!(dispatch(&mut s, &call), Outcome::Ignore);
+        assert_eq!(dispatch(&ctx, &mut s, &call).await, Outcome::Ignore);
     }
 
     /// NIP-5D's forward-compatibility rule: a napplet built against a newer
     /// registry must not be met with errors on every unknown call.
-    #[test]
-    fn an_unrecognized_domain_is_ignored_in_silence() {
+    #[tokio::test]
+    async fn an_unrecognized_domain_is_ignored_in_silence() {
+        let (ctx, _signer) = test_context();
         let mut s = session(&[]);
-        dispatch(&mut s, &ready());
+        dispatch(&ctx, &mut s, &ready()).await;
         for msg_type in ["future.thing", "relay.publish", "nonsense", ""] {
             let call = Envelope::new(msg_type).with_id("x1");
             assert_eq!(
-                dispatch(&mut s, &call),
+                dispatch(&ctx, &mut s, &call).await,
                 Outcome::Ignore,
                 "{msg_type} should have been ignored"
             );
@@ -221,36 +251,39 @@ mod tests {
 
     /// `shell.supports` is answered locally by the napplet from its cached
     /// environment. Over the wire it is not a message at all.
-    #[test]
-    fn shell_supports_is_not_a_wire_message() {
+    #[tokio::test]
+    async fn shell_supports_is_not_a_wire_message() {
+        let (ctx, _signer) = test_context();
         let mut s = session(&[]);
-        dispatch(&mut s, &ready());
+        dispatch(&ctx, &mut s, &ready()).await;
         let call = Envelope::new("shell.supports")
             .with_id("x1")
             .with_field("domain", "relay");
-        assert!(dispatch(&mut s, &call).envelopes().is_empty());
+        assert!(dispatch(&ctx, &mut s, &call).await.envelopes().is_empty());
     }
 
     /// A result arriving from the napplet is not something to service.
-    #[test]
-    fn an_inbound_result_is_ignored() {
+    #[tokio::test]
+    async fn an_inbound_result_is_ignored() {
+        let (ctx, _signer) = test_context();
         let mut s = session(&[]);
         let reflected = Envelope::new("shell.init.result").with_id("x1");
-        assert_eq!(dispatch(&mut s, &reflected), Outcome::Ignore);
+        assert_eq!(dispatch(&ctx, &mut s, &reflected).await, Outcome::Ignore);
     }
 
     /// The environment is scoped per napplet: a session's offered domains never
     /// depend on what another napplet was granted.
-    #[test]
-    fn the_environment_is_scoped_to_one_napplet() {
+    #[tokio::test]
+    async fn the_environment_is_scoped_to_one_napplet() {
+        let (ctx, _signer) = test_context();
         let mut granted = session(&["shell"]);
         let mut ungranted = session(&[]);
-        let a = dispatch(&mut granted, &ready()).envelopes()[0].clone();
-        let b = dispatch(&mut ungranted, &ready()).envelopes()[0].clone();
+        let a = dispatch(&ctx, &mut granted, &ready()).await.envelopes()[0].clone();
+        let b = dispatch(&ctx, &mut ungranted, &ready()).await.envelopes()[0].clone();
         assert_eq!(a.field("capabilities"), b.field("capabilities"));
         assert_eq!(
             a.field("capabilities").unwrap()["domains"],
-            json!(["shell"])
+            json!(granted.available_domains())
         );
     }
 }
