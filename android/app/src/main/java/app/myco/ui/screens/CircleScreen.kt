@@ -86,6 +86,9 @@ import app.myco.share.NsiteShare
 import app.myco.ui.NameSuggestions
 import app.myco.ui.applyDeviceName
 import app.myco.ui.PeersPill
+import app.myco.ui.TransferCard
+import app.myco.ui.isLive
+import app.myco.ui.needsAttention
 import app.myco.ui.peerLabel
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.avatarColorFor
@@ -317,6 +320,33 @@ fun CircleScreen(
                     )
                 }
                 item { VerifyHint() }
+            }
+
+            // Transfers live next to pairing requests for the same reason those
+            // do: they are the other thing that happens between two paired
+            // phones, and they outlive the sheet that started them. A send to a
+            // peer that never answers is visible — and cancellable — here rather
+            // than only inside a share sheet the user has since dismissed.
+            val transfers = state.fileTransfers.filter { it.isLive() || it.needsAttention() }
+            if (transfers.isNotEmpty()) {
+                item {
+                    SectionLabel(
+                        "TRANSFERS",
+                        trailing = "· ${transfers.count { it.isLive() }} in flight",
+                        scanning = false,
+                    )
+                }
+                items(transfers, key = { it.id }) { transfer ->
+                    TransferCard(
+                        transfer = transfer,
+                        onCancel = {
+                            client.dispatch(NativeActions.cancelFileTransfer(transfer.id))
+                        },
+                        onDismiss = {
+                            client.dispatch(NativeActions.forgetFileTransfer(transfer.id))
+                        },
+                    )
+                }
             }
 
             item { Spacer(Modifier.height(72.dp)) } // room for the FAB

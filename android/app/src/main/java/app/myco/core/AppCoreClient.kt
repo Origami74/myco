@@ -761,6 +761,10 @@ object NativeActions {
     fun declineFileTransfer(transferId: String): JSONObject =
         JSONObject().put("type", "decline_file_transfer").put("transferId", transferId)
 
+    /** Stop a transfer that is still in flight and tell the other phone. */
+    fun cancelFileTransfer(transferId: String): JSONObject =
+        JSONObject().put("type", "cancel_file_transfer").put("transferId", transferId)
+
     fun forgetFileTransfer(transferId: String): JSONObject =
         JSONObject().put("type", "forget_file_transfer").put("transferId", transferId)
 }

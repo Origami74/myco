@@ -333,9 +333,24 @@ fun MycoApp(
     }
         } // CompositionLocalProvider(LocalMeshControl)
 
-        // AirDrop-style transfer feedback is mounted at the app root, above the
-        // navigation host, so the sender/receiver always see the current stage.
-        FileTransferProgressOverlay(state.fileTransfers)
+        // The incoming-offer prompt is the one piece of transfer UI that has to
+        // sit above everything: it interrupts. Progress lives where the user
+        // went looking for it — the share sheet, and the Circle tab.
+        FileOfferLayer(
+            offer = state.fileTransfers.firstOrNull {
+                it.direction == "incoming" &&
+                    it.status == "waiting_user" &&
+                    it.id !in dismissedFileOffers
+            },
+            onAccept = {
+                dismissedFileOffers = dismissedFileOffers + it.id
+                state = client.dispatch(NativeActions.acceptFileTransfer(it.id))
+            },
+            onDeny = {
+                dismissedFileOffers = dismissedFileOffers + it.id
+                state = client.dispatch(NativeActions.declineFileTransfer(it.id))
+            },
+        )
 
     // Incoming pair requests now live in the persistent Requests inbox (badged on
     // the Circle tab + surfaced on the pairing home), not a transient pop-up.
@@ -393,34 +408,6 @@ fun MycoApp(
         )
     }
 
-    // Phone B's native incoming-offer prompt. This is deliberately an in-app
-    // prompt in the first slice; Android background notification delivery can
-    // be added after the foreground transfer path is proven.
-    state.fileTransfers
-        .firstOrNull { it.direction == "incoming" && it.status == "waiting_user" && it.id !in dismissedFileOffers }
-        ?.let { offer ->
-            val size = if (offer.size > 0) " (${formatSize(offer.size)})" else ""
-            AlertDialog(
-                onDismissRequest = {},
-                title = { Text("Get from ${offer.peerName.ifBlank { "your peer" }}?") },
-                text = {
-                    Text("${offer.peerName.ifBlank { "A paired phone" }} wants to send ${offer.name}$size")
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        dismissedFileOffers = dismissedFileOffers + offer.id
-                        state = client.dispatch(NativeActions.acceptFileTransfer(offer.id))
-                    }) { Text("Accept") }
-                },
-                dismissButton = {
-                    TextButton(onClick = {
-                        dismissedFileOffers = dismissedFileOffers + offer.id
-                        state = client.dispatch(NativeActions.declineFileTransfer(offer.id))
-                    }) { Text("Deny") }
-                },
-            )
-        }
-
     // Completed native receives are also app-root UI. This remains visible when
     // the user accepted from Apps, Circle, Settings, or Dev; it is not attached
     // to the Circle destination that initiated pairing.
@@ -453,12 +440,20 @@ fun MycoApp(
             uris = externalShareUris,
             onDismiss = {
                 peerShareVisible = false
+                // Closing the sheet acknowledges the outcomes it was showing.
+                // Cancelled and declined are decisions the user watched happen,
+                // so they go with it rather than queueing up on the Circle tab
+                // waiting to be dismissed a second time. `failed` stays — that
+                // one is news, and may never have been on screen at all.
+                state.fileTransfers
+                    .filter { it.status == "cancelled" || it.status == "denied" }
+                    .forEach { client.dispatch(NativeActions.forgetFileTransfer(it.id)) }
+                state = client.state()
                 onExternalShareDismissed()
             },
-            onShare = { peer ->
-                peerShareVisible = false
-                onShareToPeer(externalShareUris, peer)
-                onExternalShareDismissed()
+            onShare = { peer -> onShareToPeer(externalShareUris, peer) },
+            onCancelTransfer = {
+                state = client.dispatch(NativeActions.cancelFileTransfer(it.id))
             },
         )
     }
@@ -745,8 +740,8 @@ fun KeyVal(label: String, value: String, valueColor: Color = MaterialTheme.color
     }
 }
 
-/** Human file size for the transfer-consent dialog. */
-private fun formatSize(bytes: Long): String = when {
+/** Human file size. The one byte formatter for the whole `ui` package. */
+fun formatSize(bytes: Long): String = when {
     bytes >= 1L shl 20 -> "%.1f MB".format(bytes.toDouble() / (1L shl 20))
     bytes >= 1L shl 10 -> "%.0f kB".format(bytes.toDouble() / (1L shl 10))
     else -> "$bytes B"

@@ -6,6 +6,7 @@ import android.content.ContentValues
 import android.content.Intent
 import android.provider.Settings
 import android.provider.MediaStore
+import android.webkit.MimeTypeMap
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
@@ -59,6 +60,7 @@ import app.myco.nfc.NfcReader
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.ExternalShare
+import app.myco.share.FileOfferNotifier
 import app.myco.share.MycoLink
 import app.myco.share.NsiteShare
 import app.myco.share.PendingDeepLinks
@@ -137,6 +139,8 @@ class MainActivity : ComponentActivity() {
         // system icons legible when the AMOLED scheme is active.
         enableEdgeToEdge()
         core = MycoCore.client(this)
+        // Watches for file offers only while nothing is on screen; idempotent.
+        FileOfferNotifier.install(this)
         captureExternalShare(intent)
         // Restore the mesh-only (no IP fallback) preference into the core.
         core.dispatch(NativeActions.setOfflineOnly(prefs.getBoolean(PREF_OFFLINE_ONLY, false)))
@@ -432,7 +436,6 @@ class MainActivity : ComponentActivity() {
 
     private fun preparePeerShare(uris: List<Uri>, peer: CircleContact) {
         if (uris.isEmpty()) return
-        val peerName = peer.name.ifBlank { "this peer" }
         lifecycleScope.launch(Dispatchers.IO) {
             val outbox = File(filesDir, "myco-share-outbox").apply { mkdirs() }
             var sent = 0
@@ -454,12 +457,18 @@ class MainActivity : ComponentActivity() {
                     break
                 }
             }
-            withContext(kotlinx.coroutines.Dispatchers.Main) {
-                if (sent > 0) {
-                    val noun = if (sent == 1) "file offer" else "$sent file offers"
-                    Toast.makeText(this@MainActivity, "$noun sent to $peerName", Toast.LENGTH_LONG).show()
-                } else {
-                    Toast.makeText(this@MainActivity, failure ?: "Could not share the file", Toast.LENGTH_LONG).show()
+            // Only a local failure is worth a toast. Whether the offer actually
+            // reached the peer is not known yet — the dispatch only queues the
+            // work — so claiming success here told the user a send had happened
+            // even when the frame was dropped. The share sheet and the Circle
+            // tab report the real outcome from the transfer's own status.
+            if (sent == 0) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        failure ?: "Could not share the file",
+                        Toast.LENGTH_LONG,
+                    ).show()
                 }
             }
         }
@@ -474,7 +483,7 @@ class MainActivity : ComponentActivity() {
                 check(source.isFile) { "received file is missing" }
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, "Myco-${transfer.name}")
-                    put(MediaStore.MediaColumns.MIME_TYPE, transfer.mime.ifBlank { "application/octet-stream" })
+                    put(MediaStore.MediaColumns.MIME_TYPE, resolvedMime(transfer.name))
                     put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/Myco")
                     put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
@@ -492,7 +501,7 @@ class MainActivity : ComponentActivity() {
                     null,
                     null,
                 )
-                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                withContext(Dispatchers.Main) {
                     receivedFilePresentation.value = ReceivedFilePresentation(transfer, destination!!)
                     // The public MediaStore copy is now durable. Tell Rust to
                     // forget the terminal transfer and delete its private
@@ -507,7 +516,7 @@ class MainActivity : ComponentActivity() {
                 }
             } catch (t: Throwable) {
                 destination?.let { contentResolver.delete(it, null, null) }
-                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                withContext(Dispatchers.Main) {
                     Toast.makeText(
                         this@MainActivity,
                         "Received file but could not save it: ${t.message ?: "unknown error"}",
@@ -519,7 +528,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openReceivedFile(file: ReceivedFilePresentation) {
-        val mime = file.transfer.mime.ifBlank { "application/octet-stream" }
+        val mime = resolvedMime(file.transfer.name)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(file.uri, mime)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -529,6 +538,22 @@ class MainActivity : ComponentActivity() {
         }.onFailure {
             Toast.makeText(this, "No app can open ${file.transfer.name}", Toast.LENGTH_LONG).show()
         }
+    }
+
+    /**
+     * The type Android is told a received file is.
+     *
+     * Derived from the **name**, never from the sender's declared MIME. The name
+     * is what the user actually read on the accept prompt, so it is the only
+     * claim they consented to; a file called `holiday.jpg` that the sender typed
+     * as something executable would otherwise reach the "open with" chooser as
+     * that type. An extension Android does not recognise falls back to a neutral
+     * type rather than to the sender's word for it.
+     */
+    private fun resolvedMime(name: String): String {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+            ?: "application/octet-stream"
     }
 
     // --- NFC tap-to-pair (numo-style: we are the card; the other phone reads) ---
