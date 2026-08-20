@@ -147,11 +147,13 @@ impl Envelope {
     }
 
     /// The result envelope for this call: the same `type` with `.result`
-    /// appended, the same `id`, and `ok` set.
+    /// appended and the same `id`. Result fields are the individual NAP's
+    /// business — `ok` belongs to `relay.publish`, not to every message — so
+    /// the caller adds them with [`Envelope::with_field`].
     ///
     /// Calling this on a message that is already a result would produce
-    /// `x.result.result`, so it returns the message unchanged instead.
-    pub fn to_result(&self, ok: bool) -> Self {
+    /// `x.result.result`, so the suffix is only ever appended once.
+    pub fn to_result(&self) -> Self {
         let msg_type = if self.is_result() {
             self.msg_type.clone()
         } else {
@@ -160,10 +162,18 @@ impl Envelope {
         Self {
             msg_type,
             id: self.id.clone(),
-            fields: [("ok".to_string(), serde_json::Value::Bool(ok))]
-                .into_iter()
-                .collect(),
+            fields: serde_json::Map::new(),
         }
+    }
+
+    /// The failure result for this call. Per the registry's error model, a
+    /// result carrying `error` leaves every other result field undefined — so
+    /// this deliberately carries nothing else.
+    pub fn to_error(&self, error: impl Into<String>) -> Self {
+        let mut out = self.to_result();
+        out.fields
+            .insert("error".to_string(), serde_json::Value::String(error.into()));
+        out
     }
 
     /// Read one top-level field.
@@ -221,8 +231,19 @@ mod tests {
     fn a_result_echoes_the_type_and_id() {
         let call = Envelope::new("relay.publish").with_id("a1");
         assert_eq!(
-            serde_json::to_value(call.to_result(true)).unwrap(),
+            serde_json::to_value(call.to_result().with_field("ok", true)).unwrap(),
             json!({"type": "relay.publish.result", "id": "a1", "ok": true})
+        );
+    }
+
+    /// The registry's error model: a result carrying `error` leaves every other
+    /// result field undefined, so a failure never also looks like a success.
+    #[test]
+    fn an_error_result_carries_only_the_error() {
+        let call = Envelope::new("theme.get").with_id("t1");
+        assert_eq!(
+            serde_json::to_value(call.to_error("no active theme")).unwrap(),
+            json!({"type": "theme.get.result", "id": "t1", "error": "no active theme"})
         );
     }
 
@@ -230,8 +251,8 @@ mod tests {
     /// produce `relay.publish.result.result`, which nothing answers to.
     #[test]
     fn results_do_not_stack() {
-        let result = Envelope::new("relay.publish").with_id("a1").to_result(true);
-        assert_eq!(result.to_result(false).msg_type, "relay.publish.result");
+        let result = Envelope::new("relay.publish").with_id("a1").to_result();
+        assert_eq!(result.to_result().msg_type, "relay.publish.result");
         assert_eq!(result.domain(), "relay");
         assert_eq!(result.action(), "publish");
     }

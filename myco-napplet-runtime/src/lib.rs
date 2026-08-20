@@ -34,16 +34,20 @@
 //! [NIP-5A]: https://github.com/nostr-protocol/nips/blob/master/5A.md
 
 pub mod artifact;
+pub mod dispatch;
 pub mod error;
 pub mod host;
 pub mod manifest;
+pub mod nap;
 pub mod resolve;
 pub mod seams;
+pub mod session;
 
 #[cfg(feature = "testing")]
 pub mod testing;
 
 pub use artifact::{assemble, CspPolicy, Injection, SrcdocArtifact};
+pub use dispatch::{dispatch, Outcome};
 pub use error::{NappletError, NappletErrorCode, Result};
 pub use host::{is_shell_host, shell_host, shell_label, shell_origin, SHELL_SUFFIX};
 pub use manifest::{
@@ -53,3 +57,4 @@ pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
     BlobStore, Envelope, NapTransport, OutboxResolver, RelayBackend, RelayLane, Signer,
 };
+pub use session::{NappletIdentity, Session, IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
