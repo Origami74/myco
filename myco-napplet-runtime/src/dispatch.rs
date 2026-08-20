@@ -86,6 +86,16 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
         // boundary — and it is checked per call, so revoking a grant takes
         // effect on the next call rather than at the next reload.
         if !session.is_granted(domain) {
+            // Logged because the napplet's own error is invisible from outside:
+            // a refused call and a call never made look identical in logcat,
+            // and telling them apart is the first question anyone asks when a
+            // napplet quietly does nothing.
+            tracing::info!(
+                napplet = %session.identity().d_tag,
+                %domain,
+                action = %message.action(),
+                "refused: capability not granted to this napplet"
+            );
             return Outcome::Reply(vec![message.to_error(format!(
                 "capability {domain} was not granted to this napplet"
             ))]);
