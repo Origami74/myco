@@ -29,6 +29,14 @@ pub struct AppState {
     pub sites: Vec<crate::content::SiteStatusView>,
     /// Pinned/opened sites.
     pub library: Vec<crate::content::LibraryItem>,
+    /// A napplet that has been fetched and verified but **not installed**,
+    /// waiting on the install-review screen.
+    ///
+    /// Present only between a fetch and the user's answer. It is what makes
+    /// review unskippable: fetching stores bytes and grants nothing, and the
+    /// only thing that writes a grant is the user answering this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub napplet_review: Option<crate::napplet::NappletReview>,
     /// Local relay/Blossom counts (for the developer screen + cache view).
     pub cache: crate::content::CacheView,
     /// The user's **Circle**: paired peers we pull nsites from over the mesh.

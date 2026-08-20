@@ -211,6 +211,7 @@ class MainActivity : ComponentActivity() {
                             wifiAwareSupported = AwareRadio.isSupported(this@MainActivity),
                             onWifiAwareToggle = { enabled -> setWifiAwareEnabled(enabled) },
                             onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
+                            onLaunchNapplet = { pointer, title -> launchNapplet(pointer, title) },
                             onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
                             onScanned = { text -> handleScannedText(text) },
                             initialMeshEnabled = prefs.getBoolean(PREF_MESH, true),
@@ -751,6 +752,28 @@ class MainActivity : ComponentActivity() {
     private fun launchNsite(hostLabel: String, title: String, path: String? = null) {
         val target = path ?: PendingDeepLinks.take(this, hostLabel) ?: "/"
         startActivity(nsiteIntent(hostLabel, title, target))
+    }
+
+    /**
+     * Open a napplet as its own fullscreen task.
+     *
+     * Carries the pointer and a title, and nothing else. Grants are read from
+     * the Library on the Rust side — an intent must never be able to supply
+     * them, and this one has nowhere to put them.
+     */
+    private fun launchNapplet(pointer: String, title: String) {
+        startActivity(
+            Intent(this, NappletActivity::class.java).apply {
+                action = Intent.ACTION_VIEW
+                // Keyed on the addressable pointer, not the napplet's identity:
+                // its identity is its aggregate hash and changes every build, so
+                // keying the task on it would strand the Recents card on update.
+                data = NappletActivity.documentUri(pointer)
+                putExtra(NappletActivity.EXTRA_POINTER, pointer)
+                putExtra(NappletActivity.EXTRA_TITLE, title)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
+            }
+        )
     }
 
     /** Pin an nsite to the home screen as an app-like shortcut (favicon + title). */

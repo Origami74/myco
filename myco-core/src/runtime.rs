@@ -253,6 +253,9 @@ pub struct AppRuntime {
     content: Option<Arc<Content>>,
     /// Live napplet sessions, one per open window. Built on first use.
     napplet_host: Option<Arc<crate::napplet::NappletHost>>,
+    /// A fetched napplet awaiting the user's answer on install review. Written
+    /// by the fetch task, cleared when the user installs or dismisses.
+    napplet_review: Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
     /// Latest dev-menu peer speedtest result; written by the spawned run task and
     /// read back into `state()`. Shared so the async task can update it in place.
     speedtest: Arc<std::sync::Mutex<crate::state::SpeedtestView>>,
@@ -590,6 +593,7 @@ impl AppRuntime {
             app_version: app_version.to_string(),
             data_dir: data_dir.to_string(),
             napplet_host: None,
+            napplet_review: Arc::new(std::sync::Mutex::new(None)),
             pending_relay_url: settings.relay_url().unwrap_or_default(),
             pending_blossom_url: settings.blossom_url().unwrap_or_default(),
             aware_data_paths: settings.aware_data_paths,
@@ -758,6 +762,7 @@ impl AppRuntime {
             app_version: app_version.to_string(),
             data_dir: String::new(),
             napplet_host: None,
+            napplet_review: Arc::new(std::sync::Mutex::new(None)),
             rev: 0,
             error: msg.to_string(),
             pending_relay_url: String::new(),
@@ -849,6 +854,12 @@ impl AppRuntime {
             }
             NativeAppAction::InstallNapplet { pointer, granted } => {
                 self.install_napplet(&pointer, granted);
+                // The question has been answered; the screen goes away.
+                *self.napplet_review.lock().unwrap() = None;
+                self.rev += 1;
+            }
+            NativeAppAction::DismissNappletReview => {
+                *self.napplet_review.lock().unwrap() = None;
                 self.rev += 1;
             }
             NativeAppAction::ForgetNapplet { pointer } => {
@@ -1203,18 +1214,32 @@ impl AppRuntime {
             return;
         };
         let pointer = pointer.to_string();
+        let review = self.napplet_review.clone();
         rt.spawn(async move {
             // Whatever can reach it. Neither is trusted — every byte is hashed
             // and the signature checked against the manifest before storing.
             let relay = content.relay();
             let blobs = content.blobs();
-            match host.ingest(&addr, relay.as_ref(), blobs.as_ref()).await {
-                Ok(ingested) => tracing::info!(
-                    "fetched napplet {pointer}: requires {:?}",
-                    ingested.requires
-                ),
-                Err(e) => tracing::warn!("could not fetch napplet {pointer}: {e}"),
-            }
+            let outcome = match host.ingest(&addr, relay.as_ref(), blobs.as_ref()).await {
+                Ok(ingested) => crate::napplet::NappletReview {
+                    pointer: pointer.clone(),
+                    title: ingested.title.unwrap_or_default(),
+                    description: ingested.description.unwrap_or_default(),
+                    requires: ingested.requires,
+                    error: String::new(),
+                },
+                Err(e) => {
+                    tracing::warn!("could not fetch napplet {pointer}: {e}");
+                    crate::napplet::NappletReview {
+                        pointer: pointer.clone(),
+                        title: String::new(),
+                        description: String::new(),
+                        requires: Vec::new(),
+                        error: e.to_string(),
+                    }
+                }
+            };
+            *review.lock().unwrap() = Some(outcome);
         });
     }
 
@@ -1671,6 +1696,7 @@ impl AppRuntime {
             rev: self.rev,
             error: self.error_with_feed_health(),
             app_version: self.app_version.clone(),
+            napplet_review: self.napplet_review.lock().unwrap().clone(),
             identity: self.identity.clone(),
             node: NodeStatus {
                 running: self.node_running,

@@ -38,6 +38,22 @@ data class SiteStatus(
 )
 
 /** A pinned/opened Library entry. */
+/**
+ * A napplet fetched and verified but **not installed**, waiting on review.
+ *
+ * Carries what the napplet *asked for*, never what it was given — a grant
+ * exists only once the user answers.
+ */
+data class NappletReview(
+    val pointer: String,
+    val title: String,
+    val description: String,
+    /** The capability domains it declared with `requires` tags. */
+    val requires: List<String>,
+    /** Non-empty when the fetch failed; show this instead of asking. */
+    val error: String,
+)
+
 /** What kind of app a Library entry is. Unknown values read as [Nsite]. */
 enum class LibraryKind { Nsite, Napplet }
 
@@ -233,6 +249,8 @@ data class AppState(
     val wifiAwareScanningKnown: Boolean = false,
     val sites: List<SiteStatus>,
     val library: List<LibraryItem>,
+    /** A fetched napplet awaiting install review, or null. */
+    val nappletReview: NappletReview? = null,
     val cache: CacheStatus,
     val circle: List<CircleContact>,
     /** Circle members with a live mesh relay connection right now — reachable
@@ -314,6 +332,17 @@ data class AppState(
                     }
                 }
             }
+            val reviewJson = o.optJSONObject("nappletReview")
+            val nappletReview = if (reviewJson == null) null else NappletReview(
+                pointer = reviewJson.optString("pointer"),
+                title = reviewJson.optString("title"),
+                description = reviewJson.optString("description"),
+                requires = reviewJson.optJSONArray("requires")?.let { r ->
+                    (0 until r.length()).map { r.optString(it) }
+                }.orEmpty(),
+                error = reviewJson.optString("error"),
+            )
+
             val libraryJson = o.optJSONArray("library")
             val library = buildList {
                 if (libraryJson != null) {
@@ -522,6 +551,7 @@ data class AppState(
                 wifiAwareScanningKnown = wifiAware.optBoolean("scanningKnown"),
                 sites = sites,
                 library = library,
+                nappletReview = nappletReview,
                 cache = cache,
                 circle = circle,
                 reachableNpubs = buildSet {
@@ -779,6 +809,10 @@ object NativeActions {
     /** Unpin a napplet and drop its grants. */
     fun forgetNapplet(pointer: String): JSONObject =
         JSONObject().put("type", "forget_napplet").put("pointer", pointer)
+
+    /** Close review without installing. Nothing is granted. */
+    fun dismissNappletReview(): JSONObject =
+        JSONObject().put("type", "dismiss_napplet_review")
     fun wipeStores(): JSONObject = JSONObject().put("type", "wipe_stores")
     /** Clear cached relay/Blossom data but keep pinned nsites (Storage → "Delete cache"). */
     fun wipeCache(): JSONObject = JSONObject().put("type", "wipe_cache")
