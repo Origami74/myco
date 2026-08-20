@@ -23,7 +23,7 @@ use nostr::PublicKey;
 use nsite_deck::seams::{newest_in_slot, BlobStore, PeerSource, RelayBackend};
 
 use myco_napplet_runtime::artifact::{assemble, Injection, SrcdocArtifact};
-use myco_napplet_runtime::dispatch::dispatch;
+use myco_napplet_runtime::dispatch::{dispatch, NapContext};
 use myco_napplet_runtime::manifest::{KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT};
 use myco_napplet_runtime::prelude::render_for;
 use myco_napplet_runtime::resolve::resolve;
@@ -131,7 +131,11 @@ impl NappletAddr {
 
 /// One open napplet window.
 struct LiveNapplet {
-    session: Session,
+    /// `None` only while a capability call is in flight for this window. A
+    /// second message arriving meanwhile finds nothing to dispatch to and is
+    /// dropped, which serialises a napplet's own calls rather than letting two
+    /// run against one session.
+    session: Option<Session>,
     artifact: SrcdocArtifact,
 }
 
@@ -149,13 +153,24 @@ pub struct OpenedNapplet {
 pub struct NappletHost {
     relay: Arc<dyn RelayBackend>,
     blobs: Arc<dyn BlobStore>,
+    /// What the capabilities reach the world through. One per device — the
+    /// seams are not per napplet; the session is.
+    ctx: NapContext,
     sessions: Mutex<HashMap<String, LiveNapplet>>,
     next_id: Mutex<u64>,
 }
 
 impl NappletHost {
-    pub fn new(relay: Arc<dyn RelayBackend>, blobs: Arc<dyn BlobStore>) -> Self {
+    pub fn new(
+        relay: Arc<dyn RelayBackend>,
+        blobs: Arc<dyn BlobStore>,
+        signer: Arc<dyn myco_napplet_runtime::seams::Signer>,
+    ) -> Self {
         Self {
+            ctx: NapContext {
+                signer,
+                relay: relay.clone(),
+            },
             relay,
             blobs,
             sessions: Mutex::new(HashMap::new()),
@@ -208,10 +223,13 @@ impl NappletHost {
             *next += 1;
             id
         };
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(session_id.clone(), LiveNapplet { session, artifact });
+        self.sessions.lock().unwrap().insert(
+            session_id.clone(),
+            LiveNapplet {
+                session: Some(session),
+                artifact,
+            },
+        );
 
         Ok(OpenedNapplet {
             session_id,
@@ -224,26 +242,56 @@ impl NappletHost {
     ///
     /// An unparseable frame yields nothing: the shell is trusted to tag frames,
     /// but what it relays came from the napplet and may be anything at all.
-    pub fn frame(&self, session_id: &str, frame_json: &str) -> Vec<ToShell> {
+    pub async fn frame(&self, session_id: &str, frame_json: &str) -> Vec<ToShell> {
         let Ok(frame) = serde_json::from_str::<ToRuntime>(frame_json) else {
             return Vec::new();
         };
 
-        let mut sessions = self.sessions.lock().unwrap();
-        let Some(live) = sessions.get_mut(session_id) else {
+        // The mount reply needs no capability work, so it is answered without
+        // taking the session across an await point.
+        if let ToRuntime::Shell {
+            action: ShellAction::Mounted,
+        } = frame
+        {
+            let sessions = self.sessions.lock().unwrap();
+            return match sessions.get(session_id) {
+                Some(live) => vec![ToShell::load(&live.artifact)],
+                None => Vec::new(),
+            };
+        }
+
+        let ToRuntime::Napplet { message } = frame else {
             return Vec::new();
         };
 
-        match frame {
-            ToRuntime::Shell {
-                action: ShellAction::Mounted,
-            } => vec![ToShell::load(&live.artifact)],
-            ToRuntime::Napplet { message } => dispatch(&mut live.session, &message)
-                .envelopes()
-                .iter()
-                .cloned()
-                .map(ToShell::to_napplet)
-                .collect(),
+        // Capabilities are async — a relay read, later a publish — so the
+        // session is taken out, driven, and put back rather than held across
+        // the await. A window that closed meanwhile simply has nowhere to
+        // return to, and its answer is dropped.
+        let Some(mut session) = self.take_session(session_id) else {
+            return Vec::new();
+        };
+        let out = dispatch(&self.ctx, &mut session, &message).await;
+        self.return_session(session_id, session);
+
+        out.envelopes()
+            .iter()
+            .cloned()
+            .map(ToShell::to_napplet)
+            .collect()
+    }
+
+    /// Lift a session out for the duration of an async capability call.
+    fn take_session(&self, session_id: &str) -> Option<Session> {
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions.get_mut(session_id).and_then(|l| l.session.take())
+    }
+
+    /// Put it back, unless the window closed while the call was in flight.
+    fn return_session(&self, session_id: &str, session: Session) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(live) = sessions.get_mut(session_id) {
+            live.session = Some(session);
         }
     }
 
@@ -433,7 +481,14 @@ mod tests {
             d_tag: Some("fixture".to_string()),
             relays: Vec::new(),
         };
-        (NappletHost::new(relay, blobs), addr)
+        (
+            NappletHost::new(
+                relay,
+                blobs,
+                Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
+            ),
+            addr,
+        )
     }
 
     #[tokio::test]
@@ -451,10 +506,12 @@ mod tests {
         let (host, addr) = host_with_fixture().await;
         let opened = host.open(&addr, vec![]).await.unwrap();
 
-        let out = host.frame(
-            &opened.session_id,
-            r#"{"channel":"shell","action":"mounted"}"#,
-        );
+        let out = host
+            .frame(
+                &opened.session_id,
+                r#"{"channel":"shell","action":"mounted"}"#,
+            )
+            .await;
         assert_eq!(out.len(), 1);
         let ToShell::Shell {
             artifact, sandbox, ..
@@ -471,10 +528,12 @@ mod tests {
         let (host, addr) = host_with_fixture().await;
         let opened = host.open(&addr, vec![]).await.unwrap();
 
-        let out = host.frame(
-            &opened.session_id,
-            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
-        );
+        let out = host
+            .frame(
+                &opened.session_id,
+                r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+            )
+            .await;
         assert_eq!(out.len(), 1);
         let ToShell::Napplet { message } = &out[0] else {
             panic!("expected a relayed reply");
@@ -487,6 +546,7 @@ mod tests {
                 &opened.session_id,
                 r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#
             )
+            .await
             .is_empty());
     }
 
@@ -502,16 +562,16 @@ mod tests {
         assert_eq!(a.shell_host, b.shell_host, "same napplet, same origin");
 
         let ready = r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#;
-        assert_eq!(host.frame(&a.session_id, ready).len(), 1);
+        assert_eq!(host.frame(&a.session_id, ready).await.len(), 1);
         assert_eq!(
-            host.frame(&b.session_id, ready).len(),
+            host.frame(&b.session_id, ready).await.len(),
             1,
             "the second window needs its own handshake"
         );
 
         host.close(&a.session_id);
         assert_eq!(host.open_count(), 1);
-        assert!(host.frame(&a.session_id, ready).is_empty());
+        assert!(host.frame(&a.session_id, ready).await.is_empty());
     }
 
     /// A napplet that fails verification opens no window at all.
@@ -525,7 +585,11 @@ mod tests {
         }
         relay.publish(napplet.manifest.clone()).await.unwrap();
 
-        let host = NappletHost::new(relay, blobs);
+        let host = NappletHost::new(
+            relay,
+            blobs,
+            Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
+        );
         let addr = NappletAddr {
             author: napplet.author,
             d_tag: Some("fixture".to_string()),
@@ -571,7 +635,11 @@ mod tests {
             .unwrap();
 
         // This device, empty.
-        let host = NappletHost::new(Arc::new(MemRelay::new()), Arc::new(MemBlobs::new()));
+        let host = NappletHost::new(
+            Arc::new(MemRelay::new()),
+            Arc::new(MemBlobs::new()),
+            Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
+        );
         let addr = NappletAddr {
             author: napplet.author,
             d_tag: Some("fixture".to_string()),
@@ -609,7 +677,11 @@ mod tests {
 
         let local_relay = Arc::new(MemRelay::new());
         let local_blobs = Arc::new(MemBlobs::new());
-        let host = NappletHost::new(local_relay.clone(), local_blobs.clone());
+        let host = NappletHost::new(
+            local_relay.clone(),
+            local_blobs.clone(),
+            Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
+        );
         let addr = NappletAddr {
             author: napplet.author,
             d_tag: Some("fixture".to_string()),
@@ -760,7 +832,11 @@ mod live_fetch {
         }
 
         // Then the whole ingest, which is what the app actually runs.
-        let host = NappletHost::new(Arc::new(MemRelay::new()), Arc::new(MemBlobs::new()));
+        let host = NappletHost::new(
+            Arc::new(MemRelay::new()),
+            Arc::new(MemBlobs::new()),
+            Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
+        );
         let started = std::time::Instant::now();
         match host.ingest(&addr, &source).await {
             Ok(ingested) => println!(

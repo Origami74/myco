@@ -5,4 +5,5 @@
 //! Each is transport-neutral in the registry; what lands here is the runtime
 //! half of the web projection, reached through [`crate::dispatch`].
 
+pub mod identity;
 pub mod shell;

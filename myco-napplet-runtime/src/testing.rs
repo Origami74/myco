@@ -256,3 +256,74 @@ fn tamper(event: &Event) -> Event {
 pub fn build_test_napplet() -> TestNapplet {
     NappletBuilder::new().build()
 }
+
+// --- capability seams -----------------------------------------------------
+
+/// A [`Signer`](crate::seams::Signer) over a throwaway key.
+///
+/// Real in the way that matters: it signs with a key the test can check
+/// against, so "the runtime signed this" is a verifiable claim rather than a
+/// stub returning a fixed value.
+pub struct TestSigner {
+    keys: Keys,
+}
+
+impl TestSigner {
+    pub fn new() -> Self {
+        Self {
+            keys: Keys::generate(),
+        }
+    }
+
+    pub fn with_keys(keys: Keys) -> Self {
+        Self { keys }
+    }
+
+    pub fn public_key(&self) -> PublicKey {
+        self.keys.public_key()
+    }
+}
+
+impl Default for TestSigner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::seams::Signer for TestSigner {
+    async fn public_key(&self) -> anyhow::Result<PublicKey> {
+        Ok(self.keys.public_key())
+    }
+
+    async fn sign(&self, unsigned: nostr::UnsignedEvent) -> anyhow::Result<Event> {
+        unsigned
+            .sign_with_keys(&self.keys)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
+/// A [`Signer`](crate::seams::Signer) with no key behind it — what a device
+/// that has never run a napplet looks like.
+pub struct AbsentSigner;
+
+#[async_trait::async_trait]
+impl crate::seams::Signer for AbsentSigner {
+    async fn public_key(&self) -> anyhow::Result<PublicKey> {
+        anyhow::bail!("no user key on this device yet")
+    }
+
+    async fn sign(&self, _unsigned: nostr::UnsignedEvent) -> anyhow::Result<Event> {
+        anyhow::bail!("no user key on this device yet")
+    }
+}
+
+/// A context over in-memory seams, for driving capabilities in tests.
+pub fn test_context() -> (crate::dispatch::NapContext, std::sync::Arc<TestSigner>) {
+    let signer = std::sync::Arc::new(TestSigner::new());
+    let ctx = crate::dispatch::NapContext {
+        signer: signer.clone(),
+        relay: std::sync::Arc::new(nsite_deck::testing::MemRelay::new()),
+    };
+    (ctx, signer)
+}
