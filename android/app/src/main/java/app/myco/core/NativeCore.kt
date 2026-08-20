@@ -47,6 +47,14 @@ internal object NativeCore {
     /** Carry one shell frame; returns a JSON array of frames to send back. */
     external fun nappletFrame(handle: Long, sessionId: String, frameJson: String): String
 
+    /**
+     * Wait for frames the runtime wants to send unprompted (subscription
+     * deliveries), up to `timeoutMs`. Returns a JSON array, empty on timeout.
+     *
+     * **Blocks** — call it from a background thread, never the UI thread.
+     */
+    external fun nappletNextFrames(handle: Long, sessionId: String, timeoutMs: Long): String
+
     /** Drop a window's session. */
     external fun nappletClose(handle: Long, sessionId: String)
 

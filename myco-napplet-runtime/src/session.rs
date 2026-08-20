@@ -11,7 +11,9 @@
 //! carries no payload by design, precisely so there is nothing in it for a
 //! runtime to be tricked into trusting.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use nostr::{Event, Filter};
 
 /// NAP domains this build actually implements.
 ///
@@ -80,6 +82,13 @@ pub struct Session {
     /// deliberately narrow set.
     implemented: BTreeSet<String>,
     established: bool,
+    /// Live subscriptions: `subId` to the filters it asked for.
+    ///
+    /// Without this a subscription is a query wearing a subscription's name —
+    /// it answers with what is already stored and then nothing arriving later
+    /// has anywhere to be delivered, however well the rest of the system
+    /// carries it.
+    subscriptions: BTreeMap<String, Vec<Filter>>,
 }
 
 impl Session {
@@ -103,6 +112,7 @@ impl Session {
             granted: granted.into_iter().map(Into::into).collect(),
             implemented: implemented.into_iter().map(Into::into).collect(),
             established: false,
+            subscriptions: BTreeMap::new(),
         }
     }
 
@@ -161,6 +171,43 @@ impl Session {
     /// happened, the runtime implements it, and the user granted it.
     pub fn may_service(&self, domain: &str) -> bool {
         self.established && self.offers(domain) && self.is_granted(domain)
+    }
+
+    /// Register a live subscription, replacing any with the same `subId`.
+    pub fn subscribe(&mut self, sub_id: impl Into<String>, filters: Vec<Filter>) {
+        self.subscriptions.insert(sub_id.into(), filters);
+    }
+
+    /// Drop a subscription. Unknown ids are ignored: a napplet closing twice,
+    /// or closing after teardown, is not an error worth reporting.
+    pub fn unsubscribe(&mut self, sub_id: &str) {
+        self.subscriptions.remove(sub_id);
+    }
+
+    /// How many subscriptions are live — for state reporting and tests.
+    pub fn subscription_count(&self) -> usize {
+        self.subscriptions.len()
+    }
+
+    /// The `subId`s whose filters match `event`.
+    ///
+    /// Returns nothing unless the session is established and still granted
+    /// `relay`: a subscription registered before a grant was revoked must stop
+    /// delivering, and the check belongs here rather than at each caller, where
+    /// forgetting it would leak events to a napplet that may no longer read.
+    pub fn matching_subscriptions(&self, event: &Event) -> Vec<String> {
+        if !self.may_service("relay") {
+            return Vec::new();
+        }
+        self.subscriptions
+            .iter()
+            .filter(|(_, filters)| {
+                filters
+                    .iter()
+                    .any(|f| f.match_event(event, nostr::filter::MatchEventOptions::new()))
+            })
+            .map(|(sub_id, _)| sub_id.clone())
+            .collect()
     }
 
     /// Record the napplet's readiness signal.

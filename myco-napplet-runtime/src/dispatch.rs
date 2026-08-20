@@ -105,7 +105,7 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
     match domain {
         "shell" => Outcome::Reply(nap::shell::handle(session, message)),
         "identity" => Outcome::Reply(nap::identity::handle(ctx, message).await),
-        "relay" => Outcome::Reply(nap::relay::handle(ctx, message).await),
+        "relay" => Outcome::Reply(nap::relay::handle(ctx, session, message).await),
         // Implemented, granted, established — and still unrouted. Reaching here
         // means the implemented set grew without a handler, which is a bug in
         // this crate rather than anything the napplet did.

@@ -17,6 +17,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::sync::mpsc;
 
 use nostr::nips::nip19::FromBech32;
 use nostr::PublicKey;
@@ -142,6 +145,16 @@ struct LiveNapplet {
     /// went missing.
     session: Arc<tokio::sync::Mutex<Session>>,
     artifact: SrcdocArtifact,
+    /// Frames the runtime wants to send this window without being asked —
+    /// subscription deliveries, and later anything else the shell must be told.
+    ///
+    /// Queued rather than pushed directly because the FFI only runs when
+    /// called. The Activity drains this on a long poll, which is the same shape
+    /// the BLE and TUN bridges already use.
+    outbox: mpsc::UnboundedSender<ToShell>,
+    /// The draining end. Behind a lock because one window has one drainer, and
+    /// two would split its frames between them.
+    drain: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ToShell>>>,
 }
 
 /// What the Activity needs to put a napplet on screen.
@@ -235,11 +248,14 @@ impl NappletHost {
             *next += 1;
             id
         };
+        let (outbox, drain) = mpsc::unbounded_channel();
         self.sessions.lock().unwrap().insert(
             session_id.clone(),
             LiveNapplet {
                 session: Arc::new(tokio::sync::Mutex::new(session)),
                 artifact,
+                outbox,
+                drain: Arc::new(tokio::sync::Mutex::new(drain)),
             },
         );
 
@@ -297,6 +313,66 @@ impl NappletHost {
             .cloned()
             .map(ToShell::to_napplet)
             .collect()
+    }
+
+    /// Deliver an accepted event to whichever open napplets subscribed to it.
+    ///
+    /// Called for every event this device accepts — its own publishes and
+    /// anything a peer sent — so a subscription behaves the same whichever side
+    /// of the mesh an event came from. A napplet that never subscribed, or was
+    /// not granted `relay`, matches nothing and costs one filter check.
+    pub async fn on_event(&self, event: nostr::Event) {
+        // The handles are cloned out and the map's lock released before any
+        // await: a slow window must not hold up delivery to the others.
+        let live: Vec<(
+            Arc<tokio::sync::Mutex<Session>>,
+            mpsc::UnboundedSender<ToShell>,
+        )> = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions
+                .values()
+                .map(|l| (l.session.clone(), l.outbox.clone()))
+                .collect()
+        };
+
+        for (session, outbox) in live {
+            let frames = {
+                let session = session.lock().await;
+                myco_napplet_runtime::deliveries_for(&session, &event)
+            };
+            for frame in frames {
+                // A closed window's receiver is gone; its frames go nowhere,
+                // which is what closing means.
+                let _ = outbox.send(ToShell::to_napplet(frame));
+            }
+        }
+    }
+
+    /// Wait for frames this window should be sent unprompted, up to `timeout`.
+    ///
+    /// Blocks rather than returning immediately so the caller can long-poll
+    /// instead of spinning — the same shape the BLE and TUN bridges use. An
+    /// empty result means the wait expired, not that the window is gone.
+    pub async fn next_frames(&self, session_id: &str, timeout: Duration) -> Vec<ToShell> {
+        let drain = {
+            let sessions = self.sessions.lock().unwrap();
+            match sessions.get(session_id) {
+                Some(live) => live.drain.clone(),
+                None => return Vec::new(),
+            }
+        };
+
+        let mut drain = drain.lock().await;
+        let mut out = Vec::new();
+        // One blocking wait, then everything else already queued behind it, so
+        // a burst crosses the FFI in one call rather than one per frame.
+        if let Ok(Some(first)) = tokio::time::timeout(timeout, drain.recv()).await {
+            out.push(first);
+            while let Ok(next) = drain.try_recv() {
+                out.push(next);
+            }
+        }
+        out
     }
 
     /// Drop a window's session. Every later frame for it is ignored.
@@ -680,6 +756,135 @@ mod tests {
             message.field("error").is_none(),
             "still refused after the handshake: {:?}",
             message.field("error")
+        );
+    }
+
+    /// The whole point of a subscription: an event arriving **after** it was
+    /// made is delivered.
+    ///
+    /// Before this, `relay.subscribe` answered with what was already stored and
+    /// registered nothing, so a later event had nowhere to go — a query wearing
+    /// a subscription's name. A doorbell rung on another phone could never
+    /// reach the napplet waiting for it, however well the mesh carried it.
+    #[tokio::test]
+    async fn an_event_arriving_after_subscribe_is_delivered() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host.open(&addr, vec!["relay".into()]).await.unwrap();
+
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+
+        let out = host
+            .frame(
+                &opened.session_id,
+                r#"{"channel":"napplet","message":{"type":"relay.subscribe","id":"a1","subId":"sub-1","filters":[{"kinds":[20666]}]}}"#,
+            )
+            .await;
+        // Nothing stored yet, so the subscription opens straight to EOSE.
+        assert_eq!(out.len(), 1);
+        let ToShell::Napplet { message } = &out[0] else {
+            panic!("expected a relayed reply");
+        };
+        assert_eq!(message.msg_type, "relay.eose");
+
+        // Now an event turns up — a peer's doorbell, as far as this device is
+        // concerned.
+        let ringer = nostr::Keys::generate();
+        let ring = nostr::EventBuilder::new(nostr::Kind::from(20666u16), "ding")
+            .sign_with_keys(&ringer)
+            .unwrap();
+        host.on_event(ring.clone()).await;
+
+        // It reaches the napplet unprompted.
+        let pushed = host
+            .next_frames(&opened.session_id, Duration::from_secs(2))
+            .await;
+        assert_eq!(pushed.len(), 1, "the subscription delivered nothing");
+        let ToShell::Napplet { message } = &pushed[0] else {
+            panic!("expected a napplet frame");
+        };
+        assert_eq!(message.msg_type, "relay.event");
+        assert_eq!(message.field("subId").unwrap(), "sub-1");
+        assert_eq!(message.field("result").unwrap()["event"]["content"], "ding");
+    }
+
+    /// An event nothing asked for is not delivered, and a closed subscription
+    /// stops delivering.
+    #[tokio::test]
+    async fn only_matching_live_subscriptions_are_delivered() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host.open(&addr, vec!["relay".into()]).await.unwrap();
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"relay.subscribe","id":"a1","subId":"sub-1","filters":[{"kinds":[20666]}]}}"#,
+        )
+        .await;
+
+        // A kind nobody subscribed to.
+        let other = nostr::EventBuilder::text_note("not for you")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        host.on_event(other).await;
+        assert!(
+            host.next_frames(&opened.session_id, Duration::from_millis(200))
+                .await
+                .is_empty(),
+            "delivered an event nothing subscribed to"
+        );
+
+        // Closed, so the matching kind stops arriving too.
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"relay.close","id":"a2","subId":"sub-1"}}"#,
+        )
+        .await;
+        let ring = nostr::EventBuilder::new(nostr::Kind::from(20666u16), "ding")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        host.on_event(ring).await;
+        assert!(
+            host.next_frames(&opened.session_id, Duration::from_millis(200))
+                .await
+                .is_empty(),
+            "a closed subscription kept delivering"
+        );
+    }
+
+    /// A napplet without the grant receives nothing, even if it managed to
+    /// register a subscription — the check is on delivery, so revoking a grant
+    /// stops the next event rather than the next launch.
+    #[tokio::test]
+    async fn an_ungranted_napplet_receives_no_deliveries() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host.open(&addr, vec![]).await.unwrap();
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"relay.subscribe","id":"a1","subId":"sub-1","filters":[{"kinds":[20666]}]}}"#,
+        )
+        .await;
+
+        let ring = nostr::EventBuilder::new(nostr::Kind::from(20666u16), "ding")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        host.on_event(ring).await;
+        assert!(
+            host.next_frames(&opened.session_id, Duration::from_millis(200))
+                .await
+                .is_empty(),
+            "delivered to a napplet that was never granted relay"
         );
     }
 

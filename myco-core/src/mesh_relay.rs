@@ -330,6 +330,16 @@ impl RelayHub {
 }
 
 impl RelayHub {
+    /// Every event this hub accepts, from any source.
+    ///
+    /// The same stream the loopback WebSocket serves to nsites. A napplet's
+    /// subscriptions are fed from here too, so a napplet and an nsite see the
+    /// same events by the same route rather than through two mechanisms that
+    /// can drift apart.
+    pub fn live_events(&self) -> broadcast::Receiver<Event> {
+        self.live.subscribe()
+    }
+
     /// Accept an event this device originated, by the same route a socket
     /// takes: novelty check, store, live subscribers, then mesh fan-out.
     ///
