@@ -1470,12 +1470,41 @@ impl AppRuntime {
                 content.relay(),
             ));
 
-            self.napplet_host = Some(Arc::new(crate::napplet::NappletHost::new(
+            let host = Arc::new(crate::napplet::NappletHost::new(
                 content.relay(),
                 content.blobs(),
                 signer,
                 sink,
-            )));
+            ));
+
+            // Feed every accepted event to open napplets' subscriptions — this
+            // device's own publishes and anything a peer carried here. Without
+            // it a subscription only ever sees what was already stored when it
+            // was made, which is a query, not a subscription.
+            if let Some(hub) = self.relay_hub.lock().unwrap().clone() {
+                let mut live = hub.live_events();
+                let pump = host.clone();
+                handle.spawn(async move {
+                    loop {
+                        match live.recv().await {
+                            Ok(event) => pump.on_event(event).await,
+                            // Lagged: this consumer fell behind and the channel
+                            // dropped events for it. Keep going — missing some
+                            // deliveries beats ending the pump and missing all
+                            // of them.
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                tracing::warn!(
+                                    dropped = n,
+                                    "napplet delivery fell behind the live bus"
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+            }
+
+            self.napplet_host = Some(host);
         }
         Some((self.napplet_host.clone()?, handle))
     }

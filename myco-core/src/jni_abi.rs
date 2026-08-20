@@ -290,6 +290,44 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletFrame(
     )
 }
 
+/// Wait for frames the runtime wants to send this window unprompted, up to
+/// `timeout_ms`; returns a JSON array, empty when the wait expired.
+///
+/// A long poll rather than a callback, matching the BLE and TUN bridges: the
+/// FFI runs when Kotlin calls it, so a subscription delivery has to be waited
+/// for from that side. Call it from a background thread — it blocks.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletNextFrames(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_id: JString,
+    timeout_ms: jlong,
+) -> jstring {
+    let session_id = get_string(&mut env, &session_id);
+
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.napplet_context()
+        }
+        None => None,
+    };
+
+    let out = match ctx {
+        Some((host, rt_handle)) => rt_handle.block_on(host.next_frames(
+            &session_id,
+            std::time::Duration::from_millis(timeout_ms.max(0) as u64),
+        )),
+        None => Vec::new(),
+    };
+
+    jstr(
+        &mut env,
+        serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()),
+    )
+}
+
 /// Drop a window's session. Every later frame for it is ignored.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(

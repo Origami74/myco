@@ -16,6 +16,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import app.myco.core.AppCoreClient
 import app.myco.core.MycoCore
 import app.myco.core.NappletOpen
@@ -69,6 +74,18 @@ class NappletActivity : ComponentActivity() {
 
     /** Whether the shell page asked for the status-bar region. See [ChromelessChrome]. */
     private var pageOptedIntoFullHeight = false
+
+    /**
+     * The channel back into the shell, kept between messages.
+     *
+     * `addWebMessageListener` hands one of these to every inbound message and
+     * it stays usable afterwards, which is what lets the runtime speak first —
+     * a subscription delivering an event nobody asked for at that moment.
+     */
+    private var replyChannel: androidx.webkit.JavaScriptReplyProxy? = null
+
+    /** Drains runtime-initiated frames while the window is open. */
+    private var drainJob: kotlinx.coroutines.Job? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -137,9 +154,26 @@ class NappletActivity : ComponentActivity() {
             // iframe cannot reach it, but a nested frame in the shell would be a
             // bug worth refusing rather than trusting.
             if (!isMainFrame) return@addWebMessageListener
+            replyChannel = replyProxy
             val frame = message.data ?: return@addWebMessageListener
             for (reply in client.nappletFrame(sessionId, frame)) {
                 replyProxy.postMessage(reply)
+            }
+        }
+
+        // Runtime-initiated frames. A long poll on a background thread rather
+        // than a callback into Kotlin: the FFI only runs when called, so the
+        // waiting happens on this side — the same shape the BLE and TUN bridges
+        // use. Bound to the window's lifecycle, so it stops when the napplet
+        // closes rather than outliving it.
+        drainJob = lifecycleScope.launch {
+            while (isActive) {
+                val frames = withContext(Dispatchers.IO) {
+                    runCatching { client.nappletNextFrames(sessionId, DRAIN_WAIT_MS) }
+                        .getOrDefault(emptyList())
+                }
+                // postMessage is main-thread work; the wait above was not.
+                for (frame in frames) replyChannel?.postMessage(frame)
             }
         }
 
@@ -178,6 +212,8 @@ class NappletActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        drainJob?.cancel()
+        replyChannel = null
         // Drop the session with the window. Rust ignores every later frame for
         // it, so a leaked WebView cannot keep a capability session alive.
         if (sessionId.isNotEmpty()) client.nappletClose(sessionId)
@@ -187,6 +223,15 @@ class NappletActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "NappletActivity"
+
+        /**
+         * How long one drain call waits before coming back empty.
+         *
+         * Long enough that an idle napplet is not spinning across the FFI,
+         * short enough that closing the window is not held up by a call already
+         * in flight.
+         */
+        private const val DRAIN_WAIT_MS = 20_000L
 
         /** `naddr1…`, or the `<npub>:<dtag>` shorthand. */
         const val EXTRA_POINTER = "app.myco.extra.NAPPLET_POINTER"

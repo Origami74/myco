@@ -697,6 +697,19 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
         return (0 until array.length()).map { array.getJSONObject(it).toString() }
     }
 
+    /**
+     * Wait for frames the runtime wants to send this window unprompted — a
+     * subscription delivering an event that arrived after the napplet
+     * subscribed, whether published here or carried from a peer.
+     *
+     * **Blocks** for up to [timeoutMs]. Background thread only.
+     */
+    fun nappletNextFrames(sessionId: String, timeoutMs: Long): List<String> {
+        val raw = NativeCore.nappletNextFrames(requireHandle(), sessionId, timeoutMs)
+        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+        return (0 until array.length()).map { array.getJSONObject(it).toString() }
+    }
+
     /** Drop a window's session. Rust ignores every later frame for it. */
     fun nappletClose(sessionId: String) {
         NativeCore.nappletClose(requireHandle(), sessionId)

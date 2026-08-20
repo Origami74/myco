@@ -35,12 +35,21 @@ use crate::dispatch::NapContext;
 use crate::seams::Envelope;
 
 /// Handle an inbound `relay.*` message.
-pub async fn handle(ctx: &NapContext, message: &Envelope) -> Vec<Envelope> {
+pub async fn handle(
+    ctx: &NapContext,
+    session: &mut crate::session::Session,
+    message: &Envelope,
+) -> Vec<Envelope> {
     match message.action() {
         "query" => vec![query(ctx, message).await],
         "publish" => vec![publish(ctx, message).await],
-        "subscribe" => subscribe(ctx, message).await,
-        "close" => Vec::new(),
+        "subscribe" => subscribe(ctx, session, message).await,
+        "close" => {
+            if let Some(sub_id) = message.field("subId").and_then(|v| v.as_str()) {
+                session.unsubscribe(sub_id);
+            }
+            Vec::new()
+        }
         // Encryption is not wired up yet. Saying so beats a silent drop, which
         // a napplet would wait on forever.
         "publishEncrypted" => vec![message
@@ -69,14 +78,25 @@ async fn query(ctx: &NapContext, message: &Envelope) -> Envelope {
     }
 }
 
-/// `relay.subscribe` — the stored events, then EOSE.
+/// `relay.subscribe` — register the subscription, deliver what is stored, then
+/// EOSE.
 ///
-/// Everything the relay already holds is delivered, which is what a napplet
-/// rendering a profile or a feed is waiting for. Events arriving *after* EOSE
-/// need the runtime to push unprompted, which the shell channel does not carry
-/// yet — so this is honest about what it is: a subscription that reaches EOSE
-/// and then stays quiet, rather than one that silently never fires.
-async fn subscribe(ctx: &NapContext, message: &Envelope) -> Vec<Envelope> {
+/// Registering is the part that makes it a subscription rather than a query
+/// wearing the name. Everything the relay already holds goes out first, which
+/// is what a napplet rendering a feed waits on; everything arriving afterwards
+/// is matched against the registered filters and pushed, whether it was
+/// published on this device or carried here from a peer.
+///
+/// The filters are registered **before** the stored events are read, so an
+/// event that lands between the two is delivered by the live path rather than
+/// falling through the gap between them. A napplet may see it twice; Nostr
+/// subscriptions are at-least-once and a duplicate id is something every client
+/// already handles, whereas a missed event is invisible.
+async fn subscribe(
+    ctx: &NapContext,
+    session: &mut crate::session::Session,
+    message: &Envelope,
+) -> Vec<Envelope> {
     let sub_id = match message.field("subId").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => return vec![message.to_error("subscribe needs a subId")],
@@ -86,6 +106,8 @@ async fn subscribe(ctx: &NapContext, message: &Envelope) -> Vec<Envelope> {
         Ok(filters) => filters,
         Err(e) => return vec![message.to_error(e)],
     };
+
+    session.subscribe(sub_id.clone(), filters.clone());
 
     let mut out = Vec::new();
     match ctx.relay.query(&filters).await {
@@ -174,6 +196,24 @@ async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
                 .unwrap_or(serde_json::Value::Null),
         )
         .with_field("eventId", id)
+}
+
+/// The `relay.event` frames a session should receive for an arriving event.
+///
+/// Called for every event this device accepts — its own publishes and anything
+/// carried here from a peer — so a napplet's subscription behaves the same
+/// whichever side of the mesh the event came from. Empty when nothing matches,
+/// which is the common case and deliberately cheap.
+pub fn deliveries_for(session: &crate::session::Session, event: &nostr::Event) -> Vec<Envelope> {
+    session
+        .matching_subscriptions(event)
+        .into_iter()
+        .map(|sub_id| {
+            Envelope::new("relay.event")
+                .with_field("subId", sub_id)
+                .with_field("result", result_of(event))
+        })
+        .collect()
 }
 
 /// A publish failure, in the shape NAP-RELAY gives it: `ok` false beside the

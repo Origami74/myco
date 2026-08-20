@@ -56,6 +56,7 @@ pub use host::{is_shell_host, shell_host, shell_label, shell_origin, SHELL_SUFFI
 pub use manifest::{
     is_napplet_kind, Archetype, NappletManifest, KINDS, KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT,
 };
+pub use nap::relay::deliveries_for;
 pub use prelude::{render_for as render_prelude, PRELUDE_GLOBAL};
 pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
