@@ -849,9 +849,31 @@ class MainActivity : ComponentActivity() {
             openAppLink(link)
             return
         }
+        // A napplet pointer. Fetch and verify it, but do not install it: the
+        // review screen asks first, and a scanned code must never be able to
+        // grant a capability on its own.
+        if (looksLikeNappletPointer(text)) {
+            core.dispatch(NativeActions.fetchNapplet(text.trim()))
+            Toast.makeText(this, "Checking napplet…", Toast.LENGTH_SHORT).show()
+            return
+        }
         // Fall back to treating it as a pasteable nsite link.
         core.dispatch(NativeActions.openNsite(text))
         Toast.makeText(this, "Opening app...", Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * Whether [text] addresses a napplet rather than an nsite.
+     *
+     * `naddr` is the honest signal: it names a kind, and Rust refuses one that
+     * is not a napplet kind, so a mis-tagged `naddr` fails there with a clear
+     * error rather than being opened as the wrong thing here. A bare `npub`
+     * stays an nsite — that is what it has always meant in Myco, and a pointer
+     * with no kind in it cannot say otherwise.
+     */
+    private fun looksLikeNappletPointer(text: String): Boolean {
+        val t = text.trim().removePrefix("nostr:")
+        return t.startsWith("naddr1", ignoreCase = true)
     }
 
     private fun handleDeepLink(intent: Intent?) {

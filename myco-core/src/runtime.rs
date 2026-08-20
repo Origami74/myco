@@ -1216,11 +1216,11 @@ impl AppRuntime {
         let pointer = pointer.to_string();
         let review = self.napplet_review.clone();
         rt.spawn(async move {
-            // Whatever can reach it. Neither is trusted — every byte is hashed
-            // and the signature checked against the manifest before storing.
-            let relay = content.relay();
-            let blobs = content.blobs();
-            let outcome = match host.ingest(&addr, relay.as_ref(), blobs.as_ref()).await {
+            // Public relays + Blossom, asking for the napplet kind rather than
+            // the nsite kind a `d` tag would otherwise imply. Untrusted: every
+            // byte is hashed and the signature checked before anything is kept.
+            let source = crate::ip_source::IpPeerSource::with_defaults().with_kind(addr.kind());
+            let outcome = match host.ingest(&addr, &source).await {
                 Ok(ingested) => crate::napplet::NappletReview {
                     pointer: pointer.clone(),
                     title: ingested.title.unwrap_or_default(),

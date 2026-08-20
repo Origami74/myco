@@ -60,6 +60,9 @@ pub struct IpPeerSource {
     /// manifest REQ reuses the one persistent WS connection to the peer instead of
     /// opening a fresh `query_relay` socket. `None` for a public-relay source.
     peer_relay: Option<(std::sync::Arc<crate::peer_relay::PeerRelayPool>, String)>,
+    /// Fetch manifests of this kind instead of the nsite kind implied by the
+    /// `d` tag. Set for napplets — see [`IpPeerSource::with_kind`].
+    kind_override: Option<u16>,
 }
 
 impl IpPeerSource {
@@ -75,6 +78,7 @@ impl IpPeerSource {
             timeout: Duration::from_secs(8),
             ignore_manifest_servers: false,
             peer_relay: None,
+            kind_override: None,
         }
     }
 
@@ -104,6 +108,18 @@ impl IpPeerSource {
     /// Override the per-relay timeout (mesh links want a longer one than IP).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Fetch manifests of an explicit kind instead of the nsite kind implied by
+    /// the `d` tag.
+    ///
+    /// NIP-5D napplets share NIP-5A's manifest shape at their own kinds, so the
+    /// fetch is identical but for the number. Without this the source would ask
+    /// for 15128/35128 and find nothing, which looks exactly like a napplet that
+    /// is not published.
+    pub fn with_kind(mut self, kind: u16) -> Self {
+        self.kind_override = Some(kind);
         self
     }
 }
@@ -352,7 +368,7 @@ impl PeerSource for IpPeerSource {
         author: &PublicKey,
         d_tag: Option<&str>,
     ) -> anyhow::Result<Option<Event>> {
-        let kind = kind_for(d_tag);
+        let kind = self.kind_override.unwrap_or_else(|| kind_for(d_tag));
         let mut filter = serde_json::json!({
             "kinds": [kind],
             "authors": [hex::encode(author.to_bytes())],
