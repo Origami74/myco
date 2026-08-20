@@ -397,6 +397,34 @@ impl BlobStore for SourceBlobs<'_> {
     }
 }
 
+/// What installing a napplet would grant it: what it declared it needs, plus
+/// the defaults every napplet gets, narrowed to what this build can actually
+/// do.
+///
+/// Narrowing matters: offering a capability Myco has not implemented would put
+/// a promise on the review screen that no call could keep.
+pub fn effective_grants(requires: &[String]) -> Vec<String> {
+    use myco_napplet_runtime::session::{DEFAULT_GRANTS, IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
+
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |domain: &str| {
+        if IMPLEMENTED_DOMAINS.contains(&domain)
+            && !MANDATORY_DOMAINS.contains(&domain)
+            && !out.iter().any(|d| d == domain)
+        {
+            out.push(domain.to_string());
+        }
+    };
+    for domain in DEFAULT_GRANTS {
+        add(domain);
+    }
+    for domain in requires {
+        add(domain);
+    }
+    out.sort();
+    out
+}
+
 /// A fetched, verified napplet awaiting the user's answer on install review.
 ///
 /// Carries what the napplet asked for, never what it was given. A grant exists
@@ -412,9 +440,17 @@ pub struct NappletReview {
     pub loading: bool,
     pub title: String,
     pub description: String,
-    /// The capability domains it declared with `requires` tags. What the review
-    /// screen must put in front of the user, in words a person understands.
+    /// The capability domains it declared with `requires` tags — a statement of
+    /// what it needs, not what it gets.
     pub requires: Vec<String>,
+    /// What installing it would actually grant: its declared `requires`
+    /// together with the defaults every napplet receives, narrowed to what this
+    /// build implements.
+    ///
+    /// This — not `requires` — is what the review screen must put in front of
+    /// the user in words, because this is what they are agreeing to. A default
+    /// that was not shown would be a grant nobody made.
+    pub grants: Vec<String>,
     /// Set when the fetch failed; the screen shows this instead of asking.
     pub error: String,
 }
@@ -889,5 +925,51 @@ mod relay_probe {
             };
             println!("{elapsed:>8.2?}  {verdict:<8} {relay}");
         }
+    }
+}
+
+#[cfg(test)]
+mod grants {
+    use super::*;
+
+    /// A napplet is useful only if it can do something, and a manifest's
+    /// `requires` cannot be relied on to say what — the napplet this was first
+    /// tested against declares nothing at all, because its toolchain dropped
+    /// the tags. Defaults are what stop that being an app that can never be
+    /// granted anything.
+    #[test]
+    fn a_napplet_that_declares_nothing_still_gets_the_defaults() {
+        let grants = effective_grants(&[]);
+        assert!(grants.contains(&"relay".to_string()));
+        assert!(grants.contains(&"identity".to_string()));
+    }
+
+    #[test]
+    fn what_it_declares_is_added_to_the_defaults() {
+        let grants = effective_grants(&["identity".to_string()]);
+        assert!(grants.contains(&"identity".to_string()));
+        assert!(grants.contains(&"relay".to_string()));
+        // Declared twice over is still granted once.
+        assert_eq!(
+            grants.iter().filter(|d| *d == "identity").count(),
+            1,
+            "a domain was granted twice"
+        );
+    }
+
+    /// Offering a capability Myco has not built would put a promise on the
+    /// review screen that no call could keep.
+    #[test]
+    fn a_capability_this_build_lacks_is_never_offered() {
+        let grants = effective_grants(&["storage".to_string(), "notify".to_string()]);
+        assert!(!grants.contains(&"storage".to_string()));
+        assert!(!grants.contains(&"notify".to_string()));
+    }
+
+    /// `shell` is the handshake, not a permission. Listing it would ask someone
+    /// to agree to the app starting up.
+    #[test]
+    fn the_handshake_is_not_offered_as_a_permission() {
+        assert!(!effective_grants(&["shell".to_string()]).contains(&"shell".to_string()));
     }
 }

@@ -99,6 +99,7 @@ fun AppsScreen(
     var shareFor by remember { mutableStateOf<ShareTarget?>(null) }
     var confirmRemove by remember { mutableStateOf<SiteStatus?>(null) }
     var showAdd by remember { mutableStateOf(false) }
+    var nappletSheetFor by remember { mutableStateOf<LibraryItem?>(null) }
     var confirmForgetNapplet by remember { mutableStateOf<LibraryItem?>(null) }
 
     // One-shot toast with the result of a "Check for updates" run (fires when the
@@ -153,7 +154,7 @@ fun AppsScreen(
                     item = entry.item,
                     modifier = Modifier.animateItem(),
                     onClick = { onLaunchNapplet(entry.item.nappletPointer, entry.item.title) },
-                    onLongClick = { confirmForgetNapplet = entry.item },
+                    onLongClick = { nappletSheetFor = entry.item },
                 )
             }
         }
@@ -221,6 +222,22 @@ fun AppsScreen(
             },
             onDismiss = { client.dispatch(NativeActions.dismissNappletReview()) },
         )
+    }
+
+    nappletSheetFor?.let { item ->
+        ModalBottomSheet(onDismissRequest = { nappletSheetFor = null }) {
+            NappletSheet(
+                item = item,
+                onOpen = {
+                    nappletSheetFor = null
+                    onLaunchNapplet(item.nappletPointer, item.title)
+                },
+                onRemove = {
+                    nappletSheetFor = null
+                    confirmForgetNapplet = item
+                },
+            )
+        }
     }
 
     confirmForgetNapplet?.let { item ->
@@ -418,6 +435,77 @@ private sealed interface AppEntry {
  * No progress ring: a napplet is a single file that was fetched and verified
  * before it ever reached the Library, so there is no partial state to show.
  */
+/**
+ * The long-press sheet for a napplet — the same pull-up an nsite gets, because
+ * from the grid they are both just apps.
+ *
+ * What differs is what is on it. A napplet has no files to sync and no update
+ * check, and it does have something an nsite never has: capabilities someone
+ * agreed to, which they should be able to see and take back. That is what makes
+ * the grant reachable rather than a decision made once and buried.
+ */
+@Composable
+private fun NappletSheet(
+    item: LibraryItem,
+    onOpen: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(tileColorFor(item.nappletPointer)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    item.title.take(1).uppercase().ifEmpty { "N" },
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Spacer(Modifier.size(12.dp))
+            Column {
+                Text(
+                    item.title.ifEmpty { item.dTag ?: item.authorNpub.take(12) },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    "napplet",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        SheetAction(Icons.Filled.HomeMax, "Open") { onOpen() }
+
+        // What this app was allowed to do, in the same words it was asked in.
+        Spacer(Modifier.height(12.dp))
+        Text(
+            if (item.granted.isEmpty()) "This app can't do anything on its own." else "This app can:",
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Spacer(Modifier.height(8.dp))
+        item.granted.forEach { domain ->
+            Text(
+                "•  " + capabilityWording(domain),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+        }
+        Spacer(Modifier.height(12.dp))
+
+        SheetAction(Icons.Filled.Delete, "Remove app", tint = MaterialTheme.colorScheme.error) {
+            onRemove()
+        }
+        SheetAction(Icons.Filled.Info, item.dTag ?: item.authorNpub.take(16)) { }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun NappletTile(
@@ -566,16 +654,19 @@ private fun NappletReviewSheet(
 
             Spacer(Modifier.height(28.dp))
 
-            if (review.requires.isEmpty()) {
+            // What is listed is what is granted — including the defaults every
+            // app gets. A default that was not shown would be a grant nobody
+            // made, and one of them lets an app post as you.
+            if (review.grants.isEmpty()) {
                 Text(
                     "This app runs on its own. It can't reach the internet, " +
                         "save anything, or use your account.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             } else {
-                Text("This app would be able to:", style = MaterialTheme.typography.titleSmall)
+                Text("This app will be able to:", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(10.dp))
-                review.requires.forEach { domain ->
+                review.grants.forEach { domain ->
                     Text(
                         "•  " + capabilityWording(domain),
                         style = MaterialTheme.typography.bodyMedium,
@@ -584,7 +675,7 @@ private fun NappletReviewSheet(
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "You can change your mind later — press and hold the app to remove it.",
+                    "You can change your mind later — press and hold the app.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -594,7 +685,7 @@ private fun NappletReviewSheet(
             Row {
                 TextButton(onClick = onDismiss) { Text("Not now") }
                 Spacer(Modifier.weight(1f))
-                Button(onClick = { onInstall(review.requires) }) { Text("Add to my apps") }
+                Button(onClick = { onInstall(review.grants) }) { Text("Add to my apps") }
             }
         }
     }

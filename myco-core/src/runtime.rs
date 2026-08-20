@@ -1235,6 +1235,7 @@ impl AppRuntime {
             *review.lock().unwrap() = Some(crate::napplet::NappletReview {
                 pointer: pointer.to_string(),
                 loading: false,
+                grants: Vec::new(),
                 title: String::new(),
                 description: String::new(),
                 requires: Vec::new(),
@@ -1281,6 +1282,7 @@ impl AppRuntime {
             title: String::new(),
             description: String::new(),
             requires: Vec::new(),
+            grants: Vec::new(),
             error: String::new(),
         });
 
@@ -1303,9 +1305,11 @@ impl AppRuntime {
             .with_first_answer_grace(std::time::Duration::from_millis(600));
             let outcome = match host.ingest(&addr, &source).await {
                 Ok(ingested) => {
+                    let grants = crate::napplet::effective_grants(&ingested.requires);
                     tracing::info!(
-                        "fetched napplet {pointer}: requires {:?}",
-                        ingested.requires
+                        "fetched napplet {pointer}: requires {:?}, would grant {:?}",
+                        ingested.requires,
+                        grants
                     );
                     crate::napplet::NappletReview {
                         pointer: pointer.clone(),
@@ -1313,6 +1317,7 @@ impl AppRuntime {
                         title: ingested.title.unwrap_or_default(),
                         description: ingested.description.unwrap_or_default(),
                         requires: ingested.requires,
+                        grants,
                         error: String::new(),
                     }
                 }
@@ -1324,6 +1329,7 @@ impl AppRuntime {
                         title: String::new(),
                         description: String::new(),
                         requires: Vec::new(),
+                        grants: Vec::new(),
                         error: e.to_string(),
                     }
                 }

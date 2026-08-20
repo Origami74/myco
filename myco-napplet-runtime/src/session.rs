@@ -27,6 +27,20 @@ pub const IMPLEMENTED_DOMAINS: &[&str] = &["shell", "identity", "relay"];
 /// it is the handshake itself, and a napplet may assume it is present.
 pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 
+/// Domains a napplet is granted by default when it is installed.
+///
+/// A napplet is only useful if it can do something, and the manifest's
+/// `requires` tags cannot be relied on to say what: they are a statement of
+/// intent, and a real napplet published with a toolchain that dropped them
+/// arrives declaring nothing at all. Waiting for a napplet to ask for a
+/// capability it never declared meant it could never be granted one.
+///
+/// These are **defaults, not secrets**. The install screen lists every one of
+/// them in words before anything is agreed to — a `relay` grant lets a napplet
+/// post as you without asking again, and a default that was not shown would be
+/// a grant nobody made.
+pub const DEFAULT_GRANTS: &[&str] = &["identity", "relay"];
+
 /// A napplet's identity: the `(dTag, aggregateHash)` tuple, computed by the
 /// runtime from verified bytes.
 ///
