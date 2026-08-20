@@ -164,6 +164,7 @@ async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
     }
 
     let id = signed.id.to_hex();
+    tracing::info!(kind = %kind.as_u16(), event = %id, "napplet published");
     message
         .to_result()
         .with_field("ok", true)

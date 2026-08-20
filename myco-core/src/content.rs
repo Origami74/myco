@@ -99,6 +99,15 @@ pub struct LibraryItem {
     /// and an inbound intent cannot add to it.
     #[serde(default)]
     pub granted: Vec<String>,
+    /// The pointer this was added by — the `naddr` when there was one.
+    ///
+    /// Kept because an `naddr` carries the author's own relay hints, and those
+    /// are frequently the only relays that hold the napplet: of Myco's default
+    /// relays exactly one carried the napplet this was first tested against.
+    /// Reloading from a reconstructed `<npub>:<dtag>` would throw the hints
+    /// away and search blind.
+    #[serde(default)]
+    pub pointer: String,
 }
 
 /// A **Circle** contact: a paired peer whose device we can pull nsites from over
@@ -1080,6 +1089,7 @@ impl Content {
                 added_at,
                 kind: LibraryKind::Nsite,
                 granted: Vec::new(),
+                pointer: String::new(),
             });
         }
         let snapshot = lib.clone();
@@ -1095,6 +1105,7 @@ impl Content {
     /// to, so what they saw is what is stored. Merging would let a second
     /// install quietly accumulate capabilities across two screens neither of
     /// which showed the total.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_napplet_to_library(
         &self,
         author_npub: &str,
@@ -1102,6 +1113,7 @@ impl Content {
         title: Option<&str>,
         shell_host: &str,
         granted: Vec<String>,
+        pointer: &str,
         added_at: u64,
     ) {
         let mut lib = self.library.lock().unwrap();
@@ -1113,6 +1125,9 @@ impl Content {
             item.kind = LibraryKind::Napplet;
             item.granted = granted;
             item.url_host = shell_host.to_string();
+            if !pointer.is_empty() {
+                item.pointer = pointer.to_string();
+            }
             if let Some(t) = title {
                 item.title = t.to_string();
             }
@@ -1126,6 +1141,7 @@ impl Content {
                 added_at,
                 kind: LibraryKind::Napplet,
                 granted,
+                pointer: pointer.to_string(),
             });
         }
         let snapshot = lib.clone();
@@ -4920,6 +4936,7 @@ mod library_kind_tests {
             added_at: 0,
             kind,
             granted: Vec::new(),
+            pointer: String::new(),
         }
     }
 

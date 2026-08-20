@@ -71,10 +71,20 @@ data class LibraryItem(
     val kind: LibraryKind = LibraryKind.Nsite,
     /** Capability domains install review granted. Napplets only. */
     val granted: List<String> = emptyList(),
+    /** The pointer it was added by — an `naddr` when there was one. */
+    val pointer: String = "",
 ) {
-    /** The pointer a napplet is opened by: `<npub>` or `<npub>:<dtag>`. */
+    /**
+     * How to reach this napplet again.
+     *
+     * The stored `naddr` when there is one, because it carries the author's own
+     * relay hints — often the only relays that hold the napplet. Falling back
+     * to `<npub>:<dtag>` loses them and searches blind.
+     */
     val nappletPointer: String
-        get() = if (dTag.isNullOrEmpty()) authorNpub else "$authorNpub:$dTag"
+        get() = pointer.ifEmpty {
+            if (dTag.isNullOrEmpty()) authorNpub else "$authorNpub:$dTag"
+        }
 }
 
 /** Local relay/Blossom counts. */
@@ -374,6 +384,7 @@ data class AppState(
                                 granted = l.optJSONArray("granted")?.let { g ->
                                     (0 until g.length()).map { g.optString(it) }
                                 }.orEmpty(),
+                                pointer = l.optString("pointer"),
                             )
                         )
                     }

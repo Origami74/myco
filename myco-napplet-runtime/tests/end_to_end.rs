@@ -159,8 +159,7 @@ async fn the_namespace_is_not_the_enforcement() {
 
     // ...and relay is installed anyway.
     let prelude = render_for(&session);
-    assert!(prelude
-        .contains(r#"NappletShimPrelude.install({"domains":["relay","shell"]});"#));
+    assert!(prelude.contains(r#"NappletShimPrelude.install({"domains":["relay","shell"]});"#));
 
     // The call is what gets refused.
     let call = Envelope::new("relay.publish").with_id("x1");

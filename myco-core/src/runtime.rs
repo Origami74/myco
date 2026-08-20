@@ -1359,12 +1359,19 @@ impl AppRuntime {
             .filter(|r| r.pointer == pointer && !r.title.is_empty())
             .map(|r| r.title.clone());
 
+        tracing::info!(
+            napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
+            ?granted,
+            title = %title.as_deref().unwrap_or(""),
+            "installing napplet"
+        );
         content.add_napplet_to_library(
             &npub,
             addr.d_tag.as_deref(),
             title.as_deref(),
             &shell_host,
             granted,
+            pointer,
             crate::content::now_secs(),
         );
     }
