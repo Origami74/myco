@@ -98,6 +98,23 @@ data class PairRequest(
     val secret: String,
 )
 
+/** Native paired-peer file transfer, including incoming offers awaiting a decision. */
+data class FileTransfer(
+    val id: String,
+    val direction: String,
+    val peerNpub: String,
+    val peerName: String,
+    val name: String,
+    val mime: String,
+    val size: Long,
+    val status: String,
+    val blobHash: String,
+    val receivedPath: String,
+    val publishPending: Boolean,
+    val error: String,
+    val updatedAt: Long,
+)
+
 /**
  * One merged, npub-or-address-keyed peer diagnostics row (DIAG-01/03/04/06),
  * built once in Rust from `ble_peers` / `ble_adverts` / `circle` / pending
@@ -217,6 +234,7 @@ data class AppState(
     /** The custom Blossom URL as last saved. */
     val pendingBlossomUrl: String = "",
     val updateCheck: UpdateCheck = UpdateCheck(),
+    val fileTransfers: List<FileTransfer> = emptyList(),
     val speedtest: SpeedtestStatus = SpeedtestStatus(),
     /** Merged per-identity peer diagnostics rows (DIAG-01/03/04/06). Built once
      *  in Rust; the UI renders this directly, it never re-joins blePeers/circle. */
@@ -422,6 +440,31 @@ data class AppState(
                     }
                 }
             }
+            val transfersJson = o.optJSONArray("fileTransfers")
+            val fileTransfers = buildList {
+                if (transfersJson != null) {
+                    for (i in 0 until transfersJson.length()) {
+                        val t = transfersJson.optJSONObject(i) ?: continue
+                        add(
+                            FileTransfer(
+                                id = t.optString("id"),
+                                direction = t.optString("direction"),
+                                peerNpub = t.optString("peerNpub"),
+                                peerName = t.optString("peerName"),
+                                name = t.optString("name"),
+                                mime = t.optString("mime"),
+                                size = t.optLong("size"),
+                                status = t.optString("status"),
+                                blobHash = t.optString("blobHash"),
+                                receivedPath = t.optString("receivedPath"),
+                                publishPending = t.optBoolean("publishPending", false),
+                                error = t.optString("error"),
+                                updatedAt = t.optLong("updatedAt"),
+                            )
+                        )
+                    }
+                }
+            }
             return AppState(
                 rev = o.optLong("rev"),
                 error = o.optString("error"),
@@ -492,6 +535,7 @@ data class AppState(
                         generation = u.optLong("generation"),
                     )
                 } ?: UpdateCheck(),
+                fileTransfers = fileTransfers,
                 peers = peerDiagnostics,
             )
         }
@@ -702,4 +746,21 @@ object NativeActions {
     /** Dev-menu speedtest: round-trip a payload through `npub`'s mesh Blossom. */
     fun speedtestPeer(npub: String): JSONObject =
         JSONObject().put("type", "speedtest_peer").put("npub", npub)
+
+    /** Encrypt a local file and send a private offer to a paired peer. */
+    fun shareFile(path: String, name: String, mime: String, peerNpub: String): JSONObject =
+        JSONObject().put("type", "share_file")
+            .put("path", path)
+            .put("name", name)
+            .put("mime", mime)
+            .put("peerNpub", peerNpub)
+
+    fun acceptFileTransfer(transferId: String): JSONObject =
+        JSONObject().put("type", "accept_file_transfer").put("transferId", transferId)
+
+    fun declineFileTransfer(transferId: String): JSONObject =
+        JSONObject().put("type", "decline_file_transfer").put("transferId", transferId)
+
+    fun forgetFileTransfer(transferId: String): JSONObject =
+        JSONObject().put("type", "forget_file_transfer").put("transferId", transferId)
 }

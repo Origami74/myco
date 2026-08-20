@@ -838,6 +838,48 @@ impl AppRuntime {
                 self.start_speedtest(npub);
                 self.rev += 1;
             }
+            NativeAppAction::ShareFile {
+                path,
+                name,
+                mime,
+                peer_npub,
+            } => {
+                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
+                    rt.spawn(async move {
+                        if let Err(e) = content.start_file_share(path, name, mime, peer_npub).await
+                        {
+                            tracing::warn!(error = %e, "file share: offer failed");
+                        }
+                    });
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::AcceptFileTransfer { transfer_id } => {
+                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
+                    rt.spawn(async move {
+                        if let Err(e) = content.respond_file_transfer(transfer_id, true).await {
+                            tracing::warn!(error = %e, "file share: accept failed");
+                        }
+                    });
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::DeclineFileTransfer { transfer_id } => {
+                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
+                    rt.spawn(async move {
+                        if let Err(e) = content.respond_file_transfer(transfer_id, false).await {
+                            tracing::warn!(error = %e, "file share: decline failed");
+                        }
+                    });
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::ForgetFileTransfer { transfer_id } => {
+                if let Some(content) = &self.content {
+                    content.forget_file_transfer(&transfer_id);
+                }
+                self.rev += 1;
+            }
         }
     }
 
@@ -1436,6 +1478,11 @@ impl AppRuntime {
                 .map(|c| c.update_check_snapshot())
                 .unwrap_or_default(),
             speedtest: self.speedtest.lock().unwrap().clone(),
+            file_transfers: self
+                .content
+                .as_ref()
+                .map(|c| c.file_transfers_snapshot())
+                .unwrap_or_default(),
             peers,
         }
     }

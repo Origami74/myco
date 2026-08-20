@@ -64,6 +64,9 @@ pub struct AppState {
     pub update_check: crate::content::UpdateCheckView,
     /// Result of the dev-menu peer speedtest (a Blossom upload+download round-trip).
     pub speedtest: SpeedtestView,
+    /// Native paired-peer file transfers, including incoming offers awaiting
+    /// the user's accept/deny decision.
+    pub file_transfers: Vec<crate::file_transfer::FileTransferView>,
     /// The merged per-identity peer diagnostics view (DIAG-01/03/04/06):
     /// one row per known peer, covering every state from `connected` through
     /// `unreachable`, built once here rather than re-derived client-side from

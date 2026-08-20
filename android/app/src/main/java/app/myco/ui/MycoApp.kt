@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -70,6 +71,7 @@ import app.myco.ui.radioWarnings
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.CircleContact
+import app.myco.core.FileTransfer
 import app.myco.core.NativeActions
 import app.myco.hotspot.TransferGate
 import app.myco.nfc.PairPresent
@@ -132,6 +134,13 @@ fun MycoApp(
     onExternalShareDismissed: () -> Unit = {},
     /** Selected peer hand-off; the native file transport will plug in here. */
     onShareToPeer: (List<Uri>, CircleContact) -> Unit = { _, _ -> },
+    /** Copies a completed native receive into a user-visible Android location. */
+    onFileReceived: (FileTransfer) -> Unit = {},
+    /** Completed receive currently shown in the app-root preview dialog. */
+    receivedFile: FileTransfer? = null,
+    receivedFileUri: Uri? = null,
+    onDismissReceivedFile: () -> Unit = {},
+    onOpenReceivedFile: (FileTransfer, Uri) -> Unit = { _, _ -> },
 ) {
     var state by remember { mutableStateOf(client.state()) }
     // Mesh toggle is hoisted here so it survives tab switches.
@@ -145,6 +154,9 @@ fun MycoApp(
     // Name of a peer we just invited who hasn't accepted yet — drives the
     // "waiting" dialog, so a bump that can't be delivered says so.
     var justInvited by remember { mutableStateOf<String?>(null) }
+    var dismissedFileOffers by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var handledReceivedFiles by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showMycoAppPicker by remember { mutableStateOf(false) }
     val knownInvites = remember { mutableStateOf(state.outboundPairs.map { it.npub }.toSet()) }
     // Circle members we already knew about — anything new means a fresh pairing.
     val knownCircle = remember { mutableStateOf(state.circle.map { it.npub }.toSet()) }
@@ -211,13 +223,29 @@ fun MycoApp(
         knownInvites.value = current
     }
 
+    // Native transfer completion happens in Rust. Copy the decrypted file into
+    // Android's Downloads through the activity-owned MediaStore bridge exactly
+    // once per transfer.
+    androidx.compose.runtime.LaunchedEffect(state.fileTransfers) {
+        state.fileTransfers
+            .filter { it.status == "completed" && it.publishPending && it.receivedPath.isNotEmpty() }
+            .filterNot { it.id in handledReceivedFiles }
+            .forEach { transfer ->
+                handledReceivedFiles = handledReceivedFiles + transfer.id
+                onFileReceived(transfer)
+            }
+    }
+
     val nav = rememberNavController()
-    androidx.compose.runtime.CompositionLocalProvider(
-        LocalMeshControl provides MeshControl(meshEnabled) { on ->
-            meshEnabled = on
-            onMeshToggle(on)
-        },
-    ) {
+    // Keep the navigation host and all transient surfaces in one app-root layer.
+    // File offers must not be owned by Circle or any other selected destination.
+    Box(Modifier.fillMaxSize()) {
+        androidx.compose.runtime.CompositionLocalProvider(
+            LocalMeshControl provides MeshControl(meshEnabled) { on ->
+                meshEnabled = on
+                onMeshToggle(on)
+            },
+        ) {
     Scaffold(
         bottomBar = {
             val current by nav.currentBackStackEntryAsState()
@@ -303,7 +331,11 @@ fun MycoApp(
             }
         }
     }
-    } // CompositionLocalProvider(LocalMeshControl)
+        } // CompositionLocalProvider(LocalMeshControl)
+
+        // AirDrop-style transfer feedback is mounted at the app root, above the
+        // navigation host, so the sender/receiver always see the current stage.
+        FileTransferProgressOverlay(state.fileTransfers)
 
     // Incoming pair requests now live in the persistent Requests inbox (badged on
     // the Circle tab + surfaced on the pairing home), not a transient pop-up.
@@ -361,6 +393,56 @@ fun MycoApp(
         )
     }
 
+    // Phone B's native incoming-offer prompt. This is deliberately an in-app
+    // prompt in the first slice; Android background notification delivery can
+    // be added after the foreground transfer path is proven.
+    state.fileTransfers
+        .firstOrNull { it.direction == "incoming" && it.status == "waiting_user" && it.id !in dismissedFileOffers }
+        ?.let { offer ->
+            val size = if (offer.size > 0) " (${formatSize(offer.size)})" else ""
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text("Get from ${offer.peerName.ifBlank { "your peer" }}?") },
+                text = {
+                    Text("${offer.peerName.ifBlank { "A paired phone" }} wants to send ${offer.name}$size")
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        dismissedFileOffers = dismissedFileOffers + offer.id
+                        state = client.dispatch(NativeActions.acceptFileTransfer(offer.id))
+                    }) { Text("Accept") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        dismissedFileOffers = dismissedFileOffers + offer.id
+                        state = client.dispatch(NativeActions.declineFileTransfer(offer.id))
+                    }) { Text("Deny") }
+                },
+            )
+        }
+
+    // Completed native receives are also app-root UI. This remains visible when
+    // the user accepted from Apps, Circle, Settings, or Dev; it is not attached
+    // to the Circle destination that initiated pairing.
+    val completedTransfer = receivedFile
+    val completedUri = receivedFileUri
+    if (completedTransfer != null && completedUri != null) {
+        ReceivedFileDialog(
+            transfer = completedTransfer,
+            receivedUri = completedUri,
+            onOpenWithMycoApp = { showMycoAppPicker = true },
+            onOpenWithAnotherApp = { onOpenReceivedFile(completedTransfer, completedUri) },
+            onDismiss = onDismissReceivedFile,
+        )
+    }
+    if (showMycoAppPicker && completedTransfer != null) {
+        MycoAppPickerDialog(
+            transfer = completedTransfer,
+            apps = state.sites,
+            onDismiss = { showMycoAppPicker = false },
+        )
+    }
+
     var peerShareVisible by remember { mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(externalShareUris) {
         if (externalShareUris.isNotEmpty()) peerShareVisible = true
@@ -411,6 +493,7 @@ fun MycoApp(
             },
             confirmButton = { TextButton(onClick = { relayWarnDismissed = true }) { Text("OK") } },
         )
+    }
     }
 }
 

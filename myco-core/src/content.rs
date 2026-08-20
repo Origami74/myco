@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
@@ -26,6 +27,7 @@ use nsite_deck::seams::{BlobStore, PeerSource, RelayBackend};
 use nsite_deck::{sync, GatewayResponse, SiteAddr, SyncOutcome};
 use serde::{Deserialize, Serialize};
 
+use crate::file_transfer::{self, FileMessage, FileTransferRecord, FileTransferView};
 use crate::mesh_relay::{Inbound, Origin};
 use myco_blossom::FsBlobStore;
 use myco_relay::RelayStore;
@@ -427,6 +429,12 @@ pub struct Content {
     pending_updates: Mutex<HashMap<String, PendingUpdate>>,
     /// Status of the latest update check, for UI feedback (checking → result).
     update_check: Mutex<UpdateCheckView>,
+    /// Native paired-peer file transfers. Metadata is persisted; file keys and
+    /// encrypted outbox paths remain inside the app-private data directory.
+    file_transfers: Mutex<Vec<FileTransferRecord>>,
+    file_transfers_path: PathBuf,
+    file_outbox_dir: PathBuf,
+    received_dir: PathBuf,
     /// The **active version** the gateway serves per slot — decoupled from the
     /// relay's newest, so a newer (received/checked) manifest can sit in the relay
     /// store (NIP-01-faithful, propagated to peers) while we keep serving the fully
@@ -587,6 +595,12 @@ impl Content {
         let circle = load_circle(&circle_path);
         let active_path = data_dir.join("active.json");
         let active_manifests = load_active(&active_path);
+        let file_transfers_path = data_dir.join("file_transfers.json");
+        let file_transfers = load_file_transfers(&file_transfers_path);
+        let file_outbox_dir = data_dir.join("file-outbox");
+        let received_dir = data_dir.join("received");
+        let _ = std::fs::create_dir_all(&file_outbox_dir);
+        let _ = std::fs::create_dir_all(&received_dir);
         Ok(Self {
             relay,
             relay_remote: custom,
@@ -613,6 +627,10 @@ impl Content {
             prev_pool_connected: Mutex::new(HashSet::new()),
             pending_updates: Mutex::new(HashMap::new()),
             update_check: Mutex::new(UpdateCheckView::default()),
+            file_transfers: Mutex::new(file_transfers),
+            file_transfers_path,
+            file_outbox_dir,
+            received_dir,
             active_manifests: Mutex::new(active_manifests),
             active_path,
         })
@@ -1655,7 +1673,567 @@ impl Content {
         *prev = now;
     }
 
-    // --- mesh fan-out ---
+    // --- native paired-peer file transfer ---
+
+    /// Snapshot transfer rows for the FFI/UI. Secrets and local source paths
+    /// never cross this boundary.
+    pub fn file_transfers_snapshot(&self) -> Vec<FileTransferView> {
+        self.file_transfers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.view.clone())
+            .collect()
+    }
+
+    /// Encrypt a local file, retain the ciphertext in the app-private outbox,
+    /// and send only a gift-wrapped metadata offer. The ciphertext is not put
+    /// into Blossom until the recipient accepts.
+    pub async fn start_file_share(
+        self: Arc<Self>,
+        path: String,
+        name: String,
+        mime: String,
+        target_npub: String,
+    ) -> anyhow::Result<()> {
+        if !self.is_in_circle(&target_npub) {
+            anyhow::bail!("file share target is not in the Circle");
+        }
+        let keys = self
+            .device_keys
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+        let target = PublicKey::from_bech32(&target_npub)
+            .map_err(|e| anyhow::anyhow!("invalid target npub: {e}"))?;
+        let imported_from_android_share = Path::new(&path)
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .map(|name| name == "myco-share-outbox")
+            .unwrap_or(false);
+        let plain = tokio::fs::read(&path).await?;
+        let filename = file_transfer::safe_filename(&name, "shared-file");
+        let mime = if mime.trim().is_empty() {
+            "application/octet-stream".to_string()
+        } else {
+            mime
+        };
+        let transfer_id = file_transfer::new_transfer_id();
+        let (package, key) =
+            file_transfer::encrypt_file(&plain, &transfer_id, &target_npub, &filename)?;
+        let outbox_path = self.file_outbox_dir.join(format!("{transfer_id}.bin"));
+        tokio::fs::write(&outbox_path, &package).await?;
+        if imported_from_android_share {
+            // Android's copy is only an input staging file. Once the native
+            // encrypted outbox exists, retaining it would create a second
+            // private history of every shared file.
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+        let now = file_transfer::now_secs();
+        let expires_at = now + file_transfer::OFFER_TTL_SECS;
+        let peer_name = self
+            .circle_snapshot()
+            .into_iter()
+            .find(|p| p.npub == target_npub)
+            .map(|p| p.name)
+            .unwrap_or_else(|| target_npub.chars().take(16).collect());
+        self.insert_file_transfer(FileTransferRecord {
+            view: FileTransferView {
+                id: transfer_id.clone(),
+                direction: "outgoing".to_string(),
+                peer_npub: target_npub.clone(),
+                peer_name,
+                name: filename.clone(),
+                mime: mime.clone(),
+                size: plain.len() as u64,
+                status: "offered".to_string(),
+                blob_hash: String::new(),
+                received_path: String::new(),
+                publish_pending: false,
+                error: String::new(),
+                updated_at: now,
+            },
+            source_path: Some(outbox_path.to_string_lossy().into_owned()),
+            key_b64: Some(file_transfer::encode_key(&key)),
+            expires_at,
+        });
+        let sender_npub = keys.public_key().to_bech32()?;
+        let message = FileMessage::Offer {
+            transfer_id: transfer_id.clone(),
+            sender_npub,
+            recipient_npub: target_npub.clone(),
+            filename,
+            mime,
+            size: plain.len() as u64,
+            issued_at: now,
+            expires_at,
+        };
+        if let Err(e) = self.send_file_message(&target, &target_npub, message).await {
+            self.set_file_status(&transfer_id, "failed", &e.to_string());
+            self.forget_file_transfer(&transfer_id);
+            return Err(e);
+        }
+        tracing::info!(target = %target_npub, transfer = %transfer_id, "file share offer sent");
+        Ok(())
+    }
+
+    /// Respond to an incoming offer. Accepting only sends the control reply;
+    /// the sender uploads the encrypted blob afterward.
+    pub async fn respond_file_transfer(
+        self: Arc<Self>,
+        transfer_id: String,
+        accepted: bool,
+    ) -> anyhow::Result<()> {
+        let target_npub = {
+            let records = self.file_transfers.lock().unwrap();
+            let record = records
+                .iter()
+                .find(|r| r.view.id == transfer_id && r.view.direction == "incoming")
+                .ok_or_else(|| anyhow::anyhow!("file offer not found"))?;
+            if record.view.status != "waiting_user" {
+                anyhow::bail!("file offer is no longer waiting for a response");
+            }
+            record.view.peer_npub.clone()
+        };
+        let keys = self
+            .device_keys
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+        let target = PublicKey::from_bech32(&target_npub)?;
+        let own_npub = keys.public_key().to_bech32()?;
+        self.set_file_status(
+            &transfer_id,
+            if accepted { "accepted" } else { "denied" },
+            "",
+        );
+        let message = FileMessage::Response {
+            transfer_id: transfer_id.clone(),
+            sender_npub: own_npub,
+            recipient_npub: target_npub.clone(),
+            accepted,
+            reason: (!accepted).then(|| "declined by recipient".to_string()),
+        };
+        let result = self.send_file_message(&target, &target_npub, message).await;
+        if !accepted && result.is_ok() {
+            self.forget_file_transfer(&transfer_id);
+        }
+        result
+    }
+
+    /// Called by the mesh gossiper for every newly-arrived gift wrap. Invalid,
+    /// expired, non-file, and non-Circle messages are ignored.
+    pub async fn handle_file_event(self: &Arc<Self>, event: &Event) {
+        if event.kind != Kind::GiftWrap {
+            return;
+        }
+        let Some(keys) = self.device_keys.lock().unwrap().clone() else {
+            return;
+        };
+        let Ok(unwrapped) = nostr::nips::nip59::extract_rumor(&keys, event).await else {
+            return;
+        };
+        if unwrapped.rumor.kind != Kind::PrivateDirectMessage {
+            return;
+        }
+        let Ok(message) = serde_json::from_str::<FileMessage>(&unwrapped.rumor.content) else {
+            return;
+        };
+        let sender_npub = unwrapped.sender.to_bech32().unwrap_or_default();
+        if !self.is_in_circle(&sender_npub) {
+            tracing::warn!(sender = %sender_npub, "file message from non-Circle sender ignored");
+            return;
+        }
+        let own_npub = match keys.public_key().to_bech32() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        match message {
+            FileMessage::Offer {
+                transfer_id,
+                recipient_npub,
+                filename,
+                mime,
+                size,
+                expires_at,
+                ..
+            } if recipient_npub == own_npub => {
+                if expires_at <= file_transfer::now_secs()
+                    || size > file_transfer::MAX_FILE_BYTES as u64
+                {
+                    tracing::warn!(transfer_id, "expired or oversized file offer ignored");
+                    return;
+                }
+                if self
+                    .file_transfers
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.view.id == transfer_id)
+                {
+                    return;
+                }
+                let peer_name = self
+                    .circle_snapshot()
+                    .into_iter()
+                    .find(|p| p.npub == sender_npub)
+                    .map(|p| p.name)
+                    .unwrap_or_else(|| "peer".to_string());
+                self.insert_file_transfer(FileTransferRecord {
+                    view: FileTransferView {
+                        id: transfer_id,
+                        direction: "incoming".to_string(),
+                        peer_npub: sender_npub,
+                        peer_name,
+                        name: file_transfer::safe_filename(&filename, "shared-file"),
+                        mime,
+                        size,
+                        status: "waiting_user".to_string(),
+                        blob_hash: String::new(),
+                        received_path: String::new(),
+                        publish_pending: false,
+                        error: String::new(),
+                        updated_at: file_transfer::now_secs(),
+                    },
+                    source_path: None,
+                    key_b64: None,
+                    expires_at,
+                });
+            }
+            FileMessage::Response {
+                transfer_id,
+                recipient_npub,
+                accepted,
+                reason,
+                ..
+            } if recipient_npub == own_npub => {
+                if !self.has_file_transfer(&transfer_id, "outgoing", &sender_npub) {
+                    return;
+                }
+                if !accepted {
+                    self.set_file_status(
+                        &transfer_id,
+                        "denied",
+                        reason.as_deref().unwrap_or("declined by recipient"),
+                    );
+                    self.forget_file_transfer(&transfer_id);
+                    return;
+                }
+                self.set_file_status(&transfer_id, "accepted", "");
+                let content = Arc::clone(self);
+                tokio::spawn(async move {
+                    if let Err(e) = content.finish_outgoing_transfer(&transfer_id).await {
+                        content.set_file_status(&transfer_id, "failed", &e.to_string());
+                        content.forget_file_transfer(&transfer_id);
+                    }
+                });
+            }
+            FileMessage::Ready {
+                transfer_id,
+                recipient_npub,
+                filename,
+                mime,
+                size,
+                blob_hash,
+                key_wrap,
+                ..
+            } if recipient_npub == own_npub => {
+                if !self.has_file_transfer(&transfer_id, "incoming", &sender_npub) {
+                    return;
+                }
+                let sender = match PublicKey::from_bech32(&sender_npub) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                let key = match file_transfer::unwrap_key(&keys, &sender, &key_wrap) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.set_file_status(
+                            &transfer_id,
+                            "failed",
+                            &format!("key unwrap failed: {e}"),
+                        );
+                        self.forget_file_transfer(&transfer_id);
+                        return;
+                    }
+                };
+                self.update_file_transfer(&transfer_id, |r| {
+                    r.view.status = "downloading".to_string();
+                    r.view.blob_hash = blob_hash.clone();
+                    r.view.name = file_transfer::safe_filename(&filename, "shared-file");
+                    r.view.mime = mime.clone();
+                    r.view.size = size;
+                    r.view.updated_at = file_transfer::now_secs();
+                    r.key_b64 = Some(file_transfer::encode_key(&key));
+                });
+                let content = Arc::clone(self);
+                tokio::spawn(async move {
+                    if let Err(e) = content
+                        .finish_incoming_transfer(&transfer_id, &sender_npub)
+                        .await
+                    {
+                        content.set_file_status(&transfer_id, "failed", &e.to_string());
+                        content.forget_file_transfer(&transfer_id);
+                    }
+                });
+            }
+            FileMessage::Complete {
+                transfer_id,
+                recipient_npub,
+                ..
+            } if recipient_npub == own_npub => {
+                if self.has_file_transfer(&transfer_id, "outgoing", &sender_npub) {
+                    self.set_file_status(&transfer_id, "completed", "");
+                    self.forget_file_transfer(&transfer_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn finish_outgoing_transfer(&self, transfer_id: &str) -> anyhow::Result<()> {
+        let (target_npub, source_path, key_b64, filename, mime, size) = {
+            let records = self.file_transfers.lock().unwrap();
+            let r = records
+                .iter()
+                .find(|r| r.view.id == transfer_id && r.view.direction == "outgoing")
+                .ok_or_else(|| anyhow::anyhow!("outgoing transfer disappeared"))?;
+            (
+                r.view.peer_npub.clone(),
+                r.source_path
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("outbox path missing"))?,
+                r.key_b64
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("file key missing"))?,
+                r.view.name.clone(),
+                r.view.mime.clone(),
+                r.view.size,
+            )
+        };
+        let package = tokio::fs::read(&source_path).await?;
+        let blob_hash = self.blobs.put(&package).await?;
+        let key = file_transfer::decode_key(&key_b64)?;
+        let keys = self
+            .device_keys
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+        let target = PublicKey::from_bech32(&target_npub)?;
+        let key_wrap = file_transfer::wrap_key(&keys, &target, &key)?;
+        let sender_npub = keys.public_key().to_bech32()?;
+        let message = FileMessage::Ready {
+            transfer_id: transfer_id.to_string(),
+            sender_npub,
+            recipient_npub: target_npub.clone(),
+            filename,
+            mime,
+            size,
+            blob_hash: blob_hash.clone(),
+            ciphertext_size: package.len() as u64,
+            key_wrap,
+        };
+        self.send_file_message(&target, &target_npub, message)
+            .await?;
+        self.update_file_transfer(transfer_id, |r| {
+            r.view.status = "ready".to_string();
+            r.view.blob_hash = blob_hash.clone();
+            r.view.updated_at = file_transfer::now_secs();
+        });
+        Ok(())
+    }
+
+    async fn finish_incoming_transfer(
+        &self,
+        transfer_id: &str,
+        sender_npub: &str,
+    ) -> anyhow::Result<()> {
+        let (filename, blob_hash, key_b64, own_npub) = {
+            let records = self.file_transfers.lock().unwrap();
+            let r = records
+                .iter()
+                .find(|r| r.view.id == transfer_id && r.view.direction == "incoming")
+                .ok_or_else(|| anyhow::anyhow!("incoming transfer disappeared"))?;
+            let keys = self
+                .device_keys
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+            (
+                r.view.name.clone(),
+                r.view.blob_hash.clone(),
+                r.key_b64
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("file key missing"))?,
+                keys.public_key().to_bech32()?,
+            )
+        };
+        crate::dns_intercept::warm_route(sender_npub);
+        let base = crate::ip_source::mesh_blossom_url(sender_npub);
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(120))
+            .build()?;
+        let response = client.get(format!("{base}/{blob_hash}")).send().await?;
+        if !response.status().is_success() {
+            anyhow::bail!("peer Blossom returned {}", response.status());
+        }
+        let package = response.bytes().await?.to_vec();
+        if file_transfer::sha256_hex(&package) != blob_hash {
+            anyhow::bail!("downloaded encrypted blob hash mismatch");
+        }
+        let key = file_transfer::decode_key(&key_b64)?;
+        let plain = file_transfer::decrypt_file(&package, &key, transfer_id, &own_npub, &filename)?;
+        let destination = self
+            .received_dir
+            .join(format!("{transfer_id}-{}", filename));
+        tokio::fs::write(&destination, &plain).await?;
+        self.update_file_transfer(transfer_id, |r| {
+            r.view.status = "completed".to_string();
+            r.view.received_path = destination.to_string_lossy().into_owned();
+            r.view.publish_pending = true;
+            r.view.updated_at = file_transfer::now_secs();
+            r.key_b64 = None;
+        });
+        let keys = self
+            .device_keys
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+        let target = PublicKey::from_bech32(sender_npub)?;
+        let message = FileMessage::Complete {
+            transfer_id: transfer_id.to_string(),
+            sender_npub: own_npub,
+            recipient_npub: sender_npub.to_string(),
+        };
+        if let Err(e) = self.send_file_message(&target, sender_npub, message).await {
+            // The receiver's local copy is already complete. A failed sender
+            // acknowledgement must not turn this back into a failed transfer
+            // or prevent Android from publishing it to Downloads.
+            tracing::warn!(transfer = %transfer_id, error = %e, "file share: completion acknowledgement failed");
+        }
+        let _ = keys;
+        Ok(())
+    }
+
+    async fn send_file_message(
+        &self,
+        target: &PublicKey,
+        target_npub: &str,
+        message: FileMessage,
+    ) -> anyhow::Result<()> {
+        let keys = self
+            .device_keys
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+        let content = serde_json::to_string(&message)?;
+        let event = EventBuilder::private_msg(&keys, *target, content, std::iter::empty()).await?;
+        let event_json = serde_json::to_value(event)?;
+        // TTL 0 means store and handle at the addressed Circle relay, without
+        // flooding a private file-control message to every Circle member.
+        let frame = crate::mesh_wire::wrap(
+            &crate::mesh_wire::MeshMeta::push(0),
+            serde_json::json!(["EVENT", event_json]),
+        );
+        self.gossip_to_peer(target_npub, frame);
+        Ok(())
+    }
+
+    fn insert_file_transfer(&self, record: FileTransferRecord) {
+        let snapshot = {
+            let mut records = self.file_transfers.lock().unwrap();
+            records.retain(|r| r.view.id != record.view.id);
+            records.push(record);
+            records.clone()
+        };
+        save_file_transfers(&self.file_transfers_path, &snapshot);
+    }
+
+    fn update_file_transfer<F>(&self, transfer_id: &str, update: F)
+    where
+        F: FnOnce(&mut FileTransferRecord),
+    {
+        let snapshot = {
+            let mut records = self.file_transfers.lock().unwrap();
+            let Some(record) = records.iter_mut().find(|r| r.view.id == transfer_id) else {
+                return;
+            };
+            update(record);
+            records.clone()
+        };
+        save_file_transfers(&self.file_transfers_path, &snapshot);
+    }
+
+    fn set_file_status(&self, transfer_id: &str, status: &str, error: &str) {
+        self.update_file_transfer(transfer_id, |r| {
+            r.view.status = status.to_string();
+            r.view.error = error.to_string();
+            r.view.updated_at = file_transfer::now_secs();
+        });
+    }
+
+    /// Remove a terminal transfer from the persisted transfer list and clean
+    /// its app-private ciphertext/plaintext staging file. A completed receive
+    /// calls this only after Android has copied the file into MediaStore, so a
+    /// repeated send is always a fresh offer/blob rather than a replay.
+    pub fn forget_file_transfer(&self, transfer_id: &str) {
+        let (snapshot, cleanup_paths) = {
+            let mut records = self.file_transfers.lock().unwrap();
+            let Some(index) = records.iter().position(|r| r.view.id == transfer_id) else {
+                return;
+            };
+            let record = &records[index];
+            if !matches!(
+                record.view.status.as_str(),
+                "completed" | "denied" | "failed"
+            ) {
+                return;
+            }
+            let record = records.remove(index);
+            let mut paths = Vec::new();
+            if let Some(path) = record.source_path.as_deref() {
+                if let Some(path) = self.transfer_cleanup_path(path) {
+                    paths.push(path);
+                }
+            }
+            if !record.view.received_path.is_empty() {
+                if let Some(path) = self.transfer_cleanup_path(&record.view.received_path) {
+                    paths.push(path);
+                }
+            }
+            (records.clone(), paths)
+        };
+        save_file_transfers(&self.file_transfers_path, &snapshot);
+        for path in cleanup_paths {
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!(path = %path.display(), %error, "file share: staging cleanup failed");
+                }
+            }
+        }
+    }
+
+    fn transfer_cleanup_path(&self, path: &str) -> Option<PathBuf> {
+        let path = PathBuf::from(path);
+        (path.starts_with(&self.file_outbox_dir) || path.starts_with(&self.received_dir))
+            .then_some(path)
+    }
+
+    fn has_file_transfer(&self, transfer_id: &str, direction: &str, peer_npub: &str) -> bool {
+        self.file_transfers.lock().unwrap().iter().any(|r| {
+            r.view.id == transfer_id
+                && r.view.direction == direction
+                && r.view.peer_npub == peer_npub
+        })
+    }
 
     /// Queue a pre-built relay frame (`["EVENT", {…}]`) to a peer's relay over a
     /// persistent pooled connection (no per-message connect). `npub` is the target
@@ -2602,6 +3180,20 @@ fn load_outbound_pairs(path: &Path) -> Vec<OutboundPairView> {
 }
 
 fn save_outbound_pairs(path: &Path, items: &[OutboundPairView]) {
+    if let Ok(json) = serde_json::to_vec(items) {
+        let tmp = path.with_extension("json.tmp");
+        let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
+    }
+}
+
+fn load_file_transfers(path: &Path) -> Vec<FileTransferRecord> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_file_transfers(path: &Path, items: &[FileTransferRecord]) {
     if let Ok(json) = serde_json::to_vec(items) {
         let tmp = path.with_extension("json.tmp");
         let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));

@@ -2,8 +2,10 @@ package app.myco
 
 import android.Manifest
 import android.content.ComponentName
+import android.content.ContentValues
 import android.content.Intent
 import android.provider.Settings
+import android.provider.MediaStore
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
@@ -50,6 +52,7 @@ import app.myco.ble.BleService
 import app.myco.BuildConfig
 import app.myco.core.AppCoreClient
 import app.myco.core.CircleContact
+import app.myco.core.FileTransfer
 import app.myco.core.MycoCore
 import app.myco.core.NativeActions
 import app.myco.nfc.NfcReader
@@ -70,6 +73,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.util.UUID
+
+private data class ReceivedFilePresentation(
+    val transfer: FileTransfer,
+    val uri: Uri,
+)
 
 /**
  * Developer-UI entry point: device identity, node status, BLE diagnostics, and
@@ -82,6 +92,7 @@ class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("myco_prefs", MODE_PRIVATE) }
     private val nfcAdapter by lazy { NfcAdapter.getDefaultAdapter(this) }
     private val externalShareUris = mutableStateOf<List<Uri>>(emptyList())
+    private val receivedFilePresentation = mutableStateOf<ReceivedFilePresentation?>(null)
 
     /** Hosts with a live [watchPendingLink] coroutine, so resumes don't stack them. */
     private val pendingWatchers = mutableSetOf<String>()
@@ -202,6 +213,13 @@ class MainActivity : ComponentActivity() {
                             externalShareUris = externalShareUris.value,
                             onExternalShareDismissed = { externalShareUris.value = emptyList() },
                             onShareToPeer = { uris, peer -> preparePeerShare(uris, peer) },
+                            onFileReceived = { transfer -> publishReceivedFile(transfer) },
+                            receivedFile = receivedFilePresentation.value?.transfer,
+                            receivedFileUri = receivedFilePresentation.value?.uri,
+                            onDismissReceivedFile = { receivedFilePresentation.value = null },
+                            onOpenReceivedFile = { transfer, uri ->
+                                openReceivedFile(ReceivedFilePresentation(transfer, uri))
+                            },
                         )
                     }
 
@@ -412,19 +430,105 @@ class MainActivity : ComponentActivity() {
         externalShareUris.value = uris
     }
 
-    /**
-     * UX seam for the next transport slice. The current Myco branch has a
-     * hotspot browser transfer, but not yet a native arbitrary-file protocol
-     * over the paired FIPS peer relay, so do not claim that bytes were sent.
-     */
     private fun preparePeerShare(uris: List<Uri>, peer: CircleContact) {
-        val name = peer.name.ifBlank { "this peer" }
-        val count = if (uris.size == 1) "photo" else "${uris.size} photos"
-        Toast.makeText(
-            this,
-            "Ready to share $count with $name — native peer transfer is the next step",
-            Toast.LENGTH_LONG,
-        ).show()
+        if (uris.isEmpty()) return
+        val peerName = peer.name.ifBlank { "this peer" }
+        lifecycleScope.launch(Dispatchers.IO) {
+            val outbox = File(filesDir, "myco-share-outbox").apply { mkdirs() }
+            var sent = 0
+            var failure: String? = null
+            for (uri in uris) {
+                try {
+                    val item = ExternalShare.describe(this@MainActivity, uri)
+                    val safe = item.name.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    val local = File(outbox, "${UUID.randomUUID()}-$safe")
+                    val input = contentResolver.openInputStream(uri)
+                        ?: error("could not open ${item.name}")
+                    input.use { source ->
+                        local.outputStream().use { destination -> source.copyTo(destination) }
+                    }
+                    core.dispatch(NativeActions.shareFile(local.path, item.name, item.mimeType, peer.npub))
+                    sent += 1
+                } catch (t: Throwable) {
+                    failure = t.message ?: "could not prepare the file"
+                    break
+                }
+            }
+            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                if (sent > 0) {
+                    val noun = if (sent == 1) "file offer" else "$sent file offers"
+                    Toast.makeText(this@MainActivity, "$noun sent to $peerName", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this@MainActivity, failure ?: "Could not share the file", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    /** Move a decrypted native receive into Downloads and retain its URI for the preview. */
+    private fun publishReceivedFile(transfer: FileTransfer) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            var destination: Uri? = null
+            try {
+                val source = File(transfer.receivedPath)
+                check(source.isFile) { "received file is missing" }
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, "Myco-${transfer.name}")
+                    put(MediaStore.MediaColumns.MIME_TYPE, transfer.mime.ifBlank { "application/octet-stream" })
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/Myco")
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                destination = contentResolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    values,
+                ) ?: error("could not create a Downloads entry")
+                contentResolver.openOutputStream(destination!!).use { output ->
+                    checkNotNull(output) { "could not open the Downloads entry" }
+                    source.inputStream().use { input -> input.copyTo(output!!) }
+                }
+                contentResolver.update(
+                    destination!!,
+                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                    null,
+                    null,
+                )
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    receivedFilePresentation.value = ReceivedFilePresentation(transfer, destination!!)
+                    // The public MediaStore copy is now durable. Tell Rust to
+                    // forget the terminal transfer and delete its private
+                    // decrypted staging file; a later identical send gets a
+                    // new offer/blob and Android will choose the next name.
+                    core.dispatch(NativeActions.forgetFileTransfer(transfer.id))
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Received ${transfer.name}; saved in Downloads/Myco",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            } catch (t: Throwable) {
+                destination?.let { contentResolver.delete(it, null, null) }
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Received file but could not save it: ${t.message ?: "unknown error"}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun openReceivedFile(file: ReceivedFilePresentation) {
+        val mime = file.transfer.mime.ifBlank { "application/octet-stream" }
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(file.uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching {
+            startActivity(Intent.createChooser(intent, "Open with"))
+        }.onFailure {
+            Toast.makeText(this, "No app can open ${file.transfer.name}", Toast.LENGTH_LONG).show()
+        }
     }
 
     // --- NFC tap-to-pair (numo-style: we are the card; the other phone reads) ---
