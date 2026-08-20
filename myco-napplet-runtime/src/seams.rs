@@ -69,21 +69,107 @@ pub trait OutboxResolver: Send + Sync {
 /// One message across the shell ↔ Rust channel: a capability call, its result,
 /// or a pushed subscription event.
 ///
-/// `domain.action` is the NAP addressing scheme (`relay.publish`,
-/// `shell.supports`). `id` correlates a result with its call and is absent on
-/// unsolicited pushes.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// The wire format is NIP-5D's, and it is **flat** — the payload's fields sit
+/// beside `type` and `id`, not nested under a `payload` key:
+///
+/// ```text
+/// -> { "type": "relay.publish", "id": "a1", "event": { … } }
+/// <- { "type": "relay.publish.result", "id": "a1", "ok": true }
+/// ```
+///
+/// `type` is `domain.action` — the NAP addressing scheme, where the domain
+/// (`relay`, `shell`, `identity`) names the capability and surfaces to the
+/// napplet as `window.napplet.<domain>`. A result echoes the request's `type`
+/// with `.result` appended.
+///
+/// `id` correlates a result with its call. It is absent on unsolicited pushes,
+/// and absent on both handshake messages, which occur exactly once per napplet
+/// and so have nothing to correlate.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Envelope {
-    /// Correlation id, echoed on the response. `None` for pushes.
+    /// `domain.action`, or `domain.action.result` for a result.
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    /// Correlation id, echoed on the result. `None` for pushes and handshakes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// The NAP capability domain (`shell`, `relay`, `identity`).
-    pub domain: String,
-    /// The action within the domain.
-    pub action: String,
-    /// The action's payload, shaped by its NAP.
-    #[serde(default)]
-    pub payload: serde_json::Value,
+    /// Every other top-level field. Flattened, because the payload *is* the
+    /// top level on this wire — nesting it under a key would be a different
+    /// protocol that no conformant napplet speaks.
+    #[serde(flatten)]
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Envelope {
+    /// A message with no payload fields.
+    pub fn new(msg_type: impl Into<String>) -> Self {
+        Self {
+            msg_type: msg_type.into(),
+            id: None,
+            fields: serde_json::Map::new(),
+        }
+    }
+
+    /// Set the correlation id.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    /// Add one top-level field.
+    pub fn with_field(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.fields.insert(key.into(), value.into());
+        self
+    }
+
+    /// The capability domain — everything before the first `.`.
+    pub fn domain(&self) -> &str {
+        self.msg_type.split('.').next().unwrap_or("")
+    }
+
+    /// The action within the domain: the segment after the domain, with any
+    /// trailing `.result` removed.
+    pub fn action(&self) -> &str {
+        let rest = match self.msg_type.split_once('.') {
+            Some((_, rest)) => rest,
+            None => return "",
+        };
+        rest.strip_suffix(".result").unwrap_or(rest)
+    }
+
+    /// Whether this is a result rather than a call.
+    pub fn is_result(&self) -> bool {
+        self.msg_type.ends_with(".result")
+    }
+
+    /// The result envelope for this call: the same `type` with `.result`
+    /// appended, the same `id`, and `ok` set.
+    ///
+    /// Calling this on a message that is already a result would produce
+    /// `x.result.result`, so it returns the message unchanged instead.
+    pub fn to_result(&self, ok: bool) -> Self {
+        let msg_type = if self.is_result() {
+            self.msg_type.clone()
+        } else {
+            format!("{}.result", self.msg_type)
+        };
+        Self {
+            msg_type,
+            id: self.id.clone(),
+            fields: [("ok".to_string(), serde_json::Value::Bool(ok))]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// Read one top-level field.
+    pub fn field(&self, key: &str) -> Option<&serde_json::Value> {
+        self.fields.get(key)
+    }
 }
 
 /// The shell ↔ Rust channel.
@@ -101,4 +187,89 @@ pub trait NapTransport: Send + Sync {
 
     /// Send an envelope to the shell.
     async fn send(&self, envelope: Envelope) -> anyhow::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The examples are copied from NAP-SHELL and the NIP-5D web projection. A
+    /// napplet is built against those bytes, so this pins the shape rather than
+    /// merely round-tripping our own struct through itself.
+    #[test]
+    fn the_wire_format_is_flat() {
+        let call: Envelope = serde_json::from_value(
+            json!({"type": "relay.publish", "id": "a1", "event": {"kind": 1}}),
+        )
+        .unwrap();
+        assert_eq!(call.msg_type, "relay.publish");
+        assert_eq!(call.id.as_deref(), Some("a1"));
+        assert_eq!(call.domain(), "relay");
+        assert_eq!(call.action(), "publish");
+        assert!(!call.is_result());
+        // The payload sits at the top level, not under a `payload` key.
+        assert_eq!(call.field("event").unwrap()["kind"], 1);
+
+        assert_eq!(
+            serde_json::to_value(&call).unwrap(),
+            json!({"type": "relay.publish", "id": "a1", "event": {"kind": 1}})
+        );
+    }
+
+    #[test]
+    fn a_result_echoes_the_type_and_id() {
+        let call = Envelope::new("relay.publish").with_id("a1");
+        assert_eq!(
+            serde_json::to_value(call.to_result(true)).unwrap(),
+            json!({"type": "relay.publish.result", "id": "a1", "ok": true})
+        );
+    }
+
+    /// `.result` is appended once. Deriving a result from a result would
+    /// produce `relay.publish.result.result`, which nothing answers to.
+    #[test]
+    fn results_do_not_stack() {
+        let result = Envelope::new("relay.publish").with_id("a1").to_result(true);
+        assert_eq!(result.to_result(false).msg_type, "relay.publish.result");
+        assert_eq!(result.domain(), "relay");
+        assert_eq!(result.action(), "publish");
+    }
+
+    /// Both handshake messages occur exactly once per napplet lifecycle, so
+    /// neither carries a correlation id — and `id` must not appear in the JSON
+    /// at all rather than appear as null.
+    #[test]
+    fn the_handshake_carries_no_id() {
+        let ready: Envelope = serde_json::from_value(json!({"type": "shell.ready"})).unwrap();
+        assert_eq!(ready.id, None);
+        assert_eq!(ready.domain(), "shell");
+        assert_eq!(ready.action(), "ready");
+        assert!(ready.fields.is_empty(), "shell.ready carries no payload");
+        assert_eq!(
+            serde_json::to_value(&ready).unwrap(),
+            json!({"type": "shell.ready"})
+        );
+
+        let init = Envelope::new("shell.init")
+            .with_field("capabilities", json!({"domains": ["relay", "identity"]}))
+            .with_field("services", json!([]));
+        assert_eq!(
+            serde_json::to_value(&init).unwrap(),
+            json!({
+                "type": "shell.init",
+                "capabilities": {"domains": ["relay", "identity"]},
+                "services": []
+            })
+        );
+    }
+
+    #[test]
+    fn a_malformed_type_does_not_panic() {
+        for msg_type in ["", "shell", "...", ".result"] {
+            let envelope = Envelope::new(msg_type);
+            let _ = envelope.domain();
+            let _ = envelope.action();
+        }
+    }
 }

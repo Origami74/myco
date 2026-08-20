@@ -43,7 +43,7 @@ pub mod seams;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use artifact::{assemble, CspPolicy, Injection};
+pub use artifact::{assemble, CspPolicy, Injection, SrcdocArtifact};
 pub use error::{NappletError, NappletErrorCode, Result};
 pub use host::{is_shell_host, shell_host, shell_label, shell_origin, SHELL_SUFFIX};
 pub use manifest::{
