@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use nostr::nips::nip19::FromBech32;
 use nostr::PublicKey;
-use nsite_deck::seams::{newest_in_slot, BlobStore, RelayBackend};
+use nsite_deck::seams::{newest_in_slot, BlobStore, PeerSource, RelayBackend};
 
 use myco_napplet_runtime::artifact::{assemble, Injection, SrcdocArtifact};
 use myco_napplet_runtime::dispatch::dispatch;
@@ -207,31 +207,27 @@ impl NappletHost {
     /// Fetch a napplet from somewhere else, verify it, and store it locally.
     ///
     /// This is D9's acquisition path: online once when added by `naddr`, local
-    /// and mesh-replicable from then on. `source_relay` and `source_blobs` are
-    /// whatever can reach it — an internet relay and Blossom server, or a mesh
-    /// peer's; nothing here knows which, and neither is trusted.
-    ///
-    /// Verification happens against the fetched bytes **before** anything is
-    /// written, so a napplet that fails a check leaves no partial state behind
-    /// to be picked up by a later open.
+    /// and mesh-replicable from then on. `source` is whatever can reach it — a
+    /// public-relay source or a mesh peer's — and it is **not trusted**: every
+    /// byte it returns is hashed and the signature and aggregate checked before
+    /// any of it is kept.
     pub async fn ingest(
         &self,
         addr: &NappletAddr,
-        source_relay: &dyn RelayBackend,
-        source_blobs: &dyn BlobStore,
+        source: &dyn PeerSource,
     ) -> anyhow::Result<IngestedNapplet> {
-        let event = newest_in_slot(
-            source_relay,
-            addr.kind(),
-            &addr.author,
-            addr.d_tag.as_deref(),
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("no napplet manifest at that address"))?;
+        let event = source
+            .fetch_manifest(&addr.author, addr.d_tag.as_deref())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no napplet manifest at that address"))?;
 
-        // Resolves against the *source* store, so every byte is hashed and the
-        // signature and aggregate checked before any of it is kept.
-        let resolved = resolve(event.clone(), source_blobs)
+        // Resolving against a view onto the *source* means the bytes are
+        // verified where they arrive, before anything is written here.
+        let view = SourceBlobs {
+            source,
+            servers: servers_from(&event),
+        };
+        let resolved = resolve(event.clone(), &view)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -242,7 +238,7 @@ impl NappletHost {
             .manifest
             .index_entry()
             .ok_or_else(|| anyhow::anyhow!("verified napplet has no index entry"))?;
-        let bytes = source_blobs
+        let bytes = view
             .get(&index.sha256)
             .await?
             .ok_or_else(|| anyhow::anyhow!("source served no bytes for {}", index.sha256))?;
@@ -256,6 +252,47 @@ impl NappletHost {
             d_tag: resolved.d_tag.clone(),
             aggregate: resolved.aggregate.clone(),
         })
+    }
+}
+
+/// The manifest's `["server", …]` Blossom hints.
+fn servers_from(event: &nostr::Event) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let s = t.as_slice();
+            (s.first().map(String::as_str) == Some("server")).then(|| s.get(1).cloned())?
+        })
+        .collect()
+}
+
+/// A read-only [`BlobStore`] view onto a [`PeerSource`], so [`resolve`] can
+/// verify bytes where they arrive rather than after they are stored.
+///
+/// Writes are refused rather than silently dropped: nothing should be trying to
+/// write into a remote source, and a no-op `put` would hide the mistake.
+struct SourceBlobs<'a> {
+    source: &'a dyn PeerSource,
+    servers: Vec<String>,
+}
+
+#[async_trait::async_trait]
+impl BlobStore for SourceBlobs<'_> {
+    async fn has(&self, sha256_hex: &str) -> bool {
+        matches!(self.get(sha256_hex).await, Ok(Some(_)))
+    }
+
+    async fn get(&self, sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        self.source.fetch_blob(sha256_hex, &self.servers).await
+    }
+
+    async fn put(&self, _bytes: &[u8]) -> anyhow::Result<String> {
+        anyhow::bail!("a remote napplet source is read-only")
+    }
+
+    async fn wipe(&self) -> anyhow::Result<()> {
+        anyhow::bail!("a remote napplet source is read-only")
     }
 }
 
@@ -297,6 +334,33 @@ mod tests {
     use myco_napplet_runtime::testing::NappletBuilder;
     use nostr::nips::nip19::ToBech32;
     use nsite_deck::testing::{MemBlobs, MemRelay};
+
+    /// A [`PeerSource`] over in-memory stores — "somewhere else", with no
+    /// network. Mirrors what `IpPeerSource` does over public relays.
+    struct FakeSource {
+        relay: MemRelay,
+        blobs: MemBlobs,
+        kind: u16,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerSource for FakeSource {
+        async fn fetch_manifest(
+            &self,
+            author: &PublicKey,
+            d_tag: Option<&str>,
+        ) -> anyhow::Result<Option<nostr::Event>> {
+            newest_in_slot(&self.relay, self.kind, author, d_tag).await
+        }
+
+        async fn fetch_blob(
+            &self,
+            sha256_hex: &str,
+            _servers: &[String],
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            self.blobs.get(sha256_hex).await
+        }
+    }
 
     async fn host_with_fixture() -> (NappletHost, NappletAddr) {
         let napplet = NappletBuilder::new().build();
@@ -432,12 +496,16 @@ mod tests {
             .build();
 
         // Somewhere else entirely.
-        let source_relay = MemRelay::new();
-        let source_blobs = MemBlobs::new();
+        let source = FakeSource {
+            relay: MemRelay::new(),
+            blobs: MemBlobs::new(),
+            kind: KIND_NAMED,
+        };
         for (_, bytes) in &napplet.blobs {
-            source_blobs.put(bytes).await.unwrap();
+            source.blobs.put(bytes).await.unwrap();
         }
-        source_relay
+        source
+            .relay
             .publish(napplet.manifest.clone())
             .await
             .unwrap();
@@ -449,10 +517,7 @@ mod tests {
             d_tag: Some("fixture".to_string()),
         };
 
-        let ingested = host
-            .ingest(&addr, &source_relay, &source_blobs)
-            .await
-            .unwrap();
+        let ingested = host.ingest(&addr, &source).await.unwrap();
         // What install review has to put in front of the user.
         assert_eq!(ingested.requires, vec!["relay", "identity"]);
         assert_eq!(ingested.title.as_deref(), Some("Fixture Napplet"));
@@ -467,12 +532,16 @@ mod tests {
     #[tokio::test]
     async fn a_failed_ingest_stores_nothing() {
         let napplet = NappletBuilder::new().break_signature().build();
-        let source_relay = MemRelay::new();
-        let source_blobs = MemBlobs::new();
+        let source = FakeSource {
+            relay: MemRelay::new(),
+            blobs: MemBlobs::new(),
+            kind: KIND_NAMED,
+        };
         for (_, bytes) in &napplet.blobs {
-            source_blobs.put(bytes).await.unwrap();
+            source.blobs.put(bytes).await.unwrap();
         }
-        source_relay
+        source
+            .relay
             .publish(napplet.manifest.clone())
             .await
             .unwrap();
@@ -485,10 +554,7 @@ mod tests {
             d_tag: Some("fixture".to_string()),
         };
 
-        assert!(host
-            .ingest(&addr, &source_relay, &source_blobs)
-            .await
-            .is_err());
+        assert!(host.ingest(&addr, &source).await.is_err());
         assert!(
             local_relay.is_empty(),
             "a rejected napplet left a manifest behind"
@@ -532,5 +598,28 @@ mod tests {
         let naddr = coordinate.to_bech32().unwrap();
         let err = NappletAddr::parse(&naddr).unwrap_err();
         assert!(err.to_string().contains("35128"), "unexpected error: {err}");
+    }
+}
+
+#[cfg(test)]
+mod real_naddr {
+    use super::*;
+
+    /// A real napplet `naddr` from the ecosystem, relay hints and all.
+    ///
+    /// Hand-built pointers prove the parser agrees with itself; this one proves
+    /// it agrees with what napplet tooling actually emits — including the relay
+    /// TLVs, which a naive decoder trips over.
+    #[test]
+    fn decodes_a_real_napplet_naddr() {
+        let naddr = "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyxhwumn8ghj7mn0wvhxcmmvqy2hwumn8ghj7un9d3shjtnyd968gmewwp6kyqqgv35kuemydahxwmmmsd2";
+        let addr = NappletAddr::parse(naddr).expect("a real napplet naddr must parse");
+
+        assert_eq!(
+            addr.author.to_hex(),
+            "bbb5dda0e15567979f0543407bdc2033d6f0bbb30f72512a981cfdb2f09e2747"
+        );
+        assert_eq!(addr.d_tag.as_deref(), Some("dingdong"));
+        assert_eq!(addr.kind(), KIND_NAMED);
     }
 }
