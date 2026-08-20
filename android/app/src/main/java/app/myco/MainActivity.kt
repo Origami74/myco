@@ -2,8 +2,11 @@ package app.myco
 
 import android.Manifest
 import android.content.ComponentName
+import android.content.ContentValues
 import android.content.Intent
 import android.provider.Settings
+import android.provider.MediaStore
+import android.webkit.MimeTypeMap
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
@@ -13,6 +16,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.drawable.Icon
+import android.net.Uri
 import android.net.VpnService
 import android.nfc.NfcAdapter
 import android.nfc.Tag
@@ -48,11 +52,15 @@ import app.myco.ble.BleRadio
 import app.myco.ble.BleService
 import app.myco.BuildConfig
 import app.myco.core.AppCoreClient
+import app.myco.core.CircleContact
+import app.myco.core.FileTransfer
 import app.myco.core.MycoCore
 import app.myco.core.NativeActions
 import app.myco.nfc.NfcReader
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
+import app.myco.share.ExternalShare
+import app.myco.share.FileOfferNotifier
 import app.myco.share.MycoLink
 import app.myco.share.NsiteShare
 import app.myco.share.PendingDeepLinks
@@ -67,6 +75,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.util.UUID
+
+private data class ReceivedFilePresentation(
+    val transfer: FileTransfer,
+    val uri: Uri,
+)
 
 /**
  * Developer-UI entry point: device identity, node status, BLE diagnostics, and
@@ -78,6 +93,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var core: AppCoreClient
     private val prefs by lazy { getSharedPreferences("myco_prefs", MODE_PRIVATE) }
     private val nfcAdapter by lazy { NfcAdapter.getDefaultAdapter(this) }
+    private val externalShareUris = mutableStateOf<List<Uri>>(emptyList())
+    private val receivedFilePresentation = mutableStateOf<ReceivedFilePresentation?>(null)
 
     /** Hosts with a live [watchPendingLink] coroutine, so resumes don't stack them. */
     private val pendingWatchers = mutableSetOf<String>()
@@ -122,6 +139,9 @@ class MainActivity : ComponentActivity() {
         // system icons legible when the AMOLED scheme is active.
         enableEdgeToEdge()
         core = MycoCore.client(this)
+        // Watches for file offers only while nothing is on screen; idempotent.
+        FileOfferNotifier.install(this)
+        captureExternalShare(intent)
         // Restore the mesh-only (no IP fallback) preference into the core.
         core.dispatch(NativeActions.setOfflineOnly(prefs.getBoolean(PREF_OFFLINE_ONLY, false)))
         // (Device name is asserted in onResume, which also covers identity not yet
@@ -193,6 +213,16 @@ class MainActivity : ComponentActivity() {
                             onExitProxyChange = { spec -> setExitProxy(spec) },
                             onReplayIntro = {
                                 prefs.edit().putBoolean(PREF_INTRO_SEEN, false).apply()
+                            },
+                            externalShareUris = externalShareUris.value,
+                            onExternalShareDismissed = { externalShareUris.value = emptyList() },
+                            onShareToPeer = { uris, peer -> preparePeerShare(uris, peer) },
+                            onFileReceived = { transfer -> publishReceivedFile(transfer) },
+                            receivedFile = receivedFilePresentation.value?.transfer,
+                            receivedFileUri = receivedFilePresentation.value?.uri,
+                            onDismissReceivedFile = { receivedFilePresentation.value = null },
+                            onOpenReceivedFile = { transfer, uri ->
+                                openReceivedFile(ReceivedFilePresentation(transfer, uri))
                             },
                         )
                     }
@@ -392,7 +422,138 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        captureExternalShare(intent)
         handleDeepLink(intent)
+    }
+
+    /** Receive a photo from another app's Sharesheet without copying it yet. */
+    private fun captureExternalShare(intent: Intent?) {
+        val uris = ExternalShare.uris(intent)
+        if (uris.isEmpty()) return
+        ExternalShare.retainReadAccess(this, intent, uris)
+        externalShareUris.value = uris
+    }
+
+    private fun preparePeerShare(uris: List<Uri>, peer: CircleContact) {
+        if (uris.isEmpty()) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val outbox = File(filesDir, "myco-share-outbox").apply { mkdirs() }
+            var sent = 0
+            var failure: String? = null
+            for (uri in uris) {
+                try {
+                    val item = ExternalShare.describe(this@MainActivity, uri)
+                    val safe = item.name.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    val local = File(outbox, "${UUID.randomUUID()}-$safe")
+                    val input = contentResolver.openInputStream(uri)
+                        ?: error("could not open ${item.name}")
+                    input.use { source ->
+                        local.outputStream().use { destination -> source.copyTo(destination) }
+                    }
+                    core.dispatch(NativeActions.shareFile(local.path, item.name, item.mimeType, peer.npub))
+                    sent += 1
+                } catch (t: Throwable) {
+                    failure = t.message ?: "could not prepare the file"
+                    break
+                }
+            }
+            // Only a local failure is worth a toast. Whether the offer actually
+            // reached the peer is not known yet — the dispatch only queues the
+            // work — so claiming success here told the user a send had happened
+            // even when the frame was dropped. The share sheet and the Circle
+            // tab report the real outcome from the transfer's own status.
+            if (sent == 0) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        failure ?: "Could not share the file",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+    }
+
+    /** Move a decrypted native receive into Downloads and retain its URI for the preview. */
+    private fun publishReceivedFile(transfer: FileTransfer) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            var destination: Uri? = null
+            try {
+                val source = File(transfer.receivedPath)
+                check(source.isFile) { "received file is missing" }
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, "Myco-${transfer.name}")
+                    put(MediaStore.MediaColumns.MIME_TYPE, resolvedMime(transfer.name))
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/Myco")
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                destination = contentResolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    values,
+                ) ?: error("could not create a Downloads entry")
+                contentResolver.openOutputStream(destination!!).use { output ->
+                    checkNotNull(output) { "could not open the Downloads entry" }
+                    source.inputStream().use { input -> input.copyTo(output!!) }
+                }
+                contentResolver.update(
+                    destination!!,
+                    ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                    null,
+                    null,
+                )
+                withContext(Dispatchers.Main) {
+                    receivedFilePresentation.value = ReceivedFilePresentation(transfer, destination!!)
+                    // The public MediaStore copy is now durable. Tell Rust to
+                    // forget the terminal transfer and delete its private
+                    // decrypted staging file; a later identical send gets a
+                    // new offer/blob and Android will choose the next name.
+                    core.dispatch(NativeActions.forgetFileTransfer(transfer.id))
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Received ${transfer.name}; saved in Downloads/Myco",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            } catch (t: Throwable) {
+                destination?.let { contentResolver.delete(it, null, null) }
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Received file but could not save it: ${t.message ?: "unknown error"}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun openReceivedFile(file: ReceivedFilePresentation) {
+        val mime = resolvedMime(file.transfer.name)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(file.uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching {
+            startActivity(Intent.createChooser(intent, "Open with"))
+        }.onFailure {
+            Toast.makeText(this, "No app can open ${file.transfer.name}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
+     * The type Android is told a received file is.
+     *
+     * Derived from the **name**, never from the sender's declared MIME. The name
+     * is what the user actually read on the accept prompt, so it is the only
+     * claim they consented to; a file called `holiday.jpg` that the sender typed
+     * as something executable would otherwise reach the "open with" chooser as
+     * that type. An extension Android does not recognise falls back to a neutral
+     * type rather than to the sender's word for it.
+     */
+    private fun resolvedMime(name: String): String {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+            ?: "application/octet-stream"
     }
 
     // --- NFC tap-to-pair (numo-style: we are the card; the other phone reads) ---

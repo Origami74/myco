@@ -50,6 +50,10 @@ fn is_gossip_eligible(kind: u16) -> bool {
 impl Gossiper for MeshGossiper {
     async fn on_event(&self, event: Event, inbound: Inbound) {
         let kind = event.kind.as_u16();
+        // File-control messages are private gift wraps. Handle them locally
+        // before the normal event-gossip path; their MESH ttl is zero so they
+        // are stored and delivered only at the addressed peer.
+        self.content.handle_file_event(&event).await;
         // nsite manifests propagate over this same push plane (the relay just stored
         // a newer one), but with an interest-aware download-then-forward policy and
         // the active-version gate. See docs/design/nsite-updates.md §4.

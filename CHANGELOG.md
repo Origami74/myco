@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Send a file straight to a paired phone. Share anything from another app, pick
+  one of your paired phones, and it arrives encrypted over the mesh — no
+  hotspot, no internet. The receiving phone is asked first and can say no, and
+  the file lands in Downloads/Myco.
+- Transfers appear on the Circle tab alongside pairing requests, so a send that
+  is still waiting is visible from anywhere in the app and can be cancelled.
+  An offer nobody answers gives up after ten minutes instead of waiting forever.
+
 ## [0.6.0] - 2026-08-19
 
 ### Added

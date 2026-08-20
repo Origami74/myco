@@ -124,4 +124,25 @@ pub enum NativeAppAction {
     /// Blossom and GET it back, timing each leg. Spawn-not-block; the result lands
     /// in `speedtest`. `npub` is the target peer's device identity.
     SpeedtestPeer { npub: String },
+
+    // --- native paired-peer file transfer ---
+    /// Encrypt a local file and send a private offer to a Circle peer. The
+    /// Android side copies a content URI into its private outbox first, then
+    /// passes that filesystem path here.
+    ShareFile {
+        path: String,
+        name: String,
+        mime: String,
+        peer_npub: String,
+    },
+    /// Accept an incoming encrypted file offer.
+    AcceptFileTransfer { transfer_id: String },
+    /// Decline an incoming encrypted file offer.
+    DeclineFileTransfer { transfer_id: String },
+    /// Cancel a transfer that is still in flight and tell the other phone, so
+    /// neither side is left waiting on a message that is no longer coming.
+    CancelFileTransfer { transfer_id: String },
+    /// Forget a finished transfer after the Android side has safely published
+    /// the received file (or after a terminal sender-side outcome).
+    ForgetFileTransfer { transfer_id: String },
 }

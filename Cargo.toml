@@ -30,7 +30,7 @@ hex = "0.4"
 # Multi-thread runtime so the embedded fips node's background tasks (BLE
 # accept/scan/probe loops, Noise handshakes) keep progressing between FFI polls,
 # without the app having to drive the node's main packet loop (that's P2+).
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros", "fs"] }
 
 # --- P2 content layer (relay + Blossom + gateway) ---
 # The rust-nostr `nostr` crate supplies Event types, NIP-01 id computation,
@@ -38,9 +38,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "
 # serialization primitives. The relay STORE and the WS/REQ surface are
 # hand-rolled (the query surface Myco uses is tiny; no relay framework, and
 # negentropy/NIP-77 is not needed until P3). See docs/design/nsite-layer.md §2.1.
-nostr = { version = "0.44", default-features = false, features = ["std"] }
+nostr = { version = "0.44", default-features = false, features = ["std", "nip44", "nip59"] }
 async-trait = "0.1"
 sha2 = "0.10"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
 thiserror = "2"
 
 # IP online-fallback sync (P2 M3): query public relays (WS) + pull blobs from

@@ -21,6 +21,7 @@ mod auth_service;
 // TODO(stage 2).
 mod ble_diag;
 mod content;
+pub(crate) mod file_transfer;
 // Client for the fips node's Unix-domain control socket — the only way to read
 // peer state or push a platform-discovered peer into a node whose `run_rx_loop`
 // has borrowed it. Polled only by the Android peer-state tick and the platform

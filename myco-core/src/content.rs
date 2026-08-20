@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
@@ -26,6 +27,7 @@ use nsite_deck::seams::{BlobStore, PeerSource, RelayBackend};
 use nsite_deck::{sync, GatewayResponse, SiteAddr, SyncOutcome};
 use serde::{Deserialize, Serialize};
 
+use crate::file_transfer::{self, FileMessage, FileTransferRecord, FileTransferView};
 use crate::mesh_relay::{Inbound, Origin};
 use myco_blossom::FsBlobStore;
 use myco_relay::RelayStore;
@@ -427,6 +429,12 @@ pub struct Content {
     pending_updates: Mutex<HashMap<String, PendingUpdate>>,
     /// Status of the latest update check, for UI feedback (checking → result).
     update_check: Mutex<UpdateCheckView>,
+    /// Native paired-peer file transfers. Metadata is persisted; file keys and
+    /// encrypted outbox paths remain inside the app-private data directory.
+    file_transfers: Mutex<Vec<FileTransferRecord>>,
+    file_transfers_path: PathBuf,
+    file_outbox_dir: PathBuf,
+    received_dir: PathBuf,
     /// The **active version** the gateway serves per slot — decoupled from the
     /// relay's newest, so a newer (received/checked) manifest can sit in the relay
     /// store (NIP-01-faithful, propagated to peers) while we keep serving the fully
@@ -587,6 +595,12 @@ impl Content {
         let circle = load_circle(&circle_path);
         let active_path = data_dir.join("active.json");
         let active_manifests = load_active(&active_path);
+        let file_transfers_path = data_dir.join("file_transfers.json");
+        let file_transfers = load_file_transfers(&file_transfers_path);
+        let file_outbox_dir = data_dir.join("file-outbox");
+        let received_dir = data_dir.join("received");
+        let _ = std::fs::create_dir_all(&file_outbox_dir);
+        let _ = std::fs::create_dir_all(&received_dir);
         Ok(Self {
             relay,
             relay_remote: custom,
@@ -613,6 +627,10 @@ impl Content {
             prev_pool_connected: Mutex::new(HashSet::new()),
             pending_updates: Mutex::new(HashMap::new()),
             update_check: Mutex::new(UpdateCheckView::default()),
+            file_transfers: Mutex::new(file_transfers),
+            file_transfers_path,
+            file_outbox_dir,
+            received_dir,
             active_manifests: Mutex::new(active_manifests),
             active_path,
         })
@@ -1629,6 +1647,8 @@ impl Content {
     /// is what restores a Circle relay link **mutually and fast** after a mesh flap,
     /// regardless of where the peer sits in the mesh.
     pub fn keepwarm_tick(self: &Arc<Self>) {
+        // Cheap, and the only clock the transfer state machine has.
+        self.sweep_file_transfers();
         let circle: HashSet<String> = self.circle_npubs().into_iter().collect();
         for npub in &circle {
             if fips::PeerIdentity::from_npub(npub).is_ok() {
@@ -1655,7 +1675,832 @@ impl Content {
         *prev = now;
     }
 
-    // --- mesh fan-out ---
+    // --- native paired-peer file transfer ---
+
+    /// Snapshot transfer rows for the FFI/UI. Secrets and local source paths
+    /// never cross this boundary.
+    pub fn file_transfers_snapshot(&self) -> Vec<FileTransferView> {
+        self.file_transfers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.view.clone())
+            .collect()
+    }
+
+    /// Encrypt a local file, retain the ciphertext in the app-private outbox,
+    /// and send only a gift-wrapped metadata offer. The ciphertext is not put
+    /// into Blossom until the recipient accepts.
+    pub async fn start_file_share(
+        self: Arc<Self>,
+        path: String,
+        name: String,
+        mime: String,
+        target_npub: String,
+    ) -> anyhow::Result<()> {
+        if !self.is_in_circle(&target_npub) {
+            anyhow::bail!("file share target is not in the Circle");
+        }
+        let keys = self
+            .device_keys
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+        let target = PublicKey::from_bech32(&target_npub)
+            .map_err(|e| anyhow::anyhow!("invalid target npub: {e}"))?;
+        let imported_from_android_share = Path::new(&path)
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .map(|name| name == "myco-share-outbox")
+            .unwrap_or(false);
+        let plain = tokio::fs::read(&path).await?;
+        let filename = file_transfer::safe_filename(&name, "shared-file");
+        let mime = if mime.trim().is_empty() {
+            "application/octet-stream".to_string()
+        } else {
+            mime
+        };
+        if let Some(reason) = file_transfer::rejected_payload(&filename, &mime) {
+            anyhow::bail!(reason);
+        }
+        let transfer_id = file_transfer::new_transfer_id();
+        let (package, key) =
+            file_transfer::encrypt_file(&plain, &transfer_id, &target_npub, &filename)?;
+        let outbox_path = self.file_outbox_dir.join(format!("{transfer_id}.bin"));
+        tokio::fs::write(&outbox_path, &package).await?;
+        if imported_from_android_share {
+            // Android's copy is only an input staging file. Once the native
+            // encrypted outbox exists, retaining it would create a second
+            // private history of every shared file.
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+        let now = file_transfer::now_secs();
+        let expires_at = now + file_transfer::OFFER_TTL_SECS;
+        let peer_name = self
+            .circle_snapshot()
+            .into_iter()
+            .find(|p| p.npub == target_npub)
+            .map(|p| p.name)
+            .unwrap_or_else(|| target_npub.chars().take(16).collect());
+        self.insert_file_transfer(FileTransferRecord {
+            view: FileTransferView {
+                id: transfer_id.clone(),
+                direction: "outgoing".to_string(),
+                peer_npub: target_npub.clone(),
+                peer_name,
+                name: filename.clone(),
+                mime: mime.clone(),
+                size: plain.len() as u64,
+                status: "offered".to_string(),
+                blob_hash: String::new(),
+                received_path: String::new(),
+                publish_pending: false,
+                error: String::new(),
+                updated_at: now,
+            },
+            source_path: Some(outbox_path.to_string_lossy().into_owned()),
+            key_b64: Some(file_transfer::encode_key(&key)),
+            ciphertext_size: package.len() as u64,
+            expires_at,
+        });
+        let sender_npub = keys.public_key().to_bech32()?;
+        let message = FileMessage::Offer {
+            transfer_id: transfer_id.clone(),
+            sender_npub,
+            recipient_npub: target_npub.clone(),
+            filename,
+            mime,
+            size: plain.len() as u64,
+            issued_at: now,
+            expires_at,
+        };
+        if let Err(e) = self.send_file_message(&target, &target_npub, message).await {
+            // The row stays. `error` is the only channel this failure has to the
+            // user, and deleting the row here is what made every failed send
+            // look like a successful one.
+            self.set_file_status(&transfer_id, "failed", &e.to_string());
+            return Err(e);
+        }
+        tracing::info!(target = %target_npub, transfer = %transfer_id, "file share offer sent");
+        Ok(())
+    }
+
+    /// Respond to an incoming offer. Accepting only sends the control reply;
+    /// the sender uploads the encrypted blob afterward.
+    pub async fn respond_file_transfer(
+        self: Arc<Self>,
+        transfer_id: String,
+        accepted: bool,
+    ) -> anyhow::Result<()> {
+        let target_npub = {
+            let records = self.file_transfers.lock().unwrap();
+            let record = records
+                .iter()
+                .find(|r| r.view.id == transfer_id && r.view.direction == "incoming")
+                .ok_or_else(|| anyhow::anyhow!("file offer not found"))?;
+            if record.view.status != "waiting_user" {
+                anyhow::bail!("file offer is no longer waiting for a response");
+            }
+            record.view.peer_npub.clone()
+        };
+        let keys = self
+            .device_keys
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+        let target = PublicKey::from_bech32(&target_npub)?;
+        let own_npub = keys.public_key().to_bech32()?;
+        self.set_file_status(
+            &transfer_id,
+            if accepted { "accepted" } else { "denied" },
+            "",
+        );
+        let message = FileMessage::Response {
+            transfer_id: transfer_id.clone(),
+            sender_npub: own_npub,
+            recipient_npub: target_npub.clone(),
+            accepted,
+            reason: (!accepted).then(|| "declined by recipient".to_string()),
+        };
+        let result = self.send_file_message(&target, &target_npub, message).await;
+        if !accepted && result.is_ok() {
+            self.forget_file_transfer(&transfer_id);
+        }
+        result
+    }
+
+    /// Called by the mesh gossiper for every newly-arrived gift wrap. Invalid,
+    /// expired, non-file, and non-Circle messages are ignored.
+    pub async fn handle_file_event(self: &Arc<Self>, event: &Event) {
+        if event.kind != Kind::GiftWrap {
+            return;
+        }
+        let Some(keys) = self.device_keys.lock().unwrap().clone() else {
+            return;
+        };
+        let Ok(unwrapped) = nostr::nips::nip59::extract_rumor(&keys, event).await else {
+            return;
+        };
+        if unwrapped.rumor.kind != Kind::PrivateDirectMessage {
+            return;
+        }
+        let Ok(message) = serde_json::from_str::<FileMessage>(&unwrapped.rumor.content) else {
+            return;
+        };
+        // The id reaches a filesystem path and every lookup below keys on it, so
+        // it is checked once, here, before any branch has a chance to use it.
+        if !file_transfer::valid_transfer_id(message.transfer_id()) {
+            tracing::warn!("file message with a malformed transfer id ignored");
+            return;
+        }
+        let sender_npub = unwrapped.sender.to_bech32().unwrap_or_default();
+        if !self.is_in_circle(&sender_npub) {
+            tracing::warn!(sender = %sender_npub, "file message from non-Circle sender ignored");
+            return;
+        }
+        let own_npub = match keys.public_key().to_bech32() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        match message {
+            FileMessage::Offer {
+                transfer_id,
+                recipient_npub,
+                filename,
+                mime,
+                size,
+                expires_at,
+                ..
+            } if recipient_npub == own_npub => {
+                if expires_at <= file_transfer::now_secs()
+                    || size > file_transfer::MAX_FILE_BYTES as u64
+                {
+                    tracing::warn!(transfer_id, "expired or oversized file offer ignored");
+                    return;
+                }
+                let offered_name = file_transfer::safe_filename(&filename, "shared-file");
+                if let Some(reason) = file_transfer::rejected_payload(&offered_name, &mime) {
+                    tracing::warn!(transfer_id, %reason, "file offer refused by payload policy");
+                    return;
+                }
+                if self
+                    .file_transfers
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.view.id == transfer_id)
+                {
+                    return;
+                }
+                // Drop finished rows to make room first; refuse the offer only if
+                // the list is genuinely full of live ones. Otherwise a peer that
+                // spams offers grows the persisted list without bound.
+                if self.file_transfers.lock().unwrap().len() >= file_transfer::MAX_TRACKED_TRANSFERS
+                {
+                    self.prune_finished_transfers();
+                    if self.file_transfers.lock().unwrap().len()
+                        >= file_transfer::MAX_TRACKED_TRANSFERS
+                    {
+                        tracing::warn!(transfer_id, "file offer refused, too many open transfers");
+                        return;
+                    }
+                }
+                let peer_name = self
+                    .circle_snapshot()
+                    .into_iter()
+                    .find(|p| p.npub == sender_npub)
+                    .map(|p| p.name)
+                    .unwrap_or_else(|| "peer".to_string());
+                self.insert_file_transfer(FileTransferRecord {
+                    view: FileTransferView {
+                        id: transfer_id,
+                        direction: "incoming".to_string(),
+                        peer_npub: sender_npub,
+                        peer_name,
+                        name: offered_name,
+                        mime,
+                        size,
+                        status: "waiting_user".to_string(),
+                        blob_hash: String::new(),
+                        received_path: String::new(),
+                        publish_pending: false,
+                        error: String::new(),
+                        updated_at: file_transfer::now_secs(),
+                    },
+                    source_path: None,
+                    key_b64: None,
+                    ciphertext_size: 0,
+                    expires_at,
+                });
+            }
+            FileMessage::Response {
+                transfer_id,
+                recipient_npub,
+                accepted,
+                reason,
+                ..
+            } if recipient_npub == own_npub => {
+                // A decline also travels this way when the *sender* cancels, so
+                // the recipient's own pending row resolves instead of waiting
+                // for its sweeper. An accept only ever makes sense outbound.
+                if !accepted {
+                    if self.has_file_transfer(&transfer_id, "outgoing", &sender_npub)
+                        || self.has_file_transfer(&transfer_id, "incoming", &sender_npub)
+                    {
+                        self.set_file_status(
+                            &transfer_id,
+                            "denied",
+                            reason.as_deref().unwrap_or("declined by recipient"),
+                        );
+                        self.clear_transfer_secrets(&transfer_id);
+                    }
+                    return;
+                }
+                // Only an offer still on the wire can be accepted. Without the
+                // status check a replayed accept restarts a finished transfer.
+                if !self.transfer_in_state(&transfer_id, "outgoing", &sender_npub, &["offered"]) {
+                    return;
+                }
+                self.set_file_status(&transfer_id, "accepted", "");
+                let content = Arc::clone(self);
+                tokio::spawn(async move {
+                    if let Err(e) = content.finish_outgoing_transfer(&transfer_id).await {
+                        content.set_file_status(&transfer_id, "failed", &e.to_string());
+                    }
+                });
+            }
+            FileMessage::Ready {
+                transfer_id,
+                recipient_npub,
+                filename,
+                mime,
+                size,
+                blob_hash,
+                ciphertext_size,
+                key_wrap,
+                ..
+            } if recipient_npub == own_npub => {
+                // The user's accept is what authorises the download. Matching on
+                // the transfer alone let a sender follow its own offer straight
+                // with a `ready`, and the file would be fetched, decrypted and
+                // published to Downloads without anyone ever tapping Accept.
+                if !self.transfer_in_state(&transfer_id, "incoming", &sender_npub, &["accepted"]) {
+                    tracing::warn!(
+                        transfer_id,
+                        "file ready arrived before the offer was accepted"
+                    );
+                    return;
+                }
+                if !file_transfer::valid_blob_hash(&blob_hash) {
+                    self.set_file_status(
+                        &transfer_id,
+                        "failed",
+                        "the sender sent a malformed blob id",
+                    );
+                    return;
+                }
+                // The offer is the contract. The user approved a specific name,
+                // type and size; a `ready` that describes a different file is a
+                // bait-and-switch, not a correction, so it fails the transfer
+                // rather than quietly replacing what was agreed to.
+                if let Some(mismatch) =
+                    self.file_offer_mismatch(&transfer_id, &filename, &mime, size)
+                {
+                    tracing::warn!(transfer_id, %mismatch, "file ready contradicts the accepted offer");
+                    self.set_file_status(&transfer_id, "failed", &mismatch);
+                    return;
+                }
+                if ciphertext_size > file_transfer::MAX_PACKAGE_BYTES {
+                    self.set_file_status(&transfer_id, "failed", "the sender's file is too large");
+                    return;
+                }
+                let sender = match PublicKey::from_bech32(&sender_npub) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                let key = match file_transfer::unwrap_key(&keys, &sender, &key_wrap) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.set_file_status(
+                            &transfer_id,
+                            "failed",
+                            &format!("key unwrap failed: {e}"),
+                        );
+                        return;
+                    }
+                };
+                self.update_file_transfer(&transfer_id, |r| {
+                    r.view.status = "downloading".to_string();
+                    r.view.blob_hash = blob_hash.clone();
+                    r.view.updated_at = file_transfer::now_secs();
+                    r.key_b64 = Some(file_transfer::encode_key(&key));
+                    r.ciphertext_size = ciphertext_size;
+                });
+                let content = Arc::clone(self);
+                tokio::spawn(async move {
+                    if let Err(e) = content
+                        .finish_incoming_transfer(&transfer_id, &sender_npub)
+                        .await
+                    {
+                        content.set_file_status(&transfer_id, "failed", &e.to_string());
+                        content.clear_transfer_secrets(&transfer_id);
+                    }
+                });
+            }
+            FileMessage::Complete {
+                transfer_id,
+                recipient_npub,
+                ..
+            } if recipient_npub == own_npub => {
+                if self.has_file_transfer(&transfer_id, "outgoing", &sender_npub) {
+                    // A completed send has nothing left to tell the user, so this
+                    // is the one terminal state that still clears itself.
+                    self.set_file_status(&transfer_id, "completed", "");
+                    self.forget_file_transfer(&transfer_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn finish_outgoing_transfer(&self, transfer_id: &str) -> anyhow::Result<()> {
+        let (target_npub, source_path, key_b64, filename, mime, size) = {
+            let records = self.file_transfers.lock().unwrap();
+            let r = records
+                .iter()
+                .find(|r| r.view.id == transfer_id && r.view.direction == "outgoing")
+                .ok_or_else(|| anyhow::anyhow!("outgoing transfer disappeared"))?;
+            (
+                r.view.peer_npub.clone(),
+                r.source_path
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("outbox path missing"))?,
+                r.key_b64
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("file key missing"))?,
+                r.view.name.clone(),
+                r.view.mime.clone(),
+                r.view.size,
+            )
+        };
+        let package = tokio::fs::read(&source_path).await?;
+        let blob_hash = self.blobs.put(&package).await?;
+        let key = file_transfer::decode_key(&key_b64)?;
+        let keys = self
+            .device_keys
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+        let target = PublicKey::from_bech32(&target_npub)?;
+        let key_wrap = file_transfer::wrap_key(&keys, &target, &key)?;
+        let sender_npub = keys.public_key().to_bech32()?;
+        let message = FileMessage::Ready {
+            transfer_id: transfer_id.to_string(),
+            sender_npub,
+            recipient_npub: target_npub.clone(),
+            filename,
+            mime,
+            size,
+            blob_hash: blob_hash.clone(),
+            ciphertext_size: package.len() as u64,
+            key_wrap,
+        };
+        self.send_file_message(&target, &target_npub, message)
+            .await?;
+        self.update_file_transfer(transfer_id, |r| {
+            r.view.status = "ready".to_string();
+            r.view.blob_hash = blob_hash.clone();
+            r.view.updated_at = file_transfer::now_secs();
+        });
+        Ok(())
+    }
+
+    async fn finish_incoming_transfer(
+        &self,
+        transfer_id: &str,
+        sender_npub: &str,
+    ) -> anyhow::Result<()> {
+        let (filename, blob_hash, key_b64, declared_size, own_npub) = {
+            let records = self.file_transfers.lock().unwrap();
+            let r = records
+                .iter()
+                .find(|r| r.view.id == transfer_id && r.view.direction == "incoming")
+                .ok_or_else(|| anyhow::anyhow!("incoming transfer disappeared"))?;
+            let keys = self
+                .device_keys
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+            (
+                r.view.name.clone(),
+                r.view.blob_hash.clone(),
+                r.key_b64
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("file key missing"))?,
+                r.ciphertext_size,
+                keys.public_key().to_bech32()?,
+            )
+        };
+        // A paired peer still only gets to send what it said it would send. The
+        // ceiling is the size declared in `ready` (or the absolute package cap
+        // when a pre-upgrade record carries none), enforced first against the
+        // advertised length and then again while the body streams in, so an
+        // over-long or length-lying response is dropped rather than buffered.
+        let limit = if declared_size == 0 {
+            file_transfer::MAX_PACKAGE_BYTES
+        } else {
+            declared_size.min(file_transfer::MAX_PACKAGE_BYTES)
+        };
+        crate::dns_intercept::warm_route(sender_npub);
+        let base = crate::ip_source::mesh_blossom_url(sender_npub);
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(120))
+            .build()?;
+        let mut response = client.get(format!("{base}/{blob_hash}")).send().await?;
+        if !response.status().is_success() {
+            anyhow::bail!("peer Blossom returned {}", response.status());
+        }
+        if let Some(advertised) = response.content_length() {
+            if advertised > limit {
+                anyhow::bail!("peer offered {advertised} bytes but declared {limit}");
+            }
+        }
+        let mut package: Vec<u8> = Vec::with_capacity(limit.min(1024 * 1024) as usize);
+        while let Some(chunk) = response.chunk().await? {
+            if package.len() as u64 + chunk.len() as u64 > limit {
+                anyhow::bail!("peer sent more than the {limit} bytes it declared");
+            }
+            package.extend_from_slice(&chunk);
+        }
+        if file_transfer::sha256_hex(&package) != blob_hash {
+            anyhow::bail!("downloaded encrypted blob hash mismatch");
+        }
+        let key = file_transfer::decode_key(&key_b64)?;
+        let plain = file_transfer::decrypt_file(&package, &key, transfer_id, &own_npub, &filename)?;
+        let destination = self
+            .received_dir
+            .join(format!("{transfer_id}-{}", filename));
+        tokio::fs::write(&destination, &plain).await?;
+        self.update_file_transfer(transfer_id, |r| {
+            r.view.status = "completed".to_string();
+            r.view.received_path = destination.to_string_lossy().into_owned();
+            r.view.publish_pending = true;
+            r.view.updated_at = file_transfer::now_secs();
+            r.key_b64 = None;
+        });
+        let target = PublicKey::from_bech32(sender_npub)?;
+        let message = FileMessage::Complete {
+            transfer_id: transfer_id.to_string(),
+            sender_npub: own_npub,
+            recipient_npub: sender_npub.to_string(),
+        };
+        if let Err(e) = self.send_file_message(&target, sender_npub, message).await {
+            // The receiver's local copy is already complete. A failed sender
+            // acknowledgement must not turn this back into a failed transfer
+            // or prevent Android from publishing it to Downloads.
+            tracing::warn!(transfer = %transfer_id, error = %e, "file share: completion acknowledgement failed");
+        }
+        Ok(())
+    }
+
+    async fn send_file_message(
+        &self,
+        target: &PublicKey,
+        target_npub: &str,
+        message: FileMessage,
+    ) -> anyhow::Result<()> {
+        let keys = self
+            .device_keys
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+        let content = serde_json::to_string(&message)?;
+        let event = EventBuilder::private_msg(&keys, *target, content, std::iter::empty()).await?;
+        let event_json = serde_json::to_value(event)?;
+        // TTL 0 means store and handle at the addressed Circle relay, without
+        // flooding a private file-control message to every Circle member.
+        let frame = crate::mesh_wire::wrap(
+            &crate::mesh_wire::MeshMeta::push(0),
+            serde_json::json!(["EVENT", event_json]),
+        );
+        self.gossip_to_peer(target_npub, frame);
+        Ok(())
+    }
+
+    fn insert_file_transfer(&self, record: FileTransferRecord) {
+        let snapshot = {
+            let mut records = self.file_transfers.lock().unwrap();
+            records.retain(|r| r.view.id != record.view.id);
+            records.push(record);
+            records.clone()
+        };
+        save_file_transfers(&self.file_transfers_path, &snapshot);
+    }
+
+    fn update_file_transfer<F>(&self, transfer_id: &str, update: F)
+    where
+        F: FnOnce(&mut FileTransferRecord),
+    {
+        let snapshot = {
+            let mut records = self.file_transfers.lock().unwrap();
+            let Some(record) = records.iter_mut().find(|r| r.view.id == transfer_id) else {
+                return;
+            };
+            update(record);
+            // Every step forward resets the clock, so the deadline measures a
+            // *stall* rather than the whole transfer. Without this the sweeper
+            // would eventually kill a large transfer that is progressing
+            // normally, just for taking longer than the original offer window.
+            if matches!(
+                record.view.status.as_str(),
+                "offered" | "waiting_user" | "accepted" | "ready" | "downloading"
+            ) {
+                record.expires_at = file_transfer::now_secs() + file_transfer::OFFER_TTL_SECS;
+            }
+            records.clone()
+        };
+        save_file_transfers(&self.file_transfers_path, &snapshot);
+    }
+
+    fn set_file_status(&self, transfer_id: &str, status: &str, error: &str) {
+        self.update_file_transfer(transfer_id, |r| {
+            r.view.status = status.to_string();
+            r.view.error = error.to_string();
+            r.view.updated_at = file_transfer::now_secs();
+        });
+    }
+
+    /// Remove a terminal transfer from the persisted transfer list and clean
+    /// its app-private ciphertext/plaintext staging file. A completed receive
+    /// calls this only after Android has copied the file into MediaStore, so a
+    /// repeated send is always a fresh offer/blob rather than a replay.
+    pub fn forget_file_transfer(&self, transfer_id: &str) {
+        let (snapshot, cleanup_paths) = {
+            let mut records = self.file_transfers.lock().unwrap();
+            let Some(index) = records.iter().position(|r| r.view.id == transfer_id) else {
+                return;
+            };
+            let record = &records[index];
+            if !matches!(
+                record.view.status.as_str(),
+                "completed" | "denied" | "failed" | "cancelled"
+            ) {
+                return;
+            }
+            let record = records.remove(index);
+            let mut paths = Vec::new();
+            if let Some(path) = record.source_path.as_deref() {
+                if let Some(path) = self.transfer_cleanup_path(path) {
+                    paths.push(path);
+                }
+            }
+            if !record.view.received_path.is_empty() {
+                if let Some(path) = self.transfer_cleanup_path(&record.view.received_path) {
+                    paths.push(path);
+                }
+            }
+            (records.clone(), paths)
+        };
+        save_file_transfers(&self.file_transfers_path, &snapshot);
+        for path in cleanup_paths {
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!(path = %path.display(), %error, "file share: staging cleanup failed");
+                }
+            }
+        }
+    }
+
+    fn transfer_cleanup_path(&self, path: &str) -> Option<PathBuf> {
+        let path = PathBuf::from(path);
+        (path.starts_with(&self.file_outbox_dir) || path.starts_with(&self.received_dir))
+            .then_some(path)
+    }
+
+    /// Why a `ready` message disagrees with the offer the user accepted, or
+    /// `None` when it describes the same file. Compared against the offer's
+    /// already-sanitised name so a sender cannot slip a new one past the check
+    /// by spelling it differently.
+    fn file_offer_mismatch(
+        &self,
+        transfer_id: &str,
+        filename: &str,
+        mime: &str,
+        size: u64,
+    ) -> Option<String> {
+        let records = self.file_transfers.lock().unwrap();
+        let view = &records.iter().find(|r| r.view.id == transfer_id)?.view;
+        let offered_name = file_transfer::safe_filename(filename, "shared-file");
+        if offered_name != view.name {
+            return Some(format!(
+                "the sender changed the file name after you accepted \"{}\"",
+                view.name
+            ));
+        }
+        if mime != view.mime {
+            return Some(format!(
+                "the sender changed the file type after you accepted \"{}\"",
+                view.name
+            ));
+        }
+        if size != view.size {
+            return Some(format!(
+                "the sender changed the file size after you accepted \"{}\"",
+                view.name
+            ));
+        }
+        None
+    }
+
+    /// Drop the key and staging file of a transfer that will never finish, while
+    /// keeping its row so the UI can still explain what happened.
+    fn clear_transfer_secrets(&self, transfer_id: &str) {
+        let stale = {
+            let mut records = self.file_transfers.lock().unwrap();
+            let Some(record) = records.iter_mut().find(|r| r.view.id == transfer_id) else {
+                return;
+            };
+            record.key_b64 = None;
+            let stale = record.source_path.take();
+            let snapshot = records.clone();
+            drop(records);
+            save_file_transfers(&self.file_transfers_path, &snapshot);
+            stale
+        };
+        if let Some(path) = stale.as_deref().and_then(|p| self.transfer_cleanup_path(p)) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Fail every transfer whose offer window has closed. Without this a control
+    /// message that never arrives — the push plane is best-effort and drops
+    /// frames while a peer is in dial backoff — leaves a transfer pending
+    /// forever with no way for the user to clear it. Driven by the keepwarm
+    /// tick, so an offer dies `OFFER_TTL_SECS` after it was made.
+    pub fn sweep_file_transfers(&self) {
+        let now = file_transfer::now_secs();
+        let expired: Vec<String> = self
+            .file_transfers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                r.expires_at > 0
+                    && r.expires_at <= now
+                    && !matches!(
+                        r.view.status.as_str(),
+                        "completed" | "denied" | "failed" | "cancelled"
+                    )
+            })
+            .map(|r| r.view.id.clone())
+            .collect();
+        for id in expired {
+            tracing::info!(transfer = %id, "file share: offer timed out");
+            self.set_file_status(&id, "failed", "timed out waiting for the other phone");
+            self.clear_transfer_secrets(&id);
+        }
+    }
+
+    /// Cancel a transfer the user no longer wants and tell the other phone, so
+    /// its own row resolves instead of sitting pending until the sweeper runs.
+    pub async fn cancel_file_transfer(self: Arc<Self>, transfer_id: String) -> anyhow::Result<()> {
+        let (peer_npub, direction) = {
+            let records = self.file_transfers.lock().unwrap();
+            let record = records
+                .iter()
+                .find(|r| r.view.id == transfer_id)
+                .ok_or_else(|| anyhow::anyhow!("transfer not found"))?;
+            if matches!(
+                record.view.status.as_str(),
+                "completed" | "denied" | "failed" | "cancelled"
+            ) {
+                anyhow::bail!("transfer has already finished");
+            }
+            (record.view.peer_npub.clone(), record.view.direction.clone())
+        };
+        self.set_file_status(&transfer_id, "cancelled", "cancelled on this phone");
+        self.clear_transfer_secrets(&transfer_id);
+        let own_npub = {
+            let keys = self
+                .device_keys
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+            keys.public_key().to_bech32()?
+        };
+        let target = PublicKey::from_bech32(&peer_npub)?;
+        // A cancel is a decline in both directions: it is the same "this is not
+        // happening" the responder already knows how to act on, so no new
+        // message type is added to the wire for it.
+        let message = FileMessage::Response {
+            transfer_id: transfer_id.clone(),
+            sender_npub: own_npub,
+            recipient_npub: peer_npub.clone(),
+            accepted: false,
+            reason: Some(if direction == "outgoing" {
+                "cancelled by the sender".to_string()
+            } else {
+                "cancelled by the recipient".to_string()
+            }),
+        };
+        self.send_file_message(&target, &peer_npub, message).await
+    }
+
+    /// Like [`Self::has_file_transfer`], but also requires the transfer to be in
+    /// one of `states`. Every message that advances a transfer uses this: the
+    /// state machine's guarantees come from refusing out-of-order messages, not
+    /// from trusting the sender to send them in order.
+    fn transfer_in_state(
+        &self,
+        transfer_id: &str,
+        direction: &str,
+        peer_npub: &str,
+        states: &[&str],
+    ) -> bool {
+        self.file_transfers.lock().unwrap().iter().any(|r| {
+            r.view.id == transfer_id
+                && r.view.direction == direction
+                && r.view.peer_npub == peer_npub
+                && states.contains(&r.view.status.as_str())
+        })
+    }
+
+    /// Drop finished rows, oldest first, to make room for a new transfer.
+    fn prune_finished_transfers(&self) {
+        let finished: Vec<String> = {
+            let mut records = self.file_transfers.lock().unwrap();
+            records.sort_by_key(|r| r.view.updated_at);
+            records
+                .iter()
+                .filter(|r| {
+                    matches!(
+                        r.view.status.as_str(),
+                        "completed" | "denied" | "failed" | "cancelled"
+                    )
+                })
+                .map(|r| r.view.id.clone())
+                .collect()
+        };
+        for id in finished {
+            self.forget_file_transfer(&id);
+        }
+    }
+
+    fn has_file_transfer(&self, transfer_id: &str, direction: &str, peer_npub: &str) -> bool {
+        self.file_transfers.lock().unwrap().iter().any(|r| {
+            r.view.id == transfer_id
+                && r.view.direction == direction
+                && r.view.peer_npub == peer_npub
+        })
+    }
 
     /// Queue a pre-built relay frame (`["EVENT", {…}]`) to a peer's relay over a
     /// persistent pooled connection (no per-message connect). `npub` is the target
@@ -2224,7 +3069,26 @@ impl Content {
         self.active_manifests.lock().unwrap().clear();
         let _ = std::fs::remove_file(&self.library_path);
         let _ = std::fs::remove_file(&self.active_path);
+        self.clear_file_transfers();
         Ok(())
+    }
+
+    /// Drop every transfer and the files staged for them.
+    ///
+    /// The `received/` directory holds **decrypted plaintext** between the
+    /// native receive finishing and Android publishing it, and `file-outbox/`
+    /// holds the encrypted copy of everything being sent. A privacy control that
+    /// leaves either behind is not doing its job, so both wipes clear them.
+    fn clear_file_transfers(&self) {
+        self.file_transfers.lock().unwrap().clear();
+        let _ = std::fs::remove_file(&self.file_transfers_path);
+        for dir in [&self.file_outbox_dir, &self.received_dir] {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
     }
 
     /// Clear cached relay events + Blossom blobs **except** those backing pinned
@@ -2276,6 +3140,7 @@ impl Content {
         if let Some(store) = &self.blobs_local {
             store.retain_blobs(&keep_blobs);
         }
+        self.clear_file_transfers();
 
         // Drop unpinned Library entries and the live status of anything unpinned.
         let pinned_hosts: HashSet<String> = pinned.iter().map(|i| i.url_host.clone()).collect();
@@ -2608,6 +3473,20 @@ fn save_outbound_pairs(path: &Path, items: &[OutboundPairView]) {
     }
 }
 
+fn load_file_transfers(path: &Path) -> Vec<FileTransferRecord> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_file_transfers(path: &Path, items: &[FileTransferRecord]) {
+    if let Ok(json) = serde_json::to_vec(items) {
+        let tmp = path.with_extension("json.tmp");
+        let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
+    }
+}
+
 fn load_circle(path: &Path) -> Vec<CircleContact> {
     std::fs::read(path)
         .ok()
@@ -2864,6 +3743,222 @@ mod tests {
         assert!(p.relay_write_multihop);
         assert!(p.blossom_read);
         assert!(!p.blossom_write);
+    }
+
+    /// A record for driving the transfer state machine without a peer.
+    fn incoming_record(id: &str, expires_at: u64) -> FileTransferRecord {
+        FileTransferRecord {
+            view: FileTransferView {
+                id: id.to_string(),
+                direction: "incoming".to_string(),
+                peer_npub: "npub1peer".to_string(),
+                peer_name: "Peer".to_string(),
+                name: "photo.jpg".to_string(),
+                mime: "image/jpeg".to_string(),
+                size: 2048,
+                status: "waiting_user".to_string(),
+                blob_hash: String::new(),
+                received_path: String::new(),
+                publish_pending: false,
+                error: String::new(),
+                updated_at: 0,
+            },
+            source_path: None,
+            key_b64: None,
+            ciphertext_size: 0,
+            expires_at,
+        }
+    }
+
+    /// A `ready` message is only allowed to describe the file the user actually
+    /// said yes to. Changing the name, type or size after the accept is a
+    /// bait-and-switch, and each one has to be caught on its own — the AEAD
+    /// cannot catch it, because the sender recomputes the AAD from whatever it
+    /// sends.
+    #[test]
+    fn a_ready_message_cannot_change_what_the_user_accepted() {
+        let dir = tmp("file-ready-mismatch");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        content.insert_file_transfer(incoming_record("t1", u64::MAX));
+
+        assert!(
+            content
+                .file_offer_mismatch("t1", "photo.jpg", "image/jpeg", 2048)
+                .is_none(),
+            "the offered file itself must pass"
+        );
+        assert!(
+            content
+                .file_offer_mismatch("t1", "invoice.pdf", "image/jpeg", 2048)
+                .is_some(),
+            "a renamed file must be refused"
+        );
+        assert!(
+            content
+                .file_offer_mismatch("t1", "photo.jpg", "application/pdf", 2048)
+                .is_some(),
+            "a retyped file must be refused"
+        );
+        assert!(
+            content
+                .file_offer_mismatch("t1", "photo.jpg", "image/jpeg", 900 * 1024 * 1024)
+                .is_some(),
+            "a resized file must be refused"
+        );
+        // Spelling the same name with a path prefix is still the same name.
+        assert!(
+            content
+                .file_offer_mismatch("t1", "../photo.jpg", "image/jpeg", 2048)
+                .is_none(),
+            "comparison happens after sanitising, not before"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The control plane is best-effort — `PeerRelayPool::send` drops frames
+    /// while a peer is in dial backoff — so a transfer can be left waiting on a
+    /// message that will never arrive. The sweeper is the only thing that ends
+    /// it, and the row has to survive as `failed` so the UI can say why.
+    #[test]
+    fn an_offer_that_is_never_answered_expires_instead_of_hanging() {
+        let dir = tmp("file-sweep");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        content.insert_file_transfer(incoming_record("stale", 1));
+        content.insert_file_transfer(incoming_record("fresh", u64::MAX));
+
+        content.sweep_file_transfers();
+
+        let rows = content.file_transfers_snapshot();
+        let stale = rows.iter().find(|r| r.id == "stale").unwrap();
+        assert_eq!(stale.status, "failed", "an expired offer must terminate");
+        assert!(
+            !stale.error.is_empty(),
+            "the row has to survive carrying its reason — deleting it is what \
+             made every failure invisible"
+        );
+        assert_eq!(
+            rows.iter().find(|r| r.id == "fresh").unwrap().status,
+            "waiting_user",
+            "a live offer is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `received/` holds decrypted plaintext until Android publishes it. Both
+    /// wipes have to clear it — a "delete my data" control that leaves the
+    /// plaintext of received files on disk is worse than not having one.
+    #[tokio::test]
+    async fn wiping_clears_staged_plaintext() {
+        let dir = tmp("file-wipe-staging");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        let staged = dir.join("received").join("leftover.txt");
+        std::fs::write(&staged, b"decrypted secrets").unwrap();
+        let outbox = dir.join("file-outbox").join("abc.bin");
+        std::fs::write(&outbox, b"ciphertext").unwrap();
+        content.insert_file_transfer(incoming_record("t1", u64::MAX));
+
+        content.wipe_cache().await.unwrap();
+
+        assert!(
+            !staged.exists(),
+            "decrypted plaintext must not survive a wipe"
+        );
+        assert!(
+            !outbox.exists(),
+            "the encrypted outbox must not survive either"
+        );
+        assert!(content.file_transfers_snapshot().is_empty());
+        assert!(
+            !dir.join("file_transfers.json").exists(),
+            "the transfer list itself is metadata about who sent you what",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The accept is the whole consent model. A sender must not be able to
+    /// follow its own offer with a `ready` and have the file fetched, decrypted
+    /// and published while the prompt is still on screen — so every message that
+    /// advances a transfer is gated on the state it is allowed to advance from.
+    #[test]
+    fn a_ready_is_refused_until_the_user_has_accepted() {
+        let dir = tmp("file-consent-gate");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        content.insert_file_transfer(incoming_record("t1", u64::MAX));
+
+        assert!(
+            !content.transfer_in_state("t1", "incoming", "npub1peer", &["accepted"]),
+            "a freshly offered transfer is not yet accepted",
+        );
+
+        content.set_file_status("t1", "accepted", "");
+        assert!(
+            content.transfer_in_state("t1", "incoming", "npub1peer", &["accepted"]),
+            "the accept is what opens the gate",
+        );
+        // ...and only for the peer that made the offer.
+        assert!(
+            !content.transfer_in_state("t1", "incoming", "npub1other", &["accepted"]),
+            "a third Circle member cannot drive someone else's transfer",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The deadline has to measure a stall, not the whole transfer. A large
+    /// file that is moving along normally must not be killed for outliving the
+    /// window its offer was made in.
+    #[test]
+    fn progress_pushes_the_deadline_back() {
+        let dir = tmp("file-stall-window");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        content.insert_file_transfer(incoming_record("moving", 1));
+
+        content.set_file_status("moving", "downloading", "");
+        content.sweep_file_transfers();
+
+        assert_eq!(
+            content
+                .file_transfers_snapshot()
+                .iter()
+                .find(|r| r.id == "moving")
+                .unwrap()
+                .status,
+            "downloading",
+            "a transfer that just made progress must survive the sweep",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `forget` is the UI's dismiss button, so it has to accept every terminal
+    /// state — including a cancel — and refuse anything still in flight.
+    #[test]
+    fn only_finished_transfers_can_be_dismissed() {
+        let dir = tmp("file-forget");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+
+        content.insert_file_transfer(incoming_record("live", u64::MAX));
+        content.forget_file_transfer("live");
+        assert_eq!(
+            content.file_transfers_snapshot().len(),
+            1,
+            "an in-flight transfer must not be dismissable"
+        );
+
+        for status in ["completed", "denied", "failed", "cancelled"] {
+            content.set_file_status("live", status, "");
+            content.forget_file_transfer("live");
+            assert!(
+                content.file_transfers_snapshot().is_empty(),
+                "{status} is terminal and must dismiss"
+            );
+            content.insert_file_transfer(incoming_record("live", u64::MAX));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tmp(tag: &str) -> PathBuf {

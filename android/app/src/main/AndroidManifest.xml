@@ -66,6 +66,18 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Receive a photo from Android's system Sharesheet, then let the
+                 user choose one of Myco's already-paired Circle peers. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
             <!-- Handle scanned myco:// links (a share QR: open the nsite + carry the
                  sharer's pairing info). BROWSABLE so a camera/QR scanner can hand
                  it to Myco. -->

@@ -1,5 +1,6 @@
 package app.myco.ui
 
+import android.net.Uri
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -68,6 +70,8 @@ import androidx.compose.ui.platform.LocalContext
 import app.myco.ui.radioWarnings
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
+import app.myco.core.CircleContact
+import app.myco.core.FileTransfer
 import app.myco.core.NativeActions
 import app.myco.hotspot.TransferGate
 import app.myco.nfc.PairPresent
@@ -75,6 +79,7 @@ import app.myco.share.DeviceName
 import app.myco.share.PairSecrets
 import app.myco.ui.screens.PairConnectedDialog
 import app.myco.ui.screens.PairPendingDialog
+import app.myco.ui.screens.PeerShareSheet
 import app.myco.ui.screens.AppsScreen
 import app.myco.ui.screens.CircleScreen
 import app.myco.ui.screens.DevScreen
@@ -124,6 +129,18 @@ fun MycoApp(
     onExitProxyChange: (String) -> Unit = {},
     /** Clears the intro's "already seen" flag so it plays in full again. */
     onReplayIntro: () -> Unit = {},
+    /** Documents received from Android's system Sharesheet. */
+    externalShareUris: List<Uri> = emptyList(),
+    onExternalShareDismissed: () -> Unit = {},
+    /** Selected peer hand-off; the native file transport will plug in here. */
+    onShareToPeer: (List<Uri>, CircleContact) -> Unit = { _, _ -> },
+    /** Copies a completed native receive into a user-visible Android location. */
+    onFileReceived: (FileTransfer) -> Unit = {},
+    /** Completed receive currently shown in the app-root preview dialog. */
+    receivedFile: FileTransfer? = null,
+    receivedFileUri: Uri? = null,
+    onDismissReceivedFile: () -> Unit = {},
+    onOpenReceivedFile: (FileTransfer, Uri) -> Unit = { _, _ -> },
 ) {
     var state by remember { mutableStateOf(client.state()) }
     // Mesh toggle is hoisted here so it survives tab switches.
@@ -137,6 +154,9 @@ fun MycoApp(
     // Name of a peer we just invited who hasn't accepted yet — drives the
     // "waiting" dialog, so a bump that can't be delivered says so.
     var justInvited by remember { mutableStateOf<String?>(null) }
+    var dismissedFileOffers by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var handledReceivedFiles by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showMycoAppPicker by remember { mutableStateOf(false) }
     val knownInvites = remember { mutableStateOf(state.outboundPairs.map { it.npub }.toSet()) }
     // Circle members we already knew about — anything new means a fresh pairing.
     val knownCircle = remember { mutableStateOf(state.circle.map { it.npub }.toSet()) }
@@ -203,13 +223,29 @@ fun MycoApp(
         knownInvites.value = current
     }
 
+    // Native transfer completion happens in Rust. Copy the decrypted file into
+    // Android's Downloads through the activity-owned MediaStore bridge exactly
+    // once per transfer.
+    androidx.compose.runtime.LaunchedEffect(state.fileTransfers) {
+        state.fileTransfers
+            .filter { it.status == "completed" && it.publishPending && it.receivedPath.isNotEmpty() }
+            .filterNot { it.id in handledReceivedFiles }
+            .forEach { transfer ->
+                handledReceivedFiles = handledReceivedFiles + transfer.id
+                onFileReceived(transfer)
+            }
+    }
+
     val nav = rememberNavController()
-    androidx.compose.runtime.CompositionLocalProvider(
-        LocalMeshControl provides MeshControl(meshEnabled) { on ->
-            meshEnabled = on
-            onMeshToggle(on)
-        },
-    ) {
+    // Keep the navigation host and all transient surfaces in one app-root layer.
+    // File offers must not be owned by Circle or any other selected destination.
+    Box(Modifier.fillMaxSize()) {
+        androidx.compose.runtime.CompositionLocalProvider(
+            LocalMeshControl provides MeshControl(meshEnabled) { on ->
+                meshEnabled = on
+                onMeshToggle(on)
+            },
+        ) {
     Scaffold(
         bottomBar = {
             val current by nav.currentBackStackEntryAsState()
@@ -295,7 +331,26 @@ fun MycoApp(
             }
         }
     }
-    } // CompositionLocalProvider(LocalMeshControl)
+        } // CompositionLocalProvider(LocalMeshControl)
+
+        // The incoming-offer prompt is the one piece of transfer UI that has to
+        // sit above everything: it interrupts. Progress lives where the user
+        // went looking for it — the share sheet, and the Circle tab.
+        FileOfferLayer(
+            offer = state.fileTransfers.firstOrNull {
+                it.direction == "incoming" &&
+                    it.status == "waiting_user" &&
+                    it.id !in dismissedFileOffers
+            },
+            onAccept = {
+                dismissedFileOffers = dismissedFileOffers + it.id
+                state = client.dispatch(NativeActions.acceptFileTransfer(it.id))
+            },
+            onDeny = {
+                dismissedFileOffers = dismissedFileOffers + it.id
+                state = client.dispatch(NativeActions.declineFileTransfer(it.id))
+            },
+        )
 
     // Incoming pair requests now live in the persistent Requests inbox (badged on
     // the Circle tab + surfaced on the pairing home), not a transient pop-up.
@@ -353,6 +408,56 @@ fun MycoApp(
         )
     }
 
+    // Completed native receives are also app-root UI. This remains visible when
+    // the user accepted from Apps, Circle, Settings, or Dev; it is not attached
+    // to the Circle destination that initiated pairing.
+    val completedTransfer = receivedFile
+    val completedUri = receivedFileUri
+    if (completedTransfer != null && completedUri != null) {
+        ReceivedFileDialog(
+            transfer = completedTransfer,
+            receivedUri = completedUri,
+            onOpenWithMycoApp = { showMycoAppPicker = true },
+            onOpenWithAnotherApp = { onOpenReceivedFile(completedTransfer, completedUri) },
+            onDismiss = onDismissReceivedFile,
+        )
+    }
+    if (showMycoAppPicker && completedTransfer != null) {
+        MycoAppPickerDialog(
+            transfer = completedTransfer,
+            apps = state.sites,
+            onDismiss = { showMycoAppPicker = false },
+        )
+    }
+
+    var peerShareVisible by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(externalShareUris) {
+        if (externalShareUris.isNotEmpty()) peerShareVisible = true
+    }
+    if (peerShareVisible && externalShareUris.isNotEmpty()) {
+        PeerShareSheet(
+            state = state,
+            uris = externalShareUris,
+            onDismiss = {
+                peerShareVisible = false
+                // Closing the sheet acknowledges the outcomes it was showing.
+                // Cancelled and declined are decisions the user watched happen,
+                // so they go with it rather than queueing up on the Circle tab
+                // waiting to be dismissed a second time. `failed` stays — that
+                // one is news, and may never have been on screen at all.
+                state.fileTransfers
+                    .filter { it.status == "cancelled" || it.status == "denied" }
+                    .forEach { client.dispatch(NativeActions.forgetFileTransfer(it.id)) }
+                state = client.state()
+                onExternalShareDismissed()
+            },
+            onShare = { peer -> onShareToPeer(externalShareUris, peer) },
+            onCancelTransfer = {
+                state = client.dispatch(NativeActions.cancelFileTransfer(it.id))
+            },
+        )
+    }
+
     // A request only auto-accepts while you're on the Circle tab (presenting). If
     // it arrives while you're elsewhere — another tab, or Myco was launched by the
     // tap — prompt to accept/ignore instead of silently pairing.
@@ -383,6 +488,7 @@ fun MycoApp(
             },
             confirmButton = { TextButton(onClick = { relayWarnDismissed = true }) { Text("OK") } },
         )
+    }
     }
 }
 
@@ -634,8 +740,8 @@ fun KeyVal(label: String, value: String, valueColor: Color = MaterialTheme.color
     }
 }
 
-/** Human file size for the transfer-consent dialog. */
-private fun formatSize(bytes: Long): String = when {
+/** Human file size. The one byte formatter for the whole `ui` package. */
+fun formatSize(bytes: Long): String = when {
     bytes >= 1L shl 20 -> "%.1f MB".format(bytes.toDouble() / (1L shl 20))
     bytes >= 1L shl 10 -> "%.0f kB".format(bytes.toDouble() / (1L shl 10))
     else -> "$bytes B"
