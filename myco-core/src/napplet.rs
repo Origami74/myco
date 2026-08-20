@@ -165,11 +165,13 @@ impl NappletHost {
         relay: Arc<dyn RelayBackend>,
         blobs: Arc<dyn BlobStore>,
         signer: Arc<dyn myco_napplet_runtime::seams::Signer>,
+        sink: Arc<dyn myco_napplet_runtime::seams::EventSink>,
     ) -> Self {
         Self {
             ctx: NapContext {
                 signer,
                 relay: relay.clone(),
+                sink,
             },
             relay,
             blobs,
@@ -397,6 +399,48 @@ impl BlobStore for SourceBlobs<'_> {
     }
 }
 
+/// Accepts a napplet's published events into this device's relay **and** the
+/// mesh.
+///
+/// Routes through the [`RelayHub`](crate::mesh_relay::RelayHub) rather than the
+/// store, so a napplet's event takes the same path as one arriving on a socket:
+/// deduplicated, stored, pushed to this device's live subscriptions, and handed
+/// to the gossiper for fan-out to the Circle. Publishing to the store instead
+/// would leave the event signed, saved and invisible — nothing on this phone
+/// would redraw, and no peer would ever hear it.
+///
+/// Falls back to storing when no hub is up. That is the host-build and
+/// pre-start case, not a silent downgrade in the field: on a phone the hub is
+/// stood up with the content layer, before any napplet can open.
+pub struct MeshEventSink {
+    hub: Arc<Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
+    store: Arc<dyn RelayBackend>,
+}
+
+impl MeshEventSink {
+    pub fn new(
+        hub: Arc<Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
+        store: Arc<dyn RelayBackend>,
+    ) -> Self {
+        Self { hub, store }
+    }
+}
+
+#[async_trait::async_trait]
+impl myco_napplet_runtime::seams::EventSink for MeshEventSink {
+    async fn accept(&self, event: nostr::Event) -> anyhow::Result<()> {
+        // Cloned out rather than held: the lock must not span the await.
+        let hub = self.hub.lock().unwrap().clone();
+        match hub {
+            Some(hub) => {
+                hub.accept_local(event).await?;
+                Ok(())
+            }
+            None => self.store.publish(event).await,
+        }
+    }
+}
+
 /// What installing a napplet would grant it: what it declared it needs, plus
 /// the defaults every napplet gets, narrowed to what this build can actually
 /// do.
@@ -522,6 +566,9 @@ mod tests {
                 relay,
                 blobs,
                 Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
+                Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
+                    MemRelay::new(),
+                ))),
             ),
             addr,
         )
@@ -625,6 +672,9 @@ mod tests {
             relay,
             blobs,
             Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
+            Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
+                MemRelay::new(),
+            ))),
         );
         let addr = NappletAddr {
             author: napplet.author,
@@ -675,6 +725,9 @@ mod tests {
             Arc::new(MemRelay::new()),
             Arc::new(MemBlobs::new()),
             Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
+            Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
+                MemRelay::new(),
+            ))),
         );
         let addr = NappletAddr {
             author: napplet.author,
@@ -717,6 +770,9 @@ mod tests {
             local_relay.clone(),
             local_blobs.clone(),
             Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
+            Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
+                MemRelay::new(),
+            ))),
         );
         let addr = NappletAddr {
             author: napplet.author,
@@ -872,6 +928,9 @@ mod live_fetch {
             Arc::new(MemRelay::new()),
             Arc::new(MemBlobs::new()),
             Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
+            Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
+                MemRelay::new(),
+            ))),
         );
         let started = std::time::Instant::now();
         match host.ingest(&addr, &source).await {

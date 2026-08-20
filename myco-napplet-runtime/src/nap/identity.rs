@@ -124,9 +124,11 @@ mod tests {
     /// special-case.
     #[tokio::test]
     async fn no_user_key_reads_as_nobody_rather_than_an_error() {
+        let relay: Arc<dyn nsite_deck::seams::RelayBackend> = Arc::new(MemRelay::new());
         let ctx = NapContext {
             signer: Arc::new(AbsentSigner),
-            relay: Arc::new(MemRelay::new()),
+            relay: relay.clone(),
+            sink: Arc::new(crate::seams::StoreOnlySink(relay)),
         };
         let reply = call(&ctx, "getPublicKey").await;
         assert_eq!(reply.field("publicKey").unwrap().as_str().unwrap(), "");
@@ -144,7 +146,8 @@ mod tests {
 
         let ctx = NapContext {
             signer: Arc::new(TestSigner::with_keys(keys)),
-            relay,
+            relay: relay.clone(),
+            sink: Arc::new(crate::seams::StoreOnlySink(relay)),
         };
         let reply = call(&ctx, "getProfile").await;
         assert_eq!(reply.field("profile").unwrap()["name"], "Myco Guest 01234");
@@ -171,7 +174,8 @@ mod tests {
 
         let ctx = NapContext {
             signer: Arc::new(TestSigner::with_keys(keys)),
-            relay,
+            relay: relay.clone(),
+            sink: Arc::new(crate::seams::StoreOnlySink(relay)),
         };
         assert!(call(&ctx, "getProfile")
             .await

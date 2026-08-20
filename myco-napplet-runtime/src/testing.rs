@@ -321,9 +321,37 @@ impl crate::seams::Signer for AbsentSigner {
 /// A context over in-memory seams, for driving capabilities in tests.
 pub fn test_context() -> (crate::dispatch::NapContext, std::sync::Arc<TestSigner>) {
     let signer = std::sync::Arc::new(TestSigner::new());
+    let relay: std::sync::Arc<dyn crate::seams::RelayBackend> =
+        std::sync::Arc::new(nsite_deck::testing::MemRelay::new());
     let ctx = crate::dispatch::NapContext {
         signer: signer.clone(),
-        relay: std::sync::Arc::new(nsite_deck::testing::MemRelay::new()),
+        relay: relay.clone(),
+        sink: std::sync::Arc::new(crate::seams::StoreOnlySink(relay)),
     };
     (ctx, signer)
+}
+
+/// An [`EventSink`](crate::seams::EventSink) that records what it accepted, so
+/// a test can assert an event was handed on rather than only written.
+#[derive(Default)]
+pub struct RecordingSink {
+    accepted: std::sync::Mutex<Vec<Event>>,
+}
+
+impl RecordingSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn accepted(&self) -> Vec<Event> {
+        self.accepted.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::seams::EventSink for RecordingSink {
+    async fn accept(&self, event: Event) -> anyhow::Result<()> {
+        self.accepted.lock().unwrap().push(event);
+        Ok(())
+    }
 }

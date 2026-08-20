@@ -66,6 +66,30 @@ pub trait OutboxResolver: Send + Sync {
     async fn read_lanes(&self, author: &PublicKey) -> anyhow::Result<Vec<RelayLane>>;
 }
 
+/// Where a napplet's published events go.
+///
+/// Separate from [`RelayBackend`] because storing and *accepting* are different
+/// acts. A store is where an event rests; accepting is what also wakes this
+/// device's live subscriptions and hands the event to whatever carries it to
+/// other people. A napplet that only stored would have its event signed, saved,
+/// and invisible — nothing would redraw here and no peer would ever hear it.
+#[async_trait]
+pub trait EventSink: Send + Sync {
+    /// Take a signed event and do everything accepting it implies.
+    async fn accept(&self, event: Event) -> anyhow::Result<()>;
+}
+
+/// An [`EventSink`] that only stores — the honest default for a runtime with
+/// nothing to fan out to, and what tests use when distribution is not the point.
+pub struct StoreOnlySink(pub std::sync::Arc<dyn RelayBackend>);
+
+#[async_trait]
+impl EventSink for StoreOnlySink {
+    async fn accept(&self, event: Event) -> anyhow::Result<()> {
+        self.0.publish(event).await
+    }
+}
+
 /// One message across the shell ↔ Rust channel: a capability call, its result,
 /// or a pushed subscription event.
 ///

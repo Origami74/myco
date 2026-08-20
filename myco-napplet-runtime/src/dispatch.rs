@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use crate::nap;
-use crate::seams::{Envelope, RelayBackend, Signer};
+use crate::seams::{Envelope, EventSink, RelayBackend, Signer};
 use crate::session::Session;
 
 /// What the capabilities reach the world through.
@@ -32,8 +32,11 @@ pub struct NapContext {
     /// Signs on the user's behalf. A napplet describes an event and gets one
     /// back; it never sees a key.
     pub signer: Arc<dyn Signer>,
-    /// Where events are read from and written to.
+    /// Where events are read from.
     pub relay: Arc<dyn RelayBackend>,
+    /// Where a napplet's published events are accepted — stored, shown here,
+    /// and carried to other people. See [`EventSink`].
+    pub sink: Arc<dyn EventSink>,
 }
 
 /// What to do with an inbound message.

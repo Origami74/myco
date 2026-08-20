@@ -157,7 +157,9 @@ async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
         Err(e) => return failed(message, format!("could not sign: {e}")),
     };
 
-    if let Err(e) = ctx.relay.publish(signed.clone()).await {
+    // Accepted, not merely stored: this is what wakes local subscriptions and
+    // hands the event to the mesh.
+    if let Err(e) = ctx.sink.accept(signed.clone()).await {
         return failed(message, format!("could not publish: {e}"));
     }
 
@@ -434,6 +436,67 @@ mod tests {
         .await;
         assert_eq!(out[0].field("ok").unwrap(), &json!(false));
         assert!(out[0].field("error").is_some());
+    }
+
+    /// A published event must be *handed on*, not only written. Storing alone
+    /// leaves it invisible: nothing on this device redraws, and no peer ever
+    /// hears it — which is exactly how a doorbell that rings nowhere looks.
+    #[tokio::test]
+    async fn a_published_event_reaches_the_sink() {
+        use crate::testing::RecordingSink;
+        use std::sync::Arc;
+
+        let (base, signer) = test_context();
+        let sink = Arc::new(RecordingSink::new());
+        let ctx = NapContext {
+            signer: base.signer.clone(),
+            relay: base.relay.clone(),
+            sink: sink.clone(),
+        };
+
+        call(
+            &ctx,
+            Envelope::new("relay.publish")
+                .with_id("b2")
+                .with_field("event", json!({"kind": 1, "content": "ding", "tags": []})),
+        )
+        .await;
+
+        let accepted = sink.accepted();
+        assert_eq!(accepted.len(), 1, "the event was never handed on");
+        assert_eq!(accepted[0].content, "ding");
+        assert_eq!(accepted[0].pubkey, signer.public_key());
+    }
+
+    /// A refused publish hands on nothing. The grant is checked before the
+    /// event is signed, so there is nothing to leak downstream either.
+    #[tokio::test]
+    async fn a_refused_publish_reaches_no_sink() {
+        use crate::testing::RecordingSink;
+        use std::sync::Arc;
+
+        let (base, _signer) = test_context();
+        let sink = Arc::new(RecordingSink::new());
+        let ctx = NapContext {
+            signer: base.signer.clone(),
+            relay: base.relay.clone(),
+            sink: sink.clone(),
+        };
+
+        let mut ungranted = Session::new(
+            NappletIdentity::new("chat", "aggregate"),
+            Vec::<String>::new(),
+        );
+        ungranted.on_ready();
+        let msg = Envelope::new("relay.publish")
+            .with_id("b2")
+            .with_field("event", json!({"kind": 1, "content": "ding", "tags": []}));
+        dispatch(&ctx, &mut ungranted, &msg).await;
+
+        assert!(
+            sink.accepted().is_empty(),
+            "a refused publish was handed on"
+        );
     }
 
     /// Without the grant, nothing publishes — and the refusal never signs.
