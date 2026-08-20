@@ -50,8 +50,10 @@ data class NappletReview(
     val loading: Boolean,
     val title: String,
     val description: String,
-    /** The capability domains it declared with `requires` tags. */
+    /** What it declared it needs — a statement of intent, not what it gets. */
     val requires: List<String>,
+    /** What installing it would actually grant, defaults included. */
+    val grants: List<String>,
     /** Non-empty when the fetch failed; show this instead of asking. */
     val error: String,
 )
@@ -342,6 +344,9 @@ data class AppState(
                 description = reviewJson.optString("description"),
                 requires = reviewJson.optJSONArray("requires")?.let { r ->
                     (0 until r.length()).map { r.optString(it) }
+                }.orEmpty(),
+                grants = reviewJson.optJSONArray("grants")?.let { g ->
+                    (0 until g.length()).map { g.optString(it) }
                 }.orEmpty(),
                 error = reviewJson.optString("error"),
             )
