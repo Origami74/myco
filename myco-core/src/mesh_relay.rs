@@ -761,6 +761,18 @@ async fn handle_client_frame(
                 ];
             }
             if first_sighting {
+                // The receiving half of the same blind spot: an event that
+                // arrived and one that never did are indistinguishable without
+                // this, and that is the first thing to establish when something
+                // published on one phone does not appear on another.
+                if origin == Origin::Mesh {
+                    tracing::info!(
+                        event = %event.id,
+                        kind = %event.kind.as_u16(),
+                        from = %peer_ip,
+                        "accepted a mesh event"
+                    );
+                }
                 // Fan to this device's live subscriptions (incl. the WebView).
                 let _ = hub.live.send(event.clone());
                 // Drive the mesh gossiper off the socket path (non-blocking).

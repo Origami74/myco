@@ -103,6 +103,7 @@ impl Gossiper for MeshGossiper {
         // just direct neighbours: a Circle peer reachable only multi-hop (you've
         // moved apart) must still get the message — the routed dial handles it, an
         // offline member's connect fails fast. See `docs/design/core/event-gossip.md`.
+        let mut fanned = 0usize;
         for npub in self.content.circle_npubs() {
             let ip = match fips::PeerIdentity::from_npub(&npub) {
                 Ok(p) => IpAddr::V6(p.address().to_ipv6()),
@@ -112,7 +113,20 @@ impl Gossiper for MeshGossiper {
                 continue;
             }
             self.content.gossip_to_peer(&npub, frame.clone());
+            fanned += 1;
         }
+
+        // A fan-out to nobody is the quiet failure here: an empty Circle, or a
+        // Circle whose npubs will not parse, looks exactly like a working
+        // gossip from the sending side. Saying how many peers were written to
+        // is what tells "sent" apart from "sent nowhere".
+        tracing::info!(
+            event = %event.id,
+            kind,
+            ttl = out_ttl,
+            peers = fanned,
+            "gossip fan-out"
+        );
     }
 
     /// Pull plane: forward the REQ's
