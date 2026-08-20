@@ -6,4 +6,5 @@
 //! half of the web projection, reached through [`crate::dispatch`].
 
 pub mod identity;
+pub mod relay;
 pub mod shell;

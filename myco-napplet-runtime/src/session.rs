@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 /// this with what the user granted — a grant for a domain that does not exist
 /// yet must not be advertised, or `shell.supports()` lies and the napplet takes
 /// a branch that cannot work.
-pub const IMPLEMENTED_DOMAINS: &[&str] = &["shell", "identity"];
+pub const IMPLEMENTED_DOMAINS: &[&str] = &["shell", "identity", "relay"];
 
 /// Domains every napplet gets, grant or no grant.
 ///
@@ -208,9 +208,9 @@ mod tests {
     /// otherwise `supports()` promises something that cannot be delivered.
     #[test]
     fn an_unimplemented_domain_is_absent_even_when_granted() {
-        let s = session(&["relay", "storage"]);
-        assert!(!s.offers("relay"), "relay is not implemented yet");
-        assert!(!s.offers("storage"));
+        let s = session(&["storage", "notify"]);
+        assert!(!s.offers("storage"), "storage is not implemented yet");
+        assert!(!s.offers("notify"));
         // Exactly what this build implements — no more, whatever was granted.
         let mut expected: Vec<String> = IMPLEMENTED_DOMAINS.iter().map(|d| d.to_string()).collect();
         expected.sort();
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn a_domain_this_build_does_not_implement_is_never_offered() {
         let s = session(&[]);
-        assert!(!s.offers("relay"));
+        assert!(!s.offers("storage"));
         assert!(!s.offers("nonsense"));
         assert!(!s.offers(""));
     }

@@ -3761,9 +3761,23 @@ fn frame_response(resp: &GatewayResponse) -> Vec<u8> {
     out
 }
 
-/// Resolve a Library entry back to a site address (its npub may fail to parse if
-/// the file was hand-edited; such entries are skipped).
+/// Resolve a Library entry back to an **nsite** address.
+///
+/// Returns `None` for a napplet. A napplet shares the Library with nsites but
+/// nothing else: it has no 15128/35128 manifest, so handing one to the nsite
+/// sync engine starts a sync that can never finish and leaves a tile stuck
+/// syncing forever beside the napplet's own.
+///
+/// Every path from the Library into nsite machinery goes through here, which is
+/// why the check lives here rather than at each caller — a new caller gets the
+/// exclusion for free instead of having to remember it.
+///
+/// Also returns `None` when the npub fails to parse, which a hand-edited file
+/// can produce.
 fn library_addr(item: &LibraryItem) -> Option<SiteAddr> {
+    if item.kind != LibraryKind::Nsite {
+        return None;
+    }
     let author = PublicKey::from_bech32(&item.author_npub).ok()?;
     Some(SiteAddr {
         author,
@@ -4888,5 +4902,48 @@ mod tests {
         assert_eq!(sites[0].state, "unreachable");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod library_kind_tests {
+    use super::*;
+
+    fn entry(kind: LibraryKind, d_tag: &str) -> LibraryItem {
+        LibraryItem {
+            author_npub: "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr"
+                .to_string(),
+            d_tag: Some(d_tag.to_string()),
+            title: String::new(),
+            url_host: String::new(),
+            pinned: true,
+            added_at: 0,
+            kind,
+            granted: Vec::new(),
+        }
+    }
+
+    /// A napplet must never reach the nsite sync engine. It has no 15128/35128
+    /// manifest, so a sync started for one never finishes and leaves a tile
+    /// stuck syncing beside the napplet's own — which is exactly what happened
+    /// the first time a napplet was installed on a device.
+    #[test]
+    fn a_napplet_is_not_an_nsite_address() {
+        assert!(library_addr(&entry(LibraryKind::Napplet, "dingdong")).is_none());
+        assert!(library_addr(&entry(LibraryKind::Nsite, "bitchat")).is_some());
+    }
+
+    /// The default is the safe one for every entry written before napplets
+    /// existed: they are nsites, and they keep syncing.
+    #[test]
+    fn an_entry_with_no_kind_recorded_is_an_nsite() {
+        let stored = r#"{
+            "authorNpub": "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr",
+            "dTag": "bitchat", "title": "Bitchat", "urlHost": "x",
+            "pinned": true, "addedAt": 0
+        }"#;
+        let item: LibraryItem = serde_json::from_str(stored).unwrap();
+        assert_eq!(item.kind, LibraryKind::Nsite);
+        assert!(library_addr(&item).is_some());
     }
 }
