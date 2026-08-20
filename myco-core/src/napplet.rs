@@ -131,11 +131,16 @@ impl NappletAddr {
 
 /// One open napplet window.
 struct LiveNapplet {
-    /// `None` only while a capability call is in flight for this window. A
-    /// second message arriving meanwhile finds nothing to dispatch to and is
-    /// dropped, which serialises a napplet's own calls rather than letting two
-    /// run against one session.
-    session: Option<Session>,
+    /// The window's session, behind an async lock so concurrent frames **queue**
+    /// rather than race.
+    ///
+    /// They must queue and not be dropped. A napplet's shim sends several
+    /// messages as it starts, so anything that discards a frame under
+    /// contention will sooner or later discard `shell.ready` — and then the
+    /// session never establishes and every capability call afterwards is
+    /// refused with "session not established", long after the message that
+    /// went missing.
+    session: Arc<tokio::sync::Mutex<Session>>,
     artifact: SrcdocArtifact,
 }
 
@@ -228,7 +233,7 @@ impl NappletHost {
         self.sessions.lock().unwrap().insert(
             session_id.clone(),
             LiveNapplet {
-                session: Some(session),
+                session: Arc::new(tokio::sync::Mutex::new(session)),
                 artifact,
             },
         );
@@ -266,35 +271,27 @@ impl NappletHost {
             return Vec::new();
         };
 
-        // Capabilities are async — a relay read, later a publish — so the
-        // session is taken out, driven, and put back rather than held across
-        // the await. A window that closed meanwhile simply has nowhere to
-        // return to, and its answer is dropped.
-        let Some(mut session) = self.take_session(session_id) else {
-            return Vec::new();
+        // The session handle is cloned out and the map's lock released before
+        // awaiting, so a slow capability call never blocks another window.
+        let session = {
+            let sessions = self.sessions.lock().unwrap();
+            match sessions.get(session_id) {
+                Some(live) => live.session.clone(),
+                None => return Vec::new(),
+            }
         };
+
+        // Waits its turn rather than giving up. Capabilities are async — a
+        // relay read now, a publish and a network round trip later — so frames
+        // genuinely do overlap.
+        let mut session = session.lock().await;
         let out = dispatch(&self.ctx, &mut session, &message).await;
-        self.return_session(session_id, session);
 
         out.envelopes()
             .iter()
             .cloned()
             .map(ToShell::to_napplet)
             .collect()
-    }
-
-    /// Lift a session out for the duration of an async capability call.
-    fn take_session(&self, session_id: &str) -> Option<Session> {
-        let mut sessions = self.sessions.lock().unwrap();
-        sessions.get_mut(session_id).and_then(|l| l.session.take())
-    }
-
-    /// Put it back, unless the window closed while the call was in flight.
-    fn return_session(&self, session_id: &str, session: Session) {
-        let mut sessions = self.sessions.lock().unwrap();
-        if let Some(live) = sessions.get_mut(session_id) {
-            live.session = Some(session);
-        }
     }
 
     /// Drop a window's session. Every later frame for it is ignored.
@@ -631,6 +628,54 @@ mod tests {
             )
             .await
             .is_empty());
+    }
+
+    /// Frames that overlap must queue, never be dropped.
+    ///
+    /// This is the bug that made a napplet report "session not established"
+    /// long after it had sent `shell.ready`: an earlier design lifted the
+    /// session out for the duration of a call, so a frame arriving meanwhile
+    /// found nothing to dispatch to and was discarded. A napplet's shim sends
+    /// several messages as it starts, so the discarded one was eventually the
+    /// handshake — and then every capability call afterwards was refused, with
+    /// nothing to show that a message had gone missing.
+    #[tokio::test]
+    async fn overlapping_frames_queue_rather_than_vanish() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host.open(&addr, vec!["identity".into()]).await.unwrap();
+
+        let ready = r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#;
+        let query = r#"{"channel":"napplet","message":{"type":"identity.getPublicKey","id":"i1"}}"#;
+
+        // Fired together, as a shim starting up does.
+        let (a, b) = tokio::join!(
+            host.frame(&opened.session_id, ready),
+            host.frame(&opened.session_id, query),
+        );
+
+        // Whichever order they land in, the handshake is not lost: exactly one
+        // frame answers with shell.init.
+        let inits = [&a, &b]
+            .iter()
+            .flat_map(|out| out.iter())
+            .filter(
+                |f| matches!(f, ToShell::Napplet { message } if message.msg_type == "shell.init"),
+            )
+            .count();
+        assert_eq!(inits, 1, "the handshake was dropped under contention");
+
+        // And the session really is established afterwards — a later call is
+        // serviced rather than refused.
+        let out = host.frame(&opened.session_id, query).await;
+        let ToShell::Napplet { message } = &out[0] else {
+            panic!("expected a reply");
+        };
+        assert_eq!(message.msg_type, "identity.getPublicKey.result");
+        assert!(
+            message.field("error").is_none(),
+            "still refused after the handshake: {:?}",
+            message.field("error")
+        );
     }
 
     /// Two windows on one napplet are two sessions. Neither handshake

@@ -37,12 +37,33 @@ const PRELUDE_IIFE: &str = include_str!("../assets/vendor/napplet-shim-prelude.g
 /// The global the vendored IIFE defines.
 pub const PRELUDE_GLOBAL: &str = "NappletShimPrelude";
 
-/// Render the prelude for a set of domains: the vendored installer, then the
-/// call that activates it.
+/// Render the prelude for a set of domains: the vendored installer, the call
+/// that activates it, and the readiness signal.
+///
+/// ## Why we send `shell.ready` and the shim does not
+///
+/// NAP-SHELL says the signal is "normally emitted automatically by the
+/// runtime-provided shim at load" — and the vendored `@napplet/shim` prelude
+/// carries no `shell` domain at all, so it never sends one. The reference web
+/// runtime posts it from its own injected namespace for the same reason.
+///
+/// Without it nothing establishes the session, and every capability call is
+/// refused with "session not established" — long after the napplet believes it
+/// started up, and with no message visible to say what is missing.
+///
+/// It goes **after** `install`, not before: `shell.ready` means "my receiver is
+/// live", and the receiver is what `install` puts in place. Sent first, the
+/// runtime would answer `shell.init` into a napplet that is not listening yet,
+/// and the environment would be lost.
+///
+/// A duplicate is harmless — NAP-SHELL requires a second `shell.ready` be
+/// idempotent — so a shim that starts sending its own costs nothing.
 pub fn render(domains: &[String]) -> String {
     let allowlist = serde_json::json!({ "domains": domains });
     format!(
-        "{PRELUDE_IIFE}\n{PRELUDE_GLOBAL}.install({allowlist});\n",
+        "{PRELUDE_IIFE}\n\
+         {PRELUDE_GLOBAL}.install({allowlist});\n\
+         parent.postMessage({{ type: \"shell.ready\" }}, \"*\");\n",
         allowlist = allowlist
     )
 }
@@ -112,5 +133,49 @@ mod tests {
     fn a_napplet_granted_nothing_still_gets_the_shell_domain() {
         let s = session(&[], &["shell"]);
         assert!(render_for(&s).contains(r#"{"domains":["shell"]}"#));
+    }
+}
+
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+
+    /// The bug this exists to prevent: with no `shell.ready` the session never
+    /// establishes, and a napplet that started up perfectly well is refused
+    /// every capability it asks for.
+    ///
+    /// The vendored shim carries no `shell` domain and never sends one, so the
+    /// prelude does — which is what NAP-SHELL means by the runtime-provided
+    /// shim emitting it at load.
+    #[test]
+    fn the_prelude_signals_readiness() {
+        let out = render(&["shell".to_string()]);
+        assert!(
+            out.contains(r#"{ type: "shell.ready" }"#),
+            "the prelude never signals readiness, so no session can establish"
+        );
+    }
+
+    /// Order is the whole point. `shell.ready` means "my receiver is live", and
+    /// `install` is what puts the receiver in place — sent first, the runtime
+    /// would answer into a napplet that is not listening and the environment
+    /// would be lost.
+    #[test]
+    fn readiness_is_signalled_after_the_namespace_is_installed() {
+        let out = render(&["shell".to_string()]);
+        let installed = out.rfind(&format!("{PRELUDE_GLOBAL}.install(")).unwrap();
+        let ready = out.rfind("shell.ready").unwrap();
+        assert!(
+            installed < ready,
+            "readiness was signalled before the receiver existed"
+        );
+    }
+
+    /// The opaque origin has no origin string to match, so `'*'` is required
+    /// rather than lax — see the NIP-5D web projection.
+    #[test]
+    fn readiness_is_posted_to_the_parent_with_a_wildcard_origin() {
+        let out = render(&["shell".to_string()]);
+        assert!(out.contains(r#"parent.postMessage({ type: "shell.ready" }, "*")"#));
     }
 }
