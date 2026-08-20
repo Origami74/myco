@@ -68,13 +68,38 @@ object NsiteShare {
         deviceNpub: String,
         deviceName: String,
         pairSecret: String,
+    ): String = buildShareUri(nsiteHost, null, deviceNpub, deviceName, pairSecret)
+
+    /**
+     * A share carrying a **napplet** instead of an nsite.
+     *
+     * [nappletPointer] is the `naddr` it was added by, so the receiving phone
+     * gets the author's relay hints with it — the same reason the Library keeps
+     * the pointer. Handing over a reconstructed `<npub>:<dtag>` would make the
+     * recipient search relays that may well not hold it.
+     */
+    fun buildNappletShareUri(
+        nappletPointer: String,
+        deviceNpub: String,
+        deviceName: String,
+        pairSecret: String,
+    ): String = buildShareUri(null, nappletPointer, deviceNpub, deviceName, pairSecret)
+
+    private fun buildShareUri(
+        nsiteHost: String?,
+        nappletPointer: String?,
+        deviceNpub: String,
+        deviceName: String,
+        pairSecret: String,
     ): String {
         val json = JSONObject()
             .put("v", 1)
-            .put("nsite", nsiteHost)
             .put("npub", deviceNpub)
             .put("name", deviceName)
             .put("secret", pairSecret)
+        // One of the two, never both — a share is one app.
+        if (nsiteHost != null) json.put("nsite", nsiteHost)
+        if (nappletPointer != null) json.put("napplet", nappletPointer)
         val b64 = Base64.encodeToString(
             json.toString().toByteArray(Charsets.UTF_8),
             Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
@@ -88,7 +113,12 @@ object NsiteShare {
         val npub: String,
         val name: String,
         val secret: String,
-    )
+        /** Set when the share carries a napplet rather than an nsite. */
+        val nappletPointer: String = "",
+    ) {
+        /** Whether this share is a napplet. */
+        val isNapplet: Boolean get() = nappletPointer.isNotEmpty()
+    }
 
     /** Decode a scanned `myco://share/<base64url(json)>` URI, or null if malformed. */
     fun parseShareUri(uri: String): ShareInfo? {
@@ -103,7 +133,8 @@ object NsiteShare {
                 npub = json.optString("npub"),
                 name = json.optString("name"),
                 secret = json.optString("secret"),
-            ).takeIf { it.nsiteHost.isNotEmpty() }
+                nappletPointer = json.optString("napplet"),
+            ).takeIf { it.nsiteHost.isNotEmpty() || it.nappletPointer.isNotEmpty() }
         }.getOrNull()
     }
 

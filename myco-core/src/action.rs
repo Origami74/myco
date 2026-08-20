@@ -58,7 +58,16 @@ pub enum NativeAppAction {
     /// Deliberately **not** an install: it reports what the napplet `requires`
     /// so the review screen can ask, and grants nothing. An `naddr` arriving
     /// from outside the app routes here, never to a silent install.
-    FetchNapplet { pointer: String },
+    FetchNapplet {
+        pointer: String,
+        /// The peer who shared it, when it arrived by a tap or a scan.
+        ///
+        /// Their device is tried before the internet, so a napplet handed over
+        /// in a room with no internet still arrives — which is the whole point
+        /// of handing it over that way.
+        #[serde(default)]
+        holder: Option<String>,
+    },
     /// Record what install review granted, and pin the napplet to the Library.
     ///
     /// `granted` replaces whatever was stored: the review screen shows the whole

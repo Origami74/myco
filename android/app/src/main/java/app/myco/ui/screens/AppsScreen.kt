@@ -232,6 +232,22 @@ fun AppsScreen(
                     nappletSheetFor = null
                     onLaunchNapplet(item.nappletPointer, item.title)
                 },
+                onShare = {
+                    // Same surface an nsite share uses: a QR, and an NDEF tag
+                    // presented while the sheet is up so the phones can just be
+                    // tapped together. The payload carries the naddr, so the
+                    // author's relay hints travel with it.
+                    shareFor = ShareTarget(
+                        uri = NsiteShare.buildNappletShareUri(
+                            nappletPointer = item.nappletPointer,
+                            deviceNpub = state.ownNpub,
+                            deviceName = NsiteShare.deviceName(state.ownNpub),
+                            pairSecret = NsiteShare.newPairSecret(),
+                        ),
+                        title = item.title.ifEmpty { item.dTag ?: "napplet" },
+                    )
+                    nappletSheetFor = null
+                },
                 onReload = {
                     nappletSheetFor = null
                     // Same path a fresh add takes: fetch, verify, then the
@@ -455,6 +471,7 @@ private sealed interface AppEntry {
 private fun NappletSheet(
     item: LibraryItem,
     onOpen: () -> Unit,
+    onShare: () -> Unit,
     onReload: () -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -489,6 +506,7 @@ private fun NappletSheet(
         }
         Spacer(Modifier.height(16.dp))
         SheetAction(Icons.Filled.HomeMax, "Open") { onOpen() }
+        SheetAction(Icons.Filled.Share, "Share") { onShare() }
 
         // Fetches the app again and shows the same screen it was added with.
         // The way to pick up a newer version, and the way to revisit what it is
