@@ -484,6 +484,28 @@ private fun NappletReviewSheet(
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
+            if (review.loading) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    Spacer(Modifier.size(14.dp))
+                    Column {
+                        Text("Finding this napplet…", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Asking the relays its link points at, then the usual ones.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(24.dp))
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+                return@Column
+            }
+
             if (review.error.isNotEmpty()) {
                 Text("Couldn't add this napplet", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))

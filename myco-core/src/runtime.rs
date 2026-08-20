@@ -1215,6 +1215,7 @@ impl AppRuntime {
             tracing::warn!("napplet {pointer}: {message}");
             *review.lock().unwrap() = Some(crate::napplet::NappletReview {
                 pointer: pointer.to_string(),
+                loading: false,
                 title: String::new(),
                 description: String::new(),
                 requires: Vec::new(),
@@ -1250,13 +1251,33 @@ impl AppRuntime {
         };
         let _ = content;
 
+        // Open the screen now, in a loading state. The fetch tries several
+        // relays and can take seconds; leaving the user on an unchanged grid
+        // until it finishes reads as nothing having happened at all.
         let pointer = pointer.to_string();
         let review = self.napplet_review.clone();
+        *review.lock().unwrap() = Some(crate::napplet::NappletReview {
+            pointer: pointer.clone(),
+            loading: true,
+            title: String::new(),
+            description: String::new(),
+            requires: Vec::new(),
+            error: String::new(),
+        });
+
         rt.spawn(async move {
-            // Public relays + Blossom, asking for the napplet kind rather than
-            // the nsite kind a `d` tag would otherwise imply. Untrusted: every
-            // byte is hashed and the signature checked before anything is kept.
-            let source = crate::ip_source::IpPeerSource::with_defaults().with_kind(addr.kind());
+            // The pointer's own relay hints first, then the defaults. A napplet
+            // lives where its author published it, which is often not where the
+            // popular aggregators look — searching only the defaults reports a
+            // napplet as missing when it is simply somewhere else. Asking for
+            // the napplet kind rather than the nsite kind a `d` tag implies.
+            // Untrusted: every byte is hashed and the signature checked before
+            // anything is kept.
+            let source = crate::ip_source::IpPeerSource::new(
+                addr.search_relays(),
+                crate::ip_source::default_blossom_servers(),
+            )
+            .with_kind(addr.kind());
             let outcome = match host.ingest(&addr, &source).await {
                 Ok(ingested) => {
                     tracing::info!(
@@ -1265,6 +1286,7 @@ impl AppRuntime {
                     );
                     crate::napplet::NappletReview {
                         pointer: pointer.clone(),
+                        loading: false,
                         title: ingested.title.unwrap_or_default(),
                         description: ingested.description.unwrap_or_default(),
                         requires: ingested.requires,
@@ -1275,6 +1297,7 @@ impl AppRuntime {
                     tracing::warn!("could not fetch napplet {pointer}: {e}");
                     crate::napplet::NappletReview {
                         pointer: pointer.clone(),
+                        loading: false,
                         title: String::new(),
                         description: String::new(),
                         requires: Vec::new(),

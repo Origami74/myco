@@ -46,6 +46,8 @@ data class SiteStatus(
  */
 data class NappletReview(
     val pointer: String,
+    /** The fetch is still running; the sheet shows progress rather than a question. */
+    val loading: Boolean,
     val title: String,
     val description: String,
     /** The capability domains it declared with `requires` tags. */
@@ -335,6 +337,7 @@ data class AppState(
             val reviewJson = o.optJSONObject("nappletReview")
             val nappletReview = if (reviewJson == null) null else NappletReview(
                 pointer = reviewJson.optString("pointer"),
+                loading = reviewJson.optBoolean("loading"),
                 title = reviewJson.optString("title"),
                 description = reviewJson.optString("description"),
                 requires = reviewJson.optJSONArray("requires")?.let { r ->

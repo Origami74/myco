@@ -853,8 +853,10 @@ class MainActivity : ComponentActivity() {
         // review screen asks first, and a scanned code must never be able to
         // grant a capability on its own.
         if (looksLikeNappletPointer(text)) {
+            // No toast: the review sheet opens immediately in a loading state,
+            // which is a thing on screen rather than a message at the bottom
+            // edge that is gone before it is read.
             core.dispatch(NativeActions.fetchNapplet(text.trim()))
-            Toast.makeText(this, "Checking napplet…", Toast.LENGTH_SHORT).show()
             return
         }
         // Fall back to treating it as a pasteable nsite link.
