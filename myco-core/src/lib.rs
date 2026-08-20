@@ -40,6 +40,10 @@ mod ip_source;
 // relay). See `reference/thinning-custom-relay.md`.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod mesh_relay;
+// Wires `myco-napplet-runtime` to this device's relay and Blossom store, and
+// holds one session per open napplet window. See
+// `docs/design/napplet/napplet-runtime.md`.
+mod napplet;
 // The `MESH` envelope that carries mesh state alongside — never inside — a
 // NIP-01 message on the peer link. See `reference/thinning-custom-relay.md`.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]

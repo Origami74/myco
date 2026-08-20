@@ -1,0 +1,373 @@
+//! Wiring `myco-napplet-runtime` to this device: the relay its manifests live
+//! in, the Blossom store its files live in, and the live sessions the WebView
+//! talks to.
+//!
+//! The runtime crate names no relay, no blob store and no WebView — that is
+//! what makes it testable with no phone. This module is where those seams meet
+//! the real ones, and it is deliberately thin: no verification happens here, no
+//! policy is decided here. It resolves, hands the bytes to the runtime, and
+//! carries frames.
+//!
+//! ## One session per window
+//!
+//! A session is created when a napplet window opens and dropped when it closes.
+//! Sessions are keyed by an opaque id handed to the Activity, not by the
+//! napplet's identity: the same napplet open in two windows is two sessions
+//! with two handshakes, and neither can see the other's.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use nostr::nips::nip19::FromBech32;
+use nostr::PublicKey;
+use nsite_deck::seams::{newest_in_slot, BlobStore, RelayBackend};
+
+use myco_napplet_runtime::artifact::{assemble, Injection, SrcdocArtifact};
+use myco_napplet_runtime::dispatch::dispatch;
+use myco_napplet_runtime::manifest::{KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT};
+use myco_napplet_runtime::prelude::render_for;
+use myco_napplet_runtime::resolve::resolve;
+use myco_napplet_runtime::session::{NappletIdentity, Session};
+use myco_napplet_runtime::shell_link::{ShellAction, ToRuntime, ToShell};
+
+/// Where a napplet manifest lives: an author, and a `d` tag for a named one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NappletAddr {
+    pub author: PublicKey,
+    /// `None` for a root (`15129`) napplet.
+    pub d_tag: Option<String>,
+}
+
+impl NappletAddr {
+    /// Parse `naddr1…`, or the `<npub>:<dtag>` / `<npub>` shorthand the Library
+    /// already uses for nsites.
+    pub fn parse(pointer: &str) -> anyhow::Result<Self> {
+        let pointer = pointer.trim();
+        if pointer.starts_with("naddr1") {
+            let coordinate = nostr::nips::nip19::Nip19Coordinate::from_bech32(pointer)
+                .map_err(|e| anyhow::anyhow!("not a valid naddr: {e}"))?;
+            let kind = coordinate.coordinate.kind.as_u16();
+            anyhow::ensure!(
+                kind == KIND_NAMED || kind == KIND_ROOT || kind == KIND_SNAPSHOT,
+                "naddr points at kind {kind}, which is not a napplet manifest"
+            );
+            let identifier = coordinate.coordinate.identifier.clone();
+            return Ok(Self {
+                author: coordinate.coordinate.public_key,
+                d_tag: (!identifier.is_empty()).then_some(identifier),
+            });
+        }
+
+        let (npub, d_tag) = match pointer.split_once(':') {
+            Some((npub, d)) => (npub, (!d.is_empty()).then(|| d.to_string())),
+            None => (pointer, None),
+        };
+        let author = PublicKey::from_bech32(npub)
+            .map_err(|e| anyhow::anyhow!("not a valid npub or naddr: {e}"))?;
+        Ok(Self { author, d_tag })
+    }
+
+    /// The manifest kind this address resolves in.
+    pub fn kind(&self) -> u16 {
+        match self.d_tag {
+            Some(_) => KIND_NAMED,
+            None => KIND_ROOT,
+        }
+    }
+}
+
+/// One open napplet window.
+struct LiveNapplet {
+    session: Session,
+    artifact: SrcdocArtifact,
+}
+
+/// What the Activity needs to put a napplet on screen.
+#[derive(Debug, Clone)]
+pub struct OpenedNapplet {
+    /// Opaque per-window session id, passed back on every frame.
+    pub session_id: String,
+    /// The origin the shell is served at, `<label>.napplet.localhost`.
+    pub shell_host: String,
+    pub title: Option<String>,
+}
+
+/// The device's live napplet sessions.
+pub struct NappletHost {
+    relay: Arc<dyn RelayBackend>,
+    blobs: Arc<dyn BlobStore>,
+    sessions: Mutex<HashMap<String, LiveNapplet>>,
+    next_id: Mutex<u64>,
+}
+
+impl NappletHost {
+    pub fn new(relay: Arc<dyn RelayBackend>, blobs: Arc<dyn BlobStore>) -> Self {
+        Self {
+            relay,
+            blobs,
+            sessions: Mutex::new(HashMap::new()),
+            next_id: Mutex::new(1),
+        }
+    }
+
+    /// Resolve a napplet from the local stores and open a session for it.
+    ///
+    /// `granted` is what the user approved at install review. Nothing here
+    /// widens it, and a napplet that fails verification never gets a session —
+    /// the error propagates and no window opens.
+    pub async fn open(
+        &self,
+        addr: &NappletAddr,
+        granted: Vec<String>,
+    ) -> anyhow::Result<OpenedNapplet> {
+        let event = newest_in_slot(
+            self.relay.as_ref(),
+            addr.kind(),
+            &addr.author,
+            addr.d_tag.as_deref(),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no napplet manifest for this address"))?;
+
+        // Every check lives in the runtime crate; a failure here means no
+        // session and no window.
+        let resolved = resolve(event, self.blobs.as_ref())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let session = Session::new(NappletIdentity::from(&resolved), granted);
+        let prelude = render_for(&session);
+        let artifact = assemble(
+            &resolved.index_html,
+            &Injection {
+                prelude_js: Some(&prelude),
+                ..Default::default()
+            },
+        );
+
+        let shell_host =
+            myco_napplet_runtime::host::shell_host(&addr.author.to_bytes(), addr.d_tag.as_deref());
+        let title = resolved.manifest.title.clone();
+
+        let session_id = {
+            let mut next = self.next_id.lock().unwrap();
+            let id = format!("napplet-{}", *next);
+            *next += 1;
+            id
+        };
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session_id.clone(), LiveNapplet { session, artifact });
+
+        Ok(OpenedNapplet {
+            session_id,
+            shell_host,
+            title,
+        })
+    }
+
+    /// Carry one frame from a window's shell, and return what to send back.
+    ///
+    /// An unparseable frame yields nothing: the shell is trusted to tag frames,
+    /// but what it relays came from the napplet and may be anything at all.
+    pub fn frame(&self, session_id: &str, frame_json: &str) -> Vec<ToShell> {
+        let Ok(frame) = serde_json::from_str::<ToRuntime>(frame_json) else {
+            return Vec::new();
+        };
+
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(live) = sessions.get_mut(session_id) else {
+            return Vec::new();
+        };
+
+        match frame {
+            ToRuntime::Shell {
+                action: ShellAction::Mounted,
+            } => vec![ToShell::load(&live.artifact)],
+            ToRuntime::Napplet { message } => dispatch(&mut live.session, &message)
+                .envelopes()
+                .iter()
+                .cloned()
+                .map(ToShell::to_napplet)
+                .collect(),
+        }
+    }
+
+    /// Drop a window's session. Every later frame for it is ignored.
+    pub fn close(&self, session_id: &str) {
+        self.sessions.lock().unwrap().remove(session_id);
+    }
+
+    /// How many sessions are open — for state reporting and tests.
+    pub fn open_count(&self) -> usize {
+        self.sessions.lock().unwrap().len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use myco_napplet_runtime::testing::NappletBuilder;
+    use nostr::nips::nip19::ToBech32;
+    use nsite_deck::testing::{MemBlobs, MemRelay};
+
+    async fn host_with_fixture() -> (NappletHost, NappletAddr) {
+        let napplet = NappletBuilder::new().build();
+        let relay = Arc::new(MemRelay::new());
+        let blobs = Arc::new(MemBlobs::new());
+        for (_, bytes) in &napplet.blobs {
+            blobs.put(bytes).await.unwrap();
+        }
+        relay.publish(napplet.manifest.clone()).await.unwrap();
+
+        let addr = NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+        };
+        (NappletHost::new(relay, blobs), addr)
+    }
+
+    #[tokio::test]
+    async fn opening_resolves_and_hands_back_a_shell_origin() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host.open(&addr, vec!["shell".into()]).await.unwrap();
+
+        assert!(opened.shell_host.ends_with(".napplet.localhost"));
+        assert_eq!(opened.title.as_deref(), Some("Fixture Napplet"));
+        assert_eq!(host.open_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_mount_frame_returns_the_verified_bytes() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host.open(&addr, vec![]).await.unwrap();
+
+        let out = host.frame(
+            &opened.session_id,
+            r#"{"channel":"shell","action":"mounted"}"#,
+        );
+        assert_eq!(out.len(), 1);
+        let ToShell::Shell {
+            artifact, sandbox, ..
+        } = &out[0]
+        else {
+            panic!("expected a load command");
+        };
+        assert!(artifact.contains("Fixture Napplet"));
+        assert_eq!(sandbox, SrcdocArtifact::SANDBOX);
+    }
+
+    #[tokio::test]
+    async fn the_handshake_runs_over_the_frame_channel() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host.open(&addr, vec![]).await.unwrap();
+
+        let out = host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        );
+        assert_eq!(out.len(), 1);
+        let ToShell::Napplet { message } = &out[0] else {
+            panic!("expected a relayed reply");
+        };
+        assert_eq!(message.msg_type, "shell.init");
+
+        // Exactly once, however many times it is sent.
+        assert!(host
+            .frame(
+                &opened.session_id,
+                r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#
+            )
+            .is_empty());
+    }
+
+    /// Two windows on one napplet are two sessions. Neither handshake
+    /// establishes the other, or closing one window would silently disarm the
+    /// other's session.
+    #[tokio::test]
+    async fn two_windows_are_two_independent_sessions() {
+        let (host, addr) = host_with_fixture().await;
+        let a = host.open(&addr, vec![]).await.unwrap();
+        let b = host.open(&addr, vec![]).await.unwrap();
+        assert_ne!(a.session_id, b.session_id);
+        assert_eq!(a.shell_host, b.shell_host, "same napplet, same origin");
+
+        let ready = r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#;
+        assert_eq!(host.frame(&a.session_id, ready).len(), 1);
+        assert_eq!(
+            host.frame(&b.session_id, ready).len(),
+            1,
+            "the second window needs its own handshake"
+        );
+
+        host.close(&a.session_id);
+        assert_eq!(host.open_count(), 1);
+        assert!(host.frame(&a.session_id, ready).is_empty());
+    }
+
+    /// A napplet that fails verification opens no window at all.
+    #[tokio::test]
+    async fn a_tampered_napplet_never_opens() {
+        let napplet = NappletBuilder::new().break_signature().build();
+        let relay = Arc::new(MemRelay::new());
+        let blobs = Arc::new(MemBlobs::new());
+        for (_, bytes) in &napplet.blobs {
+            blobs.put(bytes).await.unwrap();
+        }
+        relay.publish(napplet.manifest.clone()).await.unwrap();
+
+        let host = NappletHost::new(relay, blobs);
+        let addr = NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+        };
+        assert!(host.open(&addr, vec![]).await.is_err());
+        assert_eq!(host.open_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_napplet_is_an_error_not_an_empty_window() {
+        let (host, _) = host_with_fixture().await;
+        let stranger = NappletAddr {
+            author: nostr::Keys::generate().public_key(),
+            d_tag: Some("nope".to_string()),
+        };
+        assert!(host.open(&stranger, vec![]).await.is_err());
+    }
+
+    #[test]
+    fn pointers_parse_in_the_shapes_the_library_already_uses() {
+        let keys = nostr::Keys::generate();
+        let npub = keys.public_key().to_bech32().unwrap();
+
+        let named = NappletAddr::parse(&format!("{npub}:chat")).unwrap();
+        assert_eq!(named.author, keys.public_key());
+        assert_eq!(named.d_tag.as_deref(), Some("chat"));
+        assert_eq!(named.kind(), KIND_NAMED);
+
+        let root = NappletAddr::parse(&npub).unwrap();
+        assert_eq!(root.d_tag, None);
+        assert_eq!(root.kind(), KIND_ROOT);
+
+        assert!(NappletAddr::parse("not-a-pointer").is_err());
+    }
+
+    /// An naddr naming an nsite is not a napplet. Distinct kinds are what keep
+    /// the two resolution paths apart, so the pointer has to respect them.
+    #[test]
+    fn an_naddr_for_the_nsite_kind_is_refused() {
+        let keys = nostr::Keys::generate();
+        let coordinate = nostr::nips::nip19::Nip19Coordinate {
+            coordinate: nostr::nips::nip01::Coordinate {
+                kind: nostr::Kind::from(35128u16),
+                public_key: keys.public_key(),
+                identifier: "chat".to_string(),
+            },
+            relays: Vec::new(),
+        };
+        let naddr = coordinate.to_bech32().unwrap();
+        let err = NappletAddr::parse(&naddr).unwrap_err();
+        assert!(err.to_string().contains("35128"), "unexpected error: {err}");
+    }
+}

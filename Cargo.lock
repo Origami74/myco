@@ -2098,6 +2098,7 @@ dependencies = [
  "hex",
  "jni",
  "myco-blossom",
+ "myco-napplet-runtime",
  "myco-relay",
  "nostr",
  "nsite-deck",
