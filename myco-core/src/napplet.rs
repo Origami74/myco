@@ -210,6 +210,11 @@ impl NappletHost {
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+        tracing::info!(
+            napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
+            ?granted,
+            "opening napplet"
+        );
         let session = Session::new(NappletIdentity::from(&resolved), granted);
         let prelude = render_for(&session);
         let artifact = assemble(

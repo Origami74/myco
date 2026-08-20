@@ -232,6 +232,13 @@ fun AppsScreen(
                     nappletSheetFor = null
                     onLaunchNapplet(item.nappletPointer, item.title)
                 },
+                onReload = {
+                    nappletSheetFor = null
+                    // Same path a fresh add takes: fetch, verify, then the
+                    // review screen — so a reload can also correct what the app
+                    // is allowed to do, and never widens it silently.
+                    client.dispatch(NativeActions.fetchNapplet(item.nappletPointer))
+                },
                 onRemove = {
                     nappletSheetFor = null
                     confirmForgetNapplet = item
@@ -448,6 +455,7 @@ private sealed interface AppEntry {
 private fun NappletSheet(
     item: LibraryItem,
     onOpen: () -> Unit,
+    onReload: () -> Unit,
     onRemove: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
@@ -481,6 +489,11 @@ private fun NappletSheet(
         }
         Spacer(Modifier.height(16.dp))
         SheetAction(Icons.Filled.HomeMax, "Open") { onOpen() }
+
+        // Fetches the app again and shows the same screen it was added with.
+        // The way to pick up a newer version, and the way to revisit what it is
+        // allowed to do without removing it and finding its link again.
+        SheetAction(Icons.Filled.Refresh, "Reload app") { onReload() }
 
         // What this app was allowed to do, in the same words it was asked in.
         Spacer(Modifier.height(12.dp))
