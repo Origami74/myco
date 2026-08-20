@@ -52,6 +52,25 @@ pub enum NativeAppAction {
     RemoveFromLibrary { link: String },
     /// Forget a single nsite: remove it from the Library and the Apps grid.
     ForgetNsite { link: String },
+    /// Fetch a napplet by `naddr` (or `<npub>:<dtag>`), verify it, and store it
+    /// locally — D9's acquisition path, online once and mesh-replicable after.
+    ///
+    /// Deliberately **not** an install: it reports what the napplet `requires`
+    /// so the review screen can ask, and grants nothing. An `naddr` arriving
+    /// from outside the app routes here, never to a silent install.
+    FetchNapplet { pointer: String },
+    /// Record what install review granted, and pin the napplet to the Library.
+    ///
+    /// `granted` replaces whatever was stored: the review screen shows the whole
+    /// set being agreed to, so merging would let a second install accumulate
+    /// capabilities across two screens neither of which showed the total.
+    InstallNapplet {
+        pointer: String,
+        #[serde(default)]
+        granted: Vec<String>,
+    },
+    /// Unpin a napplet and drop its grants.
+    ForgetNapplet { pointer: String },
     /// Check online relays for newer versions of installed nsites and stage/apply
     /// them (`docs/design/nsite/nsite-updates.md`). Spawn-not-block.
     CheckNsiteUpdates,

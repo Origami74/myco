@@ -203,6 +203,74 @@ impl NappletHost {
     pub fn open_count(&self) -> usize {
         self.sessions.lock().unwrap().len()
     }
+
+    /// Fetch a napplet from somewhere else, verify it, and store it locally.
+    ///
+    /// This is D9's acquisition path: online once when added by `naddr`, local
+    /// and mesh-replicable from then on. `source_relay` and `source_blobs` are
+    /// whatever can reach it — an internet relay and Blossom server, or a mesh
+    /// peer's; nothing here knows which, and neither is trusted.
+    ///
+    /// Verification happens against the fetched bytes **before** anything is
+    /// written, so a napplet that fails a check leaves no partial state behind
+    /// to be picked up by a later open.
+    pub async fn ingest(
+        &self,
+        addr: &NappletAddr,
+        source_relay: &dyn RelayBackend,
+        source_blobs: &dyn BlobStore,
+    ) -> anyhow::Result<IngestedNapplet> {
+        let event = newest_in_slot(
+            source_relay,
+            addr.kind(),
+            &addr.author,
+            addr.d_tag.as_deref(),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no napplet manifest at that address"))?;
+
+        // Resolves against the *source* store, so every byte is hashed and the
+        // signature and aggregate checked before any of it is kept.
+        let resolved = resolve(event.clone(), source_blobs)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        // Blob first, manifest last: a half-written napplet is then one the
+        // local relay has no manifest for, rather than a manifest whose bytes
+        // are missing.
+        let index = resolved
+            .manifest
+            .index_entry()
+            .ok_or_else(|| anyhow::anyhow!("verified napplet has no index entry"))?;
+        let bytes = source_blobs
+            .get(&index.sha256)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("source served no bytes for {}", index.sha256))?;
+        self.blobs.put(&bytes).await?;
+        self.relay.publish(event).await?;
+
+        Ok(IngestedNapplet {
+            requires: resolved.manifest.requires.clone(),
+            title: resolved.manifest.title.clone(),
+            description: resolved.manifest.description.clone(),
+            d_tag: resolved.d_tag.clone(),
+            aggregate: resolved.aggregate.clone(),
+        })
+    }
+}
+
+/// What a fetched, verified napplet declares — the input to install review.
+///
+/// [`IngestedNapplet::requires`] is what the review screen must show, in words a
+/// person understands: these are the capabilities the user is being asked to
+/// grant, and a granted `relay` covers publishing with no per-event prompt.
+#[derive(Debug, Clone)]
+pub struct IngestedNapplet {
+    pub requires: Vec<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub d_tag: String,
+    pub aggregate: String,
 }
 
 #[cfg(test)]
@@ -334,6 +402,83 @@ mod tests {
             d_tag: Some("nope".to_string()),
         };
         assert!(host.open(&stranger, vec![]).await.is_err());
+    }
+
+    /// D9's acquisition path: fetched from somewhere else, verified against the
+    /// fetched bytes, then stored — after which it opens from the local stores
+    /// with the source gone.
+    #[tokio::test]
+    async fn ingest_verifies_then_stores_and_the_napplet_opens_locally() {
+        let napplet = NappletBuilder::new()
+            .requires(&["relay", "identity"])
+            .build();
+
+        // Somewhere else entirely.
+        let source_relay = MemRelay::new();
+        let source_blobs = MemBlobs::new();
+        for (_, bytes) in &napplet.blobs {
+            source_blobs.put(bytes).await.unwrap();
+        }
+        source_relay
+            .publish(napplet.manifest.clone())
+            .await
+            .unwrap();
+
+        // This device, empty.
+        let host = NappletHost::new(Arc::new(MemRelay::new()), Arc::new(MemBlobs::new()));
+        let addr = NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+        };
+
+        let ingested = host
+            .ingest(&addr, &source_relay, &source_blobs)
+            .await
+            .unwrap();
+        // What install review has to put in front of the user.
+        assert_eq!(ingested.requires, vec!["relay", "identity"]);
+        assert_eq!(ingested.title.as_deref(), Some("Fixture Napplet"));
+
+        // Now local: opens with no source in reach.
+        let opened = host.open(&addr, vec!["relay".into()]).await.unwrap();
+        assert!(opened.shell_host.ends_with(".napplet.localhost"));
+    }
+
+    /// A napplet that fails verification leaves nothing behind. Storing first
+    /// and checking later would leave bytes a later open could pick up.
+    #[tokio::test]
+    async fn a_failed_ingest_stores_nothing() {
+        let napplet = NappletBuilder::new().break_signature().build();
+        let source_relay = MemRelay::new();
+        let source_blobs = MemBlobs::new();
+        for (_, bytes) in &napplet.blobs {
+            source_blobs.put(bytes).await.unwrap();
+        }
+        source_relay
+            .publish(napplet.manifest.clone())
+            .await
+            .unwrap();
+
+        let local_relay = Arc::new(MemRelay::new());
+        let local_blobs = Arc::new(MemBlobs::new());
+        let host = NappletHost::new(local_relay.clone(), local_blobs.clone());
+        let addr = NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+        };
+
+        assert!(host
+            .ingest(&addr, &source_relay, &source_blobs)
+            .await
+            .is_err());
+        assert!(
+            local_relay.is_empty(),
+            "a rejected napplet left a manifest behind"
+        );
+        assert!(
+            local_blobs.is_empty(),
+            "a rejected napplet left bytes behind"
+        );
     }
 
     #[test]
