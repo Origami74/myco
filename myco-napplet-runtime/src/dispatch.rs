@@ -62,7 +62,11 @@ pub fn dispatch(session: &mut Session, message: &Envelope) -> Outcome {
                 message.to_error("session not established: send shell.ready first")
             ]);
         }
-        if !session.offers(domain) {
+        // The permission, enforced here and only here. Every implemented API
+        // is in the napplet's namespace whatever it was granted, so this is the
+        // boundary — and it is checked per call, so revoking a grant takes
+        // effect on the next call rather than at the next reload.
+        if !session.is_granted(domain) {
             return Outcome::Reply(vec![message.to_error(format!(
                 "capability {domain} was not granted to this napplet"
             ))]);
@@ -152,9 +156,9 @@ mod tests {
         );
     }
 
-    /// A granted call still refused after the handshake, because the grant is
-    /// absent. The napplet's prelude installs only granted domains, so getting
-    /// here means it went around its own namespace.
+    /// The permission boundary. The API is in the napplet's namespace and
+    /// `supports()` says so, and the call is still refused — which is the whole
+    /// point of moving the check behind the call.
     #[test]
     fn an_ungranted_capability_is_refused_after_the_handshake() {
         let mut s = session_with_relay(&[]);
@@ -167,10 +171,16 @@ mod tests {
         assert!(error.contains("relay"), "unhelpful error: {error}");
         // The error model: a result carrying `error` carries nothing else.
         assert_eq!(sent[0].fields.len(), 1);
+
+        // And the napplet was told the API exists, so this is a refusal it can
+        // act on rather than a runtime that cannot do relay at all.
+        assert!(s.offers("relay"));
+        assert!(s.available_domains().contains(&"relay".to_string()));
     }
 
     /// A granted, implemented domain with no handler is this crate's bug, not
     /// the napplet's — but it must still fail closed rather than fall through.
+    /// (`relay` has no handler yet, so a granted call lands on that path.)
     #[test]
     fn an_unwired_capability_fails_closed() {
         let mut s = session_with_relay(&["relay"]);

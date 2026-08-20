@@ -12,24 +12,22 @@
 //! conformant runtime's; hand-writing one would mean re-deriving their
 //! interface on every registry change.
 //!
-//! ## One source for the namespace and for `supports()`
+//! ## Every API is injected, always
 //!
-//! [`render`] takes the domains a session offers and passes exactly those to
-//! the installer, which installs only what it is given. The same set goes into
-//! `shell.init`. So a napplet that was not granted `relay` finds no
-//! `window.napplet.relay` to call *and* is told `supports("relay") === false`:
-//! the namespace and the environment cannot disagree, because they are computed
-//! from one value.
+//! [`render`] installs everything this build implements, regardless of what the
+//! user granted. The permission lives *behind* the call: `window.napplet.relay`
+//! exists for every napplet, and a napplet without a `relay` grant gets a
+//! refusal when it publishes, not a missing object when it looks.
 //!
-//! That is defence in depth, not the enforcement itself. A napplet can always
-//! `postMessage` whatever it likes; [`crate::dispatch`] refuses ungranted
-//! domains regardless of what its namespace contains.
+//! The difference matters to the napplet's own logic. An absent namespace entry
+//! reads as "this runtime cannot do relay", which is permanent and sends the
+//! napplet down its fallback path for good. A refused call reads as "not right
+//! now", which it can surface, retry, or ask about — and which stays true when
+//! the user changes their mind later without the napplet reloading.
 //!
-//! Note also that the vendored bundle *contains* every domain's
-//! implementation — the allowlist decides what is installed, not what ships.
-//! A napplet without a `relay` grant has no `window.napplet.relay`, but the
-//! code for one is still in its document. Nothing in the runtime relies on the
-//! bytes being absent.
+//! Enforcement is [`crate::dispatch`], which refuses ungranted domains whatever
+//! the namespace contains — a napplet can always `postMessage` directly, so the
+//! namespace was never the boundary.
 
 use crate::session::Session;
 
@@ -39,8 +37,8 @@ const PRELUDE_IIFE: &str = include_str!("../assets/vendor/napplet-shim-prelude.g
 /// The global the vendored IIFE defines.
 pub const PRELUDE_GLOBAL: &str = "NappletShimPrelude";
 
-/// Render the prelude for a set of offered domains: the vendored installer,
-/// then the call that activates it with this napplet's allowlist.
+/// Render the prelude for a set of domains: the vendored installer, then the
+/// call that activates it.
 pub fn render(domains: &[String]) -> String {
     let allowlist = serde_json::json!({ "domains": domains });
     format!(
@@ -49,9 +47,10 @@ pub fn render(domains: &[String]) -> String {
     )
 }
 
-/// Render the prelude for a session — the domains it offers, and nothing else.
+/// Render the prelude for a session — every domain this runtime implements,
+/// granted or not. See the module docs for why grants do not filter this.
 pub fn render_for(session: &Session) -> String {
-    render(&session.offered_domains())
+    render(&session.available_domains())
 }
 
 #[cfg(test)]
@@ -90,19 +89,23 @@ mod tests {
         assert!(out.trim_end().ends_with(");"));
     }
 
-    /// The property worth having: a napplet is handed exactly the domains its
-    /// session offers, so its namespace cannot promise more than `supports()`.
+    /// Every implemented API is installed, whether or not it was granted.
     #[test]
-    fn the_allowlist_is_the_sessions_offered_set() {
-        let s = session(&["relay", "storage"], &["shell", "relay"]);
-        let offered = s.offered_domains();
-        assert_eq!(offered, vec!["relay".to_string(), "shell".to_string()]);
-
+    fn the_allowlist_is_everything_this_build_implements() {
+        // Granted nothing at all...
+        let s = session(&[], &["shell", "relay"]);
         let out = render_for(&s);
+        // ...and `relay` is still installed, because the permission is checked
+        // when the napplet calls it, not when it looks for it.
         assert!(out.contains(r#"{"domains":["relay","shell"]}"#));
-        // `storage` was granted but is not implemented, so it is neither
-        // offered nor installed.
-        assert!(!out.ends_with("storage\"]});\n"));
+    }
+
+    /// A domain this build does not implement is not installed, however it was
+    /// granted — there would be nothing behind it.
+    #[test]
+    fn an_unimplemented_domain_is_not_installed() {
+        let s = session(&["storage"], &["shell"]);
+        assert!(render_for(&s).contains(r#"{"domains":["shell"]}"#));
     }
 
     #[test]

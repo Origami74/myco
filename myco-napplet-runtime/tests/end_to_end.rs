@@ -102,7 +102,7 @@ async fn a_verified_napplet_reaches_the_shell_and_completes_the_handshake() {
     // Two different code paths, one value; if they ever diverge a napplet's
     // supports() check and its actual namespace disagree.
     let advertised = replies[0].field("capabilities").unwrap()["domains"].clone();
-    assert_eq!(advertised, json!(session.offered_domains()));
+    assert_eq!(advertised, json!(session.available_domains()));
     assert!(prelude.contains(r#"{"domains":["shell"]}"#));
 
     // --- and the session never re-establishes ---------------------------
@@ -128,9 +128,12 @@ async fn a_tampered_napplet_never_becomes_an_artifact() {
     );
 }
 
-/// An ungranted capability is refused at dispatch whatever the napplet's
-/// namespace looks like. The prelude's allowlist is defence in depth, not the
-/// enforcement — a napplet can always postMessage directly.
+/// The permission is behind the call, not in the namespace.
+///
+/// A napplet granted nothing still gets every implemented API injected and
+/// still sees `supports()` say yes — and its call is still refused. That is the
+/// shape that lets a napplet ask rather than give up: an absent API reads as
+/// "this runtime will never do relay", a refused call reads as "not right now".
 #[tokio::test]
 async fn the_namespace_is_not_the_enforcement() {
     let mut session = Session::with_implemented(
@@ -141,18 +144,15 @@ async fn the_namespace_is_not_the_enforcement() {
     );
     dispatch(&mut session, &Envelope::new("shell.ready"));
 
-    // ...so the activation call installs no relay object. Note the vendored
-    // bundle still *contains* every domain's implementation — the allowlist
-    // decides what gets installed, not what ships — so the assertion is on the
-    // install call, not on the document.
+    // ...and relay is installed anyway.
     let prelude = render_for(&session);
     let install = prelude.rfind("NappletShimPrelude.install(").unwrap();
     assert_eq!(
         prelude[install..].trim_end(),
-        r#"NappletShimPrelude.install({"domains":["shell"]});"#
+        r#"NappletShimPrelude.install({"domains":["relay","shell"]});"#
     );
 
-    // A napplet that goes around its own namespace is still refused.
+    // The call is what gets refused.
     let call = Envelope::new("relay.publish").with_id("x1");
     let replies = dispatch(&mut session, &call).envelopes().to_vec();
     assert_eq!(replies.len(), 1);

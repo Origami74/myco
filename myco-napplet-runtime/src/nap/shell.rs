@@ -38,13 +38,18 @@ pub fn handle(session: &mut Session, message: &Envelope) -> Vec<Envelope> {
     vec![init_for(session)]
 }
 
-/// The `shell.init` environment for a session: the domains offered to this
-/// napplet, and the named services exposed to it.
+/// The `shell.init` environment for a session: the domains this runtime
+/// implements, and the named services exposed to it.
+///
+/// Reports what Myco *can* do, not what this napplet was *allowed* to do —
+/// `supports()` is a question about the runtime, and a napplet that reads it as
+/// a permission check would give up before asking. Permission is answered on
+/// the call.
 pub fn init_for(session: &Session) -> Envelope {
     Envelope::new("shell.init")
         .with_field(
             "capabilities",
-            serde_json::json!({ "domains": session.offered_domains() }),
+            serde_json::json!({ "domains": session.available_domains() }),
         )
         // No named services yet. The field is required, so it is present and
         // empty rather than absent.

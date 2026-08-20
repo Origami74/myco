@@ -485,72 +485,116 @@ private fun NappletReviewSheet(
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
             if (review.loading) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                ) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(84.dp),
+                        strokeWidth = 6.dp,
                     )
-                    Spacer(Modifier.size(14.dp))
-                    Column {
-                        Text("Finding this napplet…", style = MaterialTheme.typography.titleMedium)
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "Asking the relays its link points at, then the usual ones.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    Spacer(Modifier.height(28.dp))
+                    Text("Looking for this app", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "This can take a few seconds.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                Spacer(Modifier.height(24.dp))
-                TextButton(onClick = onDismiss) { Text("Cancel") }
                 return@Column
             }
 
             if (review.error.isNotEmpty()) {
-                Text("Couldn't add this napplet", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(8.dp))
-                Text(review.error, style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(20.dp))
-                TextButton(onClick = onDismiss) { Text("Close") }
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth().padding(top = 24.dp),
+                ) {
+                    Text("Couldn't find this app", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        // Plain words. The reason underneath is for a log, not
+                        // for someone holding a phone.
+                        "It might not be shared any more, or the link might be wrong.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    TextButton(onClick = onDismiss) { Text("Close") }
+                }
                 return@Column
             }
 
-            Text(
-                review.title.ifEmpty { "Untitled napplet" },
-                style = MaterialTheme.typography.titleMedium,
-            )
-            if (review.description.isNotEmpty()) {
-                Spacer(Modifier.height(6.dp))
-                Text(review.description, style = MaterialTheme.typography.bodyMedium)
+            // The app's mark, where the spinner was — so finding it resolves
+            // into the thing itself rather than swapping one block of text for
+            // another.
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(84.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(tileColorFor(review.pointer)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        review.title.take(1).uppercase().ifEmpty { "N" },
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.headlineMedium,
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    review.title.ifEmpty { "Untitled app" },
+                    style = MaterialTheme.typography.titleMedium,
+                    textAlign = TextAlign.Center,
+                )
+                if (review.description.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        review.description,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
-            Spacer(Modifier.height(20.dp))
+
+            Spacer(Modifier.height(28.dp))
 
             if (review.requires.isEmpty()) {
                 Text(
-                    "This napplet asks for nothing. It runs sealed off: no network, " +
-                        "no storage, no access to your key.",
+                    "This app runs on its own. It can't reach the internet, " +
+                        "save anything, or use your account.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             } else {
-                Text("It wants to:", style = MaterialTheme.typography.titleSmall)
+                Text("This app would be able to:", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(10.dp))
                 review.requires.forEach { domain ->
-                    Text("•  " + capabilityWording(domain), style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "•  " + capabilityWording(domain),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                     Spacer(Modifier.height(6.dp))
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "You can take these back later from the napplet's long-press menu.",
+                    "You can change your mind later — press and hold the app to remove it.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(28.dp))
             Row {
                 TextButton(onClick = onDismiss) { Text("Not now") }
                 Spacer(Modifier.weight(1f))
-                Button(onClick = { onInstall(review.requires) }) { Text("Add napplet") }
+                Button(onClick = { onInstall(review.requires) }) { Text("Add to my apps") }
             }
         }
     }
@@ -564,19 +608,19 @@ private fun NappletReviewSheet(
  * and dropping it from the list would understate what is being agreed to.
  */
 private fun capabilityWording(domain: String): String = when (domain) {
-    "relay" -> "Read and publish Nostr events as you — including posting without asking again"
-    "identity" -> "See who you are: your public key and profile"
-    "storage" -> "Keep its own data on this device"
-    "intent" -> "Open other napplets"
-    "inc" -> "Talk to other napplets you have open"
-    "outbox" -> "Choose which relays to reach on your behalf"
-    "notify" -> "Show you notifications"
-    "theme" -> "Follow your app theme"
-    "link" -> "Ask Myco to open links outside the app"
-    "resource" -> "Fetch images and files through Myco"
-    "config" -> "Offer settings you can change"
-    "shell" -> "Start up (every napplet does this)"
-    else -> "Use \"$domain\" — a capability this version of Myco does not recognise"
+    "relay" -> "Read and post as you, whenever it likes, without asking again"
+    "identity" -> "See your name and profile"
+    "storage" -> "Save things on this phone"
+    "intent" -> "Open your other apps"
+    "inc" -> "Talk to your other open apps"
+    "outbox" -> "Choose where to send things on your behalf"
+    "notify" -> "Send you notifications"
+    "theme" -> "Match your colours"
+    "link" -> "Open links outside Myco"
+    "resource" -> "Load pictures and files"
+    "config" -> "Have settings you can change"
+    "shell" -> "Start up (every app does this)"
+    else -> "Do something this version of Myco doesn't know about (\"$domain\")"
 }
 
 @Composable

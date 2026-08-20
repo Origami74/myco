@@ -107,31 +107,46 @@ impl Session {
         self.established
     }
 
-    /// The domains offered to this napplet: what it was granted, intersected
-    /// with what this build implements, plus the mandatory ones.
+    /// The domains available to this napplet: everything this build implements.
     ///
-    /// This is the set `shell.supports()` answers from, and it has to be
-    /// truthful in both directions — `true` for everything offered, `false` for
-    /// everything else.
-    pub fn offered_domains(&self) -> Vec<String> {
+    /// **Not** filtered by what the user granted. Every API is injected and
+    /// every API answers `shell.supports()` truthfully, because `supports` asks
+    /// *"does this runtime do relay?"* — a fact about Myco — and not *"am I
+    /// allowed?"*, which is a fact about this napplet and this user, and which
+    /// can change while the napplet is running.
+    ///
+    /// Gating injection on grants looked safer and was worse. A napplet that
+    /// finds no `window.napplet.relay` concludes the runtime cannot do relay at
+    /// all and takes its permanent fallback path — the DingDong napplet
+    /// answered exactly that way, printing "this shell did not grant NAP-RELAY"
+    /// and giving up, when what had happened was that nobody had been asked
+    /// yet. The permission belongs behind the call, where a refusal is one
+    /// failed action the napplet can react to, rather than in the namespace,
+    /// where absence is indistinguishable from a runtime that will never
+    /// support it.
+    pub fn available_domains(&self) -> Vec<String> {
         let mut out: BTreeSet<String> = MANDATORY_DOMAINS.iter().map(|d| d.to_string()).collect();
-        for domain in &self.granted {
-            if self.implemented.contains(domain) {
-                out.insert(domain.clone());
-            }
-        }
+        out.extend(self.implemented.iter().cloned());
         out.into_iter().collect()
     }
 
-    /// Whether `domain` is offered to this napplet.
+    /// Whether this runtime exposes `domain` at all.
     pub fn offers(&self, domain: &str) -> bool {
-        MANDATORY_DOMAINS.contains(&domain)
-            || (self.granted.contains(domain) && self.implemented.contains(domain))
+        MANDATORY_DOMAINS.contains(&domain) || self.implemented.contains(domain)
     }
 
-    /// Whether a call in `domain` may be serviced right now.
+    /// Whether the user granted `domain` to this napplet.
+    ///
+    /// This is the permission, and [`Session::may_service`] is where it is
+    /// enforced — on the call, not on the namespace.
+    pub fn is_granted(&self, domain: &str) -> bool {
+        MANDATORY_DOMAINS.contains(&domain) || self.granted.contains(domain)
+    }
+
+    /// Whether a call in `domain` may be serviced right now: the handshake has
+    /// happened, the runtime implements it, and the user granted it.
     pub fn may_service(&self, domain: &str) -> bool {
-        self.established && self.offers(domain)
+        self.established && self.offers(domain) && self.is_granted(domain)
     }
 
     /// Record the napplet's readiness signal.
@@ -188,15 +203,47 @@ mod tests {
         assert!(s.is_established());
     }
 
-    /// The truthfulness rule: a grant for a domain this build does not
-    /// implement must not be advertised, or `supports()` promises something
-    /// that cannot be delivered.
+    /// `supports()` describes the runtime, not the permission. A domain this
+    /// build does not implement is genuinely absent, grant or no grant —
+    /// otherwise `supports()` promises something that cannot be delivered.
     #[test]
-    fn a_grant_for_an_unimplemented_domain_is_not_offered() {
+    fn an_unimplemented_domain_is_absent_even_when_granted() {
         let s = session(&["relay", "storage"]);
         assert!(!s.offers("relay"));
         assert!(!s.offers("storage"));
-        assert_eq!(s.offered_domains(), vec!["shell".to_string()]);
+        assert_eq!(s.available_domains(), vec!["shell".to_string()]);
+    }
+
+    /// The model this whole module turns on: the API is available to every
+    /// napplet, and the grant decides whether a *call* goes through.
+    ///
+    /// Hiding an implemented API from an ungranted napplet tells it the runtime
+    /// cannot do the thing at all, and it takes its permanent fallback path
+    /// rather than asking.
+    #[test]
+    fn an_implemented_domain_is_available_before_it_is_granted() {
+        let mut s = Session::with_implemented(
+            NappletIdentity::new("chat", "aggregate"),
+            Vec::<String>::new(),
+            ["shell", "relay"],
+        );
+        s.on_ready();
+
+        // Present in the namespace and truthfully reported...
+        assert!(s.offers("relay"));
+        assert!(s.available_domains().contains(&"relay".to_string()));
+        // ...but the call is refused, which is where the permission lives.
+        assert!(!s.is_granted("relay"));
+        assert!(!s.may_service("relay"));
+
+        // Granted, the same API starts working — no reload, no re-injection.
+        let mut granted = Session::with_implemented(
+            NappletIdentity::new("chat", "aggregate"),
+            ["relay"],
+            ["shell", "relay"],
+        );
+        granted.on_ready();
+        assert!(granted.may_service("relay"));
     }
 
     /// NAP-SHELL is mandatory, not a user decision — a napplet granted nothing
@@ -205,11 +252,12 @@ mod tests {
     fn shell_is_offered_without_a_grant() {
         let s = session(&[]);
         assert!(s.offers("shell"));
-        assert!(s.offered_domains().contains(&"shell".to_string()));
+        assert!(s.is_granted("shell"));
+        assert!(s.available_domains().contains(&"shell".to_string()));
     }
 
     #[test]
-    fn an_ungranted_domain_is_never_offered() {
+    fn a_domain_this_build_does_not_implement_is_never_offered() {
         let s = session(&[]);
         assert!(!s.offers("relay"));
         assert!(!s.offers("nonsense"));
