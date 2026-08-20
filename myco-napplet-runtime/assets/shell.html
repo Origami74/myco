@@ -1,0 +1,103 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Myco napplet shell</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  iframe { display: block; border: 0; width: 100%; height: 100%; }
+</style>
+<script>
+// The napplet shell. Trusted code, shipped in the APK, never fetched and never
+// mesh-updatable — it is not content.
+//
+// It does four things and deliberately nothing else:
+//   1. create the sandboxed iframe and set its srcdoc to verified bytes,
+//   2. carry messages both ways,
+//   3. verify MessageEvent.source on every inbound message,
+//   4. hand everything else to Rust.
+//
+// It holds no key, opens no connection, and makes no policy decision. Every
+// capability is implemented on the Rust side; this page cannot grant anything
+// because it has nothing to grant.
+(function () {
+  'use strict';
+
+  // Injected by addWebMessageListener, scoped to this shell's origin. The
+  // napplet's iframe has an opaque origin and matches no origin rule, so this
+  // object does not exist inside it — which is the whole reason for
+  // addWebMessageListener over addJavascriptInterface, whose object lands in
+  // every frame including the napplet's.
+  var runtime = window.mycoNappletRuntime;
+
+  var frame = null;
+
+  function toRuntime(payload) {
+    if (runtime) runtime.postMessage(JSON.stringify(payload));
+  }
+
+  // --- runtime -> shell -------------------------------------------------
+
+  function onRuntimeFrame(raw) {
+    var frameData;
+    try {
+      frameData = JSON.parse(raw);
+    } catch (e) {
+      return;
+    }
+
+    if (frameData.channel === 'shell') {
+      if (frameData.action === 'load') load(frameData);
+      return;
+    }
+
+    if (frameData.channel === 'napplet') {
+      // '*' is required, not lax: the napplet's origin is opaque, so there is
+      // no origin string that would ever match it.
+      if (frame && frame.contentWindow) {
+        frame.contentWindow.postMessage(frameData.message, '*');
+      }
+    }
+  }
+
+  function load(command) {
+    // One napplet per shell, for one lifetime. Reloading in place would leave
+    // the previous napplet's frame reachable and its session ambiguous.
+    if (frame) return;
+
+    frame = document.createElement('iframe');
+    // Exactly what the runtime specified, and nothing this page composes
+    // itself. A same-origin grant alongside allow-scripts would let the frame
+    // reach into this origin and clear its own sandbox, so the token is never
+    // written here — the runtime owns the value and a Rust test pins it.
+    frame.setAttribute('sandbox', command.sandbox);
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.srcdoc = command.artifact;
+    document.body.appendChild(frame);
+  }
+
+  // --- napplet -> shell -------------------------------------------------
+
+  window.addEventListener('message', function (event) {
+    // The unforgeable check. A Window reference cannot be spoofed, so this
+    // binds the message to the frame we created and drops anything from a
+    // popup, another frame, or the top window.
+    if (!frame || event.source !== frame.contentWindow) return;
+
+    // Wrapped, never forwarded raw — the channel tag is written here, by
+    // trusted code, so a napplet cannot dress a message up as shell control
+    // traffic.
+    toRuntime({ channel: 'napplet', message: event.data });
+  });
+
+  // --- start ------------------------------------------------------------
+
+  if (runtime) {
+    runtime.onmessage = function (event) {
+      onRuntimeFrame(event.data);
+    };
+  }
+
+  // Tell Rust the listeners are installed. Same shape as the napplet's own
+  // handshake, one layer out: nothing is delivered before the receiver exists.
+  toRuntime({ channel: 'shell', action: 'mounted' });
+})();
+</script>

@@ -42,6 +42,8 @@ pub mod nap;
 pub mod resolve;
 pub mod seams;
 pub mod session;
+pub mod shell_link;
+pub mod shell_page;
 
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -58,3 +60,5 @@ pub use seams::{
     BlobStore, Envelope, NapTransport, OutboxResolver, RelayBackend, RelayLane, Signer,
 };
 pub use session::{NappletIdentity, Session, IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
+pub use shell_link::{ShellAction, ToRuntime, ToShell};
+pub use shell_page::{shell_page, RUNTIME_OBJECT};
