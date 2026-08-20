@@ -110,6 +110,23 @@
             android:windowSoftInputMode="adjustResize"
             android:label="@string/app_name" />
 
+        <!--
+          One napplet per task, like an nsite — but its own Activity, because the
+          trust boundary differs: this one hosts a capability channel and runs
+          untrusted code in a sandboxed iframe. Not exported: a napplet is opened
+          from the Apps panel or through Myco's own deep-link handler, never by
+          another app addressing this class directly. An inbound intent may open
+          a napplet and carry a payload; it may never grant a capability.
+        -->
+        <activity
+            android:name=".NappletActivity"
+            android:exported="false"
+            android:documentLaunchMode="intoExisting"
+            android:autoRemoveFromRecents="false"
+            android:theme="@style/Theme.Myco.Splash"
+            android:windowSoftInputMode="adjustResize"
+            android:label="@string/app_name" />
+
         <!-- Portrait-locked QR scanner (the zxing default opens sideways). -->
         <activity
             android:name=".PortraitCaptureActivity"

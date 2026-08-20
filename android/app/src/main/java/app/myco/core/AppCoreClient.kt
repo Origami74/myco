@@ -1,5 +1,6 @@
 package app.myco.core
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** A peer seen/connected over BLE (keyed by node_addr, not MAC). */
@@ -602,6 +603,49 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
         return GatewayResult.decode(framed)
     }
 
+    // --- napplets --------------------------------------------------------
+
+    /**
+     * Resolve and verify a napplet, and open a session for one window.
+     *
+     * [granted] is what install review recorded on the Library entry. Nothing
+     * downstream widens it, and a napplet that fails verification returns an
+     * error rather than a session — there is no partial success to render.
+     */
+    fun nappletOpen(pointer: String, granted: List<String>): NappletOpen {
+        val list = JSONArray()
+        for (domain in granted) list.put(domain)
+        return NappletOpen.parse(
+            NativeCore.nappletOpen(requireHandle(), pointer, list.toString())
+        )
+    }
+
+    /**
+     * Carry one frame from a window's shell to Rust, and return the frames to
+     * send back. Empty is normal — a duplicate handshake, or an unrecognized
+     * message that NIP-5D says to ignore in silence.
+     */
+    fun nappletFrame(sessionId: String, frameJson: String): List<String> {
+        val raw = NativeCore.nappletFrame(requireHandle(), sessionId, frameJson)
+        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+        return (0 until array.length()).map { array.getJSONObject(it).toString() }
+    }
+
+    /** Drop a window's session. Rust ignores every later frame for it. */
+    fun nappletClose(sessionId: String) {
+        NativeCore.nappletClose(requireHandle(), sessionId)
+    }
+
+    /** The shell page — trusted HTML compiled into the runtime, not an asset. */
+    fun nappletShellPage(): String = NativeCore.nappletShellPage()
+
+    /**
+     * The name the capability channel is injected under. Read from Rust rather
+     * than written twice, so the shell page and the code registering its channel
+     * cannot disagree about it.
+     */
+    fun nappletRuntimeObject(): String = NativeCore.nappletRuntimeObject()
+
     override fun close() {
         val current = handle
         if (current != 0L) {
@@ -786,4 +830,32 @@ object NativeActions {
 
     fun forgetFileTransfer(transferId: String): JSONObject =
         JSONObject().put("type", "forget_file_transfer").put("transferId", transferId)
+}
+
+/**
+ * The result of asking Rust to open a napplet.
+ *
+ * A failure carries [error] and nothing else — no session was created, so there
+ * is nothing to render or clean up.
+ */
+data class NappletOpen(
+    val ok: Boolean,
+    val sessionId: String,
+    val shellHost: String,
+    val title: String?,
+    val error: String?,
+) {
+    companion object {
+        fun parse(json: String): NappletOpen {
+            val o = runCatching { JSONObject(json) }.getOrNull()
+                ?: return NappletOpen(false, "", "", null, "unreadable native response")
+            return NappletOpen(
+                ok = o.optBoolean("ok", false),
+                sessionId = o.optString("sessionId"),
+                shellHost = o.optString("shellHost"),
+                title = o.optString("title").ifEmpty { null },
+                error = o.optString("error").ifEmpty { null },
+            )
+        }
+    }
 }

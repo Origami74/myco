@@ -1,7 +1,6 @@
 package app.myco
 
 import android.annotation.SuppressLint
-import android.app.ActivityManager
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Color
@@ -121,29 +120,7 @@ class NsiteActivity : ComponentActivity() {
             ),
         )
         setContentView(root)
-        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
-            val nav = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
-            val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-            // Reserve whichever is taller: the nav bar (idle) or the soft keyboard
-            // (open). Shrinking the WebView above the IME keeps the composer visible
-            // on WebViews too old for `interactive-widget`/visualViewport keyboard
-            // handling (e.g. the DC-1). Newer WebViews then see no occlusion, so
-            // their own keyboard logic becomes a no-op — no double lift.
-            // Reserve the status bar unless the page opted into the full height.
-            // Take the display cutout too: on a notched/punch-hole device the
-            // cutout can extend past the status bar, and content under it is
-            // physically unreadable rather than merely cluttered.
-            val top = if (pageOptedIntoFullHeight) {
-                0
-            } else {
-                maxOf(
-                    insets.getInsets(WindowInsetsCompat.Type.statusBars()).top,
-                    insets.getInsets(WindowInsetsCompat.Type.displayCutout()).top,
-                )
-            }
-            v.setPadding(0, top, 0, maxOf(nav, ime))
-            insets
-        }
+        ChromelessChrome.applyInsets(root) { pageOptedIntoFullHeight }
 
         // Android Back navigates the WebView history, then leaves the nsite task.
         onBackPressedDispatcher.addCallback(this) {
@@ -195,18 +172,7 @@ class NsiteActivity : ComponentActivity() {
      * dark icons over a light one. Runs on the WebView's JS callback (UI thread).
      * A missing/transparent/unparseable value leaves the current appearance as-is.
      */
-    private fun syncBarContrast() {
-        webView.evaluateJavascript(BG_PROBE_JS) { raw ->
-            val color = parseCssColor(unquoteJs(raw)) ?: return@evaluateJavascript
-            // "Light appearance" = dark icons (for a light bar background). So a light
-            // page → light appearance (dark icons); a dark page → dark icons off (white).
-            val lightBg = isLightColor(color)
-            WindowCompat.getInsetsController(window, webView).apply {
-                isAppearanceLightStatusBars = lightBg
-                isAppearanceLightNavigationBars = lightBg
-            }
-        }
-    }
+    private fun syncBarContrast() = ChromelessChrome.syncBarContrast(this, webView)
 
     /**
      * Decide whether this page keeps the status-bar region or draws under it.
@@ -216,12 +182,10 @@ class NsiteActivity : ComponentActivity() {
      * the first page asked for. Runs on the WebView's JS callback (UI thread).
      */
     private fun syncTopInset() {
-        webView.evaluateJavascript(VIEWPORT_FIT_PROBE_JS) { raw ->
-            val wants = unquoteJs(raw) == "cover"
+        ChromelessChrome.probeFullHeight(webView) { wants ->
             if (wants != pageOptedIntoFullHeight) {
                 pageOptedIntoFullHeight = wants
-                // Re-run the inset listener with the new decision.
-                ViewCompat.requestApplyInsets(root)
+                ChromelessChrome.requestInsets(root)
             }
         }
     }
@@ -236,15 +200,7 @@ class NsiteActivity : ComponentActivity() {
         Thread {
             val label = title.ifEmpty { "nsite" }
             val icon = NsiteIcons.fetch(client, host)
-            runOnUiThread {
-                @Suppress("DEPRECATION")
-                val desc = if (icon != null) {
-                    ActivityManager.TaskDescription(label, icon)
-                } else {
-                    ActivityManager.TaskDescription(label)
-                }
-                setTaskDescription(desc)
-            }
+            runOnUiThread { ChromelessChrome.applyTaskDescription(this, label, icon) }
         }.start()
     }
 
@@ -263,68 +219,6 @@ class NsiteActivity : ComponentActivity() {
          * so each route would spawn its own Recents card for the same app.
          */
         fun documentUri(hostLabel: String): Uri = Uri.parse("myco://app/$hostLabel")
-
-        /** Read the page's declared theme-color, else the computed body/html background. */
-        private const val BG_PROBE_JS = """
-            (function () {
-              try {
-                var m = document.querySelector('meta[name="theme-color"]');
-                if (m && m.content) return m.content;
-                var b = document.body ? getComputedStyle(document.body).backgroundColor : '';
-                if (b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') return b;
-                return getComputedStyle(document.documentElement).backgroundColor || '';
-              } catch (e) { return ''; }
-            })()
-        """
-
-        /**
-         * Does the page declare `viewport-fit=cover`? That is the standard signal
-         * that it handles safe areas itself via `env(safe-area-inset-*)`, so it is
-         * treated as opting into the status-bar region. Anything else — including a
-         * missing viewport meta, which is the common case for a page written for a
-         * browser with its own top chrome — keeps the status bar reserved.
-         */
-        private const val VIEWPORT_FIT_PROBE_JS = """
-            (function () {
-              try {
-                var m = document.querySelector('meta[name="viewport"]');
-                var c = m ? (m.getAttribute('content') || '') : '';
-                return /viewport-fit\s*=\s*cover/i.test(c) ? 'cover' : 'auto';
-              } catch (e) { return 'auto'; }
-            })()
-        """
-
-        /** Strip the JSON quoting `evaluateJavascript` wraps a returned string in. */
-        private fun unquoteJs(raw: String?): String {
-            val s = raw?.trim().orEmpty()
-            if (s.length < 2 || s == "null" || !s.startsWith("\"")) return s
-            return s.substring(1, s.length - 1).replace("\\\"", "\"").replace("\\\\", "\\")
-        }
-
-        /** Parse a CSS color — `#rgb`/`#rrggbb`, a name, or `rgb()/rgba()`. Null if
-         *  unparseable or fully transparent (no usable background to contrast against). */
-        private fun parseCssColor(value: String): Int? {
-            val v = value.trim()
-            if (v.isEmpty()) return null
-            val rgb = Regex("rgba?\\(([^)]+)\\)").find(v)
-            if (rgb != null) {
-                val p = rgb.groupValues[1].split(",").map { it.trim() }
-                if (p.size < 3) return null
-                val r = p[0].toFloatOrNull()?.toInt() ?: return null
-                val g = p[1].toFloatOrNull()?.toInt() ?: return null
-                val b = p[2].toFloatOrNull()?.toInt() ?: return null
-                if ((p.getOrNull(3)?.toFloatOrNull() ?: 1f) == 0f) return null
-                return Color.rgb(r, g, b)
-            }
-            return runCatching { Color.parseColor(v) }.getOrNull()
-        }
-
-        /** Perceptual luminance test: true if [color] reads as a light background. */
-        private fun isLightColor(color: Int): Boolean {
-            val luminance =
-                0.299 * Color.red(color) + 0.587 * Color.green(color) + 0.114 * Color.blue(color)
-            return luminance > 140  // 0..255; midline biased slightly toward "dark icons".
-        }
     }
 }
 
@@ -392,6 +286,13 @@ private class NsiteWebViewClient(
     ): WebResourceResponse? {
         val uri = request.url
         val host = uri.host ?: return null
+        // A napplet shell origin is never ours to serve, even though it also
+        // ends in `.localhost`. The capability channel is scoped to that origin,
+        // so an nsite that navigated itself into one and had the nsite gateway
+        // answer would be running inside the origin the channel trusts. Each
+        // WebView client refuses the other's hosts; this is that refusal.
+        if (host.endsWith(NAPPLET_SUFFIX, ignoreCase = true)) return null
+
         // Only our nsite hosts are served locally; anything else falls through
         // (and, offline, simply fails — v1 nsites are self-contained). The in-app
         // WebView serves nsites under `.localhost` (see loadUrl) so loopback WS to
@@ -446,5 +347,12 @@ private class NsiteWebViewClient(
     private companion object {
         /** Schemes with no external app handler — the WebView renders them itself. */
         val IN_PAGE_SCHEMES = setOf("data", "blob", "about", "javascript", "file", "content")
+
+        /**
+         * The suffix napplet shell origins carry. Kept in sync with
+         * `myco_napplet_runtime::host::SHELL_SUFFIX`; the Rust side owns the
+         * value and its tests pin it.
+         */
+        const val NAPPLET_SUFFIX = ".napplet.localhost"
     }
 }
