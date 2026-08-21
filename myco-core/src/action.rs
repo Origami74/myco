@@ -115,6 +115,19 @@ pub enum NativeAppAction {
     /// launch, like [`NativeAppAction::SetCustomRelay`].
     SetCustomBlossom { url: String },
 
+    /// Report how many concurrent Wi-Fi Aware data paths this chipset supports
+    /// (`Characteristics.getNumberOfSupportedDataPaths()`), which is what the
+    /// Aware UDP socket pool is sized to.
+    ///
+    /// Persisted, and applied at the next **node** start rather than now: the
+    /// pool is bound when the node is built, and rebuilding it live would drop
+    /// every established link — including BLE ones that have nothing to do with
+    /// Aware. Kotlin pushes this whenever it can read it, which is not on every
+    /// launch: the call needs API 33 (above our minSdk) and returns nothing
+    /// while Wi-Fi is off. Reading last launch's answer off disk is what makes
+    /// the number available at the one moment it is needed.
+    SetAwareDataPaths { count: u8 },
+
     /// Set this device's human label (memorable name). Stamped on outgoing pair
     /// request/accept events so peers show the name the user chose. The Android
     /// app owns the value (persisted there) and re-applies it on launch.

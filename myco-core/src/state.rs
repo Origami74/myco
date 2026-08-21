@@ -273,9 +273,16 @@ pub struct BleStatus {
 pub struct WifiAwareStatus {
     /// Master switch (the `SetWifiAwareEnabled` action).
     pub enabled: bool,
-    /// The UDP port the Aware radio advertises in its
-    /// service-specific info (0 while the lane is off).
+    /// The **base** UDP port of the Aware pool (0 while the lane is off). Slot
+    /// *i* listens on `port + i`, and the radio advertises the port of the slot
+    /// it pinned to each peer's data path — the base is what a peer discovered
+    /// before its slot is known is told, and is slot 0.
     pub port: u16,
+    /// How many peers the Aware lane can carry at once: the size of the UDP
+    /// instance pool the node bound at start. The radio allocates slots within
+    /// this range rather than keeping its own copy of the number, so the two
+    /// sides cannot disagree about which instances exist.
+    pub slots: u8,
     /// Whether the Aware lane is actively discovering right now — the Aware
     /// analogue of a BLE scan, sourced from the publish/subscribe session
     /// lifecycle (`publishSession != null || subscribeSession != null`), never
