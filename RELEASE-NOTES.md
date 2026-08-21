@@ -1,91 +1,45 @@
-# Myco v0.6.0
+# Myco v0.6.1
 
-**Released**: 2026-08-19
+**Released**: 2026-08-21
 
-v0.6.0 is the release where the previous one's instrumentation pays off. v0.5.0
-could tell you *that* peers were failing; this one identifies why the fastest
-lane kept collapsing and fixes it. Alongside that, Myco's data stops being locked
-inside the app: you can point it at a Nostr relay you run and keep using it
-exactly as before.
+A maintenance release with one fix in it. v0.6.0 stopped Wi-Fi Aware links from
+dying every minute; this one stops the fast lane from carrying only a single
+phone. Everything else in v0.6.0 is unchanged.
 
-**This release changes the mesh wire format.** Two phones must both be on v0.6.0
-to exchange anything — an older build and this one will not pass events or pair.
-Everything on the device upgrades in place with no data loss.
+**No wire-format change.** A v0.6.1 phone and a v0.6.0 phone pair and exchange
+events exactly as before, and a phone that has not updated is still reachable.
+Upgrade in place, one device at a time if you like.
 
 ## At a glance
 
-- **Wi-Fi Aware links stop dying every minute.** The fast lane was being torn
-  down by phone firmware on a 64-second cycle. It turned out to be Myco's own
-  doing, not radio interference, and teardowns are now roughly one in seven
-  minutes.
-- **Your data can live on a relay you run.** Settings → Storage → Advanced takes
-  a relay URL — [Citrine](https://github.com/greenart7c3/Citrine) on the same
-  phone, or a relay on your own network — and Myco uses it as its store. A
-  Blossom server for app files can be set the same way. Both are optional and off
-  by default.
-- **Pairing has its own door.** Devices you have not paired with can no longer
-  reach the port that serves your apps and messages at all.
-- **Nobody can add themselves to your Circle.** A pairing acceptance is only
-  acted on if it answers an invitation you actually sent.
-- **Apps open without waiting on a slow phone in the room.**
+- **Wi-Fi Aware reaches every phone in the room, not just one.** In a room of
+  three, the fast lane carried one and quietly refused the rest. Each phone now
+  gets a connection of its own, as many at once as its chipset supports.
 
-## The 64-second death
+## One phone at a time
 
-Wi-Fi Aware is the fast lane: two phones talking directly over Wi-Fi with no
-router and no internet. It had a habit of coming up, carrying traffic for about a
-minute, and being killed by the phone's own firmware — then repeating, forever.
+Wi-Fi Aware is the fast lane — two phones talking directly over Wi-Fi, no router
+and no internet. In a room with several Myco phones it carried exactly one, and
+requests for the others came back refused in about three milliseconds while
+Android reported seven of eight connections free.
 
-Radio interference was the obvious suspect. Wi-Fi and Bluetooth share one chip
-and one antenna on these phones, so a Bluetooth scan drowning out a Wi-Fi data
-path is exactly the sort of thing that happens. Backing the Bluetooth scan right
-off changed nothing at all: the teardowns kept coming on the same cycle.
+The obvious reading is a hardware limit, and it was wrong. Asking the phones
+directly: a Pixel 7 Pro supports eight simultaneous Aware connections and a
+Galaxy A52s two. Neither was anywhere near its ceiling.
 
-The real cause was Myco arguing with itself. It kept re-establishing the same
-peer alternately over Bluetooth and over Wi-Fi Aware, and the firmware answered
-that churn by ending the data path. Myco now leaves a peer alone on Aware instead
-of also dialling it over Bluetooth — and with *both* radios scanning harder than
-before, teardowns dropped from one a minute to one in seven. That the fix works
-while Bluetooth is busiest is what rules interference out for good.
+The limit was Myco's own. Android delivers each Aware connection as a separate
+network, and a network socket can be attached to exactly one of them. Myco had a
+single socket for the whole lane, so the moment a second phone connected, the
+first stopped being reachable — its link still up, carrying nothing. Faced with
+that, the app deliberately refused to open a second connection at all, which was
+the right call for a design that could not have used one.
 
-Some churn remains in the first few minutes after launch, when Bluetooth
-legitimately connects a peer before Aware is ready.
+Now the lane opens a socket per phone, and asks the chipset how many it can hold
+rather than assuming. On a Pixel that is eight; on an A52s, two. Each phone is
+told which one to talk to as part of the introduction the two devices already
+exchange, so older builds keep working unchanged.
 
-## Your data, your relay
-
-Myco keeps everything in a small Nostr relay and blob store built into the app.
-That is still the default and still what most people should use. But it meant
-your apps and messages lived somewhere only Myco could reach.
-
-The reason it had to be Myco's own relay was that Myco wrote its mesh
-bookkeeping — how far a message should travel, which query it belongs to — *into*
-the messages themselves. Any relay holding that data had to understand Myco. That
-bookkeeping now travels alongside messages rather than inside them, so what gets
-stored is ordinary Nostr, and an ordinary relay can hold it.
-
-Under **Settings → Storage → Advanced** you can now point Myco at a relay you
-run. It has been confirmed working with Citrine on the same phone. If the relay
-becomes unreachable, Myco says so plainly — with a warning on the Settings screen
-rather than apps that silently refuse to load.
-
-Two things are worth knowing before you switch. Myco trusts a relay you choose to
-check signatures, so only use one you control. And *Delete* only ever clears
-what is on this device; a relay you run is not Myco's to empty, and it says so.
-
-## Pairing became its own thing
-
-Pairing is what creates your Circle, and your Circle is what grants access to
-everything else. Until now it arrived on the same port that serves your apps —
-which meant that port had to stay open to strangers, and every pairing request
-was written into your event store as a side effect.
-
-Pairing now has a service of its own, and it is the only thing an unpaired device
-can reach. The ports that serve your content refuse anyone you have not paired
-with before a connection is even established.
-
-While separating it, one weakness became obvious and is fixed here: a pairing
-*acceptance* used to be taken at face value, so a device could send one unasked
-and land in your Circle. Myco now only acts on an acceptance that answers an
-invitation you actually sent, and that was addressed to your device.
+Confirmed on three phones in a room, all connected over the fast lane at once.
 
 ## Known issues
 
@@ -95,8 +49,7 @@ invitation you actually sent, and that was addressed to your device.
   in a test and how it behaves in a day.
 - **Wi-Fi Aware is shut off entirely by deep Doze** on Android 13 and later after
   a long idle period —
-  [#30](https://github.com/Origami74/myco/issues/30), separate from the teardown
-  fixed above.
+  [#30](https://github.com/Origami74/myco/issues/30).
 - **Aware links still churn for the first few minutes** after launch.
 - **A custom Blossom server has not been tested against a third-party
   implementation.** The relay side has been confirmed with Citrine; the blob side
@@ -112,15 +65,15 @@ invitation you actually sent, and that was addressed to your device.
 ## Getting it
 
 - **Android**: install the APK from the
-  [v0.6.0 release](https://github.com/Origami74/myco/releases/tag/v0.6.0),
+  [v0.6.1 release](https://github.com/Origami74/myco/releases/tag/v0.6.1),
   or via [zapstore](https://zapstore.dev/apps/app.myco).
 - **From source**: `cd android && ./gradlew assembleDebug` from a checkout of
-  the v0.6.0 tag. See
+  the v0.6.1 tag. See
   [CONTRIBUTING.md](https://github.com/Origami74/myco/blob/main/CONTRIBUTING.md)
   for build prerequisites.
 
-**Update every phone together.** The mesh wire format changed, so a v0.6.0 phone
-and an older one cannot exchange events or pair.
+**Phones do not have to be updated together this time.** The wire format is
+unchanged from v0.6.0.
 
 The full per-release change history lives in
 [CHANGELOG.md](https://github.com/Origami74/myco/blob/main/CHANGELOG.md).
@@ -128,8 +81,9 @@ Issues and discussion at [github.com/Origami74/myco](https://github.com/Origami7
 
 ## Contributors
 
-Thanks to everyone running builds on real phones — the Wi-Fi Aware teardown was
-found and narrowed by watching two devices rather than by any test — and to
+Thanks to everyone running builds on real phones — the one-peer limit was found
+by reading a capability report off two devices and noticing it disagreed with
+what the app believed — and to
 [@Origami74](https://github.com/Origami74) for maintaining the project.
 
 <!--

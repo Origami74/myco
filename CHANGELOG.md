@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-21
+
+### Fixed
+
+- Wi-Fi Aware carries several phones at once instead of one. The lane ran a
+  single UDP socket, and Android lets a socket serve only one Wi-Fi Aware
+  connection, so a second phone's link came up and then went quiet — the
+  hardware was never the limit. Each phone now gets a socket of its own, as many
+  as the phone's chipset says it can hold.
+
 ## [0.6.0] - 2026-08-19
 
 ### Added
