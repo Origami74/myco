@@ -10,7 +10,7 @@
 //! status into `sites`; the reducer never blocks on it (Kotlin polls `siteStatus`
 //! via `Tick`). See `docs/design/nsite-layer.md` and the FFI contract.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -432,6 +432,12 @@ pub struct Content {
     /// Native paired-peer file transfers. Metadata is persisted; file keys and
     /// encrypted outbox paths remain inside the app-private data directory.
     file_transfers: Mutex<Vec<FileTransferRecord>>,
+    /// Incoming transfers this device finished, newest last. The row itself is
+    /// forgotten as soon as the shell publishes the file, but the sender may
+    /// still be retrying its `ready` if our `complete` was lost — this is what
+    /// lets a late `ready` be answered with a fresh `complete` rather than
+    /// refused as unknown. Memory only; a restart simply stops answering.
+    completed_incoming: Mutex<VecDeque<String>>,
     file_transfers_path: PathBuf,
     file_outbox_dir: PathBuf,
     received_dir: PathBuf,
@@ -628,6 +634,7 @@ impl Content {
             pending_updates: Mutex::new(HashMap::new()),
             update_check: Mutex::new(UpdateCheckView::default()),
             file_transfers: Mutex::new(file_transfers),
+            completed_incoming: Mutex::new(VecDeque::new()),
             file_transfers_path,
             file_outbox_dir,
             received_dir,
@@ -1649,6 +1656,29 @@ impl Content {
     pub fn keepwarm_tick(self: &Arc<Self>) {
         // Cheap, and the only clock the transfer state machine has.
         self.sweep_file_transfers();
+        let resend = self.stalled_file_messages(file_transfer::now_secs());
+        if !resend.is_empty() {
+            let content = Arc::clone(self);
+            tokio::spawn(async move {
+                for (peer_npub, message) in resend {
+                    let Ok(target) = PublicKey::from_bech32(&peer_npub) else {
+                        continue;
+                    };
+                    let transfer_id = message.transfer_id().to_string();
+                    match content
+                        .send_file_message(&target, &peer_npub, message)
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(transfer = %transfer_id, "file share: re-sent pending message")
+                        }
+                        Err(e) => {
+                            tracing::debug!(transfer = %transfer_id, error = %e, "file share: re-send failed")
+                        }
+                    }
+                }
+            });
+        }
         let circle: HashSet<String> = self.circle_npubs().into_iter().collect();
         for npub in &circle {
             if fips::PeerIdentity::from_npub(npub).is_ok() {
@@ -1764,6 +1794,7 @@ impl Content {
             key_b64: Some(file_transfer::encode_key(&key)),
             ciphertext_size: package.len() as u64,
             expires_at,
+            last_resend_at: 0,
         });
         let sender_npub = keys.public_key().to_bech32()?;
         let message = FileMessage::Offer {
@@ -1934,6 +1965,7 @@ impl Content {
                     key_b64: None,
                     ciphertext_size: 0,
                     expires_at,
+                    last_resend_at: 0,
                 });
             }
             FileMessage::Response {
@@ -1988,6 +2020,31 @@ impl Content {
                 // with a `ready`, and the file would be fetched, decrypted and
                 // published to Downloads without anyone ever tapping Accept.
                 if !self.transfer_in_state(&transfer_id, "incoming", &sender_npub, &["accepted"]) {
+                    // A `ready` for a transfer we already finished means our
+                    // `complete` never reached the sender: answer it again so
+                    // their row stops retrying and clears.
+                    if self.was_completed_incoming(&transfer_id) {
+                        let content = Arc::clone(self);
+                        tokio::spawn(async move {
+                            if let Err(e) = content.send_complete(&transfer_id, &sender_npub).await
+                            {
+                                tracing::debug!(transfer = %transfer_id, error = %e, "file share: repeat completion failed");
+                            }
+                        });
+                        return;
+                    }
+                    // The sender retries `ready` until it hears `complete`, so
+                    // a repeat while the download is already running is the
+                    // expected case, not an out-of-order message.
+                    if self.transfer_in_state(
+                        &transfer_id,
+                        "incoming",
+                        &sender_npub,
+                        &["downloading"],
+                    ) {
+                        tracing::debug!(transfer_id, "file ready repeated while downloading");
+                        return;
+                    }
                     tracing::warn!(
                         transfer_id,
                         "file ready arrived before the offer was accepted"
@@ -2194,19 +2251,52 @@ impl Content {
             r.view.updated_at = file_transfer::now_secs();
             r.key_b64 = None;
         });
-        let target = PublicKey::from_bech32(sender_npub)?;
-        let message = FileMessage::Complete {
-            transfer_id: transfer_id.to_string(),
-            sender_npub: own_npub,
-            recipient_npub: sender_npub.to_string(),
-        };
-        if let Err(e) = self.send_file_message(&target, sender_npub, message).await {
+        self.remember_completed_incoming(transfer_id);
+        if let Err(e) = self.send_complete(transfer_id, sender_npub).await {
             // The receiver's local copy is already complete. A failed sender
             // acknowledgement must not turn this back into a failed transfer
             // or prevent Android from publishing it to Downloads.
             tracing::warn!(transfer = %transfer_id, error = %e, "file share: completion acknowledgement failed");
         }
         Ok(())
+    }
+
+    /// Tell the sender their file arrived. Sent once on completion and again
+    /// for every retried `ready`, since the first may have been dropped.
+    async fn send_complete(&self, transfer_id: &str, sender_npub: &str) -> anyhow::Result<()> {
+        let own_npub = {
+            let keys = self
+                .device_keys
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("device identity is not ready"))?;
+            keys.public_key().to_bech32()?
+        };
+        let target = PublicKey::from_bech32(sender_npub)?;
+        let message = FileMessage::Complete {
+            transfer_id: transfer_id.to_string(),
+            sender_npub: own_npub,
+            recipient_npub: sender_npub.to_string(),
+        };
+        self.send_file_message(&target, sender_npub, message).await
+    }
+
+    fn remember_completed_incoming(&self, transfer_id: &str) {
+        let mut done = self.completed_incoming.lock().unwrap();
+        done.retain(|id| id != transfer_id);
+        done.push_back(transfer_id.to_string());
+        while done.len() > file_transfer::MAX_TRACKED_TRANSFERS {
+            done.pop_front();
+        }
+    }
+
+    pub(crate) fn was_completed_incoming(&self, transfer_id: &str) -> bool {
+        self.completed_incoming
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == transfer_id)
     }
 
     async fn send_file_message(
@@ -2406,6 +2496,90 @@ impl Content {
             self.set_file_status(&id, "failed", "timed out waiting for the other phone");
             self.clear_transfer_secrets(&id);
         }
+    }
+
+    /// The control messages a stalled transfer is still waiting to have heard.
+    ///
+    /// Every control message is a single push, and the push plane drops frames
+    /// while a peer is in dial backoff — so an accept pressed during a BLE flap
+    /// never arrives and the sender waits out the whole offer TTL. Each state
+    /// that waits on the *other* side is re-sent from what the record already
+    /// holds once it has sat for [`file_transfer::RESEND_AFTER_SECS`] since the
+    /// last step or retry: an outgoing `offered` re-sends the offer, an incoming
+    /// `accepted` the accept, an outgoing `ready` the ready. Safe to repeat —
+    /// every receiving handler is gated on the state it advances from, so a
+    /// duplicate of a message that already landed is ignored. Stamps the rows
+    /// it returns; the caller sends.
+    pub(crate) fn stalled_file_messages(&self, now: u64) -> Vec<(String, FileMessage)> {
+        let keys = self.device_keys.lock().unwrap().clone();
+        let Some(keys) = keys else {
+            return Vec::new();
+        };
+        let Ok(own_npub) = keys.public_key().to_bech32();
+        let mut out = Vec::new();
+        let snapshot = {
+            let mut records = self.file_transfers.lock().unwrap();
+            for r in records.iter_mut() {
+                let since = r.view.updated_at.max(r.last_resend_at);
+                if r.expires_at <= now
+                    || now.saturating_sub(since) < file_transfer::RESEND_AFTER_SECS
+                {
+                    continue;
+                }
+                let message = match (r.view.direction.as_str(), r.view.status.as_str()) {
+                    ("outgoing", "offered") => FileMessage::Offer {
+                        transfer_id: r.view.id.clone(),
+                        sender_npub: own_npub.clone(),
+                        recipient_npub: r.view.peer_npub.clone(),
+                        filename: r.view.name.clone(),
+                        mime: r.view.mime.clone(),
+                        size: r.view.size,
+                        issued_at: r.expires_at.saturating_sub(file_transfer::OFFER_TTL_SECS),
+                        expires_at: r.expires_at,
+                    },
+                    ("incoming", "accepted") => FileMessage::Response {
+                        transfer_id: r.view.id.clone(),
+                        sender_npub: own_npub.clone(),
+                        recipient_npub: r.view.peer_npub.clone(),
+                        accepted: true,
+                        reason: None,
+                    },
+                    ("outgoing", "ready") => {
+                        let (Some(key_b64), Ok(target)) = (
+                            r.key_b64.as_deref(),
+                            PublicKey::from_bech32(&r.view.peer_npub),
+                        ) else {
+                            continue;
+                        };
+                        let Ok(key) = file_transfer::decode_key(key_b64) else {
+                            continue;
+                        };
+                        let Ok(key_wrap) = file_transfer::wrap_key(&keys, &target, &key) else {
+                            continue;
+                        };
+                        FileMessage::Ready {
+                            transfer_id: r.view.id.clone(),
+                            sender_npub: own_npub.clone(),
+                            recipient_npub: r.view.peer_npub.clone(),
+                            filename: r.view.name.clone(),
+                            mime: r.view.mime.clone(),
+                            size: r.view.size,
+                            blob_hash: r.view.blob_hash.clone(),
+                            ciphertext_size: r.ciphertext_size,
+                            key_wrap,
+                        }
+                    }
+                    _ => continue,
+                };
+                r.last_resend_at = now;
+                out.push((r.view.peer_npub.clone(), message));
+            }
+            records.clone()
+        };
+        if !out.is_empty() {
+            save_file_transfers(&self.file_transfers_path, &snapshot);
+        }
+        out
     }
 
     /// Cancel a transfer the user no longer wants and tell the other phone, so
@@ -3767,6 +3941,7 @@ mod tests {
             key_b64: None,
             ciphertext_size: 0,
             expires_at,
+            last_resend_at: 0,
         }
     }
 
@@ -3813,6 +3988,104 @@ mod tests {
                 .is_none(),
             "comparison happens after sanitising, not before"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An accept pressed while the peer's relay link is in dial backoff is
+    /// dropped on the floor, and the sender used to wait out the whole offer
+    /// TTL for it. Each side re-sends the message its state is waiting to have
+    /// heard — but only once the row has sat still for a while, never for a
+    /// finished or expired row, and not again until the window has passed.
+    #[test]
+    fn a_stalled_transfer_resends_its_pending_control_message() {
+        let dir = tmp("file-resend");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        content.set_device_keys(&Keys::generate().secret_key().to_bech32().unwrap());
+        let peer = Keys::generate().public_key().to_bech32().unwrap();
+        let now = 1_000_000;
+        let mut offered = incoming_record("offered", now + 60);
+        offered.view.direction = "outgoing".to_string();
+        offered.view.status = "offered".to_string();
+        offered.view.peer_npub = peer.clone();
+        offered.view.updated_at = now - 30;
+        let mut accepted = incoming_record("accepted", now + 60);
+        accepted.view.status = "accepted".to_string();
+        accepted.view.peer_npub = peer.clone();
+        accepted.view.updated_at = now - 30;
+        let mut fresh = incoming_record("fresh", now + 60);
+        fresh.view.status = "accepted".to_string();
+        fresh.view.updated_at = now - 2;
+        let mut waiting = incoming_record("waiting", now + 60);
+        waiting.view.updated_at = now - 30;
+        let mut expired = incoming_record("expired", now - 1);
+        expired.view.status = "accepted".to_string();
+        expired.view.updated_at = now - 30;
+        for r in [offered, accepted, fresh, waiting, expired] {
+            content.insert_file_transfer(r);
+        }
+
+        let mut resent: Vec<(String, String)> = content
+            .stalled_file_messages(now)
+            .into_iter()
+            .map(|(npub, m)| {
+                let kind = match m {
+                    FileMessage::Offer { .. } => "offer",
+                    FileMessage::Response { accepted: true, .. } => "accept",
+                    _ => "other",
+                };
+                (npub, format!("{}:{kind}", m.transfer_id()))
+            })
+            .collect();
+        resent.sort();
+        assert_eq!(
+            resent,
+            vec![
+                (peer.clone(), "accepted:accept".to_string()),
+                (peer, "offered:offer".to_string())
+            ],
+            "only the rows waiting on the other side, and only once they have stalled"
+        );
+        assert!(
+            content.stalled_file_messages(now + 5).is_empty(),
+            "a retry must not repeat until the window has passed again"
+        );
+        // By now the row that was fresh has stalled as well.
+        assert_eq!(
+            content
+                .stalled_file_messages(now + file_transfer::RESEND_AFTER_SECS)
+                .len(),
+            3,
+            "and repeats once it has"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The receiver forgets a finished row as soon as the shell publishes the
+    /// file, but its `complete` may have been lost and the sender is then
+    /// retrying `ready` against a transfer we no longer track. The id has to
+    /// stay known so that retry is answered, and the memory must not grow
+    /// without bound.
+    #[test]
+    fn a_finished_incoming_transfer_stays_known_after_its_row_is_forgotten() {
+        let dir = tmp("file-completed-memory");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        assert!(!content.was_completed_incoming("t1"));
+        content.remember_completed_incoming("t1");
+        content.forget_file_transfer("t1");
+        assert!(
+            content.was_completed_incoming("t1"),
+            "forgetting the row must not forget the id"
+        );
+        for i in 0..file_transfer::MAX_TRACKED_TRANSFERS {
+            content.remember_completed_incoming(&format!("later-{i}"));
+        }
+        assert!(
+            !content.was_completed_incoming("t1"),
+            "the oldest id is evicted at the cap"
+        );
+        assert!(content.was_completed_incoming("later-0"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
