@@ -185,6 +185,11 @@ The exchanged pubkey then serves two purposes:
 The PSM problem — the defining fight of the BLE strategy — has no Wi-Fi Aware
 analog, and it is worth being precise about why.
 
+(It has a smaller cousin, though: the lane runs several sockets, one per peer,
+and which one a peer should dial does have to be told to it. See
+[One socket per peer](#one-socket-per-peer) below. Nothing is *discovered* —
+every port is still one we chose.)
+
 BLE's listener PSM is **assigned by the OS**; the app cannot choose it, so
 every node must advertise its PSM and every dialer must learn it before
 dialing — universal per-peer PSM discovery, a real fips-core patch. A bound UDP
@@ -210,6 +215,48 @@ is called, and open is what we want: FIPS authenticates with Noise IK, not
 with WPA3, precisely as the BLE strategy chose *insecure* L2CAP over
 Bluetooth bonding. Same trust model, new radio:
 [security.md](./security.md).
+
+### One socket per peer
+
+There is a port problem after all, one layer down from the PSM question — and
+the answer is a pool.
+
+Android routes by the network a socket is *marked* with. Every NDP is its own
+`Network`, and `Network.bindSocket` marks a socket for exactly one of them, so a
+single socket can serve exactly one peer: the most recent bind wins and every
+other peer goes dark with its data path still up. That, not the chipset, is what
+limited the lane to one peer — a Pixel 7 Pro advertises 8 concurrent data paths
+and a Galaxy A52s 2. Full investigation:
+`reference/aware-multipeer-limit.md`.
+
+So the node binds **four** UDP transport instances for this lane, `aware0…aware3`
+on ports 4872–4875, all at node start. Fixed rather than one per peer because
+fips builds its transports from config when the node starts and cannot add one
+later; growing the pool would mean rebuilding the node mid-session and dropping
+every live link, which is exactly what the Wi-Fi Aware toggle must never do.
+
+`AwareRadio` holds a pin per instance and gives each peer a slot, pinning that
+slot's socket to that peer's data path. The peer is pushed to the core under the
+lane label `"aware<slot>"`, which qualifies its address as `"udp/aware2"` — so
+fips dials the socket marked for *that* peer's network and refuses rather than
+substituting another.
+
+### The port is per peer
+
+Each pooled socket has its own port, so a peer has to be told which one to dial.
+It goes out in the identity exchange, in the same `"<npub>|<port>"` payload
+already used for the lane's own port, and the value is now the port of the slot
+pinned to *that* peer.
+
+A peer discovered before its identity is known — the match carries no npub — is
+told the base port, which is slot 0. Two phones therefore need no correction at
+all; a third learns its port one message later, and if its data path beat the
+correction the radio re-announces it to the core.
+
+Both sides answer an identity now, so the answer is conditional: sent only when
+our port changed or theirs did. An echo gets nothing back, which is what makes
+the exchange terminate without a marker in the payload that older builds could
+not parse.
 
 ### Socket exposure
 
