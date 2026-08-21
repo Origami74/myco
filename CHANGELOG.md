@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Dev: join a FIPS Wi-Fi hotspot (`!FIPS`) as a second, local-only connection
+  while staying on your normal internet Wi-Fi, so the phone can carry mesh
+  traffic over the hotspot without giving up its internet. Under Dev → Wi-Fi
+  AP. The system shows its usual join prompt.
 - Phones on the same Wi-Fi now find each other over the network instead of
   Bluetooth. Myco announces itself on the local network the same way a fips
   node does, so two phones — or a phone and a desktop — on one Wi-Fi connect

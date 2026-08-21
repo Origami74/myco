@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.WifiNetworkSpecifier
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiInfo
@@ -110,6 +111,15 @@ class ApRadio private constructor(private val context: Context) {
     private var advert: NsdManager.RegistrationListener? = null
     private var ssid: String? = null
 
+    /** A running local-only-STA request for a FIPS SSID, if the user asked for
+     *  one, and the [Network] it produced. The single UDP socket is pinned to
+     *  this network in preference to the default Wi-Fi while it is up — the
+     *  FIPS AP is where the mesh peers are — so the phone can stay on its
+     *  internet Wi-Fi and still carry mesh traffic over the FIPS link. */
+    private var localOnlyCallback: ConnectivityManager.NetworkCallback? = null
+    private var localOnlyNet: Network? = null
+    private var localOnlySsid: String? = null
+
     /** Pins this lane's UDP transport socket to the current Wi-Fi [Network] —
      *  see [UdpSocketPin] for why each lane needs a socket of its own. Asks
      *  for [LANE] by name, so it can only ever receive the LAN lane's socket,
@@ -134,7 +144,7 @@ class ApRadio private constructor(private val context: Context) {
                 startBrowse()
                 startAdvert()
             }
-            udpPin.bindTo(network)
+            repin()
             publishWifi()
         }
 
@@ -150,6 +160,103 @@ class ApRadio private constructor(private val context: Context) {
                 stopBrowse()
                 stopAdvert()
             }
+            repin()
+            publishWifi()
+        }
+    }
+
+    /** Pin the lane's UDP socket to the network mesh traffic should ride: the
+     *  local-only FIPS network when one is up (that is where the peers are),
+     *  otherwise the default Wi-Fi. Called on every network change so the
+     *  socket follows the FIPS link even if the default Wi-Fi reconnects
+     *  after it. */
+    private fun repin() {
+        (localOnlyNet ?: wifiNets.firstOrNull())?.let { udpPin.bindTo(it) }
+    }
+
+    /** Join a specific (open) SSID as a local-only second connection, so the
+     *  phone stays on its current internet Wi-Fi and reaches a FIPS access
+     *  point at the same time. Shows the system network-join prompt. A single
+     *  Wi-Fi radio associates with one SSID at a time, so on a device without
+     *  concurrent-STA support the framework may briefly move the whole radio;
+     *  on API 31+ hardware that supports it the two run side by side. Idempotent
+     *  per SSID — a second call for the same name is ignored. */
+    fun requestLocalOnly(targetSsid: String) {
+        handler.post {
+            if (localOnlyCallback != null && localOnlySsid == targetSsid) return@post
+            localOnlyCallback?.let { runCatching { connectivity.unregisterNetworkCallback(it) } }
+            val specifier = WifiNetworkSpecifier.Builder().setSsid(targetSsid).build()
+            val request = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                // Local-only: the FIPS AP carries no internet, and asking for
+                // the capability would make the framework reject or tear down
+                // the request the moment it fails validation.
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .setNetworkSpecifier(specifier)
+                .build()
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    localOnlyNet = network
+                    if (wifiNets.add(network) && wifiNets.size == 1) {
+                        startBrowse()
+                        startAdvert()
+                    }
+                    repin()
+                    Log.i(TAG, "local-only network up for '$targetSsid'")
+                    publishWifi()
+                }
+
+                override fun onLost(network: Network) {
+                    if (localOnlyNet == network) localOnlyNet = null
+                    udpPin.clearTarget(network)
+                    if (wifiNets.remove(network) && wifiNets.isEmpty()) {
+                        ssid = null
+                        stopBrowse()
+                        stopAdvert()
+                    }
+                    repin()
+                    Log.i(TAG, "local-only network lost for '$targetSsid'")
+                    publishWifi()
+                }
+
+                override fun onUnavailable() {
+                    Log.w(TAG, "local-only request for '$targetSsid' was declined or timed out")
+                    if (localOnlyCallback === this) {
+                        localOnlyCallback = null
+                        localOnlySsid = null
+                    }
+                    publishWifi()
+                }
+            }
+            localOnlyCallback = callback
+            localOnlySsid = targetSsid
+            runCatching { connectivity.requestNetwork(request, callback, handler) }
+                .onFailure {
+                    Log.w(TAG, "requestNetwork for '$targetSsid' threw", it)
+                    localOnlyCallback = null
+                    localOnlySsid = null
+                }
+        }
+    }
+
+    /** Drop the local-only-STA request and fall back to the default Wi-Fi. */
+    fun releaseLocalOnly() {
+        handler.post {
+            val cb = localOnlyCallback ?: return@post
+            runCatching { connectivity.unregisterNetworkCallback(cb) }
+            localOnlyNet?.let { net ->
+                udpPin.clearTarget(net)
+                if (wifiNets.remove(net) && wifiNets.isEmpty()) {
+                    ssid = null
+                    stopBrowse()
+                    stopAdvert()
+                }
+            }
+            localOnlyNet = null
+            localOnlyCallback = null
+            localOnlySsid = null
+            repin()
+            Log.i(TAG, "local-only request released")
             publishWifi()
         }
     }
@@ -483,6 +590,8 @@ class ApRadio private constructor(private val context: Context) {
             connected = wifiNets.isNotEmpty(),
             ssid = currentSsid() ?: ssid,
             browsing = browsing,
+            localOnlySsid = localOnlySsid,
+            localOnlyUp = localOnlyNet != null,
         )
     }
 
@@ -546,6 +655,21 @@ class ApRadio private constructor(private val context: Context) {
         /** The LAN lane's fixed UDP port — `LAN_UDP_PORT` in `runtime.rs`. */
         private const val LAN_UDP_PORT = 4871
 
+        /** The open SSID a FIPS access point broadcasts. */
+        const val FIPS_SSID = "!FIPS"
+
+        /** Ask to join [targetSsid] as a local-only second connection so the
+         *  phone keeps its internet Wi-Fi and reaches a FIPS AP at once. Shows
+         *  the system join prompt. No-op until [ensureStarted]. */
+        fun requestLocalOnly(targetSsid: String = FIPS_SSID) {
+            instance?.requestLocalOnly(targetSsid)
+        }
+
+        /** Drop any local-only request and fall back to the default Wi-Fi. */
+        fun releaseLocalOnly() {
+            instance?.releaseLocalOnly()
+        }
+
         /** Retry cadence for an advert that could not be registered yet. */
         private const val ADVERT_RETRY_MS = 5_000L
 
@@ -580,6 +704,10 @@ data class WifiApView(
     val connected: Boolean = false,
     val ssid: String? = null,
     val browsing: Boolean = false,
+    /** The SSID of a requested local-only FIPS connection, if any. */
+    val localOnlySsid: String? = null,
+    /** Whether that local-only connection is currently up. */
+    val localOnlyUp: Boolean = false,
 )
 
 /** One fips node seen on the current LAN. `pushed` = handed to the core's
