@@ -237,6 +237,14 @@ fun MycoApp(
     }
 
     val nav = rememberNavController()
+    // "Send a file" from a Circle contact: remember who, then let the user pick what.
+    var sendFileTarget by remember { mutableStateOf<CircleContact?>(null) }
+    var pickedShareUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    val pickFilesForPeer = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) pickedShareUris = uris else sendFileTarget = null
+    }
     // Keep the navigation host and all transient surfaces in one app-root layer.
     // File offers must not be owned by Circle or any other selected destination.
     Box(Modifier.fillMaxSize()) {
@@ -299,7 +307,15 @@ fun MycoApp(
                     AppsScreen(state, client, onLaunchNsite = onLaunchNsite, onPinToHome = onPinToHome, onScanned = onScanned)
                 }
                 composable("circle") {
-                    CircleScreen(state, client, onOpenQr = { nav.navigate("qr") })
+                    CircleScreen(
+                        state,
+                        client,
+                        onOpenQr = { nav.navigate("qr") },
+                        onSendFile = { peer ->
+                            sendFileTarget = peer
+                            pickFilesForPeer.launch(arrayOf("*/*"))
+                        },
+                    )
                 }
                 composable("discover") { DiscoverScreen(state, client, onLaunchNsite = onLaunchNsite) }
                 composable("settings") {
@@ -430,14 +446,19 @@ fun MycoApp(
         )
     }
 
+    // Files come either from Android's Sharesheet (peer chosen afterwards) or from
+    // a contact's sheet on the Circle tab (peer chosen first, files picked here).
+    // Both end in the same sheet; the Circle path just arrives with a preselection.
+    val shareUris = externalShareUris.ifEmpty { pickedShareUris }
     var peerShareVisible by remember { mutableStateOf(false) }
-    androidx.compose.runtime.LaunchedEffect(externalShareUris) {
-        if (externalShareUris.isNotEmpty()) peerShareVisible = true
+    androidx.compose.runtime.LaunchedEffect(shareUris) {
+        if (shareUris.isNotEmpty()) peerShareVisible = true
     }
-    if (peerShareVisible && externalShareUris.isNotEmpty()) {
+    if (peerShareVisible && shareUris.isNotEmpty()) {
         PeerShareSheet(
             state = state,
-            uris = externalShareUris,
+            uris = shareUris,
+            preselectedNpub = if (externalShareUris.isEmpty()) sendFileTarget?.npub else null,
             onDismiss = {
                 peerShareVisible = false
                 // Closing the sheet acknowledges the outcomes it was showing.
@@ -449,9 +470,11 @@ fun MycoApp(
                     .filter { it.status == "cancelled" || it.status == "denied" }
                     .forEach { client.dispatch(NativeActions.forgetFileTransfer(it.id)) }
                 state = client.state()
+                pickedShareUris = emptyList()
+                sendFileTarget = null
                 onExternalShareDismissed()
             },
-            onShare = { peer -> onShareToPeer(externalShareUris, peer) },
+            onShare = { peer -> onShareToPeer(shareUris, peer) },
             onCancelTransfer = {
                 state = client.dispatch(NativeActions.cancelFileTransfer(it.id))
             },
