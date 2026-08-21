@@ -3,9 +3,10 @@
 //! Unlike the BLE bridge, this is *control-plane only*: there is no byte
 //! bridge and no `AndroidRadio` trait to implement. A Wi-Fi Aware data path
 //! terminates in a kernel network interface, so the bytes ride an ordinary
-//! UDP transport — the node's `"aware"` instance, bound at
-//! `runtime::AWARE_UDP_PORT` and pinned by `AwareRadio` to the NDP's
-//! `android.net.Network`.
+//! UDP transport — one of the node's `"aware0"`…`"aware3"` instances, bound at
+//! `runtime::AWARE_UDP_BASE_PORT + slot` and pinned by `AwareRadio` to that
+//! peer's NDP `android.net.Network`. One socket can be marked for only one
+//! network, so the pool is what lets the lane carry more than one peer.
 //! The Kotlin `AwareRadio` runs discovery autonomously and only pushes
 //! "peer reachable" events into Myco's own bounded queue
 //! ([`crate::platform_peers`]), which a tokio task drains onto the node's
@@ -35,18 +36,20 @@ fn jstring(env: &mut JNIEnv, s: &JString) -> Option<String> {
 /// transport; the Noise IK handshake authenticates — the pushed npub is only
 /// a routing hint.
 ///
-/// `lane` is `"aware"` or `"udp"` — which Kotlin radio (Wi-Fi Aware vs. the
-/// LAN/AP lane) observed this peer. Each lane is its own UDP transport
-/// instance with its own socket, pinned to its own `android.net.Network`, so
-/// the address is qualified with that instance's name (`"udp/aware"`,
-/// `"udp/lan"`). fips's `TransportSpec` routes the dial to the matching socket
-/// and, crucially, refuses rather than substituting the other one — dialing an
-/// Aware peer from the Wi-Fi-pinned socket is unroutable and was the reason
-/// Aware never carried a handshake.
+/// `lane` is `"udp"` for the LAN/AP radio, or the Aware radio's slot —
+/// `"aware0"`…`"aware3"`. Every lane, and every Aware slot within it, is its own
+/// UDP transport instance with its own socket, pinned to its own
+/// `android.net.Network`, so the address is qualified with that instance's name
+/// (`"udp/aware2"`, `"udp/lan"`). fips's `TransportSpec` routes the dial to the
+/// matching socket and, crucially, refuses rather than substituting another one
+/// — dialing an Aware peer from the Wi-Fi-pinned socket is unroutable and was
+/// the reason Aware never carried a handshake, and dialing peer B's NDP from
+/// the socket pinned to peer A's is the same fault one layer down.
 ///
-/// `lane` is *also* recorded, separately, in [`crate::lane_observation`], for
-/// `merge_peers()`'s `lane_by_npub` override; that record is Myco-owned and
-/// never reaches fips.
+/// The lane is *also* recorded, separately, in [`crate::lane_observation`], for
+/// `merge_peers()`'s `lane_by_npub` override — as the family name (`"aware"`),
+/// because which radio saw a peer is one fact regardless of which socket
+/// carries it. That record is Myco-owned and never reaches fips.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_awarePeerFound(
     mut env: JNIEnv,
@@ -62,7 +65,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_awarePeerFound(
     ) else {
         return;
     };
-    crate::lane_observation::set_lane(&npub, &lane);
+    crate::lane_observation::set_lane(&npub, crate::runtime::lane_family(&lane));
     let transport = format!("udp/{}", crate::runtime::udp_instance_for_lane(&lane));
     crate::platform_peers::push(&npub, &addr, &transport);
 }
@@ -100,7 +103,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_awarePeerLost(
     let (Some(npub), Some(lane)) = (jstring(&mut env, &npub), jstring(&mut env, &lane)) else {
         return;
     };
-    crate::lane_observation::clear_lane(&npub, &lane);
+    crate::lane_observation::clear_lane(&npub, crate::runtime::lane_family(&lane));
 }
 
 // ============================================================================
@@ -177,12 +180,16 @@ pub extern "system" fn Java_app_myco_core_NativeCore_setUpstreamDns(
 /// it has opened and if it is newer than `since_version`. Blocks up to
 /// `timeout_ms`.
 ///
-/// `lane` is the caller's own label (`"aware"` or `"udp"`), mapped to a fips
-/// instance name by [`crate::runtime::udp_instance_for_lane`]. The node binds
-/// one socket per lane and fips labels each fd with the instance it belongs to,
-/// so a radio can only ever be handed *its* descriptor — never the other
-/// lane's, which it would then pin to the wrong `android.net.Network` and
-/// black-hole. A lane whose socket did not bind is told nothing instead.
+/// `lane` is the caller's own label (`"udp"`, or an Aware slot `"aware0"`…),
+/// mapped to a fips instance name by [`crate::runtime::udp_instance_for_lane`].
+/// The node binds one socket per instance and fips labels each fd with the
+/// instance it belongs to, so a caller can only ever be handed *its*
+/// descriptor — never another's, which it would then pin to the wrong
+/// `android.net.Network` and black-hole. An instance whose socket did not bind
+/// is told nothing instead.
+///
+/// `AwareRadio` calls this once per slot, holding a pin per instance, because
+/// each of its peers needs a socket marked for that peer's own NDP.
 ///
 /// The result packs `(version << 32) | fd`, because JNI has no tuple and two
 /// calls could not be made atomic. `fd` is `-1` when nothing newer arrived; the

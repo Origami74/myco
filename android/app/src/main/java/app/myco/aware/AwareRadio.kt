@@ -41,41 +41,66 @@ import kotlinx.coroutines.flow.asStateFlow
  * touches a payload byte. See docs/design/wifi-aware-interop.md.
  *
  * That transport is **this lane's own** UDP socket, and this class pins it to
- * the NDP's [Network] ([udpPin]). Both halves matter. An NDP is a network of
+ * the NDP's [Network] ([pins]). Both halves matter. An NDP is a network of
  * its own with its own routing table, so a socket marked with any other
  * network — infrastructure Wi-Fi, as the AP lane marks it — cannot reach an
  * Aware peer at all: the address is well-formed, the send reports success, and
  * nothing arrives. That was the whole of the "Aware discovers everything and
  * peers with nothing" fault. See [UdpSocketPin].
  *
+ * # One socket per peer, not one per lane
+ *
+ * That exclusivity does not stop at the lane boundary: each NDP is a separate
+ * [Network] too, so one socket cannot serve two peers either — the most recent
+ * bind wins and the rest go dark with their data paths still up. The core
+ * therefore binds a pool of UDP transport instances (`aware0`…) and this class
+ * holds a pin per instance, giving each peer a [slotPool] slot and pinning that
+ * slot's socket to that peer's data path. The chipsets always had the headroom
+ * (a Pixel 7 Pro advertises 8 concurrent data paths, a Galaxy A52s 2); the
+ * single socket was the ceiling. See `reference/aware-multipeer-limit.md`.
+ *
  * Flow, per peer:
  *  1. publish + subscribe the Myco service (symmetric, no group owner).
  *  2. on a subscribe match, exchange identities over Aware `sendMessage`
  *     (the analog of BLE's in-band pubkey exchange — no identity is in the
- *     advert itself). The payload is `"<npub>|<port>"`.
+ *     advert itself). The payload is `"<npub>|<port>"`, where the port is the
+ *     one *this* peer's slot listens on.
  *  3. the smaller-npub side requests the NDP (the cross-probe tiebreaker,
  *     applied before spending a scarce data-path slot; the core backstops it).
  *  4. read the peer's scoped link-local IPv6 from [WifiAwareNetworkInfo] and
- *     push `awarePeerFound(npub, "[fe80::x%ifindex]:port")`.
+ *     push `awarePeerFound(npub, "[fe80::x%ifindex]:port", "aware<slot>")`.
  *
- * The listener port is **per peer**, not a global constant. Each side binds
- * its own ([app.myco.core.AppState.wifiAwarePort], `runtime.rs`'s
- * `AWARE_UDP_PORT`) and advertises it in the identity exchange, and we dial
- * each peer at the port *it* named. Dialling our own port instead is what
- * broke interop the moment this lane moved off the LAN port: a peer on an
- * older build still listens on [LEGACY_UDP_PORT], so the dial lands on a dead
- * port, the handshake never completes, and Android tears the idle NDP down
- * ~35s later — forever. An identity payload with no port is exactly that peer,
- * and is dialled at [LEGACY_UDP_PORT]; there is no flag day.
+ * The listener port is **per peer**, not a global constant — and now doubly so.
+ * Each side advertises, in the identity exchange, the port of the socket it has
+ * pinned to *that* peer's data path (slot *i* listens on
+ * [app.myco.core.AppState.wifiAwarePort]` + i`, `runtime.rs`'s
+ * `AWARE_UDP_BASE_PORT`), and we dial each peer at the port *it* named.
+ * Dialling our own port instead is what broke interop the moment this lane
+ * moved off the LAN port: a peer on an older build still listens on
+ * [LEGACY_UDP_PORT], so the dial lands on a dead port, the handshake never
+ * completes, and Android tears the idle NDP down ~35s later — forever. An
+ * identity payload with no port is exactly that peer, and is dialled at
+ * [LEGACY_UDP_PORT]; there is no flag day.
+ *
+ * A peer discovered before its identity is known is told the base port, which
+ * is slot 0 — so two phones need no correction at all, and a third only learns
+ * its port a message later ([updatePeerPort] re-announces if its data path beat
+ * the correction).
+ *
  * The NDP is left **open** (no PSK) — fips authenticates with Noise IK.
  */
 class AwareRadio(
     private val context: Context,
     /** This device's npub, sent in the pubkey exchange and used for the tiebreaker. */
     private val ownNpub: String,
-    /** This device's Aware UDP port — bound locally and advertised to peers in
-     *  the identity exchange. Peers are dialled at *their* advertised port. */
+    /** The **base** port of this device's Aware socket pool: slot *i* is bound
+     *  at `port + i`. Each peer is told its own slot's port in the identity
+     *  exchange, and is itself dialled at *its* advertised port. */
     private val port: Int,
+    /** How many peers the lane can carry at once — the number of UDP transport
+     *  instances the core bound, read from the state rather than assumed, so
+     *  this class can never name an instance the node does not have. */
+    private val slots: Int,
 ) {
     private val manager: WifiAwareManager? =
         context.getSystemService(Context.WIFI_AWARE_SERVICE) as? WifiAwareManager
@@ -85,11 +110,15 @@ class AwareRadio(
     private val thread = HandlerThread("myco-aware").apply { start() }
     private val handler = Handler(thread.looper)
 
-    /** Pins this lane's UDP transport socket to the NDP [Network] — see the
-     *  class doc, and [UdpSocketPin] for why the lane needs a socket of its
-     *  own. Asks for [LANE] by name, so it can only ever receive the Aware
-     *  lane's socket, never the AP lane's. */
-    private val udpPin = UdpSocketPin(LANE, handler, TAG)
+    /** One pin per pooled UDP transport instance: pin *i* holds the socket the
+     *  core bound as `aware<i>` and marks it for the data path of whichever
+     *  peer holds slot *i*. Each asks for its own instance by name, so it can
+     *  only ever receive that socket — never the AP lane's, and never another
+     *  slot's. See the class doc and [UdpSocketPin]. */
+    private val pins: List<UdpSocketPin> = List(slots) { UdpSocketPin(laneFor(it), handler, TAG) }
+
+    /** Which pooled socket carries which peer. */
+    private val slotPool = AwareSlotPool(slots)
 
     private var session: WifiAwareSession? = null
     private var publishSession: PublishDiscoverySession? = null
@@ -109,12 +138,23 @@ class AwareRadio(
      *  the NDP drops so recovery does not have to wait for rediscovery. */
     private val ndpTargets = ConcurrentHashMap<String, NdpTarget>()
 
-    /** Peers whose NDP is established right now. The chipset has exactly one
-     *  `aware_data` interface, so a live NDP to one peer is the usual reason a
-     *  request for another is refused outright — and that is knowable here,
-     *  before spending a request, in a way [logResources] is not: it reports
-     *  seven of eight "data paths" free while the one interface is held. */
+    /** Peers whose NDP is established right now — the coexistence signal the
+     *  BLE radio reads, and the honest count of what the lane is carrying.
+     *  [logResources] is not a substitute: it reported seven of eight "data
+     *  paths" free throughout a run of instant refusals. */
     private val liveNdps: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Each peer's scoped link-local IPv6, kept from the moment its data path
+     *  came up so the address can be re-formatted if the peer later announces a
+     *  different port — see [updatePeerPort]. */
+    private val peerAddrs = ConcurrentHashMap<String, Inet6Address>()
+
+    /** The port we last told each peer to dial us on, and the port each peer
+     *  last named for itself. Together they decide whether an identity is worth
+     *  answering — see [announceSlot]. Cleared with the peer's slot, so a
+     *  re-established data path re-announces. */
+    private val announcedPorts = ConcurrentHashMap<String, Int>()
+    private val heardPorts = ConcurrentHashMap<String, Int>()
 
     /** Per-peer NDP retry state. Mutated only on [handler]; the map is
      *  concurrent because [ConnectivityManager.NetworkCallback]s (which arrive
@@ -144,7 +184,7 @@ class AwareRadio(
             return
         }
         running = true
-        udpPin.start()
+        pins.forEach { it.start() }
         registerAvailability(mgr)
         if (mgr.isAvailable) {
             attach(mgr)
@@ -227,6 +267,10 @@ class AwareRadio(
         publishCoexState()
         ndpTargets.clear()
         peerIdentities.clear()
+        peerAddrs.clear()
+        announcedPorts.clear()
+        heardPorts.clear()
+        slotPool.clear()
         _links.value = emptyList()
         runCatching { publishSession?.close() }
         runCatching { subscribeSession?.close() }
@@ -242,11 +286,11 @@ class AwareRadio(
         availabilityReceiver?.let { runCatching { context.unregisterReceiver(it) } }
         availabilityReceiver = null
         closeSessions()
-        // On the handler thread, where the pin's state lives. Releases our dup
-        // of the socket; the core's own descriptor, and its binding, are
+        // On the handler thread, where the pins' state lives. Releases our dups
+        // of the sockets; the core's own descriptors, and their bindings, are
         // untouched — a stale mark on a network that has gone away is harmless,
         // and the next NDP re-pins.
-        handler.post { udpPin.stop() }
+        handler.post { pins.forEach { it.stop() } }
     }
 
     fun shutdown() {
@@ -273,18 +317,16 @@ class AwareRadio(
                 NativeCore.awareSetDiscovering(discovering())
             }
 
-            // A subscriber reached us. Reply with our npub so it can label the
-            // NDP. Then, if WE are the responder for this pair (larger npub),
-            // request the data path on the publish session. Exactly one side is
-            // responder and one is initiator — an NDP needs both, complementary.
+            // A subscriber reached us. Reply with our npub and the port of the
+            // slot we just gave it, so it can label the NDP and dial the socket
+            // that will actually be marked for its data path. Then, if WE are
+            // the responder for this pair (larger npub), request the data path
+            // on the publish session. Exactly one side is responder and one is
+            // initiator — an NDP needs both, complementary.
             override fun onMessageReceived(peer: PeerHandle, message: ByteArray) {
                 val remote = parsePeer(message) ?: return
                 peerIdentities[peer] = remote
-                publishSession?.sendMessage(peer, MSG_ID_NPUB, identityPayload())
-                if (ownNpub > remote.npub) {
-                    Log.i(TAG, "publish: responder for ${short(remote.npub)}; requesting NDP")
-                    requestDataPath(publishSession, peer, remote)
-                }
+                onPeerIdentity(publishSession, peer, remote, initiate = ownNpub > remote.npub)
             }
         }, handler)
     }
@@ -308,31 +350,136 @@ class AwareRadio(
 
             // We discovered a publisher: we are the INITIATOR toward it.
             // Introduce ourselves; it replies with its npub (below).
+            //
+            // We cannot name a slot yet — a slot is per npub and the match
+            // carries no identity — so this advertises the base port, which is
+            // slot 0. That is exactly right for the first peer, and corrected
+            // one message later for any other (see [onPeerIdentity]).
             override fun onServiceDiscovered(
                 peer: PeerHandle,
                 serviceSpecificInfo: ByteArray?,
                 matchFilter: MutableList<ByteArray>?,
             ) {
                 Log.i(TAG, "discovered a peer; sending our identity")
-                subscribeSession?.sendMessage(peer, MSG_ID_NPUB, identityPayload())
+                subscribeSession?.sendMessage(peer, MSG_ID_NPUB, identityPayload(port))
             }
 
-            // The publisher replied with its npub. If WE are the initiator for
-            // this pair (smaller npub), request the NDP on the subscribe
-            // session; the peer's publish side requests as responder.
+            // The publisher replied with its npub — now we know who it is, so
+            // it gets a slot and, with it, the corrected port to dial us on. If
+            // WE are the initiator for this pair (smaller npub), request the
+            // NDP on the subscribe session; the peer's publish side requests as
+            // responder.
             override fun onMessageReceived(peer: PeerHandle, message: ByteArray) {
                 val remote = parsePeer(message) ?: return
                 peerIdentities[peer] = remote
-                if (ownNpub < remote.npub) {
-                    Log.i(TAG, "subscribe: initiator for ${short(remote.npub)}; requesting NDP")
-                    requestDataPath(subscribeSession, peer, remote)
-                }
+                onPeerIdentity(subscribeSession, peer, remote, initiate = ownNpub < remote.npub)
             }
         }, handler)
     }
 
-    /** This device's identity as it goes on the wire: `"<npub>|<port>"`. */
-    private fun identityPayload(): ByteArray = "$ownNpub$FIELD_SEP$port".toByteArray()
+    /**
+     * A peer has told us who it is, on `session`. Give it a slot, tell it which
+     * port that slot listens on, take note of the port *it* named, and request
+     * its data path if we are the side that does the requesting.
+     *
+     * The reply is conditional — see [announceSlot] for why, and why that is
+     * what stops two sides answering each other forever.
+     *
+     * A full pool is answered with silence rather than the base port: the port
+     * we would name belongs to a socket marked for somebody else's data path,
+     * so the peer's packets would arrive and our replies would leave down the
+     * wrong network. Silence leaves it to retry when a slot frees.
+     */
+    private fun onPeerIdentity(
+        session: DiscoverySession?,
+        peer: PeerHandle,
+        remote: AwarePeer,
+        initiate: Boolean,
+    ) {
+        val slot = slotPool.acquire(remote.npub)
+        if (slot == null) {
+            Log.i(
+                TAG,
+                "no free Aware slot for ${short(remote.npub)} " +
+                    "(${slotPool.inUse()}/$slots held); not answering",
+            )
+            return
+        }
+        announceSlot(remote.npub, slot, remote.port, session, peer)
+        updatePeerPort(remote)
+        if (initiate) {
+            Log.i(TAG, "initiator for ${short(remote.npub)}; requesting NDP")
+            requestDataPath(session, peer, remote)
+        }
+    }
+
+    /**
+     * Tell `npub` which port to dial us on — the one belonging to the socket we
+     * will pin to its data path.
+     *
+     * **Sent only when something has actually changed**, and that is what makes
+     * the exchange terminate. Both sides now answer an identity (the subscriber
+     * used to stay silent), so an unconditional reply would have each answering
+     * the other's answer forever. Two conditions, and each is load-bearing:
+     *
+     *  - *our* port changed — first contact, or a slot that moved because the
+     *    data path was re-established somewhere else;
+     *  - *their* port changed since we last heard it — which is how a peer that
+     *    restarted its radio, and is introducing itself at the base port again,
+     *    gets an answer instead of the silence its stale entry would otherwise
+     *    earn it.
+     *
+     * A message that changes neither is an echo, and gets nothing back. The
+     * gate lives here rather than in a marker in the payload because the
+     * payload's shape has to stay parseable by builds from before the pool.
+     *
+     * `peerPort` is what the peer just advertised, or null when re-announcing
+     * outside the identity exchange (a retry claiming a new slot).
+     */
+    private fun announceSlot(
+        npub: String,
+        slot: Int,
+        peerPort: Int?,
+        session: DiscoverySession?,
+        peer: PeerHandle,
+    ) {
+        val ours = portForSlot(slot)
+        val oursChanged = announcedPorts.put(npub, ours) != ours
+        val theirsChanged = peerPort != null && heardPorts.put(npub, peerPort) != peerPort
+        if (!oursChanged && !theirsChanged) return
+        Log.i(TAG, "telling ${short(npub)} to dial us on $ours (slot $slot)")
+        session?.sendMessage(peer, MSG_ID_NPUB, identityPayload(ours))
+    }
+
+    /**
+     * The peer named a different port than the one we are dialling it at — it
+     * has given us a slot of its own, and the message arrived after we had
+     * already started (or finished) bringing its data path up.
+     *
+     * Re-announce rather than negotiate: `platform_peers` suppresses a re-push
+     * by `(npub, address)`, so a changed port is not swallowed, and the core
+     * refreshes the peer's path instead of standing up a second one. Costs
+     * nothing when the ports already agree, which is every two-device pairing.
+     */
+    private fun updatePeerPort(remote: AwarePeer) {
+        val target = ndpTargets[remote.npub] ?: return // not requested yet; the request will use it
+        if (target.port == remote.port) return
+        ndpTargets[remote.npub] = NdpTarget(target.session, target.peer, remote.port)
+        val slot = slotPool.slotOf(remote.npub) ?: return
+        val addr = peerAddrs[remote.npub]?.let { formatPeerAddr(it, remote.port) } ?: return
+        Log.i(TAG, "${short(remote.npub)} moved to port ${remote.port}; re-announcing at $addr")
+        setLink(remote.npub, addr, up = true)
+        NativeCore.awarePeerFound(remote.npub, addr, laneFor(slot))
+    }
+
+    /** The port slot *i* listens on: the pool is contiguous from [port]. */
+    private fun portForSlot(slot: Int): Int = port + slot
+
+    /** This device's identity as it goes on the wire: `"<npub>|<port>"`, where
+     *  the port is the one the peer being addressed should dial. The shape is
+     *  unchanged by the pool, so a build from before it still parses this. */
+    private fun identityPayload(dialPort: Int): ByteArray =
+        "$ownNpub$FIELD_SEP$dialPort".toByteArray()
 
     /**
      * Parse an identity payload into the peer's npub and the UDP port to dial
@@ -389,10 +536,28 @@ class AwareRadio(
         // drop any queued retry: this request supersedes it.
         ndpTargets[peerNpub] = NdpTarget(sess, peer, remote.port)
         if (isRetry) cancelPendingRetry(peerNpub) else clearRetry(peerNpub)
-        // Don't spend a request that cannot be provisioned: the interface is
-        // already carrying someone else's NDP. Queue instead — see
-        // [deferNdpRetry], which does not touch the retry budget.
-        dataPathBlockedBy(peerNpub)?.let { why ->
+        // A socket to pin comes first. Without one, the data path could come up
+        // and still carry nothing: the peer would have no port of ours to dial.
+        // This is also where a retry gets its slot back — the previous one was
+        // handed in when the data path dropped, so another peer could use it
+        // while this one was down.
+        val slot = slotPool.acquire(peerNpub)
+        if (slot == null) {
+            Log.i(
+                TAG,
+                "not requesting NDP to ${short(peerNpub)}: " +
+                    "all $slots Aware slots in use (${logResources()})",
+            )
+            deferNdpRetry(peerNpub)
+            return false
+        }
+        // The slot may differ from the one this peer was last told about, so
+        // re-announce before the data path can come up under a stale port.
+        announceSlot(peerNpub, slot, peerPort = null, session = sess, peer = peer)
+        // Don't spend a request the framework has already said it cannot
+        // provision. Queue instead — see [deferNdpRetry], which does not touch
+        // the retry budget.
+        dataPathBlockedBy()?.let { why ->
             Log.i(TAG, "not requesting NDP to ${short(peerNpub)}: $why (${logResources()})")
             deferNdpRetry(peerNpub)
             return false
@@ -412,9 +577,19 @@ class AwareRadio(
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                 val info = caps.transportInfo as? WifiAwareNetworkInfo ?: return
-                val addr = formatPeerAddr(info.peerIpv6Addr, remote.port) ?: return
-                Log.i(TAG, "Aware NDP up to ${short(peerNpub)} at $addr")
+                val ipv6 = info.peerIpv6Addr ?: return
+                // The port the peer last named, not the one it named when this
+                // request went out — a slot-qualified identity can overtake the
+                // data path it belongs to.
+                val dialPort = ndpTargets[peerNpub]?.port ?: remote.port
+                val addr = formatPeerAddr(ipv6, dialPort) ?: return
+                val slot = slotPool.slotOf(peerNpub) ?: run {
+                    Log.w(TAG, "NDP up to ${short(peerNpub)} with no slot held; not announcing")
+                    return
+                }
+                Log.i(TAG, "Aware NDP up to ${short(peerNpub)} at $addr (slot $slot)")
                 liveNdps.add(peerNpub)
+                peerAddrs[peerNpub] = ipv6
                 publishCoexState()
                 // The link is good: hand the peer a fresh retry budget.
                 if (retries.containsKey(peerNpub)) handler.post { clearRetry(peerNpub) }
@@ -423,15 +598,13 @@ class AwareRadio(
                 // socket is what used to time out. This callback repeats for
                 // the life of the NDP, so the re-pin is idempotent and cheap.
                 //
-                // One socket, one mark: with several concurrent NDPs the most
-                // recent one wins. Each NDP is a separate Network, so a single
-                // socket cannot serve them all — the pair this milestone has to
-                // get right is two phones, and a fan-out (a socket per NDP)
-                // would need a transport instance per peer, which fips has no
-                // way to configure at runtime.
-                udpPin.bindTo(network)
+                // One socket, one mark — so this pins *this peer's* socket, the
+                // one whose port it was told to dial. Binding a shared socket
+                // here is what used to make the most recent data path the only
+                // reachable one.
+                pins[slot].bindTo(network)
                 setLink(peerNpub, addr, up = true)
-                NativeCore.awarePeerFound(peerNpub, addr, LANE)
+                NativeCore.awarePeerFound(peerNpub, addr, laneFor(slot))
             }
 
             // An NDP is otherwise only requested on *rediscovery*, so a peer
@@ -440,8 +613,9 @@ class AwareRadio(
             // [scheduleNdpRetry] for the backoff and the give-up rule.
             override fun onLost(network: Network) {
                 Log.i(TAG, "Aware NDP lost to ${short(peerNpub)}")
-                udpPin.clearTarget(network)
-                NativeCore.awarePeerLost(peerNpub, LANE)
+                val slot = slotPool.slotOf(peerNpub)
+                slot?.let { pins[it].clearTarget(network) }
+                NativeCore.awarePeerLost(peerNpub, laneFor(slot ?: 0))
                 releaseNdp(peerNpub)
                 handler.post { scheduleNdpRetry(peerNpub, "NDP lost") }
             }
@@ -505,8 +679,8 @@ class AwareRadio(
      *  - **One outstanding request per peer**: guarded here (a queued retry and
      *    a live request both bar a new one) and again, atomically, in
      *    [requestDataPath]. A success resets the budget.
-     *  - **One data-path interface**: see [deferNdpRetry], which queues a try
-     *    that could not have worked without charging it to the budget.
+     *  - **A free slot**: see [deferNdpRetry], which queues a try that could not
+     *    have worked without charging it to the budget.
      *
      * Handler thread only.
      */
@@ -523,6 +697,7 @@ class AwareRadio(
                     "waiting for rediscovery",
             )
             clearRetry(peerNpub)
+            surrenderSlot(peerNpub)
             return
         }
         val delay = backoffMs(state.attempts)
@@ -576,10 +751,11 @@ class AwareRadio(
         if (state.deferrals > MAX_NDP_SLOT_DEFERRALS) {
             Log.w(
                 TAG,
-                "data-path interface still held after $MAX_NDP_SLOT_DEFERRALS deferrals; " +
+                "still no room after $MAX_NDP_SLOT_DEFERRALS deferrals; " +
                     "leaving ${short(peerNpub)} to rediscovery",
             )
             clearRetry(peerNpub)
+            surrenderSlot(peerNpub)
             return
         }
         val delay = backoffMs(state.deferrals - 1)
@@ -590,6 +766,21 @@ class AwareRadio(
                 "retries still ${state.attempts}/$MAX_NDP_RETRIES)",
         )
         queueRetry(peerNpub, state, delay)
+    }
+
+    /**
+     * Hand a slot back for a peer we have stopped trying to reach.
+     *
+     * A slot is claimed when a data path is *requested*, not when it comes up,
+     * so a peer that walks out of the room mid-negotiation would otherwise hold
+     * a socket until the lane restarts — and with four of them, two such peers
+     * are half the room's capacity. The peer keeps its [ndpTargets] entry:
+     * rediscovery still brings it back, and takes a slot again then.
+     */
+    private fun surrenderSlot(peerNpub: String) {
+        slotPool.release(peerNpub)
+        announcedPorts.remove(peerNpub)
+        heardPorts.remove(peerNpub)
     }
 
     private fun queueRetry(peerNpub: String, state: NdpRetry, delay: Long) {
@@ -618,17 +809,18 @@ class AwareRadio(
     }
 
     /**
-     * Why a request for `peerNpub` would be refused out of hand, or null if it
-     * has a chance. The Pixel's chipset has exactly one `aware_data`
-     * interface, so an NDP live to any *other* peer is a refusal we can see
-     * coming — and [android.net.wifi.aware.AwareResources] will not tell us:
-     * it reported `dataPaths=7` free throughout a run of instant refusals.
-     * Hence our own [liveNdps] first, with the framework's count as a backstop.
+     * Why a request would be refused out of hand by the *framework*, or null if
+     * it has a chance.
+     *
+     * This used to refuse whenever any other peer held a data path, which was
+     * right only because the lane had one socket to pin: a second NDP would
+     * have unbound the first. With a socket per slot that reason is gone, and
+     * what remains is our own pool (checked where the slot is acquired) and the
+     * framework's count — kept as a backstop but never trusted alone, since
+     * [android.net.wifi.aware.AwareResources] reported `dataPaths=7` free
+     * throughout a run of instant refusals.
      */
-    private fun dataPathBlockedBy(peerNpub: String): String? {
-        liveNdps.firstOrNull { it != peerNpub }?.let {
-            return "data-path interface held by ${short(it)}"
-        }
+    private fun dataPathBlockedBy(): String? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val r = manager?.availableAwareResources
             if (r != null && r.availableDataPathsCount <= 0) return "no data paths free"
@@ -692,15 +884,23 @@ class AwareRadio(
         ndpCallbacks.remove(peerNpub)?.let {
             runCatching { connectivity.unregisterNetworkCallback(it) }
         }
+        // Hand the socket back so a peer waiting on a full pool can have it.
+        // The announced port goes with it: a re-established data path may land
+        // on a different slot, and the peer has to be told the new one —
+        // [requestDataPath] re-announces when the retry claims a slot again.
+        surrenderSlot(peerNpub)
+        peerAddrs.remove(peerNpub)
         removeLink(peerNpub)
     }
 
     /** Best-effort snapshot of free Aware data-path/session slots (API 31+),
-     *  for logging why an NDP request might be refused. */
+     *  next to our own pool occupancy — the two disagree, and which one is
+     *  refusing a request is the thing worth knowing. */
     private fun logResources(): String {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return "resources n/a"
-        val r = manager?.availableAwareResources ?: return "resources unknown"
-        return "dataPaths=${r.availableDataPathsCount} pub=${r.availablePublishSessionsCount} sub=${r.availableSubscribeSessionsCount}"
+        val ours = "slots=${slotPool.inUse()}/$slots"
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return "$ours resources n/a"
+        val r = manager?.availableAwareResources ?: return "$ours resources unknown"
+        return "$ours dataPaths=${r.availableDataPathsCount} pub=${r.availablePublishSessionsCount} sub=${r.availableSubscribeSessionsCount}"
     }
 
     /**
@@ -770,14 +970,20 @@ class AwareRadio(
         /** The Myco Wi-Fi Aware service name (the analog of the FIPS service UUID). */
         private const val SERVICE_NAME = "myco.fips.v1"
 
-        /** The lane label pushed to [NativeCore.awarePeerFound]/[NativeCore.awarePeerLost],
-         *  and asked of [NativeCore.nextUdpTransportFd] — distinguishes this radio from
-         *  [app.myco.ap.ApRadio], which pushes "udp" through the same seams. Both ride
-         *  UDP, but each lane is its own transport instance with its own socket, and
-         *  this label is what selects between them. The core turns it into the
-         *  qualified transport `"udp/aware"`, which is what makes fips dial this
-         *  lane's socket rather than the LAN lane's. */
+        /** Prefix of the lane label pushed to [NativeCore.awarePeerFound]/
+         *  [NativeCore.awarePeerLost] and asked of [NativeCore.nextUdpTransportFd]
+         *  — distinguishes this radio from [app.myco.ap.ApRadio], which pushes
+         *  "udp" through the same seams. Both ride UDP, but each transport
+         *  instance has its own socket and this label is what selects between
+         *  them. */
         private const val LANE = "aware"
+
+        /** The lane label for one pooled socket: `"aware2"`. The core maps it to
+         *  the transport instance of the same name and qualifies the peer's
+         *  address as `"udp/aware2"`, which is what makes fips dial the socket
+         *  pinned to *that* peer's data path rather than another peer's — or
+         *  the LAN lane's. */
+        private fun laneFor(slot: Int): String = "$LANE$slot"
 
         /** Message id for the identity-exchange `sendMessage`. */
         private const val MSG_ID_NPUB = 1

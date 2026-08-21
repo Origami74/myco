@@ -75,14 +75,19 @@ class AwareService : Service() {
             stopSelf()
             return
         }
-        val port = client.state().wifiAwarePort
+        // Base port and pool size both come from the core, which is what
+        // actually bound the sockets — the radio gives each peer a slot within
+        // that range and pins slot i's socket to peer i's data path.
+        val state = client.state()
+        val port = state.wifiAwarePort
+        val slots = state.wifiAwareSlots
         // The radio attaches now if Aware is available, or waits for it to
         // become available (e.g. once the user turns Wi-Fi on) — it does not
         // bail, so the lane stays armed. The UI pops the Wi-Fi panel when needed.
-        val r = AwareRadio(applicationContext, ownNpub, port)
+        val r = AwareRadio(applicationContext, ownNpub, port, slots)
         r.start()
         radio = r
-        Log.i(TAG, "Aware service started (port $port, available=${r.isAvailable()})")
+        Log.i(TAG, "Aware service started (ports $port..${port + slots - 1}, available=${r.isAvailable()})")
     }
 
     private fun stopAware() {
