@@ -37,6 +37,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.unit.dp
 import androidx.activity.enableEdgeToEdge
@@ -212,6 +213,7 @@ class MainActivity : ComponentActivity() {
                             onWifiAwareToggle = { enabled -> setWifiAwareEnabled(enabled) },
                             onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
                             onLaunchNapplet = { pointer, title -> launchNapplet(pointer, title) },
+                            onPinNappletToHome = { pointer, title -> pinNappletToHomeScreen(pointer, title) },
                             onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
                             onScanned = { text -> handleScannedText(text) },
                             initialMeshEnabled = prefs.getBoolean(PREF_MESH, true),
@@ -762,19 +764,27 @@ class MainActivity : ComponentActivity() {
      * them, and this one has nowhere to put them.
      */
     private fun launchNapplet(pointer: String, title: String) {
-        startActivity(
-            Intent(this, NappletActivity::class.java).apply {
-                action = Intent.ACTION_VIEW
-                // Keyed on the addressable pointer, not the napplet's identity:
-                // its identity is its aggregate hash and changes every build, so
-                // keying the task on it would strand the Recents card on update.
-                data = NappletActivity.documentUri(pointer)
-                putExtra(NappletActivity.EXTRA_POINTER, pointer)
-                putExtra(NappletActivity.EXTRA_TITLE, title)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
-            }
-        )
+        startActivity(nappletIntent(pointer, title))
     }
+
+    /**
+     * The intent that opens a napplet as its own fullscreen task.
+     *
+     * Shared with the home-screen shortcut, so a napplet opened from the
+     * launcher lands in the same task as one opened from the Apps grid rather
+     * than a second card for the same app.
+     */
+    private fun nappletIntent(pointer: String, title: String): Intent =
+        Intent(this, NappletActivity::class.java).apply {
+            action = Intent.ACTION_VIEW
+            // Keyed on the addressable pointer, not the napplet's identity: its
+            // identity is its aggregate hash and changes every build, so keying
+            // the task on it would strand the Recents card on update.
+            data = NappletActivity.documentUri(pointer)
+            putExtra(NappletActivity.EXTRA_POINTER, pointer)
+            putExtra(NappletActivity.EXTRA_TITLE, title)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
+        }
 
     /** Pin an nsite to the home screen as an app-like shortcut (favicon + title). */
     private fun pinToHomeScreen(hostLabel: String, title: String) {
@@ -812,6 +822,92 @@ class MainActivity : ComponentActivity() {
      * full-bleed look as a normal app icon. White only shows through where the
      * source itself is transparent.
      */
+    /**
+     * Pin a napplet to the home screen.
+     *
+     * The icon is drawn rather than fetched: a napplet is a single self-contained
+     * file with no `/favicon.ico` to pull, so the launcher gets the same mark the
+     * Apps grid shows — its colour and its initial — instead of a generic Myco
+     * icon that would make every napplet look identical on the home screen.
+     */
+    private fun pinNappletToHomeScreen(pointer: String, title: String) {
+        val sm = getSystemService(ShortcutManager::class.java)
+        if (sm == null || !sm.isRequestPinShortcutSupported) {
+            Toast.makeText(this, "Home-screen pinning isn't supported here", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val label = title.ifEmpty { "napplet" }
+        val shortcut = ShortcutInfo.Builder(this, "napplet:$pointer")
+            .setShortLabel(label)
+            .setLongLabel(label)
+            .setIcon(Icon.createWithAdaptiveBitmap(nappletShortcutIcon(pointer, label)))
+            .setIntent(nappletIntent(pointer, title))
+            .build()
+        sm.requestPinShortcut(shortcut, null)
+    }
+
+    /**
+     * The Apps-grid tile, drawn at launcher size: the pointer's colour with the
+     * title's first letter over it.
+     *
+     * Keyed on the same string the grid keys on, so the icon a person taps on
+     * the home screen is the one they recognise from inside the app.
+     */
+    private fun nappletShortcutIcon(pointer: String, label: String): Bitmap {
+        val size = 432 // 108dp @ xxhdpi
+        val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(app.myco.ui.theme.tileColorFor(pointer).toArgb())
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textAlign = Paint.Align.CENTER
+            textSize = size * 0.44f
+            typeface = android.graphics.Typeface.create(
+                android.graphics.Typeface.DEFAULT,
+                android.graphics.Typeface.BOLD,
+            )
+        }
+        // Centre on the glyph's own box, not the baseline, or the letter sits low.
+        val mid = size / 2f - (paint.descent() + paint.ascent()) / 2f
+        canvas.drawText(label.take(1).uppercase(), size / 2f, mid, paint)
+        return out
+    }
+
+    /**
+     * Offer to pin a napplet a peer just shared, once it is actually installed.
+     *
+     * Deliberately after the install rather than at tap time: the fetch can fail,
+     * and the review screen is a decision the user may decline — a home-screen
+     * icon for an app they said no to, or one that never arrived, is worse than
+     * no icon. Asked once per napplet, so declining is not re-asked on every
+     * later share.
+     */
+    private fun offerHomeScreenWhenNappletInstalled(pointer: String) {
+        if (pointer.isEmpty()) return
+        val asked = prefs.getStringSet(PREF_HOME_OFFERED, emptySet()).orEmpty()
+        val key = "napplet:$pointer"
+        if (key in asked) return
+
+        lifecycleScope.launch {
+            // Give up rather than watch forever: the user is reviewing, and if
+            // they have not decided in this long they have moved on.
+            val deadline = SystemClock.elapsedRealtime() + HOME_OFFER_TIMEOUT_MS
+            while (SystemClock.elapsedRealtime() < deadline) {
+                val installed = withContext(Dispatchers.IO) { core.state() }
+                    .library.firstOrNull {
+                        it.kind == app.myco.core.LibraryKind.Napplet &&
+                            it.nappletPointer == pointer
+                    }
+                if (installed != null) {
+                    prefs.edit().putStringSet(PREF_HOME_OFFERED, asked + key).apply()
+                    pinNappletToHomeScreen(pointer, installed.title)
+                    return@launch
+                }
+                delay(HOME_OFFER_POLL_MS)
+            }
+        }
+    }
+
     private fun adaptiveShortcutIcon(src: Bitmap): Bitmap {
         val size = 432 // 108dp @ xxhdpi
         val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
@@ -1010,6 +1106,7 @@ class MainActivity : ComponentActivity() {
             core.dispatch(NativeActions.fetchNapplet(info.nappletPointer, holder = info.npub))
             val who = info.name.ifEmpty { "a peer" }
             Toast.makeText(this, "Getting an app from $who…", Toast.LENGTH_SHORT).show()
+            offerHomeScreenWhenNappletInstalled(info.nappletPointer)
             return
         }
 

@@ -91,6 +91,7 @@ fun AppsScreen(
     client: AppCoreClient,
     onLaunchNsite: (host: String, title: String) -> Unit,
     onLaunchNapplet: (pointer: String, title: String) -> Unit,
+    onPinNappletToHome: (pointer: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,
 ) {
@@ -247,6 +248,10 @@ fun AppsScreen(
                         title = item.title.ifEmpty { item.dTag ?: "napplet" },
                     )
                     nappletSheetFor = null
+                },
+                onPinToHome = {
+                    nappletSheetFor = null
+                    onPinNappletToHome(item.nappletPointer, item.title)
                 },
                 onReload = {
                     nappletSheetFor = null
@@ -472,6 +477,7 @@ private fun NappletSheet(
     item: LibraryItem,
     onOpen: () -> Unit,
     onShare: () -> Unit,
+    onPinToHome: () -> Unit,
     onReload: () -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -507,6 +513,7 @@ private fun NappletSheet(
         Spacer(Modifier.height(16.dp))
         SheetAction(Icons.Filled.HomeMax, "Open") { onOpen() }
         SheetAction(Icons.Filled.Share, "Share") { onShare() }
+        SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
 
         // Fetches the app again and shows the same screen it was added with.
         // The way to pick up a newer version, and the way to revisit what it is
@@ -799,6 +806,7 @@ private fun AppSheet(
         Spacer(Modifier.height(16.dp))
         SheetAction(Icons.Filled.HomeMax, "Open") { onOpen() }
         SheetAction(Icons.Filled.Share, "Share") { onShare() }
+        SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
         if (site.state == "ready") {
             SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
         }
