@@ -78,10 +78,12 @@ fun PeerShareSheet(
     onDismiss: () -> Unit,
     onShare: (CircleContact) -> Unit,
     onCancelTransfer: (FileTransfer) -> Unit = {},
+    /** Peer chosen before the files were — from a contact's sheet on the Circle tab. */
+    preselectedNpub: String? = null,
 ) {
     val context = LocalContext.current
     val items = remember(uris) { uris.map { ExternalShare.describe(context, it) } }
-    var selectedNpub by remember(uris) { mutableStateOf<String?>(null) }
+    var selectedNpub by remember(uris) { mutableStateOf(preselectedNpub) }
     // Once a send starts, this is the peer whose progress the sheet follows.
     var sendingTo by remember(uris) { mutableStateOf<CircleContact?>(null) }
     val selected = state.circle.firstOrNull { it.npub == selectedNpub }
