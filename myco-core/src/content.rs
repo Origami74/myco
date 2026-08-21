@@ -2158,26 +2158,27 @@ impl Content {
         };
         crate::dns_intercept::warm_route(sender_npub);
         let base = crate::ip_source::mesh_blossom_url(sender_npub);
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(120))
-            .build()?;
-        let mut response = client.get(format!("{base}/{blob_hash}")).send().await?;
-        if !response.status().is_success() {
-            anyhow::bail!("peer Blossom returned {}", response.status());
-        }
-        if let Some(advertised) = response.content_length() {
-            if advertised > limit {
-                anyhow::bail!("peer offered {advertised} bytes but declared {limit}");
+        let url = format!("{base}/{blob_hash}");
+        // A mesh hop can be slow and can drop mid-body, so the fetch is bounded
+        // by silence rather than by total time, and a cut connection is tried
+        // again a few times before the transfer is failed.
+        let mut attempt = 0;
+        let package = loop {
+            attempt += 1;
+            match Self::fetch_package(&url, limit, file_transfer::DOWNLOAD_IDLE_TIMEOUT).await {
+                Ok(package) => break package,
+                Err(e) if attempt < file_transfer::DOWNLOAD_ATTEMPTS && is_transport_error(&e) => {
+                    tracing::warn!(
+                        transfer = %transfer_id,
+                        attempt,
+                        error = %e,
+                        "file share: download interrupted, retrying"
+                    );
+                    tokio::time::sleep(file_transfer::DOWNLOAD_RETRY_DELAY).await;
+                }
+                Err(e) => return Err(e),
             }
-        }
-        let mut package: Vec<u8> = Vec::with_capacity(limit.min(1024 * 1024) as usize);
-        while let Some(chunk) = response.chunk().await? {
-            if package.len() as u64 + chunk.len() as u64 > limit {
-                anyhow::bail!("peer sent more than the {limit} bytes it declared");
-            }
-            package.extend_from_slice(&chunk);
-        }
+        };
         if file_transfer::sha256_hex(&package) != blob_hash {
             anyhow::bail!("downloaded encrypted blob hash mismatch");
         }
@@ -2207,6 +2208,41 @@ impl Content {
             tracing::warn!(transfer = %transfer_id, error = %e, "file share: completion acknowledgement failed");
         }
         Ok(())
+    }
+
+    /// One download of the encrypted package: bounded against `limit` before
+    /// and while the body streams in, and failed if the peer goes quiet for
+    /// [`file_transfer::DOWNLOAD_IDLE_TIMEOUT`] — not by total duration, which
+    /// a large file over a slow Bluetooth hop legitimately exceeds.
+    async fn fetch_package(url: &str, limit: u64, idle: Duration) -> anyhow::Result<Vec<u8>> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .build()?;
+        let mut response = tokio::time::timeout(idle, client.get(url).send())
+            .await
+            .map_err(|_| anyhow::anyhow!("peer Blossom did not answer"))??;
+        if !response.status().is_success() {
+            anyhow::bail!("peer Blossom returned {}", response.status());
+        }
+        if let Some(advertised) = response.content_length() {
+            if advertised > limit {
+                anyhow::bail!("peer offered {advertised} bytes but declared {limit}");
+            }
+        }
+        let mut package: Vec<u8> = Vec::with_capacity(limit.min(1024 * 1024) as usize);
+        loop {
+            let chunk = tokio::time::timeout(idle, response.chunk())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("download stalled: no data for {}s", idle.as_secs())
+                })??;
+            let Some(chunk) = chunk else { break };
+            if package.len() as u64 + chunk.len() as u64 > limit {
+                anyhow::bail!("peer sent more than the {limit} bytes it declared");
+            }
+            package.extend_from_slice(&chunk);
+        }
+        Ok(package)
     }
 
     async fn send_file_message(
@@ -3473,6 +3509,18 @@ fn save_outbound_pairs(path: &Path, items: &[OutboundPairView]) {
     }
 }
 
+/// Whether a download error is the connection's fault (worth another try)
+/// rather than the peer's answer (a status, a size lie, a hash mismatch).
+fn is_transport_error(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<reqwest::Error>() {
+        Some(e) => e.is_timeout() || e.is_connect() || e.is_body() || e.is_request(),
+        None => {
+            let text = error.to_string();
+            text.starts_with("download stalled") || text.starts_with("peer Blossom did not answer")
+        }
+    }
+}
+
 fn load_file_transfers(path: &Path) -> Vec<FileTransferRecord> {
     std::fs::read(path)
         .ok()
@@ -3814,6 +3862,57 @@ mod tests {
             "comparison happens after sanitising, not before"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A slow Bluetooth hop used to fail a large download by hitting a total
+    /// timeout while bytes were still arriving ("error decoding response
+    /// body"). The fetch is now bounded by silence: a body that keeps trickling
+    /// in completes no matter how long it takes, and one that goes quiet fails
+    /// with an error the retry loop recognises as the connection's fault.
+    #[tokio::test]
+    async fn a_download_is_failed_by_silence_not_by_total_time() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            // First request: 8 bytes, drip-fed slower than the old total cap
+            // would scale to. Second: 8 bytes promised, 4 sent, then silence.
+            for stalls in [false, true] {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n")
+                    .await
+                    .unwrap();
+                for i in 0..8u8 {
+                    if stalls && i == 4 {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        break;
+                    }
+                    sock.write_all(&[i]).await.unwrap();
+                    sock.flush().await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/blob");
+        let idle = Duration::from_millis(600);
+
+        let slow = Content::fetch_package(&url, 1024, idle).await.unwrap();
+        assert_eq!(
+            slow,
+            (0..8u8).collect::<Vec<_>>(),
+            "a trickle still completes"
+        );
+
+        let stalled = Content::fetch_package(&url, 1024, idle).await.unwrap_err();
+        assert!(
+            stalled.to_string().starts_with("download stalled"),
+            "silence must fail the fetch: {stalled}"
+        );
+        assert!(is_transport_error(&stalled), "and be retried, not reported");
+        assert!(
+            !is_transport_error(&anyhow::anyhow!("downloaded encrypted blob hash mismatch")),
+            "a wrong answer from the peer is not retried"
+        );
     }
 
     /// The control plane is best-effort — `PeerRelayPool::send` drops frames

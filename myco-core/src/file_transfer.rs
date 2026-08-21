@@ -21,6 +21,14 @@ pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 /// paired peer cannot answer a small offer with an unbounded body.
 pub const MAX_PACKAGE_BYTES: u64 = MAX_FILE_BYTES as u64 + MAGIC.len() as u64 + 24 + 16;
 pub const OFFER_TTL_SECS: u64 = 10 * 60;
+/// The encrypted package download fails once the peer has sent nothing for
+/// this long. There is deliberately no cap on total duration: a multi-megabyte
+/// file over a Bluetooth hop takes minutes and is still making progress.
+pub const DOWNLOAD_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How many times a download is started before the transfer is failed; a
+/// mesh link that flaps mid-body comes back within seconds.
+pub const DOWNLOAD_ATTEMPTS: u32 = 4;
+pub const DOWNLOAD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 /// How many transfers this device will track at once. A Circle member that
 /// spams offers would otherwise grow `file_transfers.json` without bound; past
 /// this the oldest finished rows go first, and new offers are refused outright
