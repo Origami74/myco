@@ -13,10 +13,15 @@ env:
   # reference/ at all, so clone the branch carrying the mobile seams: Android
   # BLE as a backend behind the existing `BleIo` trait, per-instance transport
   # addressing (the LAN and Wi-Fi Aware lanes need one UDP socket each), and the
-  # app-owned TUN/UDP/radio seams. Built on current fips master; each commit is
-  # shaped to be cherry-picked upstream on its own.
+  # app-owned TUN/UDP/radio seams. Each commit is shaped to be cherry-picked
+  # upstream on its own.
+  #
+  # `fix/platform-ble` is that work rebased onto current fips master, plus the
+  # BLE fixes on top (advertise the PSM the listener actually bound; back a
+  # failing address off instead of re-dialling it forever). It replaces the
+  # older `integration/platform`, which is now behind master.
   FIPS_REPO: https://github.com/jmcorgan/fips.git
-  FIPS_REF: integration/platform
+  FIPS_REF: fix/platform-ble
   NDK_VERSION: 26.1.10909125
   CARGO_TERM_COLOR: always
 
