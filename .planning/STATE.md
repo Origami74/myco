@@ -87,6 +87,7 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 | 260818-dnm | Device name: default to the phone's own name, one-tap chips for it and the generated one, and a 2048-wide SHA-256-keyed generator (was 144 with a correlated hash) | 2026-08-18 | `feat/status-pill-panel` | `.planning/quick/260818-dnm-device-name-defaults/SUMMARY.md` |
 | 260818-fgt | First-run gating: radios and permission prompts wait for the intro; peer labels resolve to the name the peer actually chose | 2026-08-18 | `feat/status-pill-panel` | `.planning/quick/260818-fgt-first-run-gating/SUMMARY.md` |
 | 260818-adv | Broadcast the chosen device name in the BLE scan response so Nearby shows it before pairing; fixed inbound-BLE advert attribution via transport_addr | 2026-08-18 | `feat/status-pill-panel` | `.planning/quick/260818-adv-advertised-names/SUMMARY.md` |
+| 260821-cib | CI clones the fips `fix/platform-ble` branch instead of `integration/platform` (same mobile seams, rebased onto fips master, plus BLE PSM/dial-backoff fixes) | 2026-08-21 | `chore/ci-fips-platform-ble` | `.planning/quick/260821-cib-ci-fips-ref-platform-ble/SUMMARY.md` |
 
 ## Deferred Items
 
