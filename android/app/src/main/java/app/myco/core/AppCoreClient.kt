@@ -207,7 +207,13 @@ data class AppState(
     val blePeers: List<BlePeer>,
     val bleAdverts: List<BleAdvert>,
     val wifiAwareEnabled: Boolean,
+    /** Base port of the Aware socket pool: slot *i* listens on `port + i`, and
+     *  a peer is told the port of the slot pinned to its own data path. */
     val wifiAwarePort: Int,
+    /** How many peers the Aware lane can carry at once — the number of UDP
+     *  transport instances the core bound. One socket can be marked for only
+     *  one data path, so this is the pool size, not a chipset limit. */
+    val wifiAwareSlots: Int = 1,
     /** Whether the Aware lane is actively discovering right now, sourced from
      *  the publish/subscribe session lifecycle. */
     val wifiAwareScanning: Boolean = false,
@@ -488,6 +494,7 @@ data class AppState(
                 bleAdverts = adverts,
                 wifiAwareEnabled = wifiAware.optBoolean("enabled"),
                 wifiAwarePort = wifiAware.optInt("port"),
+                wifiAwareSlots = wifiAware.optInt("slots", 1).coerceAtLeast(1),
                 wifiAwareScanning = wifiAware.optBoolean("scanning"),
                 wifiAwareScanningKnown = wifiAware.optBoolean("scanningKnown"),
                 sites = sites,
