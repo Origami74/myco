@@ -190,7 +190,13 @@ data class AppState(
     val blePeers: List<BlePeer>,
     val bleAdverts: List<BleAdvert>,
     val wifiAwareEnabled: Boolean,
+    /** Base port of the Aware socket pool: slot *i* listens on `port + i`, and
+     *  a peer is told the port of the slot pinned to its own data path. */
     val wifiAwarePort: Int,
+    /** How many peers the Aware lane can carry at once — the number of UDP
+     *  transport instances the core bound. One socket can be marked for only
+     *  one data path, so this is the pool size, not a chipset limit. */
+    val wifiAwareSlots: Int = 1,
     /** Whether the Aware lane is actively discovering right now, sourced from
      *  the publish/subscribe session lifecycle. */
     val wifiAwareScanning: Boolean = false,
@@ -445,6 +451,7 @@ data class AppState(
                 bleAdverts = adverts,
                 wifiAwareEnabled = wifiAware.optBoolean("enabled"),
                 wifiAwarePort = wifiAware.optInt("port"),
+                wifiAwareSlots = wifiAware.optInt("slots", 1).coerceAtLeast(1),
                 wifiAwareScanning = wifiAware.optBoolean("scanning"),
                 wifiAwareScanningKnown = wifiAware.optBoolean("scanningKnown"),
                 sites = sites,
@@ -689,6 +696,18 @@ object NativeActions {
      */
     fun setCustomBlossom(url: String): JSONObject =
         JSONObject().put("type", "set_custom_blossom").put("url", url)
+
+    /**
+     * Report how many concurrent Wi-Fi Aware data paths this chipset supports,
+     * which is what the core sizes its Aware UDP socket pool to.
+     *
+     * Persisted and applied at the next *node* start, not now: the pool is
+     * bound when the node is built, and rebuilding a running node would drop
+     * every live link. See [app.myco.aware.AwareCapability] for why the answer
+     * is not always available.
+     */
+    fun setAwareDataPaths(count: Int): JSONObject =
+        JSONObject().put("type", "set_aware_data_paths").put("count", count)
 
     /** Toggle mesh-only: when enabled, don't use the public IP relay/Blossom fallback. */
     fun setOfflineOnly(enabled: Boolean): JSONObject =
