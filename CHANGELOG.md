@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still waiting is visible from anywhere in the app and can be cancelled.
   An offer nobody answers gives up after ten minutes instead of waiting forever.
 
+### Fixed
+
+- Receiving a large file over Bluetooth no longer fails part-way with
+  "error decoding response body". The download used to give up after two
+  minutes in total, which a few megabytes over a slow hop exceeds while still
+  arriving; it now only gives up when nothing has arrived for thirty seconds,
+  and a connection that drops mid-file is tried again a few times first.
+
 ## [0.6.0] - 2026-08-19
 
 ### Added
