@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Send a file from the Circle tab: tapping a paired contact now offers
+  "Send a file" next to their npub and "Remove from circle". Pick the files
+  and they go out the same encrypted mesh transfer the system Sharesheet
+  uses — to the contact's npub, over whatever path reaches them, without
+  needing a shared Wi-Fi.
 - Send a file straight to a paired phone. Share anything from another app, pick
   one of your paired phones, and it arrives encrypted over the mesh — no
   hotspot, no internet. The receiving phone is asked first and can say no, and
