@@ -14,8 +14,8 @@ use crate::state::{
     AppState, BleAdvert, BlePeer, BleStatus, IdentityView, NodeStatus, WifiAwareStatus,
 };
 
-/// The node runs **two** UDP transport instances, not one, and everything
-/// below names them.
+/// The node runs **several** UDP transport instances, not one, and everything
+/// below names them: one for the LAN/AP lane, and a fixed pool for Wi-Fi Aware.
 ///
 /// One socket cannot serve both lanes. Android routes by the network a socket
 /// is *marked* with, not by destination alone: `Network.bindSocket` pins a
@@ -27,43 +27,97 @@ use crate::state::{
 ///
 /// So: one instance per lane, each pinned by its own Kotlin radio (see
 /// [`crate::udp_fd_bridge`]), and peer addresses qualified with the instance
-/// name (`"udp/lan"`, `"udp/aware"`) so fips dials down the lane the peer was
+/// name (`"udp/lan"`, `"udp/aware0"`) so fips dials down the lane the peer was
 /// actually observed on rather than whichever transport id sorted lowest.
 const LAN_UDP_INSTANCE: &str = "lan";
-const AWARE_UDP_INSTANCE: &str = "aware";
+
+/// The Wi-Fi Aware lane's instance **pool** — one socket per concurrent peer.
+///
+/// The same exclusivity that separates the lanes also separates peers *within*
+/// the Aware lane: every NDP is its own `android.net.Network`, so a single
+/// socket can be marked for only one of them and the most recent bind silently
+/// blackholes the rest. That, and not the chipset, is what limited Aware to one
+/// peer — a Pixel 7 Pro advertises 8 concurrent data paths and a Galaxy A52s 2,
+/// against the one Myco carried. See `reference/aware-multipeer-limit.md`.
+///
+/// A **fixed** pool rather than an instance per peer because fips builds its
+/// transports from config at node start (`create_transports`) and has no way to
+/// add one at runtime. Four is sized for a room: Aware carries a handful of
+/// nearby phones, and each idle instance costs a bound socket.
+///
+/// The slot is chosen by `AwareRadio`, which pins slot *i*'s socket to peer
+/// *i*'s NDP and pushes the peer under the lane label `"aware<i>"`.
+const AWARE_UDP_INSTANCES: [&str; 4] = ["aware0", "aware1", "aware2", "aware3"];
 
 /// UDP port for the LAN / `!FIPS` AP lane. Unchanged at 4871: this lane talks
 /// to desktop fips nodes today and works, and desktop peers are discovered by
 /// mDNS advert, so moving it would break a working lane for nothing.
 const LAN_UDP_PORT: u16 = 4871;
 
-/// UDP port for the Wi-Fi Aware bulk lane. Both peers bind it on the NDP
-/// interface and exchange over it — symmetric, no listener/dialer roles. A
-/// fixed app constant (we bind our own port), so there is no PSM-style
-/// discovery problem. UDP is fips's native transport and the LAN-discovery
-/// path (which this reuses) is already UDP + scoped link-local IPv6.
-/// See docs/design/wifi-aware-interop.md.
+/// First UDP port of the Wi-Fi Aware pool: slot *i* binds `base + i`, so
+/// `aware0…aware3` listen on 4872–4875. Both peers bind their own and exchange
+/// over the NDP — symmetric, no listener/dialer roles. UDP is fips's native
+/// transport and the LAN-discovery path (which this reuses) is already UDP +
+/// scoped link-local IPv6. See docs/design/wifi-aware-interop.md.
 ///
-/// **Not a flag day.** Each phone advertises this port to its peers in the
-/// Aware identity exchange and is dialled at the port it advertised, so a
-/// phone on a build from before this port existed — which advertises no port
-/// and listens on [`LAN_UDP_PORT`] — is still reachable. `AwareRadio` formats
-/// `"[fe80::x%ifindex]:<peer's port>"`; see its `parsePeer`.
-const AWARE_UDP_PORT: u16 = 4872;
+/// **The port is per peer, and that is what makes the pool work.** A phone
+/// advertises, in the Aware identity exchange, the port of the socket it has
+/// pinned to *that* peer's NDP, and is dialled there. A peer discovered before
+/// its slot is known is told the base port, which is slot 0 — so a pair of
+/// phones needs no correction at all, and a phone on a build from before this
+/// port existed (which advertises no port and listens on [`LAN_UDP_PORT`]) is
+/// still reachable. `AwareRadio` formats `"[fe80::x%ifindex]:<peer's port>"`;
+/// see its `parsePeer`.
+const AWARE_UDP_BASE_PORT: u16 = 4872;
 
 /// Which UDP transport instance a Kotlin radio's lane rides.
 ///
-/// `lane` is the label the radio itself pushes (`AwareRadio` sends `"aware"`,
-/// `ApRadio` sends `"udp"`); this is the single place it is turned into a fips
-/// instance name, so the name a socket is pinned by and the name a dial is
-/// routed by cannot drift apart. Anything unrecognised is the AP lane, which
-/// is the one that behaves as UDP always has.
+/// `lane` is the label the radio itself pushes (`AwareRadio` sends the slot it
+/// allocated the peer — `"aware0"`… — and `ApRadio` sends `"udp"`); this is the
+/// single place it is turned into a fips instance name, so the name a socket is
+/// pinned by and the name a dial is routed by cannot drift apart.
+///
+/// A bare `"aware"` is a radio from before the pool existed and takes slot 0,
+/// which is the port such a build advertises anyway. Anything else — including
+/// a slot number beyond the pool, which would mean Kotlin and this file
+/// disagree about its size — is the AP lane, the one that behaves as UDP always
+/// has. Kotlin reads the size from [`WifiAwareStatus::slots`] rather than
+/// keeping its own copy, so that case is a bug, not a version skew.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn udp_instance_for_lane(lane: &str) -> &'static str {
-    match lane {
-        "aware" => AWARE_UDP_INSTANCE,
-        _ => LAN_UDP_INSTANCE,
+    if lane == "aware" {
+        return AWARE_UDP_INSTANCES[0];
     }
+    AWARE_UDP_INSTANCES
+        .iter()
+        .find(|instance| **instance == lane)
+        .copied()
+        .unwrap_or(LAN_UDP_INSTANCE)
+}
+
+/// The lane *family* a slot-qualified label belongs to: `"aware2"` → `"aware"`,
+/// anything else unchanged.
+///
+/// Which socket carries a peer is a routing fact; which radio saw it is what
+/// the Dev tab reports and what `merge_peers` overrides on. Only the first is
+/// per slot, so [`crate::lane_observation`] records the family and never grows
+/// a row per slot for what is one lane.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn lane_family(lane: &str) -> &str {
+    let trimmed = lane.trim_end_matches(|c: char| c.is_ascii_digit());
+    if trimmed.is_empty() {
+        lane
+    } else {
+        trimmed
+    }
+}
+
+/// How many peers the Aware lane can carry at once — the pool size, reported to
+/// Kotlin in [`WifiAwareStatus::slots`] so the radio allocates within the range
+/// this file actually configured.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn aware_udp_slots() -> u8 {
+    AWARE_UDP_INSTANCES.len() as u8
 }
 
 /// Consecutive failed `show_peers` queries before the peer feed is reported as
@@ -573,32 +627,39 @@ impl AppRuntime {
                     ..Default::default()
                 });
         }
-        // Two UDP transports, one per lane — see the instance constants at the
-        // top of this file for why one socket cannot serve both. UDP is
+        // One UDP transport for the LAN/AP lane and a pool of them for Wi-Fi
+        // Aware — see the instance constants at the top of this file for why
+        // one socket cannot serve two lanes, nor two concurrent NDPs. UDP is
         // symmetric (no listener/dialer), fips-native, and reuses the proven
         // scoped-link-local path. Peers are supplied only by the platform peer
         // queue — UDP is not advertised on Nostr and no peer config points
         // here — so `offline_only` semantics survive.
         //
-        // Both are configured UNCONDITIONALLY on Android (like the BLE
+        // All of them are configured UNCONDITIONALLY on Android (like the BLE
         // transport above), not gated on the Aware toggle: the toggle then
         // controls only the Kotlin radio (whether peers get pushed), never the
         // node's transport set — so flipping Wi-Fi Aware never restarts the
-        // node and never disrupts an active BLE link. `wifi_aware` still adds
-        // them on the host for the LAN-based dev/test stand-in.
+        // node and never disrupts an active BLE link. That is also why the pool
+        // is bound in full up front rather than grown as peers arrive: growing
+        // it would mean rebuilding the node mid-session, which costs every live
+        // link. `wifi_aware` still adds them on the host for the LAN-based
+        // dev/test stand-in.
         if wifi_aware || cfg!(target_os = "android") {
             let udp = |port: u16| fips::config::UdpConfig {
                 bind_addr: Some(format!("[::]:{port}")),
                 ..Default::default()
             };
-            config.transports.udp = fips::config::TransportInstances::Named(
-                [
-                    (LAN_UDP_INSTANCE.to_string(), udp(LAN_UDP_PORT)),
-                    (AWARE_UDP_INSTANCE.to_string(), udp(AWARE_UDP_PORT)),
-                ]
-                .into_iter()
-                .collect(),
-            );
+            let mut instances: std::collections::HashMap<String, fips::config::UdpConfig> =
+                [(LAN_UDP_INSTANCE.to_string(), udp(LAN_UDP_PORT))]
+                    .into_iter()
+                    .collect();
+            for (slot, instance) in AWARE_UDP_INSTANCES.iter().enumerate() {
+                instances.insert(
+                    (*instance).to_string(),
+                    udp(AWARE_UDP_BASE_PORT + slot as u16),
+                );
+            }
+            config.transports.udp = fips::config::TransportInstances::Named(instances);
         }
         fips::Node::new(config).map_err(|e| anyhow::anyhow!("fips Node::new failed: {e}"))
     }
@@ -1433,10 +1494,11 @@ impl AppRuntime {
                 WifiAwareStatus {
                     enabled: self.wifi_aware_enabled,
                     port: if self.wifi_aware_enabled {
-                        AWARE_UDP_PORT
+                        AWARE_UDP_BASE_PORT
                     } else {
                         0
                     },
+                    slots: aware_udp_slots(),
                     scanning,
                     scanning_known,
                 }
@@ -1666,6 +1728,52 @@ mod tests {
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("myco-test-{}-{}", std::process::id(), tag))
+    }
+
+    /// The lane label Kotlin pushes and the instance the dial is routed to meet
+    /// only at this function, and a mismatch is invisible until a handshake
+    /// times out on a device: the peer would be dialled from a socket pinned to
+    /// somebody else's data path.
+    #[test]
+    fn every_aware_slot_maps_to_its_own_instance() {
+        for (slot, instance) in AWARE_UDP_INSTANCES.iter().enumerate() {
+            assert_eq!(udp_instance_for_lane(&format!("aware{slot}")), *instance);
+        }
+        // Distinct instances, so distinct sockets — the whole point of the pool.
+        let unique: std::collections::HashSet<_> = AWARE_UDP_INSTANCES.iter().collect();
+        assert_eq!(unique.len(), AWARE_UDP_INSTANCES.len());
+        assert_eq!(aware_udp_slots() as usize, AWARE_UDP_INSTANCES.len());
+    }
+
+    /// A radio from before the pool existed pushes a bare `"aware"` and listens
+    /// on the base port, which is slot 0's — so that is where it belongs.
+    #[test]
+    fn a_bare_aware_lane_takes_slot_zero() {
+        assert_eq!(udp_instance_for_lane("aware"), AWARE_UDP_INSTANCES[0]);
+    }
+
+    /// Everything else is the AP lane. A slot past the end of the pool means
+    /// Kotlin and this file disagree about its size; it must not be routed to
+    /// an Aware socket that does not exist.
+    #[test]
+    fn unknown_lanes_fall_back_to_the_lan_instance() {
+        for lane in ["udp", "", "aware9", "awares", "lan"] {
+            assert_eq!(udp_instance_for_lane(lane), LAN_UDP_INSTANCE);
+        }
+    }
+
+    /// The Dev tab reports which *radio* saw a peer, which is one fact however
+    /// many sockets the lane owns — so the slot digits come off before the lane
+    /// is recorded.
+    #[test]
+    fn lane_family_strips_the_slot() {
+        assert_eq!(lane_family("aware0"), "aware");
+        assert_eq!(lane_family("aware3"), "aware");
+        assert_eq!(lane_family("aware"), "aware");
+        assert_eq!(lane_family("udp"), "udp");
+        // All digits: nothing to strip down to, so it is left alone rather than
+        // recorded as an empty lane.
+        assert_eq!(lane_family("42"), "42");
     }
 
     /// The action tag the app sends has to be the one the reducer accepts.
