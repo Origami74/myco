@@ -741,6 +741,18 @@ object NativeActions {
     fun setCustomBlossom(url: String): JSONObject =
         JSONObject().put("type", "set_custom_blossom").put("url", url)
 
+    /**
+     * Report how many concurrent Wi-Fi Aware data paths this chipset supports,
+     * which is what the core sizes its Aware UDP socket pool to.
+     *
+     * Persisted and applied at the next *node* start, not now: the pool is
+     * bound when the node is built, and rebuilding a running node would drop
+     * every live link. See [app.myco.aware.AwareCapability] for why the answer
+     * is not always available.
+     */
+    fun setAwareDataPaths(count: Int): JSONObject =
+        JSONObject().put("type", "set_aware_data_paths").put("count", count)
+
     /** Toggle mesh-only: when enabled, don't use the public IP relay/Blossom fallback. */
     fun setOfflineOnly(enabled: Boolean): JSONObject =
         JSONObject().put("type", "set_offline_only").put("enabled", enabled)

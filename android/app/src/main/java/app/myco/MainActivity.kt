@@ -46,6 +46,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
 import app.myco.ap.ApRadio
+import app.myco.aware.AwareCapability
 import app.myco.aware.AwareRadio
 import app.myco.aware.AwareService
 import app.myco.ble.BleRadio
@@ -144,6 +145,14 @@ class MainActivity : ComponentActivity() {
         captureExternalShare(intent)
         // Restore the mesh-only (no IP fallback) preference into the core.
         core.dispatch(NativeActions.setOfflineOnly(prefs.getBoolean(PREF_OFFLINE_ONLY, false)))
+        // Tell the core what this chipset can carry, before anything starts the
+        // node: the Aware socket pool is sized from it, and it is persisted
+        // because it is not readable at the moment the node actually needs it
+        // (Wi-Fi may be off then). Null — API below 33, Wi-Fi off — leaves the
+        // last known answer in place rather than overwriting it with a guess.
+        AwareCapability.supportedDataPaths(this)?.let {
+            core.dispatch(NativeActions.setAwareDataPaths(it))
+        }
         // (Device name is asserted in onResume, which also covers identity not yet
         // being ready at this point.)
 

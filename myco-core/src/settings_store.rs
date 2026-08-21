@@ -1,9 +1,9 @@
 //! Settings that have to survive a restart, in `settings.json`.
 //!
-//! Both values here — the custom relay and the custom Blossom — have to be
-//! persisted rather than held in memory like `offline_only`, because they decide
-//! how the content layer is *constructed*. The backends are chosen before
-//! anything else opens, so the answers must already be on disk at startup.
+//! Everything here is persisted rather than held in memory like `offline_only`
+//! because it decides how something is *constructed*. The content backends are
+//! chosen before anything else opens, and the Wi-Fi Aware socket pool is bound
+//! when the node starts — so the answers must already be on disk at startup.
 //!
 //! Deliberately a plain file rather than a settings framework. A missing or
 //! corrupt file means "use the defaults", which is the behaviour we want anyway:
@@ -31,6 +31,19 @@ pub struct Settings {
     /// pointing this at an internet server means a peer pulling an app from us
     /// needs *our* connection (`reference/thinning-custom-relay.md`, D9).
     pub custom_blossom_url: Option<String>,
+
+    /// How many concurrent Wi-Fi Aware data paths this chipset says it
+    /// supports, as last reported by Kotlin.
+    ///
+    /// Persisted because it is not knowable when it is needed. The node binds
+    /// the Aware socket pool at start, and `WifiAwareManager.getCharacteristics()`
+    /// returns null while Wi-Fi is off — so on a cold launch the number is
+    /// simply not available yet. Reading last launch's answer off disk gets it
+    /// right every time after the first.
+    ///
+    /// `None` means never reported: an API below 33 (the call is 33+, above our
+    /// minSdk of 29), Wi-Fi off on every launch so far, or a host build.
+    pub aware_data_paths: Option<u8>,
 }
 
 impl Settings {
