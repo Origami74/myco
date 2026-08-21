@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still waiting is visible from anywhere in the app and can be cancelled.
   An offer nobody answers gives up after ten minutes instead of waiting forever.
 
+### Fixed
+
+- A file transfer no longer gets stuck when a control message is lost. An
+  accept (or offer, or ready) sent while the Bluetooth link was re-dialling
+  was dropped, and the other side waited the full ten minutes before giving
+  up. Each side now re-sends the message it is still waiting to have heard,
+  every twelve seconds or so until the transfer moves on or expires — and a
+  receiver that already has the file answers a repeated "ready" with a fresh
+  "done", so a sender no longer sits on "Sending" after a delivered file.
+
 ## [0.6.0] - 2026-08-19
 
 ### Added
