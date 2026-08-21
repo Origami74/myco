@@ -19,7 +19,7 @@ on:
 
 env:
   FIPS_REPO: https://github.com/jmcorgan/fips.git
-  FIPS_REF: integration/platform   # fips branch carrying the mobile seams (Android BLE, per-instance transports)
+  FIPS_REF: fix/platform-ble       # fips branch carrying the mobile seams (Android BLE, per-instance transports)
   NDK_VERSION: 26.1.10909125
 
 jobs:
