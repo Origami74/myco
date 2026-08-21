@@ -134,6 +134,7 @@ fun MycoApp(
     onLanToggle: (Boolean) -> Unit = {},
     onLaunchNsite: (host: String, title: String) -> Unit,
     onLaunchNapplet: (pointer: String, title: String) -> Unit,
+    onPinNappletToHome: (pointer: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,
     initialMeshEnabled: Boolean,
@@ -337,6 +338,7 @@ fun MycoApp(
                         client,
                         onLaunchNsite = onLaunchNsite,
                         onLaunchNapplet = onLaunchNapplet,
+                        onPinNappletToHome = onPinNappletToHome,
                         onPinToHome = onPinToHome,
                         onScanned = onScanned,
                     )
