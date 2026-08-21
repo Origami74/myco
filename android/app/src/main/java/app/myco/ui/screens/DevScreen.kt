@@ -166,10 +166,28 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
                         apWifi.connected,
                     )
                     KeyValDot("mdns browse", if (apWifi.browsing) "active" else "idle", apWifi.browsing)
+                    KeyValDot(
+                        "local-only STA",
+                        apWifi.localOnlySsid?.let { if (apWifi.localOnlyUp) "up — $it" else "requested — $it" }
+                            ?: "off",
+                        apWifi.localOnlyUp,
+                    )
                     if (apNodes.isEmpty()) {
                         EmptyLine("no fips node on this lan")
                     } else {
                         apNodes.forEach { ApNodeRow(it) }
+                    }
+                    // Join a FIPS AP as a second, local-only connection while
+                    // staying on the current internet Wi-Fi. Shows the system
+                    // join prompt; local-only means no default route is taken.
+                    if (apWifi.localOnlySsid == null) {
+                        TextButton(onClick = { ApRadio.requestLocalOnly() }) {
+                            Text("Join a FIPS hotspot (${ApRadio.FIPS_SSID})")
+                        }
+                    } else {
+                        TextButton(onClick = { ApRadio.releaseLocalOnly() }) {
+                            Text("Leave the FIPS hotspot")
+                        }
                     }
                 }
                 // Stable alphabetical order — the state arrays arrive in snapshot
