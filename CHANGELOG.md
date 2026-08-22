@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Same-Wi-Fi peers that dropped off mDNS now reconnect on their own: the
+  discovery browse restarts periodically so a peer the phone quietly stopped
+  reporting is found again, instead of the connection staying dead.
+
 ### Added
 
 - Dev: join a FIPS Wi-Fi hotspot (`!FIPS`) as a second, local-only connection
