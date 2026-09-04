@@ -48,6 +48,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -109,6 +111,16 @@ private val TABS = listOf(
     Tab("discover", "Discover", Icons.Filled.TravelExplore),
     Tab("settings", "Settings", Icons.Filled.Settings),
     Tab("dev", "Dev", Icons.Filled.Terminal),
+)
+
+/**
+ * Picked share URIs across a configuration change. A `Uri` is Parcelable, but the
+ * list handed back by the picker is not guaranteed to be a shape the default saver
+ * can store, so save the strings and parse them back.
+ */
+private val UriListSaver = listSaver<List<Uri>, String>(
+    save = { it.map(Uri::toString) },
+    restore = { it.map(Uri::parse) },
 )
 
 @Composable
@@ -238,12 +250,18 @@ fun MycoApp(
 
     val nav = rememberNavController()
     // "Send a file" from a Circle contact: remember who, then let the user pick what.
-    var sendFileTarget by remember { mutableStateOf<CircleContact?>(null) }
-    var pickedShareUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    // Saveable, not merely remembered: the document picker is another activity, and
+    // a rotation behind it — or the sheet rotating afterwards — would otherwise drop
+    // the contact and the picks on the floor, leaving the user to start over with no
+    // sign of why.
+    var sendFileNpub by rememberSaveable { mutableStateOf<String?>(null) }
+    var pickedShareUris by rememberSaveable(stateSaver = UriListSaver) {
+        mutableStateOf<List<Uri>>(emptyList())
+    }
     val pickFilesForPeer = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
-        if (uris.isNotEmpty()) pickedShareUris = uris else sendFileTarget = null
+        if (uris.isNotEmpty()) pickedShareUris = uris else sendFileNpub = null
     }
     // Keep the navigation host and all transient surfaces in one app-root layer.
     // File offers must not be owned by Circle or any other selected destination.
@@ -312,7 +330,7 @@ fun MycoApp(
                         client,
                         onOpenQr = { nav.navigate("qr") },
                         onSendFile = { peer ->
-                            sendFileTarget = peer
+                            sendFileNpub = peer.npub
                             pickFilesForPeer.launch(arrayOf("*/*"))
                         },
                     )
@@ -458,7 +476,13 @@ fun MycoApp(
         PeerShareSheet(
             state = state,
             uris = shareUris,
-            preselectedNpub = if (externalShareUris.isEmpty()) sendFileTarget?.npub else null,
+            // Only if they are still there: a contact can drop off the mesh between
+            // the tap and the picker closing, and a preselection the picker then
+            // hides under "offline" is a selection the user cannot see.
+            preselectedNpub = sendFileNpub?.takeIf {
+                externalShareUris.isEmpty() &&
+                    (it in state.reachableNpubs || state.blePeers.any { p -> p.npub == it && p.connected })
+            },
             onDismiss = {
                 peerShareVisible = false
                 // Closing the sheet acknowledges the outcomes it was showing.
@@ -471,7 +495,7 @@ fun MycoApp(
                     .forEach { client.dispatch(NativeActions.forgetFileTransfer(it.id)) }
                 state = client.state()
                 pickedShareUris = emptyList()
-                sendFileTarget = null
+                sendFileNpub = null
                 onExternalShareDismissed()
             },
             onShare = { peer -> onShareToPeer(shareUris, peer) },

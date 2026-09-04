@@ -157,6 +157,9 @@ fun CircleScreen(
     }
 
     val connected = state.blePeers.filter { it.connected }.map { it.npub }.toSet()
+    // Who a file could actually reach right now — any mesh lane, not just BLE.
+    // The share sheet's picker partitions on the same test.
+    val reachable = state.reachableNpubs + connected
     // Who we have already invited, from the core rather than a list local to this
     // screen: an invite outlives leaving the tab, and the core is what refuses to
     // send a second one — the badge should agree with it.
@@ -431,6 +434,7 @@ fun CircleScreen(
         ModalBottomSheet(onDismissRequest = { sheetFor = null }) {
             PersonSheet(
                 contact = c,
+                canSendFile = c.npub in reachable,
                 onSendFile = { sheetFor = null; onSendFile(c) },
                 onRemove = { sheetFor = null; confirmRemove = c },
             )
@@ -484,6 +488,8 @@ fun CircleScreen(
 @Composable
 private fun PersonSheet(
     contact: CircleContact,
+    /** False when no lane reaches them: a file has nowhere to go, so we do not offer one. */
+    canSendFile: Boolean,
     onSendFile: () -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -503,7 +509,7 @@ private fun PersonSheet(
         }
         Spacer(Modifier.height(16.dp))
         SheetAction(Icons.Filled.Info, shortNpub(contact.npub)) { }
-        SheetAction(Icons.Filled.AttachFile, "Send a file") { onSendFile() }
+        if (canSendFile) SheetAction(Icons.Filled.AttachFile, "Send a file") { onSendFile() }
         SheetAction(Icons.Filled.PersonRemove, "Remove from circle", tint = MaterialTheme.colorScheme.error) { onRemove() }
     }
 }
