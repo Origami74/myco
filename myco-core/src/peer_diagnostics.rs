@@ -76,10 +76,12 @@ fn short(s: &str) -> String {
 ///
 /// `lane_by_npub` is a lane-origin override (npub → observed lane, e.g.
 /// `"aware"`), consulted in preference to the raw fips-reported transport
-/// name. It exists because Wi-Fi Aware and the LAN/AP lane both ride fips's
-/// plain UDP transport and are indistinguishable from `PeerView.transport`
-/// alone — only the Kotlin radio push site knows which one carried a given
-/// peer. Empty in plan 01-01 (every transport passes through as fips
+/// name **where that name is `udp`**. It exists because Wi-Fi Aware and the
+/// LAN/AP lane both ride fips's plain UDP transport and are indistinguishable
+/// from `PeerView.transport` alone — only the Kotlin radio push site knows
+/// which one carried a given peer. It says nothing about any other transport:
+/// the radio that observed a peer is not necessarily the one carrying it, so
+/// a link fips reports as BLE stays BLE. Empty in plan 01-01 (every transport passes through as fips
 /// reported it, unmodified); plan 01-02 populates it from
 /// `aware_bridge_jni.rs`. Never inferred from address shape (e.g.
 /// link-local vs. routable) — that would be exactly the sort of
@@ -135,11 +137,22 @@ pub fn merge_peers(
         let name = pv
             .map(|p| truncate_chars(&p.display_name, 64))
             .unwrap_or_default();
-        let transport = lane_by_npub
-            .get(&bp.npub)
-            .cloned()
-            .or_else(|| pv.map(|p| p.transport.clone()))
-            .unwrap_or_default();
+        // The lane record disambiguates fips's *UDP* transport — the one thing
+        // Wi-Fi Aware and the LAN lane both ride — so it applies only where
+        // fips reports UDP. It records which radio observed a peer, which is
+        // not a claim about what carries the session: an Aware data path can
+        // come up beside a link fips is carrying over BLE, and fips keeps the
+        // link it has. Letting the record win there labelled a 750 B/s BLE
+        // session "Wi-Fi Aware" for as long as the row lived.
+        let fips_transport = pv.map(|p| p.transport.clone()).unwrap_or_default();
+        let transport = if fips_transport == "udp" {
+            lane_by_npub
+                .get(&bp.npub)
+                .cloned()
+                .unwrap_or(fips_transport)
+        } else {
+            fips_transport
+        };
         let last_seen_ms = pv.map(|p| p.last_seen_ms).unwrap_or(0);
         let authenticated_at_ms = pv.map(|p| p.authenticated_at_ms).unwrap_or(0);
         // `None` both when there is no PeerView and when MMP has not measured
@@ -1014,6 +1027,38 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].transport, "aware");
+    }
+
+    /// A lane record is an observation by a radio, not a statement about the
+    /// link. Aware can bring a data path up beside a session fips is already
+    /// carrying over BLE — fips keeps the link it has (`API connect resolved
+    /// against an already-connected peer`) — and the row then claimed "Wi-Fi
+    /// Aware" over a 750 B/s Bluetooth session, and went on claiming it after
+    /// the Aware radio was switched off.
+    #[test]
+    fn a_lane_record_does_not_relabel_a_link_fips_carries_elsewhere() {
+        let views = vec![pv("a1", "npub-ble", true, 1_000, "ble")];
+        let peers = vec![bp("a1", "npub-ble", true)];
+        let mut lane_by_npub = HashMap::new();
+        lane_by_npub.insert("npub-ble".to_string(), "aware".to_string());
+        let out = merge_peers(
+            &views,
+            &peers,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &lane_by_npub,
+            &HashMap::new(),
+            &[],
+            0,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].transport, "ble",
+            "the lane record disambiguates UDP; it does not overrule the link"
+        );
     }
 
     #[test]

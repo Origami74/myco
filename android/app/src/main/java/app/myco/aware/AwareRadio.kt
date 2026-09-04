@@ -259,6 +259,16 @@ class AwareRadio(
     /** Drop NDPs + discovery + attach, but keep the availability watch (so the
      *  lane re-attaches if Aware flaps back). Called on availability loss. */
     private fun closeSessions() {
+        // Withdraw first, while the slots and the live set still say who was
+        // here. Unregistering a NetworkCallback delivers no `onLost`, and that
+        // callback is the only place this lane tells the core a peer is gone —
+        // so without this the core kept the pooled UDP session and the lane
+        // record went on labelling those peers "Wi-Fi Aware" long after the
+        // radio stopped. The LAN lane withdraws the same way when its browse
+        // stops (`ApRadio.stopBrowse`).
+        for (npub in liveNdps) {
+            NativeCore.awarePeerLost(npub, laneFor(slotPool.slotOf(npub) ?: 0))
+        }
         for ((_, cb) in ndpCallbacks) runCatching { connectivity.unregisterNetworkCallback(cb) }
         ndpCallbacks.clear()
         for ((_, st) in retries) st.pending?.let { handler.removeCallbacks(it) }
