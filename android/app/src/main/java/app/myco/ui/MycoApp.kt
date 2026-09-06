@@ -229,7 +229,10 @@ fun MycoApp(
         val added = current - knownInvites.value
         if (added.isNotEmpty()) {
             state.outboundPairs.firstOrNull { it.npub in added }?.let {
-                justInvited = it.name.ifEmpty { "them" }
+                // Resolve the name the same way every other surface does, so an
+                // invite recorded without one says the peer's npub-derived name
+                // rather than borrowing whatever string happened to be stored.
+                justInvited = peerLabel(state, it.npub)
             }
         }
         knownInvites.value = current
