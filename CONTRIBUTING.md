@@ -48,6 +48,10 @@ to produce the native library. `minSdk` is 29 (the L2CAP CoC floor).
 Install a debug build on a connected device with
 `./gradlew installDebug`.
 
+With Nix, `nix develop` gives you the Rust host toolchain and
+`nix develop .#android` adds the Android SDK/NDK, JDK 17, Gradle and
+adb — see [docs/how-to/build.md](docs/how-to/build.md) §1.
+
 ## Choosing a branch to target
 
 Myco is single-trunk: branch off the latest **`main`**, and open your

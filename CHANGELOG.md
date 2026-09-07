@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A Nix flake for the toolchain (`nix develop` for the Rust host shell,
+  `nix develop .#android` for the Android SDK/NDK/JDK 17/Gradle/adb shell), so a
+  NixOS or nix-enabled machine gets a working build environment without a manual
+  rustup/SDK-manager install. See `docs/how-to/build.md` §1.
 - Send a file from the Circle tab: tapping a paired contact now offers
   "Send a file" next to their npub and "Remove from circle". Pick the files
   and they go out the same encrypted mesh transfer the system Sharesheet
