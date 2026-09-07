@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needing a shared Wi-Fi.
 ### Fixed
 
+- Inviting someone from Nearby no longer labels them with your own device
+  name. The tap recorded your name against their npub, so the "invite sent"
+  pop-up — and their bubble everywhere else — read back as you. The invite now
+  carries the name they told us, and nothing at all when they have told us
+  none, so their real name still wins once it arrives.
 - Same-Wi-Fi peers that dropped off mDNS now reconnect on their own: the
   discovery browse restarts periodically so a peer the phone quietly stopped
   reporting is found again, instead of the connection staying dead.

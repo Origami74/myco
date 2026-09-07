@@ -91,6 +91,7 @@ import app.myco.ui.TransferCard
 import app.myco.ui.isLive
 import app.myco.ui.needsAttention
 import app.myco.ui.peerLabel
+import app.myco.ui.peerNameOrNull
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.avatarColorFor
 
@@ -226,8 +227,17 @@ fun CircleScreen(
                                 dim = false,
                                 onClick = if (isSent) null else {
                                     {
+                                        // Their name, never ours: the invite record is
+                                        // what the pending dialog reads back, and what
+                                        // peerLabel() trusts as a name they told us.
+                                        // Empty when they have told us nothing, so a
+                                        // placeholder can't outrank the real name later.
                                         client.dispatch(
-                                            NativeActions.sendPairRequest(peer.npub, name, NsiteShare.newPairSecret())
+                                            NativeActions.sendPairRequest(
+                                                peer.npub,
+                                                peerNameOrNull(state, peer.npub).orEmpty(),
+                                                NsiteShare.newPairSecret(),
+                                            )
                                         )
                                     }
                                 },
