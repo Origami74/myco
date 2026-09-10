@@ -27,15 +27,45 @@ For the system this build produces, see
 The toolchain matches the two reference projects. The fastest path is Nix; a
 manual install is also fine.
 
-### Option A — Nix (optional, recommended)
+### Option A — Nix (recommended)
+
+`flake.nix` at the repo root ships two dev shells:
 
 ```sh
-nix develop          # provides Rust, cargo-ndk, NDK, JDK 17, Gradle, just, adb
+nix develop            # host shell: Rust (+ aarch64-linux-android target), clippy,
+                       # rustfmt, rust-analyzer, just, clang/libclang, dbus —
+                       # enough for `just test` and `cargo fmt --check`
+nix develop .#android  # the above + Android SDK (platforms 29 + 36, build-tools
+                       # 35/36), NDK 26.1.10909125, cargo-ndk, JDK 17, Gradle, adb
 ```
 
-A Nix dev shell would provide Rust, cargo-ndk, the Android NDK, JDK 17, Gradle,
-just and adb. A `flake.nix` for Myco is **TBD / open** — until it lands, use
-Option B.
+The Android shell exports `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `ANDROID_NDK_HOME`,
+`ANDROID_NDK_ROOT` and `JAVA_HOME`, so no `local.properties` is needed. It also
+sets `GRADLE_OPTS=-Dorg.gradle.project.android.aapt2FromMavenOverride=…`: without
+it AGP downloads an `aapt2` from Maven that cannot run on NixOS.
+
+Both shells export `LIBCLANG_PATH` (bindgen, via fips' `rustables` dependency)
+and carry dbus, which fips' Linux BLE backend (bluer) needs to link
+`libdbus-sys` — the same `libdbus-1-dev` the Rust CI job installs. Both also
+default `MYCO_FIPS_REPO_PATH` to `reference/fips` when that checkout is present,
+warning when it is not (§4).
+
+Two things the flake deliberately does **not** do:
+
+- **No `packages` output.** The workspace depends on `fips` as a path dependency
+  at `reference/fips` — a local, gitignored checkout — so a hermetic Nix build of
+  the crates is impossible. The flake provides the toolchain; cargo and Gradle
+  still drive the build.
+- **No udev rules.** `adb` is in the shell, but device access needs
+  `programs.adb.enable = true` (and your user in the `adbusers` group) in the
+  host NixOS configuration — a dev shell cannot grant that.
+
+Note that the flake sets `allowUnfree` and `android_sdk.accept_license` in its
+own nixpkgs import, so entering the Android shell accepts Google's SDK licence
+without touching your user or system config.
+
+Pins live at the top of `flake.nix` (`ndkVersion`, `platformVersions`,
+`buildToolsVersions`); keep them in sync with `android/app/build.gradle.kts`.
 
 ### Option B — manual install
 
@@ -369,7 +399,6 @@ two-device demo: [run-two-device-demo.md](./run-two-device-demo.md).
   candidates, the per-peer PSM change is a wire-breaking proposal to weigh with
   upstream, and the macOS `BleIo` reuse stays a local test-only patch — vs. carrying
   them all on the local checkout. **Tracked in §4c / roadmap P0–P1.**
-- **`flake.nix`:** Myco has no Nix dev shell yet. **TBD / open.**
 - **`compileSdk`/`targetSdk`:** proposed at 36 to match reference; not yet pinned
   for Myco. **TBD / open.**
 - **Canonical build driver (§3):** Gradle-driven `Exec` task vs. `just ndk-build`.
