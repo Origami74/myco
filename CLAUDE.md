@@ -25,7 +25,7 @@ Required before opening a PR (per CONTRIBUTING.md): `cargo fmt --check`, `cargo 
 
 ### The fips dependency
 
-The workspace depends on `fips` as a **path dependency at `reference/fips`** — a local, gitignored checkout (upstream: github.com/k0sti/fips) carrying local patches (app-owned TUN, injectable `BleIo`, per-peer PSM discovery, macOS `BleIo`). Nothing builds without it. The Android Gradle build additionally reads `MYCO_FIPS_REPO_PATH` to emit a `patch.crates-io` override; `patch.crates-io` builds perturb `Cargo.lock`, so watch for a dirty lockfile after Android builds. Details: `docs/how-to/build.md` §4.
+The workspace depends on `fips` as a **path dependency at `reference/fips`** — a local, gitignored checkout of the **`master`** branch of github.com/jmcorgan/fips (build against `master`, not a feature branch) carrying local patches (app-owned TUN, injectable `BleIo`, per-peer PSM discovery, macOS `BleIo`). Nothing builds without it. The Android Gradle build additionally reads `MYCO_FIPS_REPO_PATH` to emit a `patch.crates-io` override; `patch.crates-io` builds perturb `Cargo.lock`, so watch for a dirty lockfile after Android builds. Details: `docs/how-to/build.md` §4.
 
 ### Android constraints (LOCKED)
 
