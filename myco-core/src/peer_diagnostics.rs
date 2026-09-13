@@ -19,7 +19,7 @@ use crate::control_client::PeerView;
 use crate::ble_diag::{BlePeerAttempts, MAX_ATTEMPTS_PER_PEER};
 
 use crate::content::{CircleContact, OutboundPairView, PairRequestView};
-use crate::state::{BleAdvert, BlePeer, PeerAttemptView, PeerDiagnosticView};
+use crate::state::{BleAdvert, BlePeer, PeerAttemptView, PeerDiagnosticView, PeerPathView};
 
 /// D-11 ordering weight for a row's `state` — lower sorts first.
 fn peer_state_rank(state: &str) -> u8 {
@@ -144,15 +144,53 @@ pub fn merge_peers(
         // come up beside a link fips is carrying over BLE, and fips keeps the
         // link it has. Letting the record win there labelled a 750 B/s BLE
         // session "Wi-Fi Aware" for as long as the row lived.
-        let fips_transport = pv.map(|p| p.transport.clone()).unwrap_or_default();
-        let transport = if fips_transport == "udp" {
-            lane_by_npub
-                .get(&bp.npub)
-                .cloned()
-                .unwrap_or(fips_transport)
-        } else {
-            fips_transport
+        //
+        // With multi-path fips, the row's `paths` say outright which instance
+        // each path runs over, so the active path's lane is the transport
+        // and needs no override. The lane record only fills in on a daemon
+        // that reports no paths.
+        let paths: Vec<PeerPathView> = pv
+            .map(|p| {
+                p.paths
+                    .iter()
+                    .map(|path| PeerPathView {
+                        lane: path.lane.clone(),
+                        state: path.state.clone(),
+                        active: path.active,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let active_lane = paths
+            .iter()
+            .find(|p| p.active)
+            .map(|p| p.lane.clone())
+            .filter(|lane| !lane.is_empty());
+        let transport = match active_lane {
+            Some(lane) => lane,
+            None => {
+                let fips_transport = pv.map(|p| p.transport.clone()).unwrap_or_default();
+                if fips_transport == "udp" {
+                    lane_by_npub
+                        .get(&bp.npub)
+                        .cloned()
+                        .unwrap_or(fips_transport)
+                } else {
+                    fips_transport
+                }
+            }
         };
+        // Every other path that is not confirmed gone. Deduplicated: the Aware
+        // pool can hold more than one path to a peer, and that is one lane.
+        let mut also_reachable_via: Vec<String> = Vec::new();
+        for path in paths.iter().filter(|p| !p.active && p.state != "dead") {
+            if !path.lane.is_empty()
+                && path.lane != transport
+                && !also_reachable_via.contains(&path.lane)
+            {
+                also_reachable_via.push(path.lane.clone());
+            }
+        }
         let last_seen_ms = pv.map(|p| p.last_seen_ms).unwrap_or(0);
         let authenticated_at_ms = pv.map(|p| p.authenticated_at_ms).unwrap_or(0);
         // `None` both when there is no PeerView and when MMP has not measured
@@ -182,7 +220,8 @@ pub fn merge_peers(
                 String::new()
             },
             transport,
-            also_reachable_via: Vec::new(),
+            also_reachable_via,
+            paths,
             last_seen_ms,
             authenticated_at_ms,
             advertised_name: String::new(),
@@ -237,6 +276,7 @@ pub fn merge_peers(
                 state: String::new(),
                 transport: String::new(),
                 also_reachable_via: Vec::new(),
+                paths: Vec::new(),
                 last_seen_ms: 0,
                 authenticated_at_ms: 0,
                 advertised_name: String::new(),
@@ -282,6 +322,7 @@ pub fn merge_peers(
             state: String::new(),
             transport: String::new(),
             also_reachable_via: Vec::new(),
+            paths: Vec::new(),
             last_seen_ms: 0,
             authenticated_at_ms: 0,
             advertised_name: String::new(),
@@ -443,6 +484,7 @@ mod tests {
             transport: transport.to_string(),
             transport_addr: String::new(),
             srtt_ms: None,
+            paths: Vec::new(),
             display_name: String::new(),
         }
     }
@@ -971,6 +1013,80 @@ mod tests {
         ];
         let ordered = order_transports(shuffled);
         assert_eq!(ordered, vec!["ble", "aware", "udp", "tcp"]);
+    }
+
+    fn path(lane: &str, state: &str, active: bool) -> crate::control_client::PeerPath {
+        crate::control_client::PeerPath {
+            lane: lane.to_string(),
+            state: state.to_string(),
+            active,
+        }
+    }
+
+    /// Multi-path fips: the active path's lane is the row's transport, every
+    /// other non-dead path is "also reachable via", and the lane record is
+    /// not consulted — the paths already say which UDP instance they ride.
+    #[test]
+    fn paths_decide_transport_and_also_reachable_via() {
+        let mut view = pv("a1", "npub-mp", true, 1_000, "udp");
+        view.paths = vec![
+            path("udp", "live", false),
+            path("aware", "live", true),
+            path("ble", "probing", false),
+            path("tcp", "dead", false),
+        ];
+        let mut lane_by_npub = HashMap::new();
+        // A stale record claiming the peer was seen on the LAN lane.
+        lane_by_npub.insert("npub-mp".to_string(), "udp".to_string());
+        let out = merge_peers(
+            &[view],
+            &[bp("a1", "npub-mp", true)],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &lane_by_npub,
+            &HashMap::new(),
+            &[],
+            0,
+        );
+        assert_eq!(out[0].transport, "aware");
+        assert_eq!(out[0].also_reachable_via, vec!["ble", "udp"]);
+        assert_eq!(
+            out[0].paths.len(),
+            4,
+            "every path crosses the FFI, dead ones included"
+        );
+        assert!(out[0].paths.iter().any(|p| p.lane == "aware" && p.active));
+    }
+
+    /// No active path yet (all still probing) falls back to fips's
+    /// `transport_type` plus the lane record, exactly as before multi-path.
+    #[test]
+    fn without_an_active_path_the_lane_record_still_applies() {
+        let mut view = pv("a1", "npub-probing", true, 1_000, "udp");
+        view.paths = vec![path("aware", "probing", false)];
+        let mut lane_by_npub = HashMap::new();
+        lane_by_npub.insert("npub-probing".to_string(), "aware".to_string());
+        let out = merge_peers(
+            &[view],
+            &[bp("a1", "npub-probing", true)],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &lane_by_npub,
+            &HashMap::new(),
+            &[],
+            0,
+        );
+        assert_eq!(out[0].transport, "aware");
+        assert!(
+            out[0].also_reachable_via.is_empty(),
+            "the only path is the one already labelled"
+        );
     }
 
     #[test]

@@ -103,8 +103,12 @@ pub struct PeerDiagnosticView {
     /// `udp`, `tcp`); empty when not connected.
     pub transport: String,
     /// Other transports this peer is also reachable over, in the fixed order
-    /// `ble`, `aware`, `udp`, `tcp`. Empty until Phase 2 populates it.
+    /// `ble`, `aware`, `udp`, `tcp`: the lanes of every non-dead path in
+    /// [`paths`](Self::paths) other than the active one.
     pub also_reachable_via: Vec<String>,
+    /// Every path fips holds to this peer, in fips's own order. Empty when
+    /// the row has no peer view or the daemon predates multi-path.
+    pub paths: Vec<PeerPathView>,
     /// Milliseconds-since-epoch this row was last heard from; `0` when never
     /// heard from (renders as an em-dash, never "0s").
     pub last_seen_ms: u64,
@@ -153,6 +157,22 @@ pub struct PeerDiagnosticView {
     /// Recorded connect attempts against this peer, newest first, capped at 20.
     /// Empty when nothing has been recorded.
     pub attempts: Vec<PeerAttemptView>,
+}
+
+/// One transport path to a peer, as fips's multi-path layer tracks it.
+///
+/// A peer can hold several at once and fips sends on exactly one — `active`.
+/// The others are warm standbys (`live`), still unproven (`probing`), in
+/// doubt (`suspect`) or kept for history (`dead`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerPathView {
+    /// `ble`, `aware`, `udp` (the LAN/AP lane) or `tcp`.
+    pub lane: String,
+    /// `probing`, `live`, `suspect` or `dead`.
+    pub state: String,
+    /// Whether fips currently sends to this peer over this path.
+    pub active: bool,
 }
 
 /// One recorded BLE connect attempt as rendered for the Dev tab (DIAG-01/03).
