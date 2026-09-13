@@ -106,6 +106,11 @@ class ApRadio private constructor(private val context: Context) {
     private val resolveQueue = ArrayDeque<NsdServiceInfo>()
     private var resolving = false
     private var browsing = false
+    /** The Settings "Network" switch. Off means no browse and no advert while
+     *  Wi-Fi is up; the Wi-Fi watch itself keeps running so a later "on" can
+     *  start them at once, and the UDP socket pin stays so an inbound dial
+     *  from a peer that still knows our address can be answered. */
+    private var enabled = true
     private var browseListener: NsdManager.DiscoveryListener? = null
     private var advert: NsdManager.RegistrationListener? = null
     private var ssid: String? = null
@@ -141,7 +146,7 @@ class ApRadio private constructor(private val context: Context) {
         constructor(flags: Int) : super(flags)
 
         override fun onAvailable(network: Network) {
-            if (wifiNets.add(network) && wifiNets.size == 1) {
+            if (wifiNets.add(network) && wifiNets.size == 1 && enabled) {
                 startBrowse()
                 startAdvert()
             }
@@ -184,6 +189,24 @@ class ApRadio private constructor(private val context: Context) {
         // (only once mesh is toggled on — see runtime.rs's start_node) and pin
         // it to the Wi-Fi network the browse is running over.
         udpPin.start()
+    }
+
+    /** Apply the Settings switch on the radio thread: stop the browse and
+     *  advert (dropping every LAN peer from the core) or, if Wi-Fi is already
+     *  up, start them. Idempotent. */
+    private fun applyEnabled(on: Boolean) {
+        if (enabled == on) return
+        enabled = on
+        if (on) {
+            if (wifiNets.isNotEmpty()) {
+                startBrowse()
+                startAdvert()
+            }
+        } else {
+            stopBrowse()
+            stopAdvert()
+        }
+        Log.i(TAG, "LAN discovery ${if (on) "enabled" else "disabled"}")
     }
 
     // --- mDNS browse ---
@@ -629,14 +652,25 @@ class ApRadio private constructor(private val context: Context) {
         private var instance: ApRadio? = null
 
         /** Start the process-wide watcher (idempotent; survives Activity
-         *  recreation — it holds only the application context). */
-        fun ensureStarted(context: Context) {
+         *  recreation — it holds only the application context). `enabled`
+         *  is the Settings "Network" switch as last persisted. */
+        fun ensureStarted(context: Context, enabled: Boolean = true) {
             if (instance != null) return
             synchronized(this) {
                 if (instance == null) {
-                    instance = ApRadio(context.applicationContext).also { it.start() }
+                    instance = ApRadio(context.applicationContext).also {
+                        it.enabled = enabled
+                        it.start()
+                    }
                 }
             }
+        }
+
+        /** The Settings "Network" switch: browse + advertise on the LAN, or
+         *  neither. A no-op until [ensureStarted] has run. */
+        fun setEnabled(on: Boolean) {
+            val radio = instance ?: return
+            radio.handler.post { radio.applyEnabled(on) }
         }
     }
 }

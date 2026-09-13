@@ -210,6 +210,8 @@ class MainActivity : ComponentActivity() {
                             onBleToggle = { enabled -> setBleEnabled(enabled) },
                             wifiAwareSupported = AwareRadio.isSupported(this@MainActivity),
                             onWifiAwareToggle = { enabled -> setWifiAwareEnabled(enabled) },
+                            initialLanEnabled = prefs.getBoolean(PREF_LAN, true),
+                            onLanToggle = { enabled -> setLanEnabled(enabled) },
                             onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
                             onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
                             onScanned = { text -> handleScannedText(text) },
@@ -300,8 +302,9 @@ class MainActivity : ComponentActivity() {
         // The `!FIPS` AP lane: watch Wi-Fi and browse the LAN for fips-node
         // mDNS adverts, feeding them to the node (Dev panel shows results).
         // Passive and permissionless; process-wide, so idempotent across
-        // Activity recreation.
-        ApRadio.ensureStarted(this)
+        // Activity recreation. The Wi-Fi watch always runs; the browse and
+        // advert follow the Settings "Network" switch.
+        ApRadio.ensureStarted(this, enabled = prefs.getBoolean(PREF_LAN, true))
 
         // BLE on by default, and remembered thereafter.
         if (prefs.getBoolean(PREF_BLE, true)) {
@@ -701,6 +704,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** The LAN lane's mDNS browse + advert. No permission and no service
+     *  behind it, so this is just the persisted switch handed to the radio. */
+    private fun setLanEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(PREF_LAN, enabled).apply()
+        ApRadio.setEnabled(enabled)
+    }
+
     /** Slide-up system Wi-Fi panel (API 29+) so the user can turn Wi-Fi on
      *  without leaving Myco. */
     private fun openWifiPanel() {
@@ -1036,6 +1046,8 @@ class MainActivity : ComponentActivity() {
 
         const val PREF_BLE = "ble_enabled"
         const val PREF_AWARE = "wifi_aware_enabled"
+        /** The LAN lane's mDNS discovery (browse + advert) — Settings "Network". */
+        const val PREF_LAN = "lan_discovery_enabled"
         const val PREF_MESH = "mesh_enabled"
         const val PREF_OFFLINE_ONLY = "offline_only"
         const val PREF_DEV = "developer_mode"
