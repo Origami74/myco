@@ -577,6 +577,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Self-heal the tunnel. Another VPN app taking the slot revokes ours
+        // and stops the service; the node and its radio links carry on, so the
+        // mesh looks healthy while no mesh traffic can flow. When the slot comes
+        // back (prepare() re-authorises a consented app silently on 12+) nothing
+        // restarts the service — so check here, where the user has just come
+        // back from wherever they went to release it.
+        if (prefs.getBoolean(PREF_MESH, true) && !MycoVpnService.isUp() &&
+            prefs.getBoolean(PREF_INTRO_SEEN, false) && VpnService.prepare(this) == null
+        ) {
+            android.util.Log.i("MycoVpn", "onResume: mesh on, slot ours, tunnel down — restarting")
+            startMeshNow()
+        }
         // Presenting is owned by the Circle screen (it's the only place we emulate a
         // card). Here we just (re)apply the current presenting state — re-claiming
         // the foreground HCE service after a background→foreground while on Circle.
