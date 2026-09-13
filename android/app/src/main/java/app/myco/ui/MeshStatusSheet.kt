@@ -183,8 +183,7 @@ private fun CircleSection(state: AppState, nowMs: Long) {
 private fun CircleLine(state: AppState, member: CircleContact, dot: Color, nowMs: Long) {
     val peer = state.peers.firstOrNull { it.npub == member.npub && it.npub.isNotEmpty() }
     PeerLine(
-        name = peerLabel(state, member.npub),
-        transport = peer?.transport.orEmpty(),
+        name = sheetLabel(state, member.npub),
         dot = dot,
         peer = peer,
         nowMs = nowMs,
@@ -231,7 +230,7 @@ private fun MeshSection(
                 else -> null
             },
             off = !meshEnabled || !state.bleEnabled,
-            peers = connected.filter { it.transport == "ble" },
+            peers = connected.filter { it.onLane("ble") },
             nowMs = nowMs,
         )
         // A radio this phone does not have is not a lane you can act on, so it
@@ -249,7 +248,7 @@ private fun MeshSection(
                     else -> null
                 },
                 off = !meshEnabled || !state.wifiAwareEnabled,
-                peers = connected.filter { it.transport == "aware" },
+                peers = connected.filter { it.onLane("aware") },
                 nowMs = nowMs,
             )
         }
@@ -263,7 +262,7 @@ private fun MeshSection(
             scanning = if (!meshEnabled) false else lanBrowsing,
             off = !meshEnabled || !wifiConnected,
             offLabel = if (!wifiConnected) "no wi-fi" else "off",
-            peers = connected.filter { it.transport !in setOf("ble", "aware", "") },
+            peers = connected.filter { it.onRoutedLane() },
             nowMs = nowMs,
         )
     }
@@ -323,11 +322,10 @@ private fun LaneBlock(
                     // through the names we have actually been told first, and
                     // fall back to an address only for a row with no npub yet.
                     name = if (p.npub.isNotEmpty()) {
-                        peerLabel(state, p.npub)
+                        sheetLabel(state, p.npub)
                     } else {
                         p.nodeAddrHex.ifEmpty { p.bleAddr }
                     },
-                    transport = "",
                     dot = StatusConnected,
                     peer = p,
                     nowMs = nowMs,
@@ -341,7 +339,8 @@ private fun LaneBlock(
 // ----- one peer, two lines -----
 
 /**
- * A peer as this panel states it: who, then the three link numbers.
+ * A peer as this panel states it: who, every lane fips holds a path on (the
+ * active one lit, standbys faded), then the three link numbers.
  *
  * The dot is the status — there is no status word. Green/teal/red across a
  * short list reads faster than the same three labels repeated down it.
@@ -353,7 +352,6 @@ private fun LaneBlock(
 @Composable
 private fun PeerLine(
     name: String,
-    transport: String,
     dot: Color,
     peer: PeerDiagnostic?,
     nowMs: Long,
@@ -365,7 +363,7 @@ private fun PeerLine(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             StatusDot(dot, size = 8)
-            if (transport.isNotEmpty()) TransportIcon(transport, size = 18)
+            PathIcons(peer, size = 18)
             Text(shortLabel(name), style = MaterialTheme.typography.bodyMedium)
         }
         if (peer != null) {
@@ -425,3 +423,24 @@ private fun duration(secs: Long): String = when {
 /** Trim an npub/hex fallback to something that fits one line. */
 private fun shortLabel(s: String): String =
     if (s.length > 18) "${s.take(10)}…${s.takeLast(4)}" else s
+
+/**
+ * The name a peer told us, else its npub — which [shortLabel] trims to
+ * `npub1abcde…wxyz`. This panel is about links, and a link to a device that
+ * never told us its name is better stated by its key than by the two-word
+ * placeholder [peerLabel] uses on the Circle tab: the placeholder looks like
+ * something the owner chose, and here that reads as a claim.
+ */
+private fun sheetLabel(state: AppState, npub: String): String =
+    peerNameOrNull(state, npub) ?: npub
+
+/** Whether this peer has a non-dead path on `lane` (or, on a core reporting
+ *  no paths, is carried by it). A peer with paths on two lanes is listed under
+ *  both — each block answers "what is this radio carrying". */
+private fun PeerDiagnostic.onLane(lane: String): Boolean =
+    peerLanes(this).any { (l, _) -> l == lane }
+
+/** Anything IP-routed: udp (the LAN/AP lane), tcp, and whatever else is not a
+ *  short-range radio. */
+private fun PeerDiagnostic.onRoutedLane(): Boolean =
+    peerLanes(this).any { (l, _) -> l !in setOf("ble", "aware", "") }

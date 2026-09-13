@@ -132,6 +132,9 @@ data class PeerDiagnostic(
     /** Transport carrying this row when connected ("ble", "aware", "udp", "tcp"); empty otherwise. */
     val transport: String,
     val alsoReachableVia: List<String> = emptyList(),
+    /** Every path fips holds to this peer (multi-path fips). Empty on a core
+     *  that reports none — never a fabricated single entry from [transport]. */
+    val paths: List<PeerPath> = emptyList(),
     /** 0 when never heard from — renders as an em-dash, never "0s". */
     val lastSeenMs: Long,
     /** Epoch ms the FMP session authenticated; 0 when there is no session.
@@ -178,6 +181,18 @@ data class PeerAttempt(
     /** "connected" | "connect-timeout" | "connect-error" | "pubkey-exchange-failed"
      *  | "lost-tiebreaker" | "pool-rejected" | "duplicate-node". */
     val outcome: String,
+)
+
+/**
+ * One transport path to a peer. A peer can hold several at once; fips sends
+ * on exactly one ([active]) and keeps the rest warm.
+ */
+data class PeerPath(
+    /** "ble" | "aware" | "udp" (the LAN/AP lane) | "tcp". */
+    val lane: String,
+    /** "probing" | "live" | "suspect" | "dead". */
+    val state: String,
+    val active: Boolean,
 )
 
 /** Parsed slice of the core's state snapshot (P1 BLE surface + P2 content). */
@@ -386,6 +401,20 @@ data class AppState(
                                 for (j in 0 until arr.length()) add(arr.optString(j))
                             }
                         }
+                        val paths = buildList {
+                            p.optJSONArray("paths")?.let { arr ->
+                                for (j in 0 until arr.length()) {
+                                    val path = arr.optJSONObject(j) ?: continue
+                                    add(
+                                        PeerPath(
+                                            lane = path.optString("lane"),
+                                            state = path.optString("state"),
+                                            active = path.optBoolean("active"),
+                                        )
+                                    )
+                                }
+                            }
+                        }
                         // Attempts arrive newest-first from the core, already
                         // capped per peer. A payload predating plan 01-03 simply
                         // has no `attempts` key and parses to an empty list.
@@ -414,6 +443,7 @@ data class AppState(
                                 state = p.optString("state"),
                                 transport = p.optString("transport"),
                                 alsoReachableVia = alsoReachableVia,
+                                paths = paths,
                                 lastSeenMs = p.optLong("lastSeenMs"),
                                 authenticatedAtMs = p.optLong("authenticatedAtMs"),
                                 advertisedName = p.optString("advertisedName"),
