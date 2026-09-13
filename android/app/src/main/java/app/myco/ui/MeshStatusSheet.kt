@@ -28,6 +28,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -316,6 +317,12 @@ private fun LaneBlock(
             )
         } else {
             peers.forEach { p ->
+                // The block already names the lane, so the row carries no
+                // icons; what it says is whether *this* lane is the one
+                // carrying the peer. A standby path fades the whole row.
+                val carrying = peerLanes(p)
+                    .filter { (lane, _) -> if (transport == "udp") lane.isRouted() else lane == transport }
+                    .any { (_, active) -> active }
                 PeerLine(
                     // `p.name` is fips's own label, which is an abbreviated
                     // npub rather than anything a person chose — resolve
@@ -330,6 +337,8 @@ private fun LaneBlock(
                     peer = p,
                     nowMs = nowMs,
                     indent = 44,
+                    showPaths = false,
+                    standby = !carrying,
                 )
             }
         }
@@ -339,11 +348,15 @@ private fun LaneBlock(
 // ----- one peer, two lines -----
 
 /**
- * A peer as this panel states it: who, every lane fips holds a path on (the
- * active one lit, standbys faded), then the three link numbers.
+ * A peer as this panel states it: who, then the three link numbers. With
+ * `showPaths`, every lane fips holds a path on sits between them, the active
+ * one lit and standbys faded — for the Circle list, where a peer has one row.
  *
  * The dot is the status — there is no status word. Green/teal/red across a
  * short list reads faster than the same three labels repeated down it.
+ *
+ * `standby` fades the whole row: inside a lane block it means "this lane has
+ * a path to the peer but is not the one carrying it right now".
  *
  * `peer` being null (a Circle member reachable over relay with no direct row)
  * collapses to the identity line alone — the numbers are link facts and there
@@ -356,14 +369,21 @@ private fun PeerLine(
     peer: PeerDiagnostic?,
     nowMs: Long,
     indent: Int = 14,
+    showPaths: Boolean = true,
+    standby: Boolean = false,
 ) {
-    Column(modifier = Modifier.fillMaxWidth().padding(start = indent.dp, end = 14.dp, top = 6.dp, bottom = 6.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .alpha(if (standby) STANDBY_ROW_ALPHA else 1f)
+            .padding(start = indent.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
+    ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             StatusDot(dot, size = 8)
-            PathIcons(peer, size = 18)
+            if (showPaths) PathIcons(peer, size = 18)
             Text(shortLabel(name), style = MaterialTheme.typography.bodyMedium)
         }
         if (peer != null) {
@@ -443,4 +463,10 @@ private fun PeerDiagnostic.onLane(lane: String): Boolean =
 /** Anything IP-routed: udp (the LAN/AP lane), tcp, and whatever else is not a
  *  short-range radio. */
 private fun PeerDiagnostic.onRoutedLane(): Boolean =
-    peerLanes(this).any { (l, _) -> l !in setOf("ble", "aware", "") }
+    peerLanes(this).any { (l, _) -> l.isRouted() }
+
+private fun String.isRouted(): Boolean = this !in setOf("ble", "aware", "")
+
+/** A row on a lane that is not carrying the peer: present, but clearly not
+ *  the one doing the work. */
+private const val STANDBY_ROW_ALPHA = 0.4f
