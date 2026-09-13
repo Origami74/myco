@@ -99,6 +99,19 @@ pub struct PeerPath {
     pub state: String,
     /// Whether this is the path fips currently sends on.
     pub active: bool,
+    /// `normal` or `backup` — a backup path carries traffic only while no
+    /// normal path is eligible.
+    pub role: String,
+    /// Minimum probe round trip inside fips's window, ms; `None` until one
+    /// has been measured. This, not srtt, is what selection scores on.
+    pub min_rtt_ms: Option<u64>,
+    /// RTT samples inside the window. Below `node.path.min_samples` the path
+    /// is not yet selectable.
+    pub rtt_samples: u32,
+    /// Per-path expected transmission count, smoothed.
+    pub etx: f64,
+    /// `etx × (1 + min_rtt/100)`, lower is better; `None` until measured.
+    pub score: Option<f64>,
 }
 
 /// The lane a path belongs to. `transport_type` is the answer for every
@@ -295,6 +308,11 @@ fn path_from_json(path: &Value) -> PeerPath {
         lane: lane_for_path(s("transport_type"), s("transport")),
         state: s("state").to_string(),
         active: path.get("active").and_then(Value::as_bool).unwrap_or(false),
+        role: s("role").to_string(),
+        min_rtt_ms: path.get("min_rtt_ms").and_then(Value::as_u64),
+        rtt_samples: path.get("rtt_samples").and_then(Value::as_u64).unwrap_or(0) as u32,
+        etx: path.get("etx").and_then(Value::as_f64).unwrap_or(0.0),
+        score: path.get("score").and_then(Value::as_f64),
     }
 }
 
@@ -394,7 +412,8 @@ mod tests {
             "transport_type": "ble",
             "paths": [
                 { "transport_id": 1, "transport": "ble", "transport_type": "ble",
-                  "addr": "hci0/AA:BB:CC:DD:EE:FF", "state": "live", "active": true },
+                  "addr": "hci0/AA:BB:CC:DD:EE:FF", "state": "live", "active": true,
+                  "role": "backup", "min_rtt_ms": 33, "rtt_samples": 12, "etx": 1.1, "score": 1.463 },
                 { "transport_id": 3, "transport": "aware2", "transport_type": "udp",
                   "addr": "[fe80::1]:4872", "state": "probing", "active": false },
                 { "transport_id": 2, "transport": "lan", "transport_type": "udp",
@@ -416,6 +435,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["ble"]
         );
+        assert_eq!(paths[0].role, "backup");
+        assert_eq!(paths[0].min_rtt_ms, Some(33));
+        assert_eq!(paths[0].rtt_samples, 12);
+        assert_eq!(paths[0].etx, 1.1);
+        assert_eq!(paths[0].score, Some(1.463));
+        // An unmeasured standby: no min RTT, no score — never a confident 0.
+        assert_eq!(paths[1].min_rtt_ms, None);
+        assert_eq!(paths[1].score, None);
+        assert_eq!(paths[1].rtt_samples, 0);
     }
 
     /// A daemon without multi-path has no `paths` key; that is "no paths",

@@ -157,6 +157,11 @@ pub fn merge_peers(
                         lane: path.lane.clone(),
                         state: path.state.clone(),
                         active: path.active,
+                        role: path.role.clone(),
+                        min_rtt_ms: path.min_rtt_ms,
+                        rtt_samples: path.rtt_samples,
+                        etx: path.etx,
+                        score: path.score,
                     })
                     .collect()
             })
@@ -1020,6 +1025,7 @@ mod tests {
             lane: lane.to_string(),
             state: state.to_string(),
             active,
+            ..Default::default()
         }
     }
 

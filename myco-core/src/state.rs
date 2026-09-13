@@ -173,6 +173,20 @@ pub struct PeerPathView {
     pub state: String,
     /// Whether fips currently sends to this peer over this path.
     pub active: bool,
+    /// `normal` or `backup`. A backup path yields to any selectable normal
+    /// one regardless of score.
+    pub role: String,
+    /// Minimum probe round trip in fips's window, ms; `None` until measured.
+    /// Selection scores on this, not on srtt, so load on the active path
+    /// does not by itself move traffic.
+    pub min_rtt_ms: Option<u64>,
+    /// RTT samples in the window; a standby needs `node.path.min_samples`
+    /// (default 2) before selection may pick it.
+    pub rtt_samples: u32,
+    /// Smoothed per-path expected transmission count.
+    pub etx: f64,
+    /// `etx × (1 + min_rtt/100)`, lower is better; `None` until measured.
+    pub score: Option<f64>,
 }
 
 /// One recorded BLE connect attempt as rendered for the Dev tab (DIAG-01/03).

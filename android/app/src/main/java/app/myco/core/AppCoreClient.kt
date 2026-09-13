@@ -193,6 +193,16 @@ data class PeerPath(
     /** "probing" | "live" | "suspect" | "dead". */
     val state: String,
     val active: Boolean,
+    /** "normal" | "backup" — a backup path yields to any selectable normal one. */
+    val role: String = "",
+    /** Min probe RTT in fips's window; null until measured. What selection scores on. */
+    val minRttMs: Long? = null,
+    /** RTT samples in the window; a standby needs 2 before it is selectable. */
+    val rttSamples: Int = 0,
+    /** Smoothed per-path expected transmission count. */
+    val etx: Double = 0.0,
+    /** `etx × (1 + minRtt/100)`, lower is better; null until measured. */
+    val score: Double? = null,
 )
 
 /** Parsed slice of the core's state snapshot (P1 BLE surface + P2 content). */
@@ -410,6 +420,11 @@ data class AppState(
                                             lane = path.optString("lane"),
                                             state = path.optString("state"),
                                             active = path.optBoolean("active"),
+                                            role = path.optString("role"),
+                                            minRttMs = if (path.isNull("minRttMs")) null else path.optLong("minRttMs"),
+                                            rttSamples = path.optInt("rttSamples"),
+                                            etx = path.optDouble("etx", 0.0),
+                                            score = if (path.isNull("score")) null else path.optDouble("score"),
                                         )
                                     )
                                 }
