@@ -11,6 +11,12 @@
 [workspace]
 resolver = "2"
 members = ["myco-core", "nsite-deck", "myco-relay", "myco-blossom"]
+# `reference/fips` is a path dependency that lives inside the workspace root,
+# which would make it an implicit member: `--workspace` would then lint, test
+# and format fips itself. It is upstream code with its own warnings; keep it a
+# dependency only, so `cargo clippy --workspace -- -D warnings` can gate on
+# Myco's crates alone.
+exclude = ["reference/fips"]
 
 [workspace.package]
 version = "0.0.1"

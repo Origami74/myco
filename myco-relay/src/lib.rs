@@ -265,7 +265,7 @@ impl RelayBackend for RelayStore {
             .filter(|e| !is_expired(e, now) && filters.iter().any(|f| matches_filter(e, f)))
             .cloned()
             .collect();
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|e| std::cmp::Reverse(e.created_at));
         // Honour the smallest limit any filter asked for, matching how a relay
         // caps a multi-filter REQ.
         if let Some(limit) = filters.iter().filter_map(|f| f.limit).min() {

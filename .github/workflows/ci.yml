@@ -47,10 +47,11 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      # Non-gating: surfaces clippy findings without failing on the workspace's
-      # pre-existing warnings.
+      # Gate: Myco's crates are clippy-clean and stay that way. `--workspace`
+      # covers every member and never `reference/fips` (excluded in the root
+      # Cargo.toml), whose own warnings are upstream's.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace

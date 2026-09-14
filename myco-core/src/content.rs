@@ -307,11 +307,15 @@ const PULL_HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 ///
 /// Holds the [`Content`] so the live Circle is consulted per request: adding a
 /// peer, removing one, or changing a permission takes effect immediately.
+// Constructed by the Android runtime's mesh relay wiring; the host build has
+// no mesh socket to gate.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub struct CircleGate {
     content: Arc<Content>,
 }
 
 impl CircleGate {
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub fn new(content: Arc<Content>) -> Self {
         Self { content }
     }
@@ -2119,13 +2123,13 @@ impl Content {
                 transfer_id,
                 recipient_npub,
                 ..
-            } if recipient_npub == own_npub => {
-                if self.has_file_transfer(&transfer_id, "outgoing", &sender_npub) {
-                    // A completed send has nothing left to tell the user, so this
-                    // is the one terminal state that still clears itself.
-                    self.set_file_status(&transfer_id, "completed", "");
-                    self.forget_file_transfer(&transfer_id);
-                }
+            } if recipient_npub == own_npub
+                && self.has_file_transfer(&transfer_id, "outgoing", &sender_npub) =>
+            {
+                // A completed send has nothing left to tell the user, so this
+                // is the one terminal state that still clears itself.
+                self.set_file_status(&transfer_id, "completed", "");
+                self.forget_file_transfer(&transfer_id);
             }
             _ => {}
         }

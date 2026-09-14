@@ -650,7 +650,7 @@ async fn handle_client_frame(
                 }
             }
 
-            events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
             events.dedup_by(|a, b| a.id == b.id);
 
             // Keep the subscription open so matching new events stream live.
