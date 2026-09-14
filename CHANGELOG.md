@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Napplets can talk over the mesh: a new `mesh` capability (NAP-MESH, Myco's
+  own, written in the napplet registry's form so it can be proposed upstream)
+  lets an app you have granted it publish to everyone nearby with a chosen
+  number of hops, and pull what it missed from nearby phones. Settings › App
+  reach caps both — how far apps may send (default 3 hops) and how far they
+  may look (default 2) — and zero keeps an app on your phone. The install
+  review sheet says what a mesh grant means before you agree to it.
+- `window.napplet.shell.supports()` now exists inside a napplet. The vendored
+  prelude never provided it, so a napplet checking for a capability the way
+  the spec says threw instead.
 - The status panel behind the peers pill shows every link a peer has, not
   just the one carrying traffic: one icon per lane, the active one lit and
   the standbys faded. A phone on Bluetooth and Wi-Fi at once is listed under

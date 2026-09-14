@@ -173,9 +173,18 @@ Two other shapes were rejected:
 
 A local nsite sets nothing, and **cannot** set anything: it may not send a `MESH`
 frame, so its publishes always originate at the gossiper's default (**3**,
-`DEFAULT_EVENT_TTL` in [`gossip.rs`](../../../myco-core/src/gossip.rs)). A single
+`EVENT_TTL` in [`mesh_wire.rs`](../../../myco-core/src/mesh_wire.rs)). A single
 message key must never change a message's cost by orders of magnitude, so
 per-message reach is not a client-facing knob.
+
+A **napplet** is the one exception, and a mediated one: through NAP-MESH
+([`NAP-MESH.md`](../napplet/NAP-MESH.md)) it may *ask* for a budget per publish
+and per backlog pull, and the runtime clamps the ask to a cap the **user** set
+(Settings › App reach; defaults 3 and 2, the same numbers as below) before it
+ever reaches the gossiper. The napplet cannot raise the cap, cannot exceed
+`EVENT_TTL`, and the forwarding clamp on *peers'* events is untouched — so the
+amplification argument above holds unchanged. What the user gains is a lower
+bound: an app that should stay in the room can be held to one hop, or none.
 
 ---
 
@@ -200,6 +209,8 @@ plain `["EVENT", …]` with no envelope, which arrives with no budget.
 | Originating ttl | **3** | How far *my own* events travel. The originator stamps it. |
 | `MAX_EVENT_TTL` | **3** | Clamp on forwarding, so a peer sending `ttl: 255` cannot turn this device into an amplifier. Set to the originate default so own-origin waves aren't clamped by neighbours. |
 | `relay_write_multihop` | per peer, default **on** | A per-peer clamp. Off means an inbound event's budget is treated as 0: store it, show it, never pass it on. See [nsite-permissions.md](../nsite/nsite-permissions.md). |
+| Napplet publish cap | user setting, default **3** | The most a napplet's `mesh.publish` may originate at (§2.6). Never above `EVENT_TTL`. |
+| Napplet pull cap | user setting, default **2** | The most rings of peers a napplet's `mesh.subscribe` backlog pull may ask. Never above `MAX_REQ_TTL`. |
 
 ### Loop safety is the seen-set, not the hop budget
 

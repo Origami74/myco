@@ -382,10 +382,26 @@ surface rather than replacing each other's windows.
 
 ### S5 — Mesh as a NAP
 
-Smaller than it first appears, because §7.4 puts publish/subscribe on the standard
-contracts already. What remains has no standard equivalent: peer presence, transport and
-reachability state, circle membership. It should be specified as a NAP-WORD candidate and
-proposed upstream rather than bolted onto an existing domain.
+**Shipped as NAP-MESH** ([`NAP-MESH.md`](NAP-MESH.md)), in the registry's template form so
+it can be proposed upstream. Narrower than first sketched, and differently shaped: not a
+peer directory but **hop-limited publish and subscribe**. A relay publish is "put this on
+my relays"; a mesh publish is "flood this to the people near me, this far". The hop budget
+is the whole difference, and it is the one thing a napplet may choose here that it may
+choose nowhere else — within a cap the user sets (Settings › App reach; publish default 3,
+backlog pull default 2, the mesh's own `EVENT_TTL` / `MAX_REQ_TTL`). `mesh.info` reports
+only a peer *count*; presence, transports and circle membership stay behind the seam and
+would be a separate NAP.
+
+Runtime: `MeshSink` seam (`limits` / `reach` / `publish` / `pull`), `nap/mesh.rs`,
+domain-scoped session subscriptions. Core: `NappletMeshSink` over the relay hub and the
+Circle pool; `RelayHub::accept_local_with_ttl` and `accept_pulled`. Web projection: the
+vendored `@napplet/shim` filters unknown domains, so `assets/myco-prelude.js` installs
+`window.napplet.mesh` — and `window.napplet.shell`, which the vendored build also lacks —
+after it.
+
+Still open, and deferred to the inbox/outbox work: `relay.publish` today floods the mesh at
+the default budget (§7.4). With `mesh` in place it should become spec-conformant — relays
+only — so the two domains mean what they say.
 
 ---
 
