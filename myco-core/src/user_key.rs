@@ -125,6 +125,35 @@ fn write_private(path: &PathBuf, contents: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The [`Signer`](myco_napplet_runtime::seams::Signer) a napplet's capability
+/// calls are mediated through.
+///
+/// Holds the keys and hands back signed events. There is no method that returns
+/// key material, and no FFI path to one: a napplet describes an event and gets
+/// an event back, or an error.
+pub struct UserSigner {
+    keys: Keys,
+}
+
+impl UserSigner {
+    pub fn new(keys: Keys) -> Self {
+        Self { keys }
+    }
+}
+
+#[async_trait::async_trait]
+impl myco_napplet_runtime::seams::Signer for UserSigner {
+    async fn public_key(&self) -> anyhow::Result<nostr::PublicKey> {
+        Ok(self.keys.public_key())
+    }
+
+    async fn sign(&self, unsigned: nostr::UnsignedEvent) -> anyhow::Result<nostr::Event> {
+        unsigned
+            .sign_with_keys(&self.keys)
+            .map_err(|e| anyhow::anyhow!("signing failed: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,34 +214,5 @@ mod tests {
 
         let second = load_or_generate(&dir).unwrap();
         assert_eq!(first.keys.public_key(), second.keys.public_key());
-    }
-}
-
-/// The [`Signer`](myco_napplet_runtime::seams::Signer) a napplet's capability
-/// calls are mediated through.
-///
-/// Holds the keys and hands back signed events. There is no method that returns
-/// key material, and no FFI path to one: a napplet describes an event and gets
-/// an event back, or an error.
-pub struct UserSigner {
-    keys: Keys,
-}
-
-impl UserSigner {
-    pub fn new(keys: Keys) -> Self {
-        Self { keys }
-    }
-}
-
-#[async_trait::async_trait]
-impl myco_napplet_runtime::seams::Signer for UserSigner {
-    async fn public_key(&self) -> anyhow::Result<nostr::PublicKey> {
-        Ok(self.keys.public_key())
-    }
-
-    async fn sign(&self, unsigned: nostr::UnsignedEvent) -> anyhow::Result<nostr::Event> {
-        unsigned
-            .sign_with_keys(&self.keys)
-            .map_err(|e| anyhow::anyhow!("signing failed: {e}"))
     }
 }
