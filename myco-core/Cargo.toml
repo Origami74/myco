@@ -37,6 +37,17 @@ socket2 = { workspace = true }
 # `.fips` responder for route warming. Matches fips's pin.
 simple-dns = "0.11.2"
 
+[features]
+# Build against a fips checkout that carries multi-path switchover
+# (`feat/multi-path-switchover`): the BLE transport is configured as a
+# `backup` path so Wi-Fi Aware and the LAN carry a peer whenever they can.
+# Off by default so the crate builds against fips master, which has no path
+# roles; everything else multi-path — the `paths` array in `show_peers` —
+# is read when present and absent otherwise, no feature needed. The Android
+# Gradle build turns this on by itself when `MYCO_FIPS_REPO_PATH` points at
+# a checkout that has it (see `android/app/build.gradle.kts`).
+fips-multipath = []
+
 [dev-dependencies]
 # Drive the axum routers directly in tests, so a handler can be exercised with a
 # synthetic peer address (a real socket can only ever be loopback here).

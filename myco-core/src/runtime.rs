@@ -684,6 +684,10 @@ impl AppRuntime {
                     // `backup` is fips's own escape hatch for exactly this
                     // (docs/design/fips-multi-path-switchover.md §8): a
                     // statement about the transport's purpose, not a rank.
+                    // Path roles exist only on the multi-path branch; the
+                    // feature is what lets this crate still build against
+                    // fips master (see `Cargo.toml`).
+                    #[cfg(feature = "fips-multipath")]
                     role: Some(fips::config::TransportRole::Backup),
                     ..Default::default()
                 });

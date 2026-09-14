@@ -341,6 +341,18 @@ lockfile. Myco should do the same — see the `restore_lock` / `prepare_lock_res
 trap in [reference/nostr-vpn/tools/run-android](../../reference/nostr-vpn/tools/run-android).
 Without it, a local-path build leaves `Cargo.lock` dirty in your working tree.
 
+### 4e. Features that follow the checkout
+
+`myco-core` builds against fips **master**. What a newer fips branch adds is
+read when present and absent otherwise — the `paths` array of `show_peers`
+needs no flag. The one thing that does not compile against master is the BLE
+transport's `role: backup` (path roles exist only on `feat/multi-path-switchover`),
+so it sits behind the `fips-multipath` Cargo feature. The Gradle build turns
+it on by itself when `MYCO_FIPS_REPO_PATH` points at a checkout that has
+`TransportRole` (`mycoCoreFeatureArgs()` in `build.gradle.kts`); a manual
+`cargo ndk … build -p myco-core` against that branch wants
+`--features fips-multipath` added by hand.
+
 ---
 
 ## 5. arm64-only and minSdk 29
