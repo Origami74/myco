@@ -217,6 +217,7 @@ class MycoVpnService : VpnService() {
         curExit = exitProxy
         curClaimIpv6 = claimIpv6
         running.set(true)
+        tunnelUp = true
         watchUnderlyingNetworks()
         readerThread = Thread({ readLoop(pfd) }, "myco-tun-read").apply { start() }
         writerThread = Thread({ writeLoop(pfd) }, "myco-tun-write").apply { start() }
@@ -392,7 +393,18 @@ class MycoVpnService : VpnService() {
         unwatchUnderlyingNetworks()
         teardown()
         stopForeground(STOP_FOREGROUND_REMOVE)
+        tunnelUp = false
         if (wasRunning) Log.i(TAG, "mesh TUN down")
+    }
+
+    /** Another VPN app took the slot (or the user revoked ours). The system
+     *  is about to close our interface; the default implementation stops the
+     *  service, which tears the tunnel down through [onDestroy]. Logged, so a
+     *  mesh that goes quiet has its cause in the log; recovery is the
+     *  activity's [isUp] check once the slot is ours again. */
+    override fun onRevoke() {
+        Log.w(TAG, "VPN slot revoked — another VPN app took it, or consent was withdrawn")
+        super.onRevoke()
     }
 
     override fun onDestroy() {
@@ -520,6 +532,16 @@ class MycoVpnService : VpnService() {
         private const val CHANNEL = "myco_mesh"
         private const val NOTIF_ID = 42
         private const val TAG = "MycoVpn"
+
+        /** Whether the tunnel is established right now. Process-wide so the
+         *  activity can tell "slot is ours but no tunnel" apart from a healthy
+         *  mesh: after [onRevoke] the slot can come back to us silently — on
+         *  Android 12+ `VpnService.prepare()` re-authorises a previously
+         *  consented app without a dialog — and nothing else restarts us. */
+        @Volatile
+        private var tunnelUp = false
+
+        fun isUp(): Boolean = tunnelUp
 
         /**
          * Parse an exit-proxy spec into (host, port). Accepts `<npub>.fips:8080`,

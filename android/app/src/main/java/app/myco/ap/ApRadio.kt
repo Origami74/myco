@@ -12,6 +12,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.RequiresApi
 import app.myco.core.MycoCore
@@ -85,6 +86,21 @@ class ApRadio private constructor(private val context: Context) {
      *  carries only the instance name). */
     private val npubByService = HashMap<String, String>()
 
+    /** mDNS instance name → the browse hit, kept so a peer can be re-resolved
+     *  later. NsdManager's first resolve answers from its cache with whatever
+     *  records it holds — here, AAAA only, no A — and a service already found
+     *  is never announced again by the browse, so without this the partial
+     *  address set would be the only one Myco ever dialled. */
+    private val found = HashMap<String, NsdServiceInfo>()
+
+    /** npub → when its last address was pushed. A pushed address is a dial
+     *  the core runs to its 30s handshake timeout, and a second address
+     *  inside that window is refused ("connection already in progress") —
+     *  which silently burned the one candidate that would have answered.
+     *  [push] spaces dials by [REPUSH_MS] instead. */
+    private val lastPushMs = HashMap<String, Long>()
+    private val pendingPush = HashSet<String>()
+
     /** npub → last pushed addr. */
     private val pushed = HashMap<String, String>()
 
@@ -106,6 +122,11 @@ class ApRadio private constructor(private val context: Context) {
     private val resolveQueue = ArrayDeque<NsdServiceInfo>()
     private var resolving = false
     private var browsing = false
+    /** The Settings "Network" switch. Off means no browse and no advert while
+     *  Wi-Fi is up; the Wi-Fi watch itself keeps running so a later "on" can
+     *  start them at once, and the UDP socket pin stays so an inbound dial
+     *  from a peer that still knows our address can be answered. */
+    private var enabled = true
     private var browseListener: NsdManager.DiscoveryListener? = null
     private var advert: NsdManager.RegistrationListener? = null
     private var ssid: String? = null
@@ -141,7 +162,7 @@ class ApRadio private constructor(private val context: Context) {
         constructor(flags: Int) : super(flags)
 
         override fun onAvailable(network: Network) {
-            if (wifiNets.add(network) && wifiNets.size == 1) {
+            if (wifiNets.add(network) && wifiNets.size == 1 && enabled) {
                 startBrowse()
                 startAdvert()
             }
@@ -184,6 +205,24 @@ class ApRadio private constructor(private val context: Context) {
         // (only once mesh is toggled on — see runtime.rs's start_node) and pin
         // it to the Wi-Fi network the browse is running over.
         udpPin.start()
+    }
+
+    /** Apply the Settings switch on the radio thread: stop the browse and
+     *  advert (dropping every LAN peer from the core) or, if Wi-Fi is already
+     *  up, start them. Idempotent. */
+    private fun applyEnabled(on: Boolean) {
+        if (enabled == on) return
+        enabled = on
+        if (on) {
+            if (wifiNets.isNotEmpty()) {
+                startBrowse()
+                startAdvert()
+            }
+        } else {
+            stopBrowse()
+            stopAdvert()
+        }
+        Log.i(TAG, "LAN discovery ${if (on) "enabled" else "disabled"}")
     }
 
     // --- mDNS browse ---
@@ -230,6 +269,7 @@ class ApRadio private constructor(private val context: Context) {
             override fun onServiceFound(info: NsdServiceInfo) {
                 handler.post {
                     if (browseListener !== this) return@post
+                    found[info.serviceName] = info
                     resolveQueue.add(info)
                     pumpResolve()
                 }
@@ -276,6 +316,8 @@ class ApRadio private constructor(private val context: Context) {
         candidates.clear()
         candidateIdx.clear()
         npubByService.clear()
+        found.clear()
+        pendingPush.clear()
         publishNodes()
         publishWifi()
     }
@@ -364,10 +406,36 @@ class ApRadio private constructor(private val context: Context) {
                 // First tick after a drop: go back to the address that worked
                 // rather than resuming the cycle wherever it left off.
                 if (wasConnected.remove(npub) && retryLastGood(npub)) continue
+                // A full lap of the candidates without a session, or a set
+                // with no IPv4 in it at all: ask NsdManager again before
+                // dialling the same addresses a second time. The answer
+                // replaces the set and restarts it from the front.
+                if (cycleComplete(npub) || candidates[npub]?.none { it.startsWith("[::ffff:") } == true) {
+                    if (reResolve(npub)) continue
+                }
                 rotate(npub)
             }
             handler.postDelayed(this, REPUSH_MS)
         }
+    }
+
+    /** Whether the next [rotate] would wrap back to the first candidate. */
+    private fun cycleComplete(npub: String): Boolean {
+        val n = candidates[npub]?.size ?: return false
+        return n < 2 || ((candidateIdx[npub] ?: 0) + 1) % n == 0
+    }
+
+    /** Queue a fresh resolve of the advert behind `npub`. False when the
+     *  browse hit is no longer held (the service lapsed), in which case the
+     *  caller falls back to rotating what it has. */
+    private fun reResolve(npub: String): Boolean {
+        val serviceName = npubByService.entries.firstOrNull { it.value == npub }?.key ?: return false
+        val info = found[serviceName] ?: return false
+        if (resolveQueue.any { it.serviceName == serviceName }) return true
+        Log.i(TAG, "re-resolving ${short(npub)} ($serviceName)")
+        resolveQueue.add(info)
+        pumpResolve()
+        return true
     }
 
     /** Periodic mDNS self-heal. NsdManager routinely drops a service with a
@@ -435,20 +503,36 @@ class ApRadio private constructor(private val context: Context) {
             return
         }
         npubByService[info.serviceName] = npub
-        candidates[npub] = addrs
-        candidateIdx.putIfAbsent(npub, 0)
+        val changed = candidates.put(npub, addrs) != addrs
+        // A new address set for a peer we are still trying starts from the
+        // front — that is where the IPv4 the first resolve lacked now sits.
+        // A connected peer keeps its index: its address is the one working.
+        if (changed && !connected(npub)) candidateIdx[npub] = 0 else candidateIdx.putIfAbsent(npub, 0)
         push(npub)
         publishNodes()
     }
 
-    /** Push this peer's current candidate address to the core. */
+    /** Push this peer's current candidate address to the core, no sooner
+     *  than [REPUSH_MS] after the previous address for the same peer — the
+     *  core refuses a second dial while the first is still inside its
+     *  handshake timeout, and a refused push is a candidate never tried. A
+     *  push that lands too early is deferred to the end of the window. */
     private fun push(npub: String) {
         val addrs = candidates[npub] ?: return
         val addr = addrs[(candidateIdx[npub] ?: 0) % addrs.size]
         if (pushed[npub] == addr) return
+        val now = SystemClock.elapsedRealtime()
+        val wait = REPUSH_MS - (now - (lastPushMs[npub] ?: Long.MIN_VALUE / 2))
+        if (wait > 0) {
+            if (pendingPush.add(npub)) {
+                handler.postDelayed({ pendingPush.remove(npub); push(npub) }, wait)
+            }
+            return
+        }
         Log.i(TAG, "fips node ${short(npub)} at $addr — pushing to core")
         NativeCore.awarePeerFound(npub, addr, LANE)
         pushed[npub] = addr
+        lastPushMs[npub] = now
     }
 
     /** True once the core reports an authenticated session with `npub`. */
@@ -481,6 +565,7 @@ class ApRadio private constructor(private val context: Context) {
     }
 
     private fun serviceLost(serviceName: String) {
+        found.remove(serviceName)
         val npub = npubByService.remove(serviceName) ?: return
         candidates.remove(npub)
         candidateIdx.remove(npub)
@@ -629,14 +714,25 @@ class ApRadio private constructor(private val context: Context) {
         private var instance: ApRadio? = null
 
         /** Start the process-wide watcher (idempotent; survives Activity
-         *  recreation — it holds only the application context). */
-        fun ensureStarted(context: Context) {
+         *  recreation — it holds only the application context). `enabled`
+         *  is the Settings "Network" switch as last persisted. */
+        fun ensureStarted(context: Context, enabled: Boolean = true) {
             if (instance != null) return
             synchronized(this) {
                 if (instance == null) {
-                    instance = ApRadio(context.applicationContext).also { it.start() }
+                    instance = ApRadio(context.applicationContext).also {
+                        it.enabled = enabled
+                        it.start()
+                    }
                 }
             }
+        }
+
+        /** The Settings "Network" switch: browse + advertise on the LAN, or
+         *  neither. A no-op until [ensureStarted] has run. */
+        fun setEnabled(on: Boolean) {
+            val radio = instance ?: return
+            radio.handler.post { radio.applyEnabled(on) }
         }
     }
 }

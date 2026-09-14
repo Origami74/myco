@@ -198,12 +198,46 @@ class AwareRadio(
      *  does not under-report. */
     private fun discovering(): Boolean = publishSession != null || subscribeSession != null
 
+    /** Consecutive attach failures, for the backoff below; reset on attach. */
+    private var attachFailures = 0
+
+    /** Earliest uptime at which another attach may be tried, and whether one
+     *  is already scheduled for then. */
+    private var attachNotBefore = 0L
+    private var attachScheduled = false
+
+    /**
+     * Attach, unless a recent failure says to wait.
+     *
+     * A failed attach is not a quiet event: the platform tries to bring the
+     * NAN interface up, fails (the HAL can refuse it — seen while the Wi-Fi
+     * stack was reconfiguring after a toggle), tears Aware down again, and
+     * broadcasts the state change — which reads as "available" here and
+     * used to trigger the next attach at once. Eleven thousand attempts in
+     * ninety seconds, one binder proxy each, until system_server ran out and
+     * the process was killed. Now each failure doubles the wait before the
+     * next try, from [ATTACH_BACKOFF_MIN_MS] to [ATTACH_BACKOFF_MAX_MS], and
+     * a broadcast that lands inside the wait schedules one attach for its
+     * end rather than starting another.
+     */
     private fun attach(mgr: WifiAwareManager) {
         if (session != null) return
+        val now = SystemClock.uptimeMillis()
+        if (now < attachNotBefore) {
+            if (!attachScheduled) {
+                attachScheduled = true
+                handler.postDelayed({
+                    attachScheduled = false
+                    if (running && session == null && mgr.isAvailable) attach(mgr)
+                }, attachNotBefore - now)
+            }
+            return
+        }
         try {
             mgr.attach(object : AttachCallback() {
                 override fun onAttached(s: WifiAwareSession) {
                     if (!running) { s.close(); return }
+                    attachFailures = 0
                     session = s
                     startPublish(s)
                     startSubscribe(s)
@@ -211,7 +245,16 @@ class AwareRadio(
                 }
 
                 override fun onAttachFailed() {
-                    Log.e(TAG, "Aware attach failed")
+                    attachFailures++
+                    val wait = (ATTACH_BACKOFF_MIN_MS shl (attachFailures - 1).coerceAtMost(6))
+                        .coerceAtMost(ATTACH_BACKOFF_MAX_MS)
+                    attachNotBefore = SystemClock.uptimeMillis() + wait
+                    // Logged on the first few and then once per doubling —
+                    // the storm this guards against would otherwise fill the
+                    // log as fast as it filled system_server.
+                    if (attachFailures <= 3 || wait == ATTACH_BACKOFF_MAX_MS && attachFailures % 10 == 0) {
+                        Log.e(TAG, "Aware attach failed (attempt $attachFailures); next in ${wait}ms")
+                    }
                 }
             }, handler)
         } catch (e: SecurityException) {
@@ -599,9 +642,9 @@ class AwareRadio(
                 }
                 Log.i(TAG, "Aware NDP up to ${short(peerNpub)} at $addr (slot $slot)")
                 liveNdps.add(peerNpub)
-                peerAddrs[peerNpub] = ipv6
                 publishCoexState()
-                // The link is good: hand the peer a fresh retry budget.
+                peerAddrs[peerNpub] = ipv6
+                        // The link is good: hand the peer a fresh retry budget.
                 if (retries.containsKey(peerNpub)) handler.post { clearRetry(peerNpub) }
                 // Pin BEFORE announcing the peer: the core dials as soon as it
                 // is told, and a dial from an unpinned (or wrong-network)
@@ -840,9 +883,10 @@ class AwareRadio(
 
     /** Unregister and forget a peer's NDP request, freeing its data-path slot. */
     /** Publish the node_addr prefixes of peers Aware is carrying, so the BLE
-     *  radio can refuse to dial them. The core otherwise re-establishes one
-     *  peer alternately over both transports, and that churn tears the NAN
-     *  data path down every ~60s.
+     *  radio can refuse to dial them on a single-path core (which otherwise
+     *  re-establishes one peer alternately over both transports, and that
+     *  churn tears the NAN data path down every ~60s). A multi-path core
+     *  ignores the set — see [app.myco.ble.BleRadio.connect].
      *
      *  node_addr is the only identity both radios can compute: BLE reads a
      *  prefix of it from the peer's scan response, and it is
@@ -939,6 +983,14 @@ class AwareRadio(
         if (npub.length > 12) npub.substring(0, 12) + "…" else npub
 
     companion object {
+        /** First wait after a failed Aware attach; doubles per failure. */
+        private const val ATTACH_BACKOFF_MIN_MS = 1_000L
+
+        /** Ceiling for that wait. Aware coming back is announced by the
+         *  availability broadcast anyway, so a long ceiling costs nothing
+         *  when the platform recovers on its own. */
+        private const val ATTACH_BACKOFF_MAX_MS = 60_000L
+
         private const val TAG = "MycoAwareRadio"
 
         private val _links = MutableStateFlow<List<AwareLink>>(emptyList())

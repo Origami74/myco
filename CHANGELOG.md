@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The status panel behind the peers pill shows every link a peer has, not
+  just the one carrying traffic: one icon per lane, the active one lit and
+  the standbys faded. A phone on Bluetooth and Wi-Fi at once is listed under
+  both. Needs a core built against fips multi-path; older cores show one icon
+  as before. Peers that never told us a name are shown by their shortened
+  npub there instead of a generated placeholder name.
+- Settings → Mesh has a "Network (LAN)" switch under Wi-Fi Aware that turns
+  same-network peer discovery (mDNS browse and advert) on or off.
 - A Nix flake for the toolchain (`nix develop` for the Rust host shell,
   `nix develop .#android` for the Android SDK/NDK/JDK 17/Gradle/adb shell), so a
   NixOS or nix-enabled machine gets a working build environment without a manual
@@ -28,6 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needing a shared Wi-Fi.
 ### Fixed
 
+- The mesh tunnel comes back on its own after another VPN app takes the
+  slot and gives it up again. Peers stayed linked over the radios, so the
+  mesh looked healthy while nothing could reach anyone; Settings now says
+  "Mesh tunnel is down" with a tap to fix, and reopening Myco fixes it too.
+- Wi-Fi Aware no longer retries a failed attach thousands of times a minute
+  while the phone's Wi-Fi stack refuses it, which got the app killed; it backs
+  off from a second to a minute between tries.
+- Peers on the same Wi-Fi are found even when Android's first mDNS answer
+  carried only IPv6 link-local addresses: the app re-resolves a peer it
+  cannot reach, and never dials two addresses of one peer inside the
+  handshake timeout (the second was silently refused).
 - Inviting someone from Nearby no longer labels them with your own device
   name. The tap recorded your name against their npub, so the "invite sent"
   pop-up — and their bubble everywhere else — read back as you. The invite now

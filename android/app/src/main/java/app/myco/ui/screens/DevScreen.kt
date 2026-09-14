@@ -2,6 +2,7 @@ package app.myco.ui.screens
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -44,13 +45,16 @@ import app.myco.core.BlePeer
 import app.myco.core.NativeActions
 import app.myco.core.PeerAttempt
 import app.myco.core.PeerDiagnostic
+import app.myco.core.PeerPath
 import app.myco.share.DeviceName
 import app.myco.ui.KeyVal
 import app.myco.ui.ScreenHeader
 import app.myco.ui.SectionCard
 import app.myco.ui.StatusDot
 import app.myco.ui.peerLabel
+import app.myco.ui.PathIcons
 import app.myco.ui.TransportIcon
+import app.myco.ui.peerLanes
 import app.myco.ui.locationServicesEnabled
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
@@ -498,11 +502,12 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         ) {
-        // Which radio carried this peer, read at a glance down the left edge.
-        // Deliberately larger than the text beside it: scanning the column for
-        // "which of these is on Bluetooth" is the common question, and it
-        // should not require reading a word on the second line.
-        TransportIcon(peer.transport, Modifier.padding(start = 14.dp, end = 2.dp))
+        // Every lane fips holds a path on, the one carrying traffic lit and
+        // the standbys faded, read at a glance down the left edge. A peer with
+        // no path draws the blank the icon reserves, so rows stay aligned.
+        Box(Modifier.padding(start = 14.dp, end = 2.dp)) {
+            if (peerLanes(peer).isEmpty()) TransportIcon("") else PathIcons(peer, size = 22)
+        }
         Column(modifier = Modifier.weight(1f)) {
         // Line 1: who. The caret is the affordance — a row that opens has to
         // look like one before it is tapped, and the dot alone never said so.
@@ -537,7 +542,8 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                peer.transport.ifEmpty { "—" },
+                // The active lane, then the standbys in brackets: `aware [ble]`.
+                pathSummary(peer),
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -582,6 +588,20 @@ private fun PeerForensics(peer: PeerDiagnostic) {
         ForensicLine("discovery", if (peer.discoveryMs > 0) "${peer.discoveryMs}ms" else "—")
         ForensicLine("send drops", peer.sendDrops.toString())
         ForensicLine("rssi", peer.rssi?.let { "${it}dBm" } ?: "—")
+        if (peer.paths.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            // Every path fips holds, with the numbers selection actually
+            // scores on. `min` is the window minimum, not srtt — a loaded
+            // active path shows a high ping in the status sheet and a low
+            // min here, and that is why it has not switched. `n` is the
+            // sample count: under 2 the path is not selectable yet.
+            Text(
+                "paths",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            peer.paths.forEach { PathRow(it) }
+        }
         Spacer(Modifier.height(4.dp))
         if (peer.attempts.isEmpty()) {
             Text(
@@ -592,6 +612,43 @@ private fun PeerForensics(peer: PeerDiagnostic) {
         } else {
             peer.attempts.take(MAX_ATTEMPTS_SHOWN).forEach { AttemptRow(it) }
         }
+    }
+}
+
+/**
+ * One path, fixed-width: lane, lifecycle state, then min RTT, sample count,
+ * ETX and score. `*` marks the path fips sends on, `b` a backup-role
+ * transport. Unmeasured values are dashes, never zeros.
+ */
+@Composable
+private fun PathRow(p: PeerPath) {
+    val mark = when {
+        p.active -> "*"
+        p.role == "backup" -> "b"
+        else -> " "
+    }
+    val min = p.minRttMs?.let { "${it}ms" } ?: "—"
+    val score = p.score?.let { "%.2f".format(it) } ?: "—"
+    Text(
+        "$mark ${p.lane.padEnd(5)} ${p.state.padEnd(7)} min $min n=${p.rttSamples} etx %.2f score $score".format(p.etx),
+        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        color = if (p.active) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/**
+ * The lanes on line 2 of a peer row: the active one first, standbys in
+ * brackets — `aware [ble]`. A core without paths shows the single transport
+ * as before; nothing at all is an em-dash.
+ */
+private fun pathSummary(peer: PeerDiagnostic): String {
+    val lanes = peerLanes(peer)
+    if (lanes.isEmpty()) return "—"
+    val active = lanes.filter { it.second }.map { it.first }
+    val standby = lanes.filterNot { it.second }.map { it.first }
+    return buildString {
+        append(active.joinToString(" ").ifEmpty { "—" })
+        if (standby.isNotEmpty()) append(" [${standby.joinToString(" ")}]")
     }
 }
 

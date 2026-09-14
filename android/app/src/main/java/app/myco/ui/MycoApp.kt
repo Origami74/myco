@@ -129,6 +129,9 @@ fun MycoApp(
     onBleToggle: (Boolean) -> Unit,
     wifiAwareSupported: Boolean,
     onWifiAwareToggle: (Boolean) -> Unit,
+    /** The LAN lane's mDNS discovery switch, as last persisted. */
+    initialLanEnabled: Boolean = true,
+    onLanToggle: (Boolean) -> Unit = {},
     onLaunchNsite: (host: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,
@@ -159,6 +162,9 @@ fun MycoApp(
     var meshEnabled by remember { mutableStateOf(initialMeshEnabled) }
     // Developer mode gates the Dev tab; hoisted so toggling it rebuilds the nav bar.
     var developerMode by remember { mutableStateOf(initialDeveloperMode) }
+    // Kotlin-owned like developerMode: the LAN browse is an Android NsdManager
+    // affair the core never sees, so there is no core state to read it from.
+    var lanEnabled by remember { mutableStateOf(initialLanEnabled) }
     // BLE advertiser exhaustion (set by the radio, read here for the Settings badge).
     var bleExhausted by remember { mutableStateOf(BleHealth.advertiserExhausted) }
     // Name of a peer we just connected to (drives the "connected" celebration).
@@ -346,6 +352,8 @@ fun MycoApp(
                         onBleToggle = onBleToggle,
                         wifiAwareSupported = wifiAwareSupported,
                         onWifiAwareToggle = onWifiAwareToggle,
+                        lanEnabled = lanEnabled,
+                        onLanToggle = { on -> lanEnabled = on; onLanToggle(on) },
                         meshEnabled = meshEnabled,
                         onMeshToggle = { on -> meshEnabled = on; onMeshToggle(on) },
                         onOfflineOnlyToggle = onOfflineOnlyToggle,

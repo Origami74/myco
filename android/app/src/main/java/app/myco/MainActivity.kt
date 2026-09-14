@@ -140,6 +140,8 @@ class MainActivity : ComponentActivity() {
         // system icons legible when the AMOLED scheme is active.
         enableEdgeToEdge()
         core = MycoCore.client(this)
+        // A compile-time property of the core; one read is enough.
+        BleRadio.multipathCore = core.state().multipathCore
         // Watches for file offers only while nothing is on screen; idempotent.
         FileOfferNotifier.install(this)
         captureExternalShare(intent)
@@ -210,6 +212,8 @@ class MainActivity : ComponentActivity() {
                             onBleToggle = { enabled -> setBleEnabled(enabled) },
                             wifiAwareSupported = AwareRadio.isSupported(this@MainActivity),
                             onWifiAwareToggle = { enabled -> setWifiAwareEnabled(enabled) },
+                            initialLanEnabled = prefs.getBoolean(PREF_LAN, true),
+                            onLanToggle = { enabled -> setLanEnabled(enabled) },
                             onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
                             onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
                             onScanned = { text -> handleScannedText(text) },
@@ -300,8 +304,9 @@ class MainActivity : ComponentActivity() {
         // The `!FIPS` AP lane: watch Wi-Fi and browse the LAN for fips-node
         // mDNS adverts, feeding them to the node (Dev panel shows results).
         // Passive and permissionless; process-wide, so idempotent across
-        // Activity recreation.
-        ApRadio.ensureStarted(this)
+        // Activity recreation. The Wi-Fi watch always runs; the browse and
+        // advert follow the Settings "Network" switch.
+        ApRadio.ensureStarted(this, enabled = prefs.getBoolean(PREF_LAN, true))
 
         // BLE on by default, and remembered thereafter.
         if (prefs.getBoolean(PREF_BLE, true)) {
@@ -574,6 +579,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Self-heal the tunnel. Another VPN app taking the slot revokes ours
+        // and stops the service; the node and its radio links carry on, so the
+        // mesh looks healthy while no mesh traffic can flow. When the slot comes
+        // back (prepare() re-authorises a consented app silently on 12+) nothing
+        // restarts the service — so check here, where the user has just come
+        // back from wherever they went to release it.
+        if (prefs.getBoolean(PREF_MESH, true) && !MycoVpnService.isUp() &&
+            prefs.getBoolean(PREF_INTRO_SEEN, false) && VpnService.prepare(this) == null
+        ) {
+            android.util.Log.i("MycoVpn", "onResume: mesh on, slot ours, tunnel down — restarting")
+            startMeshNow()
+        }
         // Presenting is owned by the Circle screen (it's the only place we emulate a
         // card). Here we just (re)apply the current presenting state — re-claiming
         // the foreground HCE service after a background→foreground while on Circle.
@@ -699,6 +716,13 @@ class MainActivity : ComponentActivity() {
         } else {
             AwareService.stop(this)
         }
+    }
+
+    /** The LAN lane's mDNS browse + advert. No permission and no service
+     *  behind it, so this is just the persisted switch handed to the radio. */
+    private fun setLanEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(PREF_LAN, enabled).apply()
+        ApRadio.setEnabled(enabled)
     }
 
     /** Slide-up system Wi-Fi panel (API 29+) so the user can turn Wi-Fi on
@@ -1036,6 +1060,8 @@ class MainActivity : ComponentActivity() {
 
         const val PREF_BLE = "ble_enabled"
         const val PREF_AWARE = "wifi_aware_enabled"
+        /** The LAN lane's mDNS discovery (browse + advert) — Settings "Network". */
+        const val PREF_LAN = "lan_discovery_enabled"
         const val PREF_MESH = "mesh_enabled"
         const val PREF_OFFLINE_ONLY = "offline_only"
         const val PREF_DEV = "developer_mode"

@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.DeveloperMode
 import androidx.compose.material.icons.filled.Lan
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
@@ -105,6 +106,8 @@ fun SettingsScreen(
     onBleToggle: (Boolean) -> Unit,
     wifiAwareSupported: Boolean,
     onWifiAwareToggle: (Boolean) -> Unit,
+    lanEnabled: Boolean,
+    onLanToggle: (Boolean) -> Unit,
     meshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
     onOfflineOnlyToggle: (Boolean) -> Unit,
@@ -128,6 +131,8 @@ fun SettingsScreen(
             onBleToggle = onBleToggle,
             wifiAwareSupported = wifiAwareSupported,
             onWifiAwareToggle = onWifiAwareToggle,
+            lanEnabled = lanEnabled,
+            onLanToggle = onLanToggle,
             meshEnabled = meshEnabled,
             onMeshToggle = onMeshToggle,
             developerMode = developerMode,
@@ -160,6 +165,8 @@ private fun RootSettings(
     onBleToggle: (Boolean) -> Unit,
     wifiAwareSupported: Boolean,
     onWifiAwareToggle: (Boolean) -> Unit,
+    lanEnabled: Boolean,
+    onLanToggle: (Boolean) -> Unit,
     meshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
     developerMode: Boolean,
@@ -232,6 +239,18 @@ private fun RootSettings(
                 checked = state.wifiAwareEnabled,
                 onToggle = onWifiAwareToggle,
                 enabled = meshEnabled && wifiAwareSupported,
+            )
+            RowDivider()
+            // The LAN lane: find and be found by peers on the same Wi-Fi via
+            // mDNS. Off stops both the browse and our own advert; a peer that
+            // already has our address can still dial in.
+            ToggleRow(
+                icon = Icons.Filled.Router,
+                title = "Network (LAN)",
+                subtitle = "Find peers on the same local network",
+                checked = lanEnabled,
+                onToggle = onLanToggle,
+                enabled = meshEnabled,
             )
             RowDivider()
             SoonRow(

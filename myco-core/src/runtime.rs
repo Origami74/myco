@@ -672,6 +672,23 @@ impl AppRuntime {
             config.transports.ble =
                 fips::config::TransportInstances::Single(fips::config::BleConfig {
                     auto_connect: Some(true),
+                    // BLE carries a peer only while no Wi-Fi Aware or LAN path
+                    // is eligible. fips's path score is latency and loss —
+                    // `etx × (1 + min_rtt/100)` — and on these phones BLE's
+                    // base RTT (~30ms) sits within the switch margin of an
+                    // Aware path, while an *idle* Aware data path answers
+                    // probes at NAN discovery-window cadence (~400–500ms) and
+                    // scores worse still. The score never sees the gap that
+                    // matters, ~750 B/s against megabits, so a session that
+                    // came up over BLE stayed there through every transfer.
+                    // `backup` is fips's own escape hatch for exactly this
+                    // (docs/design/fips-multi-path-switchover.md §8): a
+                    // statement about the transport's purpose, not a rank.
+                    // Path roles exist only on the multi-path branch; the
+                    // feature is what lets this crate still build against
+                    // fips master (see `Cargo.toml`).
+                    #[cfg(feature = "fips-multipath")]
+                    role: Some(fips::config::TransportRole::Backup),
                     ..Default::default()
                 });
         }
@@ -1549,6 +1566,7 @@ impl AppRuntime {
             rev: self.rev,
             error: self.error_with_feed_health(),
             app_version: self.app_version.clone(),
+            multipath_core: cfg!(feature = "fips-multipath"),
             identity: self.identity.clone(),
             node: NodeStatus {
                 running: self.node_running,

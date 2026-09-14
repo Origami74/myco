@@ -8,6 +8,7 @@ import android.net.wifi.WifiManager
 import app.myco.aware.AwareHealth
 import app.myco.ble.BleHealth
 import app.myco.core.AppState
+import app.myco.vpn.MycoVpnService
 
 /** What tapping a [RadioWarning] should do. Dispatched in SettingsScreen. */
 enum class RadioAction { FIX_VPN, ENABLE_BLUETOOTH, ENABLE_WIFI, GRANT_AWARE_PERMISSION, ENABLE_LOCATION }
@@ -32,6 +33,16 @@ fun radioWarnings(context: Context, state: AppState, meshEnabled: Boolean): List
             title = "Mesh has no VPN slot",
             detail = "Another app holds the VPN slot (or access was revoked), so no mesh " +
                 "traffic can flow. Tap to re-assign the VPN to Myco.",
+            action = RadioAction.FIX_VPN,
+        )
+    } else if (meshEnabled && !MycoVpnService.isUp()) {
+        // The slot is ours but the tunnel is not up: revoked and since
+        // re-authorised, or never established after consent. Radio links
+        // still show peers, which is exactly why this needs saying.
+        warnings += RadioWarning(
+            title = "Mesh tunnel is down",
+            detail = "Peers may be linked over the radios, but no mesh traffic can flow " +
+                "until the tunnel is back. Tap to bring it up.",
             action = RadioAction.FIX_VPN,
         )
     }

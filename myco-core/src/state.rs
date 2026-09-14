@@ -9,6 +9,13 @@ pub struct AppState {
     pub rev: u64,
     pub error: String,
     pub app_version: String,
+    /// Whether this core was built against a fips with multi-path
+    /// switchover (`fips-multipath` feature). On a single-path core a second
+    /// transport to a live peer means a second handshake that displaces the
+    /// session; on a multi-path core it means a standby path. The radios
+    /// read this to decide whether dialling a peer another lane already
+    /// carries is a standby worth having or churn to avoid.
+    pub multipath_core: bool,
     pub identity: IdentityView,
     pub node: NodeStatus,
     /// BLE adapter/transport status (the developer-UI control plane).
@@ -103,8 +110,12 @@ pub struct PeerDiagnosticView {
     /// `udp`, `tcp`); empty when not connected.
     pub transport: String,
     /// Other transports this peer is also reachable over, in the fixed order
-    /// `ble`, `aware`, `udp`, `tcp`. Empty until Phase 2 populates it.
+    /// `ble`, `aware`, `udp`, `tcp`: the lanes of every non-dead path in
+    /// [`paths`](Self::paths) other than the active one.
     pub also_reachable_via: Vec<String>,
+    /// Every path fips holds to this peer, in fips's own order. Empty when
+    /// the row has no peer view or the daemon predates multi-path.
+    pub paths: Vec<PeerPathView>,
     /// Milliseconds-since-epoch this row was last heard from; `0` when never
     /// heard from (renders as an em-dash, never "0s").
     pub last_seen_ms: u64,
@@ -153,6 +164,36 @@ pub struct PeerDiagnosticView {
     /// Recorded connect attempts against this peer, newest first, capped at 20.
     /// Empty when nothing has been recorded.
     pub attempts: Vec<PeerAttemptView>,
+}
+
+/// One transport path to a peer, as fips's multi-path layer tracks it.
+///
+/// A peer can hold several at once and fips sends on exactly one — `active`.
+/// The others are warm standbys (`live`), still unproven (`probing`), in
+/// doubt (`suspect`) or kept for history (`dead`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerPathView {
+    /// `ble`, `aware`, `udp` (the LAN/AP lane) or `tcp`.
+    pub lane: String,
+    /// `probing`, `live`, `suspect` or `dead`.
+    pub state: String,
+    /// Whether fips currently sends to this peer over this path.
+    pub active: bool,
+    /// `normal` or `backup`. A backup path yields to any selectable normal
+    /// one regardless of score.
+    pub role: String,
+    /// Minimum probe round trip in fips's window, ms; `None` until measured.
+    /// Selection scores on this, not on srtt, so load on the active path
+    /// does not by itself move traffic.
+    pub min_rtt_ms: Option<u64>,
+    /// RTT samples in the window; a standby needs `node.path.min_samples`
+    /// (default 2) before selection may pick it.
+    pub rtt_samples: u32,
+    /// Smoothed per-path expected transmission count.
+    pub etx: f64,
+    /// `etx × (1 + min_rtt/100)`, lower is better; `None` until measured.
+    pub score: Option<f64>,
 }
 
 /// One recorded BLE connect attempt as rendered for the Dev tab (DIAG-01/03).

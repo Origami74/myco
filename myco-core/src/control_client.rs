@@ -82,6 +82,50 @@ pub struct PeerView {
     /// fips's render-ready name. **This is an abbreviated npub**
     /// (`"npub1qrjr...msuc"`), not a profile name — observed on device.
     pub display_name: String,
+    /// Every path fips holds to this peer, in the order `show_peers` lists
+    /// them. Empty on a daemon that predates multi-path, or on a peer whose
+    /// paths have not been probed yet — never a fabricated single entry.
+    pub paths: Vec<PeerPath>,
+}
+
+/// One transport path to a peer, as fips's multi-path layer tracks it. A peer
+/// can hold several at once (BLE + Aware + LAN) and fips sends on exactly one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PeerPath {
+    /// Myco's lane name: `ble`, `aware`, `udp` (the LAN/AP lane) or `tcp`.
+    /// See [`lane_for_path`] for how the UDP instance name decides.
+    pub lane: String,
+    /// fips's path lifecycle: `probing`, `live`, `suspect` or `dead`.
+    pub state: String,
+    /// Whether this is the path fips currently sends on.
+    pub active: bool,
+    /// `normal` or `backup` — a backup path carries traffic only while no
+    /// normal path is eligible.
+    pub role: String,
+    /// Minimum probe round trip inside fips's window, ms; `None` until one
+    /// has been measured. This, not srtt, is what selection scores on.
+    pub min_rtt_ms: Option<u64>,
+    /// RTT samples inside the window. Below `node.path.min_samples` the path
+    /// is not yet selectable.
+    pub rtt_samples: u32,
+    /// Per-path expected transmission count, smoothed.
+    pub etx: f64,
+    /// `etx × (1 + min_rtt/100)`, lower is better; `None` until measured.
+    pub score: Option<f64>,
+}
+
+/// The lane a path belongs to. `transport_type` is the answer for every
+/// transport but UDP, where Wi-Fi Aware and the LAN/AP lane share the type
+/// and only the instance name tells them apart: the node binds the Aware
+/// pool as `aware0`…`aware7` and the LAN lane as `lan` (see `runtime.rs`).
+/// This is the instance the path really runs over, not a guess from the
+/// address shape.
+fn lane_for_path(transport_type: &str, instance: &str) -> String {
+    if transport_type == "udp" && instance.starts_with("aware") {
+        "aware".to_string()
+    } else {
+        transport_type.to_string()
+    }
 }
 
 /// Myco's notion of "connected", derived from fips's `connectivity` string.
@@ -247,6 +291,28 @@ fn peer_from_json(peer: &Value) -> PeerView {
             .and_then(|mmp| mmp.get("srtt_ms"))
             .and_then(Value::as_f64),
         display_name: s("display_name"),
+        paths: peer
+            .get("paths")
+            .and_then(Value::as_array)
+            .map(|paths| paths.iter().map(path_from_json).collect())
+            .unwrap_or_default(),
+    }
+}
+
+/// Map one entry of a `show_peers` row's `paths` array. `transport` (the
+/// instance name) is nullable on the wire; `transport_type` is absent when
+/// fips could not find the transport handle, which leaves the lane empty.
+fn path_from_json(path: &Value) -> PeerPath {
+    let s = |key: &str| path.get(key).and_then(Value::as_str).unwrap_or_default();
+    PeerPath {
+        lane: lane_for_path(s("transport_type"), s("transport")),
+        state: s("state").to_string(),
+        active: path.get("active").and_then(Value::as_bool).unwrap_or(false),
+        role: s("role").to_string(),
+        min_rtt_ms: path.get("min_rtt_ms").and_then(Value::as_u64),
+        rtt_samples: path.get("rtt_samples").and_then(Value::as_u64).unwrap_or(0) as u32,
+        etx: path.get("etx").and_then(Value::as_f64).unwrap_or(0.0),
+        score: path.get("score").and_then(Value::as_f64),
     }
 }
 
@@ -333,6 +399,59 @@ mod tests {
         // A peer row without it must read as "unknown", never as "aged zero" —
         // the UI shows a dash rather than an age computed from the epoch.
         assert_eq!(view.authenticated_at_ms, 0);
+    }
+
+    /// The `paths` array from the multi-path branch: the UDP instance name is
+    /// what separates Aware from the LAN lane, and `active` marks the one path
+    /// fips sends on.
+    #[test]
+    fn maps_every_path_with_its_lane_and_active_flag() {
+        let row = serde_json::json!({
+            "npub": "npub1x",
+            "connectivity": "connected",
+            "transport_type": "ble",
+            "paths": [
+                { "transport_id": 1, "transport": "ble", "transport_type": "ble",
+                  "addr": "hci0/AA:BB:CC:DD:EE:FF", "state": "live", "active": true,
+                  "role": "backup", "min_rtt_ms": 33, "rtt_samples": 12, "etx": 1.1, "score": 1.463 },
+                { "transport_id": 3, "transport": "aware2", "transport_type": "udp",
+                  "addr": "[fe80::1]:4872", "state": "probing", "active": false },
+                { "transport_id": 2, "transport": "lan", "transport_type": "udp",
+                  "addr": "[::ffff:192.168.8.2]:4871", "state": "dead", "active": false },
+                { "transport_id": 4, "transport": null, "transport_type": "tcp",
+                  "addr": "[::1]:1", "state": "live", "active": false },
+            ],
+        });
+        let paths = peer_from_json(&row).paths;
+        let lanes: Vec<&str> = paths.iter().map(|p| p.lane.as_str()).collect();
+        assert_eq!(lanes, ["ble", "aware", "udp", "tcp"]);
+        let states: Vec<&str> = paths.iter().map(|p| p.state.as_str()).collect();
+        assert_eq!(states, ["live", "probing", "dead", "live"]);
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|p| p.active)
+                .map(|p| p.lane.as_str())
+                .collect::<Vec<_>>(),
+            ["ble"]
+        );
+        assert_eq!(paths[0].role, "backup");
+        assert_eq!(paths[0].min_rtt_ms, Some(33));
+        assert_eq!(paths[0].rtt_samples, 12);
+        assert_eq!(paths[0].etx, 1.1);
+        assert_eq!(paths[0].score, Some(1.463));
+        // An unmeasured standby: no min RTT, no score — never a confident 0.
+        assert_eq!(paths[1].min_rtt_ms, None);
+        assert_eq!(paths[1].score, None);
+        assert_eq!(paths[1].rtt_samples, 0);
+    }
+
+    /// A daemon without multi-path has no `paths` key; that is "no paths",
+    /// not one path made up from the row's `transport_type`.
+    #[test]
+    fn a_row_without_paths_maps_to_none() {
+        let row = serde_json::json!({ "npub": "npub1x", "connectivity": "connected", "transport_type": "ble" });
+        assert!(peer_from_json(&row).paths.is_empty());
     }
 
     fn temp_socket(tag: &str) -> std::path::PathBuf {
