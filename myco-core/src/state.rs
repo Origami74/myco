@@ -44,6 +44,8 @@ pub struct AppState {
     /// only thing that writes a grant is the user answering this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub napplet_review: Option<crate::napplet::NappletReview>,
+    /// The user's cap on how far napplets reach over the mesh (NAP-MESH).
+    pub napplet_mesh_reach: NappletMeshReachView,
     /// Local relay/Blossom counts (for the developer screen + cache view).
     pub cache: crate::content::CacheView,
     /// The user's **Circle**: paired peers we pull nsites from over the mesh.
@@ -172,6 +174,17 @@ pub struct PeerDiagnosticView {
     /// Recorded connect attempts against this peer, newest first, capped at 20.
     /// Empty when nothing has been recorded.
     pub attempts: Vec<PeerAttemptView>,
+}
+
+/// The NAP-MESH caps as the Settings screen shows them: the current values and
+/// the most each may be set to.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NappletMeshReachView {
+    pub publish_ttl: u8,
+    pub publish_max: u8,
+    pub subscribe_ttl: u8,
+    pub subscribe_max: u8,
 }
 
 /// One transport path to a peer, as fips's multi-path layer tracks it.

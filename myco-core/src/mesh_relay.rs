@@ -340,23 +340,26 @@ impl RelayHub {
         self.live.subscribe()
     }
 
-    /// Accept an event this device originated, by the same route a socket
-    /// takes: novelty check, store, live subscribers, then mesh fan-out.
+    /// Accept an event this device originated — a napplet's publish — exactly
+    /// as the socket path would: dedupe, store, wake live subscriptions, and
+    /// hand it to the gossiper at the default hop budget.
     ///
-    /// Publishing straight to the store looks equivalent and is not. The store
-    /// is where an event *rests*; the hub is where one is *accepted* — and
-    /// accepting is what pushes it to this device's live subscriptions and
-    /// hands it to the gossiper. A napplet that wrote to the store would have
-    /// its event signed, saved, and invisible: nothing on this phone would
-    /// redraw, and no peer would ever hear it.
-    ///
-    /// `Origin::Local` gives the event the full hop budget, which is what makes
-    /// it travel; a mesh-received copy carries whatever budget it arrived with.
-    ///
-    /// Returns whether this was a first sighting. A duplicate is stored anyway
-    /// (storing is idempotent) but is not re-flooded, which is what stops an
-    /// event echoing around a circle of peers forever.
+    /// Returns whether this was the first sighting. A repeat is stored (idempotent)
+    /// and goes no further.
     pub async fn accept_local(self: &Arc<Self>, event: Event) -> anyhow::Result<bool> {
+        self.accept_local_with_ttl(event, None).await
+    }
+
+    /// As [`RelayHub::accept_local`], originating at `ttl` hops instead of the
+    /// default when one is given. This is NAP-MESH's entry: the one place a
+    /// local publish carries a chosen budget, already clamped by the caller to
+    /// the user's cap. `Some(0)` stores and shows the event here and sends it
+    /// nowhere.
+    pub async fn accept_local_with_ttl(
+        self: &Arc<Self>,
+        event: Event,
+        ttl: Option<u8>,
+    ) -> anyhow::Result<bool> {
         // Novelty first and independent of the store, exactly as the socket
         // path does it — see the `EVENT` handler.
         let first_sighting = self.seen.insert(&event);
@@ -371,7 +374,7 @@ impl RelayHub {
         if let Some(gossip) = self.gossip.clone() {
             let inbound = Inbound {
                 origin: Origin::Local,
-                event_ttl: None,
+                event_ttl: ttl,
                 sender: None,
             };
             // Spawned, so a slow or unreachable peer never holds up the
@@ -379,6 +382,21 @@ impl RelayHub {
             tokio::spawn(async move { gossip.on_event(event, inbound).await });
         }
         Ok(true)
+    }
+
+    /// Accept an event this device *pulled* from a peer's backlog: dedupe,
+    /// store, and wake live subscriptions — but forward nothing. A pull answer
+    /// is not a push frame (`event-gossip.md` §3) and carries no budget; the
+    /// peer that holds it floods it on its own terms.
+    ///
+    /// Returns whether this was the first sighting.
+    pub async fn accept_pulled(&self, event: Event) -> anyhow::Result<bool> {
+        let first_sighting = self.seen.insert(&event);
+        self.store.publish(event.clone()).await?;
+        if first_sighting {
+            let _ = self.live.send(event);
+        }
+        Ok(first_sighting)
     }
 }
 
@@ -822,6 +840,7 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use nsite_deck::model::KIND_ROOT;
     use nsite_deck::testing::build_test_site_with_keys;
+    use std::time::Duration;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     async fn spawn_relay(store: Arc<RelayStore>) -> SocketAddr {
@@ -955,6 +974,110 @@ mod tests {
             received,
             Some(msg.id.to_hex()),
             "live event delivered to subscriber"
+        );
+    }
+
+    /// A napplet's NAP-MESH publish rides the same route as any local event,
+    /// but with the budget it chose: the gossiper sees a local origin carrying
+    /// an explicit ttl, and the live bus sees the event once.
+    #[tokio::test]
+    async fn a_local_publish_carries_its_chosen_hop_budget() {
+        use std::sync::Mutex;
+
+        struct Capture(Mutex<Vec<Inbound>>);
+        #[async_trait]
+        impl Gossiper for Capture {
+            async fn on_event(&self, _event: Event, inbound: Inbound) {
+                self.0.lock().unwrap().push(inbound);
+            }
+        }
+
+        let store = Arc::new(RelayStore::in_memory());
+        let capture = Arc::new(Capture(Mutex::new(Vec::new())));
+        let hub = RelayHub::new(store.clone(), Some(capture.clone()));
+        let mut live = hub.live_events();
+
+        let keys = Keys::generate();
+        let msg = chat_event(&keys, "mesh", "two hops please");
+        assert!(hub
+            .accept_local_with_ttl(msg.clone(), Some(2))
+            .await
+            .unwrap());
+        assert_eq!(live.recv().await.unwrap().id, msg.id);
+
+        let seen = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(first) = capture.0.lock().unwrap().first().cloned() {
+                    return first;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen.origin, Origin::Local);
+        assert_eq!(seen.event_ttl, Some(2));
+
+        // A repeat is stored, not re-flooded, whatever budget it names.
+        assert!(!hub.accept_local_with_ttl(msg, Some(3)).await.unwrap());
+        assert_eq!(capture.0.lock().unwrap().len(), 1);
+
+        // The plain path still originates at the default: no budget named.
+        let other = chat_event(&keys, "mesh", "default reach");
+        assert!(hub.accept_local(other).await.unwrap());
+        let seen = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(second) = capture.0.lock().unwrap().get(1).cloned() {
+                    return second;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen.event_ttl, None);
+    }
+
+    /// Backlog pulled from a peer wakes this device's live subscriptions —
+    /// which is how a napplet's mesh subscription hears it — and is never
+    /// handed to the gossiper: a pull answer is not a push frame.
+    #[tokio::test]
+    async fn a_pulled_event_is_delivered_live_and_forwarded_nowhere() {
+        use std::sync::Mutex;
+
+        struct Count(Mutex<usize>);
+        #[async_trait]
+        impl Gossiper for Count {
+            async fn on_event(&self, _event: Event, _inbound: Inbound) {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+
+        let store = Arc::new(RelayStore::in_memory());
+        let count = Arc::new(Count(Mutex::new(0)));
+        let hub = RelayHub::new(store.clone(), Some(count.clone()));
+        let mut live = hub.live_events();
+
+        let keys = Keys::generate();
+        let msg = chat_event(&keys, "mesh", "from a peer's backlog");
+        assert!(hub.accept_pulled(msg.clone()).await.unwrap());
+        assert_eq!(live.recv().await.unwrap().id, msg.id);
+        assert_eq!(store.count(), 1);
+
+        // A copy by another path is stored idempotently and not re-delivered.
+        assert!(!hub.accept_pulled(msg.clone()).await.unwrap());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), live.recv())
+                .await
+                .is_err(),
+            "a duplicate pull was delivered twice"
+        );
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            *count.0.lock().unwrap(),
+            0,
+            "a pulled event reached the gossiper"
         );
     }
 

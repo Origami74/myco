@@ -7,7 +7,8 @@
 //! decrementing hop budget, carried in the `MESH` envelope:
 //!
 //! - **Local origin** (a loopback publish from the in-app nsite) originates at
-//!   `mesh_wire::EVENT_TTL`.
+//!   `mesh_wire::EVENT_TTL`; a napplet's NAP-MESH publish originates at the
+//!   budget it chose, capped by the user and clamped here to the same maximum.
 //! - **Mesh origin** re-forwards with the budget that rode in,
 //!   **except back to the sender** (split-horizon), until the budget runs out.
 //!
@@ -64,10 +65,12 @@ impl Gossiper for MeshGossiper {
         if !is_gossip_eligible(kind) {
             return;
         }
-        // Effective budget: originate at the default for our own publishes; for a
-        // mesh-received event use the TTL it carried (absent => 0 => don't forward).
+        // Effective budget: our own publishes originate at the default, or at
+        // the budget a napplet chose through NAP-MESH (already capped by the
+        // user; clamped again below regardless). A mesh-received event uses the
+        // TTL it carried (absent => 0 => don't forward).
         let effective = match inbound.origin {
-            Origin::Local => crate::mesh_wire::EVENT_TTL,
+            Origin::Local => inbound.event_ttl.unwrap_or(crate::mesh_wire::EVENT_TTL),
             Origin::Mesh => inbound.event_ttl.unwrap_or(0),
         };
         // A peer we have not granted multihop writes still gets its events

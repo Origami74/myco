@@ -320,7 +320,7 @@ const PAIR_DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_sec
 /// how long a node downstream holds query state — late results are not an error,
 /// they simply arrive to whoever is still listening
 /// (`reference/thinning-custom-relay.md`, D8).
-const PULL_BUDGET_MS: u32 = 10_000;
+pub(crate) const PULL_BUDGET_MS: u32 = 10_000;
 
 /// Longest a single forwarded hop will wait on a peer, used when no budget rode
 /// in (an older peer, or a pull that never carried one). A budget that did

@@ -80,6 +80,11 @@ pub enum NativeAppAction {
     },
     /// Unpin a napplet and drop its grants.
     ForgetNapplet { pointer: String },
+    /// Cap how far a napplet may reach over the mesh (NAP-MESH): the most hops
+    /// a `mesh.publish` and a `mesh.subscribe` backlog pull may ask for.
+    /// Values above what the mesh honours are stored as the maximum. Takes
+    /// effect on a napplet's next call, not its next launch.
+    SetNappletMeshReach { publish_ttl: u8, subscribe_ttl: u8 },
     /// Close the install-review screen without installing. The fetched bytes
     /// stay cached; no grant is written, so the napplet has nothing.
     DismissNappletReview,

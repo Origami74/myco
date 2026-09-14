@@ -260,6 +260,9 @@ pub struct AppRuntime {
     /// A fetched napplet awaiting the user's answer on install review. Written
     /// by the fetch task, cleared when the user installs or dismisses.
     napplet_review: Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
+    /// The user's NAP-MESH caps, shared with the napplet mesh sink so a change
+    /// takes effect on a napplet's next call rather than its next launch.
+    napplet_mesh_limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
     /// Latest dev-menu peer speedtest result; written by the spawned run task and
     /// read back into `state()`. Shared so the async task can update it in place.
     speedtest: Arc<std::sync::Mutex<crate::state::SpeedtestView>>,
@@ -607,6 +610,7 @@ impl AppRuntime {
             data_dir: data_dir.to_string(),
             napplet_host: None,
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
+            napplet_mesh_limits: Arc::new(std::sync::RwLock::new(settings.napplet_mesh_limits())),
             relay_hub,
             pending_relay_url: settings.relay_url().unwrap_or_default(),
             pending_blossom_url: settings.blossom_url().unwrap_or_default(),
@@ -797,6 +801,9 @@ impl AppRuntime {
             data_dir: String::new(),
             napplet_host: None,
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
+            napplet_mesh_limits: Arc::new(std::sync::RwLock::new(
+                crate::settings_store::Settings::default().napplet_mesh_limits(),
+            )),
             relay_hub: Arc::new(std::sync::Mutex::new(None)),
             rev: 0,
             error: msg.to_string(),
@@ -980,6 +987,33 @@ impl AppRuntime {
             NativeAppAction::SetOfflineOnly { enabled } => {
                 if let Some(content) = &self.content {
                     content.set_offline_only(enabled);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SetNappletMeshReach {
+                publish_ttl,
+                subscribe_ttl,
+            } => {
+                let mut settings = crate::settings_store::load(Path::new(&self.data_dir));
+                settings.napplet_mesh_publish_ttl =
+                    Some(publish_ttl.min(crate::settings_store::NAPPLET_MESH_PUBLISH_MAX));
+                settings.napplet_mesh_subscribe_ttl =
+                    Some(subscribe_ttl.min(crate::settings_store::NAPPLET_MESH_SUBSCRIBE_MAX));
+                let limits = settings.napplet_mesh_limits();
+                match crate::settings_store::save(Path::new(&self.data_dir), &settings) {
+                    Ok(()) => {
+                        // Live at once: the sink reads this per call.
+                        *self.napplet_mesh_limits.write().unwrap() = limits;
+                        tracing::info!(
+                            publish = limits.publish_ttl,
+                            subscribe = limits.subscribe_ttl,
+                            "settings: napplet mesh reach saved"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "settings: could not save napplet mesh reach");
+                        self.error = format!("Could not save the mesh reach setting: {e}");
+                    }
                 }
                 self.rev += 1;
             }
@@ -1512,11 +1546,19 @@ impl AppRuntime {
                 content.relay(),
             ));
 
+            let mesh = Arc::new(crate::napplet::NappletMeshSink::new(
+                self.relay_hub.clone(),
+                content.clone(),
+                self.napplet_mesh_limits.clone(),
+                self.node_live.clone(),
+            ));
+
             let host = Arc::new(crate::napplet::NappletHost::new(
                 content.relay(),
                 content.blobs(),
                 signer,
                 sink,
+                mesh,
             ));
 
             // Feed every accepted event to open napplets' subscriptions — this
@@ -1919,6 +1961,15 @@ impl AppRuntime {
             app_version: self.app_version.clone(),
             multipath_core: cfg!(feature = "fips-multipath"),
             napplet_review: self.napplet_review.lock().unwrap().clone(),
+            napplet_mesh_reach: {
+                let limits = *self.napplet_mesh_limits.read().unwrap();
+                crate::state::NappletMeshReachView {
+                    publish_ttl: limits.publish_ttl,
+                    publish_max: crate::settings_store::NAPPLET_MESH_PUBLISH_MAX,
+                    subscribe_ttl: limits.subscribe_ttl,
+                    subscribe_max: crate::settings_store::NAPPLET_MESH_SUBSCRIBE_MAX,
+                }
+            },
             identity: self.identity.clone(),
             node: NodeStatus {
                 running: self.node_running,

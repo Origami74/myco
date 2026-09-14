@@ -184,12 +184,14 @@ impl NappletHost {
         blobs: Arc<dyn BlobStore>,
         signer: Arc<dyn myco_napplet_runtime::seams::Signer>,
         sink: Arc<dyn myco_napplet_runtime::seams::EventSink>,
+        mesh: Arc<dyn myco_napplet_runtime::seams::MeshSink>,
     ) -> Self {
         Self {
             ctx: NapContext {
                 signer,
                 relay: relay.clone(),
                 sink,
+                mesh,
             },
             relay,
             blobs,
@@ -519,6 +521,106 @@ impl myco_napplet_runtime::seams::EventSink for MeshEventSink {
     }
 }
 
+/// NAP-MESH's seam over the device's mesh: hop-limited publish through the
+/// [`RelayHub`](crate::mesh_relay::RelayHub), backlog pull through the Circle
+/// relay pool, and the user's caps from settings.
+///
+/// The caps are read per call from a lock the settings action writes, so a
+/// user lowering "how far apps reach" is obeyed by the very next publish —
+/// there is no per-napplet copy to go stale.
+pub struct NappletMeshSink {
+    hub: Arc<Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
+    content: Arc<crate::content::Content>,
+    limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
+    node_live: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NappletMeshSink {
+    pub fn new(
+        hub: Arc<Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
+        content: Arc<crate::content::Content>,
+        limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
+        node_live: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            hub,
+            content,
+            limits,
+            node_live,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl myco_napplet_runtime::seams::MeshSink for NappletMeshSink {
+    async fn limits(&self) -> myco_napplet_runtime::MeshLimits {
+        *self.limits.read().unwrap()
+    }
+
+    async fn reach(&self) -> anyhow::Result<myco_napplet_runtime::MeshReach> {
+        Ok(myco_napplet_runtime::MeshReach {
+            online: self.node_live.load(std::sync::atomic::Ordering::Relaxed),
+            peers: self.content.reachable_npubs().len(),
+        })
+    }
+
+    async fn publish(&self, event: nostr::Event, ttl: u8) -> anyhow::Result<()> {
+        // Clamped again here, whatever the caller did: the seam is the last
+        // place a budget passes before it reaches the mesh, and the cap is the
+        // user's promise, not the runtime crate's.
+        let ttl = ttl.min(self.limits.read().unwrap().publish_ttl);
+        let hub = self.hub.lock().unwrap().clone();
+        match hub {
+            Some(hub) => {
+                hub.accept_local_with_ttl(event, Some(ttl)).await?;
+                Ok(())
+            }
+            // No hub is the host-build and pre-start case; the event is
+            // stored and goes no further, which is what `ttl` 0 means anyway.
+            None => self.content.relay().publish(event).await,
+        }
+    }
+
+    async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<()> {
+        let ttl = ttl.min(self.limits.read().unwrap().subscribe_ttl);
+        if ttl == 0 {
+            return Ok(());
+        }
+        let hub = self.hub.lock().unwrap().clone();
+        let Some(hub) = hub else {
+            // Nothing to pull through and nowhere to deliver to.
+            return Ok(());
+        };
+        let content = self.content.clone();
+        // Spawned: a peer two hops out answers in seconds, and the napplet's
+        // next call must not queue behind it. What arrives is accepted into
+        // the hub, which is what delivers it to the napplet's live
+        // subscription — and to every other subscriber on this device.
+        tokio::spawn(async move {
+            // `ttl` counts rings of peers beyond this device, as a publish's
+            // budget does. The envelope carries the budget the *receiver* may
+            // spend, so the first ring is asked with one less: 1 asks direct
+            // peers and stops, 2 lets them ask theirs.
+            let meta = crate::mesh_wire::MeshMeta::pull(
+                ttl - 1,
+                crate::mesh_wire::new_query_id(),
+                crate::content::PULL_BUDGET_MS,
+            );
+            let events = content.pull_from_peers(filters, meta, None).await;
+            let mut fresh = 0usize;
+            for event in events {
+                match hub.accept_pulled(event).await {
+                    Ok(true) => fresh += 1,
+                    Ok(false) => {}
+                    Err(e) => tracing::debug!(error = %e, "napplet mesh pull: could not store"),
+                }
+            }
+            tracing::debug!(ttl, fresh, "napplet mesh pull finished");
+        });
+        Ok(())
+    }
+}
+
 /// What installing a napplet would grant it: what it declared it needs, plus
 /// the defaults every napplet gets, narrowed to what this build can actually
 /// do.
@@ -625,6 +727,17 @@ mod tests {
         }
     }
 
+    /// A mesh with nothing behind it, for tests that are not about the mesh.
+    pub(super) fn test_mesh() -> Arc<myco_napplet_runtime::testing::MemMesh> {
+        Arc::new(myco_napplet_runtime::testing::MemMesh::new(
+            Arc::new(MemRelay::new()),
+            myco_napplet_runtime::MeshLimits {
+                publish_ttl: 3,
+                subscribe_ttl: 2,
+            },
+        ))
+    }
+
     async fn host_with_fixture() -> (NappletHost, NappletAddr) {
         let napplet = NappletBuilder::new().build();
         let relay = Arc::new(MemRelay::new());
@@ -641,12 +754,19 @@ mod tests {
         };
         (
             NappletHost::new(
-                relay,
+                relay.clone(),
                 blobs,
                 Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
                 Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
                     MemRelay::new(),
                 ))),
+                Arc::new(myco_napplet_runtime::testing::MemMesh::new(
+                    relay,
+                    myco_napplet_runtime::MeshLimits {
+                        publish_ttl: 3,
+                        subscribe_ttl: 2,
+                    },
+                )),
             ),
             addr,
         )
@@ -930,6 +1050,7 @@ mod tests {
             Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
                 MemRelay::new(),
             ))),
+            test_mesh(),
         );
         let addr = NappletAddr {
             author: napplet.author,
@@ -983,6 +1104,7 @@ mod tests {
             Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
                 MemRelay::new(),
             ))),
+            test_mesh(),
         );
         let addr = NappletAddr {
             author: napplet.author,
@@ -1028,6 +1150,7 @@ mod tests {
             Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
                 MemRelay::new(),
             ))),
+            test_mesh(),
         );
         let addr = NappletAddr {
             author: napplet.author,
@@ -1131,6 +1254,7 @@ mod real_naddr {
 
 #[cfg(test)]
 mod live_fetch {
+    use super::tests::test_mesh;
     use super::*;
     use nsite_deck::testing::{MemBlobs, MemRelay};
 
@@ -1186,6 +1310,7 @@ mod live_fetch {
             Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
                 MemRelay::new(),
             ))),
+            test_mesh(),
         );
         let started = std::time::Instant::now();
         match host.ingest(&addr, &source).await {
