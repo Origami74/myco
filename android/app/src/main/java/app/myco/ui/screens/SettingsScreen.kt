@@ -246,8 +246,8 @@ private fun RootSettings(
             // already has our address can still dial in.
             ToggleRow(
                 icon = Icons.Filled.Router,
-                title = "Network",
-                subtitle = "Find peers on the same Wi-Fi",
+                title = "Network (LAN)",
+                subtitle = "Find peers on the same local network",
                 checked = lanEnabled,
                 onToggle = onLanToggle,
                 enabled = meshEnabled,

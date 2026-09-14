@@ -23,8 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both. Needs a core built against fips multi-path; older cores show one icon
   as before. Peers that never told us a name are shown by their shortened
   npub there instead of a generated placeholder name.
-- Settings → Mesh has a "Network" switch under Wi-Fi Aware that turns the
-  same-Wi-Fi peer discovery (mDNS browse and advert) on or off.
+- Settings → Mesh has a "Network (LAN)" switch under Wi-Fi Aware that turns
+  same-network peer discovery (mDNS browse and advert) on or off.
 - A Nix flake for the toolchain (`nix develop` for the Rust host shell,
   `nix develop .#android` for the Android SDK/NDK/JDK 17/Gradle/adb shell), so a
   NixOS or nix-enabled machine gets a working build environment without a manual
