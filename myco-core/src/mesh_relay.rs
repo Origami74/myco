@@ -384,13 +384,17 @@ impl RelayHub {
         Ok(true)
     }
 
-    /// Accept an event this device *pulled* from a peer's backlog: dedupe,
-    /// store, and wake live subscriptions — but forward nothing. A pull answer
-    /// is not a push frame (`event-gossip.md` §3) and carries no budget; the
-    /// peer that holds it floods it on its own terms.
+    /// Accept an event without forwarding it: dedupe, store, and wake live
+    /// subscriptions — nothing to the gossiper.
+    ///
+    /// Two callers, one rule. Backlog *pulled* from a peer is not a push frame
+    /// (`event-gossip.md` §3) and carries no budget; the peer that holds it
+    /// floods it on its own terms. A napplet's `relay.publish` is bound for
+    /// relays, not the Circle (NAP-RELAY; the mesh is NAP-MESH's), and still
+    /// has to reach this phone's own subscriptions.
     ///
     /// Returns whether this was the first sighting.
-    pub async fn accept_pulled(&self, event: Event) -> anyhow::Result<bool> {
+    pub async fn accept_unforwarded(&self, event: Event) -> anyhow::Result<bool> {
         let first_sighting = self.seen.insert(&event);
         self.store.publish(event.clone()).await?;
         if first_sighting {
@@ -1060,12 +1064,12 @@ mod tests {
 
         let keys = Keys::generate();
         let msg = chat_event(&keys, "mesh", "from a peer's backlog");
-        assert!(hub.accept_pulled(msg.clone()).await.unwrap());
+        assert!(hub.accept_unforwarded(msg.clone()).await.unwrap());
         assert_eq!(live.recv().await.unwrap().id, msg.id);
         assert_eq!(store.count(), 1);
 
         // A copy by another path is stored idempotently and not re-delivered.
-        assert!(!hub.accept_pulled(msg.clone()).await.unwrap());
+        assert!(!hub.accept_unforwarded(msg.clone()).await.unwrap());
         assert!(
             tokio::time::timeout(Duration::from_millis(50), live.recv())
                 .await

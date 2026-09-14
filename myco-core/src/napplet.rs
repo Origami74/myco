@@ -479,45 +479,99 @@ impl BlobStore for SourceBlobs<'_> {
     }
 }
 
-/// Accepts a napplet's published events into this device's relay **and** the
-/// mesh.
+/// Accepts a napplet's `relay.publish` into the shell's **relay pool**: this
+/// device's own relay, and the internet relays when they are reachable.
 ///
-/// Routes through the [`RelayHub`](crate::mesh_relay::RelayHub) rather than the
-/// store, so a napplet's event takes the same path as one arriving on a socket:
-/// deduplicated, stored, pushed to this device's live subscriptions, and handed
-/// to the gossiper for fan-out to the Circle. Publishing to the store instead
-/// would leave the event signed, saved and invisible — nothing on this phone
-/// would redraw, and no peer would ever hear it.
+/// Not the mesh. NAP-RELAY says relays, and the Circle flood is NAP-MESH's,
+/// with a hop budget the user caps — a `relay` grant must not be a back door
+/// to it. So the event is accepted **unforwarded**: stored, shown to this
+/// phone's live subscriptions (the WebView's, other napplets'), and handed to
+/// no gossiper.
+///
+/// The internet half is spawned and best-effort. A public relay is seconds
+/// away on a good day and unreachable on the day this app is for, and the
+/// napplet's result must not wait on either: NAP-RELAY asks for the signed
+/// event back, not a per-relay tally (that is NAP-OUTBOX). `internet` is
+/// asked per publish so "offline only" is obeyed at once.
 ///
 /// Falls back to storing when no hub is up. That is the host-build and
 /// pre-start case, not a silent downgrade in the field: on a phone the hub is
 /// stood up with the content layer, before any napplet can open.
-pub struct MeshEventSink {
+pub struct RelayPoolSink {
     hub: Arc<Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
     store: Arc<dyn RelayBackend>,
+    /// The internet relays to fan out to right now; empty when offline-only.
+    internet: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
 }
 
-impl MeshEventSink {
+/// How long one internet relay gets to say `OK` before the fan-out moves on.
+const INTERNET_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl RelayPoolSink {
     pub fn new(
         hub: Arc<Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
         store: Arc<dyn RelayBackend>,
+        internet: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
     ) -> Self {
-        Self { hub, store }
+        Self {
+            hub,
+            store,
+            internet,
+        }
+    }
+
+    /// Push `event` to every relay in the pool, in parallel, each bounded.
+    /// Logged, not returned: nothing is waiting on the answer.
+    async fn fan_out(relays: Vec<String>, event: nostr::Event) {
+        let id = event.id.to_hex();
+        let sends = relays.into_iter().map(|url| {
+            let event = event.clone();
+            async move {
+                let outcome = tokio::time::timeout(
+                    INTERNET_PUBLISH_TIMEOUT,
+                    crate::ip_source::publish_to_relay(&url, &event),
+                )
+                .await;
+                (url, outcome)
+            }
+        });
+        let mut accepted = 0usize;
+        let mut total = 0usize;
+        for (url, outcome) in futures_util::future::join_all(sends).await {
+            total += 1;
+            match outcome {
+                Ok(Ok(true)) => accepted += 1,
+                Ok(Ok(false)) => {}
+                Ok(Err(e)) => tracing::debug!(url, error = %e, "relay publish failed"),
+                Err(_) => tracing::debug!(url, "relay publish timed out"),
+            }
+        }
+        tracing::info!(event = %id, accepted, total, "napplet publish reached the internet pool");
     }
 }
 
 #[async_trait::async_trait]
-impl myco_napplet_runtime::seams::EventSink for MeshEventSink {
+impl myco_napplet_runtime::seams::EventSink for RelayPoolSink {
     async fn accept(&self, event: nostr::Event) -> anyhow::Result<()> {
         // Cloned out rather than held: the lock must not span the await.
         let hub = self.hub.lock().unwrap().clone();
-        match hub {
-            Some(hub) => {
-                hub.accept_local(event).await?;
-                Ok(())
+        let first_sighting = match hub {
+            Some(hub) => hub.accept_unforwarded(event.clone()).await?,
+            None => {
+                self.store.publish(event.clone()).await?;
+                true
             }
-            None => self.store.publish(event).await,
+        };
+        // A repeat was already sent on the first sighting; a relay that has
+        // it answers a duplicate with the same OK and nothing is gained.
+        if !first_sighting {
+            return Ok(());
         }
+        let relays = (self.internet)();
+        if !relays.is_empty() {
+            tokio::spawn(Self::fan_out(relays, event));
+        }
+        Ok(())
     }
 }
 
@@ -609,7 +663,7 @@ impl myco_napplet_runtime::seams::MeshSink for NappletMeshSink {
             let events = content.pull_from_peers(filters, meta, None).await;
             let mut fresh = 0usize;
             for event in events {
-                match hub.accept_pulled(event).await {
+                match hub.accept_unforwarded(event).await {
                     Ok(true) => fresh += 1,
                     Ok(false) => {}
                     Err(e) => tracing::debug!(error = %e, "napplet mesh pull: could not store"),
@@ -1011,6 +1065,99 @@ mod tests {
     /// Two windows on one napplet are two sessions. Neither handshake
     /// establishes the other, or closing one window would silently disarm the
     /// other's session.
+    /// NAP-RELAY: a relay publish goes to the relay pool, not the Circle. The
+    /// event is stored, this phone's live subscriptions hear it, and the
+    /// gossiper is never handed it — a `relay` grant is not a back door to
+    /// the mesh flood that NAP-MESH gates behind the user's cap.
+    #[tokio::test]
+    async fn a_relay_publish_is_stored_and_shown_here_but_never_flooded() {
+        use crate::mesh_relay::{Gossiper, Inbound, RelayHub};
+        use myco_napplet_runtime::seams::EventSink;
+
+        struct Count(std::sync::Mutex<usize>);
+        #[async_trait::async_trait]
+        impl Gossiper for Count {
+            async fn on_event(&self, _event: nostr::Event, _inbound: Inbound) {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+
+        let store: Arc<dyn RelayBackend> = Arc::new(MemRelay::new());
+        let count = Arc::new(Count(std::sync::Mutex::new(0)));
+        let hub = RelayHub::new(store.clone(), Some(count.clone()));
+        let mut live = hub.live_events();
+        let sink = RelayPoolSink::new(
+            Arc::new(Mutex::new(Some(hub))),
+            store.clone(),
+            Arc::new(Vec::new),
+        );
+
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::text_note("to my relays")
+            .sign_with_keys(&keys)
+            .unwrap();
+        sink.accept(event.clone()).await.unwrap();
+
+        assert_eq!(live.recv().await.unwrap().id, event.id);
+        assert_eq!(
+            store
+                .query(&[nostr::Filter::new().id(event.id)])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            *count.0.lock().unwrap(),
+            0,
+            "a relay publish reached the gossiper"
+        );
+    }
+
+    /// The internet half of the pool: the event reaches a relay over plain
+    /// NIP-01, after the napplet already has its answer.
+    #[tokio::test]
+    async fn a_relay_publish_fans_out_to_the_internet_pool() {
+        use myco_napplet_runtime::seams::EventSink;
+
+        let remote = Arc::new(myco_relay::RelayStore::in_memory());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(crate::mesh_relay::serve_on(remote.clone(), listener));
+
+        let sink = RelayPoolSink::new(
+            Arc::new(Mutex::new(None)),
+            Arc::new(MemRelay::new()),
+            Arc::new(move || vec![url.clone()]),
+        );
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::text_note("hello internet")
+            .sign_with_keys(&keys)
+            .unwrap();
+        sink.accept(event.clone()).await.unwrap();
+
+        let arrived = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if remote.count() == 1 {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(arrived, "the event never reached the relay");
+
+        // An unreachable relay is a log line, not an error the napplet sees.
+        let dead = RelayPoolSink::new(
+            Arc::new(Mutex::new(None)),
+            Arc::new(MemRelay::new()),
+            Arc::new(|| vec!["ws://127.0.0.1:1".to_string()]),
+        );
+        dead.accept(event).await.unwrap();
+    }
+
     #[tokio::test]
     async fn two_windows_are_two_independent_sessions() {
         let (host, addr) = host_with_fixture().await;

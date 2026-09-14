@@ -139,7 +139,8 @@ async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
     };
 
     // Accepted, not merely stored: this is what wakes local subscriptions and
-    // hands the event to the mesh.
+    // hands the event to the relay pool. The pool, not the mesh — flooding the
+    // Circle is NAP-MESH's, behind its own grant and the user's hop cap.
     if let Err(e) = ctx.sink.accept(signed.clone()).await {
         return failed(message, format!("could not publish: {e}"));
     }
@@ -495,8 +496,8 @@ mod tests {
     }
 
     /// A published event must be *handed on*, not only written. Storing alone
-    /// leaves it invisible: nothing on this device redraws, and no peer ever
-    /// hears it — which is exactly how a doorbell that rings nowhere looks.
+    /// leaves it invisible: nothing on this device redraws, and no relay ever
+    /// hears it — which is exactly how a note that posts nowhere looks.
     #[tokio::test]
     async fn a_published_event_reaches_the_sink() {
         use crate::testing::RecordingSink;

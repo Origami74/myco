@@ -388,6 +388,50 @@ pub(crate) fn random_bytes(n: usize) -> Vec<u8> {
     out
 }
 
+/// Publish one signed event to one relay: connect, send `EVENT`, wait for the
+/// relay's `OK`, close. `Ok(true)` means accepted, `Ok(false)` means the relay
+/// said no (the message is logged), `Err` means it never answered. Bound the
+/// whole call with a timeout at the call site — a dead relay must not hold a
+/// fan-out task open.
+///
+/// One-shot on purpose: the internet pool is written to rarely (a napplet's
+/// publish) and read from through [`query_relay`], so a held-open socket per
+/// public relay would cost more than it saves. The custom-relay backend
+/// (`remote_backend.rs`) keeps one open because the gateway hits it per page.
+pub async fn publish_to_relay(url: &str, event: &Event) -> anyhow::Result<bool> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await?;
+    let frame = serde_json::json!(["EVENT", event]);
+    ws.send(Message::Text(frame.to_string())).await?;
+
+    let wanted = event.id.to_hex();
+    let mut verdict: anyhow::Result<bool> = Err(anyhow::anyhow!("relay closed without an OK"));
+    while let Some(msg) = ws.next().await {
+        match msg {
+            Ok(Message::Text(txt)) => {
+                let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) else {
+                    continue;
+                };
+                if val.get(0).and_then(|v| v.as_str()) != Some("OK")
+                    || val.get(1).and_then(|v| v.as_str()) != Some(wanted.as_str())
+                {
+                    continue; // NOTICE, AUTH, an OK for something else
+                }
+                let accepted = val.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
+                if !accepted {
+                    let why = val.get(3).and_then(|v| v.as_str()).unwrap_or("");
+                    tracing::debug!(url, event = %wanted, why, "relay refused the event");
+                }
+                verdict = Ok(accepted);
+                break;
+            }
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(_) => {} // ping/pong/binary
+        }
+    }
+    let _ = ws.send(Message::Close(None)).await;
+    verdict
+}
+
 /// Query one relay for a single filter, collecting events until EOSE. The whole
 /// call (connect + REQ + read) is hard-bounded by a `timeout` at the call site,
 /// so a dead relay can't hang the sync on a slow TCP/TLS connect.

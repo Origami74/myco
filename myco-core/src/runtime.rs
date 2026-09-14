@@ -1541,9 +1541,17 @@ impl AppRuntime {
                 tracing::info!("generated a user key for napplets: {}", user.guest_name());
             }
 
-            let sink = Arc::new(crate::napplet::MeshEventSink::new(
+            let pool_content = content.clone();
+            let sink = Arc::new(crate::napplet::RelayPoolSink::new(
                 self.relay_hub.clone(),
                 content.relay(),
+                Arc::new(move || {
+                    if pool_content.is_offline_only() {
+                        Vec::new()
+                    } else {
+                        crate::ip_source::default_relays()
+                    }
+                }),
             ));
 
             let mesh = Arc::new(crate::napplet::NappletMeshSink::new(

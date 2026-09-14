@@ -69,13 +69,19 @@ pub trait OutboxResolver: Send + Sync {
     async fn read_lanes(&self, author: &PublicKey) -> anyhow::Result<Vec<RelayLane>>;
 }
 
-/// Where a napplet's published events go.
+/// Where a napplet's `relay.publish` goes: the shell's **relay pool**.
 ///
 /// Separate from [`RelayBackend`] because storing and *accepting* are different
 /// acts. A store is where an event rests; accepting is what also wakes this
-/// device's live subscriptions and hands the event to whatever carries it to
-/// other people. A napplet that only stored would have its event signed, saved,
-/// and invisible — nothing would redraw here and no peer would ever hear it.
+/// device's live subscriptions and hands the event to the other relays in the
+/// pool. A napplet that only stored would have its event signed, saved, and
+/// invisible — nothing would redraw here and no relay would ever hear it.
+///
+/// Relays, not the mesh. NAP-RELAY says "relay pool"; flooding the people
+/// nearby is [`MeshSink`]'s, behind its own grant and a hop budget the user
+/// caps. An implementation that fanned a relay publish out to the Circle would
+/// hand every `relay`-granted napplet the mesh without the review screen ever
+/// saying so.
 #[async_trait]
 pub trait EventSink: Send + Sync {
     /// Take a signed event and do everything accepting it implies.

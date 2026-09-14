@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A napplet's `relay.publish` now goes where NAP-RELAY says — the relay pool:
+  this phone's own relay, and the public relays when reachable — and no
+  longer floods the mesh. Reaching the people nearby is the new `mesh`
+  capability, which the install screen asks about separately.
 - Wi-Fi Aware carries several phones at once instead of one. The lane ran a
   single UDP socket, and Android lets a socket serve only one Wi-Fi Aware
   connection, so a second phone's link came up and then went quiet — the

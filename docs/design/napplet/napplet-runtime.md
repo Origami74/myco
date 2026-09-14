@@ -399,9 +399,12 @@ vendored `@napplet/shim` filters unknown domains, so `assets/myco-prelude.js` in
 `window.napplet.mesh` — and `window.napplet.shell`, which the vendored build also lacks —
 after it.
 
-Still open, and deferred to the inbox/outbox work: `relay.publish` today floods the mesh at
-the default budget (§7.4). With `mesh` in place it should become spec-conformant — relays
-only — so the two domains mean what they say.
+With `mesh` in place, `relay.publish` means what NAP-RELAY says: the shell's relay pool —
+this device's own relay (so its live subscriptions hear it) plus the internet relays when
+reachable, best-effort and off the napplet's result — and never the Circle flood. The two
+domains now say what they mean, and a `relay` grant is no longer a back door to the mesh.
+`RelayPoolSink` in `myco-core/src/napplet.rs`. Outbox-model relay selection (NIP-65) is
+NAP-OUTBOX's and still to come; until then the pool is the default relay set.
 
 ---
 
