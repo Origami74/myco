@@ -44,6 +44,17 @@ data class SiteStatus(
  * Carries what the napplet *asked for*, never what it was given — a grant
  * exists only once the user answers.
  */
+/**
+ * The user's caps on NAP-MESH: the most hops a napplet's mesh publish and
+ * mesh subscribe may ask for. `0` means this phone only.
+ */
+data class NappletMeshReach(
+    val publishTtl: Int = 3,
+    val publishMax: Int = 3,
+    val subscribeTtl: Int = 2,
+    val subscribeMax: Int = 2,
+)
+
 data class NappletReview(
     val pointer: String,
     /** The fetch is still running; the sheet shows progress rather than a question. */
@@ -294,6 +305,8 @@ data class AppState(
     val library: List<LibraryItem>,
     /** A fetched napplet awaiting install review, or null. */
     val nappletReview: NappletReview? = null,
+    /** How far napplets may reach over the mesh (NAP-MESH), and the most each cap may be. */
+    val nappletMeshReach: NappletMeshReach = NappletMeshReach(),
     val cache: CacheStatus,
     val circle: List<CircleContact>,
     /** Circle members with a live mesh relay connection right now — reachable
@@ -621,6 +634,14 @@ data class AppState(
                 sites = sites,
                 library = library,
                 nappletReview = nappletReview,
+                nappletMeshReach = o.optJSONObject("nappletMeshReach")?.let { r ->
+                    NappletMeshReach(
+                        publishTtl = r.optInt("publishTtl", 3),
+                        publishMax = r.optInt("publishMax", 3),
+                        subscribeTtl = r.optInt("subscribeTtl", 2),
+                        subscribeMax = r.optInt("subscribeMax", 2),
+                    )
+                } ?: NappletMeshReach(),
                 cache = cache,
                 circle = circle,
                 reachableNpubs = buildSet {
@@ -892,6 +913,17 @@ object NativeActions {
     }
 
     /** Unpin a napplet and drop its grants. */
+    /**
+     * Cap how far napplets reach over the mesh: the most hops a `mesh.publish`
+     * and a `mesh.subscribe` backlog pull may ask for. Live at once — the next
+     * call a napplet makes sees it.
+     */
+    fun setNappletMeshReach(publishTtl: Int, subscribeTtl: Int): JSONObject =
+        JSONObject()
+            .put("type", "set_napplet_mesh_reach")
+            .put("publishTtl", publishTtl)
+            .put("subscribeTtl", subscribeTtl)
+
     fun forgetNapplet(pointer: String): JSONObject =
         JSONObject().put("type", "forget_napplet").put("pointer", pointer)
 

@@ -738,6 +738,7 @@ private fun NappletReviewSheet(
  */
 private fun capabilityWording(domain: String): String = when (domain) {
     "relay" -> "Read and post as you, whenever it likes, without asking again"
+    "mesh" -> "Send messages as you to everyone nearby on the mesh, and read theirs, without asking again"
     "identity" -> "See your name and profile"
     "storage" -> "Save things on this phone"
     "intent" -> "Open your other apps"
