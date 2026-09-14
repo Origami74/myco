@@ -32,3 +32,19 @@ branch: feat/multi-path-peer-view
 - 182b9442 feat(core): surface every fips path per peer
 - 807778fc feat(ui): show every path per peer in the mesh status sheet
 - fd6cc4c5 feat(settings): Network switch for the LAN mDNS browse and advert
+
+## Follow-ups on the same branch (from on-device testing, 2026-09-13/14)
+
+- d8172fd fix(ui): fade the whole peer row on a standby lane instead of icons
+- f53e83c feat(dev): per-path selection numbers on the Dev tab
+- 93505ca fix(core): make BLE a backup path (`role: backup`) so Aware/LAN carry traffic
+- 08eddce fix(ap): re-resolve LAN peers; space dials past the handshake timeout
+- a1b46be fix(vpn): restart the mesh tunnel after the VPN slot comes back
+- 3fe65d2 / c8536c3 fix(ble): dial peers Aware carries on a multi-path core; keep
+  the coexistence gate on a single-path core (`multipath_core` in AppState)
+- 9399585 build: `fips-multipath` Cargo feature, auto-detected by Gradle from
+  `MYCO_FIPS_REPO_PATH`; the branch builds for Android against fips master too
+
+fips-side fixes found along the way live in the fips repo:
+`fix/ble-link-arbitration` (off master) and the rebased
+`feat/multi-path-switchover` (two `fix(path)` commits on top).

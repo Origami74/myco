@@ -36,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needing a shared Wi-Fi.
 ### Fixed
 
+- The mesh tunnel comes back on its own after another VPN app takes the
+  slot and gives it up again. Peers stayed linked over the radios, so the
+  mesh looked healthy while nothing could reach anyone; Settings now says
+  "Mesh tunnel is down" with a tap to fix, and reopening Myco fixes it too.
+- Peers on the same Wi-Fi are found even when Android's first mDNS answer
+  carried only IPv6 link-local addresses: the app re-resolves a peer it
+  cannot reach, and never dials two addresses of one peer inside the
+  handshake timeout (the second was silently refused).
 - Inviting someone from Nearby no longer labels them with your own device
   name. The tap recorded your name against their npub, so the "invite sent"
   pop-up — and their bubble everywhere else — read back as you. The invite now
