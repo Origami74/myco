@@ -12,6 +12,13 @@
 //! conformant runtime's; hand-writing one would mean re-deriving their
 //! interface on every registry change.
 //!
+//! Two things the vendored build does not carry are supplied by Myco's own
+//! supplement (`assets/myco-prelude.js`), installed right after it: the
+//! napplet-side half of NAP-SHELL (`shell.supports()` and `shell.services`,
+//! which the vendored shim has no `shell` domain for), and NAP-MESH, which the
+//! vendored installer filters out because it is not in the upstream registry.
+//! The supplement takes the same domain list, so the two cannot disagree.
+//!
 //! ## Every API is injected, always
 //!
 //! [`render`] installs everything this build implements, regardless of what the
@@ -37,6 +44,12 @@ const PRELUDE_IIFE: &str = include_str!("../assets/vendor/napplet-shim-prelude.g
 /// The global the vendored IIFE defines.
 pub const PRELUDE_GLOBAL: &str = "NappletShimPrelude";
 
+/// Myco's supplement: NAP-SHELL's napplet side, and NAP-MESH.
+const SUPPLEMENT_IIFE: &str = include_str!("../assets/myco-prelude.js");
+
+/// The global the supplement defines.
+pub const SUPPLEMENT_GLOBAL: &str = "MycoPrelude";
+
 /// Render the prelude for a set of domains: the vendored installer, the call
 /// that activates it, and the readiness signal.
 ///
@@ -58,11 +71,16 @@ pub const PRELUDE_GLOBAL: &str = "NappletShimPrelude";
 ///
 /// A duplicate is harmless — NAP-SHELL requires a second `shell.ready` be
 /// idempotent — so a shim that starts sending its own costs nothing.
+///
+/// The supplement is installed between the two, for the same reason: its
+/// `shell.init` listener must be live before `shell.ready` invites the reply.
 pub fn render(domains: &[String]) -> String {
     let allowlist = serde_json::json!({ "domains": domains });
     format!(
         "{PRELUDE_IIFE}\n\
          {PRELUDE_GLOBAL}.install({allowlist});\n\
+         {SUPPLEMENT_IIFE}\n\
+         {SUPPLEMENT_GLOBAL}.install({allowlist});\n\
          parent.postMessage({{ type: \"shell.ready\" }}, \"*\");\n",
         allowlist = allowlist
     )
@@ -108,6 +126,44 @@ mod tests {
         let define = out.find(&format!("var {PRELUDE_GLOBAL}")).unwrap();
         assert!(define < install, "activated before the global is defined");
         assert!(out.trim_end().ends_with(");"));
+    }
+
+    /// The supplement is defined, then activated with the *same* allowlist,
+    /// after the vendored installer has put `window.napplet` in place and
+    /// before readiness is signalled — its `shell.init` listener has to be
+    /// live before the reply it invites.
+    #[test]
+    fn the_supplement_runs_after_the_vendored_installer_and_before_ready() {
+        let out = render(&["mesh".to_string(), "shell".to_string()]);
+        let vendored = out.rfind(&format!("{PRELUDE_GLOBAL}.install(")).unwrap();
+        let define = out.find(&format!("var {SUPPLEMENT_GLOBAL}")).unwrap();
+        let supplement = out
+            .rfind(&format!(
+                "{SUPPLEMENT_GLOBAL}.install({{\"domains\":[\"mesh\",\"shell\"]}})"
+            ))
+            .unwrap();
+        let ready = out.rfind("shell.ready").unwrap();
+        assert!(vendored < define && define < supplement && supplement < ready);
+    }
+
+    /// What the supplement is for: the two namespaces the vendored build lacks.
+    #[test]
+    fn the_supplement_installs_shell_and_mesh() {
+        assert!(SUPPLEMENT_IIFE.contains("installShell("));
+        assert!(SUPPLEMENT_IIFE.contains("installMesh("));
+        assert!(SUPPLEMENT_IIFE.contains(r#"domains.has("mesh")"#));
+        for wire in ["mesh.info", "mesh.publish", "mesh.subscribe", "mesh.close"] {
+            assert!(
+                SUPPLEMENT_IIFE.contains(&format!(r#"type: "{wire}""#)),
+                "the supplement never sends {wire}"
+            );
+        }
+        for push in ["mesh.event", "mesh.eose", "mesh.closed", "shell.init"] {
+            assert!(
+                SUPPLEMENT_IIFE.contains(&format!(r#""{push}""#)),
+                "the supplement never routes {push}"
+            );
+        }
     }
 
     /// Every implemented API is installed, whether or not it was granted.
