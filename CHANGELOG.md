@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slot and gives it up again. Peers stayed linked over the radios, so the
   mesh looked healthy while nothing could reach anyone; Settings now says
   "Mesh tunnel is down" with a tap to fix, and reopening Myco fixes it too.
+- Wi-Fi Aware no longer retries a failed attach thousands of times a minute
+  while the phone's Wi-Fi stack refuses it, which got the app killed; it backs
+  off from a second to a minute between tries.
 - Peers on the same Wi-Fi are found even when Android's first mDNS answer
   carried only IPv6 link-local addresses: the app re-resolves a peer it
   cannot reach, and never dials two addresses of one peer inside the
