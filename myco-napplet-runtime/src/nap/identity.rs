@@ -128,7 +128,14 @@ mod tests {
         let ctx = NapContext {
             signer: Arc::new(AbsentSigner),
             relay: relay.clone(),
-            sink: Arc::new(crate::seams::StoreOnlySink(relay)),
+            sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
+            mesh: Arc::new(crate::testing::MemMesh::new(
+                relay,
+                crate::seams::MeshLimits {
+                    publish_ttl: 3,
+                    subscribe_ttl: 2,
+                },
+            )),
         };
         let reply = call(&ctx, "getPublicKey").await;
         assert_eq!(reply.field("publicKey").unwrap().as_str().unwrap(), "");
@@ -147,7 +154,14 @@ mod tests {
         let ctx = NapContext {
             signer: Arc::new(TestSigner::with_keys(keys)),
             relay: relay.clone(),
-            sink: Arc::new(crate::seams::StoreOnlySink(relay)),
+            sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
+            mesh: Arc::new(crate::testing::MemMesh::new(
+                relay,
+                crate::seams::MeshLimits {
+                    publish_ttl: 3,
+                    subscribe_ttl: 2,
+                },
+            )),
         };
         let reply = call(&ctx, "getProfile").await;
         assert_eq!(reply.field("profile").unwrap()["name"], "Myco Guest 01234");
@@ -175,7 +189,14 @@ mod tests {
         let ctx = NapContext {
             signer: Arc::new(TestSigner::with_keys(keys)),
             relay: relay.clone(),
-            sink: Arc::new(crate::seams::StoreOnlySink(relay)),
+            sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
+            mesh: Arc::new(crate::testing::MemMesh::new(
+                relay,
+                crate::seams::MeshLimits {
+                    publish_ttl: 3,
+                    subscribe_ttl: 2,
+                },
+            )),
         };
         assert!(call(&ctx, "getProfile")
             .await

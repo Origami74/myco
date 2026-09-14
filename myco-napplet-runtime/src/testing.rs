@@ -320,15 +320,100 @@ impl crate::seams::Signer for AbsentSigner {
 
 /// A context over in-memory seams, for driving capabilities in tests.
 pub fn test_context() -> (crate::dispatch::NapContext, std::sync::Arc<TestSigner>) {
+    let (ctx, _mesh, signer) = test_context_with_mesh(crate::seams::MeshLimits {
+        publish_ttl: 3,
+        subscribe_ttl: 2,
+    });
+    (ctx, signer)
+}
+
+/// As [`test_context`], with the [`MemMesh`] handed back so a test can assert
+/// what reached the mesh, and with the user's caps set to `limits`.
+pub fn test_context_with_mesh(
+    limits: crate::seams::MeshLimits,
+) -> (
+    crate::dispatch::NapContext,
+    std::sync::Arc<MemMesh>,
+    std::sync::Arc<TestSigner>,
+) {
     let signer = std::sync::Arc::new(TestSigner::new());
     let relay: std::sync::Arc<dyn crate::seams::RelayBackend> =
         std::sync::Arc::new(nsite_deck::testing::MemRelay::new());
+    let mesh = std::sync::Arc::new(MemMesh::new(relay.clone(), limits));
     let ctx = crate::dispatch::NapContext {
         signer: signer.clone(),
         relay: relay.clone(),
         sink: std::sync::Arc::new(crate::seams::StoreOnlySink(relay)),
+        mesh: mesh.clone(),
     };
-    (ctx, signer)
+    (ctx, mesh, signer)
+}
+
+/// A [`MeshSink`](crate::seams::MeshSink) with no mesh behind it: stores a
+/// publish locally and records the hop budget it came with, records every
+/// pull, and reports whatever reach a test sets.
+pub struct MemMesh {
+    store: std::sync::Arc<dyn crate::seams::RelayBackend>,
+    limits: std::sync::Mutex<crate::seams::MeshLimits>,
+    reach: std::sync::Mutex<crate::seams::MeshReach>,
+    published: std::sync::Mutex<Vec<(Event, u8)>>,
+    pulled: std::sync::Mutex<Vec<(Vec<serde_json::Value>, u8)>>,
+}
+
+impl MemMesh {
+    pub fn new(
+        store: std::sync::Arc<dyn crate::seams::RelayBackend>,
+        limits: crate::seams::MeshLimits,
+    ) -> Self {
+        Self {
+            store,
+            limits: std::sync::Mutex::new(limits),
+            reach: std::sync::Mutex::new(crate::seams::MeshReach::default()),
+            published: std::sync::Mutex::new(Vec::new()),
+            pulled: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Every event published, with the hop budget it was given.
+    pub fn published(&self) -> Vec<(Event, u8)> {
+        self.published.lock().unwrap().clone()
+    }
+
+    /// Every pull requested: the raw filters and the hop budget.
+    pub fn pulled(&self) -> Vec<(Vec<serde_json::Value>, u8)> {
+        self.pulled.lock().unwrap().clone()
+    }
+
+    /// Change the caps under a running context, as a settings change would.
+    pub fn set_limits(&self, limits: crate::seams::MeshLimits) {
+        *self.limits.lock().unwrap() = limits;
+    }
+
+    pub fn set_reach(&self, online: bool, peers: usize) {
+        *self.reach.lock().unwrap() = crate::seams::MeshReach { online, peers };
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::seams::MeshSink for MemMesh {
+    async fn limits(&self) -> crate::seams::MeshLimits {
+        *self.limits.lock().unwrap()
+    }
+
+    async fn reach(&self) -> anyhow::Result<crate::seams::MeshReach> {
+        Ok(*self.reach.lock().unwrap())
+    }
+
+    async fn publish(&self, event: Event, ttl: u8) -> anyhow::Result<()> {
+        self.store.publish(event.clone()).await?;
+        self.published.lock().unwrap().push((event, ttl));
+        Ok(())
+    }
+
+    async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<()> {
+        self.pulled.lock().unwrap().push((filters, ttl));
+        Ok(())
+    }
 }
 
 /// An [`EventSink`](crate::seams::EventSink) that records what it accepted, so

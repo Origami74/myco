@@ -21,7 +21,7 @@ use nostr::{Event, Filter};
 /// this with what the user granted — a grant for a domain that does not exist
 /// yet must not be advertised, or `shell.supports()` lies and the napplet takes
 /// a branch that cannot work.
-pub const IMPLEMENTED_DOMAINS: &[&str] = &["shell", "identity", "relay"];
+pub const IMPLEMENTED_DOMAINS: &[&str] = &["shell", "identity", "relay", "mesh"];
 
 /// Domains every napplet gets, grant or no grant.
 ///
@@ -82,13 +82,18 @@ pub struct Session {
     /// deliberately narrow set.
     implemented: BTreeSet<String>,
     established: bool,
-    /// Live subscriptions: `subId` to the filters it asked for.
+    /// Live subscriptions: `(domain, subId)` to the filters it asked for.
     ///
     /// Without this a subscription is a query wearing a subscription's name —
     /// it answers with what is already stored and then nothing arriving later
     /// has anywhere to be delivered, however well the rest of the system
     /// carries it.
-    subscriptions: BTreeMap<String, Vec<Filter>>,
+    ///
+    /// Keyed by domain as well as id because `relay` and `mesh` subscriptions
+    /// are delivered as different message types and gated on different grants,
+    /// and a napplet may reuse a `subId` across the two — the spec scopes ids
+    /// per domain, not per session.
+    subscriptions: BTreeMap<(String, String), Vec<Filter>>,
 }
 
 impl Session {
@@ -173,15 +178,33 @@ impl Session {
         self.established && self.offers(domain) && self.is_granted(domain)
     }
 
-    /// Register a live subscription, replacing any with the same `subId`.
+    /// Register a live `relay` subscription, replacing any with the same `subId`.
     pub fn subscribe(&mut self, sub_id: impl Into<String>, filters: Vec<Filter>) {
-        self.subscriptions.insert(sub_id.into(), filters);
+        self.subscribe_in("relay", sub_id, filters);
     }
 
-    /// Drop a subscription. Unknown ids are ignored: a napplet closing twice,
-    /// or closing after teardown, is not an error worth reporting.
+    /// Register a live subscription in `domain`, replacing any with the same
+    /// `subId` in that domain.
+    pub fn subscribe_in(
+        &mut self,
+        domain: impl Into<String>,
+        sub_id: impl Into<String>,
+        filters: Vec<Filter>,
+    ) {
+        self.subscriptions
+            .insert((domain.into(), sub_id.into()), filters);
+    }
+
+    /// Drop a `relay` subscription. Unknown ids are ignored: a napplet closing
+    /// twice, or closing after teardown, is not an error worth reporting.
     pub fn unsubscribe(&mut self, sub_id: &str) {
-        self.subscriptions.remove(sub_id);
+        self.unsubscribe_in("relay", sub_id);
+    }
+
+    /// Drop a subscription in `domain`. Unknown ids are ignored.
+    pub fn unsubscribe_in(&mut self, domain: &str, sub_id: &str) {
+        self.subscriptions
+            .remove(&(domain.to_string(), sub_id.to_string()));
     }
 
     /// How many subscriptions are live — for state reporting and tests.
@@ -189,24 +212,31 @@ impl Session {
         self.subscriptions.len()
     }
 
-    /// The `subId`s whose filters match `event`.
+    /// The `relay` `subId`s whose filters match `event`.
     ///
     /// Returns nothing unless the session is established and still granted
     /// `relay`: a subscription registered before a grant was revoked must stop
     /// delivering, and the check belongs here rather than at each caller, where
     /// forgetting it would leak events to a napplet that may no longer read.
     pub fn matching_subscriptions(&self, event: &Event) -> Vec<String> {
-        if !self.may_service("relay") {
+        self.matching_subscriptions_in("relay", event)
+    }
+
+    /// The `subId`s in `domain` whose filters match `event`, subject to the
+    /// same grant check as [`Session::matching_subscriptions`] — for `domain`.
+    pub fn matching_subscriptions_in(&self, domain: &str, event: &Event) -> Vec<String> {
+        if !self.may_service(domain) {
             return Vec::new();
         }
         self.subscriptions
             .iter()
+            .filter(|((d, _), _)| d == domain)
             .filter(|(_, filters)| {
                 filters
                     .iter()
                     .any(|f| f.match_event(event, nostr::filter::MatchEventOptions::new()))
             })
-            .map(|(sub_id, _)| sub_id.clone())
+            .map(|((_, sub_id), _)| sub_id.clone())
             .collect()
     }
 

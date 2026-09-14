@@ -24,7 +24,7 @@
 //! ```text
 //! manifest.rs  the NIP-5D kinds and the tags they add
 //! resolve.rs   manifest → blobs → verify → renderable artifact
-//! seams.rs     RelayBackend / BlobStore / Signer / OutboxResolver / NapTransport
+//! seams.rs     RelayBackend / BlobStore / Signer / EventSink / MeshSink / NapTransport
 //! error.rs     one error type; every variant is a refusal to render
 //! ```
 //!
@@ -56,12 +56,12 @@ pub use host::{is_shell_host, shell_host, shell_label, shell_origin, SHELL_SUFFI
 pub use manifest::{
     is_napplet_kind, Archetype, NappletManifest, KINDS, KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT,
 };
-pub use nap::relay::deliveries_for;
+pub use nap::deliveries_for;
 pub use prelude::{render_for as render_prelude, PRELUDE_GLOBAL};
 pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
-    BlobStore, Envelope, EventSink, NapTransport, OutboxResolver, RelayBackend, RelayLane, Signer,
-    StoreOnlySink,
+    BlobStore, Envelope, EventSink, MeshLimits, MeshReach, MeshSink, NapTransport, OutboxResolver,
+    RelayBackend, RelayLane, Signer, StoreOnlySink,
 };
 pub use session::{NappletIdentity, Session, IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
 pub use shell_link::{ShellAction, ToRuntime, ToShell};

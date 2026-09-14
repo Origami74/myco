@@ -133,13 +133,44 @@ async fn subscribe(
 
 /// `relay.publish` — sign the napplet's template as the user, and store it.
 async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
+    let signed = match sign_template(ctx, message).await {
+        Ok(event) => event,
+        Err(e) => return failed(message, e),
+    };
+
+    // Accepted, not merely stored: this is what wakes local subscriptions and
+    // hands the event to the mesh.
+    if let Err(e) = ctx.sink.accept(signed.clone()).await {
+        return failed(message, format!("could not publish: {e}"));
+    }
+
+    let id = signed.id.to_hex();
+    tracing::info!(kind = %signed.kind.as_u16(), event = %id, "napplet published");
+    message
+        .to_result()
+        .with_field("ok", true)
+        .with_field("event", event_json(&signed))
+        .with_field("eventId", id)
+}
+
+/// Sign the `event` template on `message` as the user.
+///
+/// Shared with NAP-MESH, whose template is NAP-RELAY's `EventTemplate` by
+/// declared wire dependency — one parser, so the two domains cannot disagree
+/// about what a napplet may and may not set. The rules are the module's:
+/// `kind`, `content` and `tags` are the napplet's; `pubkey`, `created_at`,
+/// `id` and `sig` are the runtime's.
+pub(crate) async fn sign_template(
+    ctx: &NapContext,
+    message: &Envelope,
+) -> Result<nostr::Event, String> {
     let Some(template) = message.field("event").and_then(|v| v.as_object()) else {
-        return failed(message, "publish needs an event template");
+        return Err("publish needs an event template".to_string());
     };
 
     let kind = match template.get("kind").and_then(|v| v.as_u64()) {
         Some(kind) if kind <= u16::MAX as u64 => Kind::from(kind as u16),
-        _ => return failed(message, "the event template needs a kind"),
+        _ => return Err("the event template needs a kind".to_string()),
     };
     let content = template
         .get("content")
@@ -151,51 +182,38 @@ async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
     if let Some(raw) = template.get("tags").and_then(|v| v.as_array()) {
         for entry in raw {
             let Some(parts) = entry.as_array() else {
-                return failed(message, "every tag must be an array of strings");
+                return Err("every tag must be an array of strings".to_string());
             };
             let mut values = Vec::with_capacity(parts.len());
             for part in parts {
                 match part.as_str() {
                     Some(s) => values.push(s.to_string()),
-                    None => return failed(message, "every tag value must be a string"),
+                    None => return Err("every tag value must be a string".to_string()),
                 }
             }
             match Tag::parse(values) {
                 Ok(tag) => tags.push(tag),
-                Err(e) => return failed(message, format!("unusable tag: {e}")),
+                Err(e) => return Err(format!("unusable tag: {e}")),
             }
         }
     }
 
     let Ok(pubkey) = ctx.signer.public_key().await else {
-        return failed(message, "there is no user key on this device yet");
+        return Err("there is no user key on this device yet".to_string());
     };
 
     // The runtime owns author and time; the napplet owns the message.
     let unsigned = UnsignedEvent::new(pubkey, Timestamp::now(), kind, tags, content);
 
-    let signed = match ctx.signer.sign(unsigned).await {
-        Ok(event) => event,
-        Err(e) => return failed(message, format!("could not sign: {e}")),
-    };
+    ctx.signer
+        .sign(unsigned)
+        .await
+        .map_err(|e| format!("could not sign: {e}"))
+}
 
-    // Accepted, not merely stored: this is what wakes local subscriptions and
-    // hands the event to the mesh.
-    if let Err(e) = ctx.sink.accept(signed.clone()).await {
-        return failed(message, format!("could not publish: {e}"));
-    }
-
-    let id = signed.id.to_hex();
-    tracing::info!(kind = %kind.as_u16(), event = %id, "napplet published");
-    message
-        .to_result()
-        .with_field("ok", true)
-        .with_field(
-            "event",
-            serde_json::from_str::<serde_json::Value>(&signed.as_json())
-                .unwrap_or(serde_json::Value::Null),
-        )
-        .with_field("eventId", id)
+/// An event as the JSON a napplet reads.
+pub(crate) fn event_json(event: &nostr::Event) -> serde_json::Value {
+    serde_json::from_str::<serde_json::Value>(&event.as_json()).unwrap_or(serde_json::Value::Null)
 }
 
 /// The `relay.event` frames a session should receive for an arriving event.
@@ -226,11 +244,8 @@ fn failed(message: &Envelope, error: impl Into<String>) -> Envelope {
 }
 
 /// A `RelayEventResult`: the raw event, and no sidecar we can honestly fill in.
-fn result_of(event: &nostr::Event) -> serde_json::Value {
-    serde_json::json!({
-        "event": serde_json::from_str::<serde_json::Value>(&event.as_json())
-            .unwrap_or(serde_json::Value::Null),
-    })
+pub(crate) fn result_of(event: &nostr::Event) -> serde_json::Value {
+    serde_json::json!({ "event": event_json(event) })
 }
 
 /// The `filters` field, as NIP-01 filters.
@@ -238,7 +253,7 @@ fn result_of(event: &nostr::Event) -> serde_json::Value {
 /// Filters come from untrusted code, so an unreadable one is refused rather
 /// than quietly dropped — a napplet that asked for something specific and got
 /// everything, or nothing, would have no way to tell.
-fn filters_from(message: &Envelope) -> Result<Vec<Filter>, String> {
+pub(crate) fn filters_from(message: &Envelope) -> Result<Vec<Filter>, String> {
     let Some(raw) = message.field("filters") else {
         return Err("this call needs filters".to_string());
     };
@@ -493,6 +508,7 @@ mod tests {
             signer: base.signer.clone(),
             relay: base.relay.clone(),
             sink: sink.clone(),
+            mesh: base.mesh.clone(),
         };
 
         call(
@@ -522,6 +538,7 @@ mod tests {
             signer: base.signer.clone(),
             relay: base.relay.clone(),
             sink: sink.clone(),
+            mesh: base.mesh.clone(),
         };
 
         let mut ungranted = Session::new(

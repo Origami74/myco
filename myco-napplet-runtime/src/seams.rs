@@ -14,6 +14,9 @@
 //!   could.
 //! - [`OutboxResolver`] — which relays an event should reach, across the three
 //!   lanes (local, mesh, internet).
+//! - [`MeshSink`] — hop-limited publish and pull over the device's mesh,
+//!   behind NAP-MESH. The runtime never sees a radio or a peer address; it
+//!   hands over an event and a hop budget, and asks for backlog with one.
 //! - [`NapTransport`] — the shell ↔ Rust channel. A seam so that dispatch,
 //!   policy and capabilities never learn whether they are talking over
 //!   `addWebMessageListener`, a `WebMessagePort`, or the desktop harness's
@@ -88,6 +91,80 @@ impl EventSink for StoreOnlySink {
     async fn accept(&self, event: Event) -> anyhow::Result<()> {
         self.0.publish(event).await
     }
+}
+
+/// How far a napplet may reach over the mesh: the hop budgets the user has
+/// capped publishes and subscribes at. See NAP-MESH (`docs/design/napplet/NAP-MESH.md`).
+///
+/// Two numbers rather than one because a flooded read costs more than a
+/// flooded write — every hop answers as well as forwards — so the user is
+/// given a separate, lower default for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeshLimits {
+    /// Most hops a `mesh.publish` may ask for.
+    pub publish_ttl: u8,
+    /// Most hops a `mesh.subscribe` backlog pull may ask for.
+    pub subscribe_ttl: u8,
+}
+
+impl MeshLimits {
+    /// The hop budget a publish actually gets: what was asked, or the cap when
+    /// nothing was, and never more than the cap.
+    pub fn clamp_publish(&self, requested: Option<u8>) -> u8 {
+        requested.unwrap_or(self.publish_ttl).min(self.publish_ttl)
+    }
+
+    /// The hop budget a subscribe pull actually gets, by the same rule.
+    pub fn clamp_subscribe(&self, requested: Option<u8>) -> u8 {
+        requested
+            .unwrap_or(self.subscribe_ttl)
+            .min(self.subscribe_ttl)
+    }
+}
+
+/// Where a napplet's mesh traffic goes — the seam behind NAP-MESH.
+///
+/// Separate from [`EventSink`] because the two mean different things. A relay
+/// publish is "put this on my relays"; a mesh publish is "flood this to the
+/// people around me, this far". The hop budget is the whole difference, and it
+/// is the one thing a napplet may choose here that it may not choose anywhere
+/// else — within the user's cap, which the implementation enforces, not the
+/// napplet.
+#[async_trait]
+pub trait MeshSink: Send + Sync {
+    /// The user's current caps. Read per call, so a changed setting takes
+    /// effect on the next call rather than the next launch.
+    async fn limits(&self) -> MeshLimits;
+
+    /// Whether the mesh is up at all, and how many Circle peers are reachable
+    /// right now. Reported, not promised: a peer can leave between the answer
+    /// and the next publish.
+    async fn reach(&self) -> anyhow::Result<MeshReach>;
+
+    /// Store a signed event locally and flood it to Circle peers with `ttl`
+    /// hops of budget. `0` means store only. The caller has already clamped
+    /// `ttl` to [`MeshSink::limits`]; an implementation may clamp again but
+    /// must never raise it.
+    async fn publish(&self, event: Event, ttl: u8) -> anyhow::Result<()>;
+
+    /// Ask Circle peers, `ttl` hops out, for stored events matching `filters`.
+    /// `0` means ask nobody.
+    ///
+    /// Returns once the request is *under way*, not once peers have answered:
+    /// a peer two hops out may take seconds, and a napplet's other calls must
+    /// not queue behind it. What comes back is accepted into the local relay
+    /// by the implementation, which is what delivers it to the napplet's live
+    /// subscription — the same path a freshly published event takes.
+    async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<()>;
+}
+
+/// What [`MeshSink::reach`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MeshReach {
+    /// The mesh node is running.
+    pub online: bool,
+    /// Circle peers reachable right now.
+    pub peers: usize,
 }
 
 /// One message across the shell ↔ Rust channel: a capability call, its result,
