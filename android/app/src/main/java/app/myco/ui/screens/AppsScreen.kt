@@ -806,7 +806,6 @@ private fun AppSheet(
         Spacer(Modifier.height(16.dp))
         SheetAction(Icons.Filled.HomeMax, "Open") { onOpen() }
         SheetAction(Icons.Filled.Share, "Share") { onShare() }
-        SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
         if (site.state == "ready") {
             SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
         }
