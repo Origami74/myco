@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-02)
 Phase: 1 of 5 (Make Peering Observable)
 Plan: 0 of 2 in current phase
 Status: Ready to execute
-Last activity: 2026-08-04 — Roadmap created for Milestone A (24 v1 requirements across 5 phases)
+Last activity: 2026-09-14 — Completed quick task 260914-o2p: remove duplicated "Add to Home screen" action in nsite AppSheet
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -91,6 +91,7 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 | 260819-nn0 | Napplet runtime design doc: NIP-5D runtime inside Myco, promoted from working notes into `docs/design/` | 2026-08-19 | `next` | `.planning/quick/260819-nn0-promote-napplet-runtime-design-doc/SUMMARY.md` |
 | 260819-nti | Design docs grouped by area: `core/`, `nsite/`, `napplet/`, `fips/`, with every inbound link rewritten | 2026-08-19 | `next` | `.planning/quick/260819-nti-design-docs-by-area/SUMMARY.md` |
 | 260913-hyr | Status sheet shows every fips multi-path link per peer (active lit, standbys faded), unnamed peers by short npub; Settings "Network" switch for LAN mDNS discovery | 2026-09-13 | `feat/multi-path-peer-view` | `.planning/quick/260913-hyr-multi-path-peer-view-and-lan-discovery-t/SUMMARY.md` |
+| 260914-o2p | Nsite long-press sheet listed "Add to Home screen" twice (unconditional copy from 3c9d0cd above the `ready` guard); one-line delete | 2026-09-14 | `feat/napplet-runtime` | `.planning/quick/260914-o2p-remove-duplicated-add-to-home-screen-act/260914-o2p-SUMMARY.md` |
 
 ## Deferred Items
 
