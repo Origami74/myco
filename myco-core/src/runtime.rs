@@ -625,6 +625,9 @@ impl AppRuntime {
     /// the Wi-Fi Aware bulk lane's data plane (docs/design/wifi-aware-interop.md).
     /// Deliberately not Android-gated: the identical UDP path is the lane's
     /// dev/test stand-in on a plain LAN.
+    // `aware_slots` sizes the Aware UDP instance pool, which only the Android
+    // node configures; the host build takes the parameter and leaves it.
+    #[cfg_attr(not(target_os = "android"), allow(unused_variables))]
     fn build_node(data_dir: &str, wifi_aware: bool, aware_slots: u8) -> anyhow::Result<fips::Node> {
         let nsec = identity_store::load_or_generate(Path::new(data_dir))?;
         let mut config = fips::Config::new();
@@ -1098,7 +1101,6 @@ impl AppRuntime {
                 match result {
                     Ok((up, down)) => {
                         any_ok = true;
-                        last_err = None;
                         tracing::info!(
                             peer = %npub, size, up_mbps = up, down_mbps = down,
                             elapsed_ms = elapsed.as_millis() as u64, "speedtest: run ok"

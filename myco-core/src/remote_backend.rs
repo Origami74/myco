@@ -216,7 +216,7 @@ async fn run(
                 Some(Command::Publish { event, reply }) => {
                     let id = event.id.to_hex();
                     let frame = serde_json::json!(["EVENT", *event]).to_string();
-                    if sink.send(Message::Text(frame.into())).await.is_err() {
+                    if sink.send(Message::Text(frame)).await.is_err() {
                         let _ = reply.send(false);
                         break "write failed (publish)";
                     }
@@ -229,7 +229,7 @@ async fn run(
                         vec![serde_json::Value::from("REQ"), sub_id.clone().into()];
                     req.extend(filters.iter().filter_map(|f| serde_json::to_value(f).ok()));
                     let frame = serde_json::Value::Array(req).to_string();
-                    if sink.send(Message::Text(frame.into())).await.is_err() {
+                    if sink.send(Message::Text(frame)).await.is_err() {
                         let _ = reply.send(Vec::new());
                         break "write failed (query)";
                     }
@@ -242,7 +242,7 @@ async fn run(
                         // Close the satisfied subscription so it does not linger
                         // on the relay's side.
                         let close = serde_json::json!(["CLOSE", done]).to_string();
-                        if sink.send(Message::Text(close.into())).await.is_err() {
+                        if sink.send(Message::Text(close)).await.is_err() {
                             break "write failed (close)";
                         }
                     }
@@ -260,7 +260,7 @@ async fn run(
                 None => break "closed by relay",
             },
             _ = ping.tick() => {
-                if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                if sink.send(Message::Ping(Vec::new())).await.is_err() {
                     break "write failed (ping)";
                 }
             }

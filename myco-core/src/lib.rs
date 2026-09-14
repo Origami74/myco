@@ -61,6 +61,7 @@ mod settings_store;
 // host; the Android JNI bridge is its only real caller.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod advert_names;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod lane_observation;
 mod peer_diagnostics;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
