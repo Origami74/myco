@@ -140,6 +140,8 @@ class MainActivity : ComponentActivity() {
         // system icons legible when the AMOLED scheme is active.
         enableEdgeToEdge()
         core = MycoCore.client(this)
+        // A compile-time property of the core; one read is enough.
+        BleRadio.multipathCore = core.state().multipathCore
         // Watches for file offers only while nothing is on screen; idempotent.
         FileOfferNotifier.install(this)
         captureExternalShare(intent)

@@ -1566,6 +1566,7 @@ impl AppRuntime {
             rev: self.rev,
             error: self.error_with_feed_health(),
             app_version: self.app_version.clone(),
+            multipath_core: cfg!(feature = "fips-multipath"),
             identity: self.identity.clone(),
             node: NodeStatus {
                 running: self.node_running,

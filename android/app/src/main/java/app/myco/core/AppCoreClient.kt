@@ -210,6 +210,10 @@ data class AppState(
     val rev: Long,
     val error: String,
     val appVersion: String,
+    /** Built against multi-path fips: a peer on Wi-Fi Aware may also be dialled
+     *  over BLE as a standby. On a single-path core that dial would displace
+     *  the session instead — see [app.myco.ble.BleRadio.connect]. */
+    val multipathCore: Boolean = false,
     val ownNpub: String,
     val ownPubkeyHex: String,
     val nodeAddrHex: String,
@@ -520,6 +524,7 @@ data class AppState(
                 rev = o.optLong("rev"),
                 error = o.optString("error"),
                 appVersion = o.optString("appVersion"),
+                multipathCore = o.optBoolean("multipathCore"),
                 ownNpub = id.optString("ownNpub"),
                 ownPubkeyHex = id.optString("ownPubkeyHex"),
                 nodeAddrHex = id.optString("nodeAddrHex"),

@@ -9,6 +9,13 @@ pub struct AppState {
     pub rev: u64,
     pub error: String,
     pub app_version: String,
+    /// Whether this core was built against a fips with multi-path
+    /// switchover (`fips-multipath` feature). On a single-path core a second
+    /// transport to a live peer means a second handshake that displaces the
+    /// session; on a multi-path core it means a standby path. The radios
+    /// read this to decide whether dialling a peer another lane already
+    /// carries is a standby worth having or churn to avoid.
+    pub multipath_core: bool,
     pub identity: IdentityView,
     pub node: NodeStatus,
     /// BLE adapter/transport status (the developer-UI control plane).
