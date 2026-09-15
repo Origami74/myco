@@ -52,12 +52,12 @@ Full design docs are in **[docs/](docs/README.md)**:
 
 ## Status
 
-**Design phase — not yet built.** This repository currently holds the design
-docs and diagrams. The v1 target is a two-device Android demo over Bluetooth,
-fully offline — one phone browses an app installed from the other. See the
-[roadmap](docs/roadmap.md).
+**Built and in daily use on two phones.** Pair by bumping phones (NFC) or
+scanning a QR, and apps flow both ways over Bluetooth, Wi-Fi Aware or the LAN
+with no internet. Two kinds of app run: **nsites** (static sites published on
+Nostr) and **napplets** (sandboxed programs with a permission model — mesh,
+relays, pictures). See the [roadmap](docs/roadmap.md) for what's next and
+[docs/](docs/README.md) for how it works.
 
-> Built on [nostr-vpn](https://github.com/mmalmi/nostr-vpn) (FIPS data plane),
-> reusing the [FIPS](https://github.com/k0sti/fips) mesh, and reimplementing the
-> nsite-deck content layer in Rust.
-
+> Built on the [FIPS](https://github.com/jmcorgan/fips) mesh, with an embedded
+> Nostr relay and Blossom store in Rust and a Compose shell in Kotlin.

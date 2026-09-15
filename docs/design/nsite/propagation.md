@@ -1,7 +1,12 @@
 # Offline propagation
 
-> Status: DESIGN / proposal for a not-yet-built app. Voice is "the app will…".
-> Open questions are marked **TBD / open**.
+> Status: built, with differences from the first draft noted inline. The
+> mechanism that shipped is the push/pull gossip in
+> [event-gossip.md](../core/event-gossip.md): manifests flood between Circle
+> members with a 3-hop budget (not 5), the seen-set is the loop guard, and
+> blobs stay pull-only. Negentropy / NIP-77 reconcile (§5) is **not built**;
+> backlog is recovered by re-running each open subscription against a Circle
+> member when they reappear. Open questions are marked **TBD / open**.
 
 The vision is nak's "Pillars of Propagation": small relays and Blossom blobs
 hopping over crappy links in all directions, surviving outages via local
@@ -41,7 +46,7 @@ does not let data survive a partition.
 The behaviour "cache Alice's site and re-serve it to Carl later, offline" is
 **net-new** and is implemented at the nsite/relay layer. The embedded relay
 (`myco-relay`, a plain NIP-01 store + socket) and Blossom server
-([../../reference/site-deck](../../../reference/site-deck)) retain peers' signed
+(the nsite-deck reference) retain peers' signed
 events and content-addressed blobs and thereby **become a new source**. When
 Ben's device caches Alice's site, Ben can serve it to Carl over a fresh BLE hop
 even though Alice's original holder is nowhere in sight. The re-emission of
@@ -76,21 +81,21 @@ The proposed default (a [LOCKED DECISION], vetoable in its parameters) is
 fan-out part of propagation small (the author-signed manifest event) and the
 heavy part (the referenced blobs) lazy and demand-driven.
 
-### Announce (flood the author-signed manifest, TTL 5 hops)
+### Announce (flood the author-signed manifest, 3 hops)
 
 The unit that propagates is the **author-signed nsite manifest event itself**
 (nsite kinds `15128` root / `35128` named;
-[../../reference/site-deck/docs/nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md)) —
+the nsite-deck reference) —
 small, self-authenticating, and keyed by the *author's* pubkey plus, for named
 sites, the `d` tag. There is **no separate availability-announcement event and no
 new event kind**: a holder that wants to "announce" a site simply re-emits the
 author's manifest unchanged. Re-emitting an already-signed event relay-to-relay
 is normal relay behaviour, not authoring, and requires no holder signature.
 
-- Manifests flood outward with a hop budget. **Proposed default TTL = 5 hops**;
-  each forwarder decrements, and TTL=0 is not forwarded (the decrement-and-drop
-  discipline mirrors bitchat's `PacketRelayManager`,
-  [../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt](../../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt)).
+- Manifests flood outward with a hop budget: **3 hops** (`EVENT_TTL`), the
+  same budget as any gossiped event. Each forwarder decrements, and a spent
+  budget is stored but not forwarded; the seen-set, not the budget, is what
+  guarantees termination ([event-gossip.md §3](../core/event-gossip.md)).
 - **Only manifests propagate multi-hop. Blobs stay pull-only** — there is no
   TTL-flood of blobs.
 
@@ -122,8 +127,9 @@ constant chatter, both **strictly neighbour-local (never relayed)**: (1) **eager
 reconcile on a new link** — fire a one-shot reconcile the moment a peer connects
 (bitchat sends a unicast sync ~5 s after a new neighbour appears); and (2) a slow
 **periodic neighbour reconcile** (bitchat ~30 s, bounded to ~100 recent items). See
-§5 for the negentropy mechanics and [../reference/config.md](../../reference/config.md)
-`[propagation]` for the cadence knobs.
+§5 for the negentropy mechanics. What shipped instead of both is simpler: the
+relay pool keeps one connection per Circle member and, on every (re)connect,
+replays each open local subscription against them (`resync_from_peer`).
 
 ### Pull (fetch content on demand)
 
@@ -175,7 +181,7 @@ transitive discovery, authorized by a **mutual pairing**. See
   just the radio neighbourhood.
 
 This is the social analogue of bitchat's neighbour-gossip TLV
-([../../reference/bitchat-android/docs/ANNOUNCEMENT_GOSSIP.md](../../../reference/bitchat-android/docs/ANNOUNCEMENT_GOSSIP.md)),
+(bitchat's implementation),
 where a node advertises which peers it is directly connected to. Myco adapts
 the idea to *authorized* polling of a curated peer list rather than unsolicited
 topology gossip — pairing is the consent gate.
@@ -223,11 +229,10 @@ from bitchat (reference only).
 
 ### TTL flood with bounded relay
 
-Each flooded manifest carries a hop budget (TTL=5, §2). Forwarders decrement and
-drop at zero. As in bitchat's `PacketRelayManager`, relay can be *probabilistic*
-on larger meshes (relay with probability < 1 to thin out redundant copies) while
-small meshes always relay to preserve connectivity
-([../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt](../../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/PacketRelayManager.kt)).
+Each flooded manifest carries a hop budget (3, §2). Forwarders decrement and
+stop at zero. Probabilistic relay on large meshes (forward with probability
+< 1 to thin redundant copies, as bitchat's `PacketRelayManager` does) is
+**not built**: Circles are small and every member forwards.
 A node never relays its own packets and never relays a packet already addressed
 to it.
 
@@ -242,7 +247,7 @@ bandwidth, then each pulls only its missing manifests. It is strictly local
 (neighbour-to-neighbour, not relayed), so it converges content between directly
 connected nodes without wide-area flooding. We pick the Nostr-native NIP-77 over
 bitchat's `REQUEST_SYNC` **Golomb-Coded Set** digest (the conceptual reference,
-[../../reference/bitchat-android/docs/sync.md](../../../reference/bitchat-android/docs/sync.md))
+bitchat's implementation)
 because Myco's units are Nostr events and the `negentropy` Rust crate already ships
 in the rust-nostr stack — we are not bitchat-wire-compatible anyway. **Blobs are not
 reconciled**: they stay content-addressed pull-by-sha256.
@@ -294,7 +299,7 @@ propagation policy. Proposed defaults (vetoable):
   node; it can be re-pulled later from any other source that still has it.
 - **Retention horizon for forwarded metadata.** bitchat's store-and-forward uses
   a 12h cache for relayed messages and ages out stale records
-  ([../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/StoreForwardManager.kt](../../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/StoreForwardManager.kt)).
+  (bitchat's implementation).
   Myco's analogue: a node stops re-emitting a manifest it no longer holds,
   and re-flood of a given manifest is soft-state; cached *content* lifetime is
   governed by LRU + pinning above, not by a fixed timeout.

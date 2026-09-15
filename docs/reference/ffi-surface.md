@@ -1,431 +1,188 @@
 # FFI Surface (Kotlin ↔ Rust)
 
-This is the **proposed** Kotlin ↔ Rust FFI contract for Myco. It is modeled
-directly on nostr-vpn's JNI/JSON reducer
-([`../../reference/nostr-vpn/crates/nostr-vpn-app-core/src/c_abi.rs`](../../reference/nostr-vpn/crates/nostr-vpn-app-core/src/c_abi.rs),
-[`actions.rs`](../../reference/nostr-vpn/crates/nostr-vpn-app-core/src/actions.rs),
-[`state.rs`](../../reference/nostr-vpn/crates/nostr-vpn-app-core/src/state.rs),
-[`ffi.rs`](../../reference/nostr-vpn/crates/nostr-vpn-app-core/src/ffi.rs)) and the Kotlin side
-([`NativeCore.kt`](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/core/NativeCore.kt),
-[`AppCoreClient.kt`](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/core/AppCoreClient.kt)).
-
-> Design doc, not-yet-built app. The contract below is **proposed**; action /
-> state field names are provisional. Open questions are marked **TBD / open**.
-
-The model, taken from nostr-vpn: **JNI + JSON-over-strings, not UniFFI.** Kotlin
-owns the UI and the BLE radio; Rust owns the relay + blossom + FIPS endpoint.
-State flows one way (Rust → Kotlin as a JSON state snapshot); intent flows the
-other way as a single `dispatch(actionJson) -> stateJson` reducer. A monotonic
-`rev` counter lets the UI skip no-op redraws.
-
-For the data model behind these fields see [concepts.md](../design/core/concepts.md);
-for the BLE plumbing the radio actions drive, see
-[identity-pairing.md](../design/core/identity-pairing.md) and
-[propagation.md](../design/nsite/propagation.md).
+The contract between the Kotlin shell and `libmyco_core.so`. It is a **JNI +
+JSON-over-strings reducer**: Kotlin dispatches an action, Rust returns the whole
+state. Beside the reducer are a few per-purpose entry points that need bytes or
+blocking. Source of truth: [`action.rs`](../../myco-core/src/action.rs),
+[`state.rs`](../../myco-core/src/state.rs), [`jni_abi.rs`](../../myco-core/src/jni_abi.rs)
+(Android-only — host `cargo test` never compiles it), and
+[`NativeCore.kt`](../../android/app/src/main/java/app/myco/core/NativeCore.kt).
+This page is a map, not the contract; when they disagree, the code is right.
 
 ---
 
-## Opaque-handle lifecycle
-
-nostr-vpn wraps a Tokio-runtime-backed app in a `Box`, hands Kotlin the raw
-pointer as a `jlong`, and frees it on `close()`
-([`c_abi.rs` `appNew`/`appFree`](../../reference/nostr-vpn/crates/nostr-vpn-app-core/src/c_abi.rs)). Myco
-keeps this exactly.
-
-```
-NativeCore.appNew(dataDir, appVersion) : Long    // Box::into_raw -> opaque handle
-NativeCore.stateJson(handle)           : String  // current snapshot, no side effects
-NativeCore.refreshJson(handle)         : String  // == dispatch(Tick)
-NativeCore.dispatchJson(handle, json)  : String  // reduce one action, return new snapshot
-NativeCore.appFree(handle)                        // Box::from_raw -> drop
-```
-
-- `appNew` builds the runtime (relay + blossom + FIPS endpoint live behind it),
-  returns `Box::into_raw(Box::new(handle)) as jlong`. Returns `0` on startup
-  failure; the first `stateJson` then carries a non-empty `error` (mirrors
-  nostr-vpn's `error_state`).
-- The handle is **opaque**: Kotlin never dereferences it, only passes it back.
-- A `Mutex<Runtime>` inside `FfiApp` serializes all calls
-  ([`ffi.rs` `with_runtime`](../../reference/nostr-vpn/crates/nostr-vpn-app-core/src/ffi.rs)); a poisoned lock
-  is recovered and surfaced as an `error` string rather than aborting.
-- `appFree` is `Box::from_raw` + drop; the Kotlin wrapper guards against
-  double-free by zeroing its stored handle (`AppCoreClient.close()` pattern).
-- All returned `*mut c_char` strings are freed with a `stringFree`
-  export on the C-ABI path; on the JNI path the `jstring` is owned by the JVM.
-
-### `initializeAndroidContext`
-
-Before `appNew`, Kotlin passes the Android `Context` once so Rust can reach the
-JavaVM (needed for the BLE bridge and ndk-context). This is nostr-vpn's
-`initializeAndroidContext` JNI export, kept verbatim
-([`c_abi.rs`](../../reference/nostr-vpn/crates/nostr-vpn-app-core/src/c_abi.rs)).
-
----
-
-## The reducer: `dispatch(actionJson) -> stateJson + rev`
-
-One entry point reduces all intent. Kotlin builds a JSON action object, calls
-`dispatchJson`, and parses the returned state snapshot.
+## Opaque handle
 
 ```kotlin
-// Proposed AppCoreClient (cf. nostr-vpn AppCoreClient.kt)
-class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
-    private var handle = NativeCore.appNew(dataDir, appVersion)
-    fun state(): AppState   = parse(NativeCore.stateJson(handle))
-    fun refresh(): AppState = parse(NativeCore.refreshJson(handle))      // == dispatch(Tick)
-    fun dispatch(a: JSONObject): AppState = parse(NativeCore.dispatchJson(handle, a.toString()))
-    override fun close() { if (handle != 0L) { NativeCore.appFree(handle); handle = 0 } }
+object NativeCore {
+    external fun initializeAndroidContext(context: Context)   // once, before appNew
+    external fun appNew(dataDir: String, appVersion: String): Long
+    external fun appFree(handle: Long)
+    external fun stateJson(handle: Long): String              // read (no rev bump)
+    external fun refreshJson(handle: Long): String            // == dispatch Tick
+    external fun dispatchJson(handle: Long, actionJson: String): String
 }
 ```
 
-On the Rust side, `dispatchJson` deserializes the string into the action enum
-and falls back to an `error`-stamped state on bad JSON (nostr-vpn's
-`invalid native action JSON` path), so a malformed action never crashes the
-runtime.
+`appNew` builds the `AppRuntime` — identity, content layer, relay and Blossom
+servers, a Tokio runtime — and never panics: a failure lands in `state.error`.
+One handle per process, held by `MycoCore`. JNI symbols are
+`Java_app_myco_core_NativeCore_<name>`.
 
-### `rev` (monotonic revision)
+## The reducer
 
-Every state snapshot carries a `rev: u64` that increments whenever the runtime
-mutates. The UI keeps the last seen `rev` and skips recomposition when the new
-snapshot's `rev` is unchanged. `GetState`/`stateJson` is pure (no mutation, no
-`rev` bump); `Tick` and all mutating actions bump it. (nostr-vpn keeps `rev` on
-`NativeAppRuntime`; the wire field is the JSON `rev`.)
+```
+dispatch(actionJson) → stateJson
+```
 
-### Polling
+- Actions are internally tagged: `{"type": "snake_case", ...camelCaseFields}`.
+- The state carries a monotonic **`rev`**; Kotlin skips a redraw when it has not
+  moved. `GetState` does not bump it; everything else does.
+- **Spawn, never block.** Anything that waits on the network or a peer is
+  spawned on Tokio inside the reducer and its result lands in a later snapshot.
+  Kotlin polls `stateJson` at 1 Hz and after each dispatch.
 
-There is no Rust→Kotlin callback channel. Kotlin drives a periodic
-`refresh()` (== `dispatch(Tick)`) on a UI-side timer to advance time-based
-work (BLE scan results, manifest flood/replication, peer liveness) and pick up
-the new snapshot — same as nostr-vpn's `Tick`. A push channel is **TBD/open**.
+### Actions
+
+| `type` | fields | what |
+|---|---|---|
+| `get_state` | — | Pure read; does not bump `rev`. |
+| `tick` | — | Advance time-based work; bumps `rev`. |
+| `start_node` | — | Start the embedded FIPS node (spawns its transport loops). |
+| `stop_node` | — | Stop the embedded FIPS node. |
+| `set_ble_enabled` | `enabled`: bool | Master switch for the BLE L2CAP transport. |
+| `set_wifi_aware_enabled` | `enabled`: bool | Master switch for the Wi-Fi Aware bulk lane. |
+| `open_nsite` | `link`: String, `holder`: Option<String> | Resolve a pasted nsite link / `<host>` and drive its sync to readiness (author-signed manifest + its blobs). |
+| `import_nsite` | `dir`: String | DEV-ONLY side-load: import an already-signed manifest + blobs from a bundle directory (`<dir>/manifest.json` + `<dir>/blobs/<sha256>`). |
+| `add_to_library` | `link`: String | Pin a site to the Library (exempt from eviction; eviction itself is P5). |
+| `remove_from_library` | `link`: String | Unpin a site from the Library. |
+| `forget_nsite` | `link`: String | Forget a single nsite: remove it from the Library and the Apps grid. |
+| `fetch_napplet` | `pointer`: String, `holder`: Option<String> | Fetch a napplet by `naddr` (or `<npub>:<dtag>`), verify it, and store it locally — D9's acquisition path, online once and mesh-replicable after. |
+| `install_napplet` | `pointer`: String, `granted`: Vec<String> | Record what install review granted, and pin the napplet to the Library. |
+| `forget_napplet` | `pointer`: String | Unpin a napplet and drop its grants. |
+| `set_napplet_grant` | `pointer`: String, `domain`: String, `allowed`: bool | Allow or withdraw one capability for an installed napplet, from its sheet. |
+| `set_napplet_mesh_reach` | `publishTtl`: u8, `subscribeTtl`: u8 | Cap how far a napplet may reach over the mesh (NAP-MESH): the most hops a `mesh.publish` and a `mesh.subscribe` backlog pull may ask for. |
+| `dismiss_napplet_review` | — | Close the install-review screen without installing. |
+| `check_nsite_updates` | — | Check online relays for newer versions of installed nsites and stage/apply them (`docs/design/nsite/nsite-updates.md`). |
+| `search_nsites` | `query`: Option<String> | Discover nsites on connected Circle peers' relays ("nsites around me"): query each reachable member's mesh relay for kind 15128/35128 manifests. |
+| `wipe_stores` | — | Clear the local relay + Blossom + Library + site status (dev/test reset). |
+| `wipe_cache` | — | Clear cached relay events + Blossom blobs **except** those backing pinned nsites (Settings → Storage → "Delete cache"). |
+| `add_to_circle` | `npub`: String, `name`: String | Add a paired peer to the **Circle**: the contact list of devices we pull nsites from over the mesh. |
+| `remove_from_circle` | `npub`: String | Forget a peer (remove from the Circle). |
+| `send_pair_request` | `npub`: String, `name`: String, `secret`: String | Scanned a peer's pairing QR: send them a signed pair request over the mesh (to their relay). |
+| `accept_pair_request` | `npub`: String, `name`: String | Accept an incoming pair request: add the requester to the Circle and signal them (a pair-accept) so they add us back. |
+| `decline_pair_request` | `npub`: String | Dismiss an incoming pair request without pairing. |
+| `cancel_pair_invite` | `npub`: String | Withdraw an invite we sent that is still waiting, so it can be sent again. |
+| `set_offline_only` | `enabled`: bool | Toggle "mesh-only": when enabled, never use the public IP relay/Blossom fallback — pull only over the mesh. |
+| `set_custom_relay` | `url`: String | Point the event store at a **custom relay**, or back at the built-in one with an empty `url`. |
+| `set_custom_blossom` | `url`: String | Point the blob store at a **custom Blossom server**, or back at the built-in one with an empty `url`. |
+| `set_aware_data_paths` | `count`: u8 | Report how many concurrent Wi-Fi Aware data paths this chipset supports (`Characteristics.getNumberOfSupportedDataPaths()`), which is what the Aware UDP socket pool is sized to. |
+| `set_device_name` | `name`: String | Set this device's human label (memorable name). |
+| `speedtest_peer` | `npub`: String | Dev-menu speedtest against a mesh peer: PUT a fresh payload to the peer's Blossom and GET it back, timing each leg. |
+| `share_file` | `path`: String, `name`: String, `mime`: String, `peerNpub`: String | Encrypt a local file and send a private offer to a Circle peer. |
+| `accept_file_transfer` | `transferId`: String | Accept an incoming encrypted file offer. |
+| `decline_file_transfer` | `transferId`: String | Decline an incoming encrypted file offer. |
+| `cancel_file_transfer` | `transferId`: String | Cancel a transfer that is still in flight and tell the other phone, so neither side is left waiting on a message that is no longer coming. |
+| `forget_file_transfer` | `transferId`: String | Forget a finished transfer after the Android side has safely published the received file (or after a terminal sender-side outcome). |
+
+`Option<String>` fields are omitted when absent. `link` for an nsite is a
+pasted link or a bare `<host>` label; `pointer` for a napplet is an `naddr…` or
+`<npub>:<dtag>`.
+
+### State
+
+`AppState` in [`state.rs`](../../myco-core/src/state.rs), `camelCase`. The
+big fields, by layer:
+
+| Field | Layer | What |
+| --- | --- | --- |
+| `rev`, `error`, `appVersion`, `multipathCore` | — | bookkeeping; `error` is empty when healthy |
+| `identity` | 4 | `ownNpub`, `ownPubkeyHex`, `nodeAddrHex`, `fipsAddr`, the mesh ULA |
+| `node`, `ble`, `bleAdverts`, `blePeers`, `wifiAware`, `peers` | 4 | node status; per-lane radio status; the merged per-peer diagnostics rows (state, transport, every multi-path link, RTT, attempts) |
+| `circle`, `reachableNpubs`, `pendingPairRequests`, `outboundPairs` | 2 | the Circle; members with a live relay connection right now; incoming requests awaiting an answer; invites waiting |
+| `sites`, `library`, `discovered`, `updateCheck` | 1 | per-nsite sync state (`syncing` / `ready` / `unreachable` / `incomplete`, files pulled/total, staged update); every installed app with `kind`, `granted`, `pointer`; "around me" results |
+| `nappletReview`, `nappletDomains`, `nappletMeshReach` | 1 | a fetched napplet awaiting install review (loading / requires / grants / error / holder); every grantable NAP; the user's mesh caps |
+| `cache`, `relayBackend`, `blobBackend`, `pendingRelayUrl`, `pendingBlossomUrl`, `offlineOnly` | 3 | store counts; custom backends and their health |
+| `fileTransfers`, `speedtest` | 2 / dev | native file sharing; the Dev speedtest |
 
 ---
 
-## Proposed action enum
+## Beside the reducer
 
-Serialized internally tagged: `{"type": "snake_case", ...camelCaseFields}`,
-matching nostr-vpn's `#[serde(tag = "type", rename_all = "snake_case",
-rename_all_fields = "camelCase")]` on `NativeAppAction`. **Proposed; provisional.**
+### The gateway
 
-```rust
-// Myco NativeAppAction — PROPOSED
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
-pub enum NativeAppAction {
-    // --- lifecycle / polling ---
-    GetState,                               // pure read; no rev bump
-    Tick,                                   // advance time-based work; == refresh()
-
-    // --- node (relay + blossom + FIPS endpoint) ---
-    StartNode,                              // start embedded relay/blossom/endpoint
-    StopNode,
-
-    // --- site entry / Library ---
-    OpenNsite { author: String, dTag: Option<String> },      // trigger resolve + sync to READINESS (author-signed
-                                                             // kind 15128/35128 + its blobs) from peers/relays.
-                                                             // Does NOT launch the UI: Kotlin starts the fullscreen
-                                                             // NsiteActivity (see note below).
-    AddNsite  { author: String, dTag: Option<String> },      // aka register a site of interest, triggers a sync
-    ImportNsite { manifest: String },        // DEV-ONLY: side-load an already-signed manifest + blobs created elsewhere
-    AddToLibrary    { author: String, dTag: Option<String> },   // pin a site to the Library
-    RemoveFromLibrary { author: String, dTag: Option<String> },
-
-    // --- peers ---
-    Pair    { npub: String, name: Option<String>, pairSecret: String },  // QR: npub + memorable name + one-time long-random secret; triggers the mandatory mutual handshake
-    Unpair { npub: String },
-
-    // --- discovery ---
-    SearchNsites { query: Option<String> }, // query reachable relays for kind 15128/35128
-
-    // --- BLE radio ---
-    SetBleEnabled { enabled: bool },        // master switch for the L2CAP transport
-
-    // --- Wi-Fi Aware bulk lane (docs/design/fips/wifi-aware-interop.md) ---
-    SetWifiAwareEnabled { enabled: bool },  // master switch; adds/removes the UDP lane
-
-    // --- settings (single patch action, cf. UpdateSettings) ---
-    UpdateSettings { patch: SettingsPatch },
-}
+```kotlin
+external fun gatewayGet(handle, host, path, range, allowSync): ByteArray
 ```
 
-Notes:
+Called from `NsiteActivity`'s `shouldInterceptRequest` for every request a
+site's WebView makes. Returns `[u32 BE header-len][header JSON][body]`; the
+header is `{status, contentType, headers}`. Blocks while the in-process
+gateway serves from the local relay and Blossom — it runs on the WebView's
+worker thread, never the UI thread.
 
-- `dTag` distinguishes a **named** site (kind 35128, parameterized-replaceable)
-  from a **root** site (kind 15128, `dTag = None`). Library identity is
-  `author + dTag` (matches the search dedup key). See
-  [concepts.md](../design/core/concepts.md).
-- The app **never authors nsites** — it never signs or publishes events on an
-  author's behalf. A site enters a device only by **syncing** it (`OpenNsite` /
-  `AddNsite` pull the author-signed manifest + blobs from peers/relays) or, for
-  development, by **side-loading** externally-created artifacts (`ImportNsite`).
-- `ImportNsite.manifest` is **TBD/open** and **dev-only** — it takes an
-  already-signed manifest event (kind 15128/35128) plus its content-addressed
-  blobs, produced by external nsite tooling; the app only stores and re-serves
-  them. It is **not** an authoring path (no key, no signing).
-- **Launching an nsite is an Android-side concern, not an FFI one.** `OpenNsite`
-  only triggers the *sync / readiness* of a site over the mesh; it does not open
-  any UI. The actual launch is pure Kotlin: each nsite runs as its own
-  fullscreen `NsiteActivity` (a chrome-less `WebView`, `documentLaunchMode =
-  "always"`, started with `FLAG_ACTIVITY_NEW_DOCUMENT` and **not** `FLAG_ACTIVITY_MULTIPLE_TASK`,
-  keyed by `<host>` so re-opening the same nsite re-surfaces its task) so each distinct nsite is its
-  own card in Android Recents — Myco imposes no toolbar, back bar, or reload
-  button. Kotlin resolves the `myco://app/<host>` intent to that
-  activity, dispatches `OpenNsite` to ensure the blobs are present (readiness),
-  then loads `<host>.nsite` via the localhost gateway. Reload / in-app
-  navigation are the nsite developer's responsibility. Kotlin observes readiness
-  via the `status: SiteStatus` field carried on the site's `LibraryItem` /
-  `DiscoveredNsite` entry: `OpenNsite` flips it to `state: "syncing"` and later
-  `Tick`s advance `filesPulled`/`filesTotal` until `state: "ready"` (load the
-  gateway), `"unreachable"` (no holder yet), or `"incomplete"` (verify failed —
-  abort, do not cache). Kotlin renders the matching sync-state copy below.
-- **Pairing is a mandatory mutual handshake.** `Pair` carries the QR-scanned
-  `{ npub, name, pairSecret }`; the core completes the §6.1 invite-pairing handshake
-  against the peer's on-device `<npub>.fips` endpoint — echo the one-time
-  `pairSecret` (a long random string) back over the Noise-encrypted channel, the peer
-  matches it and confirms. `PairedPeer.pairing` tracks it
-  (`pending` → `complete`/`failed`). There is no one-way fetch-only pairing. See
-  [identity-pairing.md § 6.1](../design/core/identity-pairing.md).
-- BLE **role is symmetric** — every node both advertises its OS-assigned PSM
-  (peripheral) and dials the peer's learned PSM (central); it is **not** fixed to
-  central (see [config.md § `[ble]`](./config.md#ble) and
-  [ble-interop.md](../design/fips/ble-interop.md)). There is no role action in v1.
-- A Kotlin `NativeActions` helper object builds these JSON objects (cf.
-  nostr-vpn `NativeActions`), e.g.
-  `NativeActions.pair(npub, name) = action("pair", "npub" to npub, "name" to name)`.
+### The napplet channel
 
-### Settings patch
-
-`UpdateSettings { patch }` carries an all-`Option` struct so the UI sends only
-changed fields (cf. nostr-vpn `SettingsPatch`). Stripped to Myco scope; each
-field maps to a key in [config.md](./config.md). **Proposed; provisional.**
-
-```rust
-#[serde(rename_all = "camelCase")]
-pub struct SettingsPatch {
-    pub alias:            Option<String>,   // <alias>.fips label
-    pub relay_port:       Option<u16>,
-    pub relay_backend:    Option<String>,   // "embedded" (default) | "local-forward" (e.g. Citrine)
-    pub relay_forward_addr: Option<String>, // only when relay_backend = "local-forward"
-    pub blossom_port:     Option<u16>,       // Blossom is ALWAYS embedded (no backend toggle)
-    pub autostart:        Option<bool>,
-    pub cache_cap_bytes:  Option<u64>,
-    pub eviction:         Option<String>,   // "lru" (only value in v1)
-    pub pin_library_items:   Option<bool>,
-    pub ble_enabled:      Option<bool>,
-    pub announce_ttl:     Option<u8>,
-    pub tun_enabled:      Option<bool>,
-    pub intercept_fips:   Option<bool>,
-    pub intercept_nsite:  Option<bool>,
-}
+```kotlin
+external fun nappletShellPage(): String        // the trusted shell HTML, from the APK
+external fun nappletRuntimeObject(): String    // the name the shell's channel object is injected as
+external fun nappletOpen(handle, pointer): String              // resolve + verify → {ok, sessionId, shellHost, title, error}
+external fun nappletFrame(handle, sessionId, frameJson): String     // one frame in, JSON array of frames out
+external fun nappletNextFrames(handle, sessionId, timeoutMs): String // long poll for pushed frames; BLOCKS
+external fun nappletClose(handle, sessionId)
 ```
 
-(`SetBleEnabled` is kept as a discrete action because the radio toggle is a
-hot-path UI control; it is equivalent to `UpdateSettings { ble_enabled }`.)
+`nappletOpen` takes no grant list: grants are read from the library on the Rust
+side, so an intent that starts `NappletActivity` cannot hand a napplet
+capabilities the user never approved. Frames are `{channel: "shell" | "napplet"
+| "relaunch", ...}`; `NappletActivity` drives them off the main thread — one at
+a time until `shell.init` has answered, concurrently after — and posts replies
+to the shell. A `relaunch` frame recreates the activity.
+
+### The BLE byte bridge
+
+Kotlin owns the radio (`BleService`: scanning, advertising, L2CAP CoC
+sockets); Rust owns the protocol. `bleBridgeNew(appHandle, radio)` hands Rust
+a callback object; Rust asks it to connect/listen and Kotlin delivers bytes back
+with `bleDeliverInbound`, `bleDeliverConnectResult`, `bleChannelDeliverRecv`,
+`bleChannelClosed`, and scan/advert state with `bleDeliverScan`,
+`bleDeliverAdvertName`, `bleDeliverScanningState`,
+`bleDeliverAdvertisingState`. Outbound bytes are pulled with
+`bleChannelNextSend` (blocking, per channel). Design:
+[ble-interop.md](../design/fips/ble-interop.md).
+
+### Platform peers (Wi-Fi Aware, LAN)
+
+```kotlin
+external fun awarePeerFound(npub, addr, lane)   // "aware" or "udp"
+external fun awarePeerLost(npub, lane)
+external fun awareSetDiscovering(on)
+external fun nextUdpTransportFd(lane, sinceVersion, timeoutMs): Long  // the node's socket, for Kotlin to bind to the Aware network
+```
+
+No byte bridge: fips's own UDP transport dials the address Kotlin pushes.
+Design: [wifi-aware-interop.md](../design/fips/wifi-aware-interop.md),
+[ap-lane.md](../design/fips/ap-lane.md).
+
+### The TUN
+
+```kotlin
+external fun tunSendPacket(packet, len): Boolean   // device → mesh
+external fun tunNextPacket(out, timeoutMs): Int    // mesh → device; BLOCKS
+external fun setUpstreamDns(servers)               // where non-.fips queries go
+```
+
+The `VpnService` (scoped to Myco's uid, routing `fd00::/8`) pumps packets both
+ways on its own threads. Design: [ports.md](./ports.md) §4.
 
 ---
 
-## Proposed state shape
+## Rules that hold everywhere
 
-One JSON object per snapshot, `#[serde(rename_all = "camelCase")]` (cf.
-nostr-vpn `UiState`). Includes `rev` and an `error` string (empty when healthy).
-**Proposed; provisional.**
-
-```rust
-#[serde(rename_all = "camelCase")]
-pub struct AppState {
-    pub rev: u64,
-    pub error: String,                 // empty when healthy
-    pub app_version: String,
-
-    // --- identity (derived forms shown for the UI) ---
-    pub identity: Identity,            // ownNpub, ownPubkeyHex, nodeAddrHex, fipsAddr, alias
-
-    // --- node status ---
-    pub node: NodeStatus,              // running, relayPort/relayStatus, blossomPort/blossomStatus,
-                                       // meshReady, fipsAddr ("<npub>.fips")
-    // --- content ---
-    pub library:             Vec<LibraryItem>,        // pinned sites
-    pub discovered_nsites: Vec<DiscoveredNsite>, // search results
-
-    // --- peers ---
-    pub paired_peers: Vec<PairedPeer>, // npub + memorable name + reachability
-    pub ble_peers:    Vec<BlePeer>,    // peers seen/connected over the radio
-    pub ble: BleStatus,                // enabled, role, scanning, adapterName
-    pub wifi_aware: WifiAwareStatus,   // enabled, port (the bulk-lane control plane)
-    pub cache: CacheStatus,            // capBytes, usedBytes, itemCount, pinnedCount
-}
-
-#[serde(rename_all = "camelCase")]
-pub struct Identity {
-    pub own_npub: String,
-    pub own_pubkey_hex: String,
-    pub node_addr_hex: String,   // SHA256(npub)[0:16]
-    pub fips_addr: String,       // <npub>.fips
-    pub alias: String,           // this device's own <alias>.fips label (NOT a peer's memorable name)
-}
-
-#[serde(rename_all = "camelCase")]
-pub struct NodeStatus {
-    pub running: bool,
-    pub relay_port: u16,
-    pub relay_status: String,    // "stopped" | "listening" | "error"
-    pub relay_backend: String,   // "embedded" (default) | "local-forward" (forwarding to e.g. Citrine)
-    pub blossom_port: u16,
-    pub blossom_status: String,  // Blossom is always embedded
-    pub mesh_ready: bool,
-    pub status_text: String,
-}
-
-#[serde(rename_all = "camelCase")]
-pub struct LibraryItem {
-    pub author: String,          // npub of the site author
-    pub d_tag: Option<String>,   // None = root site (15128); Some = named (35128)
-    pub title: String,
-    pub url_host: String,        // npub1… (root) or <pubkeyB36><dTag> (named)
-    pub pinned: bool,
-    pub last_updated: u64,
-    pub status: SiteStatus,      // sync/readiness for OpenNsite (see below)
-}
-
-#[serde(rename_all = "camelCase")]
-pub struct DiscoveredNsite {
-    pub author: String,
-    pub d_tag: Option<String>,
-    pub title: String,
-    pub created_at: u64,
-    pub source: String,          // "relay" | "ble" | "cache"
-    pub in_library: bool,
-    pub status: SiteStatus,      // sync/readiness for OpenNsite (see below)
-}
-
-#[serde(rename_all = "camelCase")]
-pub struct SiteStatus {
-    pub state: String,           // "syncing" | "ready" | "unreachable" | "incomplete"
-    pub files_pulled: u64,
-    pub files_total: u64,
-    pub message: String,         // human-readable detail (see sync-state copy below)
-}
-
-#[serde(rename_all = "camelCase")]
-pub struct PairedPeer {
-    pub npub: String,
-    pub name: String,            // memorable name (colour + name)
-    pub pairing: String,         // "pending" | "complete" | "failed" — §6.1 invite-pairing handshake state
-    pub reachable: bool,         // currently reachable over mesh/BLE
-    pub last_seen_text: String,
-}
-
-#[serde(rename_all = "camelCase")]
-pub struct BlePeer {
-    pub node_addr_hex: String,   // identity from the in-band pubkey exchange, NOT MAC
-    pub npub: String,            // resolved once the Noise/pubkey handshake completes
-    pub connected: bool,
-    pub psm: u16,                // learned from adverts (addr->PSM map)
-    pub rssi: Option<i32>,
-}
-
-#[serde(rename_all = "camelCase")]
-pub struct BleStatus {
-    pub enabled: bool,
-    pub role: String,            // node is both peripheral + central (symmetric per-peer PSM discovery); not fixed central
-    pub scanning: bool,
-    pub adapter_name: String,
-}
-
-#[serde(rename_all = "camelCase")]
-pub struct CacheStatus {
-    pub cap_bytes: u64,
-    pub used_bytes: u64,
-    pub item_count: u64,
-    pub pinned_count: u64,
-}
-```
-
-`ble_peers` is identified by `node_addr` from the in-band pubkey exchange, never
-by MAC — Android MAC randomization is therefore harmless (see
-[identity-pairing.md](../design/core/identity-pairing.md) and fips-core's BLE
-discovery [`../../reference/fips/src/transport/ble/discovery.rs`](../../reference/fips/src/transport/ble/discovery.rs)).
-
----
-
-## The BLE bridge (Kotlin owns the radio)
-
-Android BLE APIs are Java-only, so Kotlin owns the radio and hands raw bytes to
-Rust — symmetric to how nostr-vpn's `MobileTunnel` exchanges raw packet bytes
-across the FFI (`mobileTunnelSendPacket` / `mobileTunnelNextPacket` in
-[`c_abi.rs`](../../reference/nostr-vpn/crates/nostr-vpn-app-core/src/c_abi.rs)). For Myco the bytes are
-L2CAP CoC stream/datagram payloads instead of TUN packets, wiring Kotlin's
-radio into the native `AndroidBleIo` that implements fips-core's `BleIo` trait
-([`../../reference/fips/src/transport/ble/io.rs`](../../reference/fips/src/transport/ble/io.rs)).
-
-This byte-bridge is **separate** from the reducer above and is **TBD/open** in
-detail (exact JNI signatures for accept/connect/send/recv, advert callbacks, the
-`addr->PSM` learn path). FIPS owns all connection tracking, the pool, the
-cross-probe tiebreaker, Noise, and reconnect; Kotlin only moves bytes and
-surfaces adverts. The reducer's `SetBleEnabled` and the `ble`/`blePeers` state
-are the **control/observation** plane over that byte plane.
-
----
-
-## The Wi-Fi Aware bridge (no byte bridge)
-
-The Wi-Fi Aware bulk lane needs no byte bridge at all — a Wi-Fi Aware data path
-terminates in a kernel network interface, so the bytes ride the ordinary fips
-**UDP** transport and never cross the FFI. The Kotlin `AwareRadio` drives
-discovery itself and pushes only *control* events into the core's process-global
-platform peer queue (`fips::discovery::platform`):
-
-```
-NativeCore.awarePeerFound(npub, addr)   // data path up: "[fe80::x%ifindex]:port"
-NativeCore.awarePeerLost(npub)          // data path gone: close the pooled UDP session
-```
-
-The node drains that queue each tick (`poll_platform_discovery`) and dials over
-the UDP transport; Noise IK authenticates, so the pushed npub is only a hint.
-`SetWifiAwareEnabled` and the `wifiAware` state are the control/observation
-plane; there is no `awareChannel*` extern family, because there are no channels
-to pump. See [../design/fips/wifi-aware-interop.md](../design/fips/wifi-aware-interop.md).
-
----
-
-## Build path
-
-Same toolchain as nostr-vpn:
-
-- Crate type `cdylib`, cross-compiled with **cargo-ndk** for `arm64-v8a`
-  (arm64-only, minSdk 29 for L2CAP) into
-  `android/app/src/main/jniLibs/arm64-v8a/lib*.so`.
-- Loaded with `System.loadLibrary(...)` in a `NativeCore` object that declares
-  the `external fun` JNI bindings (cf.
-  [`NativeCore.kt`](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/core/NativeCore.kt)).
-  Proposed library name `fips_pop_core` → `libfips_pop_core.so`.
-- The single `.so` is the whole native surface: relay + blossom + FIPS endpoint
-  (the `myco-core` Rust crate, one FFI surface).
-
-```
-cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build --release
-# -> android/app/src/main/jniLibs/arm64-v8a/libfips_pop_core.so
-```
-
-JNI export naming follows the `Java_<pkg>_core_NativeCore_<fn>` convention;
-with package id `app.myco` (placeholder) and a `core` subpackage the prefix
-is `Java_to_fips_pop_core_NativeCore_…` (cf. nostr-vpn's
-`Java_org_nostrvpn_app_core_NativeCore_…`).
-
----
-
-## Open questions
-
-- **Push vs. poll.** Whether to add a Rust→Kotlin event channel (e.g. a blocking
-  `nextEvent(handle, timeoutMs)` like `mobileTunnelNextPacket`) or stay
-  poll-only via `Tick`. **TBD/open.**
-- **`OpenNsite`/`ImportNsite` shape.** Exact inputs for triggering a sync vs.
-  side-loading already-signed artifacts (dev-only). The app stores and re-serves
-  externally-authored events/blobs; it never signs. **TBD/open.**
-- **Blocking actions.** `SearchNsites` and `OpenNsite` (a sync) may be slow;
-  whether they return immediately with a "pending" status that later `Tick`s
-  resolve, or block the reducer. **TBD/open** (nostr-vpn's reducer is
-  synchronous under the `Mutex`).
-- **BLE byte-bridge signatures.** Exact JNI shape for the radio bridge
-  (accept/connect/send/recv/advertise/scan) and how the `addr->PSM` map crosses
-  the FFI. **TBD/open.**
-- **State diffing.** Whether `rev` alone suffices or the UI needs per-section
-  revisions to avoid re-parsing the whole snapshot on every `Tick`. **TBD/open.**
+- Kotlin never waits on the mesh inside a reducer call.
+- Anything that **blocks** says so in its Kotlin doc and is called off the main
+  thread: `nappletNextFrames`, `bleChannelNextSend`, `tunNextPacket`,
+  `nextUdpTransportFd`, `gatewayGet`.
+- Grants cross the boundary in exactly one direction: from the user, through
+  `install_napplet` / `set_napplet_grant`, into the library. Nothing Kotlin
+  passes at open time can widen them.

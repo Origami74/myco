@@ -1,326 +1,244 @@
 # Concepts and Glossary
 
-This is the canonical concept and terminology doc for **Myco**. Other design
-docs build on the vocabulary fixed here. For the system structure that realizes
-these concepts, see [architecture.md](./architecture.md). For the underlying mesh,
-see the upstream FIPS docs: [fips-concepts.md](../../../reference/fips/docs/design/fips-concepts.md)
-and [fips-architecture.md](../../../reference/fips/docs/design/fips-architecture.md).
+The canonical vocabulary for **Myco**. Other design docs build on the terms
+fixed here. For the system structure see [architecture.md](./architecture.md);
+for the mesh underneath, the upstream FIPS docs:
+[fips-concepts.md](../../../reference/fips/docs/design/fips-concepts.md) and
+[fips-architecture.md](../../../reference/fips/docs/design/fips-architecture.md).
 
-Myco is a peer-to-peer **app-sharing network**: a phone app for exchanging, browsing,
-and propagating websites ("nsites") over a FIPS mesh — including fully offline
-over Bluetooth. The visual companion to this doc is
-[diagrams/01-system-layering.svg](../diagrams/01-system-layering.svg).
-
-> These are design docs for a not-yet-built app. They are written in
-> proposal voice. Open questions are marked **TBD / open**.
+Myco is a peer-to-peer **app-sharing network**: a phone app for exchanging,
+running and propagating apps published on Nostr over a FIPS mesh — including
+fully offline over Bluetooth.
 
 ---
 
-## The device identity — three derived forms
+## The four layers
 
-Myco combines several **device-level** roles into a **single Nostr
-keypair**, the **device key**:
+Everything in Myco sits in one of four layers. Each knows only the one below it.
 
-- your **mesh network identity** (who you are on the FIPS network),
-- your **BLE link authentication** (who the radio link is talking to), and
-- your **app/device identity** in Myco — the address of *this* device's
-  embedded relay + Blossom (`<npub_device>.fips:4870` / `:24243`).
+| # | Layer | Question it answers | Unit |
+| --- | --- | --- | --- |
+| 1 | **Apps** — nsites and napplets | What runs, and what may it do? | a manifest + its files |
+| 2 | **Circles and pairing** | Whom do I trust? | a Circle member |
+| 3 | **Relay and Blossom** | Where does data rest, and how does it spread? | an event, a blob |
+| 4 | **FIPS** | How do bytes get to another phone? | a peer, a link |
 
-The device key is **never** used to author nsites. nsites are authored
-elsewhere, by external tooling, under separate keys (see *nsite author identity*
-below). The app holds and serves other people's already-signed events; it does
-not sign on anyone's behalf.
+Two confusions the layering exists to prevent:
 
-There is one device keypair per device in v1 (multi-persona is later). From that
-one keypair, three addressing forms are deterministically derived. All three
-name the *same* device; they differ only in which layer consumes them.
+- **A peer is not a Circle member.** Layer 4 links to any FIPS node in range
+  and calls it a *peer*. Layer 2 *pairs* two people, by a signed handshake, and
+  calls the result a *Circle member*. Only Circle members may read your relay
+  and store. A peer can be connected and a stranger; a Circle member can be out
+  of range. See [Circles and pairing](#layer-2--circles-and-pairing).
+- **The device key is not the user key.** Layer 4's identity is the phone's;
+  layer 1's is the person's, as seen by napplets. Neither is an app author's
+  key. See [Three keys](#three-keys).
+
+---
+
+## Layer 1 — Apps: nsites and napplets
+
+Both kinds arrive the same way: a **manifest** — a signed Nostr event whose
+`path` tags map paths to sha256 hashes — plus the files those hashes name,
+stored in Blossom. Both sit in the same **Apps** grid and open as their own
+full-screen task. What differs is what Myco does with the bytes.
+
+### nsite — a document Myco serves
+
+A static website published on Nostr by its author with external tooling. Myco
+never authors one. The manifest kinds are `15128` (root site, one per author)
+and `35128` (named site, with a `d` tag). Myco stores the manifest and blobs and
+serves them to a WebView through an in-process gateway; the page gets no
+privileges beyond a browser's. Its identity is its **author key**.
+
+### napplet — a program Myco hosts
+
+A NIP-5D manifest (kinds `5129` / `15129` / `35129`) over the same shape, whose
+content is a page Myco runs in a sandboxed iframe. A napplet has no network: it
+asks Myco for things through a capability seam (the **NAPs** — `relay`,
+`outbox`, `mesh`, `resource`, `identity`), and Myco does them on its behalf,
+only where the user **granted** it. Its identity is its **aggregate hash** —
+every build is a different napplet. Design: [../napplet/napplet-runtime.md](../napplet/napplet-runtime.md).
+
+### The URL host
+
+The WebView loads an app at `http://<host>.localhost/` and every request is
+answered in-process by the gateway (`shouldInterceptRequest`) — no socket, no
+DNS, no TUN needed. `.localhost` because Chromium treats it as loopback and a
+secure context, which is what lets a page open `ws://localhost:4870` to the
+embedded relay. The `<host>` label is the nsite convention:
+
+- **root site** → `npub1…` (the author's npub),
+- **named site** → `<pubkeyB36><dTag>` (50-character base36 pubkey, then the
+  `d` tag, no separator).
+
+A napplet's window is `<label>.napplet.localhost`. The `.nsite` TLD is *not*
+used by the app; it survives only as the public gateways' suffix (`nsite.lol`).
+
+---
+
+## Layer 2 — Circles and pairing
+
+A **Circle** is this phone's list of paired people, persisted locally
+(`circle.json`). A **pairing** is a mutual, signed handshake between two Myco
+installs: one presents a one-time secret (NFC tag or QR), the other posts a
+signed **pair request** (kind `9101`) carrying it to the presenter's auth
+service at `<npub>.fips:4873`, and the presenter answers with a signed
+**pair accept** (`9102`). Forgetting a peer posts a **pair remove** (`9103`).
+Design: [identity-pairing.md](./identity-pairing.md).
+
+Pairing is what admits a phone to the content ports. The relay and Blossom
+servers gate every mesh connection on Circle membership (the **Circle gate**),
+so a FIPS peer that is not paired can reach exactly one thing: the auth
+service, to ask to pair. A Circle member is also who Myco *pulls from* — apps,
+backlog, blobs — and who receives gossip.
+
+**Not the same as a FIPS peer.** FIPS forms links with whatever compatible
+node is in range; that is transport, and it carries no trust. The Circle is a
+Myco-level decision, made by two people, stored on both phones — a *virtual*
+mesh over the physical one, built intentionally. The docs say *peer* for layer
+4 and *Circle member* or *paired* for layer 2. Design:
+[../circle/circle.md](../circle/circle.md).
+
+---
+
+## Layer 3 — Relay and Blossom
+
+Every phone runs **its own** Nostr relay (`ws://localhost:4870`) and Blossom
+store (`http://localhost:24243`), in Rust, in-process. No external service is
+required. Everything an app reads or writes rests here: manifests, blobs, chat,
+napplet events, relay lists.
+
+Both are reachable by Circle members over the mesh at `<npub>.fips:4870` and
+`<npub>.fips:24243` today — the same numbers, so a peer dialling your `.fips`
+name lands on your loopback service. These **mesh ports are deprecated**: a
+Circle-owned channel will replace them ([../circle/circle.md](../circle/circle.md) §6).
+What does not change is that a phone is a **holder**: a device that has an
+author's signed events and blobs and re-serves them. A holder is not the
+author; re-serving signed events is ordinary relay behaviour.
+
+Between Circle members, events also travel by **gossip**: a hop-limited flood
+(push plane, default 3 hops) and a hop-limited backlog pull (pull plane, default
+2 hops), carried in a `MESH` envelope beside plain NIP-01. Design:
+[event-gossip.md](./event-gossip.md).
+
+---
+
+## Layer 4 — FIPS
+
+**FIPS** is a self-organizing mesh with no central authority. Nodes use Nostr
+keys as identities, authenticate each other with Noise (IK hop-by-hop, XK
+end-to-end), form a spanning tree, and route greedily on coordinates across
+whatever transports they have — BLE L2CAP, Wi-Fi Aware, LAN UDP, TCP, Tor.
+Routing is **live-path only**: a datagram is delivered now or not at all; there
+is no store-and-forward in the transport. Store-and-forward is layer 3's job.
+
+Myco embeds a FIPS node and gives it four lanes: BLE (Kotlin owns the radio,
+fips owns the protocol), Wi-Fi Aware, the LAN, and — when a phone has internet
+— TCP. The node's IPv6 side is an app-owned `VpnService` TUN that routes only
+`fd00::/8` and answers `.fips` DNS. Design: [../fips/](../fips/).
+
+---
+
+## Three keys
+
+| Key | Layer | What it is | Where it appears |
+| --- | --- | --- | --- |
+| **device key** | 4 | this phone's Nostr keypair; generated on first launch (`identity.nsec`) | the mesh identity, link authentication, the relay/Blossom address `<npub>.fips`, pairing |
+| **user key** | 1 | the person's Nostr keypair as napplets see it; generated the first time a napplet runs, with a guest profile (kind `0`) and relay list (kind `10002`) | what a napplet publishes *as*; `identity.getPublicKey()` |
+| **author key** | 1 | an app author's key, held elsewhere by external tooling | the nsite URL host, the `authors` filter in a query; never its secret |
+
+The device key never authors an app. The app never holds an author's secret
+and never signs for them. The user key is separate from the device key so that
+a napplet learns who someone is socially, never which hardware they are on.
+
+### The device key's three forms
+
+From one keypair, three addresses derive, naming the same phone at different
+layers:
 
 | Form | Value | Who uses it |
 | --- | --- | --- |
-| **npub** | the bech32-encoded secp256k1 public key (`npub1…`) | the UI, QR pairing, BLE link auth, the relay/Blossom address |
-| **node_addr** | `SHA256(npub)[0:16]` — a 16-byte routing identifier | the FIPS mesh routing layer (packet headers, spanning tree, bloom filters) |
-| **fd00:: IPv6** | `fd` ‖ `node_addr[0:15]`, i.e. an address inside `fd00::/8` | unmodified IP applications, via the TUN |
+| **npub** | bech32 secp256k1 public key | the UI, pairing payloads, Noise handshakes, the relay/Blossom address |
+| **node_addr** | `SHA256(npub)[0:16]` | FIPS routing (headers, spanning tree, bloom filters) |
+| **fd00:: IPv6** | `fd` ‖ `node_addr[0:15]` | ordinary IPv6 software, via the TUN |
 
-The npub is the cryptographic identity used in Noise handshakes; it is never
-exposed beyond the endpoints of an encrypted channel. The **node_addr** is a
-one-way hash, so intermediate routers forward on it without learning the Nostr
-identity of either endpoint — an observer who already knows a pubkey can verify
-"does this node_addr belong to pubkey X?" but cannot enumerate identities from
-traffic. The **fd00:: IPv6** address is a ULA overlay address that lets ordinary
-IPv6 software reach a mesh node through the TUN.
-
-(See [fips-architecture.md § Identity System](../../../reference/fips/docs/design/fips-architecture.md)
-and the upstream [fips-ipv6-adapter.md](../../../reference/fips/docs/design/fips-ipv6-adapter.md).)
+The node_addr is a one-way hash, so routers forward without learning the Nostr
+identity of either endpoint. (See
+[fips-architecture.md § Identity](../../../reference/fips/docs/design/fips-architecture.md).)
 
 ---
 
-## Device identity vs nsite author identity
+## `.fips` vs `.localhost`
 
-These are **two different kinds of key** and the docs keep them strictly apart:
+- **`.fips`** is the transport namespace: `<npub>.fips` → that phone's
+  `fd00::` address (AAAA), answered by the node's own resolver through the TUN.
+  IPv6 only, mesh only. This is what **sync** talks to — relay and Blossom
+  connections to Circle members. The WebView never resolves it.
+- **`.localhost`** is the presentation namespace: what the WebView loads, served
+  in-process by the gateway. It is not DNS at all.
 
-- The **device key** (above) is the one Nostr keypair this device holds. It is
-  the mesh address, the BLE link identity, and the address of *this* device's
-  relay+Blossom. The app holds its secret key.
-- An **nsite author key** is an **external** key belonging to whoever authored a
-  site, somewhere else, with external tooling. The app **never** holds an
-  author's secret key and **never** signs on their behalf. An author key shows up
-  in exactly two places: as the **URL host** (`<npub_author>.nsite`) and as the
-  `authors` filter in a relay query (`{kinds:[15128,35128], authors:[<author>]}`).
-
-The load-bearing consequence: **the site you want and the peer you fetch it from
-are different keys.** A site is identified by its *author* npub; you fetch it from
-a *holder* — any device that has cached the author's signed events and blobs and
-re-serves them — reached on the mesh at `<npub_holder>.fips`. A holder is not the
-author; re-serving an author-signed event relay-to-relay is normal relay
-behaviour, not authorship. So to fetch a site, you query a holder's relay with
-`{kinds:[15128 or 35128], authors:[<author_pubkey>]}` — the holder's own mesh
-address has nothing to do with the author you are filtering on.
-
----
-
-## `.fips` vs `.nsite`
-
-Myco intercepts two TLDs at the device's DNS layer. They serve different
-purposes and resolve to different address families. Keeping them distinct is
-load-bearing.
-
-### `.fips` — the mesh (IPv6-only)
-
-`<npub>.fips` and `<alias>.fips` resolve to the node's `fd00::` IPv6 address
-(an **AAAA** record only). This is how mesh traffic addresses a remote node.
-`<npub>.fips` is purely *derivational* (the address is `fd` + SHA256(npub)[0:15],
-computable by anyone), whereas `<alias>.fips` depends on a **device-local
-alias→npub mapping** the interceptor holds — so aliases are local nicknames, not
-globally resolvable names.
-Queries that are *not* `.fips` are **REFUSED**, so the system falls through to
-normal DNS for everything else. Myco only ever speaks `.fips` for
-relay/blossom **sync** traffic — never for page loads.
-
-(See [fips-ipv6-adapter.md](../../../reference/fips/docs/design/fips-ipv6-adapter.md).)
-
-### `.nsite` — the local gateway (IPv4/localhost)
-
-`*.nsite` resolves to `127.0.0.1` (an **A** record). This is deliberately
-IPv4 and on localhost, and that choice matters: because it is an IPv4 loopback
-address, `.nsite` works in **any** browser, including Chromium. (Chromium
-suppresses AAAA/ULA answers, which only ever affected the IPv6-only `.fips`
-namespace; it cannot break an IPv4 loopback target.) An nsite is always loaded
-from `http://<host>.nsite`, never over `.fips`.
-
-The `<host>` label follows the nsite URL convention:
-
-- **root site** → `npub1…` (the author's npub as the single DNS label),
-- **named site** → `<pubkeyB36><dTag>` where `pubkeyB36` is the 50-character
-  base36 encoding of the raw 32-byte pubkey and `dTag` is the site identifier
-  appended directly after it (no separator).
-
-(See [reference/site-deck/docs/nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md).)
-
-**Why the split exists in one sentence:** `.fips` is the transport namespace
-(IPv6, mesh, sync-only); `.nsite` is the presentation namespace (IPv4,
-localhost, what the WebView loads). The browser never resolves `.fips`.
-
----
-
-## What an nsite is — and "nsites as apps"
-
-An **nsite** is a static website published on Nostr **by its author, using
-external nsite tooling** — Myco never authors one. It is not files on a
-server; it is a signed Nostr event plus content-addressed blobs:
-
-- a **manifest event** whose tags map absolute paths to blob hashes, e.g.
-  `["path","/index.html","<sha256>"]`. The manifest is a Nostr event, so it is
-  signed by the author and self-authenticating. Myco stores and re-emits this
-  event **unmodified**, so the author's signature stays valid.
-- each referenced file is a **blob**, stored and retrieved by its sha256 hash
-  (Blossom BUD-01, content-addressed).
-
-There are two manifest kinds:
-
-| Kind | Meaning | `d` tag | URL host |
-| --- | --- | --- | --- |
-| **15128** | root site (one replaceable event per pubkey) | none | `npub1…` |
-| **35128** | named site (parameterized-replaceable) | required | `<pubkeyB36><dTag>` |
-
-(Kind `34128`, legacy per-file events, may be supported for backward
-compatibility. See [nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md).)
-
-**Nsites as apps.** Each nsite is presented as its **own fullscreen "app"**,
-launched *by* Myco, not as a web page in a tabbed browser. **Myco itself is the
-manager app** — its home is the **Library** (your installed nsites/apps), with
-Pair, Discover, and Settings alongside. Tapping a Library entry launches that
-nsite as a **separate fullscreen task** (its own Android Recents card), a WebView
-with **no URL bar and no Myco chrome at all** — there is no fixed bottom bar, no
-Back · Reload · Library, and no long-press-in-the-Library browser. Refresh and
-in-app navigation are the **nsite developer's** responsibility, implemented
-inside the nsite; Android Back and Recents handle task-level navigation, and you
-return to Myco to *manage* a site (info, remove, re-pair, add-to-home-screen). In
-v1, nsite content is **pure static** (HTML/CSS/JS with no privileged access); a
-capability API (query peers, manage the cache) is a later milestone. The full
-shell and launch model — separate-task launch, deep links (`myco://app/<host>`),
-home-screen pinning, per-nsite origin isolation — is in
-[app-shell.md](./app-shell.md); the browse lifecycle is in
-[diagrams/04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg).
-
----
-
-## The embedded relay + Blossom server
-
-Every Myco device runs **its own** Nostr relay and Blossom server in-process.
-No external services are required.
-
-- **Embedded Nostr relay** — default `ws://localhost:4870`. A plain NIP-01 store +
-  socket: it **stores and serves** the signed manifest events (kinds 15128/35128).
-  It does **not** fan out on its own — a separate **nsite-deck propagator** does the
-  forwarding, by subscribing to the relevant relays (local + connected peers) and
-  publishing those events on to peer relays (events only, source-excluded; see
-  [propagation.md](../nsite/propagation.md)).
-- **Embedded Blossom server** — default `http://localhost:24243`. Stores and
-  serves the sha256-addressed blobs (Blossom BUD-01).
-
-Both are implemented in **Rust**, unified with the FIPS endpoint into a single
-`myco-core` crate (one `.so`, one FFI surface). They cache **other people's**
-nsites: when you browse someone's nsite, your relay retains the author's signed
-events and your Blossom store retains their blobs, so your device **becomes a new
-holder** — a fresh source for that site. Re-serving those author-signed events is
-ordinary relay behaviour, not authorship. This is the mechanism behind offline
-propagation (below).
-
-These services are exposed to peers over the mesh by FIPS **FSP port
-multiplexing**, which delivers mesh datagrams to localhost ports. A reachable
-peer reaches your relay at `<npub_device>.fips:4870` and your Blossom at
-`<npub_device>.fips:24243` — no separate gateway is needed on a reachable path.
-That address is *this device's* (the holder's) address; the nsites it serves are
-filtered by their own author keys, which are unrelated to it.
-
-(See [fips-session-layer.md](../../../reference/fips/docs/design/fips-session-layer.md),
-[fips-ipv6-adapter.md](../../../reference/fips/docs/design/fips-ipv6-adapter.md),
-and [reference/site-deck](../../../reference/site-deck/).)
-
----
-
-## The FIPS mesh, in one paragraph
-
-**FIPS** is a self-organizing mesh network with no central authority. Nodes use
-Nostr identities as addresses, authenticate each other, and route traffic for
-each other across heterogeneous transports (UDP, TCP, Tor, BLE, …) without any
-node knowing the full topology. A **spanning tree** forms by distributed parent
-selection (root = the lexicographically smallest node_addr), giving every node a
-coordinate; routing is **coordinate-based greedy**, decided locally at each hop.
-Security is two layers of Noise: **IK hop-by-hop** (every link is encrypted) and
-**XK end-to-end** (the payload is encrypted source-to-destination), so
-intermediate nodes route on the destination node_addr but cannot read the
-payload. Crucially, FIPS routing is **live-path only** — it is a best-effort
-datagram service with no store-and-forward in the transport. (See
-[fips-spanning-tree.md](../../../reference/fips/docs/design/fips-spanning-tree.md),
-[fips-mesh-layer.md](../../../reference/fips/docs/design/fips-mesh-layer.md),
-[fips-session-layer.md](../../../reference/fips/docs/design/fips-session-layer.md).)
-
----
-
-## What we dropped vs what we keep
-
-Myco is a fork of **nostr-vpn** (mmalmi), a Tailscale-style private mesh VPN
-on a FIPS data plane. Myco strips the **private-network layer** and keeps
-the FIPS transport plus the Android TUN.
-
-### Dropped — "the private network"
-
-The nostr-vpn product layer that turned the mesh into a managed private network
-is removed:
-
-- **exit-node selection** and **WireGuard upstream egress** (tunnel-all-internet),
-- **roster/admin membership** (the signed roster, kind 30388) and
-  **join-requests-as-membership**,
-- **`.nvpn` MagicDNS**,
-- **LAN-multicast pairing**.
-
-Myco is not a VPN that carries all your internet traffic and not a
-membership-gated network. There is no admin and no roster.
-
-### Kept
-
-- **The Android `VpnService`/TUN.** It is retained, but narrowed: it routes only
-  `fd00::/8` (the mesh ULA) and DNS-intercepts `*.fips` and `*.nsite`,
-  system-wide for every app on the phone. It does **not** capture `0.0.0.0/0` —
-  there is no tunnel-all-internet. The TUN is what gives every app on the device
-  `.fips`/`.nsite` resolution.
-- **The FIPS mesh** (the single upstream `fips` crate): identity, routing,
-  two-layer Noise crypto, transports.
-- **The embedding pattern**: link the upstream `fips` crate in-process via
-  `Node::new(Config)` (nostr-vpn's `FipsEndpoint::builder().without_system_tun()`
-  is a fork-only abstraction — see [build.md § 4c](../../how-to/build.md)). The app
-  owns the TUN and hands FIPS only packet bytes; that app-owned-TUN mode is itself
-  an upstream-`fips` capability Myco adds.
-- **QR pairing** (CameraX + ML Kit), reused and re-pointed at the Myco
-  payload (`myco://pair/<base64>` carrying npub + memorable name).
-
-The provenance of every layer is tabulated in
-[architecture.md](./architecture.md#reused-vs-net-new).
+**The site you want and the peer you fetch it from are different keys.** A site
+is named by its *author*; you fetch it from a *holder*, at `<npub_holder>.fips`,
+with a query filtered on the author: `{kinds:[35128], authors:[<author>]}`.
 
 ---
 
 ## Pillars of Propagation — live routing vs store-and-forward
 
-The project's framing comes from nak's **"Pillars of Propagation"**: small
-relays and Blossom blobs hopping over crappy links in all directions, surviving
-outages via local propagation. Realizing that vision requires distinguishing two
-mechanisms that Myco deliberately keeps separate:
+The framing is nak's "Pillars of Propagation": small relays and Blossom blobs
+hopping over bad links in every direction, surviving outages by local
+propagation. Two mechanisms, kept apart:
 
-- **Live-path routing (FIPS transport).** Multi-hop delivery between two nodes
-  that are *currently* connected by some path through the mesh. This is what
-  fips-core provides. It is best-effort and has **no store-and-forward** — if no
-  live path exists, the datagram does not get delivered.
-- **Store-and-forward (the nsite/relay layer).** The "cache an author's site
-  now, re-serve it to a third device tomorrow when the original holder is gone"
-  behaviour is **net-new** and lives *above* FIPS, at the relay+Blossom layer.
-  Because each device's relay retains the author's signed events and each Blossom
-  store retains their blobs, any device that has seen a site becomes an
-  independent holder for it. The data is self-authenticating (signed events,
-  content-addressed blobs), so **any source is trustworthy** regardless of who
-  relays it.
+- **Live-path routing (layer 4).** Multi-hop delivery between phones connected
+  *now*. Best-effort; no store-and-forward.
+- **Store-and-forward (layer 3).** Cache an author's site today, re-serve it to
+  a third phone tomorrow when the original holder is gone. Every phone that has
+  seen a site becomes an independent holder. The data is self-authenticating,
+  so any source is trustworthy regardless of who relays it.
 
-The **proposed default propagation mode is hybrid**: *announce availability
-widely, pull content on demand.* What floods is the author-signed **manifest
-event** itself (kind 15128 / 35128) — small, self-authenticating, and re-emitted
-**unmodified** so the author's signature stays valid. The flooding is done by the
-**nsite-deck propagator** (subscribe to local + peer relays, publish on to peer
-relays), not by the relay itself. There is no new "announcement" kind and no holder
-signature: the propagator forwards the author's manifest verbatim. "Announce widely"
-= flood those manifest events with a TTL of 5 hops; "pull on demand" = fetch the
-large **blobs** only when a site is opened. Discovery ("nsites around me") is just
-the manifests you have received via flood or queried from reachable relays. This split — FIPS for the live hop, the
-nsite layer for survival across partition — is drawn in
-[diagrams/03-offline-propagation.svg](../diagrams/03-offline-propagation.svg).
+Propagation is **hybrid**: what floods is the author-signed manifest, small and
+re-emitted unmodified (3 hops); the large blobs are pulled on demand when a site
+is opened. Design: [../nsite/propagation.md](../nsite/propagation.md).
 
 ---
 
-## Glossary (quick reference)
+## Glossary
 
 | Term | Meaning |
 | --- | --- |
-| **npub** | bech32 Nostr public key; for the **device** it is mesh/UI/BLE identity, for an **author** it is the nsite URL host + query filter |
-| **device key** | this device's one Nostr keypair: mesh address, BLE link auth, relay/Blossom address; never authors nsites |
-| **nsite author key** | an *external* key that signed a site; appears only as `<npub_author>.nsite` and the `authors` query filter; its secret key is never held by the app |
-| **holder** | a device that has cached an author's signed events + blobs and re-serves them; reached at `<npub_holder>.fips`; distinct from the author |
-| **node_addr** | `SHA256(npub)[0:16]`; the FIPS routing identifier |
-| **fd00:: IPv6** | `fd ‖ node_addr[0:15]`; the ULA overlay address used via the TUN |
-| **`.fips`** | DNS namespace → `fd00::` (AAAA); mesh sync traffic only; non-`.fips` queries refused |
-| **`.nsite`** | DNS namespace → `127.0.0.1` (A); what the WebView loads; works in any browser |
-| **nsite** | a static website authored on Nostr by external tooling: a signed manifest event + sha256 blobs |
-| **manifest** | the Nostr event whose `path` tags map paths → blob hashes (kind 15128 root / 35128 named) |
-| **blob** | a content-addressed file, retrieved by sha256 (Blossom BUD-01) |
-| **the Library** | the Myco home grid of nsites-as-apps |
-| **embedded relay** | in-process Nostr relay, `ws://localhost:4870` |
-| **embedded Blossom** | in-process blob server, `http://localhost:24243` |
-| **FIPS mesh** | self-organizing, transport-agnostic mesh; live-path-only routing |
+| **nsite** | a static site published on Nostr by external tooling: a signed manifest (`15128`/`35128`) + sha256 blobs; served to a WebView |
+| **napplet** | a NIP-5D program (`5129`/`15129`/`35129`): the same shape, run in a sandboxed iframe with granted capabilities |
+| **manifest** | the signed event whose `path` tags map paths to blob hashes |
+| **blob** | a content-addressed file, by sha256 (Blossom BUD-01) |
+| **aggregate hash** | the hash over a manifest's `path` entries; an nsite's integrity check, a napplet's identity |
+| **NAP** | a napplet capability domain (`relay`, `outbox`, `mesh`, `resource`, `identity`, `shell`) from the [napplet registry](https://github.com/napplet/naps) |
+| **grant** | the user's permission for a napplet to use a NAP; written at install review or on the app's Manage permissions sheet |
+| **Apps** | the home grid of installed nsites and napplets (in code: the Library) |
+| **Circle** | this phone's list of paired people, persisted locally |
+| **Circle member / paired** | someone in the Circle; admitted to the relay and Blossom over the mesh |
+| **peer** | a FIPS node this phone has a link to; says nothing about trust |
+| **pairing** | the mutual signed handshake (kinds `9101`/`9102`/`9103`) over the auth service on `:4873` |
+| **Circle gate** | the check on every mesh connection to the relay or Blossom: paired, or refused |
+| **holder** | a phone that has an author's events and blobs and re-serves them; reached at `<npub_holder>.fips` |
+| **device key** | this phone's keypair: mesh identity, link auth, `<npub>.fips`, pairing |
+| **user key** | the person's keypair for napplets: what they publish as |
+| **author key** | an app author's external key: the URL host and the `authors` filter; never held |
+| **node_addr** | `SHA256(npub)[0:16]`; the FIPS routing id |
+| **fd00:: IPv6** | `fd ‖ node_addr[0:15]`; the ULA overlay address via the TUN |
+| **`.fips`** | DNS → `fd00::` (AAAA); mesh sync only |
+| **`.localhost`** | what the WebView loads; answered in-process, not DNS |
+| **embedded relay** | in-process NIP-01 relay, `ws://localhost:4870`; `<npub>.fips:4870` to Circle members |
+| **embedded Blossom** | in-process blob store, `http://localhost:24243`; `<npub>.fips:24243` to Circle members |
+| **gateway** | the in-process resolver that answers a WebView's requests from relay + Blossom |
+| **gossip** | hop-limited flood (push) and backlog pull between Circle members, in a `MESH` envelope |
+| **lane** | one transport under FIPS: `ble`, `aware`, `udp` (LAN), `tcp` |
+| **FIPS mesh** | self-organizing, transport-agnostic, live-path-only routing |
 | **FMP / FSP** | FIPS Mesh Protocol (hop-by-hop, Noise IK) / FIPS Session Protocol (end-to-end, Noise XK) |
-| **FSP port-mux** | delivery of mesh datagrams to localhost ports, exposing `<npub>.fips:4870`/`:24243` |
-| **TUN** | the kept `VpnService`; routes `fd00::/8`, intercepts `.fips`/`.nsite`; not tunnel-all |
-| **store-and-forward** | net-new nsite-layer caching that lets a device re-serve a site offline |
-| **myco-core** | the app crate that wires `nsite-deck` + `myco-relay` + `myco-blossom` behind one FFI `.so`; the only crate that names FIPS or a concrete relay/Blossom |
-| **nsite-deck** | the reusable nsite host (gateway + sync); impl-agnostic — consumes the storage + transport seams, knows nothing about FIPS/BLE/Android |
-| **myco-relay / myco-blossom** | the generic, independently-reusable embedded relay / blob-store crates (impl `RelayBackend` / `BlobStore`) |
-| **RelayBackend / BlobStore** | nsite-deck's **storage** seams (provided by myco-relay / myco-blossom; Citrine-forward = an alternate `RelayBackend`) |
-| **PeerSource / FanoutSink** | nsite-deck's **transport** seams — pull from a peer / re-broadcast events — provided by `myco-core` over FIPS |
-| **the private network we dropped** | nostr-vpn's exit-node / WireGuard / roster-admin / `.nvpn` / LAN-multicast layer |
+| **TUN** | the app-owned `VpnService`, scoped to Myco's uid; routes `fd00::/8`, answers `.fips` |
+| **myco-core** | the app crate: wires everything behind one `libmyco_core.so` and a JSON reducer |
+| **nsite-deck** | the reusable nsite host (gateway + sync); reaches the world only through four seams |
+| **myco-napplet-runtime** | the napplet host: resolve, sandbox, NAPs; reaches the world only through seams |
+| **myco-relay / myco-blossom** | the embedded relay / blob-store crates |
+| **RelayBackend / BlobStore** | the storage seams (implemented by myco-relay / myco-blossom, or a custom relay/Blossom the user points at) |
+| **PeerSource / FanoutSink** | nsite-deck's transport seams — pull from a holder / re-broadcast — provided by myco-core over FIPS |

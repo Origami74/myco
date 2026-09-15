@@ -1,19 +1,19 @@
 # The Android Shell & Launch Model
 
-This document proposes the **Android shell and launch model** for Myco: how the
-app presents itself on the device, how an nsite is launched and lives as its own
-fullscreen "app", and why Myco imposes **no browser chrome** of its own. For the
-vocabulary it builds on (nsite, author vs device key, `.nsite` vs `.fips`, the
-embedded relay + Blossom, the Library), read [concepts.md](./concepts.md) first;
+This document is the **Android shell and launch model** for Myco: how the
+app presents itself on the device, how an nsite or napplet is launched and lives
+as its own fullscreen "app", and why Myco imposes **no browser chrome** of its
+own. For the vocabulary it builds on (nsite vs napplet, the three keys, `.fips`
+vs `.localhost`, the Apps grid), read [concepts.md](./concepts.md) first;
 for where the shell sits in the layer stack, see
 [architecture.md](./architecture.md); for what the WebView actually loads, see
 [nsite-layer.md](../nsite/nsite-layer.md); for the trust boundary around nsite content,
 see [security.md](./security.md).
 
-> Design doc for a not-yet-built app, written in proposal voice. Open questions
-> are marked **TBD / open**. This doc supersedes the earlier "embedded browser
-> with a fixed bottom bar (Back · Reload · Library)" chrome model wherever the
-> two disagree — that Myco-imposed chrome is **gone**.
+> Status: built. The one thing that changed from the design is the WebView
+> host — `<host>.localhost`, not `<host>.nsite` (§7). "The Library" in the
+> text is the **Apps** tab in the UI; the code still calls it the library.
+> Napplets follow the same model with their own activity (§9).
 
 ---
 
@@ -23,11 +23,12 @@ Myco has **two distinct UI surfaces**, and keeping them apart is the load-bearin
 decision of this doc:
 
 - **Myco the manager app** — its own home-screen icon, its own task. This is
-  where you *manage* nsites: install, remove, re-pair, add-to-home-screen, view
-  info. Its UI is four areas: **Library** (your installed nsites/apps),
-  **Pair** (QR scan + show, see [identity-pairing.md](./identity-pairing.md)),
-  **Discover** (nsites your circle holds — "nsites around me"), and
-  **Settings** (storage, cache cap, device identity).
+  where you *manage* apps: add, remove, share, pin to the home screen, manage a
+  napplet's permissions. Its UI is a bottom-nav shell: **Apps** (your installed
+  nsites and napplets in one grid), **Circle** (pair by bump or QR, see
+  [identity-pairing.md](./identity-pairing.md); your paired people; file
+  sharing), **Discover** (apps your Circle holds — "around me"), **Settings**
+  (radios, storage, identity, app reach), and a **Dev** tab.
 - **Each nsite as its own fullscreen app** — launched *by* Myco but running in
   its **own task/instance**, filling the screen, with **no Myco UI around it at
   all**. To an Android user it looks and behaves like a separate app, not a tab
@@ -57,7 +58,7 @@ The proposed mechanics:
   **title + favicon + colour** via
   [`ActivityManager.TaskDescription`](https://developer.android.com/reference/android/app/ActivityManager.TaskDescription),
   populated from the manifest (`["title", …]`, the `/favicon.ico` mapping).
-- The activity loads exactly one URL: `http://<host>.nsite` (see §7). It never
+- The activity loads exactly one URL: `http://<host>.localhost` (see §7). It never
   loads anything else; cross-device fetching is native code over `.fips`, which
   the WebView never sees.
 
@@ -113,7 +114,7 @@ Library, one nsite opening another, and a shared link:
   site (kind 15128) or **`<pubkeyB36><dTag>`** for a named site (kind 35128),
   exactly as the nsite spec encodes it (base36 50-char pubkey directly followed by
   the 1–13-char `dTag`, no separator — the same single label used by
-  `<host>.nsite`). One token, not an `npub/dTag` split.
+  `<host>.localhost`). One token, not an `npub/dTag` split.
 - **Myco's Library** launches an nsite by firing this intent.
 - **One nsite can open another** by the same intent (a link to
   `myco://app/<other-host>` starts — or re-surfaces (§2) — *that* nsite as its
@@ -157,7 +158,7 @@ app, but Myco **cannot** silently place icons.
 
 ## 6. Per-nsite origin isolation is automatic
 
-Because each nsite is served under its own host (`<host>.nsite`, where `<host>`
+Because each nsite is served under its own host (`<host>.localhost`, where `<host>`
 is the author npub or `<pubkeyB36><dTag>` — see [concepts.md](./concepts.md) and
 [nsite-layer.md §3.2](../nsite/nsite-layer.md)), each nsite is its **own web origin**.
 The WebView therefore **partitions storage, cookies, and `localStorage` per
@@ -179,15 +180,20 @@ The shell launches tasks; the **gateway** (see [nsite-layer.md](../nsite/nsite-l
 makes them resolvable. The seam between them is one URL:
 
 - `NsiteActivity` resolves its intent (`myco://app/<host>`) to a host
-  label and loads **`http://<host>.nsite`** in its WebView — root site →
+  label and loads **`http://<host>.localhost`** in its WebView — root site →
   `npub1…`, named site → `<pubkeyB36><dTag>`.
-- `*.nsite` is the localhost gateway (`127.0.0.1`, IPv4), so the load works in the
-  Android `WebView` exactly as in any browser. The gateway resolves the manifest,
-  fetches blobs from the local Blossom, and serves the bytes; on a cache miss it
-  drives a sync over `.fips` (all native, invisible to the WebView).
-- The WebView **never** resolves `.fips` (a locked decision, see
-  [concepts.md](./concepts.md) and [architecture.md](./architecture.md)) — the
-  shell hands it only the `.nsite` URL.
+- Every request the WebView makes is answered by `shouldInterceptRequest`
+  from the **in-process gateway** (`gatewayGet`): host → manifest → path →
+  sha256 → bytes from the local relay and Blossom. No socket is bound and no
+  DNS is consulted; the TUN is not involved. On a cache miss the gateway drives
+  a sync over `.fips` (all native, invisible to the WebView).
+- `.localhost`, not `.nsite`, because Chromium treats `*.localhost` as loopback
+  and a secure context — which is what lets a page open `ws://localhost:4870`
+  to the embedded relay without being blocked as a "public" page reaching a
+  "local" network. The design originally locked `.nsite`; this is the reason
+  it moved.
+- The WebView **never** resolves `.fips` — the shell hands it only the
+  `.localhost` URL.
 
 So the division of labour is: **the shell decides *which* task to start and
 describes it to Android; the gateway decides *what bytes* that task's one URL
@@ -236,12 +242,28 @@ until then these two explicit actions are the only reclamation path.
 
 ---
 
+## 9. Napplets: the same model, one more wall
+
+A napplet launches exactly like an nsite — its own task, its own Recents card,
+no chrome, `myco://napplet/<naddr>` as the intent — but in `NappletActivity`,
+not `NsiteActivity`, because the content is a program. The WebView loads a
+trusted **shell page** from the APK at `<label>.napplet.localhost`; the shell
+mounts the verified napplet in a `sandbox="allow-scripts"` `srcdoc` iframe,
+whose origin is opaque. The napplet reaches nothing but the shell, by
+`postMessage`; the shell reaches Rust over an origin-scoped
+`addWebMessageListener` channel; Rust does what the napplet's grants allow.
+Frames from Rust (subscription events, "relaunch") are drained by a long poll
+off the main thread. Closing the window closes the session. Design:
+[../napplet/napplet-runtime.md](../napplet/napplet-runtime.md) §5.
+
+---
+
 ## See also
 
-- [concepts.md](./concepts.md) — terminology, the Library, `.nsite` vs `.fips`,
+- [concepts.md](./concepts.md) — terminology, the Apps grid, `.localhost` vs `.fips`,
   the embedded relay + Blossom.
 - [architecture.md](./architecture.md) — the six-layer stack the shell sits atop.
-- [nsite-layer.md](../nsite/nsite-layer.md) — the gateway that serves `http://<host>.nsite`.
+- [nsite-layer.md](../nsite/nsite-layer.md) — the gateway that serves `http://<host>.localhost`.
 - [security.md](./security.md) — nsite sandbox, origin isolation, the
   impersonation/capability trust boundary.
 - [identity-pairing.md](./identity-pairing.md) — QR pairing (`myco://pair/…`),

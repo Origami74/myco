@@ -336,7 +336,7 @@ above the transport, in the nsite/relay store-and-re-serve layer:
   this as **negentropy / NIP-77** (events only — blobs stay pull-by-sha256). See
   [propagation.md §5](../nsite/propagation.md).
 - **TTL-bounded flood with probabilistic relay** → the manifest-flood
-  propagation TTL (proposed default 5 hops; author-signed manifests flood via
+  propagation TTL (3 hops, `EVENT_TTL`; author-signed manifests flood via
   relay-mesh fanout, blobs stay pull-only).
 
 These belong to the offline-propagation design

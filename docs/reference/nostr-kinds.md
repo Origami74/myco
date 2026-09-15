@@ -32,8 +32,12 @@ cited inline.
 | `5129` | napplet snapshot manifest | Regular | napplet | **Used** |
 | `15129` | napplet root manifest | Replaceable | napplet | **Used** |
 | `35129` | napplet named manifest | Param-replaceable (`d`) | napplet | **Used** |
-| `10002` | NIP-65 relay list | Replaceable | discovery hint | Online fallback only |
-| `10063` | BUD-03 user Blossom servers | Replaceable | discovery hint | Online fallback only |
+| `0` | profile metadata | Replaceable | napplet identity | **Published** — the user key's guest profile, on first napplet use (local relay) |
+| `10002` | NIP-65 relay list | Replaceable | napplet routing | **Published and read** — the user's own (mesh relay first, then the defaults) on first napplet use; other authors' lists drive NAP-OUTBOX plans, fetched and cached when missing |
+| `10063` | BUD-03 user Blossom servers | Replaceable | discovery hint | Not read yet |
+| `9101` / `9102` / `9103` | pair request / accept / remove | Regular | pairing (layer 2) | **Published and read** — signed by the device key, delivered to the peer's auth service `:4873`, never stored in the relay |
+| `14` in `13` in `1059` | NIP-17 rumor, NIP-59 seal and gift wrap | Regular | file sharing (layer 2) | **Published and read** — file offers and control messages between Circle members, gift-wrapped to the device key |
+| `24242` | Blossom auth | Regular | blob store | **Published** — authorises uploads to a custom Blossom server |
 | `37195` | FIPS overlay advert | Param-replaceable (`d`) | FIPS discovery | Future public peering |
 | `21059` | FIPS traversal signaling | Ephemeral | FIPS discovery | Future public peering |
 | `10050` | NIP-17 inbox relay list | Replaceable | FIPS discovery | Future public peering |
@@ -257,6 +261,29 @@ manifests you choose to replicate* are all detailed in
 [../design/nsite/propagation.md](../design/nsite/propagation.md).
 
 ---
+
+## Pairing and file-sharing kinds (layer 2)
+
+Layer 2 has its own small vocabulary, all signed by the **device key** and
+carried point-to-point, never gossiped:
+
+| Kind | Name | Carried how |
+| --- | --- | --- |
+| `9101` | pair request — carries the one-time secret from the presented code and the sender's name | HTTP POST to `<npub>.fips:4873/pair`, Noise-encrypted to the presenter |
+| `9102` | pair accept — the presenter's answer, so the requester adds them back | the same service on the requester |
+| `9103` | pair remove — forgetting a peer tells them, so both sides stay symmetric | the same service |
+| `1059` (wrapping `13` wrapping `14`) | file offer / accept / decline / cancel / done, as NIP-17 private messages | the peer's relay over the mesh; the wrap keeps them unreadable to anyone else, and the hub stores them with a zero hop budget so they travel no further |
+
+Design: [identity-pairing.md](../design/core/identity-pairing.md) §6–7,
+`file_transfer.rs`.
+
+## Napplet-published kinds (layer 1)
+
+Signed by the **user key**, on the first napplet run: a `0` guest profile named
+`Myco Guest <5 digits>` and a `10002` relay list naming this phone's mesh relay
+(`ws://<npub>.fips:4870`) first and the configured public relays after it. Both
+go to the local relay only. Whatever a napplet publishes through `relay`,
+`outbox` or `mesh` is signed by the same key with the kind the napplet chose.
 
 ## FIPS discovery kinds (future public-node peering)
 

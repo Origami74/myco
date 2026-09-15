@@ -1,343 +1,131 @@
 # Run the two-device offline demo
 
-The **v1 target** for Myco: a two-device Android demo over **BLE**, fully
-offline. One phone is seeded with an nsite (synced once while online, or
-side-loaded); the other QR-pairs to it and **opens that site as a fullscreen
-app** (its own task) — with **both devices in airplane mode** (BLE on). No internet, no
-Wi-Fi, no cell. This is the headline "Pillars of Propagation over crappy links"
-scenario. (The app never authors nsites; it stores, serves, and replicates sites
-authored elsewhere by external tooling.)
-
-This is a forward-looking runbook. Steps that depend on an unbuilt phase
-describe the *intended* procedure and are marked **(once Phase N lands)**.
-
-Companion diagrams:
-[02-pairing-transitive-discovery.svg](../design/diagrams/02-pairing-transitive-discovery.svg),
-[03-offline-propagation.svg](../design/diagrams/03-offline-propagation.svg),
-[04-nsite-browse-flow.svg](../design/diagrams/04-nsite-browse-flow.svg).
-For the concepts behind identity, `.fips`/`.nsite`, and the relay+Blossom store,
-see [../design/core/concepts.md](../design/core/concepts.md),
-[../design/core/identity-pairing.md](../design/core/identity-pairing.md), and
-[../design/nsite/propagation.md](../design/nsite/propagation.md).
-
-> Design doc for a not-yet-built app. Commands are modelled on the reference
-> checkouts and adapted. Unverifiable specifics are marked **TBD / open**.
+Two Android phones, both in airplane mode with Bluetooth on: pair them, share
+an app from one to the other, and open it — no internet, no Wi-Fi, no
+servers. This is the check that the whole stack works, and the manual test
+every mesh, pairing or BLE change needs before it ships (host `cargo test`
+cannot see any of it).
 
 ---
 
 ## What you need
 
-- **Two physical arm64 Android handsets**, **API 29+** (Android 10 or newer).
-  L2CAP CoC and BLE peripheral support are required and are **not** reliable on
-  the standard emulator — this demo is physical-device-only.
-- Both running a Myco debug build (see [build.md](./build.md)).
-- A USB cable + `adb` on the build host (used only for install and log
-  inspection — the demo itself is wireless).
-- Bluetooth radios that support **BLE peripheral advertising + L2CAP**. Some
-  older or budget chipsets advertise GATT fine but reject L2CAP listeners; if
-  pairing never completes, suspect the radio first.
-
-We'll call the two phones **A** (source/holder) and **B** (browser).
-
-### Per-peer PSM discovery and how that shapes the demo
-
-The fixed default FIPS PSM `0x0085` is only a **legacy default**; Myco does not
-rely on it. PSM assignment is symmetric and **per-peer**: every node advertises
-its own **OS-assigned** L2CAP listener PSM (in service-data and/or a readable
-GATT characteristic), and every dialer **reads the peer's PSM before
-`connect()`**. On Android, `listenUsingInsecureL2capChannel()` returns the
-dynamically-assigned listener PSM and `createL2capChannel(psm)` dials any PSM;
-Apple's `CBPeripheralManager.publishL2CAPChannel` likewise yields an OS-assigned
-`CBL2CAPPSM`. So both peers can listen *and* dial — there is no fixed
-well-known PSM and no "one side is forced to be central" constraint. FIPS
-identifies peers by the in-band pubkey exchange (`[0x00][pubkey:32]`, 33 bytes),
-**not** by MAC, so Android MAC randomization is harmless. (See
-[../../reference/fips/src/transport/ble/io.rs](../../reference/fips/src/transport/ble/io.rs)
-and the BLE specifics in [../design/core/identity-pairing.md](../design/core/identity-pairing.md).)
-
-For a two-device demo this means **each side reads the other's advertised PSM
-and dials it**. The cross-probe tiebreaker (smaller `node_addr`'s outbound
-connection wins) decides which of the two dials is kept. **(once the AndroidBleIo
-BLE transport + universal PSM discovery land — Phase: P1 (BLE peering over
-FIPS).)**
+- Two Android phones, **Android 10+ (API 29)**, with **BLE L2CAP CoC** support
+  (any phone from the last few years). No emulator: BLE, Wi-Fi Aware and NFC
+  need hardware.
+- The debug APK, built per [build.md](./build.md), on both.
+- An app to share. Any nsite reachable from the internet will do for seeding
+  (paste its link into phone A while A is online); a napplet by `naddr` works
+  the same way.
+- Optional: NFC on both, for the bump. QR works everywhere.
 
 ---
 
-## Step 1 — Install on both devices
-
-From the build host, with each device connected in turn:
+## Step 1 — Install and first run
 
 ```sh
-# device A
-adb -s <serialA> install -r android/app/build/outputs/apk/debug/app-debug.apk
-# device B
-adb -s <serialB> install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb devices -l
+adb -s <A> install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb -s <B> install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`adb devices -l` lists serials. The `just install` recipe (see
-[build.md](./build.md) §3b) installs to whichever single device is attached;
-for two devices, address them explicitly with `-s` as above.
+Open Myco on each. The intro runs once; then you are asked for a **name** —
+the memorable label the other phone will see. Accept the permission prompts
+(Bluetooth, nearby devices, notifications, and the VPN consent for the
+app-owned TUN). Each phone generates its **device key** on this launch; the
+Settings › Identity page shows the npub.
 
-Launch the app on each (replace with the real applicationId; `app.myco` is a
-placeholder):
+Settings › Mesh should show **Enable** on, **Bluetooth** on. Leave Wi-Fi Aware
+on if the phones support it; it only adds a faster lane.
 
-```sh
-adb -s <serial> shell am start -n app.myco/.MainActivity
-```
+## Step 2 — Seed an app on phone A (online, once)
 
----
+On **A**, with internet: Apps › **+** › paste a link. An nsite link (`npub1…`,
+`<host>.nsite.lol`, or a bare host label) syncs the manifest and blobs from the
+public relays and Blossom servers; an `naddr…` fetches a napplet and shows the
+install review — tap **Add to my apps**. The tile appears in the grid, with a
+progress ring until every file is local.
 
-## Step 2 — First-run identity generation
+Long-press the tile and **Add to Home screen** if you want the full effect.
 
-On first launch each device **generates a Nostr keypair (nsec) and persists it**
-to the app's `filesDir`. From that one keypair the device deterministically
-derives all three addressing forms — `npub`, `node_addr = SHA256(npub)[0:16]`,
-and the `fd00::` IPv6 address — so a device's mesh address is stable across
-restarts. (Persisting the identity in `filesDir` and deriving the FIPS address
-deterministically from the public key are standard FIPS-node behaviour — our
-base nostr-vpn does the same; see
-[reference/nostr-vpn/README.md](../../reference/nostr-vpn/README.md) and
-[../design/core/concepts.md](../design/core/concepts.md) "One identity, three derived
-forms".)
+## Step 3 — Pair
 
-No account, no server, no sign-up. Confirm each device shows its own `npub` in
-the UI (proposed: on the Library/home screen or a settings/identity panel —
-exact placement **TBD / open**).
+On both phones open the **Circle** tab.
 
-> One identity per device in v1; multi-persona is a later milestone.
+- **Bump:** hold the phones back to back. Each presents its invite as an NFC
+  tag and reads the other's; both add each other and both show a toast. Done.
+- **QR:** on A tap **Show my code**; on B tap **Scan** and point at it. B sends
+  a signed pair request over the mesh to A; A, still on the Circle tab, accepts
+  it automatically because the code it just showed is the one being answered.
+  (Off the Circle tab, A gets an accept/ignore prompt instead.)
 
----
+Either way the pairing is **mutual**: both phones list the other in Circle.
+The row shows the name from Step 1 and, when the mesh link is up, a lane icon.
 
-## Step 3 — Seed a sample nsite on device A
+## Step 4 — Go fully offline
 
-On **A**, seed a small externally-authored nsite so there is something to
-browse. The app never authors nsites — it only stores and serves sites authored
-elsewhere — so seeding means either **syncing a known public nsite once while
-A is still online**, or a one-time **side-load/import** of the externally-created
-artifacts (its already-signed manifest event + blobs).
-**(once the relay + Blossom + site-entry path lands — Phase: embedded relay +
-Blossom.)**
+On both phones: enable **airplane mode**, then turn **Bluetooth back on**
+(airplane mode switches it off). Wi-Fi and cellular stay off. If you left Wi-Fi
+Aware enabled, it does not need Wi-Fi to be on.
 
-The intended procedure:
+Within a few seconds the Circle rows should show the BLE lane lit — the phones
+found each other's L2CAP listener from the scan advert and formed a Noise link.
+The Dev tab lists the peer with its transport, RTT and every path fips holds.
 
-1. On A, add the nsite by its **author** identity — `AddNsite { author, dTag? }`,
-   which triggers a sync of that site — while A is online; or, for a fully
-   self-contained demo, use the dev-only `ImportNsite { … }` side-load to import
-   the externally-created artifacts directly. Either way the embedded Blossom
-   store ends up holding each file as a **content-addressed blob** (sha256,
-   Blossom BUD-01) and the embedded relay holds the author's **nsite manifest
-   event** — a Nostr event (kind **15128** root site, or **35128** named site
-   with a `d` tag) **signed by the external author**, whose tags map paths to
-   blob hashes, e.g. `["path","/index.html","<sha256>"]`. A stores and serves
-   that signed event unmodified; it does not author or re-sign it.
-   (See [reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)
-   and [../design/core/concepts.md](../design/core/concepts.md).)
-2. The site is now reachable on A locally at its nsite host —
-   `<npub_author>.nsite` for a root site (resolving to `127.0.0.1`, an A record),
-   served by the embedded gateway from the relay (`ws://localhost:4870`) + Blossom
-   (`http://localhost:24243`). Note the host is the **author's** npub, not A's
-   device npub.
-3. **Pin** the site so it is exempt from LRU eviction (sites added to the Library
-   are pinned by default; cache cap defaults to 2 GB).
+## Step 5 — Share the app
 
-Sanity-check on A *before* going offline, while it can only ever be talking to
-its own loopback:
+On **A**: long-press the tile › **Share**. A QR appears — and, while that sheet
+is open, the same payload is presented over NFC.
 
-```sh
-# from device A's own shell (Termux/adb shell) — loads the site from A's stores;
-# host is the nsite AUTHOR's npub, not A's device npub
-adb -s <serialA> shell am start -a android.intent.action.VIEW -d "http://<npub_author>.nsite/"
-```
+On **B**: Apps › **+** › **Scan**, or hold the phones together. The share
+payload names the app *and* A as its holder, so B pulls the manifest and
+blobs straight from A over the mesh — the ring fills — and the tile appears.
+For a napplet, B sees the install review first; its capabilities are listed in
+words. Add it.
 
-(Launching the site as a fullscreen `NsiteActivity` is the real target; the
-`am start` above is just a loopback smoke test. The WebView never resolves
-`.fips` — only relay/Blossom **sync** traffic uses `.fips`. See
-[../design/core/concepts.md](../design/core/concepts.md) "`.fips` vs `.nsite`".)
+Tap the tile on B. It opens full-screen as its own task, served from B's own
+relay and Blossom.
 
----
+## Step 6 — Verify
 
-## Step 4 — QR-pair the two devices
+- **Both phones are offline.** Pull down quick settings on each: airplane mode
+  on, Wi-Fi off.
+- **B serves from its own store.** Kill Myco on A (or walk it out of range);
+  B's app still opens and its pages still load. Settings › Storage on B shows
+  the event and blob counts that grew in Step 5.
+- **Discover works.** On B, the **Discover** tab lists what A holds — the
+  "around me" query to A's relay over the mesh — as long as A is reachable.
+- **Logs.** `adb -s <B> logcat | grep myco` during Step 5 shows the pull from
+  `<npubA>.fips:4870` / `:24243`, and `accepted a mesh event` lines as gossip
+  arrives.
 
-Pairing exchanges identity so each device can find and authenticate the other
-over the mesh. Myco reuses nostr-vpn's QR machinery (CameraX + ML Kit
-`BarcodeScanning`, a payload-prefix check, plus a deep-link intent filter; see
-[reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt](../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)).
-**(once the pairing UI lands — Phase P3: pairing + sync.)**
-
-1. On **A**, open **Show pairing QR**. A renders a code carrying the proposed
-   payload `myco://pair/<base64>` — **`{ npub, name, pairSecret }`**, where
-   `pairSecret` is a long, single-use random string (≈256 bits). It carries
-   **no MAC and no PSM**; those are learned later over BLE adverts.
-   (See [../design/core/identity-pairing.md](../design/core/identity-pairing.md).)
-2. On **B**, open **Scan to pair** and point the camera at A's code. B validates
-   the `myco://pair/` prefix, decodes A's npub, then **completes the mandatory
-   handshake** against A's on-device `<npubA>.fips` pairing endpoint: B echoes
-   `pairSecret` back over that Noise-encrypted channel, A matches it and taps **OK**.
-   A acks, and the two are now **mutually paired** — each holds the other, so
-   `<npubA>.fips` / `<aliasA>.fips` resolves on B and vice-versa.
-3. Pairing is always this single handshake — there is **no one-way fetch-only
-   scan**. See [../design/core/identity-pairing.md § 6.1](../design/core/identity-pairing.md).
-
-Because the handshake is a live round-trip, the two phones must be **reachable when
-B scans** — so in this offline demo bring up the BLE link (Step 6) first, or pair
-over any available FIPS path. Pairing establishes the mutual identity relationship;
-content sync follows.
-
----
-
-## Step 5 — Go fully offline
-
-On **both** devices:
-
-1. Enable **airplane mode**.
-2. Re-enable **Bluetooth** (airplane mode turns it off; toggle BT back on while
-   leaving Wi-Fi and cellular off).
-3. Confirm there is genuinely no other path: Wi-Fi off, mobile data off. This is
-   what makes the demo prove *offline* propagation rather than accidental
-   internet reachability.
-
-Start the Myco node / VPN on each device if it is not already running (the
-app owns the `VpnService`/TUN that routes `fd00::/8` and DNS-intercepts `.fips`
-and `.nsite`; it does **not** capture `0.0.0.0/0`).
-
----
-
-## Step 6 — Bring up the BLE link and browse
-
-**(once the AndroidBleIo BLE transport + offline re-serve land — Phases P1 (BLE
-peering) then P2–P4 (content + offline browse).)**
-
-1. Each device advertises the 128-bit FIPS service UUID (UUID-only adverts, no
-   identity material) and scans. Adverts carry the **OS-assigned** L2CAP listener
-   PSM so the peer can dial it (no fixed `0x0085`).
-2. Each device reads the peer's advertised PSM and dials it with
-   `createL2capChannel(psm)`. After the L2CAP connect, the pre-handshake
-   pubkey exchange (`[0x00][pubkey:32]`) runs, then **Noise IK** authenticates the
-   link. The cross-probe tiebreaker (smaller `node_addr` wins) resolves the
-   double-dial. (See
-   [../../reference/fips/src/transport/ble/io.rs](../../reference/fips/src/transport/ble/io.rs),
-   [discovery.rs](../../reference/fips/src/transport/ble/discovery.rs).)
-3. Once the link is up, B and A form a one-hop spanning tree. B can now reach A's
-   embedded services over the mesh at `<npubA>.fips:4870` (relay) and
-   `<npubA>.fips:24243` (Blossom), via FIPS FSP port-multiplexing — no separate
-   gateway needed. (See
-   [../../reference/fips/docs/design/fips-session-layer.md](../../reference/fips/docs/design/fips-session-layer.md).)
-4. On **B**, open the Library and **Search nsites around me** (query the holder A's
-   reachable relay for kind 15128/35128, filtering by `authors` and newest-first,
-   dedup by author+dTag). The discovered manifests are simply the author-signed
-   manifest events B has received via flood or queried — so the site A holds
-   appears.
-5. Tap the site. It launches as a fullscreen `NsiteActivity` — a `WebView`
-   filling the screen, no Myco chrome (no URL bar, no Back/Reload bar; refresh and
-   in-app navigation are the nsite developer's responsibility) — in its own task,
-   loading `http://<npub_author>.nsite/`; the host is the **author's** npub. Under
-   the hood B queries the **holder** A's relay
-   at `<npubA>.fips` with `{kinds:[15128 or 35128], authors:[<author_pubkey>]}`,
-   pulls the author's signed manifest event and the referenced blobs over Blossom
-   sync — **on demand** (HYBRID default: flood the author-signed manifests
-   widely, pull the large blobs on demand) — caches them in B's own relay +
-   Blossom stores, and serves the page from `127.0.0.1`. The site you want
-   (author npub) and the peer you fetch it from (holder A at `<npubA>.fips`) are
-   different keys.
-
-After this, **B has become a new source**: B's local relay/Blossom now hold the
-author's signed events and content-addressed blobs, so B could re-serve the site
-to a third device later, even if A is gone. Re-emitting an author-signed manifest
-relay-to-relay is normal relay behaviour, not authoring — B never signs anything.
-Data is self-authenticating (author-signed events, sha256 blobs), so any holder
-is a trustworthy source.
-(See [../design/nsite/propagation.md](../design/nsite/propagation.md) and
-[03-offline-propagation.svg](../design/diagrams/03-offline-propagation.svg).)
-
----
-
-## Step 7 — Verify
-
-The demo is a success when all three hold with **both devices still offline**:
-
-### 7a. `.fips` resolves on B
-
-From B's shell (Termux or `adb -s <serialB> shell`), the mesh name resolves to
-A's `fd00::` address (AAAA-only); non-`.fips` queries are refused:
-
-```sh
-# resolves to A's fd00:: ULA over the mesh DNS interceptor
-dig @10.1.1.1 AAAA <npubA>.fips
-# expect an fd00::… answer
-
-ping6 <npubA>.fips        # one-hop reachability A<->B over BLE
-```
-
-(`.fips` name resolution for bionic `getaddrinfo` clients — `ping6 <alias>.fips`,
-`dig @10.1.1.1` — is the FIPS `.fips` DNS feature; see
-[fips-ipv6-adapter.md](../../reference/fips/docs/design/fips-ipv6-adapter.md).)
-
-### 7b. The site loads from cache
-
-In B's fullscreen nsite app, the site renders. Then **break the link** — turn
-Bluetooth off on B (or walk A out of range) — and **re-launch the site from the
-Library** (or trigger the nsite's own in-app refresh). Because B cached the
-author's signed manifest event and blobs (fetched from holder A) in Step 6, the
-page **still loads from B's local stores**. This is the load-bearing proof of
-local propagation: the content outlives the live path. **(once offline re-serve
-lands.)**
-
-### 7c. It works with no internet
-
-Confirm throughout that both devices remain in airplane mode (Wi-Fi + cellular
-off, BT on). If you want belt-and-suspenders proof, watch logcat for the node's
-transport selection and confirm only the BLE transport is active, no
-UDP/TCP/internet path:
-
-```sh
-adb -s <serialB> logcat -s "fips:*" "FipsViewModel:*"
-# expect BLE link up to A; no internet transport
-```
-
-(Log tags are placeholders adapted from nostr-vpn's debug tooling — see
-[reference/nostr-vpn/Justfile](../../reference/nostr-vpn/Justfile);
-Myco's actual tag names are **TBD / open**.)
+For a napplet with `mesh` granted, the doorbell test: ring on A, `mesh.event`
+lands on B (logcat: `napplet published to the mesh` on A, `accepted a mesh
+event` on B).
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Try |
+| Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| BLE link never forms | Radio rejects L2CAP listener, or no advert seen | Confirm both radios support L2CAP CoC; bring devices within ~1 m; ensure BT re-enabled after airplane mode |
-| Pairing QR won't scan | Camera permission, or wrong prefix | Grant camera permission; confirm payload starts `myco://pair/` |
-| `.fips` won't resolve | Node/VPN not started, or peer not paired | Start the node on both; re-check Step 4 pairing seeded A's npub on B |
-| Site won't load in WebView | Browser tried to resolve `.fips`, or blobs not pulled | The WebView must use `.nsite` (127.0.0.1), never `.fips`; confirm relay/Blossom sync completed in Step 6 |
-| Both dial, neither sticks | Tiebreaker confusion | The smaller `node_addr`'s outbound connection should win; check logs for the cross-probe resolution |
+| No lane icon on the Circle row | BLE off after airplane mode; phones too far; one phone's radio rejected the L2CAP listener | Toggle Bluetooth on; bring within ~1 m; check the Dev tab's attempt log (`connect-timeout`, `pool-rejected`) |
+| Pair request never accepted | A left the Circle tab before B scanned, so the request needs a manual accept | Look for the prompt on A; or re-show the code (it rotates) |
+| Share scanned, ring never fills | No mesh route yet — the link came up after the pull started | Wait for the lane icon, then scan again; the pull retries the holder first |
+| "Couldn't find this app" on a napplet share | Same as above, or the sharer's link dropped mid-fetch | **Try again** on the sheet |
+| App opens but a napplet says a capability was refused | Not granted at install (declared nothing) | Long-press › **Manage permissions** |
+| Everything works until the phones are apart | That's the mesh: live-path only. The app stays, the feed does not | Expected — B is now a holder; a third phone can pull from B |
+| VPN consent dialog again | The app-owned TUN was revoked (another VPN, or the system) | Accept; Settings › Mesh › Enable re-prompts |
 
 ---
 
-## Phase dependency summary
+## What this exercises
 
-| Step | Lands with |
+| Step | Layer |
 | --- | --- |
-| 1 — install | available now (build pipeline, [build.md](./build.md)) |
-| 2 — identity | Phase: identity persistence (mirrors nostr-vpn, low risk) |
-| 3 — seed nsite | Phase: embedded relay + Blossom + site-entry (sync / side-load) |
-| 4 — QR pair | Phase: QR pairing (reuses nostr-vpn machinery) |
-| 5 — go offline | available once the node/TUN runs |
-| 6 — BLE browse | Phase: AndroidBleIo BLE peering, then offline propagation |
-| 7 — verify | follows 6 |
-
----
-
-## Open questions
-
-- **Identity UI placement (Step 2):** where the device shows its own npub.
-  **TBD / open.**
-- **Seed UX (Step 3):** how a user seeds an externally-authored nsite on-device
-  (`AddNsite { author, dTag? }` sync while online? dev-only `ImportNsite` side-load
-  from a file? sample bundled with the app?). The app never authors a site.
-  **TBD / open.**
-- **Two-Android dialing (Steps 4/6):** both phones are central-only dialers;
-  confirm the cross-probe tiebreaker reliably yields exactly one kept L2CAP
-  connection between two Android peers. **TBD / open.**
-- **Log tag names (Step 7c):** placeholders adapted from nostr-vpn.
-  **TBD / open.**
-- **Throughput:** BLE L2CAP MTU vs. blob sizes — how large an nsite is
-  practical to pull over BLE in the demo. **TBD / open.**
+| 1 | device identity (4), radios (4) |
+| 2 | nsite/napplet sync from the internet (1, 3) |
+| 3 | pairing over the auth service, the Circle (2) |
+| 4 | BLE L2CAP link, Noise, the TUN (4) |
+| 5 | share payload, holder-first pull over `.fips`, install review and grants (1, 2, 3) |
+| 6 | store-and-forward: B as a holder; discovery; gossip (3) |
