@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-02)
 Phase: 1 of 5 (Make Peering Observable)
 Plan: 0 of 2 in current phase
 Status: Ready to execute
-Last activity: 2026-09-14 — Completed quick task 260914-ovv: relay.publish follows NAP-RELAY
+Last activity: 2026-09-15 — Completed quick task 260915-emn: NAP-OUTBOX napplet capability
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -94,6 +94,7 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 | 260914-o2p | Nsite long-press sheet listed "Add to Home screen" twice (unconditional copy from 3c9d0cd above the `ready` guard); one-line delete | 2026-09-14 | `feat/napplet-runtime` | `.planning/quick/260914-o2p-remove-duplicated-add-to-home-screen-act/260914-o2p-SUMMARY.md` |
 | 260914-of6 | NAP-MESH: `mesh` napplet capability — hop-limited publish/subscribe over the mesh, user caps in Settings › App reach, `napplet.shell.supports()` supplement | 2026-09-14 | `feat/napplet-runtime` | `.planning/quick/260914-of6-nap-mesh-hop-limited-mesh-publish-subscr/260914-of6-SUMMARY.md` |
 | 260914-ovv | `relay.publish` follows NAP-RELAY: relay pool (local relay + public relays, best-effort), never the mesh flood | 2026-09-14 | `feat/napplet-runtime` | `.planning/quick/260914-ovv-relay-publish-follows-nap-relay-relay-po/260914-ovv-SUMMARY.md` |
+| 260915-emn | NAP-OUTBOX: `outbox` napplet capability — NIP-65 relay plans over local/mesh/internet lanes, per-relay publish verdicts, own kind 10002 on first use | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-emn-nap-outbox-outbox-aware-relay-routing-fo/260915-emn-SUMMARY.md` |
 
 ## Deferred Items
 
