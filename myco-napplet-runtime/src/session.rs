@@ -46,8 +46,10 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// can be allowed while still working.
 pub const DEFAULT_GRANTS: &[&str] = &["identity", "relay", "resource"];
 
-/// A napplet's identity: the `(dTag, aggregateHash)` tuple, computed by the
-/// runtime from verified bytes.
+/// A napplet's identity: the `(dTag, aggregateHash)` tuple NIP-5D defines,
+/// computed by the runtime from verified bytes — plus the author who signed
+/// the manifest, so a host can tell two authors' napplets apart when they
+/// chose the same `d`.
 ///
 /// Assigned at creation and never negotiated. `d_tag` is empty for root and
 /// snapshot manifests, which have none.
@@ -55,6 +57,9 @@ pub const DEFAULT_GRANTS: &[&str] = &["identity", "relay", "resource"];
 pub struct NappletIdentity {
     pub d_tag: String,
     pub aggregate: String,
+    /// The manifest author's public key, lowercase hex. Empty for a session
+    /// built without a manifest (tests).
+    pub author: String,
 }
 
 impl NappletIdentity {
@@ -62,13 +67,20 @@ impl NappletIdentity {
         Self {
             d_tag: d_tag.into(),
             aggregate: aggregate.into(),
+            author: String::new(),
         }
+    }
+
+    pub fn with_author(mut self, author: &nostr::PublicKey) -> Self {
+        self.author = author.to_hex();
+        self
     }
 }
 
 impl From<&crate::resolve::ResolvedNapplet> for NappletIdentity {
     fn from(resolved: &crate::resolve::ResolvedNapplet) -> Self {
         Self::new(resolved.d_tag.clone(), resolved.aggregate.clone())
+            .with_author(&resolved.manifest.author)
     }
 }
 

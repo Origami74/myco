@@ -15,7 +15,16 @@
 //! - **Regular** (e.g. kind 9 chat) — kept **by event id** (many per author), so a
 //!   second message does not overwrite the first. These are typically ephemeral
 //!   (a NIP-40 `expiration` tag, `docs/design/core/event-gossip.md` §5): they are GC'd
-//!   on expiry and **not persisted** — chat is memory-only by design.
+//!   on expiry and **not persisted** — chat is memory-only by design. A regular
+//!   event with no expiration (a napplet's note, an event pulled from a public
+//!   relay) is memory-only too, and the set is capped at [`REGULAR_CAP`] with
+//!   the oldest dropped first. The one regular kind persisted is the napplet
+//!   snapshot manifest (5129), which is content, not conversation.
+//!
+//! Persistence is a full rewrite of one JSON file, so what is persisted must
+//! stay small: manifests and the handful of replaceable kinds a user has. The
+//! day this store held every kind-1 a napplet pulled from the internet, each new
+//! event rewrote megabytes and every gateway lookup walked them all.
 //!
 //! The query surface Myco uses is tiny (`{kinds, authors, #d, limit}`), so this is
 //! a hand-rolled store over the rust-`nostr` `Event` type. Negentropy/NIP-77 is
@@ -96,7 +105,7 @@ impl RelayStore {
             let mut map = self.events.lock().unwrap();
             map.retain(|id, _| keep.contains(id));
             map.values()
-                .filter(|e| expiration(e).is_none())
+                .filter(|e| is_persistable(e))
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -119,6 +128,45 @@ impl RelayStore {
         if let Err(e) = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path)) {
             tracing::error!(error = %e, "relay store: persist failed");
         }
+    }
+}
+
+/// The most regular, non-expiring events held in memory at once. Beyond it the
+/// oldest go first. Sized for a phone: enough for a feed's worth of notes and a
+/// mesh pull or two, small enough that a query walking all of them stays cheap.
+pub const REGULAR_CAP: usize = 4096;
+
+/// NIP-5D napplet snapshot manifest — the one regular kind that is content
+/// rather than conversation, and so is persisted like the manifests it sits
+/// beside. Named here rather than imported so this crate keeps depending on
+/// nothing but `nsite-deck`.
+const NAPPLET_SNAPSHOT_KIND: u16 = 5129;
+
+/// Whether an event belongs in the persisted set: no expiration, and a kind
+/// whose loss would be the loss of something the user installed or published
+/// about themselves — not a note that will be pulled again.
+fn is_persistable(event: &Event) -> bool {
+    if expiration(event).is_some() {
+        return false;
+    }
+    let kind = event.kind.as_u16();
+    is_replaceable(kind) || is_addressable(kind) || kind == NAPPLET_SNAPSHOT_KIND
+}
+
+/// Drop the oldest memory-only regular events until at most [`REGULAR_CAP`]
+/// remain. Expiring events are left to their own GC.
+fn cap_regular(map: &mut HashMap<[u8; 32], Event>) {
+    let mut regular: Vec<([u8; 32], nostr::Timestamp)> = map
+        .iter()
+        .filter(|(_, e)| !is_persistable(e) && expiration(e).is_none())
+        .map(|(id, e)| (*id, e.created_at))
+        .collect();
+    if regular.len() <= REGULAR_CAP {
+        return;
+    }
+    regular.sort_by_key(|(_, at)| *at);
+    for (id, _) in regular.iter().take(regular.len() - REGULAR_CAP) {
+        map.remove(id);
     }
 }
 
@@ -227,7 +275,7 @@ impl RelayStore {
     /// relay could not answer it anyway.
     pub async fn admit_event(&self, event: Event) -> anyhow::Result<bool> {
         let now = now_secs();
-        let persistable = expiration(&event).is_none();
+        let persistable = is_persistable(&event);
         let snapshot = {
             let mut map = self.events.lock().unwrap();
             // Opportunistic GC: drop anything that has expired since last touch.
@@ -235,11 +283,14 @@ impl RelayStore {
             if !admit(&mut map, event, now) {
                 return Ok(false);
             }
-            // Only the non-expiring (manifest) set is persisted; expiring chat
-            // events stay in memory, so they never hit disk.
+            if !persistable {
+                cap_regular(&mut map);
+            }
+            // Only the persisted set (manifests, the user's replaceable kinds)
+            // hits disk; chat and pulled notes stay in memory.
             persistable.then(|| {
                 map.values()
-                    .filter(|e| expiration(e).is_none())
+                    .filter(|e| is_persistable(e))
                     .cloned()
                     .collect::<Vec<_>>()
             })
@@ -488,5 +539,59 @@ mod tests {
         store.wipe().await.unwrap();
         assert_eq!(store.count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn note(keys: &Keys, at: u64, text: &str) -> Event {
+        nostr::EventBuilder::text_note(text)
+            .custom_created_at(nostr::Timestamp::from(at))
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    /// A regular event with no expiration — a napplet's note, a note pulled
+    /// from a public relay — is served while held but never written to disk:
+    /// the persisted file is manifests and the user's own replaceable kinds,
+    /// and it is rewritten whole on every persist.
+    #[tokio::test]
+    async fn regular_events_are_memory_only() {
+        let dir = tmp("regular-memory");
+        let _ = std::fs::remove_dir_all(&dir);
+        let keys = Keys::generate();
+        let site = build_test_site_with_keys(&keys, &[("/index.html", b"x")], None, None);
+        {
+            let store = RelayStore::open(&dir).unwrap();
+            store.admit_event(site.manifest.clone()).await.unwrap();
+            store.admit_event(note(&keys, 100, "hello")).await.unwrap();
+            assert_eq!(store.count(), 2, "held while the store is open");
+        }
+        let store = RelayStore::open(&dir).unwrap();
+        assert_eq!(store.count(), 1, "the note came back from disk");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The memory-only set is bounded, oldest first; manifests are never
+    /// counted against it.
+    #[tokio::test]
+    async fn regular_events_are_capped_oldest_first() {
+        let store = RelayStore::in_memory();
+        let keys = Keys::generate();
+        let site = build_test_site_with_keys(&keys, &[("/index.html", b"x")], None, None);
+        store.admit_event(site.manifest.clone()).await.unwrap();
+        for i in 0..(REGULAR_CAP as u64 + 10) {
+            store
+                .admit_event(note(&keys, 1_000 + i, &format!("n{i}")))
+                .await
+                .unwrap();
+        }
+        assert_eq!(store.count(), REGULAR_CAP + 1);
+        let oldest = store
+            .query(&[Filter::new().kind(nostr::Kind::TextNote).until(nostr::Timestamp::from(1_009))])
+            .await
+            .unwrap();
+        assert!(oldest.is_empty(), "the ten oldest notes should have gone first");
+        let manifest = nsite_deck::seams::newest_in_slot(&store, KIND_ROOT, &keys.public_key(), None)
+            .await
+            .unwrap();
+        assert!(manifest.is_some(), "a manifest was evicted by the note cap");
     }
 }

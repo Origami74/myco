@@ -1,7 +1,6 @@
 package app.myco
 
 import android.annotation.SuppressLint
-import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
@@ -261,24 +260,13 @@ private class NsiteWebViewClient(
             return openExternally(view, uri)
         }
         // No external handler for these — let the WebView deal with them in-page.
-        if (scheme == null || scheme in IN_PAGE_SCHEMES) return false
+        if (ExternalNavigation.staysInPage(uri)) return false
         // mailto:, tel:, sms:, geo:, intent:, … always belong to a native app.
         return openExternally(view, uri)
     }
 
-    /** Hand [uri] to the system's default handler; swallow a missing handler. */
-    private fun openExternally(view: WebView, uri: Uri): Boolean {
-        val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        return try {
-            view.context.startActivity(intent)
-            true
-        } catch (e: ActivityNotFoundException) {
-            // Nothing on the device can open it (e.g. a bare .nsite with no TUN);
-            // stay put rather than navigating the WebView to a dead page.
-            Log.w("NsiteActivity", "No handler for $uri", e)
-            true
-        }
-    }
+    private fun openExternally(view: WebView, uri: Uri): Boolean =
+        ExternalNavigation.openExternally(view.context, uri, "NsiteActivity")
 
     override fun shouldInterceptRequest(
         view: WebView,
@@ -345,9 +333,6 @@ private class NsiteWebViewClient(
     }
 
     private companion object {
-        /** Schemes with no external app handler — the WebView renders them itself. */
-        val IN_PAGE_SCHEMES = setOf("data", "blob", "about", "javascript", "file", "content")
-
         /**
          * The suffix napplet shell origins carry. Kept in sync with
          * `myco_napplet_runtime::host::SHELL_SUFFIX`; the Rust side owns the

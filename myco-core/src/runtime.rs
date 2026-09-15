@@ -1266,39 +1266,39 @@ impl AppRuntime {
             return;
         };
         let npub = addr.author.to_bech32().unwrap_or_default();
-        let Some(mut granted) = content.napplet_grants(&npub, addr.d_tag.as_deref()) else {
+        let Some(mut grants) = content.napplet_grants(&npub, addr.d_tag.as_deref()) else {
             tracing::warn!(pointer, "napplet grant: not installed");
             return;
         };
-        if allowed {
-            if !granted.iter().any(|d| d == domain) {
-                granted.push(domain.to_string());
-            }
-        } else {
-            granted.retain(|d| d != domain);
-        }
+        // Moved between the two sets, not merely dropped from one: "off" is a
+        // decision the next launch must respect, and only `denied` records it.
+        grants.set(domain, allowed);
         tracing::info!(
             pointer,
             domain,
             allowed,
             "napplet grant changed on the sheet"
         );
-        content.set_napplet_grants(&npub, addr.d_tag.as_deref(), granted.clone());
+        content.set_napplet_grants(&npub, addr.d_tag.as_deref(), grants.clone());
         if let (Some(host), Some(rt)) = (self.napplet_host.clone(), self.rt.as_ref()) {
+            let author = addr.author;
             let d_tag = addr.d_tag.clone();
-            rt.spawn(async move { host.apply_grants(d_tag.as_deref(), granted).await });
+            rt.spawn(async move {
+                host.apply_grants(&author, d_tag.as_deref(), grants.granted)
+                    .await
+            });
         }
     }
 
-    /// Resolve a napplet and open a session, with the grants **this device**
-    /// recorded for it.
+    /// Everything needed to open a napplet, gathered under the runtime lock so
+    /// the resolve itself can run **without** it.
     ///
     /// Grants are read from the Library here rather than accepted from the
     /// caller. The caller is an Activity, and an Activity can be started by an
     /// intent: taking a grant list across that boundary would let an inbound
     /// intent hand a napplet capabilities the user never approved. Install
-    /// review is the only writer, and this is the only reader.
-    pub fn open_napplet(&mut self, pointer: &str) -> anyhow::Result<crate::napplet::OpenedNapplet> {
+    /// review and the sheet are the only writers, and this is the only reader.
+    pub fn prepare_open_napplet(&mut self, pointer: &str) -> anyhow::Result<NappletOpenRequest> {
         use nostr::nips::nip19::ToBech32;
         let addr = crate::napplet::NappletAddr::parse(pointer)?;
         let content = self
@@ -1306,22 +1306,37 @@ impl AppRuntime {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("content layer is not running"))?;
         let npub = addr.author.to_bech32().unwrap_or_default();
-        let granted = content.napplet_grants(&npub, addr.d_tag.as_deref());
-
+        let grants = content.napplet_grants(&npub, addr.d_tag.as_deref());
         let (host, rt) = self
             .napplet_context()
             .ok_or_else(|| anyhow::anyhow!("content layer is not running"))?;
-        let opened = rt.block_on(host.open(&addr, granted.clone()))?;
-        // The session may have been opened with more than was stored (a
-        // declared domain this build newly implements). Record it, so the
-        // sheet says what the app can do and the next open needs no widening.
-        if let Some(stored) = granted {
-            if opened.granted != stored {
-                content.set_napplet_grants(&npub, addr.d_tag.as_deref(), opened.granted.clone());
-                self.rev += 1;
-            }
+        Ok(NappletOpenRequest {
+            addr,
+            npub,
+            grants,
+            content,
+            host,
+            rt,
+        })
+    }
+
+    /// Resolve a napplet and open a session — the lock-holding shape, for
+    /// host tests and callers that already own the runtime. The FFI uses
+    /// [`AppRuntime::prepare_open_napplet`] and runs the request with the
+    /// lock released.
+    pub fn open_napplet(&mut self, pointer: &str) -> anyhow::Result<crate::napplet::OpenedNapplet> {
+        let request = self.prepare_open_napplet(pointer)?;
+        let (opened, widened) = request.run()?;
+        if widened {
+            self.rev += 1;
         }
         Ok(opened)
+    }
+
+    /// The Library changed under an open (a widened grant); bump `rev` so the
+    /// UI re-reads.
+    pub fn note_library_changed(&mut self) {
+        self.rev += 1;
     }
 
     /// Fetch a napplet online, verify it, and store it locally — without
@@ -2803,5 +2818,46 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A napplet open, prepared under the runtime lock and run without it.
+///
+/// The resolve reads the relay and the blob store — a configured custom relay
+/// makes that a network round trip — and it used to run inside the reducer's
+/// mutex on the main thread, queuing every `Tick` behind it. Now the lock is
+/// held only to gather these handles; `run` does the waiting.
+pub struct NappletOpenRequest {
+    addr: crate::napplet::NappletAddr,
+    npub: String,
+    grants: Option<crate::content::NappletGrants>,
+    content: Arc<crate::content::Content>,
+    host: Arc<crate::napplet::NappletHost>,
+    rt: tokio::runtime::Handle,
+}
+
+impl NappletOpenRequest {
+    /// Resolve, open the session, and record any widening in the Library.
+    /// Returns the opened napplet and whether the Library changed. Blocks the
+    /// calling thread; never call it on a Tokio worker.
+    pub fn run(self) -> anyhow::Result<(crate::napplet::OpenedNapplet, bool)> {
+        let opened = self
+            .rt
+            .block_on(self.host.open_with(&self.addr, self.grants.clone()))?;
+        // The session may have been opened with more than was stored (a
+        // declared domain this build newly implements). Record it, so the
+        // sheet says what the app can do and the next open needs no widening.
+        let mut widened = false;
+        if let Some(stored) = self.grants {
+            if opened.grants != stored {
+                self.content.set_napplet_grants(
+                    &self.npub,
+                    self.addr.d_tag.as_deref(),
+                    opened.grants.clone(),
+                );
+                widened = true;
+            }
+        }
+        Ok((opened, widened))
     }
 }

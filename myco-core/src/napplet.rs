@@ -166,9 +166,17 @@ pub struct OpenedNapplet {
     pub shell_host: String,
     pub title: Option<String>,
     /// What the session was actually opened with: the stored grants, widened
-    /// by any domain the napplet declared that this build implements and an
-    /// earlier one did not. See [`NappletHost::open`].
-    pub granted: Vec<String>,
+    /// by any domain the napplet declared that this build implements, an
+    /// earlier one did not, and the user has not switched off. See
+    /// [`NappletHost::open_with`].
+    pub grants: crate::content::NappletGrants,
+}
+
+impl OpenedNapplet {
+    /// The domains the session may use — a view over [`OpenedNapplet::grants`].
+    pub fn granted(&self) -> &[String] {
+        &self.grants.granted
+    }
 }
 
 /// The device's live napplet sessions.
@@ -195,16 +203,34 @@ impl NappletHost {
         }
     }
 
-    /// Resolve a napplet from the local stores and open a session for it.
-    ///
-    /// `granted` is what the user approved at install review, or `None` for
-    /// a napplet that is not installed — which opens with nothing but the
-    /// handshake. A napplet that fails verification never gets a session:
-    /// the error propagates and no window opens.
+    /// As [`NappletHost::open_with`], for a napplet with nothing switched off:
+    /// `granted` is what the user approved, or `None` for one not installed.
     pub async fn open(
         &self,
         addr: &NappletAddr,
         granted: Option<Vec<String>>,
+    ) -> anyhow::Result<OpenedNapplet> {
+        self.open_with(
+            addr,
+            granted.map(|granted| crate::content::NappletGrants {
+                granted,
+                denied: Vec::new(),
+            }),
+        )
+        .await
+    }
+
+    /// Resolve a napplet from the local stores and open a session for it.
+    ///
+    /// `grants` is what the Library records — what the user allowed and what
+    /// they switched off — or `None` for a napplet that is not installed,
+    /// which opens with nothing but the handshake. A napplet that fails
+    /// verification never gets a session: the error propagates and no window
+    /// opens.
+    pub async fn open_with(
+        &self,
+        addr: &NappletAddr,
+        grants: Option<crate::content::NappletGrants>,
     ) -> anyhow::Result<OpenedNapplet> {
         let event = newest_in_slot(
             self.relay.as_ref(),
@@ -227,32 +253,42 @@ impl NappletHost {
         // fails on the first call, with no screen ever having said no. What
         // the user agreed to was "what it declares, plus the defaults"; this
         // build implementing more of that list does not change the agreement,
-        // so the session is opened with the declared set as of now. Nothing
-        // undeclared is added, nothing is added to a napplet that was never
-        // installed, and the long-press sheet shows the result.
-        let granted = match granted {
-            None => Vec::new(),
-            Some(mut granted) => {
+        // so the session is opened with the declared set as of now.
+        //
+        // Except what the user switched off. A domain in `denied` is a
+        // decision, and a launch does not get to overrule it — that is the
+        // difference between "never decided" and "said no", and why the two
+        // are stored apart. Nothing undeclared is added, nothing is added to a
+        // napplet that was never installed, and the long-press sheet shows
+        // the result.
+        let grants = match grants {
+            None => crate::content::NappletGrants::default(),
+            Some(mut grants) => {
                 for domain in effective_grants(&resolved.manifest.requires) {
-                    if !granted.contains(&domain) {
-                        tracing::info!(
-                            napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
-                            %domain,
-                            "granting a declared capability this build newly implements"
-                        );
-                        granted.push(domain);
+                    if grants.granted.contains(&domain) || grants.denied.contains(&domain) {
+                        continue;
                     }
+                    tracing::info!(
+                        napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
+                        %domain,
+                        "granting a declared capability this build newly implements"
+                    );
+                    grants.granted.push(domain);
                 }
-                granted
+                grants
             }
         };
 
         tracing::info!(
             napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
-            ?granted,
+            granted = ?grants.granted,
+            denied = ?grants.denied,
             "opening napplet"
         );
-        let session = Session::new(NappletIdentity::from(&resolved), granted.clone());
+        let session = Session::new(
+            NappletIdentity::from(&resolved),
+            grants.granted.iter().cloned(),
+        );
         let prelude = render_for(&session);
         let artifact = assemble(
             &resolved.index_html,
@@ -287,25 +323,26 @@ impl NappletHost {
             session_id,
             shell_host,
             title,
-            granted,
+            grants,
         })
     }
 
-    /// Push changed grants into every open window of the napplet with this
-    /// `d_tag`, so a switch flipped on the sheet is obeyed by the next call
-    /// rather than the next launch.
+    /// Push changed grants into every open window of the napplet at
+    /// `(author, d_tag)`, so a switch flipped on the sheet is obeyed by the
+    /// next call rather than the next launch.
     ///
-    /// Matched by `d_tag` because that is what the session identity carries.
-    /// Two authors' napplets with the same `d_tag` open at once would both be
-    /// touched; the user's own grant list is the one read on every call, so
-    /// the wrong window is at most refused until it reloads.
+    /// Matched on the author as well as the `d_tag`. Two authors may publish
+    /// napplets under the same `d`, and a grant given to one must not reach
+    /// the other's open window even for the moment before it relaunches —
+    /// that moment is exactly long enough to make a call.
     ///
     /// Each window touched is also told to relaunch (see
     /// [`ToShell::Relaunch`]): the grant is live for the next call, but the
     /// napplet made its startup calls — its subscriptions — under the old
     /// grants, and a refused subscribe is not retried.
-    pub async fn apply_grants(&self, d_tag: Option<&str>, granted: Vec<String>) {
+    pub async fn apply_grants(&self, author: &PublicKey, d_tag: Option<&str>, granted: Vec<String>) {
         let wanted = d_tag.unwrap_or("");
+        let author = author.to_hex();
         let live: Vec<(
             Arc<tokio::sync::Mutex<Session>>,
             mpsc::UnboundedSender<ToShell>,
@@ -320,7 +357,7 @@ impl NappletHost {
             // A session mid-call is updated when the call ends; the grant is
             // checked per call anyway.
             let mut s = session.lock().await;
-            if s.identity().d_tag == wanted {
+            if s.identity().d_tag == wanted && s.identity().author == author {
                 s.set_granted(granted.clone());
                 let _ = outbox.send(ToShell::Relaunch);
             }
@@ -1202,7 +1239,7 @@ mod tests {
     async fn an_installed_napplets_grants_widen_to_what_it_declared() {
         let (host, addr) = host_with_fixture().await; // declares shell, relay
         let opened = host.open(&addr, Some(vec![])).await.unwrap();
-        let mut granted = opened.granted.clone();
+        let mut granted = opened.granted().to_vec();
         granted.sort();
         let mut expected: Vec<String> = effective_grants(&["shell".into(), "relay".into()]);
         expected.sort();
@@ -1215,8 +1252,77 @@ mod tests {
 
         let stranger = host.open(&addr, None).await.unwrap();
         assert!(
-            stranger.granted.is_empty(),
+            stranger.granted().is_empty(),
             "an uninstalled napplet was granted something"
+        );
+    }
+
+    /// A domain the user switched off on the sheet stays off at the next
+    /// launch, however plainly the napplet declares it and whatever the
+    /// defaults say. This is the bug where the switch flipped itself back on:
+    /// "not granted" and "said no" were the same empty slot, so the widening
+    /// that grants newly implemented declared domains re-granted the refusal.
+    #[tokio::test]
+    async fn a_domain_switched_off_stays_off_at_the_next_launch() {
+        let (host, addr) = host_with_fixture().await; // declares shell, relay
+        let stored = crate::content::NappletGrants {
+            granted: vec!["identity".into()],
+            denied: vec!["relay".into(), "resource".into()],
+        };
+        let opened = host.open_with(&addr, Some(stored.clone())).await.unwrap();
+        assert!(
+            !opened.granted().contains(&"relay".to_string()),
+            "a declared domain the user switched off was granted at launch"
+        );
+        assert!(
+            !opened.granted().contains(&"resource".to_string()),
+            "a default domain the user switched off was granted at launch"
+        );
+        assert_eq!(opened.grants.denied, stored.denied, "the refusal was lost");
+        assert!(opened.granted().contains(&"identity".to_string()));
+
+        // And the refusal holds on the wire, not only in the record.
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        let out = host
+            .frame(
+                &opened.session_id,
+                r#"{"channel":"napplet","message":{"type":"relay.query","id":"q1","filters":{"kinds":[1]}}}"#,
+            )
+            .await;
+        let ToShell::Napplet { message } = &out[0] else {
+            panic!("not a napplet frame")
+        };
+        assert!(message.field("error").is_some(), "relay was served after being switched off");
+    }
+
+    /// A grant given to one author's napplet must not reach another author's
+    /// napplet that happens to share the `d` tag — not even for the moment
+    /// before the other window relaunches.
+    #[tokio::test]
+    async fn a_grant_change_is_scoped_to_the_author() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host.open(&addr, Some(vec![])).await.unwrap();
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        let ask = r#"{"channel":"napplet","message":{"type":"mesh.info","id":"m1"}}"#;
+
+        let other_author = nostr::Keys::generate().public_key();
+        host.apply_grants(&other_author, Some("fixture"), vec!["mesh".into()])
+            .await;
+        let out = host.frame(&opened.session_id, ask).await;
+        let ToShell::Napplet { message } = &out[0] else {
+            panic!("not a napplet frame")
+        };
+        assert!(
+            message.field("error").is_some(),
+            "another author's grant reached this napplet"
         );
     }
 
@@ -1242,7 +1348,7 @@ mod tests {
             "mesh was granted without asking"
         );
 
-        host.apply_grants(Some("fixture"), vec!["mesh".into()])
+        host.apply_grants(&addr.author, Some("fixture"), vec!["mesh".into()])
             .await;
         let out = host.frame(&opened.session_id, ask).await;
         let ToShell::Napplet { message } = &out[0] else {
@@ -1254,7 +1360,7 @@ mod tests {
         );
         assert!(message.field("limits").is_some());
 
-        host.apply_grants(Some("fixture"), vec![]).await;
+        host.apply_grants(&addr.author, Some("fixture"), vec![]).await;
         let out = host.frame(&opened.session_id, ask).await;
         let ToShell::Napplet { message } = &out[0] else {
             panic!("not a napplet frame")

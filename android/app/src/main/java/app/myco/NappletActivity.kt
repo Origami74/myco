@@ -10,6 +10,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.addCallback
 import androidx.activity.enableEdgeToEdge
@@ -20,7 +21,10 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import app.myco.core.AppCoreClient
 import app.myco.core.MycoCore
 import app.myco.core.NappletOpen
@@ -100,14 +104,21 @@ class NappletActivity : ComponentActivity() {
         var init = false
         withContext(Dispatchers.Main) {
             for (reply in replies) {
-                if (reply.contains("\"shell.init\"")) init = true
+                if (relayedType(reply) == "shell.init") init = true
                 replyChannel?.postMessage(reply)
             }
         }
         return init
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
+    /**
+     * At most this many capability calls in flight per window. Each one holds a
+     * background thread in the FFI for as long as its relays take to answer, and
+     * a napplet that fires a hundred queries at dead relays would otherwise pin
+     * the whole IO pool and stall the rest of the app behind it.
+     */
+    private val inFlight = Semaphore(MAX_IN_FLIGHT)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
@@ -122,17 +133,31 @@ class NappletActivity : ComponentActivity() {
 
         // Resolve and verify before anything is shown. A napplet that fails any
         // check gets no session and no window — there is no partial render to
-        // fall back to, by design.
-        val opened = client.nappletOpen(pointer)
-        if (!opened.ok) {
-            Log.w(TAG, "napplet $pointer did not open: ${opened.error}")
-            // TODO(S1): surface this to the user rather than closing silently.
-            finish()
-            return
+        // fall back to, by design. Off the main thread: the resolve reads the
+        // relay and the blob store, and with a custom relay configured that is
+        // a network round trip. The splash screen covers the wait.
+        lifecycleScope.launch {
+            val opened = withContext(Dispatchers.IO) { client.nappletOpen(pointer) }
+            if (!opened.ok) {
+                Log.w(TAG, "napplet $pointer did not open: ${opened.error}")
+                // Said out loud: a window that closes on its own reads as a tap
+                // that did not register, and hides that the app is gone.
+                Toast.makeText(
+                    this@NappletActivity,
+                    "Couldn't open this app: ${opened.error.ifEmpty { "it isn't on this phone" }}",
+                    Toast.LENGTH_LONG,
+                ).show()
+                finish()
+                return@launch
+            }
+            sessionId = opened.sessionId
+            shellHost = opened.shellHost
+            mountShell()
         }
-        sessionId = opened.sessionId
-        shellHost = opened.shellHost
+    }
 
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun mountShell() {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
             // WebView 88+ carries this. Older ones need the WebMessagePort
             // fallback, which is not built yet — refuse rather than run a
@@ -192,7 +217,7 @@ class NappletActivity : ComponentActivity() {
             var established = false
             for (frame in inbound) {
                 if (established) {
-                    launch { relay(frame) }
+                    launch { inFlight.withPermit { relay(frame) } }
                 } else {
                     if (relay(frame)) established = true
                 }
@@ -216,7 +241,7 @@ class NappletActivity : ComponentActivity() {
                     // made its startup calls under the old grants, so start it
                     // over — new session, fresh handshake. Never in place: the
                     // shell runs one napplet for one lifetime.
-                    if (frame.contains("\"channel\":\"relaunch\"")) {
+                    if (channelOf(frame) == "relaunch") {
                         recreate()
                         break
                     }
@@ -283,6 +308,25 @@ class NappletActivity : ComponentActivity() {
          */
         private const val DRAIN_WAIT_MS = 20_000L
 
+        /** See [inFlight]. */
+        private const val MAX_IN_FLIGHT = 8
+
+        /** The top-level `channel` of a runtime frame, or null if it is not one. */
+        private fun channelOf(frame: String): String? =
+            runCatching { JSONObject(frame).optString("channel") }.getOrNull()?.ifEmpty { null }
+
+        /**
+         * The `type` of a napplet-bound message inside a runtime frame, or null.
+         * Parsed rather than searched for: the message body carries text the
+         * napplet — or a stranger whose event it subscribed to — chose.
+         */
+        private fun relayedType(frame: String): String? =
+            runCatching {
+                val obj = JSONObject(frame)
+                if (obj.optString("channel") != "napplet") return null
+                obj.optJSONObject("message")?.optString("type")
+            }.getOrNull()?.ifEmpty { null }
+
         /** `naddr1…`, or the `<npub>:<dtag>` shorthand. */
         const val EXTRA_POINTER = "app.myco.extra.NAPPLET_POINTER"
         const val EXTRA_TITLE = "app.myco.extra.NAPPLET_TITLE"
@@ -318,12 +362,18 @@ private class NappletWebViewClient(
     override fun onPageFinished(view: WebView, url: String) = onContentVisible()
 
     /**
-     * The shell never navigates. Every navigation attempt is refused, and any
-     * link that reaches here goes to the system instead.
+     * The shell never navigates, and the napplet's frame never leaves.
      *
      * This is the boundary that keeps the shell origin the shell's: a navigation
      * away and back, or into an nsite host, would put other content inside the
      * origin the capability channel is scoped to.
+     *
+     * The napplet's iframe is `sandbox="allow-scripts"`, which still lets it
+     * navigate *itself* — `location.href = …` — and this callback fires for
+     * that too. Refused outright: a subframe navigation is either the napplet
+     * trying to reach the network around its CSP, or trying to fire a system
+     * intent (`intent:`, `tel:`, a browser) with no one having tapped anything.
+     * A link the shell itself would open externally needs a gesture behind it.
      */
     override fun shouldOverrideUrlLoading(
         view: WebView,
@@ -331,18 +381,22 @@ private class NappletWebViewClient(
     ): Boolean {
         val uri = request.url
         // The shell's own initial load is not a navigation request.
-        if (uri.host?.equals(shellHost, ignoreCase = true) == true && uri.path == "/") {
+        if (request.isForMainFrame &&
+            uri.host?.equals(shellHost, ignoreCase = true) == true &&
+            uri.path == "/"
+        ) {
             return false
         }
-        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
-            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-        return try {
-            view.context.startActivity(intent)
-            true
-        } catch (e: android.content.ActivityNotFoundException) {
-            Log.w("NappletActivity", "No handler for $uri", e)
-            true
+        if (!request.isForMainFrame) {
+            Log.w("NappletActivity", "napplet frame tried to navigate to $uri; refused")
+            return true
         }
+        if (ExternalNavigation.staysInPage(uri)) return true
+        if (!request.hasGesture()) {
+            Log.w("NappletActivity", "shell navigation to $uri without a gesture; refused")
+            return true
+        }
+        return ExternalNavigation.openExternally(view.context, uri, "NappletActivity")
     }
 
     override fun shouldInterceptRequest(
@@ -350,12 +404,25 @@ private class NappletWebViewClient(
         request: WebResourceRequest,
     ): WebResourceResponse? {
         val uri = request.url
-        val host = uri.host ?: return null
+        val host = uri.host.orEmpty()
 
-        // This window's shell origin, and only it. Another napplet's shell
-        // origin is refused here just as firmly as an nsite host: each window
-        // serves itself.
-        if (!host.equals(shellHost, ignoreCase = true)) return null
+        // This window's shell origin, and only it. Everything else is answered
+        // with a refusal rather than handed to the network: the shell loads
+        // nothing external, and the napplet's CSP already forbids it — this is
+        // the belt to that braces, so a request that slips past the CSP (a
+        // frame navigation, a WebView quirk) still reaches nothing. Another
+        // napplet's shell origin is refused here just as firmly as an nsite
+        // host: each window serves itself.
+        if (!host.equals(shellHost, ignoreCase = true)) {
+            return WebResourceResponse(
+                "text/plain",
+                "utf-8",
+                403,
+                "Forbidden",
+                emptyMap(),
+                ByteArrayInputStream(ByteArray(0)),
+            )
+        }
 
         val path = uri.path?.ifEmpty { "/" } ?: "/"
         if (path != "/" && path != "/index.html") {

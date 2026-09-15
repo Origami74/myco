@@ -94,11 +94,20 @@ pub struct LibraryItem {
     pub added_at: u64,
     #[serde(default)]
     pub kind: LibraryKind,
-    /// Capability domains the user approved at install review. Napplets only,
-    /// and the **only** place a grant comes from — nothing widens this at launch,
-    /// and an inbound intent cannot add to it.
+    /// Capability domains the user approved — at install review, or later on
+    /// the app's sheet. Napplets only. An inbound intent cannot add to it.
     #[serde(default)]
     pub granted: Vec<String>,
+    /// Capability domains the user switched **off** on the app's sheet.
+    ///
+    /// Kept apart from "not granted" because the two mean different things at
+    /// launch: a declared domain this build newly implements is granted on open
+    /// (what the user agreed to was "what it declares"), but a domain the user
+    /// has said no to must stay off however plainly the napplet declares it.
+    /// Without this set the sheet's switch flipped itself back on at the next
+    /// launch.
+    #[serde(default)]
+    pub denied: Vec<String>,
     /// The pointer this was added by — the `naddr` when there was one.
     ///
     /// Kept because an `naddr` carries the author's own relay hints, and those
@@ -108,6 +117,29 @@ pub struct LibraryItem {
     /// away and search blind.
     #[serde(default)]
     pub pointer: String,
+}
+
+/// A napplet's grants as the Library records them: what the user allowed, and
+/// what the user switched off. A domain in neither set was never decided —
+/// which is what lets a launch grant a declared domain this build newly
+/// implements without overriding a decision the user did make.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NappletGrants {
+    pub granted: Vec<String>,
+    pub denied: Vec<String>,
+}
+
+impl NappletGrants {
+    /// Allow or withdraw one domain, keeping the two sets disjoint.
+    pub fn set(&mut self, domain: &str, allowed: bool) {
+        self.granted.retain(|d| d != domain);
+        self.denied.retain(|d| d != domain);
+        if allowed {
+            self.granted.push(domain.to_string());
+        } else {
+            self.denied.push(domain.to_string());
+        }
+    }
 }
 
 /// A **Circle** contact: a paired peer whose device we can pull nsites from over
@@ -1124,13 +1156,16 @@ impl Content {
         let npub = addr.author.to_bech32().unwrap_or_default();
         if let Some(item) = lib
             .iter_mut()
-            .find(|i| i.author_npub == npub && i.d_tag == addr.d_tag)
+            .find(|i| i.kind == LibraryKind::Nsite && i.author_npub == npub && i.d_tag == addr.d_tag)
         {
             item.pinned = true;
             if let Some(t) = title {
                 item.title = t.to_string();
             }
         } else {
+            // Matched on kind as well as `(author, d)`: an author may publish
+            // an nsite and a napplet under the same `d` tag, and they are two
+            // Library entries, not one entry that changes kind.
             lib.push(LibraryItem {
                 author_npub: npub,
                 d_tag: addr.d_tag.clone(),
@@ -1140,6 +1175,7 @@ impl Content {
                 added_at,
                 kind: LibraryKind::Nsite,
                 granted: Vec::new(),
+                denied: Vec::new(),
                 pointer: String::new(),
             });
         }
@@ -1168,13 +1204,16 @@ impl Content {
         added_at: u64,
     ) {
         let mut lib = self.library.lock().unwrap();
-        if let Some(item) = lib
-            .iter_mut()
-            .find(|i| i.author_npub == author_npub && i.d_tag.as_deref() == d_tag)
-        {
+        if let Some(item) = lib.iter_mut().find(|i| {
+            i.kind == LibraryKind::Napplet
+                && i.author_npub == author_npub
+                && i.d_tag.as_deref() == d_tag
+        }) {
             item.pinned = true;
-            item.kind = LibraryKind::Napplet;
             item.granted = granted;
+            // A fresh review is a fresh decision: what was switched off before
+            // is on the table again, and the screen showed the whole set.
+            item.denied = Vec::new();
             item.url_host = shell_host.to_string();
             if !pointer.is_empty() {
                 item.pointer = pointer.to_string();
@@ -1192,6 +1231,7 @@ impl Content {
                 added_at,
                 kind: LibraryKind::Napplet,
                 granted,
+                denied: Vec::new(),
                 pointer: pointer.to_string(),
             });
         }
@@ -1200,10 +1240,15 @@ impl Content {
         save_library(&self.library_path, &snapshot);
     }
 
-    /// Replace a napplet's recorded grants. Used when an open widened them to
-    /// a declared domain this build newly implements; install review remains
-    /// the only place a grant is *decided*.
-    pub fn set_napplet_grants(&self, author_npub: &str, d_tag: Option<&str>, granted: Vec<String>) {
+    /// Replace a napplet's recorded grants — both sets. Used when an open
+    /// widened them to a declared domain this build newly implements, and when
+    /// a switch on the sheet moves a domain between the two.
+    pub fn set_napplet_grants(
+        &self,
+        author_npub: &str,
+        d_tag: Option<&str>,
+        grants: NappletGrants,
+    ) {
         let mut lib = self.library.lock().unwrap();
         let Some(item) = lib.iter_mut().find(|i| {
             i.kind == LibraryKind::Napplet
@@ -1212,19 +1257,20 @@ impl Content {
         }) else {
             return;
         };
-        item.granted = granted;
+        item.granted = grants.granted;
+        item.denied = grants.denied;
         let snapshot = lib.clone();
         drop(lib);
         save_library(&self.library_path, &snapshot);
     }
 
-    /// The capability domains a napplet was granted, or `None` for one that
-    /// is not installed.
+    /// What a napplet was granted and what it was refused, or `None` for one
+    /// that is not installed.
     ///
     /// An uninstalled napplet getting `None` is the safe answer, not an
     /// oversight: it still opens, and gets nothing but the mandatory handshake
     /// — and, unlike an installed one, nothing it declares is granted at open.
-    pub fn napplet_grants(&self, author_npub: &str, d_tag: Option<&str>) -> Option<Vec<String>> {
+    pub fn napplet_grants(&self, author_npub: &str, d_tag: Option<&str>) -> Option<NappletGrants> {
         self.library
             .lock()
             .unwrap()
@@ -1234,7 +1280,10 @@ impl Content {
                     && i.author_npub == author_npub
                     && i.d_tag.as_deref() == d_tag
             })
-            .map(|i| i.granted.clone())
+            .map(|i| NappletGrants {
+                granted: i.granted.clone(),
+                denied: i.denied.clone(),
+            })
     }
 
     /// Unpin a napplet and drop its grants.
@@ -3581,6 +3630,21 @@ impl Content {
         let mut keep_active: HashSet<String> = HashSet::new();
         let backend = self.active_backend();
         for item in &pinned {
+            // A napplet is one manifest and one blob. Both stay, or the tile
+            // stays and the app behind it is gone — which is what happened the
+            // first time "Delete cache" met an installed napplet.
+            if item.kind == LibraryKind::Napplet {
+                if let Some((event, index_hash)) = self.napplet_keep_set(item).await {
+                    keep_events.insert(event.id.to_bytes());
+                    keep_blobs.insert(index_hash);
+                    keep_active.insert(manifest_key(
+                        event.kind.as_u16(),
+                        &event.pubkey,
+                        item.d_tag.as_deref(),
+                    ));
+                }
+                continue;
+            }
             let Some(addr) = library_addr(item) else {
                 continue;
             };
@@ -3631,6 +3695,29 @@ impl Content {
         };
         save_active(&self.active_path, &active_snapshot);
         Ok(())
+    }
+
+    /// The manifest event and index-blob hash an installed napplet is served
+    /// from, for the keep-sets: the active manifest when one is pinned, else
+    /// the newest in the slot.
+    async fn napplet_keep_set(&self, item: &LibraryItem) -> Option<(Event, String)> {
+        use nostr::nips::nip19::FromBech32;
+        let author = nostr::PublicKey::from_bech32(&item.author_npub).ok()?;
+        let kind = match item.d_tag {
+            Some(_) => myco_napplet_runtime::KIND_NAMED,
+            None => myco_napplet_runtime::KIND_ROOT,
+        };
+        let event = nsite_deck::seams::newest_in_slot(
+            &self.active_backend(),
+            kind,
+            &author,
+            item.d_tag.as_deref(),
+        )
+        .await
+        .ok()??;
+        let manifest = myco_napplet_runtime::NappletManifest::from_event(event.clone()).ok()?;
+        let index = manifest.index_entry()?.sha256.clone();
+        Some((event, index))
     }
 
     // --- snapshots for state() ---
@@ -4666,7 +4753,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn tmp(tag: &str) -> PathBuf {
+    pub(super) fn tmp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("myco-content-test-{}-{}", std::process::id(), tag))
     }
 
@@ -4993,6 +5080,8 @@ mod tests {
 #[cfg(test)]
 mod library_kind_tests {
     use super::*;
+    use super::tests::tmp;
+    use nostr::nips::nip19::ToBech32;
 
     fn entry(kind: LibraryKind, d_tag: &str) -> LibraryItem {
         LibraryItem {
@@ -5005,6 +5094,7 @@ mod library_kind_tests {
             added_at: 0,
             kind,
             granted: Vec::new(),
+            denied: Vec::new(),
             pointer: String::new(),
         }
     }
@@ -5017,6 +5107,96 @@ mod library_kind_tests {
     fn a_napplet_is_not_an_nsite_address() {
         assert!(library_addr(&entry(LibraryKind::Napplet, "dingdong")).is_none());
         assert!(library_addr(&entry(LibraryKind::Nsite, "bitchat")).is_some());
+    }
+
+    /// An author may publish an nsite and a napplet under the same `d` tag.
+    /// They are two Library entries; adding one must not turn the other into
+    /// it — which stopped the nsite syncing and left the napplet's tile
+    /// pointing at an nsite host.
+    #[tokio::test]
+    async fn an_nsite_and_a_napplet_with_one_d_tag_are_two_entries() {
+        let dir = tmp("library-kinds");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        let author = nostr::Keys::generate().public_key();
+        let npub = author.to_bech32().unwrap();
+        let addr = SiteAddr {
+            author,
+            d_tag: Some("bitchat".into()),
+        };
+
+        content.add_to_library(&addr, Some("Bitchat site"), 1);
+        content.add_napplet_to_library(
+            &npub,
+            Some("bitchat"),
+            Some("Bitchat app"),
+            "bitchat.napplet.localhost",
+            vec!["relay".into()],
+            "naddr1x",
+            2,
+        );
+        let lib = content.library_snapshot();
+        assert_eq!(lib.len(), 2, "one entry swallowed the other");
+        let site = lib.iter().find(|i| i.kind == LibraryKind::Nsite).unwrap();
+        let app = lib.iter().find(|i| i.kind == LibraryKind::Napplet).unwrap();
+        assert!(library_addr(site).is_some(), "the nsite stopped being one");
+        assert_eq!(app.granted, vec!["relay".to_string()]);
+        assert!(site.granted.is_empty());
+
+        // And the other way round.
+        content.add_to_library(&addr, Some("Bitchat site again"), 3);
+        assert_eq!(content.library_snapshot().len(), 2);
+        assert_eq!(
+            content.napplet_grants(&npub, Some("bitchat")).unwrap().granted,
+            vec!["relay".to_string()],
+            "re-adding the nsite touched the napplet's grants"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Delete cache" keeps installed apps working. A napplet is one manifest
+    /// and one blob; both survive, or the tile survives and the app does not.
+    #[tokio::test]
+    async fn wipe_cache_keeps_an_installed_napplet() {
+        use myco_napplet_runtime::testing::NappletBuilder;
+        let dir = tmp("wipe-napplet");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+
+        let napplet = NappletBuilder::new().d_tag(Some("ding")).build();
+        for (_, bytes) in &napplet.blobs {
+            content.blobs().put(bytes).await.unwrap();
+        }
+        content.relay().publish(napplet.manifest.clone()).await.unwrap();
+        // Something else to prove the wipe still wipes.
+        content.blobs().put(b"stray bytes").await.unwrap();
+        assert_eq!(content.cache_view().blob_count, 2);
+
+        let npub = napplet.author.to_bech32().unwrap();
+        content.add_napplet_to_library(
+            &npub,
+            Some("ding"),
+            Some("Ding"),
+            "ding.napplet.localhost",
+            vec![],
+            "naddr1ding",
+            1,
+        );
+        content.wipe_cache().await.unwrap();
+
+        assert_eq!(content.cache_view().relay_events, 1, "the napplet manifest was wiped");
+        assert_eq!(content.cache_view().blob_count, 1, "the index blob was wiped");
+        let kept = nsite_deck::seams::newest_in_slot(
+            content.relay().as_ref(),
+            myco_napplet_runtime::KIND_NAMED,
+            &napplet.author,
+            Some("ding"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(kept.map(|e| e.id), Some(napplet.manifest.id));
+        assert_eq!(content.library_snapshot().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The default is the safe one for every entry written before napplets

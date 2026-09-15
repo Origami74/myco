@@ -193,9 +193,9 @@ pub extern "system" fn Java_app_myco_core_NativeCore_gatewayGet(
 
 // --- napplets ------------------------------------------------------------
 //
-// Three calls, mirroring `gatewayGet`'s shape: the lock is held only long
-// enough to clone out the host and a Tokio handle, so a slow resolve does not
-// block the rest of the FFI.
+// Every call mirrors `gatewayGet`'s shape: the lock is held only long enough
+// to clone out the host and a Tokio handle (or, for `nappletOpen`, the
+// prepared request), so a slow resolve does not block the rest of the FFI.
 //
 // The shell page is static, so it needs no handle at all.
 
@@ -237,20 +237,37 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletOpen(
 ) -> jstring {
     let pointer = get_string(&mut env, &pointer);
 
-    let result = match unsafe { handle_ref(handle) } {
+    // The lock is held only to gather the handles; the resolve — a relay read
+    // and a blob read, a network round trip with a custom relay configured —
+    // runs with it released, so a slow open never queues the reducer.
+    let prepared = match unsafe { handle_ref(handle) } {
         Some(h) => {
             let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
-            match guard.open_napplet(&pointer) {
-                Ok(opened) => serde_json::json!({
+            Some(guard.prepare_open_napplet(&pointer))
+        }
+        None => None,
+    };
+
+    let result = match prepared {
+        None => serde_json::json!({"ok": false, "error": "native core is closed"}),
+        Some(Err(e)) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        Some(Ok(request)) => match request.run() {
+            Ok((opened, widened)) => {
+                if widened {
+                    if let Some(h) = unsafe { handle_ref(handle) } {
+                        let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+                        guard.note_library_changed();
+                    }
+                }
+                serde_json::json!({
                     "ok": true,
                     "sessionId": opened.session_id,
                     "shellHost": opened.shell_host,
                     "title": opened.title,
-                }),
-                Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+                })
             }
-        }
-        None => serde_json::json!({"ok": false, "error": "native core is closed"}),
+            Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        },
     };
 
     jstr(&mut env, result.to_string())
