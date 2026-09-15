@@ -7,15 +7,9 @@
 > phone, ready to use offline. Anything you install you can pass on — so apps
 > spread from phone to phone, on their own.
 
-![Install apps from the people around you](design/diagrams/intro-01-what-it-is.svg)
+![Apps from the people you trust — over whatever mesh is around](design/diagrams/intro-01-what-it-is.svg)
 
-![Get started in 3 steps](design/diagrams/intro-02-get-started.svg)
-
-![How apps spread](design/diagrams/intro-03-how-it-spreads.svg)
-
-![Apps you install live on your home screen](design/diagrams/intro-04-on-your-homescreen.svg)
-
-![Every app gets its own window](design/diagrams/intro-05-each-its-own-app.svg)
+![Your apps live on your home screen and open like any app](design/diagrams/intro-02-your-apps.svg)
 
 ---
 

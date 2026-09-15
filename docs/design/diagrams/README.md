@@ -5,28 +5,14 @@ set was drawn from the first plan and has not been redrawn since; each row
 says what has moved. Treat the docs as authoritative where they disagree.
 Structure mirrors `reference/fips/docs/design/diagrams/`.
 
-### Friendly intro — v2 (one image, the core idea)
+### Friendly intro (for the README / non-technical readers)
 
-One frame, redrawn around the three things a newcomer has to get: the FIPS
-mesh is always there, out of whoever is in range; you build your own Circle on
-top of it, by bumping phones with people you trust; apps come from your Circle
-and what you do in them goes to your Circle. Ben is reached *through a
-stranger's phone* — the mesh carries the packets, the Circle decides who they
-are for. Dan is out of range and still in the Circle.
-
-| File | Compare with |
-| --- | --- |
-| [v2_intro-01-what-it-is.svg](v2_intro-01-what-it-is.svg) | intro-01 · intro-02 · intro-03 (v1 below) |
-
-### Friendly intro — v1 (five images, kept for comparison)
+Two images, redrawn around the ideas a newcomer has to get.
 
 | File | What it shows |
 | --- | --- |
-| [intro-01-what-it-is.svg](intro-01-what-it-is.svg) | Plain-language hero: install apps from the people around you over Bluetooth, works offline. |
-| [intro-02-get-started.svg](intro-02-get-started.svg) | The 3 steps: scan a friend's QR (you pair both ways) → install their apps → open one (works offline). |
-| [intro-03-how-it-spreads.svg](intro-03-how-it-spreads.svg) | "Like passing a note": an app hops Alice→Ben→Carl; it keeps spreading even after Alice leaves. |
-| [intro-04-on-your-homescreen.svg](intro-04-on-your-homescreen.svg) | Installed apps get their own home-screen icon (alongside Myco the manager) — a real icon you tap to open, no app store. |
-| [intro-05-each-its-own-app.svg](intro-05-each-its-own-app.svg) | Each nsite opens full-screen as its own app — separate Android Recents cards you switch between; re-opening the same one returns to its single window. |
+| [intro-01-what-it-is.svg](intro-01-what-it-is.svg) | One room: the FIPS mesh forms out of whoever is in range (grey); you bump phones to build a **Circle** of people you trust on top of it (indigo); apps come from your Circle and what you do in them travels your Circle. Ben is reached *through a stranger's phone* — the mesh carries the packets, the Circle decides who they are for; Dan is out of range and still in it. |
+| [intro-02-your-apps.svg](intro-02-your-apps.svg) | Your home screen in the middle; tap an icon and the app opens full-screen as its own Recents card — a map on the left, a chat on the right — no browser, no tabs, no Myco chrome. Works offline; one window per app. |
 
 ### Technical (design docs)
 
