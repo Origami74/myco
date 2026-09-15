@@ -111,7 +111,28 @@ Folded into N1 as its second path; listed here because it is the one that
 matters to people who already have an identity. Ships after the paste path,
 on the same `Signer` seam.
 
-### N5 — Release the napplet runtime
+### N5 — An app store napplet in place of the Discover tab
+
+**Goal.** Retire the built-in Discover tab and ship "around me" as a
+**napplet** — the first-party app store. It lists what your Circle holds
+(nsites and napplets), shows who has each one, lets you install with one tap,
+and surfaces new arrivals — all through the NAPs everyone else gets: `mesh`
+for the room, `outbox` for reach beyond it, `resource` for icons, `intent`
+(N6+) to hand an install to Myco. Dogfoods the runtime on the one feature that
+needs every mesh capability, and lets the store evolve like any other app —
+shared, updated and forked over the mesh — instead of being frozen into a
+release.
+
+**Exit criterion.** The Discover tab is gone; the store napplet ships
+preinstalled, lists the same holders and apps the tab did, installs from the
+list, and works with no internet. Needs an install intent (a napplet asking
+Myco to fetch and review an app by pointer) that cannot skip the review
+screen.
+
+**Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2b
+(intents) · [NAP-MESH](./design/napplet/NAP-MESH.md) · [circle.md](./design/circle/circle.md).
+
+### N6 — Release the napplet runtime
 
 **Goal.** Cut v0.7.0 from `feat/napplet-runtime` after the two-phone checks:
 share a napplet by bump with no internet; doorbell rings across phones; a
