@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-02)
 Phase: 1 of 5 (Make Peering Observable)
 Plan: 0 of 2 in current phase
 Status: Ready to execute
-Last activity: 2026-09-15 — Completed quick task 260915-l2e: napplet grants widen; resource refusal shape
+Last activity: 2026-09-15 — Completed quick task 260915-l9d: per-app capability switches
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -100,6 +100,7 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 | 260915-kq9 | "Try again" on the napplet review sheet's couldn't-find state; review keeps the sharer for the retry | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-kq9-retry-button-on-the-napplet-review-sheet/260915-kq9-SUMMARY.md` |
 | 260915-kva | Napplet capability calls off the main thread and overlapping after the handshake; internet breaker after a fully failed relay round (fixes "outbox.query timed out") | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-kva-napplet-capability-calls-off-the-main-thr/260915-kva-SUMMARY.md` |
 | 260915-l2e | Installed napplets' grants widen to declared domains this build newly implements; resource refusals as `.error`; `resource` default grant (fixes "reading arrayBuffer") | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-l2e-napplet-grants-widen-to-newly-implemented/260915-l2e-SUMMARY.md` |
+| 260915-l9d | Per-app capability switches on the napplet sheet, live in open windows (`SetNappletGrant`, `apply_grants`) | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-l9d-per-app-capability-switches-on-the-nappl/260915-l9d-SUMMARY.md` |
 
 ## Deferred Items
 
