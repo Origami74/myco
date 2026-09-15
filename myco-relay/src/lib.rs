@@ -585,13 +585,19 @@ mod tests {
         }
         assert_eq!(store.count(), REGULAR_CAP + 1);
         let oldest = store
-            .query(&[Filter::new().kind(nostr::Kind::TextNote).until(nostr::Timestamp::from(1_009))])
+            .query(&[Filter::new()
+                .kind(nostr::Kind::TextNote)
+                .until(nostr::Timestamp::from(1_009))])
             .await
             .unwrap();
-        assert!(oldest.is_empty(), "the ten oldest notes should have gone first");
-        let manifest = nsite_deck::seams::newest_in_slot(&store, KIND_ROOT, &keys.public_key(), None)
-            .await
-            .unwrap();
+        assert!(
+            oldest.is_empty(),
+            "the ten oldest notes should have gone first"
+        );
+        let manifest =
+            nsite_deck::seams::newest_in_slot(&store, KIND_ROOT, &keys.public_key(), None)
+                .await
+                .unwrap();
         assert!(manifest.is_some(), "a manifest was evicted by the note cap");
     }
 }

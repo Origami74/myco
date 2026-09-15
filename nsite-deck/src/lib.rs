@@ -168,7 +168,10 @@ mod tests {
             .await
             .unwrap();
         let resp = serve(&relay, &blobs, &host, "/index.html", None).await;
-        assert_eq!(resp.status, 200, "per-blob verified content must still serve");
+        assert_eq!(
+            resp.status, 200,
+            "per-blob verified content must still serve"
+        );
 
         let manifest = Manifest::from_event(site.manifest).unwrap();
         assert_eq!(
