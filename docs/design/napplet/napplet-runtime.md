@@ -493,12 +493,18 @@ written for the open web works in a room with no internet, and neither the nappl
 specification needs to know why.
 
 The work this implied is done with NAP-OUTBOX (S3): a `.fips` URL in a relay list becomes a
-`RelayLane::Mesh` and is reached through `PeerRelayPool`; the user's own kind 10002 — mesh
-relay first, then the configured relays — is published beside the guest profile on first
-napplet use, so peers can route back and the user's own outbox plan resolves as NIP-65;
-per-lane reachability is reported (`incomplete`, the per-relay map on publish) rather than
-failing hard. Policy lives in one place (`outbox.rs`): a mesh relay is a lane only if its
-npub is a Circle member, our own is never one, and internet lanes go when offline-only.
+`RelayLane::Mesh` and is reached through `PeerRelayPool`; the user's own kind 10002 — the
+configured relays — is published beside the guest profile on first napplet use, so the
+user's own outbox plan resolves as NIP-65; per-lane reachability is reported
+(`incomplete`, the per-relay map on publish) rather than failing hard. Policy lives in one
+place (`outbox.rs`): a mesh relay is a lane only if its npub is a Circle member, our own is
+never one, and internet lanes go when offline-only.
+
+The user's own list names **no** `.fips` relay. A `ws://<npub>.fips` URL is the device key,
+and the list is signed by the user key: one inside the other is the link D3 keeps apart,
+published in an event anyone may keep. Circle members reach this device's relay by policy
+— they are paired, they know the device — and need no tag to say so. A peer's list *may*
+name its `.fips` relay if that peer chooses to; Myco reads such lists, and does not write one.
 
 The open question is answered by not hiding it: a mesh relay's URL is a `ws://<npub>.fips`
 URL, and `relayHints` and `resolveRelays` show it as such. A napplet cannot do anything with

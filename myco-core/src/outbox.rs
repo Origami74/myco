@@ -482,15 +482,18 @@ pub(crate) fn relay_list_lanes(list: &Event, direction: Direction) -> Vec<RelayL
         .collect()
 }
 
-/// The user's own kind 10002: their mesh relay for the people around them,
-/// and the configured relays for everyone else. Published with the guest
-/// profile on first napplet use, so peers can route back (design §7.4) and
-/// the user's own outbox plan resolves as NIP-65 rather than fallback.
-pub fn own_relay_list(keys: &nostr::Keys, own_npub: &str) -> anyhow::Result<Event> {
-    let mut tags = vec![nostr::Tag::parse([
-        "r".to_string(),
-        crate::ip_source::mesh_relay_url(own_npub),
-    ])?];
+/// The user's own kind 10002: the configured internet relays, so the user's
+/// own outbox plan resolves as NIP-65 rather than fallback.
+///
+/// Deliberately **not** this device's mesh relay. `ws://<device-npub>.fips`
+/// names the device key, and this event is signed by the user key: putting the
+/// one inside the other would publish the link D3 exists to avoid — the social
+/// identity tied to the hardware, in a signed event anyone could keep. The
+/// people who can reach this device over the mesh are Circle members, and they
+/// already reach its relay by policy (`OutboxService::allowed`), which needs no
+/// tag to say so.
+pub fn own_relay_list(keys: &nostr::Keys) -> anyhow::Result<Event> {
+    let mut tags = Vec::new();
     for url in crate::ip_source::default_relays() {
         tags.push(nostr::Tag::parse(["r".to_string(), url])?);
     }
@@ -564,20 +567,27 @@ mod tests {
         );
     }
 
+    /// The user key's relay list must not carry the device key. A `.fips`
+    /// relay URL *is* the device npub, and a signed event naming both is a
+    /// permanent public link between the person and the hardware.
     #[test]
-    fn the_own_relay_list_names_the_mesh_relay_first() {
+    fn the_own_relay_list_never_names_this_device() {
         let keys = Keys::generate();
-        let list = own_relay_list(&keys, "npub1me").unwrap();
+        let list = own_relay_list(&keys).unwrap();
         assert_eq!(list.kind, Kind::RelayList);
         assert!(list.verify().is_ok());
         let lanes = relay_list_lanes(&list, Direction::Read);
-        assert_eq!(
-            lanes[0],
-            RelayLane::Mesh {
-                url: "ws://npub1me.fips:4870".into()
-            }
+        assert!(!lanes.is_empty(), "the configured relays should be listed");
+        assert!(
+            lanes
+                .iter()
+                .all(|lane| matches!(lane, RelayLane::Internet { .. })),
+            "a mesh relay URL leaked the device npub into a user-key event: {lanes:?}"
         );
-        assert!(lanes.len() > 1);
+        assert!(
+            !nostr::JsonUtil::as_json(&list).contains(".fips"),
+            "no .fips host anywhere in the event"
+        );
     }
 
     /// A mock internet relay: the embedded store served over a socket.

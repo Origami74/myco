@@ -1602,10 +1602,11 @@ impl AppRuntime {
                 // profile that failed to publish is cosmetic, and a launch that
                 // waited on the network would not be.
                 //
-                // Beside it, a relay list (kind 10002) naming this device's
-                // mesh relay and the configured relays: what lets a peer route
-                // back to us by the outbox model, and what makes the user's own
-                // outbox plan resolve as NIP-65 rather than fallback (§7.4).
+                // Beside it, a relay list (kind 10002) naming the configured
+                // relays, so the user's own outbox plan resolves as NIP-65
+                // rather than fallback (§7.4). Never this device's mesh relay:
+                // that URL is the device npub, and a user-key event carrying
+                // it would publish the link between the two for good.
                 let relay = content.relay();
                 let profile = nostr::EventBuilder::new(
                     nostr::Kind::Metadata,
@@ -1613,7 +1614,7 @@ impl AppRuntime {
                 )
                 .sign_with_keys(&user.keys)
                 .map_err(anyhow::Error::from);
-                let relay_list = crate::outbox::own_relay_list(&user.keys, &self.identity.own_npub);
+                let relay_list = crate::outbox::own_relay_list(&user.keys);
                 for (what, signed) in [("guest profile", profile), ("relay list", relay_list)] {
                     match signed {
                         Ok(event) => {
