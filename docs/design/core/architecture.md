@@ -42,7 +42,7 @@ Each layer talks only to the one below it. Layer 1 never names a radio; layer
 | `myco-core` | all | the app crate and only cdylib: wires everything, owns identity, embeds the fips node, the JNI surface | — (it *is* the wiring) |
 | `myco-napplet-runtime` | 1 | the napplet host: NIP-5D manifest, verified resolve, the `srcdoc` artifact, the session and grants, one module per NAP | `Signer`, `EventSink`, `MeshSink`, `OutboxResolver`, `LaneTransport`, `BlobFetcher`, `NapTransport` |
 | `nsite-deck` | 1 | the nsite host: gateway (manifest → path → sha256 → serve), sync/import, propagator; the NIP-5A primitives napplets reuse | `RelayBackend`, `BlobStore`, `PeerSource`, `FanoutSink` |
-| `myco-relay` | 3 | embedded NIP-01 relay store (replaceable kinds persisted to JSON, regular kinds memory-only) | implements `RelayBackend` |
+| `myco-relay` | 3 | embedded NIP-01 relay store (durable events in LMDB via `nostr-lmdb`; expiring chat memory-only) | implements `RelayBackend` |
 | `myco-blossom` | 3 | embedded Blossom store: sha256-named files, hash verified on write | implements `BlobStore` |
 
 The two layer-1 crates are **Android-free and transport-agnostic**. Every

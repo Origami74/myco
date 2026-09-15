@@ -2409,6 +2409,47 @@ const _: fn() = || {
     assert_send::<AppRuntime>();
 };
 
+/// A napplet open, prepared under the runtime lock and run without it.
+///
+/// The resolve reads the relay and the blob store — a configured custom relay
+/// makes that a network round trip — and it used to run inside the reducer's
+/// mutex on the main thread, queuing every `Tick` behind it. Now the lock is
+/// held only to gather these handles; `run` does the waiting.
+pub struct NappletOpenRequest {
+    addr: crate::napplet::NappletAddr,
+    npub: String,
+    grants: Option<crate::content::NappletGrants>,
+    content: Arc<crate::content::Content>,
+    host: Arc<crate::napplet::NappletHost>,
+    rt: tokio::runtime::Handle,
+}
+
+impl NappletOpenRequest {
+    /// Resolve, open the session, and record any widening in the Library.
+    /// Returns the opened napplet and whether the Library changed. Blocks the
+    /// calling thread; never call it on a Tokio worker.
+    pub fn run(self) -> anyhow::Result<(crate::napplet::OpenedNapplet, bool)> {
+        let opened = self
+            .rt
+            .block_on(self.host.open_with(&self.addr, self.grants.clone()))?;
+        // The session may have been opened with more than was stored (a
+        // declared domain this build newly implements). Record it, so the
+        // sheet says what the app can do and the next open needs no widening.
+        let mut widened = false;
+        if let Some(stored) = self.grants {
+            if opened.grants != stored {
+                self.content.set_napplet_grants(
+                    &self.npub,
+                    self.addr.d_tag.as_deref(),
+                    opened.grants.clone(),
+                );
+                widened = true;
+            }
+        }
+        Ok((opened, widened))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2875,46 +2916,5 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-/// A napplet open, prepared under the runtime lock and run without it.
-///
-/// The resolve reads the relay and the blob store — a configured custom relay
-/// makes that a network round trip — and it used to run inside the reducer's
-/// mutex on the main thread, queuing every `Tick` behind it. Now the lock is
-/// held only to gather these handles; `run` does the waiting.
-pub struct NappletOpenRequest {
-    addr: crate::napplet::NappletAddr,
-    npub: String,
-    grants: Option<crate::content::NappletGrants>,
-    content: Arc<crate::content::Content>,
-    host: Arc<crate::napplet::NappletHost>,
-    rt: tokio::runtime::Handle,
-}
-
-impl NappletOpenRequest {
-    /// Resolve, open the session, and record any widening in the Library.
-    /// Returns the opened napplet and whether the Library changed. Blocks the
-    /// calling thread; never call it on a Tokio worker.
-    pub fn run(self) -> anyhow::Result<(crate::napplet::OpenedNapplet, bool)> {
-        let opened = self
-            .rt
-            .block_on(self.host.open_with(&self.addr, self.grants.clone()))?;
-        // The session may have been opened with more than was stored (a
-        // declared domain this build newly implements). Record it, so the
-        // sheet says what the app can do and the next open needs no widening.
-        let mut widened = false;
-        if let Some(stored) = self.grants {
-            if opened.grants != stored {
-                self.content.set_napplet_grants(
-                    &self.npub,
-                    self.addr.d_tag.as_deref(),
-                    opened.grants.clone(),
-                );
-                widened = true;
-            }
-        }
-        Ok((opened, widened))
     }
 }

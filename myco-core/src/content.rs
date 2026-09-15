@@ -3769,7 +3769,7 @@ impl Content {
         }
 
         if let Some(store) = &self.relay_store {
-            store.retain_events(&keep_events);
+            store.retain_events(&keep_events).await;
         }
         if let Some(store) = &self.blobs_local {
             store.retain_blobs(&keep_blobs);
@@ -4195,6 +4195,24 @@ fn save_circle(path: &Path, items: &[CircleContact]) {
     if let Ok(json) = serde_json::to_vec(items) {
         let tmp = path.with_extension("json.tmp");
         let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
+    }
+}
+
+#[async_trait]
+impl crate::napplet::ManifestStore for Content {
+    async fn current(
+        &self,
+        kind: u16,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+    ) -> anyhow::Result<Option<Event>> {
+        // The active view substitutes the pinned version for the relay's
+        // newest — the same gate the nsite gateway reads through.
+        nsite_deck::seams::newest_in_slot(&self.active_backend(), kind, author, d_tag).await
+    }
+
+    fn pin(&self, manifest: &Event) {
+        self.set_active(manifest);
     }
 }
 
@@ -5329,23 +5347,5 @@ mod library_kind_tests {
         let item: LibraryItem = serde_json::from_str(stored).unwrap();
         assert_eq!(item.kind, LibraryKind::Nsite);
         assert!(library_addr(&item).is_some());
-    }
-}
-
-#[async_trait]
-impl crate::napplet::ManifestStore for Content {
-    async fn current(
-        &self,
-        kind: u16,
-        author: &PublicKey,
-        d_tag: Option<&str>,
-    ) -> anyhow::Result<Option<Event>> {
-        // The active view substitutes the pinned version for the relay's
-        // newest — the same gate the nsite gateway reads through.
-        nsite_deck::seams::newest_in_slot(&self.active_backend(), kind, author, d_tag).await
-    }
-
-    fn pin(&self, manifest: &Event) {
-        self.set_active(manifest);
     }
 }

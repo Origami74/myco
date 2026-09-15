@@ -213,11 +213,13 @@ assume.
 
 **Patterns in use:**
 
-- A hand-rolled store over the [`nostr`](https://github.com/rust-nostr/nostr)
-  crate's `Event` type, keyed by event id, with replaceable/addressable slot
-  dedup, NIP-40 expiry GC, and JSON persistence of the non-expiring (manifest)
-  set. Ephemeral chat is memory-only by design. A SQLite- or redb-backed index is
-  the obvious upgrade if the store ever outgrows this.
+- rust-nostr's LMDB store ([`nostr-lmdb`](https://github.com/rust-nostr/nostr))
+  for durable events: indexed NIP-01 queries, replaceable/addressable slot
+  dedup and NIP-09 deletions applied by the database, one small ACID write per
+  event, mmap reads. It replaced a JSON file that was rewritten whole on every
+  event once napplets started publishing and pulling notes into the store; it
+  also brings negentropy (NIP-77) items for P3. Events with a NIP-40
+  `expiration` — chat — stay in memory and never touch disk, by design.
 - The same `nostr` crate for signature verification, NIP-19 (`npub`)
   encode/decode, and the relay-message wire format.
 - `axum` handlers for the proxy's WebSocket sockets, the Blossom HTTP routes, and
