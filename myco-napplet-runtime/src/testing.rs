@@ -401,9 +401,18 @@ pub fn test_context_with_fetcher() -> (crate::dispatch::NapContext, std::sync::A
 pub struct MemFetcher {
     held: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
     asked: std::sync::Mutex<Vec<String>>,
+    /// Set to hand back blobs over the caller's cap, as a fetcher that forgot
+    /// to enforce it would — so the handler's own size check can be exercised.
+    ignores_cap: std::sync::atomic::AtomicBool,
 }
 
 impl MemFetcher {
+    /// Stop honouring `max_bytes`. See [`MemFetcher::ignores_cap`].
+    pub fn ignore_cap(&self) {
+        self.ignores_cap
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Hold `bytes` under their real sha256.
     pub fn hold(&self, bytes: &[u8]) -> String {
         let sha = nsite_deck::sync::sha256_hex(bytes);
@@ -429,9 +438,17 @@ impl MemFetcher {
 
 #[async_trait::async_trait]
 impl crate::seams::BlobFetcher for MemFetcher {
-    async fn fetch(&self, sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn fetch(&self, sha256_hex: &str, max_bytes: usize) -> anyhow::Result<Option<Vec<u8>>> {
         self.asked.lock().unwrap().push(sha256_hex.to_string());
-        Ok(self.held.lock().unwrap().get(sha256_hex).cloned())
+        // As a real fetcher would: an oversized blob is "nobody had it".
+        let ignores_cap = self.ignores_cap.load(std::sync::atomic::Ordering::Relaxed);
+        Ok(self
+            .held
+            .lock()
+            .unwrap()
+            .get(sha256_hex)
+            .filter(|bytes| ignores_cap || bytes.len() <= max_bytes)
+            .cloned())
     }
 }
 

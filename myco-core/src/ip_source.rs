@@ -66,6 +66,10 @@ pub struct IpPeerSource {
     /// How long to keep waiting for other relays after the first answers.
     /// `None` waits for every relay. See [`IpPeerSource::with_first_answer_grace`].
     first_answer_grace: Option<Duration>,
+    /// Refuse a blob larger than this while it downloads. `None` accepts any
+    /// size, which is what nsite sync wants — its manifests say what to
+    /// expect. See [`IpPeerSource::with_max_blob_bytes`].
+    max_blob_bytes: Option<usize>,
 }
 
 impl IpPeerSource {
@@ -83,6 +87,7 @@ impl IpPeerSource {
             peer_relay: None,
             kind_override: None,
             first_answer_grace: None,
+            max_blob_bytes: None,
         }
     }
 
@@ -130,6 +135,17 @@ impl IpPeerSource {
     /// longer sets the pace.
     pub fn with_first_answer_grace(mut self, grace: Duration) -> Self {
         self.first_answer_grace = Some(grace);
+        self
+    }
+
+    /// Give up on a blob the moment it is known to exceed `max` bytes — from
+    /// the `Content-Length` when there is one, else as the body streams in.
+    ///
+    /// For fetches a napplet asked for by hash: it names the blob, not the
+    /// size, and a cap checked on the finished body has already paid for the
+    /// body, over BLE if the holder is a peer in the room.
+    pub fn with_max_blob_bytes(mut self, max: usize) -> Self {
+        self.max_blob_bytes = Some(max);
         self
     }
 
@@ -554,16 +570,37 @@ impl PeerSource for IpPeerSource {
                 Ok(r) if r.status().is_success() => r,
                 _ => continue,
             };
-            let Ok(bytes) = resp.bytes().await else {
+            let Some(bytes) = read_body_bounded(resp, self.max_blob_bytes).await else {
                 continue;
             };
             // Self-authenticating: only accept bytes that hash to the wanted name.
             if sha256_hex(&bytes) == sha256_hex_want {
-                return Ok(Some(bytes.to_vec()));
+                return Ok(Some(bytes));
             }
         }
         Ok(None)
     }
+}
+
+/// Read a response body, stopping early — `None` — the moment it is known to
+/// exceed `max`: from `Content-Length` when the server sends one, otherwise as
+/// the chunks arrive. `None` for a read error too; the caller tries the next
+/// server either way.
+async fn read_body_bounded(mut resp: reqwest::Response, max: Option<usize>) -> Option<Vec<u8>> {
+    let Some(max) = max else {
+        return resp.bytes().await.ok().map(|b| b.to_vec());
+    };
+    if resp.content_length().is_some_and(|len| len > max as u64) {
+        return None;
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if out.len() + chunk.len() > max {
+            return None;
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Some(out)
 }
 
 fn event_d_tag(event: &Event) -> Option<String> {

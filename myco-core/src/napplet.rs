@@ -719,7 +719,7 @@ impl BlossomFetcher {
 
 #[async_trait::async_trait]
 impl myco_napplet_runtime::seams::BlobFetcher for BlossomFetcher {
-    async fn fetch(&self, sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn fetch(&self, sha256_hex: &str, max_bytes: usize) -> anyhow::Result<Option<Vec<u8>>> {
         // Every reachable Circle member at once; the first to answer wins.
         // A peer that does not hold it answers quickly with nothing, and a
         // peer that is gone hits the bound — either way the others are not
@@ -730,6 +730,7 @@ impl myco_napplet_runtime::seams::BlobFetcher for BlossomFetcher {
             .reachable_npubs()
             .into_iter()
             .filter_map(|npub| crate::ip_source::mesh_source_for(pool.clone(), &npub).ok())
+            .map(|source| source.with_max_blob_bytes(max_bytes))
             .map(|source| async move {
                 match tokio::time::timeout(MESH_BLOB_TIMEOUT, source.fetch_blob(sha256_hex, &[]))
                     .await
@@ -750,7 +751,8 @@ impl myco_napplet_runtime::seams::BlobFetcher for BlossomFetcher {
         if self.content.internet_looks_down() {
             return Ok(None);
         }
-        let public = crate::ip_source::IpPeerSource::new(Vec::new(), self.public_servers.clone());
+        let public = crate::ip_source::IpPeerSource::new(Vec::new(), self.public_servers.clone())
+            .with_max_blob_bytes(max_bytes);
         match tokio::time::timeout(INTERNET_BLOB_TIMEOUT, public.fetch_blob(sha256_hex, &[])).await
         {
             Ok(Ok(bytes)) => Ok(bytes),
@@ -1512,12 +1514,18 @@ mod tests {
             crate::ip_source::tests::mock_blossom(vec![(sha.clone(), bytes.clone())]).await;
         let fetcher = BlossomFetcher::new(content.clone()).with_public_servers(vec![server]);
 
-        assert_eq!(fetcher.fetch(&sha).await.unwrap(), Some(bytes));
-        assert_eq!(fetcher.fetch(&"00".repeat(32)).await.unwrap(), None);
+        assert_eq!(fetcher.fetch(&sha, 1 << 20).await.unwrap(), Some(bytes.clone()));
+        assert_eq!(fetcher.fetch(&"00".repeat(32), 1 << 20).await.unwrap(), None);
+        // A cap below the blob's size is enforced by the download, not after it.
+        assert_eq!(
+            fetcher.fetch(&sha, bytes.len() - 1).await.unwrap(),
+            None,
+            "an oversized blob came back anyway"
+        );
 
         content.set_offline_only(true);
         assert_eq!(
-            fetcher.fetch(&sha).await.unwrap(),
+            fetcher.fetch(&sha, 1 << 20).await.unwrap(),
             None,
             "offline only reached the internet"
         );

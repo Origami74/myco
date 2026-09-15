@@ -223,8 +223,11 @@ pub trait LaneTransport: Send + Sync {
 #[async_trait]
 pub trait BlobFetcher: Send + Sync {
     /// The bytes named by `sha256_hex`, verified, or `None` when nobody
-    /// reachable had them. `Err` is for a fetch that could not even start.
-    async fn fetch(&self, sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>>;
+    /// reachable had them — or when what they had was over `max_bytes`, which
+    /// a fetcher must enforce **while downloading**, not after: a cap checked
+    /// on the finished body has already paid for the body. `Err` is for a
+    /// fetch that could not even start.
+    async fn fetch(&self, sha256_hex: &str, max_bytes: usize) -> anyhow::Result<Option<Vec<u8>>>;
 }
 
 /// A [`BlobFetcher`] with nowhere to fetch from — the honest default for a
@@ -234,7 +237,7 @@ pub struct NoFetcher;
 
 #[async_trait]
 impl BlobFetcher for NoFetcher {
-    async fn fetch(&self, _sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn fetch(&self, _sha256_hex: &str, _max_bytes: usize) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
     }
 }

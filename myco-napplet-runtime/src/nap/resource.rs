@@ -38,6 +38,11 @@ use crate::seams::Envelope;
 pub const MAX_BYTES: usize = 10 * 1024 * 1024;
 /// The spec's recommended bulk cap.
 pub const MAX_URLS: usize = 100;
+/// The most one `bytesMany` may return in total. Every blob crosses the FFI
+/// as base64 inside one JSON string, and a hundred blobs at the per-blob cap
+/// would be a gigabyte of it; past this the remaining URLs are answered
+/// `too-large` without being fetched.
+pub const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
 /// Handle an inbound `resource.*` message.
 pub async fn handle(ctx: &NapContext, message: &Envelope) -> Vec<Envelope> {
@@ -68,6 +73,7 @@ fn info(message: &Envelope) -> Envelope {
             ],
             "maxBytes": MAX_BYTES,
             "maxUrls": MAX_URLS,
+            "maxTotalBytes": MAX_TOTAL_BYTES,
         }),
     )
 }
@@ -78,7 +84,7 @@ async fn bytes(ctx: &NapContext, message: &Envelope) -> Envelope {
         return error_for(message, "invalid-request", Some("bytes needs a url"));
     };
     match fetch(ctx, url).await {
-        Ok(Fetched { blob, mime }) => message
+        Ok(Fetched { blob, mime, .. }) => message
             .to_result()
             .with_field("blob", blob)
             .with_field("mime", mime),
@@ -113,9 +119,18 @@ async fn bytes_many(ctx: &NapContext, message: &Envelope) -> Envelope {
     }
 
     let mut items = Vec::with_capacity(urls.len());
+    let mut total = 0usize;
     for url in urls {
+        if total >= MAX_TOTAL_BYTES {
+            items.push(serde_json::json!({
+                "url": url, "ok": false, "error": "too-large",
+                "message": format!("this request already carries {MAX_TOTAL_BYTES} bytes"),
+            }));
+            continue;
+        }
         let item = match fetch(ctx, &url).await {
-            Ok(Fetched { blob, mime }) => {
+            Ok(Fetched { blob, mime, len }) => {
+                total += len;
                 serde_json::json!({ "url": url, "ok": true, "blob": blob, "mime": mime })
             }
             Err(e) => {
@@ -131,10 +146,11 @@ async fn bytes_many(ctx: &NapContext, message: &Envelope) -> Envelope {
     message.to_result().with_field("items", items)
 }
 
-/// One delivered resource: base64 bytes and the sniffed type.
+/// One delivered resource: base64 bytes, the sniffed type, and the raw size.
 struct Fetched {
     blob: String,
     mime: String,
+    len: usize,
 }
 
 /// A per-resource failure, in the spec's vocabulary.
@@ -166,7 +182,7 @@ async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
         None => {
             let fetched = ctx
                 .fetcher
-                .fetch(&sha)
+                .fetch(&sha, MAX_BYTES)
                 .await
                 .map_err(|e| Failure::new("network-error", e.to_string()))?
                 .ok_or(Failure {
@@ -175,7 +191,15 @@ async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
                 })?;
             // Verified here whatever the fetcher did, then kept: the spec's
             // hash check, and the "anything queried is saved" rule, in the
-            // one place every miss passes through.
+            // one place every miss passes through. The size is checked
+            // **before** the store, so an oversized blob is refused rather
+            // than kept and then refused.
+            if fetched.len() > MAX_BYTES {
+                return Err(Failure::new(
+                    "too-large",
+                    format!("{} bytes, cap is {MAX_BYTES}", fetched.len()),
+                ));
+            }
             if sha256_hex(&fetched) != sha {
                 return Err(Failure::new("decode-failed", "sha256 mismatch"));
             }
@@ -204,6 +228,7 @@ async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
     Ok(Fetched {
         blob: base64::engine::general_purpose::STANDARD.encode(&raw),
         mime: mime.to_string(),
+        len: raw.len(),
     })
 }
 
@@ -502,6 +527,58 @@ mod tests {
 
     /// Bulk: order and length preserved, one failure beside its successful
     /// siblings; an empty list or too many is a top-level error.
+    /// A blob over the cap is refused before it is stored: the store must not
+    /// end up holding what the napplet was told it could not have.
+    #[tokio::test]
+    async fn an_oversized_fetch_is_refused_and_not_kept() {
+        let (ctx, fetcher) = crate::testing::test_context_with_fetcher();
+        let big = vec![7u8; MAX_BYTES + 1];
+        let sha = nsite_deck::sync::sha256_hex(&big);
+        // The fetcher ignores the cap, as a misbehaving one might.
+        fetcher.ignore_cap();
+        fetcher.lie(&sha, &big);
+        let r = call(
+            &ctx,
+            Envelope::new("resource.bytes")
+                .with_id("b1")
+                .with_field("url", format!("blossom:sha256:{sha}")),
+        )
+        .await;
+        assert_eq!(r["type"], "resource.bytes.error");
+        assert_eq!(r["error"], "too-large");
+        assert!(!ctx.blobs.has(&sha).await, "the oversized blob was kept");
+    }
+
+    /// `bytesMany` stops fetching once the reply is already at the total cap;
+    /// the rest are answered `too-large` without a fetch.
+    #[tokio::test]
+    async fn bytes_many_stops_at_the_total_cap() {
+        let (ctx, fetcher) = crate::testing::test_context_with_fetcher();
+        let chunk = vec![1u8; MAX_BYTES];
+        let held: Vec<String> = (0..3)
+            .map(|i| {
+                let mut b = chunk.clone();
+                b[0] = i;
+                fetcher.hold(&b)
+            })
+            .collect();
+        let urls: Vec<String> = held.iter().map(|h| format!("blossom:sha256:{h}")).collect();
+        let r = call(
+            &ctx,
+            Envelope::new("resource.bytesMany")
+                .with_id("m1")
+                .with_field("urls", urls),
+        )
+        .await;
+        let items = r["items"].as_array().unwrap();
+        let ok: Vec<bool> = items.iter().map(|i| i["ok"].as_bool().unwrap()).collect();
+        // 16 MiB total, 10 MiB blobs: the first fits, the second crosses the
+        // line and is delivered, the third is refused unfetched.
+        assert_eq!(ok, vec![true, true, false], "{items:?}");
+        assert_eq!(items[2]["error"], "too-large");
+        assert_eq!(fetcher.asked().len(), 2, "the third blob was fetched anyway");
+    }
+
     #[tokio::test]
     async fn bytes_many_keeps_order_and_isolates_failures() {
         let (ctx, _fetcher) = test_context_with_fetcher();
