@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-02)
 Phase: 1 of 5 (Make Peering Observable)
 Plan: 0 of 2 in current phase
 Status: Ready to execute
-Last activity: 2026-09-15 — Completed quick task 260915-kh3: NAP-RESOURCE (blossom only)
+Last activity: 2026-09-15 — Completed quick task 260915-kq9: retry on napplet review sheet
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -97,6 +97,7 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 | 260915-emn | NAP-OUTBOX: `outbox` napplet capability — NIP-65 relay plans over local/mesh/internet lanes, per-relay publish verdicts, own kind 10002 on first use | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-emn-nap-outbox-outbox-aware-relay-routing-fo/260915-emn-SUMMARY.md` |
 | 260915-h5w | Outbox follow-ups: missing NIP-65 lists fetched from the pool and cached (24h fresh, 10 min miss memory); `relay.query`/`subscribe` read the whole relay pool | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-h5w-outbox-follow-ups-fetch-and-cache-missin/260915-h5w-SUMMARY.md` |
 | 260915-kh3 | NAP-RESOURCE (blossom only): local Blossom first, misses fetched over mesh then internet, verified and stored; shell builds the Blob | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-kh3-nap-resource-blossom-only-resource-fetch/260915-kh3-SUMMARY.md` |
+| 260915-kq9 | "Try again" on the napplet review sheet's couldn't-find state; review keeps the sharer for the retry | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-kq9-retry-button-on-the-napplet-review-sheet/260915-kq9-SUMMARY.md` |
 
 ## Deferred Items
 
