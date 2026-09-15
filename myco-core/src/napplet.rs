@@ -179,26 +179,13 @@ pub struct NappletHost {
 }
 
 impl NappletHost {
-    pub fn new(
-        relay: Arc<dyn RelayBackend>,
-        blobs: Arc<dyn BlobStore>,
-        signer: Arc<dyn myco_napplet_runtime::seams::Signer>,
-        sink: Arc<dyn myco_napplet_runtime::seams::EventSink>,
-        mesh: Arc<dyn myco_napplet_runtime::seams::MeshSink>,
-        outbox: Arc<dyn myco_napplet_runtime::seams::OutboxResolver>,
-        lanes: Arc<dyn myco_napplet_runtime::seams::LaneTransport>,
-    ) -> Self {
+    /// Stand up the host over a wired set of seams. The relay and blob store
+    /// the host resolves napplets from are the ones the capabilities use.
+    pub fn new(ctx: NapContext) -> Self {
         Self {
-            ctx: NapContext {
-                signer,
-                relay: relay.clone(),
-                sink,
-                mesh,
-                outbox,
-                lanes,
-            },
-            relay,
-            blobs,
+            relay: ctx.relay.clone(),
+            blobs: ctx.blobs.clone(),
+            ctx,
             sessions: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
         }
@@ -579,6 +566,85 @@ impl myco_napplet_runtime::seams::EventSink for RelayPoolSink {
     }
 }
 
+/// NAP-RESOURCE's fetcher: where a blob this device does not hold is looked
+/// for, in the order Myco prefers — the Circle's Blossom stores over the mesh
+/// first, in parallel, then the public servers when the internet is allowed.
+///
+/// Only ever reached on a local miss; the handler asks the store first and
+/// keeps whatever this returns. The mesh goes first because it is what this
+/// app is for: a picture one phone in the room fetched once is a picture
+/// nobody else in the room needs the internet for.
+pub struct BlossomFetcher {
+    content: Arc<crate::content::Content>,
+    /// The public Blossom servers. The defaults, unless a test says otherwise.
+    public_servers: Vec<String>,
+}
+
+/// How long one mesh peer gets before the public servers are tried.
+const MESH_BLOB_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long the public servers get, all together.
+const INTERNET_BLOB_TIMEOUT: Duration = Duration::from_secs(20);
+
+impl BlossomFetcher {
+    pub fn new(content: Arc<crate::content::Content>) -> Self {
+        Self {
+            content,
+            public_servers: crate::ip_source::default_blossom_servers(),
+        }
+    }
+
+    /// Use `servers` instead of the public defaults — for tests, which must
+    /// never reach the internet.
+    #[cfg(test)]
+    pub fn with_public_servers(mut self, servers: Vec<String>) -> Self {
+        self.public_servers = servers;
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl myco_napplet_runtime::seams::BlobFetcher for BlossomFetcher {
+    async fn fetch(&self, sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        // Every reachable Circle member at once; the first to answer wins.
+        // A peer that does not hold it answers quickly with nothing, and a
+        // peer that is gone hits the bound — either way the others are not
+        // waited on serially.
+        let pool = self.content.peer_relays();
+        let asks = self
+            .content
+            .reachable_npubs()
+            .into_iter()
+            .filter_map(|npub| crate::ip_source::mesh_source_for(pool.clone(), &npub).ok())
+            .map(|source| async move {
+                match tokio::time::timeout(MESH_BLOB_TIMEOUT, source.fetch_blob(sha256_hex, &[]))
+                    .await
+                {
+                    Ok(Ok(Some(bytes))) => Some(bytes),
+                    _ => None,
+                }
+            });
+        if let Some(found) = futures_util::future::join_all(asks)
+            .await
+            .into_iter()
+            .flatten()
+            .next()
+        {
+            return Ok(Some(found));
+        }
+
+        if self.content.is_offline_only() {
+            return Ok(None);
+        }
+        let public = crate::ip_source::IpPeerSource::new(Vec::new(), self.public_servers.clone());
+        match tokio::time::timeout(INTERNET_BLOB_TIMEOUT, public.fetch_blob(sha256_hex, &[])).await
+        {
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
 /// NAP-MESH's seam over the device's mesh: hop-limited publish through the
 /// [`RelayHub`](crate::mesh_relay::RelayHub), backlog pull through the Circle
 /// relay pool, and the user's caps from settings.
@@ -785,6 +851,23 @@ mod tests {
         }
     }
 
+    /// A context over in-memory seams for `relay` and `blobs`, with nothing
+    /// behind the mesh, the outbox or the fetcher.
+    pub(super) fn test_ctx(relay: Arc<dyn RelayBackend>, blobs: Arc<dyn BlobStore>) -> NapContext {
+        NapContext {
+            signer: Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
+            relay: relay.clone(),
+            sink: Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
+                MemRelay::new(),
+            ))),
+            mesh: test_mesh(),
+            outbox: test_outbox(),
+            lanes: test_outbox(),
+            blobs,
+            fetcher: Arc::new(myco_napplet_runtime::seams::NoFetcher),
+        }
+    }
+
     /// An outbox with nothing staged, for tests that are not about it.
     pub(super) fn test_outbox() -> Arc<myco_napplet_runtime::testing::OutboxFixture> {
         Arc::new(myco_napplet_runtime::testing::OutboxFixture::new(Arc::new(
@@ -817,26 +900,7 @@ mod tests {
             d_tag: Some("fixture".to_string()),
             relays: Vec::new(),
         };
-        (
-            NappletHost::new(
-                relay.clone(),
-                blobs,
-                Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
-                Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
-                    MemRelay::new(),
-                ))),
-                Arc::new(myco_napplet_runtime::testing::MemMesh::new(
-                    relay,
-                    myco_napplet_runtime::MeshLimits {
-                        publish_ttl: 3,
-                        subscribe_ttl: 2,
-                    },
-                )),
-                test_outbox(),
-                test_outbox(),
-            ),
-            addr,
-        )
+        (NappletHost::new(test_ctx(relay, blobs)), addr)
     }
 
     #[tokio::test]
@@ -1171,6 +1235,34 @@ mod tests {
         dead.accept(event).await.unwrap();
     }
 
+    /// The fetcher reaches the public servers when the store misses, and not
+    /// at all when offline only.
+    #[tokio::test]
+    async fn the_blossom_fetcher_uses_the_public_servers_unless_offline() {
+        use myco_napplet_runtime::seams::BlobFetcher as _;
+
+        let dir = std::env::temp_dir().join(format!("myco-fetcher-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(crate::content::Content::open(&dir).unwrap());
+        let bytes = b"a picture, allegedly".to_vec();
+        let sha = nsite_deck::sync::sha256_hex(&bytes);
+        let server =
+            crate::ip_source::tests::mock_blossom(vec![(sha.clone(), bytes.clone())]).await;
+        let fetcher = BlossomFetcher::new(content.clone()).with_public_servers(vec![server]);
+
+        assert_eq!(fetcher.fetch(&sha).await.unwrap(), Some(bytes));
+        assert_eq!(fetcher.fetch(&"00".repeat(32)).await.unwrap(), None);
+
+        content.set_offline_only(true);
+        assert_eq!(
+            fetcher.fetch(&sha).await.unwrap(),
+            None,
+            "offline only reached the internet"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn two_windows_are_two_independent_sessions() {
         let (host, addr) = host_with_fixture().await;
@@ -1203,17 +1295,7 @@ mod tests {
         }
         relay.publish(napplet.manifest.clone()).await.unwrap();
 
-        let host = NappletHost::new(
-            relay,
-            blobs,
-            Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
-            Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
-                MemRelay::new(),
-            ))),
-            test_mesh(),
-            test_outbox(),
-            test_outbox(),
-        );
+        let host = NappletHost::new(test_ctx(relay, blobs));
         let addr = NappletAddr {
             author: napplet.author,
             d_tag: Some("fixture".to_string()),
@@ -1259,17 +1341,10 @@ mod tests {
             .unwrap();
 
         // This device, empty.
-        let host = NappletHost::new(
+        let host = NappletHost::new(test_ctx(
             Arc::new(MemRelay::new()),
             Arc::new(MemBlobs::new()),
-            Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
-            Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
-                MemRelay::new(),
-            ))),
-            test_mesh(),
-            test_outbox(),
-            test_outbox(),
-        );
+        ));
         let addr = NappletAddr {
             author: napplet.author,
             d_tag: Some("fixture".to_string()),
@@ -1307,17 +1382,7 @@ mod tests {
 
         let local_relay = Arc::new(MemRelay::new());
         let local_blobs = Arc::new(MemBlobs::new());
-        let host = NappletHost::new(
-            local_relay.clone(),
-            local_blobs.clone(),
-            Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
-            Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
-                MemRelay::new(),
-            ))),
-            test_mesh(),
-            test_outbox(),
-            test_outbox(),
-        );
+        let host = NappletHost::new(test_ctx(local_relay.clone(), local_blobs.clone()));
         let addr = NappletAddr {
             author: napplet.author,
             d_tag: Some("fixture".to_string()),
@@ -1420,7 +1485,7 @@ mod real_naddr {
 
 #[cfg(test)]
 mod live_fetch {
-    use super::tests::{test_mesh, test_outbox};
+    use super::tests::test_ctx;
     use super::*;
     use nsite_deck::testing::{MemBlobs, MemRelay};
 
@@ -1469,17 +1534,10 @@ mod live_fetch {
         }
 
         // Then the whole ingest, which is what the app actually runs.
-        let host = NappletHost::new(
+        let host = NappletHost::new(test_ctx(
             Arc::new(MemRelay::new()),
             Arc::new(MemBlobs::new()),
-            Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
-            Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
-                MemRelay::new(),
-            ))),
-            test_mesh(),
-            test_outbox(),
-            test_outbox(),
-        );
+        ));
         let started = std::time::Instant::now();
         match host.ingest(&addr, &source).await {
             Ok(ingested) => println!(

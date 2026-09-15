@@ -576,7 +576,7 @@ fn event_d_tag(event: &Event) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -631,7 +631,7 @@ mod tests {
 
     /// A mock Blossom: serve `GET /<hash>` from a (hash -> bytes) map. Returns the
     /// `http://` base URL.
-    async fn mock_blossom(blobs: Vec<(String, Vec<u8>)>) -> String {
+    pub(crate) async fn mock_blossom(blobs: Vec<(String, Vec<u8>)>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let map: Arc<std::collections::HashMap<String, Vec<u8>>> =

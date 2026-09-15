@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Napplets can load pictures and files by content hash (`resource`
+  capability, NAP-RESOURCE, `blossom:` URLs only for now). Your phone's own
+  store is checked first; anything it has to fetch — from a friend's phone
+  over the mesh, or from a public server — is kept, so the next app, or the
+  next phone in the room, gets it without the internet.
 - Napplets get outbox-model relay access (`outbox` capability, NAP-OUTBOX):
   ask for an author's notes and Myco finds their relays from their NIP-65
   list — a phone across the room over the mesh, a public relay over the

@@ -2122,6 +2122,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "myco-napplet-runtime",
  "nostr",
  "nsite-deck",

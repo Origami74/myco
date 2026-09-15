@@ -1578,13 +1578,16 @@ impl AppRuntime {
             ));
 
             let host = Arc::new(crate::napplet::NappletHost::new(
-                content.relay(),
-                content.blobs(),
-                signer,
-                sink,
-                mesh,
-                outbox.clone(),
-                outbox,
+                myco_napplet_runtime::dispatch::NapContext {
+                    signer,
+                    relay: content.relay(),
+                    sink,
+                    mesh,
+                    outbox: outbox.clone(),
+                    lanes: outbox,
+                    blobs: content.blobs(),
+                    fetcher: Arc::new(crate::napplet::BlossomFetcher::new(content.clone())),
+                },
             ));
 
             // Feed every accepted event to open napplets' subscriptions — this
