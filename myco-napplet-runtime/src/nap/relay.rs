@@ -510,6 +510,8 @@ mod tests {
             relay: base.relay.clone(),
             sink: sink.clone(),
             mesh: base.mesh.clone(),
+            outbox: base.outbox.clone(),
+            lanes: base.lanes.clone(),
         };
 
         call(
@@ -540,6 +542,8 @@ mod tests {
             relay: base.relay.clone(),
             sink: sink.clone(),
             mesh: base.mesh.clone(),
+            outbox: base.outbox.clone(),
+            lanes: base.lanes.clone(),
         };
 
         let mut ungranted = Session::new(

@@ -10,6 +10,7 @@
 
 pub mod identity;
 pub mod mesh;
+pub mod outbox;
 pub mod relay;
 pub mod shell;
 
@@ -26,5 +27,6 @@ use crate::session::Session;
 pub fn deliveries_for(session: &Session, event: &nostr::Event) -> Vec<Envelope> {
     let mut out = relay::deliveries_for(session, event);
     out.extend(mesh::deliveries_for(session, event));
+    out.extend(outbox::deliveries_for(session, event));
     out
 }

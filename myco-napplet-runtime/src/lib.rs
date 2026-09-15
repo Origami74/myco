@@ -60,8 +60,9 @@ pub use nap::deliveries_for;
 pub use prelude::{render_for as render_prelude, PRELUDE_GLOBAL, SUPPLEMENT_GLOBAL};
 pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
-    BlobStore, Envelope, EventSink, MeshLimits, MeshReach, MeshSink, NapTransport, OutboxResolver,
-    RelayBackend, RelayLane, Signer, StoreOnlySink,
+    is_mesh_relay_url, BlobStore, Direction, Envelope, EventSink, LaneTransport, MeshLimits,
+    MeshReach, MeshSink, NapTransport, OutboxResolver, PlanSource, RelayBackend, RelayLane,
+    RelayPlan, Signer, StoreOnlySink,
 };
 pub use session::{NappletIdentity, Session, IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
 pub use shell_link::{ShellAction, ToRuntime, ToShell};

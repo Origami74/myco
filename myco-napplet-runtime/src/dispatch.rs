@@ -19,7 +19,9 @@
 use std::sync::Arc;
 
 use crate::nap;
-use crate::seams::{Envelope, EventSink, MeshSink, RelayBackend, Signer};
+use crate::seams::{
+    Envelope, EventSink, LaneTransport, MeshSink, OutboxResolver, RelayBackend, Signer,
+};
 use crate::session::Session;
 
 /// What the capabilities reach the world through.
@@ -40,6 +42,10 @@ pub struct NapContext {
     /// Hop-limited publish and pull over the mesh, behind NAP-MESH. See
     /// [`MeshSink`].
     pub mesh: Arc<dyn MeshSink>,
+    /// NIP-65 relay planning, behind NAP-OUTBOX. See [`OutboxResolver`].
+    pub outbox: Arc<dyn OutboxResolver>,
+    /// Lane I/O for NAP-OUTBOX. See [`LaneTransport`].
+    pub lanes: Arc<dyn LaneTransport>,
 }
 
 /// What to do with an inbound message.
@@ -110,6 +116,7 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
         "identity" => Outcome::Reply(nap::identity::handle(ctx, message).await),
         "relay" => Outcome::Reply(nap::relay::handle(ctx, session, message).await),
         "mesh" => Outcome::Reply(nap::mesh::handle(ctx, session, message).await),
+        "outbox" => Outcome::Reply(nap::outbox::handle(ctx, session, message).await),
         // Implemented, granted, established — and still unrouted. Reaching here
         // means the implemented set grew without a handler, which is a bug in
         // this crate rather than anything the napplet did.

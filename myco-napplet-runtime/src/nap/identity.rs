@@ -130,12 +130,14 @@ mod tests {
             relay: relay.clone(),
             sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
             mesh: Arc::new(crate::testing::MemMesh::new(
-                relay,
+                relay.clone(),
                 crate::seams::MeshLimits {
                     publish_ttl: 3,
                     subscribe_ttl: 2,
                 },
             )),
+            outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
+            lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
         };
         let reply = call(&ctx, "getPublicKey").await;
         assert_eq!(reply.field("publicKey").unwrap().as_str().unwrap(), "");
@@ -156,12 +158,14 @@ mod tests {
             relay: relay.clone(),
             sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
             mesh: Arc::new(crate::testing::MemMesh::new(
-                relay,
+                relay.clone(),
                 crate::seams::MeshLimits {
                     publish_ttl: 3,
                     subscribe_ttl: 2,
                 },
             )),
+            outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
+            lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
         };
         let reply = call(&ctx, "getProfile").await;
         assert_eq!(reply.field("profile").unwrap()["name"], "Myco Guest 01234");
@@ -191,12 +195,14 @@ mod tests {
             relay: relay.clone(),
             sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
             mesh: Arc::new(crate::testing::MemMesh::new(
-                relay,
+                relay.clone(),
                 crate::seams::MeshLimits {
                     publish_ttl: 3,
                     subscribe_ttl: 2,
                 },
             )),
+            outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
+            lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
         };
         assert!(call(&ctx, "getProfile")
             .await

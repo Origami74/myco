@@ -48,7 +48,11 @@ pub trait Signer: Send + Sync {
 /// NIP-65 relay list can name `ws://<npub>.fips:4870` beside `wss://` internet
 /// relays, and the outbox model works unmodified (design §7.4). A napplet
 /// written for the open web works in a room with no internet.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// A mesh lane is a *directed* connection to one peer's relay — the relay
+/// model, not the flood. Flooding the Circle with a hop budget is NAP-MESH's
+/// ([`MeshSink`]), behind its own grant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RelayLane {
     /// The device's own embedded relay.
     Local,
@@ -59,14 +63,152 @@ pub enum RelayLane {
     Internet { url: String },
 }
 
-/// Resolves which relays to read from and write to for a given pubkey (NIP-65).
+impl RelayLane {
+    /// Classify a relay URL the way a NIP-65 list would be read: a `.fips`
+    /// host is a mesh peer, anything else is the internet. Local is never a
+    /// URL — it is this device, and nothing outside it can name it.
+    pub fn from_url(url: &str) -> Self {
+        if is_mesh_relay_url(url) {
+            Self::Mesh {
+                url: url.to_string(),
+            }
+        } else {
+            Self::Internet {
+                url: url.to_string(),
+            }
+        }
+    }
+
+    /// The URL a napplet may be shown for this lane. `None` for the local
+    /// relay, which has no address anyone else could use.
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            Self::Local => None,
+            Self::Mesh { url } | Self::Internet { url } => Some(url),
+        }
+    }
+}
+
+/// Whether `url` names a mesh peer's relay: a `ws://` URL whose host ends in
+/// `.fips`.
+pub fn is_mesh_relay_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("ws://") else {
+        return false;
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    host.ends_with(".fips")
+}
+
+/// Which way a relay plan is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    /// Where an author's events can be read from (their NIP-65 write relays).
+    Read,
+    /// Where events *for* an author should be sent (their NIP-65 read relays).
+    Write,
+}
+
+/// Where a relay plan came from — NAP-OUTBOX's `OutboxRelayPlan.source`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanSource {
+    /// Every author's NIP-65 list was found.
+    Nip65,
+    /// Served from a cached relay list.
+    Cache,
+    /// Shell policy — for Myco, a Circle member's mesh relay.
+    Policy,
+    /// Configured relays, because NIP-65 data was absent.
+    Fallback,
+}
+
+impl PlanSource {
+    /// The wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nip65 => "nip65",
+            Self::Cache => "cache",
+            Self::Policy => "policy",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+/// The relays a read or write should use, and how sure the shell is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayPlan {
+    /// Deduplicated lanes, in the order the shell would try them.
+    pub lanes: Vec<RelayLane>,
+    pub source: PlanSource,
+    /// Authors whose relay lists could not be resolved. Non-empty means the
+    /// plan is a fallback for at least one of them.
+    pub missing_authors: Vec<PublicKey>,
+}
+
+impl RelayPlan {
+    /// A plan that reaches only this device.
+    pub fn local_only(source: PlanSource) -> Self {
+        Self {
+            lanes: vec![RelayLane::Local],
+            source,
+            missing_authors: Vec::new(),
+        }
+    }
+}
+
+/// Resolves which relays to read from and write to (NIP-65) — the seam behind
+/// NAP-OUTBOX's routing.
+///
+/// The shell owns relay discovery, fallback and policy; a napplet only ever
+/// sees the resulting plan. What "policy" means here is Myco's: a Circle
+/// member is reachable at their mesh relay whether or not they have published
+/// a relay list, and a device with no internet has no fallback relays to offer.
 #[async_trait]
 pub trait OutboxResolver: Send + Sync {
-    /// Relays to publish this author's events to.
-    async fn write_lanes(&self, author: &PublicKey) -> anyhow::Result<Vec<RelayLane>>;
+    /// The plan for `authors` in `direction`. An empty `authors` asks for the
+    /// shell-user's own plan — where they publish (`Write`) or, for a read,
+    /// the shell's policy relays.
+    async fn plan(&self, direction: Direction, authors: &[PublicKey]) -> RelayPlan;
+}
 
-    /// Relays to read this author's events from.
-    async fn read_lanes(&self, author: &PublicKey) -> anyhow::Result<Vec<RelayLane>>;
+/// Carries NIP-01 traffic over lanes — the seam behind NAP-OUTBOX's I/O.
+///
+/// Nothing here names a socket, a pool or a radio: a lane is a value, and the
+/// implementation decides what carrying it means. That is what keeps the
+/// handler testable with an in-memory relay per URL.
+#[async_trait]
+pub trait LaneTransport: Send + Sync {
+    /// Query every lane in parallel, each bounded by `timeout`. A lane that
+    /// could not be reached yields `None`, so the caller can say `incomplete`
+    /// rather than pass an empty answer off as a complete one. Events are
+    /// signature-verified before they are returned.
+    async fn query(
+        &self,
+        lanes: &[RelayLane],
+        filters: &[nostr::Filter],
+        timeout: std::time::Duration,
+    ) -> Vec<(RelayLane, Option<Vec<Event>>)>;
+
+    /// Publish to every lane in parallel, each bounded by `timeout`, and say
+    /// which accepted. The local lane is accepted *unforwarded*: stored and
+    /// shown to this device's live subscriptions, handed to no flood.
+    async fn publish(
+        &self,
+        lanes: &[RelayLane],
+        event: &Event,
+        timeout: std::time::Duration,
+    ) -> Vec<(RelayLane, bool)>;
+
+    /// Query the lanes for `filters` and accept what comes back into the
+    /// local relay — unforwarded — so it reaches live subscriptions here.
+    ///
+    /// Returns once the work is under way, not once it is done: this is the
+    /// remote half of an outbox subscription, and a napplet's other calls
+    /// must not queue behind a slow relay.
+    async fn pull_into_local(
+        &self,
+        lanes: &[RelayLane],
+        filters: &[nostr::Filter],
+    ) -> anyhow::Result<()>;
 }
 
 /// Where a napplet's `relay.publish` goes: the shell's **relay pool**.

@@ -340,13 +340,255 @@ pub fn test_context_with_mesh(
     let relay: std::sync::Arc<dyn crate::seams::RelayBackend> =
         std::sync::Arc::new(nsite_deck::testing::MemRelay::new());
     let mesh = std::sync::Arc::new(MemMesh::new(relay.clone(), limits));
+    let outbox = std::sync::Arc::new(OutboxFixture::new(relay.clone()));
     let ctx = crate::dispatch::NapContext {
         signer: signer.clone(),
         relay: relay.clone(),
         sink: std::sync::Arc::new(crate::seams::StoreOnlySink(relay)),
         mesh: mesh.clone(),
+        outbox: outbox.clone(),
+        lanes: outbox,
     };
     (ctx, mesh, signer)
+}
+
+/// As [`test_context`], with the [`OutboxFixture`] handed back so a test can
+/// stage relay lists and relays, and assert what was asked of them.
+pub fn test_context_with_outbox() -> (
+    crate::dispatch::NapContext,
+    std::sync::Arc<OutboxFixture>,
+    std::sync::Arc<TestSigner>,
+) {
+    let signer = std::sync::Arc::new(TestSigner::new());
+    let relay: std::sync::Arc<dyn crate::seams::RelayBackend> =
+        std::sync::Arc::new(nsite_deck::testing::MemRelay::new());
+    let mesh = std::sync::Arc::new(MemMesh::new(
+        relay.clone(),
+        crate::seams::MeshLimits {
+            publish_ttl: 3,
+            subscribe_ttl: 2,
+        },
+    ));
+    let outbox = std::sync::Arc::new(OutboxFixture::new(relay.clone()));
+    let ctx = crate::dispatch::NapContext {
+        signer: signer.clone(),
+        relay: relay.clone(),
+        sink: std::sync::Arc::new(crate::seams::StoreOnlySink(relay)),
+        mesh,
+        outbox: outbox.clone(),
+        lanes: outbox.clone(),
+    };
+    (ctx, outbox, signer)
+}
+
+/// Staged relay lists: `(author, direction)` to the URLs and their source.
+type StagedPlans = std::collections::HashMap<
+    (PublicKey, crate::seams::Direction),
+    (Vec<String>, crate::seams::PlanSource),
+>;
+
+/// An in-memory world for NAP-OUTBOX: relay lists a test stages, and one
+/// [`MemRelay`](nsite_deck::testing::MemRelay) per URL that a test can
+/// pre-load, kill, or make refuse publishes. Implements both seams.
+pub struct OutboxFixture {
+    local: std::sync::Arc<dyn crate::seams::RelayBackend>,
+    plans: std::sync::Mutex<StagedPlans>,
+    fallback: std::sync::Mutex<Vec<String>>,
+    relays: std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<nsite_deck::testing::MemRelay>>,
+    >,
+    dead: std::sync::Mutex<std::collections::HashSet<String>>,
+    refusing: std::sync::Mutex<std::collections::HashSet<String>>,
+    queried: std::sync::Mutex<Vec<crate::seams::RelayLane>>,
+    published: std::sync::Mutex<Vec<(crate::seams::RelayLane, Event)>>,
+    pulled: std::sync::Mutex<Vec<(Vec<crate::seams::RelayLane>, Vec<nostr::Filter>)>>,
+}
+
+impl OutboxFixture {
+    pub fn new(local: std::sync::Arc<dyn crate::seams::RelayBackend>) -> Self {
+        Self {
+            local,
+            plans: std::sync::Mutex::new(std::collections::HashMap::new()),
+            fallback: std::sync::Mutex::new(Vec::new()),
+            relays: std::sync::Mutex::new(std::collections::HashMap::new()),
+            dead: std::sync::Mutex::new(std::collections::HashSet::new()),
+            refusing: std::sync::Mutex::new(std::collections::HashSet::new()),
+            queried: std::sync::Mutex::new(Vec::new()),
+            published: std::sync::Mutex::new(Vec::new()),
+            pulled: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Stage an author's relays for one direction.
+    pub fn set_plan(
+        &self,
+        author: PublicKey,
+        direction: crate::seams::Direction,
+        urls: &[&str],
+        source: crate::seams::PlanSource,
+    ) {
+        self.plans.lock().unwrap().insert(
+            (author, direction),
+            (urls.iter().map(|u| u.to_string()).collect(), source),
+        );
+    }
+
+    /// The relays used when an author has no list, and for policy reads.
+    pub fn set_fallback(&self, urls: &[&str]) {
+        *self.fallback.lock().unwrap() = urls.iter().map(|u| u.to_string()).collect();
+    }
+
+    /// The in-memory relay at `url`, created on first use.
+    pub fn relay(&self, url: &str) -> std::sync::Arc<nsite_deck::testing::MemRelay> {
+        self.relays
+            .lock()
+            .unwrap()
+            .entry(url.to_string())
+            .or_insert_with(|| std::sync::Arc::new(nsite_deck::testing::MemRelay::new()))
+            .clone()
+    }
+
+    /// Make `url` unreachable: queries yield `None`, publishes `false`.
+    pub fn mark_dead(&self, url: &str) {
+        self.dead.lock().unwrap().insert(url.to_string());
+    }
+
+    /// Make `url` answer publishes with `OK false`.
+    pub fn mark_refusing(&self, url: &str) {
+        self.refusing.lock().unwrap().insert(url.to_string());
+    }
+
+    pub fn queried(&self) -> Vec<crate::seams::RelayLane> {
+        self.queried.lock().unwrap().clone()
+    }
+
+    pub fn published(&self) -> Vec<(crate::seams::RelayLane, Event)> {
+        self.published.lock().unwrap().clone()
+    }
+
+    pub fn pulled(&self) -> Vec<(Vec<crate::seams::RelayLane>, Vec<nostr::Filter>)> {
+        self.pulled.lock().unwrap().clone()
+    }
+
+    fn lanes_of(urls: &[String]) -> Vec<crate::seams::RelayLane> {
+        urls.iter()
+            .map(|u| crate::seams::RelayLane::from_url(u))
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::seams::OutboxResolver for OutboxFixture {
+    async fn plan(
+        &self,
+        direction: crate::seams::Direction,
+        authors: &[PublicKey],
+    ) -> crate::seams::RelayPlan {
+        use crate::seams::{PlanSource, RelayPlan};
+        let fallback = self.fallback.lock().unwrap().clone();
+        if authors.is_empty() {
+            return RelayPlan {
+                lanes: Self::lanes_of(&fallback),
+                source: PlanSource::Policy,
+                missing_authors: Vec::new(),
+            };
+        }
+        let plans = self.plans.lock().unwrap();
+        let mut lanes = Vec::new();
+        let mut missing = Vec::new();
+        let mut source = PlanSource::Nip65;
+        for author in authors {
+            match plans.get(&(*author, direction)) {
+                Some((urls, src)) => {
+                    lanes.extend(Self::lanes_of(urls));
+                    if *src != PlanSource::Nip65 {
+                        source = *src;
+                    }
+                }
+                None => {
+                    missing.push(*author);
+                    lanes.extend(Self::lanes_of(&fallback));
+                    source = PlanSource::Fallback;
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        lanes.retain(|l| seen.insert(l.clone()));
+        RelayPlan {
+            lanes,
+            source,
+            missing_authors: missing,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::seams::LaneTransport for OutboxFixture {
+    async fn query(
+        &self,
+        lanes: &[crate::seams::RelayLane],
+        filters: &[nostr::Filter],
+        _timeout: std::time::Duration,
+    ) -> Vec<(crate::seams::RelayLane, Option<Vec<Event>>)> {
+        self.queried.lock().unwrap().extend(lanes.iter().cloned());
+        let mut out = Vec::new();
+        for lane in lanes {
+            let answer = match lane.url() {
+                None => self.local.query(filters).await.ok(),
+                Some(url) if self.dead.lock().unwrap().contains(url) => None,
+                Some(url) => {
+                    let relay: std::sync::Arc<dyn crate::seams::RelayBackend> = self.relay(url);
+                    relay.query(filters).await.ok()
+                }
+            };
+            out.push((lane.clone(), answer));
+        }
+        out
+    }
+
+    async fn publish(
+        &self,
+        lanes: &[crate::seams::RelayLane],
+        event: &Event,
+        _timeout: std::time::Duration,
+    ) -> Vec<(crate::seams::RelayLane, bool)> {
+        let mut out = Vec::new();
+        for lane in lanes {
+            let ok = match lane.url() {
+                None => self.local.publish(event.clone()).await.is_ok(),
+                Some(url)
+                    if self.dead.lock().unwrap().contains(url)
+                        || self.refusing.lock().unwrap().contains(url) =>
+                {
+                    false
+                }
+                Some(url) => {
+                    let relay: std::sync::Arc<dyn crate::seams::RelayBackend> = self.relay(url);
+                    relay.publish(event.clone()).await.is_ok()
+                }
+            };
+            if ok {
+                self.published
+                    .lock()
+                    .unwrap()
+                    .push((lane.clone(), event.clone()));
+            }
+            out.push((lane.clone(), ok));
+        }
+        out
+    }
+
+    async fn pull_into_local(
+        &self,
+        lanes: &[crate::seams::RelayLane],
+        filters: &[nostr::Filter],
+    ) -> anyhow::Result<()> {
+        self.pulled
+            .lock()
+            .unwrap()
+            .push((lanes.to_vec(), filters.to_vec()));
+        Ok(())
+    }
 }
 
 /// A [`MeshSink`](crate::seams::MeshSink) with no mesh behind it: stores a
