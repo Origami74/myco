@@ -157,7 +157,7 @@ listener is on *some* OS-assigned PSM, and a peer that blindly dials 133 will
 not reach it.
 
 Compounding it, the adverts don't carry the PSM. FIPS adverts are **UUID-only**
-([../../reference/fips/src/transport/ble/discovery.rs](../../../reference/fips/src/transport/ble/discovery.rs))
+([../../reference/fips/src/transport/ble/psm.rs](../../../reference/fips/src/transport/ble/psm.rs))
 — deliberately, so no identity or routing material leaks before the Noise
 handshake. A scanner learns "a FIPS peer is at this BLE address," nothing
 more. There is currently no channel for "…and its listener PSM is N."

@@ -170,7 +170,7 @@ The exchanged pubkey then serves two purposes:
 
 - It becomes the `pubkey_hint` the core's discovery drain requires
   (`poll_transport_discovery` silently skips hintless peers —
-  [../../reference/fips/src/node/lifecycle.rs](../../../reference/fips/src/node/lifecycle.rs)).
+  [../../reference/fips/src/node/lifecycle/mod.rs](../../../reference/fips/src/node/lifecycle/mod.rs)).
 - It lets *Kotlin* apply the **cross-probe tiebreaker before spending an
   NDP**: both phones discover each other, but data-path slots are scarce
   (chipset-limited; query `getAvailableAwareResources()`), so only the
@@ -292,7 +292,7 @@ with a scope — *which* interface to send from. Two facts make this workable:
 - fips-core already does exactly this for LAN mDNS discovery: the discovery
   path builds a `SocketAddrV6` with an explicit `scope_id` and refuses
   scope-less link-locals
-  ([../../reference/fips/src/discovery/lan/mod.rs](../../../reference/fips/src/discovery/lan/mod.rs))
+  ([../../reference/fips/src/mdns/mod.rs](../../../reference/fips/src/mdns/mod.rs))
   — the pattern is proven in-tree on the very same UDP transport.
 
 One honest caveat: Google's documented dial pattern goes through the Android
