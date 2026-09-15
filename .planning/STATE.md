@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-02)
 Phase: 1 of 5 (Make Peering Observable)
 Plan: 0 of 2 in current phase
 Status: Ready to execute
-Last activity: 2026-09-15 — Completed quick task 260915-lwj: docs overhaul
+Last activity: 2026-09-15 - Completed quick task 260915-nwh: napplet review remediation
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -102,6 +102,7 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 | 260915-l2e | Installed napplets' grants widen to declared domains this build newly implements; resource refusals as `.error`; `resource` default grant (fixes "reading arrayBuffer") | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-l2e-napplet-grants-widen-to-newly-implemented/260915-l2e-SUMMARY.md` |
 | 260915-l9d | Per-app capability switches on the napplet sheet, live in open windows (`SetNappletGrant`, `apply_grants`) | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-l9d-per-app-capability-switches-on-the-nappl/260915-l9d-SUMMARY.md` |
 | 260915-lwj | Docs overhaul: four-layer restructure, Circle doc, code-aligned reference docs, nostr-vpn dropped, roadmap rewritten with login/notifications/nsite-mesh items | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-lwj-docs-overhaul-align-with-code-drop-nostr/260915-lwj-SUMMARY.md` |
+| 260915-nwh | Napplet review remediation: blockers, security, reliability, active gate, LMDB relay store, dedupe, tests | 2026-09-15 | feat/napplet-runtime | [260915-nwh](./quick/260915-nwh-napplet-review-remediation-blockers-secu/260915-nwh-SUMMARY.md) |
 
 ## Deferred Items
 
