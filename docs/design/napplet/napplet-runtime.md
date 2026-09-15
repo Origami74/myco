@@ -371,8 +371,18 @@ is not yet claimed — the resolver needs the same normalization regardless.
 
 ### S3 — Fill out the seam
 
-`NAP-STORAGE` (scoped per identity tuple), `NAP-THEME`, `NAP-NOTIFY`, `NAP-LINK`,
-`NAP-OUTBOX` and `NAP-CONFIG`.
+`NAP-STORAGE` (scoped per identity tuple), `NAP-THEME`, `NAP-NOTIFY`, `NAP-LINK` and
+`NAP-CONFIG`.
+
+**`NAP-OUTBOX` shipped** (registry draft PR #32, pinned copy in
+`reference/naps/drafts/NAP-OUTBOX.md`): `getEvent`, `query`, `subscribe`/`close`, `publish`,
+`resolveRelays`. Two seams — `OutboxResolver` (a NIP-65 plan per direction, with `source`
+and `missing_authors`) and `LaneTransport` (`query` / `publish` / `pull_into_local` over the
+three `RelayLane`s) — implemented by `OutboxService` in `myco-core/src/outbox.rs`. Reads and
+publishes wait for their lanes, bounded, and say `incomplete` when one never answered; a
+subscribe answers the local backlog and pulls the remote lanes *into* the local relay, which
+is what delivers them live (the spec has no `outbox.eose`, and this is why). Napplet-supplied
+relay URLs are validated: `ws`/`wss` only, never loopback or a private network.
 
 ### S4 — Composition
 
@@ -453,11 +463,22 @@ contract, same napplet code — the URLs simply happen to resolve over the mesh.
 written for the open web works in a room with no internet, and neither the napplet nor the
 specification needs to know why.
 
-The work this implies is small: resolve `<npub>.fips` on the Rust side of relay
-connections, since napplets never open sockets and `PeerRelayPool` reaches peers by mesh
-IPv6 today; publish our own kind 10002 naming our mesh relay so peers can route back;
-report per-lane reachability in results rather than failing hard. One question stays open —
-whether a napplet may see that a relay is mesh-local, or whether that stays opaque.
+The work this implied is done with NAP-OUTBOX (S3): a `.fips` URL in a relay list becomes a
+`RelayLane::Mesh` and is reached through `PeerRelayPool`; the user's own kind 10002 — mesh
+relay first, then the configured relays — is published beside the guest profile on first
+napplet use, so peers can route back and the user's own outbox plan resolves as NIP-65;
+per-lane reachability is reported (`incomplete`, the per-relay map on publish) rather than
+failing hard. Policy lives in one place (`outbox.rs`): a mesh relay is a lane only if its
+npub is a Circle member, our own is never one, and internet lanes go when offline-only.
+
+The open question is answered by not hiding it: a mesh relay's URL is a `ws://<npub>.fips`
+URL, and `relayHints` and `resolveRelays` show it as such. A napplet cannot do anything with
+the address that it could not already do by asking — it still never opens a socket — and
+hiding it would make the plan a lie about where an event was seen.
+
+What NAP-OUTBOX does **not** do is flood. A mesh lane is one directed connection to one
+peer's relay, exactly as a `wss://` lane is; reaching everyone nearby with a hop budget is
+NAP-MESH's (S5), behind its own grant.
 
 ### 7.5 The WebView floor
 

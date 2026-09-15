@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Napplets get outbox-model relay access (`outbox` capability, NAP-OUTBOX):
+  ask for an author's notes and Myco finds their relays from their NIP-65
+  list — a phone across the room over the mesh, a public relay over the
+  internet, or both — deduplicates what comes back, and says when a relay
+  never answered. Publishing to someone's inbox is a delivery contract:
+  without their relay list it is refused rather than sent somewhere else.
+  Your own relay list (mesh relay first, then the public defaults) is
+  published with your guest profile the first time you open a napplet.
 - Napplets can talk over the mesh: a new `mesh` capability (NAP-MESH, Myco's
   own, written in the napplet registry's form so it can be proposed upstream)
   lets an app you have granted it publish to everyone nearby with a chosen
