@@ -35,6 +35,20 @@ use crate::mesh_relay::RelayHub;
 /// How long a subscription's remote pull waits for its lanes.
 const PULL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a plan waits for a missing relay list before falling back. Paid
+/// once per unknown author, on the first call that names them.
+const LIST_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// A stored relay list older than this is used now and refreshed behind the
+/// answer. NIP-65 lists change rarely; a day keeps a phone that was offline
+/// for a week from serving a week-old plan forever.
+const LIST_FRESH_FOR: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How long a miss is remembered. An author with no list anywhere is not
+/// asked about again on every call, and is asked again soon enough that a
+/// list published today is found today.
+const MISS_REMEMBERED_FOR: Duration = Duration::from_secs(10 * 60);
+
 pub struct OutboxService {
     store: Arc<dyn RelayBackend>,
     hub: Arc<Mutex<Option<Arc<RelayHub>>>>,
@@ -42,6 +56,25 @@ pub struct OutboxService {
     /// This device's mesh npub, so its own `.fips` relay is recognised and
     /// never dialled.
     own_npub: String,
+    /// The internet relays used as fallback and searched for relay lists.
+    /// The defaults, unless a test says otherwise.
+    configured: Vec<String>,
+    /// Authors asked about and not found, with when. The local relay is the
+    /// positive cache; this is the negative one.
+    misses: Arc<Mutex<std::collections::HashMap<PublicKey, std::time::Instant>>>,
+    /// Authors whose stale list is being refreshed right now, so a burst of
+    /// calls spawns one fetch rather than one per call.
+    refreshing: Arc<Mutex<std::collections::HashSet<PublicKey>>>,
+}
+
+/// What a lookup found, and how fresh it is.
+enum Listed {
+    /// Stored and fresh, or fetched just now.
+    Fresh(Vec<RelayLane>),
+    /// Stored but old; served now, refreshed behind the answer.
+    Stale(Vec<RelayLane>),
+    /// Not stored, not found, or a recent miss.
+    Missing,
 }
 
 impl OutboxService {
@@ -56,7 +89,71 @@ impl OutboxService {
             hub,
             content,
             own_npub,
+            configured: crate::ip_source::default_relays(),
+            misses: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            refreshing: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    /// Use `relays` instead of the default public set — for tests, which
+    /// must never reach the internet.
+    #[cfg(test)]
+    pub fn with_configured_relays(mut self, relays: Vec<String>) -> Self {
+        self.configured = relays;
+        self
+    }
+
+    /// A clone that owns its handles — for work spawned past a `&self`. The
+    /// caches are shared, not copied.
+    fn detached(&self) -> Arc<Self> {
+        Arc::new(Self {
+            store: self.store.clone(),
+            hub: self.hub.clone(),
+            content: self.content.clone(),
+            own_npub: self.own_npub.clone(),
+            configured: self.configured.clone(),
+            misses: self.misses.clone(),
+            refreshing: self.refreshing.clone(),
+        })
+    }
+
+    /// Where a relay list might be found: the configured relays unless
+    /// offline-only, and every Circle member's mesh relay — the people around
+    /// the user are exactly who would have seen a friend's list.
+    fn list_lanes(&self) -> Vec<RelayLane> {
+        let mut lanes = self.fallback_lanes();
+        for npub in self.content.circle_npubs() {
+            if npub != self.own_npub {
+                lanes.push(RelayLane::Mesh {
+                    url: crate::ip_source::mesh_relay_url(&npub),
+                });
+            }
+        }
+        lanes
+    }
+
+    /// Ask the pool for `author`'s newest relay list and store it. Returns
+    /// the list, or `None` when nobody had one within the bound.
+    async fn fetch_relay_list(&self, author: &PublicKey) -> Option<Event> {
+        let lanes = self.list_lanes();
+        if lanes.is_empty() {
+            return None;
+        }
+        let filter = Filter::new().kind(Kind::RelayList).author(*author).limit(1);
+        let answers = self
+            .query(&lanes, std::slice::from_ref(&filter), LIST_FETCH_TIMEOUT)
+            .await;
+        let newest = answers
+            .into_iter()
+            .filter_map(|(_, events)| events)
+            .flatten()
+            .filter(|e| e.kind == Kind::RelayList && e.pubkey == *author)
+            .max_by_key(|e| e.created_at)?;
+        // The local relay is the cache: a replaceable kind keeps the newest.
+        if let Err(e) = self.store.publish(newest.clone()).await {
+            tracing::debug!(error = %e, "outbox: could not cache a relay list");
+        }
+        Some(newest)
     }
 
     /// The configured relays as lanes, or nothing when offline only.
@@ -64,9 +161,9 @@ impl OutboxService {
         if self.content.is_offline_only() {
             return Vec::new();
         }
-        crate::ip_source::default_relays()
-            .into_iter()
-            .map(|url| RelayLane::Internet { url })
+        self.configured
+            .iter()
+            .map(|url| RelayLane::Internet { url: url.clone() })
             .collect()
     }
 
@@ -82,22 +179,60 @@ impl OutboxService {
         }
     }
 
-    /// The author's NIP-65 relays for `direction`, if they have published a
-    /// list this device has stored.
-    async fn nip65_lanes(
-        &self,
-        author: &PublicKey,
-        direction: Direction,
-    ) -> Option<Vec<RelayLane>> {
+    /// The author's NIP-65 relays for `direction`: from the local store when
+    /// it has a list, from the pool when it does not — stored on the way in,
+    /// so the second call is local.
+    async fn nip65_lanes(&self, author: &PublicKey, direction: Direction) -> Listed {
         let filter = Filter::new().kind(Kind::RelayList).author(*author).limit(1);
-        let newest = self
+        let stored = self
             .store
             .query(&[filter])
             .await
-            .ok()?
-            .into_iter()
-            .max_by_key(|e| e.created_at)?;
-        Some(relay_list_lanes(&newest, direction))
+            .ok()
+            .and_then(|events| events.into_iter().max_by_key(|e| e.created_at));
+
+        if let Some(list) = stored {
+            let age = Duration::from_secs(
+                nostr::Timestamp::now()
+                    .as_secs()
+                    .saturating_sub(list.created_at.as_secs()),
+            );
+            let lanes = relay_list_lanes(&list, direction);
+            if age <= LIST_FRESH_FOR {
+                return Listed::Fresh(lanes);
+            }
+            // Old enough to check, not too old to use. The napplet gets the
+            // stored plan now; the next call gets whatever the refresh found.
+            if self.refreshing.lock().unwrap().insert(*author) {
+                let this = self.detached();
+                let author = *author;
+                tokio::spawn(async move {
+                    let _ = this.fetch_relay_list(&author).await;
+                    this.refreshing.lock().unwrap().remove(&author);
+                });
+            }
+            return Listed::Stale(lanes);
+        }
+
+        let recently_missed = self
+            .misses
+            .lock()
+            .unwrap()
+            .get(author)
+            .is_some_and(|at| at.elapsed() < MISS_REMEMBERED_FOR);
+        if recently_missed {
+            return Listed::Missing;
+        }
+        match self.fetch_relay_list(author).await {
+            Some(list) => Listed::Fresh(relay_list_lanes(&list, direction)),
+            None => {
+                self.misses
+                    .lock()
+                    .unwrap()
+                    .insert(*author, std::time::Instant::now());
+                Listed::Missing
+            }
+        }
     }
 
     /// Query one lane, verifying what comes back. `None` when the lane could
@@ -204,10 +339,17 @@ impl OutboxResolver for OutboxService {
 
         let mut lanes: Vec<RelayLane> = vec![RelayLane::Local];
         let mut missing = Vec::new();
+        let mut any_stale = false;
         for author in authors {
             match self.nip65_lanes(author, direction).await {
-                Some(listed) => lanes.extend(listed.into_iter().filter(|l| self.allowed(l))),
-                None => {
+                Listed::Fresh(listed) => {
+                    lanes.extend(listed.into_iter().filter(|l| self.allowed(l)))
+                }
+                Listed::Stale(listed) => {
+                    any_stale = true;
+                    lanes.extend(listed.into_iter().filter(|l| self.allowed(l)))
+                }
+                Listed::Missing => {
                     missing.push(*author);
                     lanes.extend(self.fallback_lanes());
                 }
@@ -217,10 +359,14 @@ impl OutboxResolver for OutboxService {
         lanes.retain(|l| seen.insert(l.clone()));
         RelayPlan {
             lanes,
-            source: if missing.is_empty() {
-                PlanSource::Nip65
-            } else {
+            // Fallback outranks cache: a plan with one author's list missing
+            // is a fallback plan whatever the other lists' age.
+            source: if !missing.is_empty() {
                 PlanSource::Fallback
+            } else if any_stale {
+                PlanSource::Cache
+            } else {
+                PlanSource::Nip65
             },
             missing_authors: missing,
         }
@@ -259,12 +405,7 @@ impl LaneTransport for OutboxService {
             // Nothing to deliver through.
             return Ok(());
         };
-        let this = Arc::new(Self {
-            store: self.store.clone(),
-            hub: self.hub.clone(),
-            content: self.content.clone(),
-            own_npub: self.own_npub.clone(),
-        });
+        let this = self.detached();
         let lanes = lanes.to_vec();
         let filters = filters.to_vec();
         tokio::spawn(async move {
@@ -422,6 +563,15 @@ mod tests {
         assert!(lanes.len() > 1);
     }
 
+    /// A mock internet relay: the embedded store served over a socket.
+    async fn mock_relay() -> (Arc<myco_relay::RelayStore>, String) {
+        let remote = Arc::new(myco_relay::RelayStore::in_memory());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(crate::mesh_relay::serve_on(remote.clone(), listener));
+        (remote, url)
+    }
+
     /// The plan follows NIP-65 when a list is stored, drops what policy
     /// forbids (a stranger's mesh relay, our own), and falls back — saying so
     /// — when it is not.
@@ -431,12 +581,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(Content::open(&dir).unwrap());
         let store = content.relay();
+        let (_remote, url) = mock_relay().await;
         let svc = OutboxService::new(
             store.clone(),
             Arc::new(Mutex::new(None)),
             content.clone(),
             "npub1me".to_string(),
-        );
+        )
+        .with_configured_relays(vec![url.clone()]);
 
         let alice = Keys::generate();
         let list = EventBuilder::new(Kind::RelayList, "")
@@ -467,8 +619,9 @@ mod tests {
         let plan = svc.plan(Direction::Read, &[nobody.public_key()]).await;
         assert_eq!(plan.source, PlanSource::Fallback);
         assert_eq!(plan.missing_authors, vec![nobody.public_key()]);
-        assert!(
-            plan.lanes.len() > 1,
+        assert_eq!(
+            plan.lanes,
+            vec![RelayLane::Local, RelayLane::Internet { url: url.clone() }],
             "fallback offers the configured relays"
         );
 
@@ -479,6 +632,130 @@ mod tests {
             vec![RelayLane::Local],
             "offline only: nothing to fall back to"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A relay list the store does not have is fetched from the pool, cached
+    /// in the store, and served from there afterwards; an author nobody has a
+    /// list for is remembered as a miss rather than asked about every call.
+    #[tokio::test]
+    async fn a_missing_relay_list_is_fetched_once_and_cached() {
+        let dir = std::env::temp_dir().join(format!("myco-outbox-fetch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let store = content.relay();
+        let (remote, url) = mock_relay().await;
+        let svc = OutboxService::new(
+            store.clone(),
+            Arc::new(Mutex::new(None)),
+            content.clone(),
+            "npub1me".to_string(),
+        )
+        .with_configured_relays(vec![url.clone()]);
+
+        // Alice's list lives only on the internet relay.
+        let alice = Keys::generate();
+        let list = EventBuilder::new(Kind::RelayList, "")
+            .tags([Tag::parse(["r", "wss://alice.example"]).unwrap()])
+            .sign_with_keys(&alice)
+            .unwrap();
+        remote.admit_event(list.clone()).await.unwrap();
+
+        let plan = svc.plan(Direction::Read, &[alice.public_key()]).await;
+        assert_eq!(
+            plan.source,
+            PlanSource::Nip65,
+            "the fetched list should count as NIP-65"
+        );
+        assert!(plan.lanes.contains(&RelayLane::Internet {
+            url: "wss://alice.example".into()
+        }));
+        // Cached: the store has it now.
+        let cached = store
+            .query(&[Filter::new()
+                .kind(Kind::RelayList)
+                .author(alice.public_key())])
+            .await
+            .unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].id, list.id);
+
+        // Served from the cache even when the relay is gone.
+        content.set_offline_only(true);
+        let plan = svc.plan(Direction::Read, &[alice.public_key()]).await;
+        assert_eq!(plan.source, PlanSource::Nip65);
+        content.set_offline_only(false);
+
+        // A miss is remembered: the second ask does not touch the relay.
+        let nobody = Keys::generate();
+        let plan = svc.plan(Direction::Read, &[nobody.public_key()]).await;
+        assert_eq!(plan.source, PlanSource::Fallback);
+        assert!(svc
+            .misses
+            .lock()
+            .unwrap()
+            .contains_key(&nobody.public_key()));
+        drop(remote);
+        let plan = svc.plan(Direction::Read, &[nobody.public_key()]).await;
+        assert_eq!(plan.missing_authors, vec![nobody.public_key()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stored list older than a day is served as `cache` and refreshed
+    /// behind the answer.
+    #[tokio::test]
+    async fn a_stale_list_is_served_as_cache_and_refreshed() {
+        let dir = std::env::temp_dir().join(format!("myco-outbox-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let store = content.relay();
+        let (remote, url) = mock_relay().await;
+        let svc = OutboxService::new(
+            store.clone(),
+            Arc::new(Mutex::new(None)),
+            content.clone(),
+            "npub1me".to_string(),
+        )
+        .with_configured_relays(vec![url.clone()]);
+
+        let alice = Keys::generate();
+        let old = EventBuilder::new(Kind::RelayList, "")
+            .tags([Tag::parse(["r", "wss://old.example"]).unwrap()])
+            .custom_created_at(nostr::Timestamp::from_secs(
+                nostr::Timestamp::now().as_secs() - 3 * 24 * 60 * 60,
+            ))
+            .sign_with_keys(&alice)
+            .unwrap();
+        store.publish(old).await.unwrap();
+        let newer = EventBuilder::new(Kind::RelayList, "")
+            .tags([Tag::parse(["r", "wss://new.example"]).unwrap()])
+            .sign_with_keys(&alice)
+            .unwrap();
+        remote.admit_event(newer.clone()).await.unwrap();
+
+        let plan = svc.plan(Direction::Read, &[alice.public_key()]).await;
+        assert_eq!(plan.source, PlanSource::Cache);
+        assert!(plan.lanes.contains(&RelayLane::Internet {
+            url: "wss://old.example".into()
+        }));
+
+        // The refresh lands; the next plan is fresh and new.
+        let refreshed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let plan = svc.plan(Direction::Read, &[alice.public_key()]).await;
+                if plan.source == PlanSource::Nip65 {
+                    return plan;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the stale list was never refreshed");
+        assert!(refreshed.lanes.contains(&RelayLane::Internet {
+            url: "wss://new.example".into()
+        }));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
