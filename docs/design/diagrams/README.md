@@ -5,17 +5,18 @@ set was drawn from the first plan and has not been redrawn since; each row
 says what has moved. Treat the docs as authoritative where they disagree.
 Structure mirrors `reference/fips/docs/design/diagrams/`.
 
-### Friendly intro — v2 (three images, the core idea)
+### Friendly intro — v2 (one image, the core idea)
 
-Redrawn around the three things a newcomer has to get: the mesh is always
-there; you build your own Circle on top of it; you exchange apps, and data
-through those apps, with your Circle. Same room, same people, in every frame.
+One frame, redrawn around the three things a newcomer has to get: the FIPS
+mesh is always there, out of whoever is in range; you build your own Circle on
+top of it, by bumping phones with people you trust; apps come from your Circle
+and what you do in them goes to your Circle. Ben is reached *through a
+stranger's phone* — the mesh carries the packets, the Circle decides who they
+are for. Dan is out of range and still in the Circle.
 
-| File | What it shows |
+| File | Compare with |
 | --- | --- |
-| [v2_intro-01-the-mesh.svg](v2_intro-01-the-mesh.svg) | The FIPS mesh forms by itself out of whoever is in range — friends and strangers alike. Links are encrypted; a stranger can forward, not read. |
-| [v2_intro-02-your-circle.svg](v2_intro-02-your-circle.svg) | You bump phones to build a **Circle** — a virtual mesh of trust on top of the physical one. A friend out of range is still in it; a stranger in range is not. |
-| [v2_intro-03-apps-and-data.svg](v2_intro-03-apps-and-data.svg) | An app arrives from a Circle member; what you do in it (a chat, a ring) travels the same Circle edges and no further; whoever is away catches up. |
+| [v2_intro-01-what-it-is.svg](v2_intro-01-what-it-is.svg) | intro-01 · intro-02 · intro-03 (v1 below) |
 
 ### Friendly intro — v1 (five images, kept for comparison)
 
