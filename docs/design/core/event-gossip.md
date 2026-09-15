@@ -44,6 +44,17 @@ A `MESH` frame arriving on the **loopback** socket is refused with a `NOTICE`.
 That is boundary 1 enforced rather than assumed, and it is the only route by
 which an nsite could otherwise have asked for extra hops.
 
+> **Changing — nsites and the mesh.** Today a plain `EVENT` on the loopback
+> socket is gossiped to the Circle at the default budget, and an nsite's `REQ`
+> is replayed to Circle members when they reappear: an nsite reaches the room
+> by the side effect of a loopback socket. With napplets, reaching the room is
+> a **granted** capability (NAP-MESH, user-capped), and an nsite has no grant
+> and no review screen. The loopback socket is therefore going **local-only**
+> for nsites (roadmap N2): store and show, forward nowhere, replay nothing. The
+> mesh socket (`proxy ↔ proxy`) is itself deprecated in favour of a Circle-owned
+> channel ([circle.md](../circle/circle.md) §6); the `MESH` envelope's semantics
+> carry over.
+
 If a future change wants to put something Myco-shaped on the loopback socket or
 on the backend link, that is not a tweak to this design — it is a reversal of it.
 Background: [`reference/thinning-custom-relay.md`](../../../reference/thinning-custom-relay.md).
@@ -303,9 +314,12 @@ and NIP-40 GC is not something an arbitrary backend guarantees.
 
 ## 6. What shipped
 
-- **Circle fan-out.** Published app events are gossiped to circle peers — v1
+- **Circle fan-out.** Published app events are gossiped to Circle members — v1
   default **all kinds** except the manifest kinds 15128/35128, which take the
-  interest-aware path (§4).
+  interest-aware path (§4). Napplet publishes through NAP-MESH originate at
+  the budget the napplet chose, within the user's cap (§2.6); `relay.publish`
+  from a napplet does **not** gossip (relays only); nsite publishes still do,
+  until N2.
 - **Multi-hop flood.** The `MESH` envelope (§2), the §3 forward rule (seen-set +
   split-horizon + clamp), decrementing per hop.
 - **Multi-hop pull.** Hop budget, mandatory query id, and a carried time budget

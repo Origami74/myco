@@ -66,7 +66,7 @@ These are two different kinds of key and they never overlap:
   relay + Blossom (`<npub_device>.fips`). It is **never** used to author nsites.
 - **nsite author identity** — *external* keys belonging to whoever authored a
   site, created by external nsite tooling elsewhere. An author key appears here
-  **only** as the URL host of a requested site (`<npub_author>.nsite`) and as the
+  **only** as the URL host of a requested site (`<npub_author>.localhost`) and as the
   `authors` filter in relay queries. The app holds and serves an author's signed
   events but never holds their secret key and never signs on their behalf.
 

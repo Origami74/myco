@@ -535,9 +535,9 @@ this order, stopping at the first hit:
 3. **Servers/relays the nsite event lists** — the manifest's `["server", …]` hints
    plus the author's NIP-65 `10002` relay list / BUD-03 `10063` Blossom servers.
    This is the **online fallback** (needs IP internet), so it is the **last resort**
-   — and a Settings toggle (`[sync] offline_only`, see
-   [config.md](../../reference/config.md)) disables it entirely so Myco never reaches
-   the IP internet (tiers 1–2 only).
+   — and the Dev tab's **Offline only** switch (`set_offline_only`, see
+   [settings.md](../../reference/settings.md)) disables it entirely so Myco
+   never reaches the IP internet (tiers 1–2 only).
 
 ### 5.1 Reaching the holder's services over `.fips`
 

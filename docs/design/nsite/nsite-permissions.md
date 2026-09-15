@@ -126,9 +126,9 @@ site, `npub:dTag` for a named one — [nsite-layer.md §3.2](./nsite-layer.md)).
 Per-application permissions are a record stored **per-siteKey** on the device.
 
 The enforcement hook is the **WebSocket / HTTP `Origin`**. The nsite loads at
-`http://<host>.nsite` and talks to the localhost relay (`ws://localhost:4870`) and
+`http://<host>.localhost` and talks to the localhost relay (`ws://localhost:4870`) and
 Blossom (`http://localhost:24243`); every request carries
-`Origin: http://<host>.nsite`. The proxy maps **`Origin → siteKey → permission
+`Origin: http://<host>.localhost`. The proxy maps **`Origin → siteKey → permission
 record`** and applies it.
 
 **Not built.** The proxy does no `Origin` check today; a loopback connection is

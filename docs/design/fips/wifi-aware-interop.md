@@ -138,12 +138,10 @@ a `wifiAwarePeers` list beside `blePeers`
 ([ffi-surface.md](../../reference/ffi-surface.md)). But where BLE needed the
 whole `ble*` byte-bridge extern family, Aware needs only the control pushes —
 there is no `awareChannelNextSend`, because there are no channels to pump.
-Config mirrors the `[ble]` precedent: a `[wifi_aware]` table whose only field
-is `enabled` ([config.md](../../reference/config.md)), with the port
-living where it already belongs — the fips UDP transport's `bind_addr` —
-surfaced as a Myco config knob (proposed default port, vetoable, settled at
-implementation). Both reference docs gain their matching `wifi_aware` entries
-when this lands.
+The switch lives with the other lanes: `wifi_aware_enabled` in Kotlin's
+prefs, sent as `set_wifi_aware_enabled` on launch; the data-path count the
+chipset reports is persisted as `awareDataPaths` and sizes the UDP socket pool
+at node start ([settings.md](../../reference/settings.md)).
 
 ## Discovery: the service announcement carries no identity
 

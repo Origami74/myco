@@ -1,5 +1,9 @@
 # The Wi-Fi AP Lane (`!FIPS` access SSID)
 
+> Status: built (`app.myco.ap.ApRadio`; the Settings › Mesh "Network (LAN)"
+> switch). The same mDNS browse also finds any fips node on the current Wi-Fi,
+> not only `!FIPS` routers, since v0.6.
+
 FIPS routers can broadcast an open access SSID — `!FIPS` — that phones
 join to reach the mesh through the router (see the fips repo's
 `docs/how-to/set-up-open-access-ssid.md`). This lane connects Myco's
