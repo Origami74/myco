@@ -163,27 +163,27 @@ async fn subscribe(
         None => None,
     };
 
-    session.subscribe(sub_id.clone(), filters.clone());
-
-    let mut out = Vec::new();
-    if target.is_none() {
-        match ctx.relay.query(&filters).await {
-            Ok(events) => {
-                for event in &events {
-                    out.push(
-                        Envelope::new("relay.event")
-                            .with_field("subId", sub_id.clone())
-                            .with_field("result", result_of(event)),
-                    );
+    // A named relay skips the local backlog — the napplet asked for that
+    // relay's view — but the subscription is registered either way, since the
+    // pull lands in the local relay and is delivered from there.
+    let mut out = match target {
+        Some(_) => {
+            session.subscribe(sub_id.clone(), filters.clone());
+            Vec::new()
+        }
+        None => {
+            match crate::nap::open_subscription(ctx, session, "relay", &sub_id, filters.clone())
+                .await
+            {
+                Ok(backlog) => backlog,
+                Err(reason) => {
+                    return vec![Envelope::new("relay.closed")
+                        .with_field("subId", sub_id)
+                        .with_field("reason", reason)]
                 }
             }
-            Err(e) => {
-                return vec![Envelope::new("relay.closed")
-                    .with_field("subId", sub_id)
-                    .with_field("reason", format!("query failed: {e}"))];
-            }
         }
-    }
+    };
 
     let remote: Vec<RelayLane> = match target {
         Some(lane) => vec![lane],
@@ -296,15 +296,7 @@ pub(crate) fn event_json(event: &nostr::Event) -> serde_json::Value {
 /// whichever side of the mesh the event came from. Empty when nothing matches,
 /// which is the common case and deliberately cheap.
 pub fn deliveries_for(session: &crate::session::Session, event: &nostr::Event) -> Vec<Envelope> {
-    session
-        .matching_subscriptions(event)
-        .into_iter()
-        .map(|sub_id| {
-            Envelope::new("relay.event")
-                .with_field("subId", sub_id)
-                .with_field("result", result_of(event))
-        })
-        .collect()
+    crate::nap::deliveries_in(session, "relay", event)
 }
 
 /// A publish failure, in the shape NAP-RELAY gives it: `ok` false beside the

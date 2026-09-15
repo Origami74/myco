@@ -263,25 +263,28 @@ impl OutboxService {
                 Some(events.into_iter().filter(|e| e.verify().is_ok()).collect())
             }
             RelayLane::Internet { url } => {
-                // `query_relay` takes one filter and verifies at ingress.
-                let mut out = Vec::new();
-                for filter in filters {
-                    let value = serde_json::to_value(filter).ok()?;
-                    match tokio::time::timeout(timeout, crate::ip_source::query_relay(url, value))
-                        .await
-                    {
-                        Ok(Ok(events)) => out.extend(events),
-                        Ok(Err(e)) => {
-                            tracing::debug!(url, error = %e, "outbox: relay query failed");
-                            return None;
-                        }
-                        Err(_) => {
-                            tracing::debug!(url, "outbox: relay query timed out");
-                            return None;
-                        }
+                // One connection, one REQ carrying every filter; verified at
+                // ingress by `query_relay_filters`.
+                let values: Vec<serde_json::Value> = filters
+                    .iter()
+                    .filter_map(|f| serde_json::to_value(f).ok())
+                    .collect();
+                match tokio::time::timeout(
+                    timeout,
+                    crate::ip_source::query_relay_filters(url, values),
+                )
+                .await
+                {
+                    Ok(Ok(events)) => Some(events),
+                    Ok(Err(e)) => {
+                        tracing::debug!(url, error = %e, "outbox: relay query failed");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::debug!(url, "outbox: relay query timed out");
+                        None
                     }
                 }
-                Some(out)
             }
         }
     }
@@ -291,14 +294,7 @@ impl OutboxService {
             return false;
         }
         match lane {
-            RelayLane::Local => {
-                // Cloned out rather than held: the lock must not span the await.
-                let hub = self.hub.lock().unwrap().clone();
-                match hub {
-                    Some(hub) => hub.accept_unforwarded(event.clone()).await.is_ok(),
-                    None => self.store.publish(event.clone()).await.is_ok(),
-                }
-            }
+            RelayLane::Local => self.accept_local(event.clone()).await.is_ok(),
             RelayLane::Mesh { url } => {
                 let Some(npub) = mesh_relay_npub(url) else {
                     return false;
@@ -321,6 +317,70 @@ impl OutboxService {
                 Ok(Ok(true))
             ),
         }
+    }
+}
+
+impl OutboxService {
+    /// Accept an event into this device's relay **unforwarded**: stored, shown
+    /// to live subscriptions here (the WebView's, other napplets'), handed to
+    /// no gossiper. Returns whether it was the first sighting.
+    ///
+    /// Falls back to storing when no hub is up — the host-build and pre-start
+    /// case, not a silent downgrade in the field: on a phone the hub is stood
+    /// up with the content layer, before any napplet can open.
+    async fn accept_local(&self, event: Event) -> anyhow::Result<bool> {
+        // Cloned out rather than held: the lock must not span the await.
+        let hub = self.hub.lock().unwrap().clone();
+        match hub {
+            Some(hub) => hub.accept_unforwarded(event).await,
+            None => {
+                self.store.publish(event).await?;
+                Ok(true)
+            }
+        }
+    }
+}
+
+/// How long one internet relay gets to say `OK` before a pool publish moves on.
+const POOL_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// NAP-RELAY's `relay.publish` lands here: the shell's **relay pool** — this
+/// device's own relay, and the configured internet relays when reachable.
+///
+/// Not the mesh. NAP-RELAY says relays, and the Circle flood is NAP-MESH's,
+/// with a hop budget the user caps — a `relay` grant must not be a back door
+/// to it. So the event is accepted unforwarded here and fanned out to the
+/// internet lanes through the same [`LaneTransport`] NAP-OUTBOX uses, which
+/// is what applies offline-only and feeds the internet breaker.
+///
+/// The internet half is spawned and best-effort: a public relay is seconds
+/// away on a good day and unreachable on the day this app is for, and the
+/// napplet's result must not wait on either. NAP-RELAY asks for the signed
+/// event back, not a per-relay tally — that is NAP-OUTBOX's `publish`.
+#[async_trait::async_trait]
+impl myco_napplet_runtime::seams::EventSink for OutboxService {
+    async fn accept(&self, event: Event) -> anyhow::Result<()> {
+        // A repeat was already sent on the first sighting; a relay that has
+        // it answers a duplicate with the same OK and nothing is gained.
+        if !self.accept_local(event.clone()).await? {
+            return Ok(());
+        }
+        let lanes = self.fallback_lanes();
+        if lanes.is_empty() {
+            return Ok(());
+        }
+        let this = self.detached();
+        tokio::spawn(async move {
+            let results = this.publish(&lanes, &event, POOL_PUBLISH_TIMEOUT).await;
+            let accepted = results.iter().filter(|(_, ok)| *ok).count();
+            tracing::info!(
+                event = %event.id,
+                accepted,
+                total = results.len(),
+                "napplet publish reached the internet pool"
+            );
+        });
+        Ok(())
     }
 }
 
@@ -597,6 +657,127 @@ mod tests {
         let url = format!("ws://{}", listener.local_addr().unwrap());
         tokio::spawn(crate::mesh_relay::serve_on(remote.clone(), listener));
         (remote, url)
+    }
+
+    fn scratch_content(tag: &str) -> Arc<Content> {
+        let dir = std::env::temp_dir().join(format!(
+            "myco-outbox-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        Arc::new(Content::open(&dir).unwrap())
+    }
+
+    /// NAP-RELAY: a relay publish goes to the relay pool, not the Circle. The
+    /// event is stored, this phone's live subscriptions hear it, and the
+    /// gossiper is never handed it — a `relay` grant is not a back door to
+    /// the mesh flood that NAP-MESH gates behind the user's cap.
+    #[tokio::test]
+    async fn a_relay_publish_is_stored_and_shown_here_but_never_flooded() {
+        use crate::mesh_relay::{Gossiper, Inbound};
+        use myco_napplet_runtime::seams::EventSink;
+
+        struct Count(std::sync::Mutex<usize>);
+        #[async_trait::async_trait]
+        impl Gossiper for Count {
+            async fn on_event(&self, _event: Event, _inbound: Inbound) {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+
+        let content = scratch_content("sink-local");
+        content.set_offline_only(true);
+        let store = content.relay();
+        let count = Arc::new(Count(std::sync::Mutex::new(0)));
+        let hub = RelayHub::new(store.clone(), Some(count.clone()));
+        let mut live = hub.live_events();
+        let svc = OutboxService::new(
+            store.clone(),
+            Arc::new(Mutex::new(Some(hub))),
+            content,
+            "npub1me".to_string(),
+        );
+
+        let keys = Keys::generate();
+        let event = EventBuilder::text_note("to my relays")
+            .sign_with_keys(&keys)
+            .unwrap();
+        svc.accept(event.clone()).await.unwrap();
+
+        assert_eq!(live.recv().await.unwrap().id, event.id);
+        assert_eq!(
+            store
+                .query(&[Filter::new().id(event.id)])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            *count.0.lock().unwrap(),
+            0,
+            "a relay publish reached the gossiper"
+        );
+    }
+
+    /// The internet half of the pool: the event reaches a configured relay
+    /// over plain NIP-01, after the napplet already has its answer — and not
+    /// at all when offline only.
+    #[tokio::test]
+    async fn a_relay_publish_fans_out_to_the_internet_pool() {
+        use myco_napplet_runtime::seams::EventSink;
+
+        let (remote, url) = mock_relay().await;
+        let content = scratch_content("sink-pool");
+        let svc = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content.clone(),
+            "npub1me".to_string(),
+        )
+        .with_configured_relays(vec![url.clone()]);
+        let keys = Keys::generate();
+        let event = EventBuilder::text_note("hello internet")
+            .sign_with_keys(&keys)
+            .unwrap();
+        svc.accept(event.clone()).await.unwrap();
+
+        let arrived = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if remote.count() == 1 {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(arrived, "the event never reached the relay");
+
+        // Offline only: stored here, sent nowhere.
+        content.set_offline_only(true);
+        let second = EventBuilder::text_note("stays home")
+            .sign_with_keys(&keys)
+            .unwrap();
+        svc.accept(second).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(remote.count(), 1, "offline-only reached the internet");
+
+        // An unreachable relay is a log line, not an error the napplet sees.
+        content.set_offline_only(false);
+        let dead = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content,
+            "npub1me".to_string(),
+        )
+        .with_configured_relays(vec!["ws://127.0.0.1:1".to_string()]);
+        dead.accept(event).await.unwrap();
     }
 
     /// The plan follows NIP-65 when a list is stored, drops what policy

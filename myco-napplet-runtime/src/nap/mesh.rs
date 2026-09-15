@@ -25,7 +25,7 @@
 //! it behind a long wait.
 
 use crate::dispatch::NapContext;
-use crate::nap::relay::{event_json, filters_from, result_of, sign_template};
+use crate::nap::relay::{event_json, filters_from, sign_template};
 use crate::seams::Envelope;
 use crate::session::Session;
 
@@ -114,25 +114,15 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
         Err(e) => return vec![message.to_error(e)],
     };
 
-    session.subscribe_in("mesh", sub_id.clone(), filters.clone());
-
-    let mut out = Vec::new();
-    match ctx.relay.query(&filters).await {
-        Ok(events) => {
-            for event in &events {
-                out.push(
-                    Envelope::new("mesh.event")
-                        .with_field("subId", sub_id.clone())
-                        .with_field("result", result_of(event)),
-                );
+    let mut out =
+        match crate::nap::open_subscription(ctx, session, "mesh", &sub_id, filters.clone()).await {
+            Ok(backlog) => backlog,
+            Err(reason) => {
+                return vec![Envelope::new("mesh.closed")
+                    .with_field("subId", sub_id)
+                    .with_field("reason", reason)]
             }
-        }
-        Err(e) => {
-            return vec![Envelope::new("mesh.closed")
-                .with_field("subId", sub_id)
-                .with_field("reason", format!("query failed: {e}"))];
-        }
-    }
+        };
 
     // Peers are asked with the raw filters: hops ride the envelope, and the
     // filters stay canonical NIP-01 all the way out.
@@ -160,15 +150,7 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
 
 /// The `mesh.event` frames a session should receive for an arriving event.
 pub fn deliveries_for(session: &Session, event: &nostr::Event) -> Vec<Envelope> {
-    session
-        .matching_subscriptions_in("mesh", event)
-        .into_iter()
-        .map(|sub_id| {
-            Envelope::new("mesh.event")
-                .with_field("subId", sub_id)
-                .with_field("result", result_of(event))
-        })
-        .collect()
+    crate::nap::deliveries_in(session, "mesh", event)
 }
 
 /// The optional `ttl` field. Absent means "the cap"; present, it must be a

@@ -215,23 +215,12 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
         Err(e) => return closed(e),
     };
 
-    // Registered before anything is read, so an event landing between the
-    // backlog and the live path is delivered rather than lost in the gap.
-    session.subscribe_in("outbox", sub_id.clone(), filters.clone());
-
-    let mut out = Vec::new();
-    match ctx.relay.query(&filters).await {
-        Ok(events) => {
-            for event in &events {
-                out.push(
-                    Envelope::new("outbox.event")
-                        .with_field("subId", sub_id.clone())
-                        .with_field("result", result_with_hints(event, &[])),
-                );
-            }
-        }
-        Err(e) => return closed(format!("query failed: {e}")),
-    }
+    let out = match crate::nap::open_subscription(ctx, session, "outbox", &sub_id, filters.clone())
+        .await
+    {
+        Ok(backlog) => backlog,
+        Err(reason) => return closed(reason),
+    };
 
     let plan = ctx.outbox.plan(Direction::Read, &authors).await;
     let remote: Vec<RelayLane> = dedupe(plan.lanes.into_iter().chain(hints))
@@ -342,15 +331,7 @@ async fn resolve_relays(ctx: &NapContext, message: &Envelope) -> Envelope {
 
 /// The `outbox.event` frames a session should receive for an arriving event.
 pub fn deliveries_for(session: &Session, event: &Event) -> Vec<Envelope> {
-    session
-        .matching_subscriptions_in("outbox", event)
-        .into_iter()
-        .map(|sub_id| {
-            Envelope::new("outbox.event")
-                .with_field("subId", sub_id)
-                .with_field("result", result_with_hints(event, &[]))
-        })
-        .collect()
+    crate::nap::deliveries_in(session, "outbox", event)
 }
 
 // --- helpers ---------------------------------------------------------------

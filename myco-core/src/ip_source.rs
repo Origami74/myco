@@ -452,9 +452,22 @@ pub async fn publish_to_relay(url: &str, event: &Event) -> anyhow::Result<bool> 
 /// call (connect + REQ + read) is hard-bounded by a `timeout` at the call site,
 /// so a dead relay can't hang the sync on a slow TCP/TLS connect.
 pub async fn query_relay(url: &str, filter: serde_json::Value) -> anyhow::Result<Vec<Event>> {
+    query_relay_filters(url, vec![filter]).await
+}
+
+/// As [`query_relay`], with several filters in **one** `REQ` on **one**
+/// connection — how a multi-filter subscription is meant to travel. A
+/// napplet's subscribe hands over a list of filters; opening a socket per
+/// filter per relay was a TLS handshake for each, on a phone.
+pub async fn query_relay_filters(
+    url: &str,
+    filters: Vec<serde_json::Value>,
+) -> anyhow::Result<Vec<Event>> {
     let (mut ws, _) = tokio_tungstenite::connect_async(url).await?;
-    let req = serde_json::json!(["REQ", "myco", filter]);
-    ws.send(Message::Text(req.to_string())).await?;
+    let mut req = vec![serde_json::json!("REQ"), serde_json::json!("myco")];
+    req.extend(filters);
+    ws.send(Message::Text(serde_json::Value::Array(req).to_string()))
+        .await?;
 
     let mut events = Vec::new();
     while let Some(msg) = ws.next().await {

@@ -1447,21 +1447,8 @@ impl AppRuntime {
             // The pointer's own relay hints first, then the defaults. A napplet
             // lives where its author published it, which is often not where the
             // popular aggregators look — searching only the defaults reports a
-            // napplet as missing when it is simply somewhere else. Asking for
-            // the napplet kind rather than the nsite kind a `d` tag implies.
-            // Untrusted: every byte is hashed and the signature checked before
-            // anything is kept.
-            sources.push(
-                crate::ip_source::IpPeerSource::new(
-                    addr.search_relays(),
-                    crate::ip_source::default_blossom_servers(),
-                )
-                .with_kind(addr.kind())
-                // Somebody is watching a spinner. One relay answering in a few
-                // hundred milliseconds should not be held up by another that
-                // will sit on the connection until the timeout.
-                .with_first_answer_grace(std::time::Duration::from_millis(600)),
-            );
+            // napplet as missing when it is simply somewhere else.
+            sources.push(addr.public_source());
 
             let mut ingested = Err(anyhow::anyhow!("no source had this napplet"));
             for source in &sources {
@@ -1678,19 +1665,6 @@ impl AppRuntime {
                 tracing::info!("generated a user key for napplets: {}", user.guest_name());
             }
 
-            let pool_content = content.clone();
-            let sink = Arc::new(crate::napplet::RelayPoolSink::new(
-                self.relay_hub.clone(),
-                content.relay(),
-                Arc::new(move || {
-                    if pool_content.is_offline_only() {
-                        Vec::new()
-                    } else {
-                        crate::ip_source::default_relays()
-                    }
-                }),
-            ));
-
             let mesh = Arc::new(crate::napplet::NappletMeshSink::new(
                 self.relay_hub.clone(),
                 content.clone(),
@@ -1709,7 +1683,10 @@ impl AppRuntime {
                 crate::napplet::NappletHost::new(myco_napplet_runtime::dispatch::NapContext {
                     signer,
                     relay: content.relay(),
-                    sink,
+                    // NAP-RELAY's publish, NAP-OUTBOX's lanes and plans: one
+                    // service, so the pool, offline-only and the internet
+                    // breaker are decided in one place.
+                    sink: outbox.clone(),
                     mesh,
                     outbox: outbox.clone(),
                     lanes: outbox,
