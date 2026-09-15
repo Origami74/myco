@@ -14,6 +14,11 @@
 //! any napplet, is local; and a picture one phone fetched is a picture the
 //! whole room can now get over the mesh.
 //!
+//! That last sentence is also a privacy question, and an open one: the ask
+//! tells every Circle member what you are looking at, and the keep makes you
+//! a host of it. See `docs/design/napplet/napplet-runtime.md` §7.11 before
+//! changing the fetch order or the keep rule.
+//!
 //! ## Bytes on this wire
 //!
 //! The shell ↔ Rust channel is JSON, so `blob` travels as base64. The shell

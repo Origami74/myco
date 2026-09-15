@@ -551,6 +551,52 @@ partly so the shell can be exercised in a desktop browser against a host build, 
 the only cheap way to run any of it. Passing the suite is not a goal this cycle (D7), but
 nothing here should make it impossible later.
 
+### 7.11 Pulling blobs over the mesh leaks what you are looking at
+
+**Open.** NAP-RESOURCE (S2) fetches a `blossom:` blob the local store lacks from every
+reachable Circle member at once, then from the public servers. That is the right order
+for availability — the room is what this app is for — and the wrong one for privacy, in
+three ways.
+
+**The ask is a disclosure.** "Do you have `<sha>`?" tells every phone in the room which
+picture or file you are opening, tied to your device npub, at that moment. A public server
+learns the same, but a public server is a stranger; a Circle member is someone who knows
+you, and the hash is trivially matched to the event that referenced it — they hold the
+same event. Interest in a specific message's attachment is a specific fact about you.
+
+**The keep is a broadcast.** "Anything queried is saved" means a blob you merely viewed is
+now served from your phone to anyone in your Circle who asks (the mesh Blossom gates on
+Circle membership, not on why you hold it). You become a host of content you did not
+publish and may not endorse, and a peer probing your store learns what you have looked at.
+
+**The serve is a probe.** The inverse of the first point: answering "yes" reveals what you
+hold, to anyone paired with you, for the cost of a hash. Hashes of well-known files are
+well known.
+
+None of this is new to the mesh — nsite sync pulls blobs from peers too — but an nsite's
+blobs are an app someone chose to install, and a napplet's are the attachments of whatever
+its feed happens to contain. The scale and the specificity are different.
+
+Options, roughly in order of how much they cost:
+
+1. **Ask the peer who told you.** A blob referenced by an event that arrived from a peer
+   can be asked of *that* peer without telling them anything they do not know — they sent
+   the reference. This is the `holder` pattern nsite sync already uses. Anything else goes
+   to the internet, or nowhere.
+2. **Internet first when online, mesh only when not.** Cheap, and it inverts the current
+   order; costs mesh availability for the online case, and still discloses offline.
+3. **Do not keep viewer-only fetches, or keep them unserved.** A "fetched for a napplet"
+   mark that the mesh Blossom refuses to serve until the user shares or the blob is
+   referenced by something they published. Breaks "anything queried is saved" as a mesh
+   promise, keeps it as a local cache.
+4. **A per-napplet or per-Circle switch.** Honest, and one more thing nobody sets.
+
+Recommendation: (1) as the default — it is the one that leaks nothing new — with (2) as the
+fallback path, and (3) worth doing regardless, since it closes the serve-side leak for
+content the user never chose to host. Until decided, `BlossomFetcher` stays as shipped and
+this section is the warning label. See also NAP-RESOURCE's own note that sidecar prefetch
+"can leak user interest to resource hosts": the mesh makes the hosts your friends.
+
 ---
 
 ## 8. Specification pinning
