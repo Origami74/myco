@@ -350,6 +350,11 @@ reachable.
 
 Relay access sits behind one resolver with three lanes: the local relay, mesh relays
 addressed as `ws://<npub>.fips:4870`, and internet relays when reachable (§7.4).
+`relay.query` reads the whole pool — the local relay and the configured relays unless
+offline-only — bounded and deduplicated by id; `relay.subscribe` answers the local backlog,
+sends `EOSE`, and pulls the pool into the local relay behind it, so what arrives is
+delivered live. `options.relay` targets one relay instead, validated like any
+napplet-named URL. Relay selection *by author* is NAP-OUTBOX's (S3).
 
 *Done when* a profile napplet renders a kind 0 and can publish an edit.
 
@@ -382,7 +387,12 @@ three `RelayLane`s) — implemented by `OutboxService` in `myco-core/src/outbox.
 publishes wait for their lanes, bounded, and say `incomplete` when one never answered; a
 subscribe answers the local backlog and pulls the remote lanes *into* the local relay, which
 is what delivers them live (the spec has no `outbox.eose`, and this is why). Napplet-supplied
-relay URLs are validated: `ws`/`wss` only, never loopback or a private network.
+relay URLs are validated: `ws`/`wss` only, never loopback or a private network. An author
+whose kind 10002 the local store lacks is looked up in the pool once (the configured relays
+and every Circle member's mesh relay, bounded), stored — the local relay is the cache — and
+a miss remembered for ten minutes; a list older than a day is served as `source: cache` and
+refreshed behind the answer. NIP-66 relay intelligence is not used: it is a MAY, and the
+offline case has no monitors to ask.
 
 ### S4 — Composition
 

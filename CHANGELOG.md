@@ -28,7 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never answered. Publishing to someone's inbox is a delivery contract:
   without their relay list it is refused rather than sent somewhere else.
   Your own relay list (mesh relay first, then the public defaults) is
-  published with your guest profile the first time you open a napplet.
+  published with your guest profile the first time you open a napplet. An
+  author's relay list that this phone has not seen is fetched once and kept.
+- A napplet's `relay.query` and `relay.subscribe` now read the whole relay
+  pool — this phone's relay and the public relays when reachable — instead
+  of the local store alone; a subscription's `EOSE` marks the local backlog
+  and what the pool holds streams in behind it.
 - Napplets can talk over the mesh: a new `mesh` capability (NAP-MESH, Myco's
   own, written in the napplet registry's form so it can be proposed upstream)
   lets an app you have granted it publish to everyone nearby with a chosen

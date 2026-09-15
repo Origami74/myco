@@ -32,7 +32,7 @@
 use nostr::{Filter, JsonUtil, Kind, Tag, Timestamp, UnsignedEvent};
 
 use crate::dispatch::NapContext;
-use crate::seams::Envelope;
+use crate::seams::{Direction, Envelope, RelayLane};
 
 /// Handle an inbound `relay.*` message.
 pub async fn handle(
@@ -61,31 +61,70 @@ pub async fn handle(
 }
 
 /// `relay.query` — collect stored events matching the filters.
+///
+/// "The shell queries its relay pool": this device's relay and the
+/// configured relays when reachable — the policy plan — each bounded, merged
+/// and deduplicated by id. No relay selection by author here; that is
+/// NAP-OUTBOX's, and a napplet that wants it asks there.
 async fn query(ctx: &NapContext, message: &Envelope) -> Envelope {
     let filters = match filters_from(message) {
         Ok(filters) => filters,
         Err(e) => return message.to_error(e),
     };
 
-    match ctx.relay.query(&filters).await {
-        Ok(events) => {
-            let results: Vec<serde_json::Value> = events.iter().map(result_of).collect();
-            message
-                .to_result()
-                .with_field("events", serde_json::Value::Array(results))
+    let lanes = pool_lanes(ctx).await;
+    let answers = ctx.lanes.query(&lanes, &filters, POOL_QUERY_TIMEOUT).await;
+    let mut by_id: std::collections::HashMap<nostr::EventId, nostr::Event> =
+        std::collections::HashMap::new();
+    let mut reached_any = false;
+    for (_, events) in answers {
+        let Some(events) = events else { continue };
+        reached_any = true;
+        for event in events {
+            by_id.entry(event.id).or_insert(event);
         }
-        Err(e) => message.to_error(format!("query failed: {e}")),
     }
+    if !reached_any {
+        return message.to_error("query failed: no relay answered");
+    }
+    let mut events: Vec<nostr::Event> = by_id.into_values().collect();
+    events.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+    let results: Vec<serde_json::Value> = events.iter().map(result_of).collect();
+    message
+        .to_result()
+        .with_field("events", serde_json::Value::Array(results))
+}
+
+/// How long a pool query waits for its lanes. The local lane answers at once;
+/// this bounds the internet ones.
+const POOL_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The shell's relay pool as lanes: the policy plan, which always starts with
+/// the local relay.
+async fn pool_lanes(ctx: &NapContext) -> Vec<RelayLane> {
+    let mut lanes = vec![RelayLane::Local];
+    for lane in ctx.outbox.plan(Direction::Read, &[]).await.lanes {
+        if !lanes.contains(&lane) {
+            lanes.push(lane);
+        }
+    }
+    lanes
 }
 
 /// `relay.subscribe` — register the subscription, deliver what is stored, then
-/// EOSE.
+/// EOSE; and pull the rest of the pool into the local relay behind it.
 ///
 /// Registering is the part that makes it a subscription rather than a query
 /// wearing the name. Everything the relay already holds goes out first, which
 /// is what a napplet rendering a feed waits on; everything arriving afterwards
 /// is matched against the registered filters and pushed, whether it was
-/// published on this device or carried here from a peer.
+/// published on this device, carried here from a peer, or pulled from a relay
+/// in the pool — the pull lands in the local relay, and the local relay is
+/// what delivers. `EOSE` therefore marks the end of *this device's* backlog.
+///
+/// `options.relay` targets one relay instead of the pool (NIP-29 groups are
+/// the spec's example). It is validated like any napplet-named relay, and the
+/// local backlog is skipped — the napplet asked for that relay's view.
 ///
 /// The filters are registered **before** the stored events are read, so an
 /// event that lands between the two is delivered by the live path rather than
@@ -107,23 +146,56 @@ async fn subscribe(
         Err(e) => return vec![message.to_error(e)],
     };
 
+    // A named relay, or the pool.
+    let target = match message
+        .field("options")
+        .and_then(|o| o.get("relay"))
+        .and_then(|v| v.as_str())
+    {
+        Some(url) => match crate::nap::outbox::validate_relay_url(url) {
+            Ok(lane) => Some(lane),
+            Err(e) => {
+                return vec![Envelope::new("relay.closed")
+                    .with_field("subId", sub_id)
+                    .with_field("reason", e)]
+            }
+        },
+        None => None,
+    };
+
     session.subscribe(sub_id.clone(), filters.clone());
 
     let mut out = Vec::new();
-    match ctx.relay.query(&filters).await {
-        Ok(events) => {
-            for event in &events {
-                out.push(
-                    Envelope::new("relay.event")
-                        .with_field("subId", sub_id.clone())
-                        .with_field("result", result_of(event)),
-                );
+    if target.is_none() {
+        match ctx.relay.query(&filters).await {
+            Ok(events) => {
+                for event in &events {
+                    out.push(
+                        Envelope::new("relay.event")
+                            .with_field("subId", sub_id.clone())
+                            .with_field("result", result_of(event)),
+                    );
+                }
+            }
+            Err(e) => {
+                return vec![Envelope::new("relay.closed")
+                    .with_field("subId", sub_id)
+                    .with_field("reason", format!("query failed: {e}"))];
             }
         }
-        Err(e) => {
-            return vec![Envelope::new("relay.closed")
-                .with_field("subId", sub_id)
-                .with_field("reason", format!("query failed: {e}"))];
+    }
+
+    let remote: Vec<RelayLane> = match target {
+        Some(lane) => vec![lane],
+        None => pool_lanes(ctx)
+            .await
+            .into_iter()
+            .filter(|l| *l != RelayLane::Local)
+            .collect(),
+    };
+    if !remote.is_empty() {
+        if let Err(e) = ctx.lanes.pull_into_local(&remote, &filters).await {
+            tracing::warn!(sub_id, error = %e, "relay pool pull could not be started");
         }
     }
 
@@ -427,6 +499,157 @@ mod tests {
         assert_eq!(rest.len(), 1);
         assert_eq!(rest[0].msg_type, "relay.eose");
         assert_eq!(rest[0].field("subId").unwrap(), "sub-1");
+    }
+
+    /// "The shell queries its relay pool": a query reaches the configured
+    /// relays as well as the local one, and the same event on both is one
+    /// result.
+    #[tokio::test]
+    async fn query_reads_the_whole_pool_and_dedupes() {
+        use crate::seams::RelayBackend as _;
+        use crate::testing::test_context_with_outbox;
+
+        let (ctx, fx, _signer) = test_context_with_outbox();
+        fx.set_fallback(&["wss://pool-a.example", "wss://pool-b.example"]);
+        let keys = Keys::generate();
+        let local_only = EventBuilder::text_note("here")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let everywhere = EventBuilder::text_note("everywhere")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let remote_only = EventBuilder::text_note("out there")
+            .sign_with_keys(&keys)
+            .unwrap();
+        ctx.relay.publish(local_only.clone()).await.unwrap();
+        ctx.relay.publish(everywhere.clone()).await.unwrap();
+        fx.relay("wss://pool-a.example")
+            .publish(everywhere.clone())
+            .await
+            .unwrap();
+        fx.relay("wss://pool-b.example")
+            .publish(remote_only.clone())
+            .await
+            .unwrap();
+
+        let mut s = granted();
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.query")
+                .with_id("q1")
+                .with_field("filters", json!({"kinds": [1]})),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        let r = serde_json::to_value(&out[0]).unwrap();
+        let ids: std::collections::BTreeSet<String> = r["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["event"]["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            [&local_only, &everywhere, &remote_only]
+                .iter()
+                .map(|e| e.id.to_hex())
+                .collect()
+        );
+        assert_eq!(
+            r["events"].as_array().unwrap().len(),
+            3,
+            "a duplicate slipped through"
+        );
+        let asked = fx.queried();
+        assert!(asked.contains(&RelayLane::Local));
+        assert!(asked.contains(&RelayLane::Internet {
+            url: "wss://pool-a.example".into()
+        }));
+    }
+
+    /// A subscription answers the local backlog, then pulls the rest of the
+    /// pool into the local relay; `options.relay` pulls that relay alone and
+    /// skips the local backlog.
+    #[tokio::test]
+    async fn subscribe_pulls_the_pool_or_the_named_relay() {
+        use crate::testing::test_context_with_outbox;
+
+        let (ctx, fx, _signer) = test_context_with_outbox();
+        fx.set_fallback(&["wss://pool.example"]);
+        let keys = Keys::generate();
+        let stored = EventBuilder::text_note("stored")
+            .sign_with_keys(&keys)
+            .unwrap();
+        ctx.relay.publish(stored.clone()).await.unwrap();
+
+        let mut s = granted();
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s1")
+                .with_field("subId", "pool")
+                .with_field("filters", json!({"kinds": [1]})),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].msg_type, "relay.event");
+        assert_eq!(out[1].msg_type, "relay.eose");
+        let pulled = fx.pulled();
+        assert_eq!(pulled.len(), 1);
+        assert_eq!(
+            pulled[0].0,
+            vec![RelayLane::Internet {
+                url: "wss://pool.example".into()
+            }],
+            "the local lane is answered directly, not pulled"
+        );
+
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s2")
+                .with_field("subId", "group")
+                .with_field("filters", json!({"kinds": [9]}))
+                .with_field("options", json!({"relay": "wss://groups.example"})),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert_eq!(out.len(), 1, "a named relay skips the local backlog");
+        assert_eq!(out[0].msg_type, "relay.eose");
+        let pulled = fx.pulled();
+        assert_eq!(pulled.len(), 2);
+        assert_eq!(
+            pulled[1].0,
+            vec![RelayLane::Internet {
+                url: "wss://groups.example".into()
+            }]
+        );
+
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s3")
+                .with_field("subId", "bad")
+                .with_field("filters", json!({"kinds": [9]}))
+                .with_field("options", json!({"relay": "ws://127.0.0.1:4870"})),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert_eq!(out[0].msg_type, "relay.closed");
+        assert_eq!(
+            s.subscription_count(),
+            2,
+            "a refused subscribe was registered"
+        );
     }
 
     /// A single filter object, not only a list — the spec allows both.
