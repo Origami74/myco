@@ -21,7 +21,8 @@ use nostr::{Event, Filter};
 /// this with what the user granted — a grant for a domain that does not exist
 /// yet must not be advertised, or `shell.supports()` lies and the napplet takes
 /// a branch that cannot work.
-pub const IMPLEMENTED_DOMAINS: &[&str] = &["shell", "identity", "relay", "mesh", "outbox"];
+pub const IMPLEMENTED_DOMAINS: &[&str] =
+    &["shell", "identity", "relay", "mesh", "outbox", "resource"];
 
 /// Domains every napplet gets, grant or no grant.
 ///

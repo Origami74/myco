@@ -138,6 +138,8 @@ mod tests {
             )),
             outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
+            blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
+            fetcher: Arc::new(crate::seams::NoFetcher),
         };
         let reply = call(&ctx, "getPublicKey").await;
         assert_eq!(reply.field("publicKey").unwrap().as_str().unwrap(), "");
@@ -166,6 +168,8 @@ mod tests {
             )),
             outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
+            blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
+            fetcher: Arc::new(crate::seams::NoFetcher),
         };
         let reply = call(&ctx, "getProfile").await;
         assert_eq!(reply.field("profile").unwrap()["name"], "Myco Guest 01234");
@@ -203,6 +207,8 @@ mod tests {
             )),
             outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
+            blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
+            fetcher: Arc::new(crate::seams::NoFetcher),
         };
         assert!(call(&ctx, "getProfile")
             .await

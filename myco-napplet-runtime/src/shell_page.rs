@@ -74,4 +74,15 @@ mod tests {
             );
         }
     }
+
+    /// NAP-RESOURCE bytes cross the JSON channel as base64 and reach the
+    /// napplet as a `Blob` — built here, typed by the runtime's sniffed mime.
+    #[test]
+    fn the_page_materializes_resource_blobs() {
+        let page = shell_page();
+        assert!(page.contains("'resource.bytes.result'"));
+        assert!(page.contains("'resource.bytesMany.result'"));
+        assert!(page.contains("new Blob("));
+        assert!(page.contains("atob("));
+    }
 }

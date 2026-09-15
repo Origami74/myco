@@ -53,9 +53,38 @@
       // '*' is required, not lax: the napplet's origin is opaque, so there is
       // no origin string that would ever match it.
       if (frame && frame.contentWindow) {
-        frame.contentWindow.postMessage(frameData.message, '*');
+        frame.contentWindow.postMessage(materialize(frameData.message), '*');
       }
     }
+  }
+
+  // The runtime's channel is JSON, so NAP-RESOURCE bytes arrive as base64.
+  // The napplet's shim resolves `resource.bytes()` with `result.blob` as a
+  // Blob, which structured clone carries across postMessage and JSON cannot —
+  // so it is built here, in trusted code, typed by the runtime's sniffed
+  // `mime`. Nothing else is touched.
+  function materialize(message) {
+    if (!message || typeof message !== 'object') return message;
+    if (message.type === 'resource.bytes.result' && typeof message.blob === 'string') {
+      return Object.assign({}, message, { blob: toBlob(message.blob, message.mime) });
+    }
+    if (message.type === 'resource.bytesMany.result' && Array.isArray(message.items)) {
+      return Object.assign({}, message, {
+        items: message.items.map(function (item) {
+          return item && typeof item.blob === 'string'
+            ? Object.assign({}, item, { blob: toBlob(item.blob, item.mime) })
+            : item;
+        })
+      });
+    }
+    return message;
+  }
+
+  function toBlob(b64, mime) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: typeof mime === 'string' ? mime : 'application/octet-stream' });
   }
 
   function load(command) {

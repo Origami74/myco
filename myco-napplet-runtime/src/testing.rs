@@ -348,6 +348,8 @@ pub fn test_context_with_mesh(
         mesh: mesh.clone(),
         outbox: outbox.clone(),
         lanes: outbox,
+        blobs: std::sync::Arc::new(nsite_deck::testing::MemBlobs::new()),
+        fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
     };
     (ctx, mesh, signer)
 }
@@ -377,8 +379,60 @@ pub fn test_context_with_outbox() -> (
         mesh,
         outbox: outbox.clone(),
         lanes: outbox.clone(),
+        blobs: std::sync::Arc::new(nsite_deck::testing::MemBlobs::new()),
+        fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
     };
     (ctx, outbox, signer)
+}
+
+/// As [`test_context`], with the [`MemFetcher`] handed back so a test can
+/// stage what "somewhere else" holds and assert what was asked for.
+pub fn test_context_with_fetcher() -> (crate::dispatch::NapContext, std::sync::Arc<MemFetcher>) {
+    let (mut ctx, _signer) = test_context();
+    let fetcher = std::sync::Arc::new(MemFetcher::default());
+    ctx.fetcher = fetcher.clone();
+    (ctx, fetcher)
+}
+
+/// A [`BlobFetcher`](crate::seams::BlobFetcher) over a map: what it holds by
+/// sha256, plus anything a test told it to lie about, and every sha it was
+/// asked for.
+#[derive(Default)]
+pub struct MemFetcher {
+    held: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl MemFetcher {
+    /// Hold `bytes` under their real sha256.
+    pub fn hold(&self, bytes: &[u8]) -> String {
+        let sha = nsite_deck::sync::sha256_hex(bytes);
+        self.held
+            .lock()
+            .unwrap()
+            .insert(sha.clone(), bytes.to_vec());
+        sha
+    }
+
+    /// Answer `sha` with `bytes` that do not hash to it — a bad server.
+    pub fn lie(&self, sha: &str, bytes: &[u8]) {
+        self.held
+            .lock()
+            .unwrap()
+            .insert(sha.to_string(), bytes.to_vec());
+    }
+
+    pub fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::seams::BlobFetcher for MemFetcher {
+    async fn fetch(&self, sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        self.asked.lock().unwrap().push(sha256_hex.to_string());
+        Ok(self.held.lock().unwrap().get(sha256_hex).cloned())
+    }
 }
 
 /// Staged relay lists: `(author, direction)` to the URLs and their source.

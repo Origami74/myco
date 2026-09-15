@@ -12,6 +12,7 @@ pub mod identity;
 pub mod mesh;
 pub mod outbox;
 pub mod relay;
+pub mod resource;
 pub mod shell;
 
 use crate::seams::Envelope;

@@ -211,6 +211,34 @@ pub trait LaneTransport: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
+/// Fetches a blob this device does not hold — the seam behind NAP-RESOURCE's
+/// `blossom:` scheme.
+///
+/// The local [`BlobStore`] is always asked first, by the handler; this is
+/// only ever reached on a miss. An implementation goes to the Circle's
+/// Blossom stores over the mesh and to the public servers when reachable,
+/// and returns the bytes only if they hash to `sha256_hex`. What it returns
+/// is stored locally by the handler before delivery, so the next ask is
+/// local — "anything queried is saved".
+#[async_trait]
+pub trait BlobFetcher: Send + Sync {
+    /// The bytes named by `sha256_hex`, verified, or `None` when nobody
+    /// reachable had them. `Err` is for a fetch that could not even start.
+    async fn fetch(&self, sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>>;
+}
+
+/// A [`BlobFetcher`] with nowhere to fetch from — the honest default for a
+/// runtime with no network behind it, and what tests use when fetching is not
+/// the point.
+pub struct NoFetcher;
+
+#[async_trait]
+impl BlobFetcher for NoFetcher {
+    async fn fetch(&self, _sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+}
+
 /// Where a napplet's `relay.publish` goes: the shell's **relay pool**.
 ///
 /// Separate from [`RelayBackend`] because storing and *accepting* are different

@@ -735,6 +735,8 @@ mod tests {
             mesh: base.mesh.clone(),
             outbox: base.outbox.clone(),
             lanes: base.lanes.clone(),
+            blobs: base.blobs.clone(),
+            fetcher: base.fetcher.clone(),
         };
 
         call(
@@ -767,6 +769,8 @@ mod tests {
             mesh: base.mesh.clone(),
             outbox: base.outbox.clone(),
             lanes: base.lanes.clone(),
+            blobs: base.blobs.clone(),
+            fetcher: base.fetcher.clone(),
         };
 
         let mut ungranted = Session::new(
