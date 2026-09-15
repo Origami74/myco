@@ -291,6 +291,30 @@ impl NappletHost {
         })
     }
 
+    /// Push changed grants into every open window of the napplet with this
+    /// `d_tag`, so a switch flipped on the sheet is obeyed by the next call
+    /// rather than the next launch.
+    ///
+    /// Matched by `d_tag` because that is what the session identity carries.
+    /// Two authors' napplets with the same `d_tag` open at once would both be
+    /// touched; the user's own grant list is the one read on every call, so
+    /// the wrong window is at most refused until it reloads.
+    pub async fn apply_grants(&self, d_tag: Option<&str>, granted: Vec<String>) {
+        let wanted = d_tag.unwrap_or("");
+        let live: Vec<Arc<tokio::sync::Mutex<Session>>> = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions.values().map(|l| l.session.clone()).collect()
+        };
+        for session in live {
+            // A session mid-call is updated when the call ends; the grant is
+            // checked per call anyway.
+            let mut s = session.lock().await;
+            if s.identity().d_tag == wanted {
+                s.set_granted(granted.clone());
+            }
+        }
+    }
+
     /// Carry one frame from a window's shell, and return what to send back.
     ///
     /// An unparseable frame yields nothing: the shell is trusted to tag frames,
@@ -1181,6 +1205,51 @@ mod tests {
         assert!(
             stranger.granted.is_empty(),
             "an uninstalled napplet was granted something"
+        );
+    }
+
+    /// A grant flipped on the sheet reaches an open window: refused before,
+    /// served after, with no reload — and withdrawn the same way.
+    #[tokio::test]
+    async fn a_grant_changed_on_the_sheet_is_live() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host.open(&addr, Some(vec![])).await.unwrap();
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        let ask = r#"{"channel":"napplet","message":{"type":"mesh.info","id":"m1"}}"#;
+
+        let out = host.frame(&opened.session_id, ask).await;
+        let ToShell::Napplet { message } = &out[0] else {
+            panic!("not a napplet frame")
+        };
+        assert!(
+            message.field("error").is_some(),
+            "mesh was granted without asking"
+        );
+
+        host.apply_grants(Some("fixture"), vec!["mesh".into()])
+            .await;
+        let out = host.frame(&opened.session_id, ask).await;
+        let ToShell::Napplet { message } = &out[0] else {
+            panic!("not a napplet frame")
+        };
+        assert!(
+            message.field("error").is_none(),
+            "the switch did not reach the window"
+        );
+        assert!(message.field("limits").is_some());
+
+        host.apply_grants(Some("fixture"), vec![]).await;
+        let out = host.frame(&opened.session_id, ask).await;
+        let ToShell::Napplet { message } = &out[0] else {
+            panic!("not a napplet frame")
+        };
+        assert!(
+            message.field("error").is_some(),
+            "withdrawing did not reach the window"
         );
     }
 

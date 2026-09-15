@@ -41,6 +41,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -229,10 +230,17 @@ fun AppsScreen(
         )
     }
 
-    nappletSheetFor?.let { item ->
+    nappletSheetFor?.let { picked ->
+        // Read the live entry, not the snapshot the long-press captured: a
+        // switch on this sheet changes the grants, and the sheet shows them.
+        val item = state.library.firstOrNull { it.nappletPointer == picked.nappletPointer } ?: picked
         ModalBottomSheet(onDismissRequest = { nappletSheetFor = null }) {
             NappletSheet(
                 item = item,
+                domains = state.nappletDomains,
+                onGrant = { domain, allowed ->
+                    client.dispatch(NativeActions.setNappletGrant(item.nappletPointer, domain, allowed))
+                },
                 onOpen = {
                     nappletSheetFor = null
                     onLaunchNapplet(item.nappletPointer, item.title)
@@ -479,6 +487,8 @@ private sealed interface AppEntry {
 @Composable
 private fun NappletSheet(
     item: LibraryItem,
+    domains: List<String>,
+    onGrant: (domain: String, allowed: Boolean) -> Unit,
     onOpen: () -> Unit,
     onShare: () -> Unit,
     onPinToHome: () -> Unit,
@@ -524,22 +534,30 @@ private fun NappletSheet(
         // allowed to do without removing it and finding its link again.
         SheetAction(Icons.Filled.Refresh, "Reload app") { onReload() }
 
-        // What this app was allowed to do, in the same words it was asked in.
+        // What this app may do, in the same words it was asked in — and a
+        // switch for each, because a napplet's own declaration is a statement
+        // of intent its toolchain may have dropped, and the user is the one
+        // who gets to say. Live: an open window sees a change on its next call.
         Spacer(Modifier.height(12.dp))
-        Text(
-            if (item.granted.isEmpty()) "This app can't do anything on its own." else "This app can:",
-            style = MaterialTheme.typography.titleSmall,
-        )
-        Spacer(Modifier.height(8.dp))
-        item.granted.forEach { domain ->
-            Text(
-                "•  " + capabilityWording(domain),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(4.dp))
+        Text("This app can:", style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.height(4.dp))
+        val listed = (domains + item.granted.filter { it !in domains }).distinct()
+        listed.forEach { domain ->
+            val allowed = domain in item.granted
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+            ) {
+                Text(
+                    capabilityWording(domain),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (allowed) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(checked = allowed, onCheckedChange = { onGrant(domain, it) })
+            }
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
 
         SheetAction(Icons.Filled.Delete, "Remove app", tint = MaterialTheme.colorScheme.error) {
             onRemove()

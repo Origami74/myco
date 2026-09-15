@@ -309,6 +309,8 @@ data class AppState(
     val nappletReview: NappletReview? = null,
     /** How far napplets may reach over the mesh (NAP-MESH), and the most each cap may be. */
     val nappletMeshReach: NappletMeshReach = NappletMeshReach(),
+    /** Every capability Myco can grant a napplet, in sheet order. */
+    val nappletDomains: List<String> = emptyList(),
     val cache: CacheStatus,
     val circle: List<CircleContact>,
     /** Circle members with a live mesh relay connection right now — reachable
@@ -637,6 +639,9 @@ data class AppState(
                 sites = sites,
                 library = library,
                 nappletReview = nappletReview,
+                nappletDomains = o.optJSONArray("nappletDomains")?.let { d ->
+                    (0 until d.length()).map { d.optString(it) }
+                }.orEmpty(),
                 nappletMeshReach = o.optJSONObject("nappletMeshReach")?.let { r ->
                     NappletMeshReach(
                         publishTtl = r.optInt("publishTtl", 3),
@@ -926,6 +931,17 @@ object NativeActions {
             .put("type", "set_napplet_mesh_reach")
             .put("publishTtl", publishTtl)
             .put("subscribeTtl", subscribeTtl)
+
+    /**
+     * Allow or withdraw one capability for an installed napplet. Live: an open
+     * window sees it on its next call.
+     */
+    fun setNappletGrant(pointer: String, domain: String, allowed: Boolean): JSONObject =
+        JSONObject()
+            .put("type", "set_napplet_grant")
+            .put("pointer", pointer)
+            .put("domain", domain)
+            .put("allowed", allowed)
 
     fun forgetNapplet(pointer: String): JSONObject =
         JSONObject().put("type", "forget_napplet").put("pointer", pointer)

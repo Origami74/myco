@@ -167,6 +167,18 @@ impl Session {
         MANDATORY_DOMAINS.contains(&domain) || self.implemented.contains(domain)
     }
 
+    /// Replace the grants of a live session — the user changed them on the
+    /// app's sheet. Takes effect on the next call and the next delivery,
+    /// because both check the grant then rather than at handshake.
+    pub fn set_granted(&mut self, granted: impl IntoIterator<Item = impl Into<String>>) {
+        self.granted = granted.into_iter().map(Into::into).collect();
+    }
+
+    /// The grants as they stand, sorted.
+    pub fn granted(&self) -> Vec<String> {
+        self.granted.iter().cloned().collect()
+    }
+
     /// Whether the user granted `domain` to this napplet.
     ///
     /// This is the permission, and [`Session::may_service`] is where it is

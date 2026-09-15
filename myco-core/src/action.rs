@@ -80,6 +80,14 @@ pub enum NativeAppAction {
     },
     /// Unpin a napplet and drop its grants.
     ForgetNapplet { pointer: String },
+    /// Allow or withdraw one capability for an installed napplet, from its
+    /// sheet. Live: an open window sees it on its next call. This and install
+    /// review are the only two writers of a grant.
+    SetNappletGrant {
+        pointer: String,
+        domain: String,
+        allowed: bool,
+    },
     /// Cap how far a napplet may reach over the mesh (NAP-MESH): the most hops
     /// a `mesh.publish` and a `mesh.subscribe` backlog pull may ask for.
     /// Values above what the mesh honours are stored as the maximum. Takes

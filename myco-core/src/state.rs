@@ -46,6 +46,10 @@ pub struct AppState {
     pub napplet_review: Option<crate::napplet::NappletReview>,
     /// The user's cap on how far napplets reach over the mesh (NAP-MESH).
     pub napplet_mesh_reach: NappletMeshReachView,
+    /// Every capability domain this build can grant a napplet, in the order
+    /// the sheet lists them. The handshake is not among them: it is not a
+    /// grant.
+    pub napplet_domains: Vec<String>,
     /// Local relay/Blossom counts (for the developer screen + cache view).
     pub cache: crate::content::CacheView,
     /// The user's **Circle**: paired peers we pull nsites from over the mesh.

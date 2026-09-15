@@ -63,7 +63,7 @@ transport-neutral; the *web projection* binds them to iframes, `postMessage`, an
 | D5 | Mesh | Standard NAPs behave exactly as specified. Mesh rides those contracts through `<npub>.fips` relay URLs (§7.4); a Myco mesh NAP covers only what has no standard equivalent. |
 | D6 | First milestone | A full verified resolve — manifest, blobs, aggregate, `srcdoc`, handshake. No shortcuts that get thrown away. |
 | D7 | Specification drift | Pin one `napplet/naps` revision and re-audit deliberately (§8). |
-| D8 | Capability policy | An install-time review screen; grants stored per library entry. A granted `relay` covers publishing — no per-event prompt. |
+| D8 | Capability policy | An install-time review screen; grants stored per library entry, and switchable per capability on the app's sheet afterwards (live — an open window obeys on its next call). A granted `relay` covers publishing — no per-event prompt. |
 | D9 | Acquisition | Fetch online when added by `naddr`; local and mesh-replicable from then on. |
 | D10 | Crate | A new `myco-napplet-runtime`, over shared NIP-5A primitives in `nsite-deck`. |
 | D11 | Intents | Android Intents and NAP-INTENT resolve through one shared resolver, bridged both ways, landed early. Claiming the `nostr:` URI scheme is deferred. |

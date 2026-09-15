@@ -990,6 +990,14 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
+            NativeAppAction::SetNappletGrant {
+                pointer,
+                domain,
+                allowed,
+            } => {
+                self.set_napplet_grant(&pointer, &domain, allowed);
+                self.rev += 1;
+            }
             NativeAppAction::SetNappletMeshReach {
                 publish_ttl,
                 subscribe_ttl,
@@ -1240,6 +1248,48 @@ impl AppRuntime {
     }
 
     /// Spawn a dev side-load of a bundle directory.
+    /// Allow or withdraw one capability for an installed napplet, and tell
+    /// any open window of it.
+    fn set_napplet_grant(&mut self, pointer: &str, domain: &str, allowed: bool) {
+        use nostr::nips::nip19::ToBech32;
+        if !myco_napplet_runtime::IMPLEMENTED_DOMAINS.contains(&domain)
+            || myco_napplet_runtime::MANDATORY_DOMAINS.contains(&domain)
+        {
+            tracing::warn!(domain, "napplet grant: not a grantable domain");
+            return;
+        }
+        let Ok(addr) = crate::napplet::NappletAddr::parse(pointer) else {
+            tracing::warn!(pointer, "napplet grant: unreadable pointer");
+            return;
+        };
+        let Some(content) = self.content.clone() else {
+            return;
+        };
+        let npub = addr.author.to_bech32().unwrap_or_default();
+        let Some(mut granted) = content.napplet_grants(&npub, addr.d_tag.as_deref()) else {
+            tracing::warn!(pointer, "napplet grant: not installed");
+            return;
+        };
+        if allowed {
+            if !granted.iter().any(|d| d == domain) {
+                granted.push(domain.to_string());
+            }
+        } else {
+            granted.retain(|d| d != domain);
+        }
+        tracing::info!(
+            pointer,
+            domain,
+            allowed,
+            "napplet grant changed on the sheet"
+        );
+        content.set_napplet_grants(&npub, addr.d_tag.as_deref(), granted.clone());
+        if let (Some(host), Some(rt)) = (self.napplet_host.clone(), self.rt.as_ref()) {
+            let d_tag = addr.d_tag.clone();
+            rt.spawn(async move { host.apply_grants(d_tag.as_deref(), granted).await });
+        }
+    }
+
     /// Resolve a napplet and open a session, with the grants **this device**
     /// recorded for it.
     ///
@@ -2005,6 +2055,11 @@ impl AppRuntime {
             app_version: self.app_version.clone(),
             multipath_core: cfg!(feature = "fips-multipath"),
             napplet_review: self.napplet_review.lock().unwrap().clone(),
+            napplet_domains: myco_napplet_runtime::IMPLEMENTED_DOMAINS
+                .iter()
+                .filter(|d| !myco_napplet_runtime::MANDATORY_DOMAINS.contains(d))
+                .map(|d| d.to_string())
+                .collect(),
             napplet_mesh_reach: {
                 let limits = *self.napplet_mesh_limits.read().unwrap();
                 crate::state::NappletMeshReachView {

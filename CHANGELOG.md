@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Hold an installed napplet and switch each capability on or off — "send
+  messages to everyone nearby", "load pictures", and so on, in the same
+  words the install sheet used. It takes effect at once, even in an open
+  window. For an app whose declaration was dropped by its build tools, this
+  is how you let it do what it was written to do.
 - "Couldn't find this app" on the napplet review sheet has a **Try again**
   button. It repeats the same fetch, the sharer's phone first — the case it
   is for is a tap in a room with no internet, before the sharer's link has
