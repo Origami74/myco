@@ -88,7 +88,13 @@ async fn bytes(ctx: &NapContext, message: &Envelope) -> Envelope {
             .to_result()
             .with_field("blob", blob)
             .with_field("mime", mime),
-        Err(e) => error_for(message, e.code, e.message.as_deref()),
+        Err(e) => {
+            // A napplet's own error is invisible from outside; without this a
+            // "not found" on its screen cannot be told apart from a scheme it
+            // never had.
+            tracing::info!(url, code = e.code, message = ?e.message, "resource: not delivered");
+            error_for(message, e.code, e.message.as_deref())
+        }
     }
 }
 
@@ -134,6 +140,7 @@ async fn bytes_many(ctx: &NapContext, message: &Envelope) -> Envelope {
                 serde_json::json!({ "url": url, "ok": true, "blob": blob, "mime": mime })
             }
             Err(e) => {
+                tracing::info!(url, code = e.code, message = ?e.message, "resource: not delivered");
                 let mut item = serde_json::json!({ "url": url, "ok": false, "error": e.code });
                 if let Some(m) = e.message {
                     item["message"] = serde_json::Value::String(m);

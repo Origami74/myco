@@ -453,6 +453,23 @@ impl LaneTransport for OutboxService {
             .iter()
             .any(|(l, r)| matches!(l, RelayLane::Internet { .. }) && r.is_some());
         self.content.note_internet_round(any_ok, tried_internet);
+        // One line per round: which lanes answered and with how much. This
+        // is the first thing to look at when a napplet says "not found".
+        let summary: Vec<String> = out
+            .iter()
+            .map(|(lane, r)| {
+                let name = lane.url().unwrap_or("local");
+                match r {
+                    Some(events) => format!("{name}={}", events.len()),
+                    None => format!("{name}=unreachable"),
+                }
+            })
+            .collect();
+        tracing::info!(
+            filters = filters.len(),
+            lanes = %summary.join(" "),
+            "outbox query round"
+        );
         out
     }
 
