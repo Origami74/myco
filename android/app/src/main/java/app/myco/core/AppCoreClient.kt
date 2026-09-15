@@ -67,6 +67,8 @@ data class NappletReview(
     val grants: List<String>,
     /** Non-empty when the fetch failed; show this instead of asking. */
     val error: String,
+    /** The peer who shared it, if any — so a retry tries their phone first again. */
+    val holder: String? = null,
 )
 
 /** What kind of app a Library entry is. Unknown values read as [Nsite]. */
@@ -401,6 +403,7 @@ data class AppState(
                     (0 until g.length()).map { g.optString(it) }
                 }.orEmpty(),
                 error = reviewJson.optString("error"),
+                holder = reviewJson.optString("holder").ifEmpty { null },
             )
 
             val libraryJson = o.optJSONArray("library")

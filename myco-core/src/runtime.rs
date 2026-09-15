@@ -1277,6 +1277,7 @@ impl AppRuntime {
         // would leave the Add sheet looking like it did nothing, which is
         // indistinguishable from a tap that never registered — and is exactly
         // how a broken fetch hides.
+        let holder_for_retry = holder.clone();
         let fail = |review: &Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
                     pointer: &str,
                     message: String| {
@@ -1289,6 +1290,7 @@ impl AppRuntime {
                 description: String::new(),
                 requires: Vec::new(),
                 error: message,
+                holder: holder_for_retry.clone(),
             });
         };
 
@@ -1334,6 +1336,7 @@ impl AppRuntime {
             requires: Vec::new(),
             grants: Vec::new(),
             error: String::new(),
+            holder: holder.clone(),
         });
 
         rt.spawn(async move {
@@ -1391,6 +1394,7 @@ impl AppRuntime {
                         requires: ingested.requires,
                         grants,
                         error: String::new(),
+                        holder: holder.clone(),
                     }
                 }
                 Err(e) => {
@@ -1403,6 +1407,7 @@ impl AppRuntime {
                         requires: Vec::new(),
                         grants: Vec::new(),
                         error: e.to_string(),
+                        holder: holder.clone(),
                     }
                 }
             };

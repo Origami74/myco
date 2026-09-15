@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- "Couldn't find this app" on the napplet review sheet has a **Try again**
+  button. It repeats the same fetch, the sharer's phone first — the case it
+  is for is a tap in a room with no internet, before the sharer's link has
+  come up.
 - Napplets can load pictures and files by content hash (`resource`
   capability, NAP-RESOURCE, `blossom:` URLs only for now). Your phone's own
   store is checked first; anything it has to fetch — from a friend's phone

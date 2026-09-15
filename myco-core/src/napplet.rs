@@ -801,6 +801,11 @@ pub struct NappletReview {
     pub grants: Vec<String>,
     /// Set when the fetch failed; the screen shows this instead of asking.
     pub error: String,
+    /// The peer who shared it, when it arrived by a tap or a scan — kept so a
+    /// retry tries their phone first again, exactly as the first attempt did.
+    /// Without it a retry in a room with no internet would search blind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
 }
 
 /// What a fetched, verified napplet declares — the input to install review.

@@ -221,6 +221,10 @@ fun AppsScreen(
             onInstall = { granted ->
                 client.dispatch(NativeActions.installNapplet(review.pointer, granted))
             },
+            // The same fetch again, sharer first — a tap in a room with no
+            // internet fails when the sharer's link is still coming up, and
+            // that is the case a retry is for.
+            onRetry = { client.dispatch(NativeActions.fetchNapplet(review.pointer, review.holder)) },
             onDismiss = { client.dispatch(NativeActions.dismissNappletReview()) },
         )
     }
@@ -606,6 +610,7 @@ private fun NappletTile(
 private fun NappletReviewSheet(
     review: NappletReview,
     onInstall: (List<String>) -> Unit,
+    onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -647,6 +652,8 @@ private fun NappletReviewSheet(
                         textAlign = TextAlign.Center,
                     )
                     Spacer(Modifier.height(24.dp))
+                    Button(onClick = onRetry) { Text("Try again") }
+                    Spacer(Modifier.height(4.dp))
                     TextButton(onClick = onDismiss) { Text("Close") }
                 }
                 return@Column
