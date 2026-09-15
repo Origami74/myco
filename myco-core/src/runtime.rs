@@ -1521,22 +1521,31 @@ impl AppRuntime {
                 // relay only, and never in the way of opening a napplet — a
                 // profile that failed to publish is cosmetic, and a launch that
                 // waited on the network would not be.
+                //
+                // Beside it, a relay list (kind 10002) naming this device's
+                // mesh relay and the configured relays: what lets a peer route
+                // back to us by the outbox model, and what makes the user's own
+                // outbox plan resolve as NIP-65 rather than fallback (§7.4).
                 let relay = content.relay();
                 let profile = nostr::EventBuilder::new(
                     nostr::Kind::Metadata,
                     crate::user_key::guest_profile_json(&user),
                 )
-                .sign_with_keys(&user.keys);
-                match profile {
-                    Ok(event) => {
-                        let rt = handle.clone();
-                        rt.spawn(async move {
-                            if let Err(e) = relay.publish(event).await {
-                                tracing::warn!("could not publish the guest profile: {e}");
-                            }
-                        });
+                .sign_with_keys(&user.keys)
+                .map_err(anyhow::Error::from);
+                let relay_list = crate::outbox::own_relay_list(&user.keys, &self.identity.own_npub);
+                for (what, signed) in [("guest profile", profile), ("relay list", relay_list)] {
+                    match signed {
+                        Ok(event) => {
+                            let relay = relay.clone();
+                            handle.spawn(async move {
+                                if let Err(e) = relay.publish(event).await {
+                                    tracing::warn!("could not publish the {what}: {e}");
+                                }
+                            });
+                        }
+                        Err(e) => tracing::warn!("could not sign the {what}: {e}"),
                     }
-                    Err(e) => tracing::warn!("could not sign the guest profile: {e}"),
                 }
                 tracing::info!("generated a user key for napplets: {}", user.guest_name());
             }
@@ -1561,12 +1570,21 @@ impl AppRuntime {
                 self.node_live.clone(),
             ));
 
+            let outbox = Arc::new(crate::outbox::OutboxService::new(
+                content.relay(),
+                self.relay_hub.clone(),
+                content.clone(),
+                self.identity.own_npub.clone(),
+            ));
+
             let host = Arc::new(crate::napplet::NappletHost::new(
                 content.relay(),
                 content.blobs(),
                 signer,
                 sink,
                 mesh,
+                outbox.clone(),
+                outbox,
             ));
 
             // Feed every accepted event to open napplets' subscriptions — this

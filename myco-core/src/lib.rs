@@ -44,6 +44,7 @@ mod mesh_relay;
 // holds one session per open napplet window. See
 // `docs/design/napplet/napplet-runtime.md`.
 mod napplet;
+mod outbox;
 // The user key a napplet publishes as — separate from the mesh device key (D3).
 mod user_key;
 // The `MESH` envelope that carries mesh state alongside — never inside — a

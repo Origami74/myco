@@ -185,6 +185,8 @@ impl NappletHost {
         signer: Arc<dyn myco_napplet_runtime::seams::Signer>,
         sink: Arc<dyn myco_napplet_runtime::seams::EventSink>,
         mesh: Arc<dyn myco_napplet_runtime::seams::MeshSink>,
+        outbox: Arc<dyn myco_napplet_runtime::seams::OutboxResolver>,
+        lanes: Arc<dyn myco_napplet_runtime::seams::LaneTransport>,
     ) -> Self {
         Self {
             ctx: NapContext {
@@ -192,6 +194,8 @@ impl NappletHost {
                 relay: relay.clone(),
                 sink,
                 mesh,
+                outbox,
+                lanes,
             },
             relay,
             blobs,
@@ -781,6 +785,13 @@ mod tests {
         }
     }
 
+    /// An outbox with nothing staged, for tests that are not about it.
+    pub(super) fn test_outbox() -> Arc<myco_napplet_runtime::testing::OutboxFixture> {
+        Arc::new(myco_napplet_runtime::testing::OutboxFixture::new(Arc::new(
+            MemRelay::new(),
+        )))
+    }
+
     /// A mesh with nothing behind it, for tests that are not about the mesh.
     pub(super) fn test_mesh() -> Arc<myco_napplet_runtime::testing::MemMesh> {
         Arc::new(myco_napplet_runtime::testing::MemMesh::new(
@@ -821,6 +832,8 @@ mod tests {
                         subscribe_ttl: 2,
                     },
                 )),
+                test_outbox(),
+                test_outbox(),
             ),
             addr,
         )
@@ -1198,6 +1211,8 @@ mod tests {
                 MemRelay::new(),
             ))),
             test_mesh(),
+            test_outbox(),
+            test_outbox(),
         );
         let addr = NappletAddr {
             author: napplet.author,
@@ -1252,6 +1267,8 @@ mod tests {
                 MemRelay::new(),
             ))),
             test_mesh(),
+            test_outbox(),
+            test_outbox(),
         );
         let addr = NappletAddr {
             author: napplet.author,
@@ -1298,6 +1315,8 @@ mod tests {
                 MemRelay::new(),
             ))),
             test_mesh(),
+            test_outbox(),
+            test_outbox(),
         );
         let addr = NappletAddr {
             author: napplet.author,
@@ -1401,7 +1420,7 @@ mod real_naddr {
 
 #[cfg(test)]
 mod live_fetch {
-    use super::tests::test_mesh;
+    use super::tests::{test_mesh, test_outbox};
     use super::*;
     use nsite_deck::testing::{MemBlobs, MemRelay};
 
@@ -1458,6 +1477,8 @@ mod live_fetch {
                 MemRelay::new(),
             ))),
             test_mesh(),
+            test_outbox(),
+            test_outbox(),
         );
         let started = std::time::Instant::now();
         match host.ingest(&addr, &source).await {
