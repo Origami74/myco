@@ -73,6 +73,14 @@ impl Default for CspPolicy {
                 // A napplet's executable JS is necessarily inline: an opaque
                 // origin has no server to fetch a `<script src>` from.
                 "script-src 'unsafe-inline'",
+                // A Worker built from the napplet's own bytes (`new Worker(
+                // URL.createObjectURL(blob))`) — how a map renderer or a
+                // parser moves work off the main thread. Same trust as the
+                // inline script it came from, and the worker inherits this
+                // policy: `connect-src 'none'` binds it too. Without this the
+                // fallback is `script-src`, which has no `blob:`, and the
+                // napplet hangs on the first thing it hands to a worker.
+                "worker-src blob:",
                 "style-src 'unsafe-inline'",
                 // Self-contained assets the build tooling inlines.
                 "img-src data: blob:",
@@ -265,6 +273,13 @@ mod tests {
         // Inline script is unavoidable — an opaque origin has no server to
         // fetch an external one from — so it must be granted deliberately.
         assert!(csp.as_str().contains("script-src 'unsafe-inline'"));
+        // A blob worker is the napplet's own code on another thread; a map
+        // renderer cannot start without one, and it stays under connect-src.
+        assert!(csp.as_str().contains("worker-src blob:"));
+        assert!(
+            !csp.as_str().contains("worker-src blob: http"),
+            "a worker must never come from the network"
+        );
     }
 
     #[test]
