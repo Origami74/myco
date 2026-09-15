@@ -92,11 +92,14 @@ Hash-checking each blob proves no file is corrupt. Only the aggregate proves the
 set is *whole* — that what is served is the site its author signed, with nothing
 removed by a re-signing intermediary.
 
-Myco verifies it in `nsite_deck::aggregate`. A manifest whose aggregate
-disagrees with its own `path` tags never imports, syncs, or serves. A manifest
-with **no** aggregate tag is accepted: most published nsites predate the tag and
-every blob is individually hash-verified anyway. Napplets treat it the same way,
-but use the recomputed value as identity — see below.
+Myco verifies it in `nsite_deck::aggregate`. For an **nsite**, a manifest whose
+aggregate disagrees with its own `path` tags is logged and served on its
+per-blob hashes, with no verified aggregate recorded — a warning, not a refusal,
+until the formula has been checked against enough published sites to take one
+off the air on its say-so. A manifest with **no** aggregate tag is accepted:
+most published nsites predate the tag and every blob is individually
+hash-verified anyway. **Napplets** are strict: a mismatch is refused, because
+the recomputed value is their identity — see below.
 
 The site icon is conventionally the blob mapped at `/favicon.ico`. A custom
 not-found page is the blob mapped at `/404.html`.

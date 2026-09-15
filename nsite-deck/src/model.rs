@@ -97,15 +97,27 @@ impl Manifest {
             }
         }
 
-        // A declared-but-wrong aggregate means the file set is not the one the
-        // author signed — files may have been removed by a re-signing
-        // intermediary. Individually hash-checking each blob cannot catch that.
+        // A declared-but-wrong aggregate means the file set may not be the one
+        // the author signed. For an **nsite** it is logged, not fatal: every
+        // blob is still hash-verified against the signed `path` tags, and the
+        // formula here has yet to be checked against enough published sites to
+        // refuse one on its say-so — a disagreement over line order or case
+        // would take every nsite carrying the tag off the air at once. The
+        // manifest parses with `aggregate: None`, as if the tag were absent.
+        // Napplets are strict about it: NIP-5D makes the aggregate their
+        // identity, and `myco-napplet-runtime` checks it itself.
         let aggregate = match check_aggregate(&event) {
             AggregateCheck::Match { hash } => Some(hash),
             AggregateCheck::Missing => None,
-            AggregateCheck::Mismatch { declared, computed } => anyhow::bail!(
-                "manifest aggregate mismatch: declared {declared}, recomputed {computed}"
-            ),
+            AggregateCheck::Mismatch { declared, computed } => {
+                tracing::warn!(
+                    event = %event.id,
+                    declared,
+                    computed,
+                    "nsite manifest aggregate does not match its path tags; serving on per-blob hashes"
+                );
+                None
+            }
         };
 
         // Enforce the kind/d-tag invariant from the spec.

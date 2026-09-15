@@ -145,12 +145,14 @@ mod tests {
         );
     }
 
-    /// A manifest whose aggregate `x` tag disagrees with its own `path` tags is
-    /// rejected at parse — so it never imports and never serves. This is the
-    /// case per-blob hashing cannot catch: every listed file is intact, but the
-    /// *set* is not the one the author signed.
+    /// An nsite manifest whose aggregate `x` tag disagrees with its own `path`
+    /// tags still imports and serves — every blob is hash-verified against the
+    /// signed path tags regardless — but records no verified aggregate. A
+    /// mismatch is a warning until the formula has been checked against
+    /// enough published sites to refuse one on its say-so. Napplets are the
+    /// strict case, tested in `myco-napplet-runtime`.
     #[tokio::test]
-    async fn corrupt_aggregate_never_imports_or_serves() {
+    async fn corrupt_aggregate_serves_without_a_verified_aggregate() {
         let relay = MemRelay::new();
         let blobs = MemBlobs::new();
         let site = build_test_site_full(
@@ -162,22 +164,17 @@ mod tests {
         );
         let host = host_for(&site.author);
 
-        let err = import_site(&relay, &blobs, site.manifest.clone(), &site.blobs)
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("aggregate mismatch"),
-            "unexpected error: {err}"
-        );
-
-        // Even if the manifest reaches the store by another route (a peer's
-        // gossip, say), the gateway refuses to serve it.
-        verify_and_store_event(&relay, site.manifest.clone())
+        import_site(&relay, &blobs, site.manifest.clone(), &site.blobs)
             .await
             .unwrap();
-        blobs.put(b"<h1>hi</h1>").await.unwrap();
         let resp = serve(&relay, &blobs, &host, "/index.html", None).await;
-        assert_ne!(resp.status, 200, "a mismatched aggregate must not serve");
+        assert_eq!(resp.status, 200, "per-blob verified content must still serve");
+
+        let manifest = Manifest::from_event(site.manifest).unwrap();
+        assert_eq!(
+            manifest.aggregate, None,
+            "a mismatched aggregate must not be recorded as verified"
+        );
     }
 
     /// Lenient the other way: most published nsites predate the aggregate tag.
