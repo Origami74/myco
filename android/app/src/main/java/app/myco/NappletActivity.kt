@@ -144,7 +144,7 @@ class NappletActivity : ComponentActivity() {
                 // that did not register, and hides that the app is gone.
                 Toast.makeText(
                     this@NappletActivity,
-                    "Couldn't open this app: ${opened.error.ifEmpty { "it isn't on this phone" }}",
+                    "Couldn't open this app: ${opened.error.orEmpty().ifEmpty { "it isn't on this phone" }}",
                     Toast.LENGTH_LONG,
                 ).show()
                 finish()

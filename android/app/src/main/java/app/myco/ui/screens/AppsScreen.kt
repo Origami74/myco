@@ -156,6 +156,10 @@ fun AppsScreen(
                 )
                 is AppEntry.Napplet -> NappletTile(
                     item = entry.item,
+                    // Unknown counts as ready: the status is computed a moment
+                    // after startup, and a tile that dims for that moment reads
+                    // as a broken app.
+                    status = state.nappletStatus[entry.item.urlHost],
                     modifier = Modifier.animateItem(),
                     onClick = { onLaunchNapplet(entry.item.nappletPointer, entry.item.title) },
                     onLongClick = { nappletSheetFor = entry.item },
@@ -604,10 +608,12 @@ private fun PermissionsSheet(
 @Composable
 private fun NappletTile(
     item: LibraryItem,
+    status: app.myco.core.NappletStatus?,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
+    val ready = status?.ready ?: true
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
@@ -617,6 +623,9 @@ private fun NappletTile(
                 .fillMaxWidth()
                 .aspectRatio(1f)
                 .clip(RoundedCornerShape(18.dp))
+                // Dimmed like an nsite that is not downloaded: the app is in
+                // the Library but not on the phone — after a cache wipe, say.
+                .alpha(if (ready) 1f else 0.35f)
                 .background(tileColorFor(item.nappletPointer)),
             contentAlignment = Alignment.Center,
         ) {
@@ -643,6 +652,16 @@ private fun NappletTile(
             color = MaterialTheme.colorScheme.onSurface,
             textAlign = TextAlign.Center,
         )
+        if (!ready) {
+            Text(
+                status?.message.orEmpty().ifEmpty { "Not on this phone" },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }
 

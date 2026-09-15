@@ -44,6 +44,9 @@ pub struct AppState {
     /// only thing that writes a grant is the user answering this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub napplet_review: Option<crate::napplet::NappletReview>,
+    /// Whether each installed napplet can open right now — the tile's dim
+    /// state. Keyed by the Library entry's `urlHost`.
+    pub napplet_status: Vec<crate::content::NappletStatusView>,
     /// The user's cap on how far napplets reach over the mesh (NAP-MESH).
     pub napplet_mesh_reach: NappletMeshReachView,
     /// Every capability domain this build can grant a napplet, in the order

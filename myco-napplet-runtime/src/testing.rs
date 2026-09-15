@@ -76,6 +76,7 @@ pub struct NappletBuilder {
     servers: Vec<String>,
     aggregate: FixtureAggregate,
     break_signature: bool,
+    created_at: Option<u64>,
 }
 
 impl Default for NappletBuilder {
@@ -92,6 +93,7 @@ impl Default for NappletBuilder {
             servers: Vec::new(),
             aggregate: FixtureAggregate::Valid,
             break_signature: false,
+            created_at: None,
         }
     }
 }
@@ -166,6 +168,18 @@ impl NappletBuilder {
 
     /// Tamper with the event after signing, so its id and signature no longer
     /// cover its contents.
+    /// Sign with this `created_at` instead of now — for two versions of one
+    /// napplet that must order deterministically.
+    pub fn created_at(mut self, secs: u64) -> Self {
+        self.created_at = Some(secs);
+        self
+    }
+
+    pub fn title(mut self, title: &str) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
     pub fn break_signature(mut self) -> Self {
         self.break_signature = true;
         self
@@ -224,10 +238,11 @@ impl NappletBuilder {
             }
         }
 
-        let manifest = EventBuilder::new(Kind::from(self.kind), "")
-            .tags(tags)
-            .sign_with_keys(&self.keys)
-            .expect("sign manifest");
+        let mut builder = EventBuilder::new(Kind::from(self.kind), "").tags(tags);
+        if let Some(at) = self.created_at {
+            builder = builder.custom_created_at(nostr::Timestamp::from(at));
+        }
+        let manifest = builder.sign_with_keys(&self.keys).expect("sign manifest");
 
         let manifest = if self.break_signature {
             tamper(&manifest)

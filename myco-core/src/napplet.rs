@@ -179,10 +179,55 @@ impl OpenedNapplet {
     }
 }
 
+/// Where a napplet's **served** manifest comes from, and how a version is
+/// pinned once its bytes are here.
+///
+/// The relay keeps the newest manifest per slot, and a newer one can arrive
+/// with no blob behind it — pulled by a subscription, flooded by a peer. Served
+/// straight from the relay, that napplet stops opening until the blob turns up.
+/// So, as with nsites (`nsite-updates.md` §1), what is served is the version
+/// that was **pinned** when its blob landed, and the pin moves only when the
+/// next version's blob has landed too.
+#[async_trait::async_trait]
+pub trait ManifestStore: Send + Sync {
+    /// The manifest to serve for a slot: the pinned version when there is one,
+    /// else the newest the relay holds.
+    async fn current(
+        &self,
+        kind: u16,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+    ) -> anyhow::Result<Option<nostr::Event>>;
+
+    /// Pin `manifest` as the version to serve for its slot. Called only once
+    /// its index blob is in the local store.
+    fn pin(&self, manifest: &nostr::Event);
+}
+
+/// A [`ManifestStore`] with no pin: always the relay's newest. For tests, and
+/// for a host stood up over bare seams.
+pub struct NewestInSlot(pub Arc<dyn RelayBackend>);
+
+#[async_trait::async_trait]
+impl ManifestStore for NewestInSlot {
+    async fn current(
+        &self,
+        kind: u16,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+    ) -> anyhow::Result<Option<nostr::Event>> {
+        newest_in_slot(self.0.as_ref(), kind, author, d_tag).await
+    }
+
+    fn pin(&self, _manifest: &nostr::Event) {}
+}
+
 /// The device's live napplet sessions.
 pub struct NappletHost {
     relay: Arc<dyn RelayBackend>,
     blobs: Arc<dyn BlobStore>,
+    /// Which version of each napplet is served. See [`ManifestStore`].
+    manifests: Arc<dyn ManifestStore>,
     /// What the capabilities reach the world through. One per device — the
     /// seams are not per napplet; the session is.
     ctx: NapContext,
@@ -197,10 +242,18 @@ impl NappletHost {
         Self {
             relay: ctx.relay.clone(),
             blobs: ctx.blobs.clone(),
+            manifests: Arc::new(NewestInSlot(ctx.relay.clone())),
             ctx,
             sessions: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
         }
+    }
+
+    /// Serve versions through `manifests` — on the device, the content layer's
+    /// active-version pins — instead of the relay's newest.
+    pub fn with_manifests(mut self, manifests: Arc<dyn ManifestStore>) -> Self {
+        self.manifests = manifests;
+        self
     }
 
     /// As [`NappletHost::open_with`], for a napplet with nothing switched off:
@@ -232,20 +285,21 @@ impl NappletHost {
         addr: &NappletAddr,
         grants: Option<crate::content::NappletGrants>,
     ) -> anyhow::Result<OpenedNapplet> {
-        let event = newest_in_slot(
-            self.relay.as_ref(),
-            addr.kind(),
-            &addr.author,
-            addr.d_tag.as_deref(),
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("no napplet manifest for this address"))?;
+        let event = self
+            .manifests
+            .current(addr.kind(), &addr.author, addr.d_tag.as_deref())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no napplet manifest for this address"))?;
 
         // Every check lives in the runtime crate; a failure here means no
         // session and no window.
-        let resolved = resolve(event, self.blobs.as_ref())
+        let resolved = resolve(event.clone(), self.blobs.as_ref())
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // It opened, so its blob is here: this is the version to keep serving
+        // until the next one's blob is too. Covers napplets ingested before
+        // pinning existed, and costs nothing when already pinned.
+        self.manifests.pin(&event);
 
         // The grants were narrowed at install to what *that* build could do
         // (`effective_grants`), so a napplet installed before a domain existed
@@ -340,7 +394,12 @@ impl NappletHost {
     /// [`ToShell::Relaunch`]): the grant is live for the next call, but the
     /// napplet made its startup calls — its subscriptions — under the old
     /// grants, and a refused subscribe is not retried.
-    pub async fn apply_grants(&self, author: &PublicKey, d_tag: Option<&str>, granted: Vec<String>) {
+    pub async fn apply_grants(
+        &self,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+        granted: Vec<String>,
+    ) {
         let wanted = d_tag.unwrap_or("");
         let author = author.to_hex();
         let live: Vec<(
@@ -520,19 +579,16 @@ impl NappletHost {
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        // Blob first, manifest last: a half-written napplet is then one the
-        // local relay has no manifest for, rather than a manifest whose bytes
-        // are missing.
-        let index = resolved
-            .manifest
-            .index_entry()
-            .ok_or_else(|| anyhow::anyhow!("verified napplet has no index entry"))?;
-        let bytes = view
-            .get(&index.sha256)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("source served no bytes for {}", index.sha256))?;
-        self.blobs.put(&bytes).await?;
-        self.relay.publish(event).await?;
+        // Blob first, manifest last, pin last of all: a half-written napplet
+        // is then one the local relay has no manifest for, rather than a
+        // manifest whose bytes are missing — and the served version moves only
+        // once the new bytes are here. The bytes are the ones `resolve` already
+        // fetched and verified: `index_html` decoded as UTF-8 without loss, so
+        // re-encoding it is the original blob, and the source — a peer over
+        // BLE, often — is not asked for it twice.
+        self.blobs.put(resolved.index_html.as_bytes()).await?;
+        self.relay.publish(event.clone()).await?;
+        self.manifests.pin(&event);
 
         Ok(IngestedNapplet {
             requires: resolved.manifest.requires.clone(),
@@ -542,6 +598,70 @@ impl NappletHost {
             aggregate: resolved.aggregate.clone(),
         })
     }
+}
+
+impl NappletHost {
+    /// Fetch whatever `source` has for `addr` and, if it is a newer version
+    /// than the one served, bring it in — bytes first, so the served version
+    /// moves only when the new one can open. Returns whether it moved.
+    ///
+    /// The update path for napplets: the same [`NappletHost::ingest`] the first
+    /// fetch used, gated on version. A source with nothing newer, or nothing at
+    /// all, leaves the served version alone.
+    pub async fn refresh(
+        &self,
+        addr: &NappletAddr,
+        source: &dyn PeerSource,
+    ) -> anyhow::Result<bool> {
+        let served = self
+            .manifests
+            .current(addr.kind(), &addr.author, addr.d_tag.as_deref())
+            .await?;
+        let offered = source
+            .fetch_manifest(&addr.author, addr.d_tag.as_deref())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no napplet manifest at that address"))?;
+        let newer = match &served {
+            Some(served) => offered.created_at > served.created_at && offered.id != served.id,
+            None => true,
+        };
+        if !newer {
+            return Ok(false);
+        }
+        self.ingest(addr, source).await?;
+        Ok(true)
+    }
+}
+
+/// Refresh every installed napplet from the public relays, in parallel.
+/// Returns `(updated, checked)` for the update-check toast.
+///
+/// Public relays only: a napplet's author publishes there, and the holder
+/// who shared it is not recorded. Offline-only skips the lot — `checked`
+/// still counts them, so the toast says they were not updated rather than
+/// that there were none.
+pub async fn refresh_all(host: &NappletHost, addrs: &[NappletAddr]) -> (usize, usize) {
+    let checks = addrs.iter().map(|addr| async move {
+        let source = crate::ip_source::IpPeerSource::new(
+            addr.search_relays(),
+            crate::ip_source::default_blossom_servers(),
+        )
+        .with_kind(addr.kind())
+        .with_first_answer_grace(Duration::from_millis(600));
+        match host.refresh(addr, &source).await {
+            Ok(moved) => moved,
+            Err(e) => {
+                tracing::debug!(
+                    napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
+                    error = %e,
+                    "napplet update check: no newer version reachable"
+                );
+                false
+            }
+        }
+    });
+    let results = futures_util::future::join_all(checks).await;
+    (results.iter().filter(|m| **m).count(), addrs.len())
 }
 
 /// The manifest's `["server", …]` Blossom hints.
@@ -1259,6 +1379,82 @@ mod tests {
         );
     }
 
+    /// The version served is the one whose bytes are here. A newer manifest
+    /// landing in the relay with no blob behind it — pulled by a subscription,
+    /// flooded by a peer — must not take the napplet off the air; and once
+    /// the newer version's bytes arrive, it is served. The nsite rule
+    /// (`nsite-updates.md` §1), for napplets.
+    #[tokio::test]
+    async fn a_newer_manifest_without_its_blob_does_not_displace_the_served_version() {
+        let dir = std::env::temp_dir().join(format!(
+            "myco-napplet-pin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(crate::content::Content::open(&dir).unwrap());
+        let host = NappletHost::new(test_ctx(content.relay(), content.blobs()))
+            .with_manifests(content.clone());
+
+        let keys = nostr::Keys::generate();
+        let v1 = NappletBuilder::new()
+            .keys(keys.clone())
+            .created_at(1_000)
+            .title("Version one")
+            .files(&[("/index.html", b"<!doctype html><title>one</title>")])
+            .build();
+        let v2 = NappletBuilder::new()
+            .keys(keys.clone())
+            .created_at(2_000)
+            .title("Version two")
+            .files(&[("/index.html", b"<!doctype html><title>two</title>")])
+            .build();
+        let addr = NappletAddr {
+            author: keys.public_key(),
+            d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
+        };
+        async fn source_for(napplet: &myco_napplet_runtime::testing::TestNapplet) -> FakeSource {
+            let relay = MemRelay::new();
+            let blobs = MemBlobs::new();
+            for (_, bytes) in &napplet.blobs {
+                blobs.put(bytes).await.unwrap();
+            }
+            relay.publish(napplet.manifest.clone()).await.unwrap();
+            FakeSource {
+                relay,
+                blobs,
+                kind: KIND_NAMED,
+            }
+        }
+
+        // v1 arrives whole and opens.
+        host.ingest(&addr, &source_for(&v1).await).await.unwrap();
+        let opened = host.open(&addr, None).await.unwrap();
+        assert_eq!(opened.title.as_deref(), Some("Version one"));
+
+        // v2's manifest lands in the relay by some other route — no blob.
+        content.relay().publish(v2.manifest.clone()).await.unwrap();
+        let opened = host.open(&addr, None).await.unwrap();
+        assert_eq!(
+            opened.title.as_deref(),
+            Some("Version one"),
+            "a manifest with no bytes behind it was served"
+        );
+
+        // A refresh from a source that has v2 whole moves the served version;
+        // one that has nothing newer does not.
+        assert!(host.refresh(&addr, &source_for(&v2).await).await.unwrap());
+        let opened = host.open(&addr, None).await.unwrap();
+        assert_eq!(opened.title.as_deref(), Some("Version two"));
+        assert!(!host.refresh(&addr, &source_for(&v2).await).await.unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A domain the user switched off on the sheet stays off at the next
     /// launch, however plainly the napplet declares it and whatever the
     /// defaults say. This is the bug where the switch flipped itself back on:
@@ -1298,7 +1494,10 @@ mod tests {
         let ToShell::Napplet { message } = &out[0] else {
             panic!("not a napplet frame")
         };
-        assert!(message.field("error").is_some(), "relay was served after being switched off");
+        assert!(
+            message.field("error").is_some(),
+            "relay was served after being switched off"
+        );
     }
 
     /// A grant given to one author's napplet must not reach another author's
@@ -1362,7 +1561,8 @@ mod tests {
         );
         assert!(message.field("limits").is_some());
 
-        host.apply_grants(&addr.author, Some("fixture"), vec![]).await;
+        host.apply_grants(&addr.author, Some("fixture"), vec![])
+            .await;
         let out = host.frame(&opened.session_id, ask).await;
         let ToShell::Napplet { message } = &out[0] else {
             panic!("not a napplet frame")
@@ -1514,8 +1714,14 @@ mod tests {
             crate::ip_source::tests::mock_blossom(vec![(sha.clone(), bytes.clone())]).await;
         let fetcher = BlossomFetcher::new(content.clone()).with_public_servers(vec![server]);
 
-        assert_eq!(fetcher.fetch(&sha, 1 << 20).await.unwrap(), Some(bytes.clone()));
-        assert_eq!(fetcher.fetch(&"00".repeat(32), 1 << 20).await.unwrap(), None);
+        assert_eq!(
+            fetcher.fetch(&sha, 1 << 20).await.unwrap(),
+            Some(bytes.clone())
+        );
+        assert_eq!(
+            fetcher.fetch(&"00".repeat(32), 1 << 20).await.unwrap(),
+            None
+        );
         // A cap below the blob's size is enforced by the download, not after it.
         assert_eq!(
             fetcher.fetch(&sha, bytes.len() - 1).await.unwrap(),

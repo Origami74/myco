@@ -923,8 +923,28 @@ impl AppRuntime {
             }
             NativeAppAction::CheckNsiteUpdates => {
                 // Poll online relays for newer manifests; stage + apply. Non-blocking.
+                // Napplets ride the same check when any are installed — the
+                // host is only stood up (and a user key only generated) when
+                // there is one to check.
+                let napplets = self.napplet_refresh_targets();
+                let host = if napplets.is_empty() {
+                    None
+                } else {
+                    self.napplet_context().map(|(host, _)| host)
+                };
                 if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    rt.spawn(content.check_updates());
+                    // Napplet authors publish to public relays and the sharer
+                    // is not recorded, so offline-only has nowhere to ask:
+                    // counted as checked, none updated.
+                    let offline_only = content.is_offline_only();
+                    let napplet_check = async move {
+                        let host = host?;
+                        if offline_only {
+                            return Some((0, napplets.len()));
+                        }
+                        Some(crate::napplet::refresh_all(&host, &napplets).await)
+                    };
+                    rt.spawn(content.check_updates_with(napplet_check));
                 }
                 self.rev += 1;
             }
@@ -1395,8 +1415,6 @@ impl AppRuntime {
             self.rev += 1;
             return;
         };
-        let _ = content;
-
         // Open the screen now, in a loading state. The fetch tries several
         // relays and can take seconds; leaving the user on an unchanged grid
         // until it finishes reads as nothing having happened at all.
@@ -1487,6 +1505,7 @@ impl AppRuntime {
                 }
             };
             *review.lock().unwrap() = Some(outcome);
+            content.refresh_napplet_status().await;
         });
     }
 
@@ -1530,6 +1549,34 @@ impl AppRuntime {
             pointer,
             crate::content::now_secs(),
         );
+        if let Some(rt) = self.rt.as_ref() {
+            rt.spawn(async move { content.refresh_napplet_status().await });
+        }
+    }
+
+    /// The installed napplets an update check should ask about, as addresses
+    /// — from the pointer each was added by (its relay hints included), or
+    /// the `(author, d)` pair when there was none.
+    fn napplet_refresh_targets(&self) -> Vec<crate::napplet::NappletAddr> {
+        let Some(content) = self.content.as_ref() else {
+            return Vec::new();
+        };
+        content
+            .library_snapshot()
+            .into_iter()
+            .filter(|i| i.kind == crate::content::LibraryKind::Napplet)
+            .filter_map(|i| {
+                let pointer = if i.pointer.is_empty() {
+                    match &i.d_tag {
+                        Some(d) => format!("{}:{d}", i.author_npub),
+                        None => i.author_npub.clone(),
+                    }
+                } else {
+                    i.pointer.clone()
+                };
+                crate::napplet::NappletAddr::parse(&pointer).ok()
+            })
+            .collect()
     }
 
     fn import_nsite(&mut self, dir: &str) {
@@ -1658,8 +1705,8 @@ impl AppRuntime {
                 self.identity.own_npub.clone(),
             ));
 
-            let host = Arc::new(crate::napplet::NappletHost::new(
-                myco_napplet_runtime::dispatch::NapContext {
+            let host = Arc::new(
+                crate::napplet::NappletHost::new(myco_napplet_runtime::dispatch::NapContext {
                     signer,
                     relay: content.relay(),
                     sink,
@@ -1668,8 +1715,12 @@ impl AppRuntime {
                     lanes: outbox,
                     blobs: content.blobs(),
                     fetcher: Arc::new(crate::napplet::BlossomFetcher::new(content.clone())),
-                },
-            ));
+                })
+                // Served versions come from the content layer's pins, so a
+                // newer manifest with no blob behind it cannot displace the
+                // one that opens.
+                .with_manifests(content.clone()),
+            );
 
             // Feed every accepted event to open napplets' subscriptions — this
             // device's own publishes and anything a peer carried here. Without
@@ -2071,6 +2122,11 @@ impl AppRuntime {
             app_version: self.app_version.clone(),
             multipath_core: cfg!(feature = "fips-multipath"),
             napplet_review: self.napplet_review.lock().unwrap().clone(),
+            napplet_status: self
+                .content
+                .as_ref()
+                .map(|c| c.napplet_status_snapshot())
+                .unwrap_or_default(),
             napplet_domains: myco_napplet_runtime::IMPLEMENTED_DOMAINS
                 .iter()
                 .filter(|d| !myco_napplet_runtime::MANDATORY_DOMAINS.contains(d))

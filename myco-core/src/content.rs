@@ -67,6 +67,23 @@ pub struct UpdateCheckView {
     pub generation: u64,
 }
 
+/// How the nsite half of an update check ended.
+enum NsiteCheck {
+    /// No nsites installed; nothing was asked.
+    Nothing,
+    /// Checked, with the message to show.
+    Done(String),
+}
+
+/// The napplet half of an update-check toast.
+fn napplet_update_message(updated: usize, checked: usize) -> String {
+    match (updated, checked) {
+        (_, 0) => "no napplets to check".to_string(),
+        (0, _) => "napplets are up to date".to_string(),
+        (n, _) => format!("{n} napplet(s) updated"),
+    }
+}
+
 /// What kind of app a Library entry is.
 ///
 /// Defaults to [`LibraryKind::Nsite`] so every entry written before napplets
@@ -127,6 +144,18 @@ pub struct LibraryItem {
 pub struct NappletGrants {
     pub granted: Vec<String>,
     pub denied: Vec<String>,
+}
+
+/// Whether an installed napplet can open, for its tile.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NappletStatusView {
+    /// The shell host the Library entry carries as `url_host`.
+    pub host: String,
+    /// `ready` when the served manifest and its index blob are both here,
+    /// `missing` when either is not.
+    pub state: String,
+    pub message: String,
 }
 
 impl NappletGrants {
@@ -528,6 +557,10 @@ pub struct Content {
     /// `docs/design/nsite/nsite-updates.md` §1. Persisted to `active.json`.
     active_manifests: Mutex<HashMap<String, Event>>,
     active_path: PathBuf,
+    /// Whether each installed napplet can open right now, keyed by shell host.
+    /// Rebuilt at startup, after a cache wipe, and whenever a version is
+    /// pinned — the napplet counterpart of `sites` for nsites.
+    napplet_status: Mutex<HashMap<String, NappletStatusView>>,
 }
 
 /// A [`RelayBackend`] view the **gateway** reads: it returns the core-chosen
@@ -724,6 +757,7 @@ impl Content {
             received_dir,
             active_manifests: Mutex::new(active_manifests),
             active_path,
+            napplet_status: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1154,10 +1188,9 @@ impl Content {
     pub fn add_to_library(&self, addr: &SiteAddr, title: Option<&str>, added_at: u64) {
         let mut lib = self.library.lock().unwrap();
         let npub = addr.author.to_bech32().unwrap_or_default();
-        if let Some(item) = lib
-            .iter_mut()
-            .find(|i| i.kind == LibraryKind::Nsite && i.author_npub == npub && i.d_tag == addr.d_tag)
-        {
+        if let Some(item) = lib.iter_mut().find(|i| {
+            i.kind == LibraryKind::Nsite && i.author_npub == npub && i.d_tag == addr.d_tag
+        }) {
             item.pinned = true;
             if let Some(t) = title {
                 item.title = t.to_string();
@@ -1374,6 +1407,50 @@ impl Content {
                 Err(_) => {}
             }
         }
+        self.refresh_napplet_status().await;
+    }
+
+    /// Recompute [`NappletStatusView`] for every installed napplet: ready when
+    /// the served manifest and its index blob are both local, missing when not.
+    pub async fn refresh_napplet_status(&self) {
+        let napplets: Vec<LibraryItem> = self
+            .library_snapshot()
+            .into_iter()
+            .filter(|i| i.kind == LibraryKind::Napplet)
+            .collect();
+        let mut fresh = HashMap::new();
+        for item in napplets {
+            let ready = match self.napplet_keep_set(&item).await {
+                Some((_, index)) => self.blobs.has(&index).await,
+                None => false,
+            };
+            let (state, message) = if ready {
+                ("ready", "Ready")
+            } else {
+                ("missing", "Not on this phone — hold to reload")
+            };
+            fresh.insert(
+                item.url_host.clone(),
+                NappletStatusView {
+                    host: item.url_host.clone(),
+                    state: state.to_string(),
+                    message: message.to_string(),
+                },
+            );
+        }
+        *self.napplet_status.lock().unwrap() = fresh;
+    }
+
+    pub fn napplet_status_snapshot(&self) -> Vec<NappletStatusView> {
+        let mut out: Vec<NappletStatusView> = self
+            .napplet_status
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.host.cmp(&b.host));
+        out
     }
 
     // --- circle (paired peers we pull from) ---
@@ -3141,7 +3218,36 @@ impl Content {
     /// until EOSE), and for each newer-than-active candidate stages its blobs and
     /// activates when complete. Spawn-not-block; the UI polls `siteStatus`.
     pub async fn check_updates(self: Arc<Self>) {
+        self.check_updates_with(async { None }).await
+    }
+
+    /// Check nsites and, through `napplets`, napplets — one "Checking…" and
+    /// one result toast for both. `napplets` resolves to
+    /// `Some((updated, checked))`, or `None` when there are none to check;
+    /// the napplet path lives in `napplet.rs` because it needs the host.
+    pub async fn check_updates_with<F>(self: Arc<Self>, napplets: F)
+    where
+        F: std::future::Future<Output = Option<(usize, usize)>>,
+    {
         self.set_update_check(true, "Checking for updates…");
+        let (nsites, napplets) = tokio::join!(self.clone().check_nsite_updates(), napplets);
+        let msg = match (nsites, napplets) {
+            (NsiteCheck::Nothing, Some((updated, checked))) => {
+                napplet_update_message(updated, checked)
+            }
+            (NsiteCheck::Nothing, None) => "No apps to check".to_string(),
+            (NsiteCheck::Done(msg), None) => msg,
+            (NsiteCheck::Done(msg), Some((updated, checked))) => {
+                format!("{msg}; {}", napplet_update_message(updated, checked))
+            }
+        };
+        self.finish_update_check(&msg);
+    }
+
+    /// The nsite half of an update check. Progress lands in `update_check`
+    /// as it goes; the final message is returned rather than posted, so the
+    /// caller can join it with the napplet half.
+    async fn check_nsite_updates(self: Arc<Self>) -> NsiteCheck {
         // Tracked sites + the union of their authors (one filter covers all).
         let addrs: Vec<SiteAddr> = self
             .library_snapshot()
@@ -3149,8 +3255,7 @@ impl Content {
             .filter_map(library_addr)
             .collect();
         if addrs.is_empty() {
-            self.finish_update_check("No apps to check");
-            return;
+            return NsiteCheck::Nothing;
         }
         let authors: Vec<String> = {
             let mut s: HashSet<String> = HashSet::new();
@@ -3189,8 +3294,7 @@ impl Content {
             crate::ip_source::default_relays()
         };
         if mesh_peers.is_empty() && online.is_empty() {
-            self.finish_update_check("No peers or relays to check");
-            return;
+            return NsiteCheck::Done("No peers or relays to check".to_string());
         }
         let mesh_count = mesh_peers.len();
         tracing::info!(
@@ -3291,8 +3395,7 @@ impl Content {
             "update check: results"
         );
         if candidates.is_empty() {
-            self.finish_update_check("All apps are up to date");
-            return;
+            return NsiteCheck::Done("All apps are up to date".to_string());
         }
 
         // Download + activate each, concurrently. Reflect progress, then report.
@@ -3312,7 +3415,7 @@ impl Content {
         } else {
             format!("{applied} of {n} updated; some downloads failed")
         };
-        self.finish_update_check(&msg);
+        NsiteCheck::Done(msg)
     }
 
     fn set_update_check(&self, checking: bool, message: &str) {
@@ -5079,8 +5182,8 @@ mod tests {
 
 #[cfg(test)]
 mod library_kind_tests {
-    use super::*;
     use super::tests::tmp;
+    use super::*;
     use nostr::nips::nip19::ToBech32;
 
     fn entry(kind: LibraryKind, d_tag: &str) -> LibraryItem {
@@ -5147,7 +5250,10 @@ mod library_kind_tests {
         content.add_to_library(&addr, Some("Bitchat site again"), 3);
         assert_eq!(content.library_snapshot().len(), 2);
         assert_eq!(
-            content.napplet_grants(&npub, Some("bitchat")).unwrap().granted,
+            content
+                .napplet_grants(&npub, Some("bitchat"))
+                .unwrap()
+                .granted,
             vec!["relay".to_string()],
             "re-adding the nsite touched the napplet's grants"
         );
@@ -5167,7 +5273,11 @@ mod library_kind_tests {
         for (_, bytes) in &napplet.blobs {
             content.blobs().put(bytes).await.unwrap();
         }
-        content.relay().publish(napplet.manifest.clone()).await.unwrap();
+        content
+            .relay()
+            .publish(napplet.manifest.clone())
+            .await
+            .unwrap();
         // Something else to prove the wipe still wipes.
         content.blobs().put(b"stray bytes").await.unwrap();
         assert_eq!(content.cache_view().blob_count, 2);
@@ -5184,8 +5294,16 @@ mod library_kind_tests {
         );
         content.wipe_cache().await.unwrap();
 
-        assert_eq!(content.cache_view().relay_events, 1, "the napplet manifest was wiped");
-        assert_eq!(content.cache_view().blob_count, 1, "the index blob was wiped");
+        assert_eq!(
+            content.cache_view().relay_events,
+            1,
+            "the napplet manifest was wiped"
+        );
+        assert_eq!(
+            content.cache_view().blob_count,
+            1,
+            "the index blob was wiped"
+        );
         let kept = nsite_deck::seams::newest_in_slot(
             content.relay().as_ref(),
             myco_napplet_runtime::KIND_NAMED,
@@ -5211,5 +5329,23 @@ mod library_kind_tests {
         let item: LibraryItem = serde_json::from_str(stored).unwrap();
         assert_eq!(item.kind, LibraryKind::Nsite);
         assert!(library_addr(&item).is_some());
+    }
+}
+
+#[async_trait]
+impl crate::napplet::ManifestStore for Content {
+    async fn current(
+        &self,
+        kind: u16,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+    ) -> anyhow::Result<Option<Event>> {
+        // The active view substitutes the pinned version for the relay's
+        // newest — the same gate the nsite gateway reads through.
+        nsite_deck::seams::newest_in_slot(&self.active_backend(), kind, author, d_tag).await
+    }
+
+    fn pin(&self, manifest: &Event) {
+        self.set_active(manifest);
     }
 }

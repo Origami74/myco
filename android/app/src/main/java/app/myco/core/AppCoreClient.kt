@@ -20,6 +20,11 @@ data class BleAdvert(
 )
 
 /** Per-site sync/readiness for an `OpenNsite` (keyed by the `<host>` label). */
+/** Whether an installed napplet can open: `ready`, or `missing` with a reason. */
+data class NappletStatus(val state: String, val message: String) {
+    val ready: Boolean get() = state == "ready"
+}
+
 data class SiteStatus(
     val host: String,
     val authorNpub: String,
@@ -307,6 +312,11 @@ data class AppState(
     val library: List<LibraryItem>,
     /** A fetched napplet awaiting install review, or null. */
     val nappletReview: NappletReview? = null,
+    /**
+     * Whether each installed napplet can open right now, keyed by the Library
+     * entry's `urlHost`. Missing from the map means not yet computed.
+     */
+    val nappletStatus: Map<String, NappletStatus> = emptyMap(),
     /** How far napplets may reach over the mesh (NAP-MESH), and the most each cap may be. */
     val nappletMeshReach: NappletMeshReach = NappletMeshReach(),
     /** Every capability Myco can grant a napplet, in sheet order. */
@@ -639,6 +649,17 @@ data class AppState(
                 sites = sites,
                 library = library,
                 nappletReview = nappletReview,
+                nappletStatus = o.optJSONArray("nappletStatus")?.let { arr ->
+                    buildMap {
+                        for (i in 0 until arr.length()) {
+                            val st = arr.optJSONObject(i) ?: continue
+                            val host = st.optString("host")
+                            if (host.isNotEmpty()) {
+                                put(host, NappletStatus(st.optString("state"), st.optString("message")))
+                            }
+                        }
+                    }
+                }.orEmpty(),
                 nappletDomains = o.optJSONArray("nappletDomains")?.let { d ->
                     (0 until d.length()).map { d.optString(it) }
                 }.orEmpty(),

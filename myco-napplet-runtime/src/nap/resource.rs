@@ -576,7 +576,11 @@ mod tests {
         // line and is delivered, the third is refused unfetched.
         assert_eq!(ok, vec![true, true, false], "{items:?}");
         assert_eq!(items[2]["error"], "too-large");
-        assert_eq!(fetcher.asked().len(), 2, "the third blob was fetched anyway");
+        assert_eq!(
+            fetcher.asked().len(),
+            2,
+            "the third blob was fetched anyway"
+        );
     }
 
     #[tokio::test]
