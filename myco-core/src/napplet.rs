@@ -295,11 +295,21 @@ impl NappletHost {
             }
         };
 
-        // Waits its turn rather than giving up. Capabilities are async — a
-        // relay read now, a publish and a network round trip later — so frames
-        // genuinely do overlap.
-        let mut session = session.lock().await;
-        let out = dispatch(&self.ctx, &mut session, &message).await;
+        // The session is held only for what changes it — the handshake, a
+        // subscription opening or closing. A read runs against a snapshot
+        // with the lock released: a relay query waits on the network for
+        // seconds, and holding the session across it would queue every other
+        // call from this window behind it, until the napplet's own timeout
+        // fired on a call that had not even started. The gate (established,
+        // granted) is checked on the snapshot, which is as current as the
+        // moment the call arrived.
+        let out = if myco_napplet_runtime::needs_session(&message) {
+            let mut session = session.lock().await;
+            dispatch(&self.ctx, &mut session, &message).await
+        } else {
+            let mut snapshot = session.lock().await.clone();
+            dispatch(&self.ctx, &mut snapshot, &message).await
+        };
 
         out.envelopes()
             .iter()
@@ -632,7 +642,7 @@ impl myco_napplet_runtime::seams::BlobFetcher for BlossomFetcher {
             return Ok(Some(found));
         }
 
-        if self.content.is_offline_only() {
+        if self.content.internet_looks_down() {
             return Ok(None);
         }
         let public = crate::ip_source::IpPeerSource::new(Vec::new(), self.public_servers.clone());

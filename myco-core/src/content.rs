@@ -327,6 +327,11 @@ pub(crate) const PULL_BUDGET_MS: u32 = 10_000;
 /// arrive only ever shortens this.
 const PULL_HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// How long napplet-driven internet lanes are skipped after every public relay
+/// failed in one round. Short: a phone walking back into Wi-Fi should not wait
+/// long to notice.
+pub(crate) const INTERNET_DOWN_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The mesh access gate backing the relay + Blossom servers: content (reads, chat,
 /// manifests, blobs) is restricted to **paired** (Circle) peers, and what a paired
 /// peer may do is its own [`PeerPerms`] record.
@@ -414,6 +419,9 @@ pub struct Content {
     /// it pulls only over the mesh (holder + connected Circle peers). Lets you
     /// verify the mesh path even when this device has internet (e.g. a hotspot).
     offline_only: AtomicBool,
+    /// When the internet last looked down from here, as a moment until which
+    /// napplet-driven internet lanes are skipped. See [`Content::internet_looks_down`].
+    internet_down_until: Mutex<Option<std::time::Instant>>,
     library: Mutex<Vec<LibraryItem>>,
     library_path: PathBuf,
     /// The Circle: paired peers we pull from over the mesh. Persisted.
@@ -658,6 +666,7 @@ impl Content {
             blobs,
             source: Mutex::new(None),
             offline_only: AtomicBool::new(false),
+            internet_down_until: Mutex::new(None),
             library: Mutex::new(library),
             library_path,
             circle: Mutex::new(circle),
@@ -698,6 +707,38 @@ impl Content {
 
     pub fn is_offline_only(&self) -> bool {
         self.offline_only.load(Ordering::Relaxed)
+    }
+
+    /// Whether a napplet's internet lane should be skipped right now: the
+    /// user said mesh-only, or every public relay timed out a moment ago.
+    ///
+    /// The second is a breaker, not a setting. A phone with no route out
+    /// still has DNS and TCP timeouts to pay, per relay, per call — and a
+    /// napplet that fires several calls pays them several times over while
+    /// its local results wait behind them. One full round of failures buys
+    /// [`INTERNET_DOWN_FOR`] of skipping; the next call after that tries again.
+    pub fn internet_looks_down(&self) -> bool {
+        if self.is_offline_only() {
+            return true;
+        }
+        self.internet_down_until
+            .lock()
+            .unwrap()
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    /// Record how a round of internet lanes went. All failed → trip the
+    /// breaker; any succeeded → reset it.
+    pub fn note_internet_round(&self, any_succeeded: bool, any_tried: bool) {
+        if !any_tried {
+            return;
+        }
+        let mut until = self.internet_down_until.lock().unwrap();
+        *until = if any_succeeded {
+            None
+        } else {
+            Some(std::time::Instant::now() + INTERNET_DOWN_FOR)
+        };
     }
 
     /// The shared per-peer relay pool, for building a mesh source against a

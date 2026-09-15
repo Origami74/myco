@@ -74,6 +74,23 @@ impl Outcome {
     }
 }
 
+/// Whether handling `message` changes the session — the handshake, and
+/// opening or closing a subscription. Everything else reads the session for
+/// the gate and nothing more.
+///
+/// A host uses this to decide what to hold while a call runs. A relay read
+/// waits on the network for seconds; holding the session across it queues
+/// every other call from that window behind it, and a napplet that fires
+/// five queries at once has its fifth time out on the shim side before it
+/// is even started. A stateless call can run against a snapshot instead,
+/// and does — see `NappletHost::frame` in `myco-core`.
+pub fn needs_session(message: &Envelope) -> bool {
+    matches!(
+        (message.domain(), message.action()),
+        ("shell", _) | ("relay" | "mesh" | "outbox", "subscribe" | "close")
+    )
+}
+
 /// Route one inbound message for one napplet's session.
 pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelope) -> Outcome {
     // Results travel runtime -> napplet. One arriving the other way is either a
@@ -137,6 +154,59 @@ mod tests {
     use crate::session::NappletIdentity;
     use crate::testing::test_context;
     use serde_json::json;
+
+    /// What `needs_session` says is stateless must leave the session as it
+    /// found it — a host runs those against a snapshot and throws it away.
+    #[tokio::test]
+    async fn stateless_calls_do_not_change_the_session() {
+        let (ctx, _signer) = test_context();
+        let mut s = Session::new(
+            NappletIdentity::new("chat", "aggregate"),
+            ["relay", "mesh", "outbox", "resource", "identity"],
+        );
+        s.on_ready();
+        s.subscribe("keep", vec![nostr::Filter::new()]);
+        let before = s.clone();
+        for (t, fields) in [
+            ("relay.query", json!({"filters": {"kinds": [1]}})),
+            (
+                "relay.publish",
+                json!({"event": {"kind": 1, "content": "x"}}),
+            ),
+            ("mesh.info", json!({})),
+            (
+                "mesh.publish",
+                json!({"event": {"kind": 1, "content": "x"}}),
+            ),
+            ("outbox.query", json!({"filters": {"kinds": [1]}})),
+            ("outbox.resolveRelays", json!({"target": {}})),
+            ("resource.info", json!({})),
+            ("identity.getPublicKey", json!({})),
+        ] {
+            let mut e = Envelope::new(t).with_id("x");
+            for (k, v) in fields.as_object().unwrap() {
+                e = e.with_field(k.clone(), v.clone());
+            }
+            assert!(!needs_session(&e), "{t} was marked stateful");
+            let _ = dispatch(&ctx, &mut s, &e).await;
+            assert_eq!(
+                s.subscription_count(),
+                before.subscription_count(),
+                "{t} changed the session"
+            );
+        }
+        for t in [
+            "shell.ready",
+            "relay.subscribe",
+            "relay.close",
+            "mesh.subscribe",
+            "mesh.close",
+            "outbox.subscribe",
+            "outbox.close",
+        ] {
+            assert!(needs_session(&Envelope::new(t)), "{t} was marked stateless");
+        }
+    }
 
     fn session(granted: &[&str]) -> Session {
         Session::new(NappletIdentity::new("chat", "aggregate"), granted.to_vec())

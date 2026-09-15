@@ -86,6 +86,26 @@ class NappletActivity : ComponentActivity() {
 
     /** Drains runtime-initiated frames while the window is open. */
     private var drainJob: kotlinx.coroutines.Job? = null
+    /** Frames from the shell, in arrival order, consumed off the main thread. */
+    private val inbound = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    private var frameJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Drive one frame through the runtime and post its replies to the shell.
+     * Returns true when a reply was `shell.init` — the handshake has answered
+     * and later frames may overlap.
+     */
+    private suspend fun relay(frame: String): Boolean {
+        val replies = runCatching { client.nappletFrame(sessionId, frame) }.getOrDefault(emptyList())
+        var init = false
+        withContext(Dispatchers.Main) {
+            for (reply in replies) {
+                if (reply.contains("\"shell.init\"")) init = true
+                replyChannel?.postMessage(reply)
+            }
+        }
+        return init
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -156,8 +176,26 @@ class NappletActivity : ComponentActivity() {
             if (!isMainFrame) return@addWebMessageListener
             replyChannel = replyProxy
             val frame = message.data ?: return@addWebMessageListener
-            for (reply in client.nappletFrame(sessionId, frame)) {
-                replyProxy.postMessage(reply)
+            // Never on this thread: a capability call can wait on the network
+            // for seconds, and this is the main thread. Queued in arrival
+            // order; the consumer decides what may overlap.
+            inbound.trySend(frame)
+        }
+
+        // The inbound frames, driven off the main thread. Until the handshake
+        // has answered, frames run one at a time in order — `shell.ready` must
+        // land before the first capability call, or that call is refused as
+        // "not established". After it, each frame gets its own coroutine, so
+        // a relay query waiting on a slow relay does not hold up the publish
+        // behind it. Rust holds the session only for calls that change it.
+        frameJob = lifecycleScope.launch(Dispatchers.IO) {
+            var established = false
+            for (frame in inbound) {
+                if (established) {
+                    launch { relay(frame) }
+                } else {
+                    if (relay(frame)) established = true
+                }
             }
         }
 
@@ -213,6 +251,8 @@ class NappletActivity : ComponentActivity() {
 
     override fun onDestroy() {
         drainJob?.cancel()
+        frameJob?.cancel()
+        inbound.close()
         replyChannel = null
         // Drop the session with the window. Rust ignores every later frame for
         // it, so a leaked WebView cannot keep a capability session alive.

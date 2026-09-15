@@ -171,7 +171,7 @@ impl OutboxService {
     fn allowed(&self, lane: &RelayLane) -> bool {
         match lane {
             RelayLane::Local => true,
-            RelayLane::Internet { .. } => !self.content.is_offline_only(),
+            RelayLane::Internet { .. } => !self.content.internet_looks_down(),
             RelayLane::Mesh { url } => match mesh_relay_npub(url) {
                 Some(npub) => npub != self.own_npub && self.content.circle_npubs().contains(&npub),
                 None => false,
@@ -381,10 +381,19 @@ impl LaneTransport for OutboxService {
         filters: &[Filter],
         timeout: Duration,
     ) -> Vec<(RelayLane, Option<Vec<Event>>)> {
-        join_all(lanes.iter().map(|lane| async move {
-            (lane.clone(), self.query_lane(lane, filters, timeout).await)
-        }))
-        .await
+        let tried_internet = lanes
+            .iter()
+            .any(|l| matches!(l, RelayLane::Internet { .. }) && self.allowed(l));
+        let out: Vec<(RelayLane, Option<Vec<Event>>)> =
+            join_all(lanes.iter().map(|lane| async move {
+                (lane.clone(), self.query_lane(lane, filters, timeout).await)
+            }))
+            .await;
+        let any_ok = out
+            .iter()
+            .any(|(l, r)| matches!(l, RelayLane::Internet { .. }) && r.is_some());
+        self.content.note_internet_round(any_ok, tried_internet);
+        out
     }
 
     async fn publish(
@@ -393,10 +402,18 @@ impl LaneTransport for OutboxService {
         event: &Event,
         timeout: Duration,
     ) -> Vec<(RelayLane, bool)> {
-        join_all(lanes.iter().map(|lane| async move {
+        let tried_internet = lanes
+            .iter()
+            .any(|l| matches!(l, RelayLane::Internet { .. }) && self.allowed(l));
+        let out: Vec<(RelayLane, bool)> = join_all(lanes.iter().map(|lane| async move {
             (lane.clone(), self.publish_lane(lane, event, timeout).await)
         }))
-        .await
+        .await;
+        let any_ok = out
+            .iter()
+            .any(|(l, ok)| matches!(l, RelayLane::Internet { .. }) && *ok);
+        self.content.note_internet_round(any_ok, tried_internet);
+        out
     }
 
     async fn pull_into_local(&self, lanes: &[RelayLane], filters: &[Filter]) -> anyhow::Result<()> {
@@ -815,6 +832,56 @@ mod tests {
         assert_eq!(answers[0].1.as_ref().map(|e| e.len()), Some(1));
         assert_eq!(answers[1].1.as_ref().map(|e| e.len()), Some(1));
         assert!(answers[2].1.is_none(), "a dead relay answered");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One round where every internet lane failed trips a breaker: the next
+    /// round skips the internet at once instead of paying the timeouts
+    /// again, and reports the lane as unreached so the answer says
+    /// `incomplete`.
+    #[tokio::test]
+    async fn a_dead_internet_trips_the_breaker_for_the_next_round() {
+        let dir = std::env::temp_dir().join(format!("myco-outbox-breaker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let svc = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content.clone(),
+            "npub1me".to_string(),
+        );
+        let dead = RelayLane::Internet {
+            url: "ws://127.0.0.1:1".to_string(),
+        };
+        let filters = [Filter::new().kind(Kind::TextNote)];
+
+        let first = svc
+            .query(
+                std::slice::from_ref(&dead),
+                &filters,
+                Duration::from_secs(2),
+            )
+            .await;
+        assert!(first[0].1.is_none());
+        assert!(
+            content.internet_looks_down(),
+            "one failed round should trip the breaker"
+        );
+
+        let started = std::time::Instant::now();
+        let second = svc
+            .query(
+                std::slice::from_ref(&dead),
+                &filters,
+                Duration::from_secs(2),
+            )
+            .await;
+        assert!(second[0].1.is_none());
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the tripped breaker still waited on the internet"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

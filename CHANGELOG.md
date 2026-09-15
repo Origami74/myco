@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A napplet's relay or outbox query no longer freezes the screen or queues
+  every other call behind it. Capability calls ran on the UI thread and
+  one at a time per window, so a few queries against unreachable relays
+  froze the app for seconds each and timed the last one out. Calls now run
+  off the main thread and overlap once the handshake is done; only calls
+  that change the session (subscribe, close) still take their turn. When
+  every public relay fails, the internet is skipped for the next 30 s
+  instead of paying the timeouts again on each call.
+
 ### Changed
 
 - A napplet's `relay.publish` now goes where NAP-RELAY says — the relay pool:
