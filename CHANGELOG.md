@@ -7,76 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- A napplet installed before this version can now use capabilities it
-  declared that Myco has since learned — it was refused, and for pictures
-  the refusal arrived in a shape the napplet read as an empty download
-  (`cannot read properties of undefined (reading 'arrayBuffer')`). Opening
-  an installed napplet grants what it declared, as of this version; the
-  long-press sheet shows the result. Loading pictures and files is now a
-  default grant, listed on the install sheet like the others.
-- A napplet's relay or outbox query no longer freezes the screen or queues
-  every other call behind it. Capability calls ran on the UI thread and
-  one at a time per window, so a few queries against unreachable relays
-  froze the app for seconds each and timed the last one out. Calls now run
-  off the main thread and overlap once the handshake is done; only calls
-  that change the session (subscribe, close) still take their turn. When
-  every public relay fails, the internet is skipped for the next 30 s
-  instead of paying the timeouts again on each call.
-
-### Changed
-
-- A napplet's `relay.publish` now goes where NAP-RELAY says — the relay pool:
-  this phone's own relay, and the public relays when reachable — and no
-  longer floods the mesh. Reaching the people nearby is the new `mesh`
-  capability, which the install screen asks about separately.
-- Wi-Fi Aware carries several phones at once instead of one. The lane ran a
-  single UDP socket, and Android lets a socket serve only one Wi-Fi Aware
-  connection, so a second phone's link came up and then went quiet — the
-  hardware was never the limit. Each phone now gets a socket of its own, up to
-  four at a time.
-
 ### Added
 
-- Hold an installed napplet → **Manage permissions**: switch each
-  capability on or off — "send messages to everyone nearby", "load
-  pictures", and so on, in the same words the install sheet used. A change
-  restarts the app if it is open, so what it set up at launch is set up
-  again with the new permissions. For an app whose declaration was dropped
-  by its build tools, this is how you let it do what it was written to do.
-- "Couldn't find this app" on the napplet review sheet has a **Try again**
-  button. It repeats the same fetch, the sharer's phone first — the case it
-  is for is a tap in a room with no internet, before the sharer's link has
-  come up.
-- Napplets can load pictures and files by content hash (`resource`
-  capability, NAP-RESOURCE, `blossom:` URLs only for now). Your phone's own
-  store is checked first; anything it has to fetch — from a friend's phone
-  over the mesh, or from a public server — is kept, so the next app, or the
-  next phone in the room, gets it without the internet.
-- Napplets get outbox-model relay access (`outbox` capability, NAP-OUTBOX):
-  ask for an author's notes and Myco finds their relays from their NIP-65
-  list — a phone across the room over the mesh, a public relay over the
-  internet, or both — deduplicates what comes back, and says when a relay
-  never answered. Publishing to someone's inbox is a delivery contract:
-  without their relay list it is refused rather than sent somewhere else.
-  Your own relay list (mesh relay first, then the public defaults) is
-  published with your guest profile the first time you open a napplet. An
-  author's relay list that this phone has not seen is fetched once and kept.
-- A napplet's `relay.query` and `relay.subscribe` now read the whole relay
-  pool — this phone's relay and the public relays when reachable — instead
-  of the local store alone; a subscription's `EOSE` marks the local backlog
-  and what the pool holds streams in behind it.
-- Napplets can talk over the mesh: a new `mesh` capability (NAP-MESH, Myco's
-  own, written in the napplet registry's form so it can be proposed upstream)
-  lets an app you have granted it publish to everyone nearby with a chosen
-  number of hops, and pull what it missed from nearby phones. Settings › App
-  reach caps both — how far apps may send (default 3 hops) and how far they
-  may look (default 2) — and zero keeps an app on your phone. The install
-  review sheet says what a mesh grant means before you agree to it.
-- `window.napplet.shell.supports()` now exists inside a napplet. The vendored
-  prelude never provided it, so a napplet checking for a capability the way
-  the spec says threw instead.
+- **Napplets.** Myco runs napplets — single-file NIP-5D programs published
+  on Nostr — beside nsites, as its own apps. Add one by `naddr` (paste, QR,
+  or a bump from a friend, whose phone is asked first so it arrives with no
+  internet), review what it asks for, and it lands on the Apps grid with a
+  🦆 badge and its own full-screen window, home-screen shortcut included.
+  Every napplet runs in a sandboxed iframe inside a trusted shell page with
+  no network of its own; everything it does goes through capabilities Myco
+  implements on its behalf.
+
+  Capabilities this version implements, in the words the install sheet
+  uses:
+  - **Identity** (NAP-IDENTITY) — a user key, separate from the mesh device
+    key, generated the first time a napplet opens and seeded with a guest
+    profile and a relay list of the configured relays. The device is never
+    named in a user-key event.
+  - **Relays** (NAP-RELAY) — read and post as you on the relay pool: this
+    phone's relay and the public relays when reachable. A granted `relay`
+    posts without asking each time. Subscriptions are live; what the pool
+    holds streams in behind the local backlog.
+  - **Outbox** (NAP-OUTBOX) — outbox-model routing: an author's notes from
+    their NIP-65 relays, a phone across the room over the mesh or a public
+    relay over the internet, deduplicated, with `incomplete` when a relay
+    never answered. Inbox delivery is refused rather than misrouted when a
+    relay list is missing.
+  - **Mesh** (NAP-MESH, Myco's own, in the registry's form) — publish to
+    everyone nearby with a chosen hop count and pull what was missed.
+    Settings › App reach caps how far apps may send (default 3 hops) and
+    look (default 2); zero keeps an app on your phone.
+  - **Pictures and files** (NAP-RESOURCE, `blossom:` only) — by content
+    hash, this phone first, then a friend's phone over the mesh, then the
+    public servers; what is fetched is kept for the next app and the next
+    phone in the room, bounded per blob and per request.
+
+  Permissions: the install sheet lists everything a napplet will be able
+  to do — its declared needs plus the defaults (identity, relays, pictures)
+  — before anything is agreed to. Hold an installed napplet → **Manage
+  permissions** to switch each capability on or off; a change is live, and
+  an open window restarts so its startup calls run under the new grants. A
+  capability switched off stays off at the next launch; one the napplet
+  declared that a later Myco learns to do is granted at launch and shown on
+  the sheet.
+
+  Updates and state: "Check for updates" refreshes installed napplets from
+  their pointer's relays beside the nsite check, and the version served is
+  always the one whose bytes are here — a newer manifest with no bytes
+  behind it cannot take an app off the air. A tile dims and says so when
+  its app is not on this phone (after "Delete cache", say); "Reload app"
+  and "Try again" on the review sheet fetch it again, the sharer's phone
+  first.
+
+- The relay store is an LMDB database (`nostr-lmdb`): indexed queries, one
+  small write per event, and negentropy items ready for mesh sync. Chat and
+  other expiring events stay in memory and never touch disk, as before. A
+  store from an earlier version is migrated on first open.
+- Nsite manifests declaring a NIP-5A aggregate hash are checked against it;
+  a mismatch is logged and the site is served on its per-blob hashes
+  (napplets, whose identity the aggregate is, are refused instead).
 - The status panel behind the peers pill shows every link a peer has, not
   just the one carrying traffic: one icon per lane, the active one lit and
   the standbys faded. A phone on Bluetooth and Wi-Fi at once is listed under
@@ -94,6 +83,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and they go out the same encrypted mesh transfer the system Sharesheet
   uses — to the contact's npub, over whatever path reaches them, without
   needing a shared Wi-Fi.
+### Changed
+
+- Wi-Fi Aware carries several phones at once instead of one. The lane ran a
+  single UDP socket, and Android lets a socket serve only one Wi-Fi Aware
+  connection, so a second phone's link came up and then went quiet — the
+  hardware was never the limit. Each phone now gets a socket of its own, up to
+  four at a time.
+
 ### Fixed
 
 - The mesh tunnel comes back on its own after another VPN app takes the

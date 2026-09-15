@@ -26,9 +26,10 @@ re-deriving their interface on every registry change.
 
 It exposes one global, `NappletShimPrelude`, whose `install({ domains })`
 takes an explicit allowlist and installs **only** the requested domains. Myco
-passes the session's offered set, so a napplet that was not granted `relay`
-has no `window.napplet.relay` to call — the namespace and `shell.supports()`
-answer from one source and cannot disagree.
+passes every domain this build **implements**, granted or not: the namespace
+and `shell.supports()` describe the runtime, and the permission is enforced
+per call in `dispatch.rs`, where a refusal is one failed action rather than a
+missing object the napplet reads as "this runtime cannot".
 
 ### Updating
 

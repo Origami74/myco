@@ -69,7 +69,7 @@ transport-neutral; the *web projection* binds them to iframes, `postMessage`, an
 | D5 | Mesh | Standard NAPs behave exactly as specified. Mesh rides those contracts through `<npub>.fips` relay URLs (§7.4); a Myco mesh NAP covers only what has no standard equivalent. |
 | D6 | First milestone | A full verified resolve — manifest, blobs, aggregate, `srcdoc`, handshake. No shortcuts that get thrown away. |
 | D7 | Specification drift | Pin one `napplet/naps` revision and re-audit deliberately (§8). |
-| D8 | Capability policy | An install-time review screen; grants stored per library entry, and switchable per capability on the app's sheet afterwards (live — an open window obeys on its next call). A granted `relay` covers publishing — no per-event prompt. |
+| D8 | Capability policy | An install-time review screen; grants stored per library entry as two sets — `granted` and `denied` — and switchable per capability on the app's sheet afterwards (live — an open window obeys on its next call, and relaunches). A launch may grant a declared domain this build newly implements, but never one the user switched off: "never decided" and "said no" are different slots. A granted `relay` covers publishing — no per-event prompt. |
 | D9 | Acquisition | Fetch online when added by `naddr`; local and mesh-replicable from then on. |
 | D10 | Crate | A new `myco-napplet-runtime`, over shared NIP-5A primitives in `nsite-deck`. |
 | D11 | Intents | Android Intents and NAP-INTENT resolve through one shared resolver, bridged both ways, landed early. Claiming the `nostr:` URI scheme is deferred. |
@@ -338,7 +338,10 @@ stores. The Apps panel grows a type discriminant and its 🦆 / ＠ annotations,
 install-time review screen shows `requires` and records grants on the library entry.
 
 *Done when* a real napplet, fetched by `naddr`, renders on a phone and completes the
-handshake, with `shell.supports()` answering truthfully from granted ∩ implemented.
+handshake. Every implemented API is injected whatever was granted, and
+`shell.supports()` answers from *implemented* — "does this runtime do relay?" is a fact
+about Myco; the permission lives behind the call, where a refusal is one failed action
+the napplet can react to rather than a namespace it reads as permanent absence.
 
 ### S2 — Publish and subscribe
 
@@ -368,6 +371,21 @@ offline-only — bounded and deduplicated by id; `relay.subscribe` answers the l
 sends `EOSE`, and pulls the pool into the local relay behind it, so what arrives is
 delivered live. `options.relay` targets one relay instead, validated like any
 napplet-named URL. Relay selection *by author* is NAP-OUTBOX's (S3).
+
+**Napplet-named relays are shell policy.** NAP-RELAY prescribes `options.relay` (NIP-29
+groups are its example) and says "the shell controls which relays the napplet can access";
+NAP-OUTBOX says `options.relays` "never bypasses shell ACLs" and napplets "MUST NOT be able
+to force connections to private network relays or disallowed hosts". Myco's policy, in one
+place (`validate_relay_url` and `OutboxService::allowed`): a `.fips` host is a mesh lane
+only when its npub is a Circle member and not our own; loopback, link-local, private and
+`.local`/`.localhost` hosts are refused; any other `wss://`/`ws://` host is allowed while
+the internet is; offline-only refuses them all. Note what that permits: a napplet with the
+`relay` grant can make this phone open a connection to a public relay of its choosing and
+put napplet-chosen filter values on the wire — an exfiltration channel the CSP in the
+iframe does not close. It is the conformant reading of the specs and a `relay` grant
+already lets the napplet publish as the user; tightening it (a relay allowlist, or a
+separate grant for naming relays) is a policy knob to revisit with the permission model
+(roadmap).
 
 *Done when* a profile napplet renders a kind 0 and can publish an edit.
 
@@ -469,16 +487,27 @@ a napplet overwrites it, bio link included — the link is a default, not a wate
 ### 7.2 Update semantics versus content addressing
 
 A napplet's identity *is* its aggregate hash, so every build is a different identity, while
-the library row tracks an addressable `(pubkey, dTag)` pointer. Open: whether storage
-carries across versions, what happens to an open window when an update lands, and when a
-pinned session re-resolves. Deferred — but §7.8's task-keying choice quietly picks a side,
-so it wants revisiting before deep links ship.
+the library row tracks an addressable `(pubkey, dTag)` pointer.
+
+Settled the way nsites settle it (`nsite-updates.md` §1): the version **served** is the
+one whose index blob is here, pinned through the content layer's active-version map
+(`ManifestStore` in `napplet.rs`, `Content::set_active` behind it). A newer manifest
+landing in the relay with no blob behind it — pulled by a subscription, flooded by a peer
+— does not displace the one that opens. The pin moves when a fetch brings the new bytes:
+"Check for updates" refreshes every installed napplet from its pointer's relays beside
+the nsite check (`NappletHost::refresh`, bytes first, manifest, then pin), and the tile
+reports `ready` or `missing` from the same pin. An open window keeps its session — it
+pinned the aggregate at open — and sees the new version at its next launch. Storage
+across versions is still open: napplets have no storage capability yet.
 
 ### 7.3 Mesh replication of the new kinds
 
 Napplets replicate for free only if the peer-sync filters and gossip paths know about
-`5129` / `15129` / `35129` and pull their blobs. A small change, easy to forget, worth an
-explicit test.
+`5129` / `15129` / `35129` and pull their blobs. Not done: the napplet kinds are
+gossip-eligible as plain events (no download-then-forward, no Discover listing), and the
+active-version pin (§7.2) is what keeps a manifest arriving that way from breaking the
+installed app. A napplet reaches another phone by the share handoff (bump, QR) and the
+public relays; automatic Circle replication and Discover are roadmap items.
 
 ### 7.4 The outbox model over the mesh
 

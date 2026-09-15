@@ -12,9 +12,10 @@
 //! - **Not yet handshaken — an error.** NAP-SHELL forbids servicing capability
 //!   calls before the session is established. The type is recognized, so
 //!   silence would look like a lost message.
-//! - **Not granted — an error.** The napplet's prelude installs only granted
-//!   domains, so a call here means it went around its own namespace. It already
-//!   knows its grants from `shell.init`, so saying so leaks nothing.
+//! - **Not granted — an error.** Every implemented domain is in the napplet's
+//!   namespace whatever it was granted (see `session.rs`), so this is the one
+//!   place the permission is enforced. Saying so leaks nothing the napplet
+//!   could not learn by trying.
 
 use std::sync::Arc;
 

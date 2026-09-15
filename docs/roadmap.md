@@ -163,6 +163,25 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Blob privacy over the mesh.** Whether a napplet's `blossom:` miss should
   ask every Circle member, or only the peer whose event referenced it —
   [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
+- **One permission model for apps and peers.** Napplet grants (per capability,
+  per app) and Circle permissions (per peer) grew up apart. Bring them under
+  one structure, and use it to answer what a blanket `relay` grant leaves
+  open today: a napplet signs any kind as the user — profile (0), contacts
+  (3), relay list (10002), deletions (5) — with no prompt. Sensitive
+  replaceable kinds want a separate grant or a per-event confirmation; a
+  napplet naming its own relays (`options.relay`, conformant under shell
+  policy — [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2)
+  may want an allowlist or a grant of its own.
+- **Mesh rate limits and a trust model.** A napplet with the `mesh` grant can
+  publish or pull as often as it likes; each pull is a Circle-wide flood at
+  the user's hop cap, and one misbehaving app saturates the BLE lane for the
+  room. Nsites can already do this through the loopback relay. A per-session
+  token bucket is the cheap fix; what the mesh should trust from whom — apps,
+  peers, peers' peers — is the design pass behind it.
+- **Napplet replication and Discover.** Napplet manifests are gossip-eligible
+  as plain events; no download-then-forward, no Discover listing. An
+  installed napplet reaches another phone by the share handoff and the public
+  relays — [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.3.
 - **More NAPs.** `storage` (per-napplet key-value), `intent` + `inc` (open
   another napplet by role; napplet-to-napplet channels), `theme`, `link`,
   `config`; `resource` beyond `blossom:` (`https:`, `nostr:`, SVG
