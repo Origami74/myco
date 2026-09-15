@@ -36,10 +36,18 @@ pub fn default_relays() -> Vec<String> {
 /// Default public Blossom servers, tried after a manifest's own `["server",…]`
 /// hints.
 pub fn default_blossom_servers() -> Vec<String> {
+    // A fixed list is not a resolution policy — a `blossom:sha256:` URI names
+    // no server, and BUD-03 (kind 10063) is how an author says where their
+    // blobs live; reading it is roadmap. Until then the list has to cover the
+    // large public replicas napplets are actually published to: `blssm.us`
+    // and `blossom.ditto.pub` hold the letsmap release set, which none of the
+    // first three do.
     [
         "https://blossom.primal.net",
         "https://cdn.satellite.earth",
         "https://blossom.band",
+        "https://blssm.us",
+        "https://blossom.ditto.pub",
     ]
     .iter()
     .map(|s| s.to_string())

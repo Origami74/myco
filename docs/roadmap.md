@@ -160,6 +160,11 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Peer permissions UI.** The per-peer record exists (`relay_write`,
   `relay_read_multihop`, …) with defaults for everyone; a switch per Circle
   member — [nsite-permissions.md](./design/nsite/nsite-permissions.md) §2.
+- **BUD-03 blob resolution.** A `blossom:sha256:` URI names no server, and
+  Myco resolves it against a fixed list of public replicas. Read the kind
+  10063 server lists of the authors a napplet has been reading from (cached
+  in the local relay like 10002), and the napplet manifest's `server` tags,
+  before the defaults — [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
 - **Blob privacy over the mesh.** Whether a napplet's `blossom:` miss should
   ask every Circle member, or only the peer whose event referenced it —
   [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
