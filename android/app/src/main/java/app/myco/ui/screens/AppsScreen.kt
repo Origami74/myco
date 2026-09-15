@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.HomeMax
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
@@ -102,6 +103,7 @@ fun AppsScreen(
     var confirmRemove by remember { mutableStateOf<SiteStatus?>(null) }
     var showAdd by remember { mutableStateOf(false) }
     var nappletSheetFor by remember { mutableStateOf<LibraryItem?>(null) }
+    var permissionsFor by remember { mutableStateOf<LibraryItem?>(null) }
     var confirmForgetNapplet by remember { mutableStateOf<LibraryItem?>(null) }
 
     // One-shot toast with the result of a "Check for updates" run (fires when the
@@ -237,9 +239,9 @@ fun AppsScreen(
         ModalBottomSheet(onDismissRequest = { nappletSheetFor = null }) {
             NappletSheet(
                 item = item,
-                domains = state.nappletDomains,
-                onGrant = { domain, allowed ->
-                    client.dispatch(NativeActions.setNappletGrant(item.nappletPointer, domain, allowed))
+                onManagePermissions = {
+                    nappletSheetFor = null
+                    permissionsFor = item
                 },
                 onOpen = {
                     nappletSheetFor = null
@@ -275,6 +277,20 @@ fun AppsScreen(
                 onRemove = {
                     nappletSheetFor = null
                     confirmForgetNapplet = item
+                },
+            )
+        }
+    }
+
+    permissionsFor?.let { picked ->
+        // Live entry, not the snapshot: the switches change what this shows.
+        val item = state.library.firstOrNull { it.nappletPointer == picked.nappletPointer } ?: picked
+        ModalBottomSheet(onDismissRequest = { permissionsFor = null }) {
+            PermissionsSheet(
+                item = item,
+                domains = state.nappletDomains,
+                onGrant = { domain, allowed ->
+                    client.dispatch(NativeActions.setNappletGrant(item.nappletPointer, domain, allowed))
                 },
             )
         }
@@ -487,8 +503,7 @@ private sealed interface AppEntry {
 @Composable
 private fun NappletSheet(
     item: LibraryItem,
-    domains: List<String>,
-    onGrant: (domain: String, allowed: Boolean) -> Unit,
+    onManagePermissions: () -> Unit,
     onOpen: () -> Unit,
     onShare: () -> Unit,
     onPinToHome: () -> Unit,
@@ -527,42 +542,66 @@ private fun NappletSheet(
         Spacer(Modifier.height(16.dp))
         SheetAction(Icons.Filled.HomeMax, "Open") { onOpen() }
         SheetAction(Icons.Filled.Share, "Share") { onShare() }
+        // What this app may do, on its own page: the wording is long and the
+        // switches want room.
+        SheetAction(Icons.Filled.Lock, "Manage permissions") { onManagePermissions() }
         SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
 
         // Fetches the app again and shows the same screen it was added with.
         // The way to pick up a newer version, and the way to revisit what it is
         // allowed to do without removing it and finding its link again.
         SheetAction(Icons.Filled.Refresh, "Reload app") { onReload() }
-
-        // What this app may do, in the same words it was asked in — and a
-        // switch for each, because a napplet's own declaration is a statement
-        // of intent its toolchain may have dropped, and the user is the one
-        // who gets to say. Live: an open window sees a change on its next call.
-        Spacer(Modifier.height(12.dp))
-        Text("This app can:", style = MaterialTheme.typography.titleSmall)
-        Spacer(Modifier.height(4.dp))
-        val listed = (domains + item.granted.filter { it !in domains }).distinct()
-        listed.forEach { domain ->
-            val allowed = domain in item.granted
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-            ) {
-                Text(
-                    capabilityWording(domain),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (allowed) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
-                )
-                Switch(checked = allowed, onCheckedChange = { onGrant(domain, it) })
-            }
-        }
         Spacer(Modifier.height(8.dp))
 
         SheetAction(Icons.Filled.Delete, "Remove app", tint = MaterialTheme.colorScheme.error) {
             onRemove()
         }
         SheetAction(Icons.Filled.Info, item.dTag ?: item.authorNpub.take(16)) { }
+    }
+}
+
+/**
+ * What a napplet may do, in the same words the install sheet used, with a
+ * switch for each. A napplet's own declaration is a statement of intent its
+ * toolchain may have dropped; the user is the one who gets to say. A change
+ * is live — an open window of the app is restarted so its startup calls are
+ * made again under the new grants.
+ */
+@Composable
+private fun PermissionsSheet(
+    item: LibraryItem,
+    domains: List<String>,
+    onGrant: (domain: String, allowed: Boolean) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
+        Text(
+            item.title.ifEmpty { item.dTag ?: "This app" },
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+        )
+        Text(
+            "What it's allowed to do. Changing one restarts the app if it's open.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(12.dp))
+        val listed = (domains + item.granted.filter { it !in domains }).distinct()
+        listed.forEach { domain ->
+            val allowed = domain in item.granted
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            ) {
+                Text(
+                    capabilityWording(domain),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (allowed) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.size(12.dp))
+                Switch(checked = allowed, onCheckedChange = { onGrant(domain, it) })
+            }
+        }
     }
 }
 
@@ -768,7 +807,7 @@ private fun capabilityWording(domain: String): String = when (domain) {
     "storage" -> "Save things on this phone"
     "intent" -> "Open your other apps"
     "inc" -> "Talk to your other open apps"
-    "outbox" -> "Choose where to send things on your behalf"
+    "outbox" -> "Post as you to your relays and to other people's, and read from theirs"
     "notify" -> "Send you notifications"
     "theme" -> "Match your colours"
     "link" -> "Open links outside Myco"

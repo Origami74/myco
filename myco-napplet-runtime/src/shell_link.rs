@@ -64,6 +64,14 @@ pub enum ToShell {
     },
     /// Deliver a NAP message into the napplet's iframe.
     Napplet { message: Envelope },
+    /// Tear the window down and open it again — a new session, a fresh
+    /// handshake, the napplet's startup calls made over with the grants as
+    /// they now stand. Sent when the user changes a grant on the app's sheet:
+    /// a live grant covers the *next* call, but a napplet subscribes once at
+    /// startup and does not retry a refusal, so a subscription refused before
+    /// the switch would otherwise never exist. Handled by the window host,
+    /// not the shell page — the shell never reloads in place.
+    Relaunch,
 }
 
 impl ToShell {

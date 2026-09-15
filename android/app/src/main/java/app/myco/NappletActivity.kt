@@ -211,7 +211,17 @@ class NappletActivity : ComponentActivity() {
                         .getOrDefault(emptyList())
                 }
                 // postMessage is main-thread work; the wait above was not.
-                for (frame in frames) replyChannel?.postMessage(frame)
+                for (frame in frames) {
+                    // A grant changed on the app's sheet: this window's napplet
+                    // made its startup calls under the old grants, so start it
+                    // over — new session, fresh handshake. Never in place: the
+                    // shell runs one napplet for one lifetime.
+                    if (frame.contains("\"channel\":\"relaunch\"")) {
+                        recreate()
+                        break
+                    }
+                    replyChannel?.postMessage(frame)
+                }
             }
         }
 

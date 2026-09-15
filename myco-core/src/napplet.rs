@@ -299,18 +299,30 @@ impl NappletHost {
     /// Two authors' napplets with the same `d_tag` open at once would both be
     /// touched; the user's own grant list is the one read on every call, so
     /// the wrong window is at most refused until it reloads.
+    ///
+    /// Each window touched is also told to relaunch (see
+    /// [`ToShell::Relaunch`]): the grant is live for the next call, but the
+    /// napplet made its startup calls — its subscriptions — under the old
+    /// grants, and a refused subscribe is not retried.
     pub async fn apply_grants(&self, d_tag: Option<&str>, granted: Vec<String>) {
         let wanted = d_tag.unwrap_or("");
-        let live: Vec<Arc<tokio::sync::Mutex<Session>>> = {
+        let live: Vec<(
+            Arc<tokio::sync::Mutex<Session>>,
+            mpsc::UnboundedSender<ToShell>,
+        )> = {
             let sessions = self.sessions.lock().unwrap();
-            sessions.values().map(|l| l.session.clone()).collect()
+            sessions
+                .values()
+                .map(|l| (l.session.clone(), l.outbox.clone()))
+                .collect()
         };
-        for session in live {
+        for (session, outbox) in live {
             // A session mid-call is updated when the call ends; the grant is
             // checked per call anyway.
             let mut s = session.lock().await;
             if s.identity().d_tag == wanted {
                 s.set_granted(granted.clone());
+                let _ = outbox.send(ToShell::Relaunch);
             }
         }
     }
