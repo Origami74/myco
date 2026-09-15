@@ -10,21 +10,21 @@
 | :--: | :--: | :--: | :--: | :--: |
 | ![Tap to pair over NFC](docs/images/01-nfc-pairing.png)<br>**Bump phones to pair** | ![Your Circle of paired people](docs/images/02-circle.png)<br>**Your Circle** | ![Share an app with someone](docs/images/03-app-sharing.png)<br>**Share an app** | ![Installed apps on the home screen](docs/images/04-home.png)<br>**Your apps** | ![An installed app running full-screen](docs/images/05-bitchat.png)<br>**Apps run full-screen** |
 
-![Apps from the people you trust — over whatever mesh is around](docs/design/diagrams/intro-01-what-it-is.svg)
+![Your apps live on your home screen and open like any app](docs/design/diagrams/intro-01-your-apps.svg)
 
-Myco is a peer-to-peer app-sharing network. Meet someone, **pair** with a bump
-or a QR scan, and their apps land in your **Apps** grid, ready to use offline.
-Pairing always goes both ways: the code carries a one-time invite, so the moment
-you connect, apps can flow in either direction between you. Anything you install
-you can pass on to the next person — so apps spread from phone to phone, on their
-own, with no servers and no single point that has to stay online. What you do
-*inside* an app — a chat, a doorbell — travels the same way, to the people you
-paired with and no one else.
+Myco is a peer-to-peer app-sharing network. The apps you collect get their own
+home-screen icons, and each one opens full-screen as its own app — no browser,
+no tabs, works offline.
 
-The apps you collect get their own home-screen icons, and each one opens
-full-screen as its own app:
+Meet someone, **pair** with a bump or a QR scan, and their apps land in your
+**Apps** grid. Pairing always goes both ways: the code carries a one-time
+invite, so the moment you connect, apps can flow in either direction between
+you. Anything you install you can pass on to the next person — so apps spread
+from phone to phone, on their own, with no servers and no single point that has
+to stay online. What you do *inside* an app — a chat, a doorbell — travels the
+same way, to the people you paired with and no one else.
 
-![Your apps live on your home screen and open like any app](docs/design/diagrams/intro-02-your-apps.svg)
+![Apps from the people you trust — over whatever mesh is around](docs/design/diagrams/intro-02-what-it-is.svg)
 
 ## How it works (for developers)
 

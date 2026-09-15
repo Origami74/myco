@@ -11,8 +11,8 @@ Two images, redrawn around the ideas a newcomer has to get.
 
 | File | What it shows |
 | --- | --- |
-| [intro-01-what-it-is.svg](intro-01-what-it-is.svg) | One room: the FIPS mesh forms out of whoever is in range (grey); you bump phones to build a **Circle** of people you trust on top of it (indigo); apps come from your Circle and what you do in them travels your Circle. Ben is reached *through a stranger's phone* — the mesh carries the packets, the Circle decides who they are for; Dan is out of range and still in it. |
-| [intro-02-your-apps.svg](intro-02-your-apps.svg) | Your home screen in the middle; tap an icon and the app opens full-screen as its own Recents card — a map on the left, a chat on the right — no browser, no tabs, no Myco chrome. Works offline; one window per app. |
+| [intro-01-your-apps.svg](intro-01-your-apps.svg) | Your home screen in the middle; tap an icon and the app opens full-screen as its own Recents card — a map on the left, a chat on the right — no browser, no tabs, no Myco chrome. Works offline; one window per app. |
+| [intro-02-what-it-is.svg](intro-02-what-it-is.svg) | One room: the FIPS mesh forms out of whoever is in range (grey); you bump phones to build a **Circle** of people you trust on top of it (indigo); apps come from your Circle and what you do in them travels your Circle. Ben is reached *through a stranger's phone* — the mesh carries the packets, the Circle decides who they are for; Dan is out of range and still in it. |
 
 ### Technical (design docs)
 

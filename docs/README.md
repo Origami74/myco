@@ -7,9 +7,9 @@
 > phone, ready to use offline. Anything you install you can pass on — so apps
 > spread from phone to phone, on their own.
 
-![Apps from the people you trust — over whatever mesh is around](design/diagrams/intro-01-what-it-is.svg)
+![Your apps live on your home screen and open like any app](design/diagrams/intro-01-your-apps.svg)
 
-![Your apps live on your home screen and open like any app](design/diagrams/intro-02-your-apps.svg)
+![Apps from the people you trust — over whatever mesh is around](design/diagrams/intro-02-what-it-is.svg)
 
 ---
 
