@@ -592,12 +592,7 @@ private fun PermissionsSheet(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
             ) {
-                Text(
-                    capabilityWording(domain),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (allowed) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
-                )
+                CapabilityRow(domain, dimmed = !allowed, modifier = Modifier.weight(1f))
                 Spacer(Modifier.size(12.dp))
                 Switch(checked = allowed, onCheckedChange = { onGrant(domain, it) })
             }
@@ -769,11 +764,8 @@ private fun NappletReviewSheet(
                 Text("This app will be able to:", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(10.dp))
                 review.grants.forEach { domain ->
-                    Text(
-                        "•  " + capabilityWording(domain),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Spacer(Modifier.height(6.dp))
+                    CapabilityRow(domain)
+                    Spacer(Modifier.height(10.dp))
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -800,21 +792,43 @@ private fun NappletReviewSheet(
  * something this build has never heard of is exactly what the user should see,
  * and dropping it from the list would understate what is being agreed to.
  */
-private fun capabilityWording(domain: String): String = when (domain) {
-    "relay" -> "Read and post as you, whenever it likes, without asking again"
-    "mesh" -> "Send messages as you to everyone nearby on the mesh, and read theirs, without asking again"
-    "identity" -> "See your name and profile"
-    "storage" -> "Save things on this phone"
-    "intent" -> "Open your other apps"
-    "inc" -> "Talk to your other open apps"
-    "outbox" -> "Post as you to your relays and to other people's, and read from theirs"
-    "notify" -> "Send you notifications"
-    "theme" -> "Match your colours"
-    "link" -> "Open links outside Myco"
-    "resource" -> "Load pictures and files"
-    "config" -> "Have settings you can change"
-    "shell" -> "Start up (every app does this)"
-    else -> "Do something this version of Myco doesn't know about (\"$domain\")"
+/** A capability as a person reads it: a name, and what allowing it means. */
+private data class Capability(val title: String, val detail: String)
+
+private fun capabilityWording(domain: String): Capability = when (domain) {
+    "relay" -> Capability("Relays", "Read and post as you on your relays, without asking each time")
+    "outbox" -> Capability("Outbox", "Post as you to your relays and to other people's, and read from theirs")
+    "mesh" -> Capability("Mesh", "Send and receive data within your Circle, without the internet")
+    "identity" -> Capability("Identity", "See your name and profile")
+    "resource" -> Capability("Pictures & files", "Load pictures and files by their content hash")
+    "storage" -> Capability("Storage", "Save things on this phone")
+    "intent" -> Capability("Other apps", "Open your other apps")
+    "inc" -> Capability("App to app", "Talk to your other open apps")
+    "notify" -> Capability("Notifications", "Send you notifications")
+    "theme" -> Capability("Theme", "Match your colours")
+    "link" -> Capability("Links", "Open links outside Myco")
+    "config" -> Capability("Settings", "Have settings you can change")
+    "shell" -> Capability("Start up", "Every app does this")
+    else -> Capability(domain, "Something this version of Myco doesn't know about")
+}
+
+/** One capability, as a title with its meaning underneath. */
+@Composable
+private fun CapabilityRow(domain: String, dimmed: Boolean = false, modifier: Modifier = Modifier) {
+    val c = capabilityWording(domain)
+    Column(modifier = modifier) {
+        Text(
+            c.title,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = if (dimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            c.detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 @Composable
