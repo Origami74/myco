@@ -310,8 +310,8 @@ wire incompatibility:
 - **bitchat is GATT-only.** It advertises service UUID
   `F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C` and moves data through GATT
   characteristic writes/notifies
-  ([../../reference/bitchat-android/app/src/main/java/com/bitchat/android/util/AppConstants.kt](../../../reference/bitchat-android/app/src/main/java/com/bitchat/android/util/AppConstants.kt),
-  [.../mesh/BluetoothMeshService.kt](../../../reference/bitchat-android/app/src/main/java/com/bitchat/android/mesh/BluetoothMeshService.kt)).
+  (bitchat's `app/src/main/java/com/bitchat/android/util/AppConstants.kt`,
+  `.../mesh/BluetoothMeshService.kt`).
 - **FIPS is L2CAP-only.** It advertises UUID
   `9c90b790-2cc5-42c0-9f87-c9cc40648f4c` and moves data through L2CAP CoC
   SeqPacket sockets.

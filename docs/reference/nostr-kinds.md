@@ -47,10 +47,10 @@ cited inline.
 ## nsite content kinds
 
 Source of truth:
-[../../reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)
+the nsite-deck reference (`docs/nsite-protocol.md`)
 (NIP-5A, "Pubkey Static Websites"), and the reference implementation in
-[../../reference/site-deck/internal/sync/service.go](../../reference/site-deck/internal/sync/service.go)
-and [../../reference/site-deck/internal/gateway/handlers.go](../../reference/site-deck/internal/gateway/handlers.go).
+the nsite-deck reference (`internal/sync/service.go`)
+and the nsite-deck reference (`internal/gateway/handlers.go`).
 
 ### Kind 15128 — root-site manifest
 
@@ -69,7 +69,7 @@ and [../../reference/site-deck/internal/gateway/handlers.go](../../reference/sit
 - **Content:** empty.
 - **URL host:** `<pubkeyB36><dTag>` — the 50-char lowercase-base36 pubkey
   directly followed by the d-tag, no separator. Encoder/decoder + regex:
-  [../../reference/site-deck/internal/gateway/base36.go](../../reference/site-deck/internal/gateway/base36.go).
+  the nsite-deck reference (`internal/gateway/base36.go`).
 
 ### Tag layout (both kinds)
 
@@ -224,7 +224,7 @@ unit.
 > the author's `10002` (NIP-65 relay list) and `10063`
 > ([BUD-03](https://github.com/hzrd149/blossom/blob/master/buds/03.md) user
 > Blossom servers) to find public sources, exactly as the Go reference does
-> ([service.go](../../reference/site-deck/internal/sync/service.go)). On the
+> (`service.go`). On the
 > **offline** BLE path these are irrelevant — the source is a single reachable
 > peer's `.fips` services.
 
@@ -331,7 +331,7 @@ and `../../reference/fips/docs/design/fips-nostr-discovery.md`.
 - [../design/nsite/propagation.md](../design/nsite/propagation.md) — flooding the
   author-signed manifests and device-to-device hopping.
 - [./ports.md](./ports.md) — the localhost ports the relay/Blossom listen on.
-- [../../reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)
+- the nsite-deck reference (`docs/nsite-protocol.md`)
   — NIP-5A, the authoritative nsite manifest spec.
 - [../../reference/fips/docs/reference/nostr-events.md](../../reference/fips/docs/reference/nostr-events.md)
   — the authoritative FIPS discovery-kind spec.

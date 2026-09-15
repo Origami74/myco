@@ -1,12 +1,18 @@
 # Identity & pairing
 
-This doc covers how Myco establishes a device identity and how two devices
-become peers. The central simplification over the upstream
-[nostr-vpn](../../../reference/nostr-vpn) design is that Myco has **no network,
-no roster, and no admin**. A "pairing" is not a membership grant — it is just
-the act of learning another peer's npub and treating their relay + Blossom as a
-data source. Everything downstream (mesh address, where to fetch, who to poll)
-is derived deterministically from that one npub.
+This doc covers how Myco establishes a device identity and how two phones
+become **Circle members** of each other. There is **no network, no roster, no
+admin**: a pairing is two people's mutual, signed decision, stored on both
+phones, and it is what admits each to the other's relay and store. Everything
+downstream (mesh address, where to fetch, who to poll) derives
+deterministically from the paired npub. What a pairing *means* — and why it is
+not the same as a FIPS peer link — is [../circle/circle.md](../circle/circle.md).
+
+> **Two keys on this phone.** Everything below is about the **device key**.
+> A napplet publishes as a separate **user key** (`user.nsec`), generated on
+> first napplet use with a guest profile; see
+> [../napplet/napplet-runtime.md §7.1](../napplet/napplet-runtime.md) and the
+> roadmap's login item for bringing your own.
 
 See [diagram 09 — the two identities (device vs nsite author)](../diagrams/09-identity-model.svg)
 and [diagram 02 — Pairing & transitive peer discovery](../diagrams/02-pairing-transitive-discovery.svg).
@@ -72,26 +78,19 @@ the holder's device key addresses the relay, the author key selects the events.
 
 ## 2. Identity storage
 
-Proposed: the secret key (`nsec`) is generated on first launch and persisted in
-the app's private `filesDir` (`Context.getFilesDir()`), owned by the Rust core
-(`myco-core`) and never surfaced to the WebView or to JS.
+The secret key (`identity.nsec`) is generated on first launch and persisted in
+the app's private `filesDir`, owned by the Rust core (`identity_store.rs`) and
+never surfaced to a WebView.
 
 - **Generation:** on first run the core generates a fresh keypair if no key file
-  exists, mirroring how the nostr-vpn core seeds its data dir on first launch
-  (the Android side hands the core a data-dir path —
-  [MainActivity.kt:50–55](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt) —
-  and the core is responsible for what lives there).
+  exists; the Android side hands the core a data-dir path and the core owns
+  what lives there ([settings.md](../../reference/settings.md)).
 - **Scope:** `filesDir` is app-private storage on Android, not world-readable.
   Whether to additionally wrap the key with the Android Keystore / a
   user-supplied passphrase is an open question deferred to
   [security.md](./security.md).
 - **No export in v1:** there is no UI to display or copy the `nsec`. Backup /
   key portability is **TBD / open**.
-
-> Contrast with nostr-vpn: nostr-vpn also stores a Nostr identity, but it pairs
-> that identity with *network* state (which network you joined, the admin set,
-> the roster). Myco stores **only the key**; there is no network record to
-> persist because there is no network.
 
 ## 3. One identity per device (default)
 
@@ -111,28 +110,16 @@ account picker; the single on-disk key *is* the user.
 
 ## 4. QR pairing
 
-### 4.1 Reuse: the scanner and the deep-link path
+### 4.1 The scanner and the deep-link path
 
-Myco reuses nostr-vpn's pairing UX wholesale; only the *payload semantics*
-change.
-
-- **Camera scanner.** The CameraX + ML Kit `BarcodeScanning` dialog is reused
-  as-is:
-  [QrScannerDialog.kt](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt).
-  It is a self-contained Compose component — back-camera preview, QR-only
-  barcode options ([:137–142](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)),
-  single-emit guard, and an `onScanned: (String) -> String?` callback that
-  returns an error string to keep scanning or `null` to accept
-  ([:204–208](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)).
-  Myco changes only what that callback validates (see below).
-- **Deep-link intent.** nostr-vpn already wires a deep-link path: the activity
-  reads `intent.dataString` and, if it matches the scheme, dispatches an import
-  action ([MainActivity.kt:274–279](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt),
-  with the same handling in `onNewIntent`,
-  [:389–397](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt)).
-  Myco reuses this structure with its own scheme, so a `myco://` link
-  opened from anywhere (a chat, an NFC tag, another app) reaches the same
-  add-peer code path as a scanned QR.
+- **Camera scanner.** A ZXing-based scan screen (`PortraitCaptureActivity`)
+  with a single-emit guard and a prefix check on the payload; a scan of anything
+  but a `myco://` code is rejected with "Not a Myco code" and scanning
+  continues.
+- **Deep-link intent.** `MainActivity` handles `myco://` in `onCreate` and
+  `onNewIntent`, so a link opened from anywhere — a chat, an NFC tag, another
+  app — reaches the same add-peer code path as a scanned QR
+  (`share/MycoLink.kt`).
 
 ### 4.2 Our payload: `myco://pair/<base64>`
 
@@ -161,8 +148,7 @@ handshake — proving the peer actually scanned *this* invite — but is itself 
 a membership or authorization token. Its unguessable length is the whole defence:
 there is no key-exchange ceremony, just **echo-and-match** over the already-encrypted
 mesh channel (§6.1). The `base64`
-is URL-safe, unpadded — matching the encoding nostr-vpn uses for its own payloads
-([invite.rs:10](../../../reference/nostr-vpn/crates/nostr-vpn-core/src/invite.rs)).
+is URL-safe, unpadded.
 
 Crucially, the payload carries **no MAC and no PSM**. Those are radio-layer
 details that are (a) volatile (Android MAC randomization) and (b) not needed for
@@ -171,33 +157,15 @@ pre-handshake, not by MAC, and the listener PSM is learned from BLE adverts at
 connect time (see BLE doc / [propagation.md](../nsite/propagation.md)). The QR is a
 *stable, transport-independent* identity; the radio details come over the air.
 
-Validation in the `onScanned` callback is a prefix check, exactly paralleling
-nostr-vpn's `if (!invite.startsWith("nvpn://invite/", …))` guard
-([MainActivity.kt:375–382](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/MainActivity.kt)) —
-ours checks `myco://pair/` and rejects anything else with "Not a Myco
-peer code."
+Validation on scan is a prefix check — `myco://pair/` (or `myco://share/`,
+`myco://app/`, `myco://napplet/`) — and anything else is rejected.
 
-### 4.3 Contrast: what we drop from `nvpn://invite/`
+### 4.3 What the payload deliberately is not
 
-nostr-vpn's QR is a **network invite**, not a peer card. Its decoded shape
-([NetworkInvite in invite.rs:19–40](../../../reference/nostr-vpn/crates/nostr-vpn-core/src/invite.rs))
-carries a versioned, multi-field membership document:
-
-| nvpn://invite/ field | Why Myco drops it |
-| --- | --- |
-| `networkId`, `networkName` | no network construct exists |
-| `inviteSecret` | **kept, but reframed:** Myco carries a one-time `pairSecret` — a long random string echoed back over the Noise-encrypted channel — that proves the peer saw your invite, *not* a join-as-membership / authorization token |
-| `admins[]` | no admin role; data is self-authenticating, not authority-gated |
-| `participants[]` | no roster; you collect peers one npub at a time |
-| `inviterEndpoints[]`, `relays[]` | endpoints derive from npub via `<npub>.fips`; no relay hints needed |
-
-The upstream parser even *requires* an admin to exist
-([invite.rs:89–110](../../../reference/nostr-vpn/crates/nostr-vpn-core/src/invite.rs)) —
-an invite with no admin is an error. Myco has no such concept. We keep the
-prefix-and-base64 *envelope* shape and the URL-safe-no-pad encoding, and throw
-away the entire membership document inside it. Our envelope decodes to three
-fields (`npub`, `name`, `pairSecret`), where `pairSecret` authenticates the
-pairing handshake but grants **no membership or admin authority**.
+It is a **peer card**, not a network invite: no network id, no admin list, no
+roster, no relay hints. The `pairSecret` proves the peer saw *this* invite; it
+grants no membership and no authority. Endpoints derive from the npub
+(`<npub>.fips`), so nothing else needs to be carried.
 
 ## 5. Peer as data source
 
@@ -225,7 +193,7 @@ FIPS (live-path only; see [propagation.md](../nsite/propagation.md)).
 Why this is safe without authorization: all content the peer serves is
 **self-authenticating** — Nostr events are signed by their (external) author and
 Blossom blobs are content-addressed by SHA-256
-([nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md)). A
+(`nsite-protocol.md` (nsite-deck reference)). A
 malicious or impersonating source cannot forge an nsite whose *author* key it
 doesn't hold, and cannot substitute blob content without changing the hash.
 Re-serving an author's already-signed events is normal relay behaviour and does
@@ -233,10 +201,10 @@ not make the serving device the author. So "anyone can be a source" carries no
 trust cost; verification happens at fetch/serve time, covered in
 [security.md](./security.md).
 
-> This is the inversion of the nostr-vpn model: there, being added to a network
-> *granted reachability* (and was gated by an invite secret + admin). Here,
-> learning an npub grants nothing on the peer's side — it only configures *your*
-> client to point at *their* always-derivable address.
+> Learning an npub grants nothing on the peer's side by itself — it only
+> configures *your* client to point at *their* always-derivable address. What
+> grants the peer anything on *your* side is the mutual handshake (§6), which
+> puts them in your Circle.
 
 ## 6. Mutual pairing and transitive authorization
 

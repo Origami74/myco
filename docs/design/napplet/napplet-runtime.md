@@ -1,6 +1,6 @@
 # Napplets: a NIP-5D runtime inside Myco
 
-This document proposes the **app runtime** layer of Myco: a conformant
+This document is the **app runtime** layer of Myco: a conformant
 [NIP-5D](https://github.com/nostr-protocol/nips/pull/2303) napplet runtime, written in
 Rust, hosted in an Android WebView. Where the nsite layer makes an author's static site
 browsable, this layer makes a small Nostr app *runnable* — with the relay, the blob
@@ -17,7 +17,13 @@ Related docs: [./nsite-layer.md](../nsite/nsite-layer.md) (the content layer thi
 [./app-shell.md](../core/app-shell.md) (the per-app window model),
 [./deep-links.md](../core/deep-links.md) (the existing `myco://app/…` link),
 [./identity-pairing.md](../core/identity-pairing.md) (the device key this deliberately does not
-reuse), [../reference/nostr-kinds.md](../../reference/nostr-kinds.md) (event kinds).
+reuse), [../circle/circle.md](../circle/circle.md) (what "everyone nearby" means),
+[../reference/nostr-kinds.md](../../reference/nostr-kinds.md) (event kinds).
+
+> Status: built through S2, S3's `NAP-OUTBOX` and `NAP-RESOURCE` (`blossom:`
+> only), and S5. Each stage below says what shipped. Not built: S2b (intents,
+> `NAP-INC`), S4 (composition), the rest of S3 (`storage`, `theme`, `notify`,
+> `link`, `config`). Login with your own key is the roadmap's N1.
 
 ---
 
@@ -367,6 +373,10 @@ napplet-named URL. Relay selection *by author* is NAP-OUTBOX's (S3).
 
 ### S2b — Intents and deep links
 
+**Not built** beyond `myco://napplet/<naddr>` opening install review and a
+share by bump or QR. The archetype registry, `NAP-INTENT` and `NAP-INC` are
+still to come.
+
 Early rather than late: this is how a napplet gets *reached*, and what makes the Apps
 panel feel like a system rather than a list.
 
@@ -402,6 +412,8 @@ refreshed behind the answer. NIP-66 relay intelligence is not used: it is a MAY,
 offline case has no monitors to ask.
 
 ### S4 — Composition
+
+**Not built.**
 
 Several napplets in one window: layout strategy, and INC channels held open between live
 napplets. NAP-INTENT and NAP-INC already exist by then; this is about napplets sharing a
@@ -605,14 +617,18 @@ Everything except NAP-SHELL is Draft, and NIP-5D is an open pull request. Expect
 NAP-RELAY, NAP-IDENTITY and NAP-OUTBOX in particular — the three S2 depends on.
 
 Per D7, freeze against a specific `napplet/naps` revision and record it here on change.
-Kehto, the reference web runtime, pins `5ac0490461ca6fec2f0d2e45b4835cf9bc08de24`; adopting
-the same revision keeps the two implementations comparable.
 
-Also recorded, and re-audited on change:
-
-- NIP-5D — `nostr-protocol/nips` PR #2303 (living), read 2026-08-19 at blob `2e8fcc4657`,
-- NIP-5A — `nostr-protocol/nips` master,
-- Kehto's runtime specification — read as a reference implementation, not as authority.
+- `napplet/naps` — master at `a040914` (2026-09-15), checked out at
+  `reference/naps`; the drafts this runtime implements are open pull requests,
+  pinned as copies in `reference/naps/drafts/`: NAP-RELAY (#2), NAP-OUTBOX
+  (#32), NAP-RESOURCE (#13). NAP-MESH is Myco's own, in this tree.
+- `@napplet/shim` — `0.29.2`, vendored verbatim (`assets/vendor/README.md`), with
+  Myco's supplement (`assets/myco-prelude.js`) for `shell` and `mesh`.
+- NIP-5D — `nostr-protocol/nips` PR #2303 (living), read 2026-08-19 at blob `2e8fcc4657`.
+- NIP-5A — `nostr-protocol/nips` master.
+- Kehto, the reference web runtime (`reference/kheto-web`), pins
+  `5ac0490461ca6fec2f0d2e45b4835cf9bc08de24` of the registry — read as a
+  reference implementation, not as authority.
 
 One correction worth carrying upstream: the NAP registry README describes a napplet as
 "a NIP-5A manifest (a Nostr event, kind 35128)". That names the parent specification and

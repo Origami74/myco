@@ -1,10 +1,16 @@
 # Permissions: per-peer grants and per-application capabilities
 
-> Status: MIXED. **Per-peer permissions (§2) are built** — the record ships on
-> every circle contact and is enforced on both content ports, though no UI
-> exposes it yet. **Per-application capabilities (§3 onward) are still a
-> proposal**: the `Origin` → siteKey mapping and the rate gate are not
-> implemented. Open questions are marked **TBD / open**.
+> Status: **§2 (per-peer permissions) is built** — the record ships on every
+> Circle contact and is enforced on both content ports, though no UI exposes it
+> yet. **§3–§6 (per-application capabilities for nsites) are superseded**, not
+> built: the per-app permission model shipped for **napplets** instead —
+> install review, a grant per capability domain, checked on every call,
+> switchable on the app's sheet — in
+> [../napplet/napplet-runtime.md](../napplet/napplet-runtime.md). An nsite
+> stays pure-static and gets nothing; the one thing an nsite can do today that
+> looks like a capability (publish to `ws://localhost:4870` and have it gossip
+> to the Circle) is being removed (roadmap N2). §3–§6 are kept as the record of
+> why an `Origin`-keyed model was considered and where it would have bitten.
 
 An nsite is a static web app served from the local gateway
 ([nsite-layer.md](./nsite-layer.md)). Most just render; some want to do more —

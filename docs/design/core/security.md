@@ -1,19 +1,21 @@
 # Security & Trust Model
 
-This document describes the security posture proposed for Myco: what is
-authenticated, what is authorized, who is trusted, and what is explicitly out
-of scope. Where a section describes something not yet built it says so;
-everything else describes the app as it stands.
+This document describes Myco's security posture: what is authenticated, what
+is authorized, who is trusted, and what is explicitly out of scope. Where a
+section describes something not yet built it says so; everything else describes
+the app as it stands.
 
-The short version: **Myco trusts data, not peers.** Every artifact it
-exchanges — Nostr events and Blossom blobs — is self-authenticating, so any
-relay or peer is safe to use as a *source* of that data. A source can withhold
-or lie about *availability*, but it cannot forge content. Myco drops the
-private-network roster that nostr-vpn used as a membership gate, so there is no
-longer an "is this peer a member" question; the only questions left are "is
-this packet from who it claims" (yes, by FIPS transport crypto) and "is this
-content what it claims" (yes, by signature/hash). Authorization to *transact
-data* is therefore implicit in being paired.
+The short version: **Myco trusts data, not peers — and trusts people, not
+radios.** Every artifact it exchanges — Nostr events and Blossom blobs — is
+self-authenticating, so any relay or peer is safe to use as a *source* of that
+data. A source can withhold or lie about *availability*, but it cannot forge
+content. There is no network-membership question: FIPS links to whoever is in
+range, and that says nothing. The questions that matter are "is this packet
+from who it claims" (yes, by FIPS transport crypto), "is this content what it
+claims" (yes, by signature/hash), and "is this person in my Circle" (yes or no,
+by a pairing two people made) — which is what admits a peer to the content
+ports. A fourth question arrived with napplets: "may this *program* do that"
+(yes or no, by a grant the user made; §5).
 
 > **Note on the name "FIPS".** Throughout Myco, *FIPS* is the **Free
 > Internet Protocol Suite** (the mesh project this app is built on), **not**
@@ -31,13 +33,13 @@ who handed them to you:
 - **Nostr events** (the relay layer). nsite manifests are signed Nostr events:
   kind `15128` (root site) and `35128` (named site), whose tags map paths to
   blob hashes, e.g. `["path","/index.html","<sha256>"]`
-  ([../../reference/site-deck/docs/nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md)).
+  (`../../reference/site-deck/docs/nsite-protocol.md` (nsite-deck reference)).
   Every event carries a secp256k1 Schnorr signature over its content and an
   author pubkey. The receiver verifies the signature before trusting the event.
   A forged or tampered manifest fails verification and is discarded.
 - **Blossom blobs** (the content layer). Blobs are content-addressed by
   SHA-256 (Blossom BUD-01;
-  [../../reference/site-deck](../../../reference/site-deck)). The manifest names a
+  the nsite-deck reference). The manifest names a
   blob by its hash; the receiver hashes the bytes it got and checks them against
   that name. A substituted or corrupted blob has a different hash and is
   rejected.
@@ -105,9 +107,7 @@ What self-authentication does **not** give you:
 ## 2. Transport crypto inherited from FIPS
 
 Myco does not invent transport security; it inherits the FIPS two-layer
-crypto wholesale by embedding the upstream `fips` crate in-process (the
-same embedding nostr-vpn uses,
-[../../reference/nostr-vpn/crates/nostr-vpn-cli/src/fips_private_mesh/runtime_send.rs](../../../reference/nostr-vpn/crates/nostr-vpn-cli/src/fips_private_mesh/runtime_send.rs)).
+crypto wholesale by embedding the upstream `fips` crate in-process.
 
 - **End-to-end (session layer, FSP): Noise XK.**
   `Noise_XK_secp256k1_ChaChaPoly_SHA256`. The two session endpoints (the two
@@ -143,45 +143,36 @@ The crucial inherited principle, carried over verbatim from FIPS:
 > should act on it
 > ([../../reference/fips/docs/design/fips-security.md](../../../reference/fips/docs/design/fips-security.md)).
 
-## 3. Dropping the roster: no membership gate
+## 3. No membership gate on the mesh — a Circle gate on the content
 
-nostr-vpn was a *private network*. Membership was a signed roster (kind
-`30388`), join-requests promoted nodes to members, and an admin gated who could
-participate. Myco **strips all of that** (a locked decision): there is no
-roster, no admin, no membership event, no `.nvpn` MagicDNS, no exit node.
+The mesh is not private. Any FIPS node in range gets a Noise-authenticated
+link and may route your encrypted datagrams; there is no roster, no admin, no
+join event, and nothing to gate. What *is* gated is the content: the relay and
+Blossom servers check every mesh connection against the **Circle** — the list
+of people this phone has paired with — and refuse everyone else before the
+WebSocket upgrade or the first byte of a blob. That check is not a roster: it
+is a purely local list, symmetric, with no signer and no authority beyond this
+device. See [../circle/circle.md](../circle/circle.md) for what the Circle is
+and is not.
 
-What this changes:
+What this means:
 
-- **There is no "is this peer authorized to be on the network" check.** The
-  network is not private. Anyone you pair with (Section 4) becomes a peer and,
-  by virtue of being a peer, a data source and a data sink. "Paired" is the
-  only relationship.
-- **There *is* an "is this peer in my circle" check on the content ports.** That
-  is not a roster: it is a purely local list, symmetric, with no signer, no
-  admin, and no authority beyond this device. It gates who may talk to *our*
-  relay and *our* Blossom, and it changes nothing about who may be on the mesh
-  (§3.1).
-- **Authorization collapses to data semantics.** Because all data is
-  self-authenticating (Section 1), there is little a peer is "authorized" to do
-  beyond exchange verifiable artifacts. A peer cannot impersonate an author,
-  cannot forge content, cannot read your end-to-end payloads to third parties.
-  What a peer *can* do is: offer you sites (which you verify), request sites
-  from you (which it verifies), and observe traffic metadata it forwards (it
-  routes on `node_addr`, sees ciphertext only).
-- **What is therefore "authorized" vs not.** Authorized by being paired:
-  flooding you author-signed manifest events (kinds `15128`/`35128`,
-  re-emitted unmodified — see the propagation model), pulling content you host,
-  forwarding your encrypted mesh datagrams. *Not* conferred by pairing: reading
-  your end-to-end payloads to others, forging or altering content, learning your
-  identity from a passive BLE scan, or reaching arbitrary localhost services on
-  your phone (see below).
+- **Being a peer confers nothing.** A phone can hold a link to yours for an
+  hour and never read a byte of content. It reaches exactly one service: the
+  auth port, to ask to pair (§3.2).
+- **Being paired confers the data relationship.** A Circle member may read your
+  relay and store, receive your gossip, offer you apps, send you files. All of
+  it is self-authenticating (§1), so what a member is "authorized" to do is
+  narrow: exchange verifiable artifacts, and be believed about *having* them.
+- **Not conferred by pairing:** reading your end-to-end payloads to others,
+  forging or altering content, learning your identity from a passive BLE scan,
+  reaching arbitrary localhost services on your phone (§3.1).
 
 **The FIPS optional peer ACL still exists upstream** (`peers.allow` /
 `peers.deny`, evaluated at the Noise IK handshake;
 [../../reference/fips/docs/reference/security.md](../../../reference/fips/docs/reference/security.md)).
-Myco's v1 stance is *default-allow* — pairing is the gesture, and we do not
-ship a roster-like allowlist UI. Re-exposing the ACL as a "block this peer"
-control is a candidate later feature (TBD / open).
+Myco does not use it: pairing is the gesture. A "block this peer" control that
+re-exposes it is a later item.
 
 ### 3.1 Inbound surface on the mesh
 
@@ -191,7 +182,7 @@ can reach your services over `.fips`
 On Linux, FIPS recommends a default-deny nftables baseline to bound this surface;
 **on Android there is no nftables equivalent the app controls.** The app's
 mitigation is to expose *only* its own ports over the mesh — the VpnService/TUN
-routes only `fd00::/8` and DNS-intercepts `*.fips`/`*.nsite`; it does **not**
+routes only `fd00::/8` and answers `*.fips` DNS; it does **not**
 capture `0.0.0.0/0`, and the WebView never resolves `.fips`.
 
 Three ports are exposed, and only one of them answers a stranger.
@@ -275,9 +266,8 @@ Pairing is the one moment a human asserts "this is who I think it is."
   is still no MAC and no PSM in the payload (those are
   learned later over BLE adverts; see
   [diagrams/02-pairing-transitive-discovery.svg](../diagrams/02-pairing-transitive-discovery.svg)).
-  Myco reuses nostr-vpn's existing QR machinery (CameraX + ML Kit
-  BarcodeScanning, payload-prefix check, deep-link intent filter;
-  [../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt](../../../reference/nostr-vpn/android/app/src/main/java/org/nostrvpn/app/QrScannerDialog.kt)).
+  The same payload is presented as an NFC tag, so a bump is a scan
+  ([identity-pairing.md §7](./identity-pairing.md)).
 - **The trust model is scan-and-confirm over an already-encrypted channel, not
   bare TOFU.** Scanning the QR does not merely bind an npub on faith — it initiates
   the mandatory **invite-pairing handshake** against the inviter's on-device auth
@@ -325,62 +315,67 @@ Pairing is the one moment a human asserts "this is who I think it is."
   discovered peer gains any authority a directly paired one lacks, because
   pairing confers no authority beyond "exchange verifiable data."
 
-## 5. The nsite sandbox
+## 5. Two sandboxes: the nsite's and the napplet's
 
-An nsite is served to the in-app WebView from **localhost** via the nsite
-gateway: `*.nsite` resolves to `127.0.0.1`, the WebView loads `npub.nsite`, and
-the bytes come from the local Blossom store after manifest+hash verification
+### 5.1 The nsite sandbox — pure static, no capabilities
+
+An nsite is served to the in-app WebView at `http://<host>.localhost/` by the
+in-process gateway, after manifest and hash verification
 ([diagrams/04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg)).
+It is *just signed static files* — HTML, CSS, JS, images — authored elsewhere by
+an external author. There is **no capability API**: nsite JavaScript cannot
+query peers, reach the store's control surface, or sign anything. The threat
+surface is the ordinary web-content surface, scoped down:
 
-**v1: pure-static (proposed default).** In v1 an nsite is *just signed static
-files* — HTML, CSS, JS, images — authored elsewhere by an external nsite author,
-verified against that author's signed manifest, and served from localhost. There
-is **no capability API**: nsite JavaScript cannot query peers or reach the
-relay/Blossom control surface. (The app itself never authors, signs, or
-publishes Nostr events at all — it is a relay + cache + browser + propagator for
-events authored externally — so there is no signing capability for nsite JS to
-reach in the first place.) The threat surface is therefore the ordinary
-web-content surface, scoped down:
+- nsite JS runs in the WebView's normal sandbox as untrusted third-party code.
+- **Per-nsite origin isolation is automatic.** Each nsite is its own origin —
+  `<host>.localhost` — so storage, cookies and scripting are partitioned per
+  site; each launches as its own `NsiteActivity` and WebView.
+- The WebView never resolves `.fips`, which keeps nsite JS off the sync
+  transport. What it *can* reach is `ws://localhost:4870` — the embedded relay,
+  as any local web page could. Today an event published there is gossiped to
+  the Circle at the default hop budget; that is being removed (roadmap N2), so
+  that reaching the room is a *granted* capability (below) rather than a side
+  effect of a loopback socket.
+- No `file://`, no Myco chrome to redirect, no shared navigation surface.
 
-- nsite JS runs in the WebView's normal sandbox. It is untrusted third-party
-  code (the site author is not you).
-- **Per-nsite origin isolation is automatic.** Each nsite is its own web origin —
-  its `<host>.nsite` hostname — so the WebView partitions storage, cookies, and
-  scripting per nsite: one nsite's JS cannot read another's storage/cookies or
-  script it. This falls out of each nsite launching as its own fullscreen app
-  (its own `NsiteActivity`/WebView instance) at a distinct `<host>.nsite` origin,
-  rather than as a tab inside a shared shell. A Content-Security-Policy that
-  blocks off-origin/`.fips` access still belongs on top so a malicious nsite
-  cannot exfiltrate to a remote server (CSP enforcement is the remaining open
-  item, §7). The WebView must **never** resolve `.fips` (locked decision), which
-  already keeps nsite JS off the sync transport.
-- No `file://` access, no arbitrary network from nsite JS beyond what CSP
-  allows. Each nsite is launched fullscreen with **no Myco chrome** — no URL bar,
-  no Back/Reload bar; in-app navigation and refresh are the nsite developer's own
-  responsibility. Myco does not host a shared navigation surface a site could
-  redirect to an attacker origin.
+### 5.2 The napplet sandbox — a program behind a permission model
 
-**Later: capability API (call out the risk now).** A future milestone might
-propose giving nsite JS a capability API — query peers, write blobs, or other
-host affordances. **This is a large trust escalation** and is explicitly *not*
-in v1. Note this is independent of authoring: the app's design is that it never
-signs or publishes Nostr events on anyone's behalf, and the device's Nostr
-keypair is used for FIPS mesh addressing and BLE/link authentication only, never
-to author nsites — so exposing a `sign()`-style capability to nsite JS is *not*
-on the roadmap. Any capability API that did land would still need: an explicit
-per-capability permission model, user-in-the-loop prompts, per-nsite capability
-scoping, and a clear UI for what an nsite is asking to do. Designing that is
-deferred; v1 sidesteps it entirely by shipping pure-static.
+A napplet is a program, and it gets exactly what the user granted. The design
+is in [../napplet/napplet-runtime.md](../napplet/napplet-runtime.md); the
+security shape is:
 
-One concrete instance of this is propagation.md's open question on
-**nsite-scoped propagation (capability-gated)** — whether a loaded nsite could
-influence what the propagator gossips onward (see
-[propagation.md](../nsite/propagation.md)). That is exactly the kind of affordance that
-is **not** free expansion of an untrusted nsite: any such hook is a **bounded,
-permissioned capability** subject to the per-capability permission model above
-(user-in-the-loop, per-nsite scoping), never an implicit power the WebView
-sandbox grants by default. It is called out there as an open question, not a v1
-capability.
+- **Two walls.** The napplet runs in a `sandbox="allow-scripts"` `srcdoc`
+  iframe with an **opaque origin**: no storage, no network, no same-origin
+  access to anything. Around it is a trusted shell page from the APK, and around
+  that the WebView's channel to Rust, scoped to the shell's origin. The napplet
+  can only `postMessage` to the shell; a nested frame, a popup, or a message
+  from any other source is dropped by a `MessageEvent.source` check.
+- **Every capability is mediated.** The napplet describes what it wants
+  (`relay.publish {event}`, `mesh.subscribe {filters, ttl}`,
+  `resource.bytes {url}`); Rust decides, does it, and returns the result. No
+  key material, no socket, no file handle ever crosses into the iframe. The
+  user key signs on the napplet's behalf; the napplet never sees it (§7.1 of
+  the runtime design).
+- **Grants are the user's, per call.** What a napplet may do is decided at
+  install review — in words, on a screen the fetch cannot skip — and can be
+  changed per capability on its sheet. The check is made on **every call**
+  and every delivery, so revoking a grant stops the next call, not the next
+  launch. Nothing an inbound intent carries can widen a grant: grants are read
+  from the library, never passed at open.
+- **A napplet's identity is its bytes.** The aggregate hash over the manifest
+  is the session identity; a different build is a different napplet, and a
+  manifest whose files do not hash to it never gets a session.
+- **What a grant lets a napplet do to you** is said plainly on the review
+  screen because it is real: `relay` and `mesh` let it publish *as you*, to
+  your relays or to everyone in your Circle, with no per-event prompt.
+  `resource` lets it fetch content by hash — and, because fetched blobs are
+  kept and served, makes you a holder of what it looked at (the open privacy
+  question in the runtime design, §7.11).
+- **Napplet-supplied addresses are validated.** A relay URL a napplet names
+  must be `ws`/`wss` and may not point at loopback or a private network; a
+  `.fips` URL is honoured only for a Circle member. Blob fetches are content
+  addressed, so there is no address to abuse.
 
 ## 6. Threats and mitigations
 
@@ -388,15 +383,17 @@ capability.
 | ------ | ---------------------- | ---------- |
 | **Malicious / forging relay or peer** | Tries to serve forged content | **Cannot forge.** Signatures + SHA-256 verified locally (§1); bad artifacts are rejected. |
 | **Withholding / availability attack** | Refuses to serve, serves stale, hides a newer event | Pull-from-many: query all reachable relays, keep newest valid event; manifests flood widely (announce-wide) while large blobs are pulled on demand. Best-effort, no freshness guarantee (§1). |
-| **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | Only circle members reach the content ports at all, and **blob upload is off by default per peer** (§3.3), so a peer cannot push bytes onto your disk unless you grant it. Plus: LRU cache (default cap **2 GB**); Library sites are **pinned** (exempt from eviction); per-source relay rate limits (TBD). Junk that fails verification is never stored (§1). |
+| **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | Only Circle members reach the content ports at all, and **blob upload is off by default per peer** (§3.3), so a peer cannot push bytes onto your disk unless you grant it. Junk that fails verification is never stored (§1). **Not built:** an LRU cap (roadmap); today the store grows until the user deletes the cache. |
 | **Identity / link spoofing** | Pretends to be a paired peer | Noise IK/XK over secp256k1; identity is pubkey not MAC; spoof cannot complete handshake (§2). |
 | **Replay** | Re-injects captured datagrams | 2048-entry sliding replay window at both FMP and FSP layers (§2). |
 | **Malicious / relayed QR at pairing** | Tries to bind the attacker's npub as your paired peer | Scan-and-confirm over Noise: the single-use, unguessable `pairSecret` is echoed back inside the Noise-authenticated channel to the inviter's `<npub>.fips:4873` and confirmed by the inviter's OK prompt, so a captured/relayed invite cannot bind (§4). Optional out-of-band safety-string check on top is an open proposal (§4). |
 | **DoS on the auth port** | Floods `:4873`, the one port open to strangers, to burn a BLE radio | Per-source token bucket (1/s, burst 5), a global in-flight ceiling of 8, and an 8 KiB body cap. Over-limit is a delay, not a ban — there is no identity to ban that costs a mesh peer anything to replace (§3.2, [identity-pairing.md §6.2](./identity-pairing.md)). |
 | **Stranger writing to your event store** | Gets data into a store you may not own | Pairing kinds are refused on the relay from every source; the handshake never touches the store. Unpaired peers are refused before the WebSocket upgrade (§3.2). |
 | **Revoked peer keeps reading** | An unpaired peer's open subscription keeps streaming | Membership is re-checked on delivery and the connection is dropped, so revocation reaches connections that already exist (§3.2). |
-| **Malicious nsite content** | Untrusted JS in the WebView | Pure-static v1, no capability API; per-nsite origin isolation + CSP; WebView never resolves `.fips` (§5). |
-| **Capability-API abuse** (future) | nsite JS reaches host affordances (query peers, write blobs) | Out of scope for v1; the app never signs/publishes events, so no `sign()` capability exists; needs explicit permission model if any capability is ever introduced (§5). |
+| **Malicious nsite content** | Untrusted JS in the WebView | Pure-static, no capability API; per-nsite origin isolation; WebView never resolves `.fips` (§5.1). |
+| **Malicious napplet** | Untrusted program asks for more than it should, or tries to go around the seam | Opaque-origin iframe; every capability mediated and checked per call against the user's grants; no key material in the iframe; refused calls are logged (§5.2). |
+| **A napplet publishing as you** | A granted `relay`/`mesh` napplet posts without asking | By design and said in words at install; revocable per capability, effective on the next call; the hop budget is capped by the user (NAP-MESH). |
+| **Napplet-named relay as SSRF** | A napplet points the shell at a private host | Relay URLs validated: `ws`/`wss` only, no loopback or private ranges; `.fips` only for Circle members (§5.2). |
 | **Propagation-privacy leak** | Observers learn what you host / re-serve | See below — partial mitigation only (open). |
 | **Metadata / traffic analysis** | A forwarding peer sees who-talks-to-whom | FIPS routes on `node_addr`, payload is end-to-end encrypted; FIPS rejects onion routing, so traffic-graph metadata is visible to forwarders by design ([../../reference/fips/docs/design/fips-mesh-operation.md](../../../reference/fips/docs/design/fips-mesh-operation.md)). |
 
@@ -436,7 +433,7 @@ everything cached, or only Library-pinned sites?
 - **No freshness guarantee.** Self-authentication proves origin/integrity, not
   recency; withholding a newer replaceable event is undetectable in general.
 - **Per-nsite origin isolation** is automatic: each nsite is its own origin
-  (`<host>.nsite`), so WebView storage/cookies/scripting partition per nsite and
+  (`<host>.localhost`), so WebView storage/cookies/scripting partition per nsite and
   one nsite cannot read another's data (§5). **Open:** CSP enforcement on top to
   bound off-origin exfiltration.
 - **Open / TBD — which nsite am I in?** With each nsite launching fullscreen and
@@ -445,7 +442,7 @@ everything cached, or only Library-pinned sites?
   own `ActivityManager.TaskDescription`, which is **author-controlled** — so a
   malicious nsite can present another nsite's title/favicon/colour, an
   impersonation/spoofing risk. How (or whether) Myco surfaces a trustworthy
-  "you are in `<host>.nsite`" signal without re-imposing chrome is unresolved.
+  "you are in `<host>`" signal without re-imposing chrome is unresolved.
 - **Open:** explicit inbound port allowlist on the FSP-multiplexed mesh surface
   on Android (§3).
 - **Open:** optional out-of-band pairing verification (§4).
@@ -465,7 +462,7 @@ everything cached, or only Library-pinned sites?
   — Noise XK end-to-end session layer and FSP port-multiplexing.
 - [../../reference/fips/src/transport/ble/io.rs](../../../reference/fips/src/transport/ble/io.rs)
   — BLE pubkey pre-handshake and the `BleIo` surface Myco implements.
-- [../../reference/site-deck/docs/nsite-protocol.md](../../../reference/site-deck/docs/nsite-protocol.md)
+- `../../reference/site-deck/docs/nsite-protocol.md` (nsite-deck reference)
   — nsite manifest event format (signed events, path→hash tags).
 - Diagrams:
   [01-system-layering.svg](../diagrams/01-system-layering.svg) ·
