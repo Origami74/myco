@@ -41,8 +41,10 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// These are **defaults, not secrets**. The install screen lists every one of
 /// them in words before anything is agreed to — a `relay` grant lets a napplet
 /// post as you without asking again, and a default that was not shown would be
-/// a grant nobody made.
-pub const DEFAULT_GRANTS: &[&str] = &["identity", "relay"];
+/// a grant nobody made. `resource` is here because a napplet that shows a
+/// feed shows pictures, and a content-addressed fetch is the least a napplet
+/// can be allowed while still working.
+pub const DEFAULT_GRANTS: &[&str] = &["identity", "relay", "resource"];
 
 /// A napplet's identity: the `(dTag, aggregateHash)` tuple, computed by the
 /// runtime from verified bytes.

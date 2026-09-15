@@ -1200,12 +1200,31 @@ impl Content {
         save_library(&self.library_path, &snapshot);
     }
 
-    /// The capability domains a napplet was granted, or an empty set for one
-    /// that is not installed.
+    /// Replace a napplet's recorded grants. Used when an open widened them to
+    /// a declared domain this build newly implements; install review remains
+    /// the only place a grant is *decided*.
+    pub fn set_napplet_grants(&self, author_npub: &str, d_tag: Option<&str>, granted: Vec<String>) {
+        let mut lib = self.library.lock().unwrap();
+        let Some(item) = lib.iter_mut().find(|i| {
+            i.kind == LibraryKind::Napplet
+                && i.author_npub == author_npub
+                && i.d_tag.as_deref() == d_tag
+        }) else {
+            return;
+        };
+        item.granted = granted;
+        let snapshot = lib.clone();
+        drop(lib);
+        save_library(&self.library_path, &snapshot);
+    }
+
+    /// The capability domains a napplet was granted, or `None` for one that
+    /// is not installed.
     ///
-    /// An uninstalled napplet getting `[]` is the safe answer, not an oversight:
-    /// it still opens, and gets nothing but the mandatory handshake.
-    pub fn napplet_grants(&self, author_npub: &str, d_tag: Option<&str>) -> Vec<String> {
+    /// An uninstalled napplet getting `None` is the safe answer, not an
+    /// oversight: it still opens, and gets nothing but the mandatory handshake
+    /// — and, unlike an installed one, nothing it declares is granted at open.
+    pub fn napplet_grants(&self, author_npub: &str, d_tag: Option<&str>) -> Option<Vec<String>> {
         self.library
             .lock()
             .unwrap()
@@ -1216,7 +1235,6 @@ impl Content {
                     && i.d_tag.as_deref() == d_tag
             })
             .map(|i| i.granted.clone())
-            .unwrap_or_default()
     }
 
     /// Unpin a napplet and drop its grants.

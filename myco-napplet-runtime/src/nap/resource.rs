@@ -603,6 +603,8 @@ mod tests {
         .envelopes()
         .to_vec();
         let r = serde_json::to_value(&out[0]).unwrap();
-        assert!(r["error"].as_str().unwrap().contains("not granted"));
+        assert_eq!(r["type"], "resource.bytes.error");
+        assert_eq!(r["error"], "blocked-by-policy");
+        assert!(r["message"].as_str().unwrap().contains("not granted"));
     }
 }

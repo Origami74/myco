@@ -165,6 +165,10 @@ pub struct OpenedNapplet {
     /// The origin the shell is served at, `<label>.napplet.localhost`.
     pub shell_host: String,
     pub title: Option<String>,
+    /// What the session was actually opened with: the stored grants, widened
+    /// by any domain the napplet declared that this build implements and an
+    /// earlier one did not. See [`NappletHost::open`].
+    pub granted: Vec<String>,
 }
 
 /// The device's live napplet sessions.
@@ -193,13 +197,14 @@ impl NappletHost {
 
     /// Resolve a napplet from the local stores and open a session for it.
     ///
-    /// `granted` is what the user approved at install review. Nothing here
-    /// widens it, and a napplet that fails verification never gets a session —
+    /// `granted` is what the user approved at install review, or `None` for
+    /// a napplet that is not installed — which opens with nothing but the
+    /// handshake. A napplet that fails verification never gets a session:
     /// the error propagates and no window opens.
     pub async fn open(
         &self,
         addr: &NappletAddr,
-        granted: Vec<String>,
+        granted: Option<Vec<String>>,
     ) -> anyhow::Result<OpenedNapplet> {
         let event = newest_in_slot(
             self.relay.as_ref(),
@@ -216,12 +221,38 @@ impl NappletHost {
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+        // The grants were narrowed at install to what *that* build could do
+        // (`effective_grants`), so a napplet installed before a domain existed
+        // here has no grant for it however plainly it declared the need — and
+        // fails on the first call, with no screen ever having said no. What
+        // the user agreed to was "what it declares, plus the defaults"; this
+        // build implementing more of that list does not change the agreement,
+        // so the session is opened with the declared set as of now. Nothing
+        // undeclared is added, nothing is added to a napplet that was never
+        // installed, and the long-press sheet shows the result.
+        let granted = match granted {
+            None => Vec::new(),
+            Some(mut granted) => {
+                for domain in effective_grants(&resolved.manifest.requires) {
+                    if !granted.contains(&domain) {
+                        tracing::info!(
+                            napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
+                            %domain,
+                            "granting a declared capability this build newly implements"
+                        );
+                        granted.push(domain);
+                    }
+                }
+                granted
+            }
+        };
+
         tracing::info!(
             napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
             ?granted,
             "opening napplet"
         );
-        let session = Session::new(NappletIdentity::from(&resolved), granted);
+        let session = Session::new(NappletIdentity::from(&resolved), granted.clone());
         let prelude = render_for(&session);
         let artifact = assemble(
             &resolved.index_html,
@@ -256,6 +287,7 @@ impl NappletHost {
             session_id,
             shell_host,
             title,
+            granted,
         })
     }
 
@@ -921,7 +953,7 @@ mod tests {
     #[tokio::test]
     async fn opening_resolves_and_hands_back_a_shell_origin() {
         let (host, addr) = host_with_fixture().await;
-        let opened = host.open(&addr, vec!["shell".into()]).await.unwrap();
+        let opened = host.open(&addr, Some(vec!["shell".into()])).await.unwrap();
 
         assert!(opened.shell_host.ends_with(".napplet.localhost"));
         assert_eq!(opened.title.as_deref(), Some("Fixture Napplet"));
@@ -931,7 +963,7 @@ mod tests {
     #[tokio::test]
     async fn the_mount_frame_returns_the_verified_bytes() {
         let (host, addr) = host_with_fixture().await;
-        let opened = host.open(&addr, vec![]).await.unwrap();
+        let opened = host.open(&addr, None).await.unwrap();
 
         let out = host
             .frame(
@@ -953,7 +985,7 @@ mod tests {
     #[tokio::test]
     async fn the_handshake_runs_over_the_frame_channel() {
         let (host, addr) = host_with_fixture().await;
-        let opened = host.open(&addr, vec![]).await.unwrap();
+        let opened = host.open(&addr, None).await.unwrap();
 
         let out = host
             .frame(
@@ -989,7 +1021,10 @@ mod tests {
     #[tokio::test]
     async fn overlapping_frames_queue_rather_than_vanish() {
         let (host, addr) = host_with_fixture().await;
-        let opened = host.open(&addr, vec!["identity".into()]).await.unwrap();
+        let opened = host
+            .open(&addr, Some(vec!["identity".into()]))
+            .await
+            .unwrap();
 
         let ready = r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#;
         let query = r#"{"channel":"napplet","message":{"type":"identity.getPublicKey","id":"i1"}}"#;
@@ -1035,7 +1070,7 @@ mod tests {
     #[tokio::test]
     async fn an_event_arriving_after_subscribe_is_delivered() {
         let (host, addr) = host_with_fixture().await;
-        let opened = host.open(&addr, vec!["relay".into()]).await.unwrap();
+        let opened = host.open(&addr, Some(vec!["relay".into()])).await.unwrap();
 
         host.frame(
             &opened.session_id,
@@ -1082,7 +1117,7 @@ mod tests {
     #[tokio::test]
     async fn only_matching_live_subscriptions_are_delivered() {
         let (host, addr) = host_with_fixture().await;
-        let opened = host.open(&addr, vec!["relay".into()]).await.unwrap();
+        let opened = host.open(&addr, Some(vec!["relay".into()])).await.unwrap();
         host.frame(
             &opened.session_id,
             r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
@@ -1124,13 +1159,38 @@ mod tests {
         );
     }
 
+    /// An installed napplet whose stored grants predate a domain this build
+    /// implements gets that domain if it declared it — and a napplet that was
+    /// never installed gets nothing whatever it declares.
+    #[tokio::test]
+    async fn an_installed_napplets_grants_widen_to_what_it_declared() {
+        let (host, addr) = host_with_fixture().await; // declares shell, relay
+        let opened = host.open(&addr, Some(vec![])).await.unwrap();
+        let mut granted = opened.granted.clone();
+        granted.sort();
+        let mut expected: Vec<String> = effective_grants(&["shell".into(), "relay".into()]);
+        expected.sort();
+        assert_eq!(granted, expected);
+        assert!(granted.contains(&"relay".to_string()));
+        assert!(
+            !granted.contains(&"mesh".to_string()),
+            "undeclared, non-default: not granted"
+        );
+
+        let stranger = host.open(&addr, None).await.unwrap();
+        assert!(
+            stranger.granted.is_empty(),
+            "an uninstalled napplet was granted something"
+        );
+    }
+
     /// A napplet without the grant receives nothing, even if it managed to
     /// register a subscription — the check is on delivery, so revoking a grant
     /// stops the next event rather than the next launch.
     #[tokio::test]
     async fn an_ungranted_napplet_receives_no_deliveries() {
         let (host, addr) = host_with_fixture().await;
-        let opened = host.open(&addr, vec![]).await.unwrap();
+        let opened = host.open(&addr, None).await.unwrap();
         host.frame(
             &opened.session_id,
             r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
@@ -1281,8 +1341,8 @@ mod tests {
     #[tokio::test]
     async fn two_windows_are_two_independent_sessions() {
         let (host, addr) = host_with_fixture().await;
-        let a = host.open(&addr, vec![]).await.unwrap();
-        let b = host.open(&addr, vec![]).await.unwrap();
+        let a = host.open(&addr, None).await.unwrap();
+        let b = host.open(&addr, None).await.unwrap();
         assert_ne!(a.session_id, b.session_id);
         assert_eq!(a.shell_host, b.shell_host, "same napplet, same origin");
 
@@ -1316,7 +1376,7 @@ mod tests {
             d_tag: Some("fixture".to_string()),
             relays: Vec::new(),
         };
-        assert!(host.open(&addr, vec![]).await.is_err());
+        assert!(host.open(&addr, None).await.is_err());
         assert_eq!(host.open_count(), 0);
     }
 
@@ -1328,7 +1388,7 @@ mod tests {
             d_tag: Some("nope".to_string()),
             relays: Vec::new(),
         };
-        assert!(host.open(&stranger, vec![]).await.is_err());
+        assert!(host.open(&stranger, None).await.is_err());
     }
 
     /// D9's acquisition path: fetched from somewhere else, verified against the
@@ -1372,7 +1432,7 @@ mod tests {
         assert_eq!(ingested.title.as_deref(), Some("Fixture Napplet"));
 
         // Now local: opens with no source in reach.
-        let opened = host.open(&addr, vec!["relay".into()]).await.unwrap();
+        let opened = host.open(&addr, Some(vec!["relay".into()])).await.unwrap();
         assert!(opened.shell_host.ends_with(".napplet.localhost"));
     }
 

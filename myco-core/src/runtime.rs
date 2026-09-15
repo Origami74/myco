@@ -1261,7 +1261,17 @@ impl AppRuntime {
         let (host, rt) = self
             .napplet_context()
             .ok_or_else(|| anyhow::anyhow!("content layer is not running"))?;
-        rt.block_on(host.open(&addr, granted))
+        let opened = rt.block_on(host.open(&addr, granted.clone()))?;
+        // The session may have been opened with more than was stored (a
+        // declared domain this build newly implements). Record it, so the
+        // sheet says what the app can do and the next open needs no widening.
+        if let Some(stored) = granted {
+            if opened.granted != stored {
+                content.set_napplet_grants(&npub, addr.d_tag.as_deref(), opened.granted.clone());
+                self.rev += 1;
+            }
+        }
+        Ok(opened)
     }
 
     /// Fetch a napplet online, verify it, and store it locally — without

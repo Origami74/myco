@@ -91,6 +91,24 @@ pub fn needs_session(message: &Envelope) -> bool {
     )
 }
 
+/// A refusal in the shape the message's domain reads errors in.
+///
+/// Most NAPs put `error` on the `.result` envelope. NAP-RESOURCE does not:
+/// its shim resolves every `.result` with `result.blob` and rejects only on a
+/// distinct `.error` type, so a refusal sent as a result there would hand the
+/// napplet `undefined` where it expects bytes — and the napplet would fall
+/// over on `blob.arrayBuffer()` with no idea it had been refused.
+fn refusal(message: &Envelope, why: &str) -> Envelope {
+    if message.domain() == "resource" {
+        let mut out = Envelope::new(format!("{}.error", message.msg_type))
+            .with_field("error", "blocked-by-policy")
+            .with_field("message", why);
+        out.id = message.id.clone();
+        return out;
+    }
+    message.to_error(why)
+}
+
 /// Route one inbound message for one napplet's session.
 pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelope) -> Outcome {
     // Results travel runtime -> napplet. One arriving the other way is either a
@@ -109,9 +127,10 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
     // established — it is what establishes it. Everything else is not.
     if domain != "shell" {
         if !session.is_established() {
-            return Outcome::Reply(vec![
-                message.to_error("session not established: send shell.ready first")
-            ]);
+            return Outcome::Reply(vec![refusal(
+                message,
+                "session not established: send shell.ready first",
+            )]);
         }
         // The permission, enforced here and only here. Every implemented API
         // is in the napplet's namespace whatever it was granted, so this is the
@@ -128,9 +147,10 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
                 action = %message.action(),
                 "refused: capability not granted to this napplet"
             );
-            return Outcome::Reply(vec![message.to_error(format!(
-                "capability {domain} was not granted to this napplet"
-            ))]);
+            return Outcome::Reply(vec![refusal(
+                message,
+                &format!("capability {domain} was not granted to this napplet"),
+            )]);
         }
     }
 
@@ -154,6 +174,34 @@ mod tests {
     use crate::session::NappletIdentity;
     use crate::testing::test_context;
     use serde_json::json;
+
+    /// A refused resource call is a `resource.bytes.error`, never a result:
+    /// the shim would resolve a result with an undefined blob.
+    #[tokio::test]
+    async fn a_resource_refusal_is_an_error_envelope() {
+        let (ctx, _signer) = test_context();
+        let mut s = Session::new(NappletIdentity::new("pics", "aggregate"), ["relay"]);
+        s.on_ready();
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("resource.bytes")
+                .with_id("b1")
+                .with_field("url", "blossom:sha256:00"),
+        )
+        .await;
+        let r = serde_json::to_value(&out.envelopes()[0]).unwrap();
+        assert_eq!(r["type"], "resource.bytes.error");
+        assert_eq!(r["id"], "b1");
+        assert_eq!(r["error"], "blocked-by-policy");
+        assert!(r["message"].as_str().unwrap().contains("not granted"));
+
+        // And the other domains keep the registry's result-with-error shape.
+        let out = dispatch(&ctx, &mut s, &Envelope::new("mesh.info").with_id("i1")).await;
+        let r = serde_json::to_value(&out.envelopes()[0]).unwrap();
+        assert_eq!(r["type"], "mesh.info.result");
+        assert!(r["error"].is_string());
+    }
 
     /// What `needs_session` says is stateless must leave the session as it
     /// found it — a host runs those against a snapshot and throws it away.

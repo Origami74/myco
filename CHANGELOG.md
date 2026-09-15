@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A napplet installed before this version can now use capabilities it
+  declared that Myco has since learned — it was refused, and for pictures
+  the refusal arrived in a shape the napplet read as an empty download
+  (`cannot read properties of undefined (reading 'arrayBuffer')`). Opening
+  an installed napplet grants what it declared, as of this version; the
+  long-press sheet shows the result. Loading pictures and files is now a
+  default grant, listed on the install sheet like the others.
 - A napplet's relay or outbox query no longer freezes the screen or queues
   every other call behind it. Capability calls ran on the UI thread and
   one at a time per window, so a few queries against unreachable relays
