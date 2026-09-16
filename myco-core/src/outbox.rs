@@ -249,6 +249,9 @@ impl OutboxService {
         match lane {
             RelayLane::Local => self.store.query(filters).await.ok(),
             RelayLane::Mesh { url } => {
+                // The pool dials the URL rebuilt from the npub, never the
+                // lane's string: a mesh URL is an address *by name*, and the
+                // name is all that is taken from it.
                 let npub = mesh_relay_npub(url)?;
                 let raw: Vec<serde_json::Value> = filters
                     .iter()
@@ -257,7 +260,12 @@ impl OutboxService {
                 let events = self
                     .content
                     .peer_relays()
-                    .request(&npub, url, raw, timeout)
+                    .request(
+                        &npub,
+                        &crate::ip_source::mesh_relay_url(&npub),
+                        raw,
+                        timeout,
+                    )
                     .await;
                 // The pool returns events as received; the caller verifies.
                 Some(events.into_iter().filter(|e| e.verify().is_ok()).collect())
@@ -309,7 +317,7 @@ impl OutboxService {
                 let Ok(frame) = serde_json::to_string(&serde_json::json!(["EVENT", event])) else {
                     return false;
                 };
-                pool.send(&npub, url, frame);
+                pool.send(&npub, &crate::ip_source::mesh_relay_url(&npub), frame);
                 true
             }
             RelayLane::Internet { url } => matches!(
@@ -518,22 +526,23 @@ impl LaneTransport for OutboxService {
     }
 }
 
-/// The npub in a mesh relay URL, `ws://<npub>.fips:4870`.
+/// The npub in a mesh relay URL, `ws://<npub>.fips:4870` — and `None` for
+/// anything that is not exactly that shape. One strict parser, shared with
+/// the runtime crate, so the lane a napplet names and the URL the pool dials
+/// cannot disagree.
 pub(crate) fn mesh_relay_npub(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("ws://")?;
-    let host = rest.split(['/', ':']).next()?;
-    let npub = host.strip_suffix(".fips")?;
-    if npub.starts_with("npub1") {
-        Some(npub.to_string())
-    } else {
-        None
-    }
+    myco_napplet_runtime::seams::mesh_relay_npub(url)
 }
 
 /// The lanes a kind 10002 names for `direction`: a `["r", url]` tag with no
 /// marker is both, `read` and `write` markers are one each. NIP-65's marker
 /// is from the author's point of view, so what *we* read from is what they
 /// marked `write`, and vice versa.
+///
+/// Every URL goes through the same gate a napplet's `options.relays` does:
+/// a relay list is signed by its author, not trusted, and a hostile one
+/// naming `ws://npub1peer.fips:4870@evil.example/` or a loopback address
+/// must mint no lane at all.
 pub(crate) fn relay_list_lanes(list: &Event, direction: Direction) -> Vec<RelayLane> {
     let wanted = match direction {
         Direction::Read => "write",
@@ -551,9 +560,16 @@ pub(crate) fn relay_list_lanes(list: &Event, direction: Direction) -> Vec<RelayL
                 return None;
             }
             match parts.get(2).map(|m| m.as_str()) {
-                None => Some(RelayLane::from_url(url)),
-                Some(marker) if marker == wanted => Some(RelayLane::from_url(url)),
-                Some(_) => None,
+                None => {}
+                Some(marker) if marker == wanted => {}
+                Some(_) => return None,
+            }
+            match myco_napplet_runtime::nap::outbox::validate_relay_url(url) {
+                Ok(lane) => Some(lane),
+                Err(reason) => {
+                    tracing::debug!(url, reason, "outbox: relay list names a URL we refuse");
+                    None
+                }
             }
         })
         .collect()
@@ -596,6 +612,58 @@ mod tests {
         );
         assert_eq!(mesh_relay_npub("wss://relay.damus.io"), None);
         assert_eq!(mesh_relay_npub("ws://evil.fips:4870"), None);
+    }
+
+    /// A relay list is signed, not trusted. A `.fips` URL with userinfo is
+    /// userinfo on an internet host to the WebSocket client, and a wrong port
+    /// is the peer's Blossom: neither may become a lane the pool would dial
+    /// as the peer's relay (H2 of the PR #52 review).
+    #[test]
+    fn a_hostile_relay_list_cannot_name_a_userinfo_mesh_url() {
+        let keys = Keys::generate();
+        let hostile = EventBuilder::new(Kind::RelayList, "")
+            .tags([
+                Tag::parse(["r", "ws://npub1peer.fips:4870@evil.example/"]).unwrap(),
+                Tag::parse(["r", "ws://npub1peer.fips:24243"]).unwrap(),
+                Tag::parse(["r", "ws://npub1peer.fips:4870/path"]).unwrap(),
+                Tag::parse(["r", "ws://127.0.0.1:4870"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(relay_list_lanes(&hostile, Direction::Read), Vec::new());
+        assert_eq!(relay_list_lanes(&hostile, Direction::Write), Vec::new());
+
+        let honest = EventBuilder::new(Kind::RelayList, "")
+            .tags([Tag::parse(["r", "ws://npub1peer.fips"]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(
+            relay_list_lanes(&honest, Direction::Read),
+            vec![RelayLane::Mesh {
+                url: crate::ip_source::mesh_relay_url("npub1peer")
+            }],
+            "a bare .fips host is rebuilt as the canonical URL"
+        );
+    }
+
+    /// The runtime crate's parser and the core's builder are the two halves
+    /// of one address; if either drifts, a lane the napplet named would not
+    /// be the URL the pool dials.
+    #[test]
+    fn mesh_url_round_trips_between_crates() {
+        use myco_napplet_runtime::seams;
+        assert_eq!(
+            seams::mesh_relay_npub(&crate::ip_source::mesh_relay_url("npub1x")).as_deref(),
+            Some("npub1x")
+        );
+        assert_eq!(
+            seams::mesh_relay_url("npub1x"),
+            crate::ip_source::mesh_relay_url("npub1x")
+        );
+        assert_eq!(
+            mesh_relay_npub("ws://npub1peer.fips:4870@evil.example/"),
+            None
+        );
     }
 
     /// NIP-65 markers are the author's; ours are the reverse.

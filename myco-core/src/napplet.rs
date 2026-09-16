@@ -112,10 +112,20 @@ impl NappletAddr {
 
     /// Strip a `napplet:` or `nostr:` scheme, with or without `//`, and any
     /// trailing slash the OS may have added.
+    ///
+    /// Never index a `&str` by a length derived from another string: the
+    /// pointer comes from a QR code, an NFC tap or a share link, and a
+    /// multibyte character straddling the cut is a panic that unwinds through
+    /// the JNI boundary and aborts the app. `get` refuses a non-boundary cut
+    /// with `None`; the slice below is only taken once the prefix is known to
+    /// be ASCII, so the boundary is safe.
     fn strip_scheme(pointer: &str) -> &str {
         let mut rest = pointer;
         for scheme in ["napplet://", "napplet:", "nostr://", "nostr:"] {
-            if rest.len() >= scheme.len() && rest[..scheme.len()].eq_ignore_ascii_case(scheme) {
+            if rest
+                .get(..scheme.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+            {
                 rest = &rest[scheme.len()..];
                 break;
             }
@@ -1736,6 +1746,27 @@ mod tests {
         // The scheme is stripped, not trusted: it does not make a non-napplet
         // pointer into one.
         assert!(NappletAddr::parse("napplet://nonsense").is_err());
+    }
+
+    /// A pointer whose bytes cut a multibyte character where a scheme would
+    /// end is an error, not a panic. The pointer arrives from a peer (QR,
+    /// NFC, share link) and a panic here unwinds through JNI and kills the
+    /// app — H1 of the PR #52 review.
+    #[test]
+    fn a_non_ascii_pointer_is_refused_not_a_panic() {
+        for pointer in [
+            "nostré",
+            "naddr1€€",
+            "napplet:€",
+            "nostr:€x",
+            "é",
+            "napplet://é",
+        ] {
+            assert!(
+                NappletAddr::parse(pointer).is_err(),
+                "{pointer:?} should be refused"
+            );
+        }
     }
 
     /// An naddr naming an nsite is not a napplet. Distinct kinds are what keep

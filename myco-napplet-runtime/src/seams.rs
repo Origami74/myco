@@ -91,12 +91,66 @@ impl RelayLane {
 
 /// Whether `url` names a mesh peer's relay: a `ws://` URL whose host ends in
 /// `.fips`.
+///
+/// Deliberately lenient — this is the *classifier*, not the gate. A malformed
+/// `.fips` URL must land in the Mesh lane and be refused there by
+/// [`mesh_relay_npub`]; if it fell through to Internet, the runtime would dial
+/// whatever the URL's userinfo trick actually names.
 pub fn is_mesh_relay_url(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("ws://") else {
         return false;
     };
-    let host = rest.split(['/', ':']).next().unwrap_or("");
+    let host = rest.split(['/', ':', '?', '#']).next().unwrap_or("");
     host.ends_with(".fips")
+}
+
+/// The mesh relay port every peer serves on.
+pub const MESH_RELAY_PORT: u16 = 4870;
+
+/// The one way a peer's mesh relay is addressed: `ws://<npub>.fips:4870`.
+///
+/// Byte-identical to the builder the core uses to dial — a mesh URL from
+/// outside (a napplet's `options.relays`, a kind 10002) is never dialled as
+/// given; its npub is taken by [`mesh_relay_npub`] and the URL rebuilt here.
+pub fn mesh_relay_url(npub: &str) -> String {
+    format!("ws://{npub}.fips:{MESH_RELAY_PORT}")
+}
+
+/// The npub a mesh relay URL names, if the URL is exactly the shape
+/// [`mesh_relay_url`] produces — `ws://<npub>.fips`, optionally `:4870`,
+/// optionally a bare `/`.
+///
+/// Strict on purpose. A URL is parsed by the WebSocket client, not by us, and
+/// `ws://npub1peer.fips:4870@evil.example/` parses as *userinfo* on
+/// `evil.example`: whoever got that string into the pool would own the
+/// peer's connection. So userinfo, any other port, any path, query or
+/// fragment, and any host label that is not `npub1[a-z0-9]*` are `None` —
+/// refused, never dialled.
+pub fn mesh_relay_npub(url: &str) -> Option<String> {
+    use nostr::types::url::Host;
+    let parsed = nostr::Url::parse(url).ok()?;
+    if parsed.scheme() != "ws" || !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    let Some(Host::Domain(host)) = parsed.host() else {
+        return None;
+    };
+    let npub = host.strip_suffix(".fips")?;
+    let is_npub_label = npub.starts_with("npub1")
+        && npub
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    if !is_npub_label {
+        return None;
+    }
+    if !matches!(parsed.port(), None | Some(MESH_RELAY_PORT)) {
+        return None;
+    }
+    if !matches!(parsed.path(), "" | "/") || parsed.query().is_some() || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    Some(npub.to_string())
 }
 
 /// Which way a relay plan is for.

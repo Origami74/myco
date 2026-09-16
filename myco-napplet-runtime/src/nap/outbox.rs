@@ -31,7 +31,9 @@ use nostr::{Event, EventId, Filter, PublicKey};
 
 use crate::dispatch::NapContext;
 use crate::nap::relay::{event_json, filters_from, sign_template};
-use crate::seams::{Direction, Envelope, RelayLane, RelayPlan};
+use crate::seams::{
+    is_mesh_relay_url, mesh_relay_npub, mesh_relay_url, Direction, Envelope, RelayLane, RelayPlan,
+};
 use crate::session::Session;
 
 /// How long a read waits for its lanes when the napplet did not say.
@@ -419,9 +421,18 @@ pub fn validate_relay_url(url: &str) -> Result<RelayLane, String> {
     if host.is_empty() {
         return Err(format!("relay URL has no host: {url}"));
     }
-    if host.ends_with(".fips") {
+    // Classified leniently (a `?` or `#` glued to the host counts too) so a
+    // malformed `.fips` URL is refused below rather than falling through to
+    // the Internet branch.
+    if host.ends_with(".fips") || is_mesh_relay_url(url) {
+        // Never carry the string as given: the lane holds the canonical
+        // `ws://<npub>.fips:4870` rebuilt from the npub, so no userinfo,
+        // port or path a napplet wrote can reach the peer pool.
+        let npub = mesh_relay_npub(url).ok_or_else(|| {
+            "mesh relay URL must be ws://<npub>.fips:4870 with no userinfo or path".to_string()
+        })?;
         return Ok(RelayLane::Mesh {
-            url: url.to_string(),
+            url: mesh_relay_url(&npub),
         });
     }
     if is_private_host(host) {
@@ -884,6 +895,42 @@ mod tests {
                 url: "ws://npub1abc.fips:4870".into()
             }
         );
+
+        // A `.fips` URL is only ever the canonical `ws://<npub>.fips:4870`.
+        // `ws://npub1peer.fips:4870@evil.example/` is userinfo on
+        // `evil.example` to the WebSocket client; a wrong port points the
+        // pool at the peer's Blossom and mutes the peer; a path or query is
+        // nothing a mesh relay has. All refused, never fall through to
+        // Internet (H2 of the PR #52 review).
+        for bad in [
+            "ws://npub1peer.fips:4870@evil.example/",
+            "ws://npub1peer.fips:24243",
+            "ws://npub1peer.fips:4870/path",
+            "ws://npub1peer.fips?x=1",
+            "ws://npub1peer.fips#frag",
+            "ws://user@npub1peer.fips:4870",
+            "ws://evil.fips:4870",
+            "ws://npub1-peer.fips:4870",
+        ] {
+            let err = validate_relay_url(bad).unwrap_err();
+            assert!(
+                err.contains("ws://<npub>.fips:4870"),
+                "{bad} gave the wrong error: {err}"
+            );
+        }
+        for (loose, canonical) in [
+            ("ws://npub1peer.fips", "ws://npub1peer.fips:4870"),
+            ("ws://npub1peer.fips:4870/", "ws://npub1peer.fips:4870"),
+            ("ws://npub1peer.fips/", "ws://npub1peer.fips:4870"),
+        ] {
+            assert_eq!(
+                validate_relay_url(loose).unwrap(),
+                RelayLane::Mesh {
+                    url: canonical.into()
+                },
+                "{loose} should be rebuilt as {canonical}"
+            );
+        }
     }
 
     /// Subscribe: local backlog now, remote lanes pulled into the local relay,
