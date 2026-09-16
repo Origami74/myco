@@ -22,98 +22,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Capabilities this version implements, in the words the install sheet
   uses:
-  - **Identity** (NAP-IDENTITY) — a user key, separate from the mesh device
-    key, generated the first time a napplet opens and seeded with a guest
-    profile and a relay list of the configured relays. The device is never
-    named in a user-key event.
-  - **Relays** (NAP-RELAY) — read and post as you on the relay pool: this
-    phone's relay and the public relays when reachable. A granted `relay`
-    posts without asking each time. Subscriptions are live; what the pool
-    holds streams in behind the local backlog.
-  - **Outbox** (NAP-OUTBOX) — outbox-model routing: an author's notes from
-    their NIP-65 relays, a phone across the room over the mesh or a public
-    relay over the internet, deduplicated, with `incomplete` when a relay
-    never answered. Inbox delivery is refused rather than misrouted when a
-    relay list is missing.
-  - **Mesh** (NAP-MESH, Myco's own, in the registry's form) — publish to
-    everyone nearby with a chosen hop count and pull what was missed.
-    Settings › App reach caps how far apps may send (default 3 hops) and
-    look (default 2); zero keeps an app on your phone.
-  - **Pictures and files** (NAP-RESOURCE, `blossom:` only) — by content
-    hash, this phone first, then a friend's phone over the mesh, then the
-    public servers; what is fetched is kept for the next app and the next
-    phone in the room, bounded per blob and per request.
+  - **Identity** — a user key, separate from the mesh device key, generated
+    the first time a napplet opens and seeded with a guest profile and a
+    relay list of the configured relays. The device is never named in
+    anything signed by that key.
+  - **Relays** — read and post as you on the relay pool: this phone's relay
+    and the public relays when reachable. Subscriptions are live. Posting
+    excludes your profile, contacts, relay list and deletions for now; a
+    napplet that tries gets a refusal, not a silent drop.
+  - **Outbox** — an author's notes from the relays they publish to, whether
+    that is a phone across the room over the mesh or a public relay over the
+    internet, deduplicated, with `incomplete` when a relay never answered.
+  - **Mesh** (Myco's own) — publish to everyone nearby with a chosen hop
+    count and pull what was missed. Settings › App reach caps how far apps
+    may send (default 3 hops) and look (default 2); zero keeps an app on
+    your phone.
+  - **Pictures and files** (`blossom:` only) — by content hash, this phone
+    first, then a friend's phone over the mesh, then the public servers;
+    what is fetched is kept for the next app and the next phone in the room,
+    bounded per blob and per request.
 
   Permissions: the install sheet lists everything a napplet will be able
-  to do — its declared needs plus the defaults (identity, relays, pictures)
+  to do — what it declares plus the defaults (identity, relays, pictures)
   — before anything is agreed to. Hold an installed napplet → **Manage
   permissions** to switch each capability on or off; a change is live, and
-  an open window restarts so its startup calls run under the new grants. A
-  capability switched off stays off at the next launch; one the napplet
-  declared that a later Myco learns to do is granted at launch and shown on
-  the sheet. A napplet update that asks for more than the sheet showed goes
-  back through the review sheet before it gets it. Posting as you excludes
-  your profile, contacts, relay list and deletions for now; a napplet that
-  tries gets a refusal, not a silent drop.
+  an open window restarts under the new grants. What you switch off stays
+  off. An update that asks for more than you were shown goes back through
+  the sheet before it gets it.
 
-  Updates and state: "Check for updates" refreshes installed napplets from
-  their pointer's relays beside the nsite check, and the version served is
-  always the one whose bytes are here — a newer manifest with no bytes
-  behind it cannot take an app off the air. A tile dims and says so when
-  its app is not on this phone (after "Delete cache", say); "Reload app"
-  and "Try again" on the review sheet fetch it again, the sharer's phone
-  first.
+  Updates: "Check for updates" refreshes installed napplets beside the
+  nsite check, and the version you open is always the one whose bytes are
+  on the phone — a newer manifest with nothing behind it cannot take an app
+  off the air. A tile dims and says so when its app is not on this phone
+  (after "Delete cache", say); "Reload app" fetches it again, the sharer's
+  phone first.
 
-- Nsite manifests declaring a NIP-5A aggregate hash are checked against it;
-  a mismatch is logged and the site is served on its per-blob hashes
-  (napplets, whose identity the aggregate is, are refused instead).
+- Discover suggests napplets beside its nsites — Mappy, Minesweeper and
+  DingDong. A tap fetches the napplet and opens install review on the Apps
+  tab; nothing is granted until you say so there.
+- DingDong comes preinstalled, like bitchat: pinned on first run with only
+  the default grants, and what it declares is put in front of you the first
+  time it opens.
+
+- **Send a file to a paired phone.** Share anything from another app, pick
+  one of your paired phones, and it arrives encrypted over the mesh — no
+  hotspot, no internet. The Circle tab has the same door: tap a contact and
+  choose "Send a file". The receiving phone is asked first and can say no;
+  received files land in Downloads/Myco. Transfers in flight show on the
+  Circle tab beside pairing requests, so a send that is still waiting is
+  visible from anywhere in the app and can be cancelled; an offer nobody
+  answers gives up after ten minutes. A transfer survives a flaky link: a
+  lost offer, accept or "ready" is re-sent until the other side has heard
+  it, and a large file over a slow hop is only given up when nothing has
+  arrived for thirty seconds.
+- Phones on the same Wi-Fi find each other over the network instead of
+  Bluetooth. Myco announces itself on the local network the same way a fips
+  node does, so two phones — or a phone and a desktop — on one Wi-Fi connect
+  over UDP, which moves a file in seconds rather than minutes. A peer the
+  phone quietly stops reporting is found again on its own, and one that
+  first answered with only a link-local address is re-resolved rather than
+  given up on. Settings → Mesh has a "Network (LAN)" switch to turn this on
+  or off.
+
+- **Peers keep every link they have.** The mesh holds more than one path
+  to a phone — Bluetooth and Wi-Fi Aware, or Bluetooth and the local
+  network — probes the standbys so they are known to work, and moves
+  traffic when the active one degrades, instead of dropping the peer and
+  finding it again from scratch. Two connected phones stay connected
+  through the hiccups that used to disconnect them. Built on fips's
+  multi-path branch; an older Myco ignores the new link messages and keeps
+  linking over one path as before.
 - The status panel behind the peers pill shows every link a peer has, not
   just the one carrying traffic: one icon per lane, the active one lit and
-  the standbys faded. A phone on Bluetooth and Wi-Fi at once is listed under
-  both. Needs a core built against fips multi-path; older cores show one icon
-  as before. Peers that never told us a name are shown by their shortened
+  the standbys faded. A phone on Bluetooth and Wi-Fi at once is listed
+  under both. Peers that never told us a name are shown by their shortened
   npub there instead of a generated placeholder name.
-- Settings → Mesh has a "Network (LAN)" switch under Wi-Fi Aware that turns
-  same-network peer discovery (mDNS browse and advert) on or off.
+
+- Nsite manifests that declare a NIP-5A aggregate hash are checked against
+  it. An nsite whose hash does not match is still served on its per-file
+  hashes; a napplet, whose identity the aggregate is, is refused.
 - A Nix flake for the toolchain (`nix develop` for the Rust host shell,
   `nix develop .#android` for the Android SDK/NDK/JDK 17/Gradle/adb shell), so a
   NixOS or nix-enabled machine gets a working build environment without a manual
   rustup/SDK-manager install. See `docs/how-to/build.md` §1.
-- Send a file from the Circle tab: tapping a paired contact now offers
-  "Send a file" next to their npub and "Remove from circle". Pick the files
-  and they go out the same encrypted mesh transfer the system Sharesheet
-  uses — to the contact's npub, over whatever path reaches them, without
-  needing a shared Wi-Fi.
-- Phones on the same Wi-Fi now find each other over the network instead of
-  Bluetooth. Myco announces itself on the local network the same way a fips
-  node does, so two phones — or a phone and a desktop — on one Wi-Fi connect
-  over UDP, which moves a file in seconds rather than minutes.
-- Send a file straight to a paired phone. Share anything from another app, pick
-  one of your paired phones, and it arrives encrypted over the mesh — no
-  hotspot, no internet. The receiving phone is asked first and can say no, and
-  the file lands in Downloads/Myco.
-- Transfers appear on the Circle tab alongside pairing requests, so a send that
-  is still waiting is visible from anywhere in the app and can be cancelled.
-  An offer nobody answers gives up after ten minutes instead of waiting forever.
-- Discover suggests napplets beside its nsites — Mappy, Minesweeper and DingDong.
-  A tap fetches the napplet and opens install review on the Apps tab; nothing is
-  granted until you say so there.
-- DingDong comes preinstalled, like bitchat: pinned on first run with only the
-  default grants, and what it declares is put in front of you the first time it
-  opens.
 
 ### Changed
 
-- The relay store is an LMDB database (`nostr-lmdb`): indexed queries, one
-  small write per event, and negentropy items ready for mesh sync. Chat and
-  other expiring events stay in memory and never touch disk, as before. A
-  store from an earlier version is migrated on first open.
+- The relay store is an LMDB database: indexed queries, one small write per
+  event, and ready for mesh sync. Chat and other expiring events stay in
+  memory and never touch disk, as before. A store from an earlier version is
+  migrated on first open; if anything fails to migrate, the old file is kept.
 
 ### Fixed
 
-- An nsite window whose page renderer crashed took the whole app with it —
-  mesh, relay and every other window. The window now closes on its own and
-  the rest of Myco keeps running.
+- A page that crashes cannot take Myco down. An nsite window whose renderer
+  died used to kill the whole app — mesh, relay and every other window. The
+  window now closes on its own and the rest of Myco keeps running.
 - The mesh tunnel comes back on its own after another VPN app takes the
   slot and gives it up again. Peers stayed linked over the radios, so the
   mesh looked healthy while nothing could reach anyone; Settings now says
@@ -121,30 +125,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Wi-Fi Aware no longer retries a failed attach thousands of times a minute
   while the phone's Wi-Fi stack refuses it, which got the app killed; it backs
   off from a second to a minute between tries.
-- Peers on the same Wi-Fi are found even when Android's first mDNS answer
-  carried only IPv6 link-local addresses: the app re-resolves a peer it
-  cannot reach, and never dials two addresses of one peer inside the
-  handshake timeout (the second was silently refused).
 - Inviting someone from Nearby no longer labels them with your own device
   name. The tap recorded your name against their npub, so the "invite sent"
   pop-up — and their bubble everywhere else — read back as you. The invite now
   carries the name they told us, and nothing at all when they have told us
   none, so their real name still wins once it arrives.
-- Same-Wi-Fi peers that dropped off mDNS now reconnect on their own: the
-  discovery browse restarts periodically so a peer the phone quietly stopped
-  reporting is found again, instead of the connection staying dead.
-- A file transfer no longer gets stuck when a control message is lost. An
-  accept (or offer, or ready) sent while the Bluetooth link was re-dialling
-  was dropped, and the other side waited the full ten minutes before giving
-  up. Each side now re-sends the message it is still waiting to have heard,
-  every twelve seconds or so until the transfer moves on or expires — and a
-  receiver that already has the file answers a repeated "ready" with a fresh
-  "done", so a sender no longer sits on "Sending" after a delivered file.
-- Receiving a large file over Bluetooth no longer fails part-way with
-  "error decoding response body". The download used to give up after two
-  minutes in total, which a few megabytes over a slow hop exceeds while still
-  arriving; it now only gives up when nothing has arrived for thirty seconds,
-  and a connection that drops mid-file is tried again a few times first.
 
 ## [0.6.1] - 2026-08-21
 
