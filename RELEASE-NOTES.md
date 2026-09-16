@@ -75,18 +75,6 @@ Versions are pinned to bytes: the napplet you open is always the one whose file
 is on your phone, and a newer manifest with nothing behind it cannot take an
 app off the air. "Check for updates" refreshes napplets beside the nsite check.
 
-### What was reviewed
-
-The runtime went through two adversarial reviews before this release, the
-second with a dedicated look at how a napplet might break out of its sandbox.
-Every finding is fixed in this build. The sandbox itself held; what needed work
-was around it — a napplet could have pointed one of Myco's own mesh connections
-at an internet host through a crafted relay address, reached the phone's local
-relay on the loopback interface, or crashed the whole app by exhausting its
-page. All three are closed, along with the rest of the list. The design doc now
-carries an explicit list of what remains policy rather than enforcement, so it
-is visible rather than implied.
-
 ## Send a file
 
 Share a photo, a document, anything, from any app on the phone: Myco appears in
@@ -106,14 +94,11 @@ Bluetooth — Myco announces itself on the local network the way a fips node
 does — and a file that took minutes over Bluetooth takes seconds over UDP.
 Bluetooth still works when there is no shared network; it is just slower.
 
-Two things that used to go wrong no longer do. A transfer got stuck when a
-control message — the accept, the offer, the "ready" — was lost while the
-Bluetooth link was re-dialling, and the other side waited the full ten minutes.
-Each side now re-sends what it is still waiting to have heard, every twelve
-seconds or so, until the transfer moves on. And a large file over Bluetooth no
-longer fails part-way with a decoding error: the download used to give up after
-two minutes in total, which a few megabytes over a slow hop exceeds while still
-arriving; it now only gives up when nothing has arrived for thirty seconds.
+A transfer survives a flaky link. If a control message — the offer, the accept,
+the "ready" — is lost while Bluetooth is re-dialling, each side keeps re-sending
+what it is waiting to hear until the transfer moves on, and a large file over a
+slow hop is only given up when nothing has arrived for thirty seconds, not on a
+fixed clock.
 
 ## The mesh holds more than one link
 
