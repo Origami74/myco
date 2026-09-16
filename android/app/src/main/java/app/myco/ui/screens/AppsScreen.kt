@@ -6,6 +6,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -271,6 +272,11 @@ fun AppsScreen(
                     nappletSheetFor = null
                     onPinNappletToHome(item.nappletPointer, item.title)
                 },
+                onCheckUpdates = {
+                    nappletSheetFor = null
+                    client.dispatch(NativeActions.checkNsiteUpdates())
+                    android.widget.Toast.makeText(context, "Checking for updates…", android.widget.Toast.LENGTH_SHORT).show()
+                },
                 onReload = {
                     nappletSheetFor = null
                     // Same path a fresh add takes: fetch, verify, then the
@@ -511,6 +517,7 @@ private fun NappletSheet(
     onOpen: () -> Unit,
     onShare: () -> Unit,
     onPinToHome: () -> Unit,
+    onCheckUpdates: () -> Unit,
     onReload: () -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -551,9 +558,13 @@ private fun NappletSheet(
         SheetAction(Icons.Filled.Lock, "Manage permissions") { onManagePermissions() }
         SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
 
+        // The same check the nsite sheet offers: every installed app, napplets
+        // included, asked for a newer version; the toast says what came of it.
+        SheetAction(Icons.Filled.Refresh, "Check for updates") { onCheckUpdates() }
         // Fetches the app again and shows the same screen it was added with.
-        // The way to pick up a newer version, and the way to revisit what it is
-        // allowed to do without removing it and finding its link again.
+        // The way to revisit what it is allowed to do without removing it and
+        // finding its link again — or to force a re-fetch when a check found
+        // nothing but the app still misbehaves.
         SheetAction(Icons.Filled.Refresh, "Reload app") { onReload() }
         Spacer(Modifier.height(8.dp))
 
@@ -636,12 +647,10 @@ private fun NappletTile(
                 style = MaterialTheme.typography.titleLarge,
             )
             // The duck marks a napplet: a program Myco hosts, as against an
-            // nsite, which is a document Myco serves.
-            Text(
-                "\uD83E\uDD86",
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.align(Alignment.TopEnd).padding(5.dp),
-            )
+            // nsite, which is a document Myco serves. On its own chip, so it
+            // reads against any tile colour rather than sinking into a green
+            // or yellow one.
+            NappletBadge(modifier = Modifier.align(Alignment.TopEnd).padding(4.dp))
         }
         Spacer(Modifier.height(6.dp))
         Text(
@@ -662,6 +671,21 @@ private fun NappletTile(
                 textAlign = TextAlign.Center,
             )
         }
+    }
+}
+
+/** The napplet mark: a duck on a small light chip with a dark rim, legible on every tile colour. */
+@Composable
+private fun NappletBadge(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(22.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .background(Color.White.copy(alpha = 0.92f))
+            .border(1.dp, Color.Black.copy(alpha = 0.35f), RoundedCornerShape(7.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("\uD83E\uDD86", style = MaterialTheme.typography.labelMedium)
     }
 }
 
