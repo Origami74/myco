@@ -44,6 +44,12 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The action's default is `tools platform-tools`; the legacy `tools`
+          # package is gone from the SDK repository, and sdkmanager fails the
+          # whole step on the one it cannot find. Gradle pulls the platform and
+          # build-tools it needs itself.
+          packages: platform-tools
 
       - name: Install Android NDK ${{ env.NDK_VERSION }}
         run: sdkmanager "ndk;${NDK_VERSION}"
