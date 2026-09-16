@@ -676,7 +676,7 @@ private fun NappletTile(
 
 /** The napplet mark: a duck on a small light chip with a dark rim, legible on every tile colour. */
 @Composable
-private fun NappletBadge(modifier: Modifier = Modifier) {
+internal fun NappletBadge(modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .size(22.dp)

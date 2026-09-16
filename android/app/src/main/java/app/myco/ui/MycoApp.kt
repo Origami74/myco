@@ -356,7 +356,22 @@ fun MycoApp(
                         },
                     )
                 }
-                composable("discover") { DiscoverScreen(state, client, onLaunchNsite = onLaunchNsite) }
+                composable("discover") {
+                    DiscoverScreen(
+                        state,
+                        client,
+                        onLaunchNsite = onLaunchNsite,
+                        // The review sheet lives on the Apps tab and is driven by
+                        // state.nappletReview, which the fetch has already set.
+                        onShowNappletReview = {
+                            nav.navigate("apps") {
+                                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
+                    )
+                }
                 composable("settings") {
                     SettingsScreen(
                         state = state,

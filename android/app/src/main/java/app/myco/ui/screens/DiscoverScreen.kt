@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import app.myco.NsiteIcons
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
+import app.myco.core.LibraryKind
 import app.myco.core.NativeActions
 import app.myco.ui.ScreenHeader
 
@@ -51,18 +52,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * **Discover** — an app-drawer of nsites to add: a curated **Suggested** row
- * (the bundled bitchat + community apps) and **Around you** — nsites your
- * connected Circle peers are hosting, queried over the mesh. Tiles mirror the
- * Apps grid (favicon or lettered fallback); tapping an nsite opens it exactly
- * like opening a shared app — it starts syncing and shows its live page, pulling
- * from a Circle holder (Around you) or public relays/Blossom (Suggested).
+ * **Discover** — an app-drawer of apps to add: a curated **Suggested** row
+ * (the bundled bitchat + community nsites, and a few napplets) and **Around
+ * you** — nsites your connected Circle peers are hosting, queried over the
+ * mesh. Tiles mirror the Apps grid (favicon or lettered fallback; a duck chip
+ * marks a napplet). Tapping an nsite opens it exactly like opening a shared
+ * app — it starts syncing and shows its live page, pulling from a Circle holder
+ * (Around you) or public relays/Blossom (Suggested). Tapping a napplet fetches
+ * it and hands over to the install review on the Apps tab; nothing is granted
+ * until the user says so there.
  */
 @Composable
 fun DiscoverScreen(
     state: AppState,
     client: AppCoreClient,
     onLaunchNsite: (host: String, title: String) -> Unit,
+    onShowNappletReview: () -> Unit,
 ) {
     // Auto-run discovery when the screen first appears, so results show without a
     // manual tap (the button stays available as Refresh).
@@ -88,19 +93,41 @@ fun DiscoverScreen(
             }
         }
 
+        // A napplet already in the Library is on the Apps tab; it is not news
+        // here. Nsite suggestions stay listed when installed (unchanged).
+        val installedNapplets = state.library.filter { it.kind == LibraryKind.Napplet && it.pinned }
+        val suggestions = SUGGESTED_APPS.filterNot { s ->
+            s is Suggestion.Napplet && installedNapplets.any { it.authorNpub == s.authorNpub && it.dTag == s.dTag }
+        }
+
         item(span = { GridItemSpan(maxLineSpan) }) { SectionLabel("Suggested") }
-        items(SUGGESTED_APPS, key = { it.host }) { app ->
-            DiscoverTile(
-                client = client,
-                iconHost = app.host,
-                colorKey = app.host,
-                title = app.title,
-            ) {
-                // Same as opening a shared app (minus pairing): kick off the sync
-                // and open its live page. No holder — a public nsite pulls from the
-                // Circle if a peer has it, else public relays/Blossom.
-                client.dispatch(NativeActions.openNsite(app.host))
-                onLaunchNsite(app.host, app.title)
+        items(suggestions, key = { it.key }) { s ->
+            when (s) {
+                is Suggestion.Nsite -> DiscoverTile(
+                    client = client,
+                    iconHost = s.host,
+                    colorKey = s.host,
+                    title = s.title,
+                ) {
+                    // Same as opening a shared app (minus pairing): kick off the sync
+                    // and open its live page. No holder — a public nsite pulls from the
+                    // Circle if a peer has it, else public relays/Blossom.
+                    client.dispatch(NativeActions.openNsite(s.host))
+                    onLaunchNsite(s.host, s.title)
+                }
+                is Suggestion.Napplet -> DiscoverTile(
+                    client = client,
+                    iconHost = null,
+                    colorKey = s.pointer,
+                    title = s.title,
+                    napplet = true,
+                ) {
+                    // The tap fetches and asks; the install action belongs to the
+                    // review sheet alone, so a suggestion can never grant a
+                    // capability by itself (mirrors MainActivity.handleScannedText).
+                    client.dispatch(NativeActions.fetchNapplet(s.pointer))
+                    onShowNappletReview()
+                }
             }
         }
 
@@ -108,7 +135,8 @@ fun DiscoverScreen(
         // news here: one already offered under Suggested (the tile above opens
         // it), and one you have already pinned — that lives on your Apps tab, and
         // finding it again on a peer's relay does not make it a discovery.
-        val alreadyOffered = SUGGESTED_APPS.map { it.host }.toSet() +
+        // `state.discovered` is an nsite search, so only nsite hosts belong here.
+        val alreadyOffered = SUGGESTED_APPS.filterIsInstance<Suggestion.Nsite>().map { it.host }.toSet() +
             state.library.filter { it.pinned }.map { it.urlHost }
         val around = state.discovered.filter { it.host !in alreadyOffered }
 
@@ -152,18 +180,23 @@ private fun SectionLabel(text: String) {
  * A Discover grid tile, styled like an Apps-drawer icon: the nsite's favicon when
  * one can be fetched locally (installed / already-pulled sites), otherwise a
  * lettered tile tinted by [colorKey].
+ *
+ * A napplet ([iconHost] null, [napplet] true) has no nsite favicon to fetch; it
+ * gets the lettered tile tinted by its pointer (the same key `NappletTile` tints
+ * by, so the colour survives install) and the duck chip.
  */
 @Composable
 private fun DiscoverTile(
     client: AppCoreClient,
-    iconHost: String,
+    iconHost: String?,
     colorKey: String,
     title: String,
+    napplet: Boolean = false,
     onClick: () -> Unit,
 ) {
     var icon by remember(iconHost) { mutableStateOf<Bitmap?>(null) }
     LaunchedEffect(iconHost) {
-        if (icon == null) {
+        if (iconHost != null && icon == null) {
             icon = withContext(Dispatchers.IO) {
                 runCatching { NsiteIcons.fetch(client, "$iconHost.localhost") }.getOrNull()
             }
@@ -192,6 +225,9 @@ private fun DiscoverTile(
                     style = MaterialTheme.typography.titleLarge,
                 )
             }
+            if (napplet) {
+                NappletBadge(modifier = Modifier.align(Alignment.TopEnd).padding(4.dp))
+            }
         }
         Spacer(Modifier.height(6.dp))
         Text(
@@ -207,20 +243,63 @@ private fun DiscoverTile(
 private fun initialOf(label: String): String =
     label.firstOrNull { it.isLetterOrDigit() }?.uppercase() ?: "?"
 
-/**
- * A curated app suggestion. [host] is the nsite gateway label (the `nsite.lol`
- * subdomain, i.e. a `<base36-pubkey><d-tag>` named site) — the same string a
- * discovered nsite carries in `host`, so opening one runs the identical path.
- */
-private data class SuggestedApp(val title: String, val host: String)
+/** A curated app suggestion; [key] is the stable grid key. */
+private sealed interface Suggestion {
+    val title: String
+    val key: String
+
+    /**
+     * An nsite. [host] is the nsite gateway label (the `nsite.lol` subdomain,
+     * i.e. a `<base36-pubkey><d-tag>` named site) — the same string a discovered
+     * nsite carries in `host`, so opening one runs the identical path.
+     */
+    data class Nsite(override val title: String, val host: String) : Suggestion {
+        override val key: String get() = "nsite:$host"
+    }
+
+    /**
+     * A napplet. [pointer] is the `naddr` handed to `fetchNapplet` — an naddr
+     * rather than `<npub>:<d>` because its relay hints ride inside it and are
+     * where the fetch looks first. [authorNpub] + [dTag] are what the Library
+     * keys a napplet by, whatever pointer spelling it was added under; they are
+     * how an installed suggestion is recognised.
+     */
+    data class Napplet(
+        override val title: String,
+        val pointer: String,
+        val authorNpub: String,
+        val dTag: String,
+    ) : Suggestion {
+        override val key: String get() = "napplet:$authorNpub:$dTag"
+    }
+}
 
 /**
- * Curated starter apps shown in Discover. `bitchat` is also the bundled first-run
- * default (`DEFAULT_SITES` in `myco-core`); listing it here lets a user who wiped
- * it get it back.
+ * Curated starter apps shown in Discover: nsites first, then napplets. `bitchat`
+ * and `DingDong` are also the bundled first-run defaults (`DEFAULT_SITES` /
+ * `DEFAULT_NAPPLETS` in `myco-core`); listing them here lets a user who removed
+ * one get it back.
  */
-private val SUGGESTED_APPS = listOf(
-    SuggestedApp("bitchat", "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivbitchat"),
-    SuggestedApp("ICS", "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivics"),
-    SuggestedApp("Dumplings", "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivdumplings"),
+private val SUGGESTED_APPS: List<Suggestion> = listOf(
+    Suggestion.Nsite("bitchat", "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivbitchat"),
+    Suggestion.Nsite("ICS", "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivics"),
+    Suggestion.Nsite("Dumplings", "4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivdumplings"),
+    Suggestion.Napplet(
+        "Mappy",
+        "naddr1qqyx6ctswpkx2arnqgsqhtasevhkqty908ymemjgwuphelgrv33gf62p64ywy5ldum0as5srqsqqpzfe5a247a",
+        "npub1pwhmpje0vqkg27wfhnhysacr0n7sxerzsn55r42guff7meklmpfqka6r38",
+        "mapplets",
+    ),
+    Suggestion.Napplet(
+        "Minesweeper",
+        "naddr1qq9k66twv4ehwet9wpjhyqg4waehxw309aex2mrp0yhxg6t5w3hjuur4vgpzqfngzhsvjggdlgeycm96x4emzjlwf8dyyzdfg4hefp89zpkdgz99qvzqqqyf8yzehfvw",
+        "npub1ye5ptcxfyyxl5vjvdjar2ua3f0hynkjzpx552mu5snj3qmx5pzjscpknpr",
+        "minesweeper",
+    ),
+    Suggestion.Napplet(
+        "DingDong",
+        "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9hxwer0denstp6v0k",
+        "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr",
+        "dingdong",
+    ),
 )

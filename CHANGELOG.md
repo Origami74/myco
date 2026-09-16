@@ -93,6 +93,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Transfers appear on the Circle tab alongside pairing requests, so a send that
   is still waiting is visible from anywhere in the app and can be cancelled.
   An offer nobody answers gives up after ten minutes instead of waiting forever.
+- Discover suggests napplets beside its nsites — Mappy, Minesweeper and DingDong.
+  A tap fetches the napplet and opens install review on the Apps tab; nothing is
+  granted until you say so there.
 
 ### Changed
 
