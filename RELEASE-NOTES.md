@@ -2,11 +2,14 @@
 
 **Released**: 2026-09-16
 
-v0.7.0 turns Myco from an nsite viewer into an app runtime. Alongside nsites it
-now runs **napplets** — single-file programs published on Nostr — each in its
-own sandbox, with the capabilities it uses granted by you and implemented by
-Myco. Underneath, the mesh learned to hold more than one link to a phone and
-switch between them, and the relay moved to a real database.
+v0.7.0 is three releases in one. Myco turns from an nsite viewer into an app
+runtime: alongside nsites it runs **napplets** — single-file programs published
+on Nostr — each in its own sandbox, with the capabilities it uses granted by
+you. You can **send a file to a friend's phone** from any app, encrypted over
+the mesh, no hotspot and no internet. And **peers stay connected**: the mesh now
+holds every link it has to a phone and switches between them, which on real
+phones in a real room is the difference between a peer that flickers and one
+that stays.
 
 **No wire-format change from v0.6.x.** A v0.7.0 phone and a v0.6.1 phone still
 exchange apps and messages and pair. The new multi-path link messages are
@@ -16,6 +19,15 @@ first open.
 
 ## At a glance
 
+- **Peers stay connected.** A phone next to you is usually reachable more than
+  one way; Myco now keeps every path, probes the spares, and moves traffic when
+  the active one degrades instead of dropping the peer and finding it again
+  from scratch. Built on fips's multi-path branch. The status panel shows each
+  link, the active one lit.
+- **Send a file.** Share anything from another app, pick a paired phone, and it
+  arrives encrypted over the mesh — or tap a contact on the Circle tab. The
+  other phone is asked first; the file lands in Downloads/Myco. Two phones on
+  the same Wi-Fi move it in seconds rather than minutes.
 - **Napplets.** Add one by pasting an `naddr`, scanning a QR, or bumping a
   friend's phone — the friend's phone is asked first, so it arrives with no
   internet. Review what it asks for, and it lands on the Apps grid with a 🦆
@@ -25,13 +37,8 @@ first open.
   napplet will be able to do before you agree. Hold a tile → Manage permissions
   to switch each capability off or on; a change is live. An update that asks for
   more than you were shown goes back through the sheet first.
-- **Every link to a peer, not just one.** The status panel behind the peers pill
-  shows a phone on Bluetooth and Wi-Fi at once, the active lane lit and the
-  standbys faded, and the mesh moves traffic between them without re-pairing.
 - **Same-Wi-Fi discovery has a switch,** and peers that dropped off the network
   come back on their own.
-- **Files that get there.** A transfer no longer sticks when a control message
-  is lost, and a large file over Bluetooth no longer fails part-way.
 - **A crashed page cannot take Myco down.** A window whose renderer dies closes
   on its own; the mesh, the relay and your other windows keep running.
 
@@ -80,21 +87,58 @@ page. All three are closed, along with the rest of the list. The design doc now
 carries an explicit list of what remains policy rather than enforcement, so it
 is visible rather than implied.
 
+## Send a file
+
+Share a photo, a document, anything, from any app on the phone: Myco appears in
+the system Sharesheet, you pick one of your paired phones, and the file goes
+out over the mesh — encrypted to that phone's key, over whichever path reaches
+it, with no hotspot and no internet. The Circle tab has the same door: tap a
+contact and choose **Send a file**.
+
+The receiving phone is asked before anything is transferred and can say no. A
+transfer in flight shows on the Circle tab beside pairing requests, so a send
+that is still waiting is visible from anywhere in the app and can be cancelled;
+an offer nobody answers gives up after ten minutes. Received files land in
+Downloads/Myco.
+
+Two phones on the same Wi-Fi now find each other over the network rather than
+Bluetooth — Myco announces itself on the local network the way a fips node
+does — and a file that took minutes over Bluetooth takes seconds over UDP.
+Bluetooth still works when there is no shared network; it is just slower.
+
+Two things that used to go wrong no longer do. A transfer got stuck when a
+control message — the accept, the offer, the "ready" — was lost while the
+Bluetooth link was re-dialling, and the other side waited the full ten minutes.
+Each side now re-sends what it is still waiting to have heard, every twelve
+seconds or so, until the transfer moves on. And a large file over Bluetooth no
+longer fails part-way with a decoding error: the download used to give up after
+two minutes in total, which a few megabytes over a slow hop exceeds while still
+arriving; it now only gives up when nothing has arrived for thirty seconds.
+
 ## The mesh holds more than one link
 
-A phone next to you is usually reachable more than one way — Bluetooth and
-Wi-Fi Aware, or Bluetooth and the local network. Until now Myco used one and
-forgot the other, and when that one failed the peer was gone until it was found
-again from scratch.
+This is the change that matters most in a room. A phone next to you is usually
+reachable more than one way — Bluetooth and Wi-Fi Aware, or Bluetooth and the
+local network. Until now Myco used one and forgot the other, and when that one
+failed the peer was gone until it was found again from scratch: a Bluetooth
+hiccup, a Wi-Fi Aware teardown, a phone walking behind a wall, each one a
+disconnect and a re-discovery.
 
 The mesh now keeps every path to a peer, probes the standbys so they are known
-to work before they are needed, and switches when the active one degrades. The
-status panel shows this directly: one icon per lane, the lit one carrying
-traffic. Two connected phones stay connected through a Bluetooth hiccup or a
-Wi-Fi Aware teardown without re-pairing or re-discovering.
+to work before they are needed, and switches when the active one degrades. Two
+connected phones stay connected through the hiccups that used to drop them,
+without re-pairing or re-discovering. In testing on real phones this is the
+largest single reliability gain Myco has had; the peers pill stops flickering.
 
-This is the first release built on fips's multi-path branch. The link messages
-it adds are ignored by older nodes, so mixed rooms keep working.
+The status panel shows it directly: one icon per lane, the lit one carrying
+traffic, the standbys faded. A phone on Bluetooth and Wi-Fi at once is listed
+under both, and peers that never told us a name are shown by their shortened
+npub instead of a placeholder.
+
+This is the first release built on fips's `feat/multi-path-switchover` branch,
+which is experimental upstream. The link messages it adds are ignored by older
+nodes, so mixed rooms keep working; the multi-path link itself only forms
+between two v0.7.0 phones.
 
 ## Storage
 
