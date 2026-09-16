@@ -49,7 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an open window restarts so its startup calls run under the new grants. A
   capability switched off stays off at the next launch; one the napplet
   declared that a later Myco learns to do is granted at launch and shown on
-  the sheet.
+  the sheet. A napplet update that asks for more than the sheet showed goes
+  back through the review sheet before it gets it. Posting as you excludes
+  your profile, contacts, relay list and deletions for now; a napplet that
+  tries gets a refusal, not a silent drop.
 
   Updates and state: "Check for updates" refreshes installed napplets from
   their pointer's relays beside the nsite check, and the version served is
@@ -105,6 +108,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An nsite window whose page renderer crashed took the whole app with it —
+  mesh, relay and every other window. The window now closes on its own and
+  the rest of Myco keeps running.
 - The mesh tunnel comes back on its own after another VPN app takes the
   slot and gives it up again. Peers stayed linked over the radios, so the
   mesh looked healthy while nothing could reach anyone; Settings now says

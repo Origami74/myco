@@ -69,7 +69,7 @@ transport-neutral; the *web projection* binds them to iframes, `postMessage`, an
 | D5 | Mesh | Standard NAPs behave exactly as specified. Mesh rides those contracts through `<npub>.fips` relay URLs (§7.4); a Myco mesh NAP covers only what has no standard equivalent. |
 | D6 | First milestone | A full verified resolve — manifest, blobs, aggregate, `srcdoc`, handshake. No shortcuts that get thrown away. |
 | D7 | Specification drift | Pin one `napplet/naps` revision and re-audit deliberately (§8). |
-| D8 | Capability policy | An install-time review screen; grants stored per library entry as two sets — `granted` and `denied` — and switchable per capability on the app's sheet afterwards (live — an open window obeys on its next call, and relaunches). A launch may grant a declared domain this build newly implements, but never one the user switched off: "never decided" and "said no" are different slots. A granted `relay` covers publishing — no per-event prompt. |
+| D8 | Capability policy | An install-time review screen; grants stored per library entry as two sets — `granted` and `denied` — and switchable per capability on the app's sheet afterwards (live — an open window obeys on its next call, and relaunches). A launch may grant a declared domain this build newly implements, but never one the user switched off: "never decided" and "said no" are different slots — and only if the domain was on the list the review sheet showed; a later manifest declaring more goes back through the review sheet before it gets it. A granted `relay` covers publishing with no per-event prompt, except — interim, until the permission model adds prompts — kinds 0, 3, 5 and 10000–19999, which are refused per call. |
 | D9 | Acquisition | Fetch online when added by `naddr`; local and mesh-replicable from then on. |
 | D10 | Crate | A new `myco-napplet-runtime`, over shared NIP-5A primitives in `nsite-deck`. |
 | D11 | Intents | Android Intents and NAP-INTENT resolve through one shared resolver, bridged both ways, landed early. Claiming the `nostr:` URI scheme is deferred. |
@@ -194,6 +194,17 @@ The shell's whole job is:
 
 It stays thin on purpose. Every policy decision, every capability implementation, and all
 verification live in Rust. The shell holds no key and opens no connection of its own.
+
+#### Secure context
+
+`*.localhost` is potentially trustworthy, and the `srcdoc` frame inherits that from the
+shell. So the napplet has a secure context: `navigator.clipboard.writeText` works on a
+tap inside it, and `crypto.subtle` is available.
+
+Camera, microphone, geolocation and clipboard *read* stay denied, because no
+`WebChromeClient` grants them — `NappletActivity` sets none, and that is deliberate.
+Keep it that way. Any secure-context API a later WebView adds is reviewed against this
+note before the shell is touched.
 
 ### 5.3 The shell ↔ Rust channel
 
@@ -357,12 +368,18 @@ seam — the Circle's stores over the mesh, then the public servers unless offli
 is verified by hash, **stored**, and only then delivered, so the second ask from any
 napplet is local and the room can serve it over the mesh. `mime` is sniffed from the
 bytes, never a header; raw SVG is refused (`blocked-by-policy`) for want of a sandboxed
-rasterizer. Bytes cross the JSON channel as base64 and the shell builds the `Blob` the
+rasterizer — checked over the whole body once the first kilobyte reads as text, not the
+first kilobyte alone. Bytes cross the JSON channel as base64 and the shell builds the `Blob` the
 vendored shim expects. `https:`, `htree:` and `nostr:` report `unsupported-scheme`. Signing is mediated: the napplet asks, Rust signs, no napplet ever
 sees a key. A `relay` grant accepted at install covers publishing, with no per-event
 prompt (D8) — which means a granted napplet can publish as you at will, so the review
 screen has to say so in words a person understands, and revoking a grant has to be
-reachable.
+reachable. Interim, until the permission model has per-event prompts, the one parser
+behind `relay.publish`, `outbox.publish` and `mesh.publish` (`sign_template`) refuses
+kinds 0, 3, 5 and 10000–19999: a napplet may post as you, not rewrite your profile,
+contacts or relay list, or delete your events. The refusal is `ok: false` with the
+reason on the `.result` frame. The runtime's own first-use kind 0 and 10002 do not go
+through it.
 
 Relay access sits behind one resolver with three lanes: the local relay, mesh relays
 addressed as `ws://<npub>.fips:4870`, and internet relays when reachable (§7.4).
@@ -386,6 +403,25 @@ iframe does not close. It is the conformant reading of the specs and a `relay` g
 already lets the napplet publish as the user; tightening it (a relay allowlist, or a
 separate grant for naming relays) is a policy knob to revisit with the permission model
 (roadmap).
+
+How the URL check works: `validate_relay_url` parses with the `url` crate (no hand-rolled
+prefix matching), refuses any userinfo, unwraps a v4-mapped v6 address before judging it,
+and counts CGNAT (`100.64/10`) and multicast as private beside loopback, link-local and
+RFC 1918; the parser normalises `127.1`, decimal and hex shorthand, so those need no
+special case. A `.fips` host is accepted only as `ws://<npub>.fips`, optionally `:4870` or
+a bare `/`, and is always dialled as the rebuilt `ws://<npub>.fips:4870` (§7.4). At most
+ten relays may be named per call. The outbox resolves an internet lane before dialling
+and refuses it when any resolved address is private (the connect re-resolves; a
+pre-connected stream is the follow-up).
+
+**Accepted policy**, listed so it is explicit rather than discovered:
+
+- Napplet-named internet relays (`options.relay`, `options.relays`) are an exfiltration
+  channel by design — data rides in the URL even when the relay refuses the connection.
+- `relay.subscribe` is unscoped: a napplet reads every other napplet's events and
+  everything the user has published.
+- `relay.publish` signs any kind, except the interim set above (0, 3, 5, 10000–19999).
+- All three are roadmap items under the unified permission model.
 
 *Done when* a profile napplet renders a kind 0 and can publish an edit.
 
@@ -522,7 +558,9 @@ written for the open web works in a room with no internet, and neither the nappl
 specification needs to know why.
 
 The work this implied is done with NAP-OUTBOX (S3): a `.fips` URL in a relay list becomes a
-`RelayLane::Mesh` and is reached through `PeerRelayPool`; the user's own kind 10002 — the
+`RelayLane::Mesh` and is reached through `PeerRelayPool` — and only ever as
+`ws://<npub>.fips:4870` rebuilt from its npub, never as the string given, so a list or a
+napplet cannot smuggle userinfo, a path or another port into the pool's dial; the user's own kind 10002 — the
 configured relays — is published beside the guest profile on first napplet use, so the
 user's own outbox plan resolves as NIP-65; per-lane reachability is reported
 (`incomplete`, the per-relay map on publish) rather than failing hard. Policy lives in one

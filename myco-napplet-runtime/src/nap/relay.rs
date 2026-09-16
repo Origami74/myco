@@ -28,11 +28,34 @@
 //! says so in words, and why the grant is checked on every call rather than
 //! cached at handshake — revoking it stops the next publish, not the next
 //! launch.
+//!
+//! ## Interim: the kinds that reshape the user are refused
+//!
+//! Until the permission model has per-event prompts, `sign_template` refuses
+//! the kinds that rewrite who the user *is* rather than what they say: kind 0
+//! (profile), 3 (contacts), 5 (deletion) and 10000–19999 (the replaceable
+//! range, kind 10002 among them). A napplet that could publish a kind 10002
+//! under the default grant would make its own relay the user's newest relay
+//! list, and every later outbox publish would fan the user's signed events to
+//! it. The refusal is per call and surfaces as `ok: false` with the reason on
+//! the `.result` frame, never silently. See `REFUSED_KINDS`.
 
 use nostr::{Filter, JsonUtil, Kind, Tag, Timestamp, UnsignedEvent};
 
 use crate::dispatch::NapContext;
 use crate::seams::{Direction, Envelope, RelayLane};
+
+/// Kinds a napplet may not publish under the `relay` grant until per-event
+/// prompts exist: profile (0), contacts (3) and deletion (5). The replaceable
+/// range 10000–19999 (relay list 10002 among them) is refused as well, by
+/// `kind_needs_a_prompt`. Interim policy pending the unified permission model;
+/// the runtime's own first-use kind 0 / 10002 do not go through `sign_template`.
+pub const REFUSED_KINDS: &[u16] = &[0, 3, 5];
+
+/// Whether publishing `kind` as the user needs a prompt this build cannot show.
+fn kind_needs_a_prompt(kind: u16) -> bool {
+    REFUSED_KINDS.contains(&kind) || (10_000..=19_999).contains(&kind)
+}
 
 /// Handle an inbound `relay.*` message.
 pub async fn handle(
@@ -249,11 +272,13 @@ async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
 
 /// Sign the `event` template on `message` as the user.
 ///
-/// Shared with NAP-MESH, whose template is NAP-RELAY's `EventTemplate` by
-/// declared wire dependency — one parser, so the two domains cannot disagree
-/// about what a napplet may and may not set. The rules are the module's:
-/// `kind`, `content` and `tags` are the napplet's; `pubkey`, `created_at`,
-/// `id` and `sig` are the runtime's.
+/// Shared with NAP-MESH and NAP-OUTBOX, whose templates are NAP-RELAY's
+/// `EventTemplate` by declared wire dependency — one parser, so the three
+/// domains cannot disagree about what a napplet may and may not set. The rules
+/// are the module's: `kind`, `content` and `tags` are the napplet's; `pubkey`,
+/// `created_at`, `id` and `sig` are the runtime's — and the kinds in
+/// `REFUSED_KINDS` and the 1xxxx replaceable range are refused outright
+/// (interim, see the module docs).
 pub(crate) async fn sign_template(
     ctx: &NapContext,
     message: &Envelope,
@@ -263,9 +288,16 @@ pub(crate) async fn sign_template(
     };
 
     let kind = match template.get("kind").and_then(|v| v.as_u64()) {
-        Some(kind) if kind <= u16::MAX as u64 => Kind::from(kind as u16),
+        Some(kind) if kind <= u16::MAX as u64 => kind as u16,
         _ => return Err("the event template needs a kind".to_string()),
     };
+    if kind_needs_a_prompt(kind) {
+        return Err(format!(
+            "kind {kind} rewrites the user's profile, contacts, relay list or deletes their \
+             events; not allowed under the relay grant until per-event prompts exist"
+        ));
+    }
+    let kind = Kind::from(kind);
     let content = template
         .get("content")
         .and_then(|v| v.as_str())
@@ -920,5 +952,76 @@ mod tests {
             .await
             .unwrap();
         assert!(stored.is_empty(), "a refused publish still wrote an event");
+    }
+
+    /// Interim M11: a granted napplet may post as the user, but not rewrite
+    /// who the user is. Profile, contacts, deletion and the replaceable range
+    /// are refused per call with a reason on the `.result` frame, and nothing
+    /// reaches the sink or the store; ordinary kinds still sign.
+    #[tokio::test]
+    async fn identity_shaping_kinds_are_refused_under_the_relay_grant() {
+        use crate::testing::RecordingSink;
+        use std::sync::Arc;
+
+        let (base, signer) = test_context();
+        let sink = Arc::new(RecordingSink::new());
+        let ctx = NapContext {
+            signer: base.signer.clone(),
+            relay: base.relay.clone(),
+            sink: sink.clone(),
+            mesh: base.mesh.clone(),
+            outbox: base.outbox.clone(),
+            lanes: base.lanes.clone(),
+            blobs: base.blobs.clone(),
+            fetcher: base.fetcher.clone(),
+        };
+
+        for kind in [0u16, 3, 5, 10002, 10050, 19999] {
+            let out = call(
+                &ctx,
+                Envelope::new("relay.publish").with_id("k").with_field(
+                    "event",
+                    json!({"kind": kind, "content": "", "tags": [["r", "wss://attacker.example"]]}),
+                ),
+            )
+            .await;
+            assert_eq!(out.len(), 1, "kind {kind}");
+            let reply = &out[0];
+            assert_eq!(reply.msg_type, "relay.publish.result", "kind {kind}");
+            assert_eq!(reply.field("ok").unwrap(), &json!(false), "kind {kind}");
+            let reason = reply.field("error").unwrap().as_str().unwrap();
+            assert!(
+                reason.starts_with(&format!("kind {kind} rewrites the user's")),
+                "kind {kind}: {reason}"
+            );
+            assert!(reply.field("event").is_none(), "kind {kind} was signed");
+        }
+        assert!(
+            sink.accepted().is_empty(),
+            "a refused kind reached the sink"
+        );
+        assert!(
+            ctx.relay
+                .query(&[Filter::new().author(signer.public_key())])
+                .await
+                .unwrap()
+                .is_empty(),
+            "a refused kind was stored"
+        );
+
+        for kind in [1u16, 9, 20666, 30023] {
+            let out = call(
+                &ctx,
+                Envelope::new("relay.publish").with_id("k").with_field(
+                    "event",
+                    json!({"kind": kind, "content": "fine", "tags": [["d", "x"]]}),
+                ),
+            )
+            .await;
+            let reply = &out[0];
+            assert_eq!(reply.field("ok").unwrap(), &json!(true), "kind {kind}");
+            assert_eq!(reply.field("event").unwrap()["kind"], kind, "kind {kind}");
+        }
+        assert_eq!(sink.accepted().len(), 4);
     }
 }

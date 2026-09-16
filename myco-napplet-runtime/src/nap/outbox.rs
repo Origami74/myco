@@ -898,6 +898,45 @@ mod tests {
         assert!(fx.published().is_empty());
     }
 
+    /// Interim M11 through the outbox path: a kind 10002 would make the
+    /// napplet's relay the user's own relay list, so `sign_template` refuses
+    /// it here too — unsigned, unstored, on no lane.
+    #[tokio::test]
+    async fn a_relay_list_cannot_be_published_through_the_outbox() {
+        let (ctx, fx, signer) = test_context_with_outbox();
+        fx.set_plan(
+            signer.public_key(),
+            Direction::Read,
+            &["wss://mine.example"],
+            PlanSource::Nip65,
+        );
+        let mut s = granted();
+        let out = call(
+            &ctx,
+            &mut s,
+            Envelope::new("outbox.publish").with_id("p1").with_field(
+                "event",
+                json!({"kind": 10002, "content": "", "tags": [["r", "wss://attacker.example"]]}),
+            ),
+        )
+        .await;
+        let r = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(r["type"], "outbox.publish.result");
+        assert_eq!(r["ok"], false);
+        assert!(r["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("kind 10002 rewrites the user's"));
+        assert!(ctx
+            .relay
+            .query(&[Filter::new().kind(Kind::RelayList)])
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(fx.published().is_empty());
+        assert_eq!(fx.relay("wss://mine.example").len(), 0);
+    }
+
     /// `toOutbox: false` with nothing else is a local publish and an empty map.
     #[tokio::test]
     async fn publish_without_outbox_stays_local() {
