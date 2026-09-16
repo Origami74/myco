@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 
 use nostr::{Event, PublicKey};
 
+use crate::aggregate::{check_aggregate, AggregateCheck};
+
 /// Replaceable root-site manifest — one per pubkey, no `d` tag.
 pub const KIND_ROOT: u16 = 15128;
 /// Parameterized-replaceable named-site manifest — one per `(pubkey, d-tag)`.
@@ -42,12 +44,25 @@ pub struct Manifest {
     pub servers: Vec<String>,
     pub title: Option<String>,
     pub description: Option<String>,
+    /// The NIP-5A aggregate hash from `["x", "<hex>", "aggregate"]`, present
+    /// only when the manifest declared one **and** it matched the `path` tags.
+    /// `None` means the publisher's tooling omitted the tag — see
+    /// [`Manifest::from_event`].
+    pub aggregate: Option<String>,
 }
 
 impl Manifest {
     /// Parse a manifest event. Does **not** verify the signature — callers verify
-    /// before storing (the store/sync paths do). Returns an error only if the
-    /// kind is not a manifest kind.
+    /// before storing (the store/sync paths do).
+    ///
+    /// Does verify the NIP-5A aggregate, and this is the choke point every
+    /// caller reaches: a manifest declaring an `["x", "<hex>", "aggregate"]`
+    /// that disagrees with its own `path` tags is rejected here, so no such
+    /// site is ever served, synced, or listed. A manifest with **no** aggregate
+    /// tag parses as before — most published nsites predate the tag, and
+    /// rejecting them would break sites that are individually hash-verified
+    /// and perfectly serveable. Napplets are stricter: NIP-5D makes the
+    /// aggregate their identity, so `myco-napplet-runtime` requires it.
     pub fn from_event(event: Event) -> anyhow::Result<Self> {
         let kind = event.kind.as_u16();
         if kind != KIND_ROOT && kind != KIND_NAMED {
@@ -82,6 +97,29 @@ impl Manifest {
             }
         }
 
+        // A declared-but-wrong aggregate means the file set may not be the one
+        // the author signed. For an **nsite** it is logged, not fatal: every
+        // blob is still hash-verified against the signed `path` tags, and the
+        // formula here has yet to be checked against enough published sites to
+        // refuse one on its say-so — a disagreement over line order or case
+        // would take every nsite carrying the tag off the air at once. The
+        // manifest parses with `aggregate: None`, as if the tag were absent.
+        // Napplets are strict about it: NIP-5D makes the aggregate their
+        // identity, and `myco-napplet-runtime` checks it itself.
+        let aggregate = match check_aggregate(&event) {
+            AggregateCheck::Match { hash } => Some(hash),
+            AggregateCheck::Missing => None,
+            AggregateCheck::Mismatch { declared, computed } => {
+                tracing::warn!(
+                    event = %event.id,
+                    declared,
+                    computed,
+                    "nsite manifest aggregate does not match its path tags; serving on per-blob hashes"
+                );
+                None
+            }
+        };
+
         // Enforce the kind/d-tag invariant from the spec.
         match (kind, &d_tag) {
             (KIND_ROOT, Some(_)) => anyhow::bail!("kind 15128 must not carry a d tag"),
@@ -99,6 +137,7 @@ impl Manifest {
             servers,
             title,
             description,
+            aggregate,
         })
     }
 

@@ -1,16 +1,17 @@
 # Myco — Cargo workspace.
 #
-# Four crates build into one native library (`libmyco_core.so`):
+# Five crates build into one native library (`libmyco_core.so`):
 #   myco-core    — app crate: device identity, embedded FIPS node, JNI/JSON FFI
 #   nsite-deck   — reusable nsite host: gateway + sync + propagator (P2/P3)
-#   myco-relay   — embedded NIP-01 relay (RelayBackend) — nostr-relay-builder (P2)
+#   myco-relay   — embedded NIP-01 relay (RelayBackend) over nostr-lmdb
 #   myco-blossom — embedded Blossom blob store (BlobStore) (P2)
+#   myco-napplet-runtime — NIP-5D napplet runtime: manifests, resolution, seams
 #
 # `fips` is a LOCAL checkout under reference/fips (gitignored), wired as a path
 # dependency. See docs/how-to/build.md.
 [workspace]
 resolver = "2"
-members = ["myco-core", "nsite-deck", "myco-relay", "myco-blossom"]
+members = ["myco-core", "nsite-deck", "myco-relay", "myco-blossom", "myco-napplet-runtime"]
 # `reference/fips` is a path dependency that lives inside the workspace root,
 # which would make it an implicit member: `--workspace` would then lint, test
 # and format fips itself. It is upstream code with its own warnings; keep it a
@@ -43,8 +44,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "
 # Schnorr signature verification, and NIP-19 (npub) — the cryptographic /
 # serialization primitives. The relay STORE and the WS/REQ surface are
 # hand-rolled (the query surface Myco uses is tiny; no relay framework, and
-# negentropy/NIP-77 is not needed until P3). See docs/design/nsite-layer.md §2.1.
+# negentropy/NIP-77 is not needed until P3). See docs/design/nsite/nsite-layer.md §2.1.
 nostr = { version = "0.44", default-features = false, features = ["std", "nip44", "nip59"] }
+# The relay's persistent store: rust-nostr's LMDB backend. Indexed NIP-01
+# queries over an mmap — reads are page-cache hits, idle cost is nothing, and
+# negentropy (NIP-77) comes with it for P3. Pinned to the `nostr` 0.44 line.
+nostr-lmdb = { version = "0.44", default-features = false }
+nostr-database = { version = "0.44", default-features = false }
 async-trait = "0.1"
 sha2 = "0.10"
 base64 = "0.22"

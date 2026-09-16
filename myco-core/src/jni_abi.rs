@@ -190,3 +190,174 @@ pub extern "system" fn Java_app_myco_core_NativeCore_gatewayGet(
         .map(|a| a.into_raw())
         .unwrap_or(std::ptr::null_mut())
 }
+
+// --- napplets ------------------------------------------------------------
+//
+// Every call mirrors `gatewayGet`'s shape: the lock is held only long enough
+// to clone out the host and a Tokio handle (or, for `nappletOpen`, the
+// prepared request), so a slow resolve does not block the rest of the FFI.
+//
+// The shell page is static, so it needs no handle at all.
+
+/// The napplet shell page — trusted HTML compiled into the runtime.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletShellPage(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    jstr(&mut env, myco_napplet_runtime::shell_page().to_string())
+}
+
+/// The name the capability channel must be injected under, so Kotlin and the
+/// shell page cannot disagree about it.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletRuntimeObject(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    jstr(&mut env, myco_napplet_runtime::RUNTIME_OBJECT.to_string())
+}
+
+/// Resolve a napplet and open a session for one window.
+///
+/// Returns `{"ok":true,"sessionId":…,"shellHost":…,"title":…}`, or
+/// `{"ok":false,"error":…}`. A verification failure lands in `error` and opens
+/// no session — there is no partial success to render.
+///
+/// Takes no grant list. Grants are read from the Library on the Rust side,
+/// because the caller is an Activity and an Activity can be started by an
+/// intent — accepting them here would let an inbound intent hand a napplet
+/// capabilities nobody approved.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletOpen(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    pointer: JString,
+) -> jstring {
+    let pointer = get_string(&mut env, &pointer);
+
+    // The lock is held only to gather the handles; the resolve — a relay read
+    // and a blob read, a network round trip with a custom relay configured —
+    // runs with it released, so a slow open never queues the reducer.
+    let prepared = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            Some(guard.prepare_open_napplet(&pointer))
+        }
+        None => None,
+    };
+
+    let result = match prepared {
+        None => serde_json::json!({"ok": false, "error": "native core is closed"}),
+        Some(Err(e)) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        Some(Ok(request)) => match request.run() {
+            Ok((opened, widened)) => {
+                if widened {
+                    if let Some(h) = unsafe { handle_ref(handle) } {
+                        let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+                        guard.note_library_changed();
+                    }
+                }
+                serde_json::json!({
+                    "ok": true,
+                    "sessionId": opened.session_id,
+                    "shellHost": opened.shell_host,
+                    "title": opened.title,
+                })
+            }
+            Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        },
+    };
+
+    jstr(&mut env, result.to_string())
+}
+
+/// Carry one frame from a window's shell; returns a JSON array of frames to
+/// send back (possibly empty).
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletFrame(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_id: JString,
+    frame_json: JString,
+) -> jstring {
+    let session_id = get_string(&mut env, &session_id);
+    let frame_json = get_string(&mut env, &frame_json);
+
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.napplet_context()
+        }
+        None => None,
+    };
+
+    // Capability calls are async (a relay read now, a publish later), so the
+    // frame is driven on the Tokio runtime. The lock is already released.
+    let out = match ctx {
+        Some((host, rt_handle)) => rt_handle.block_on(host.frame(&session_id, &frame_json)),
+        None => Vec::new(),
+    };
+
+    jstr(
+        &mut env,
+        serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()),
+    )
+}
+
+/// Wait for frames the runtime wants to send this window unprompted, up to
+/// `timeout_ms`; returns a JSON array, empty when the wait expired.
+///
+/// A long poll rather than a callback, matching the BLE and TUN bridges: the
+/// FFI runs when Kotlin calls it, so a subscription delivery has to be waited
+/// for from that side. Call it from a background thread — it blocks.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletNextFrames(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_id: JString,
+    timeout_ms: jlong,
+) -> jstring {
+    let session_id = get_string(&mut env, &session_id);
+
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.napplet_context()
+        }
+        None => None,
+    };
+
+    let out = match ctx {
+        Some((host, rt_handle)) => rt_handle.block_on(host.next_frames(
+            &session_id,
+            std::time::Duration::from_millis(timeout_ms.max(0) as u64),
+        )),
+        None => Vec::new(),
+    };
+
+    jstr(
+        &mut env,
+        serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()),
+    )
+}
+
+/// Drop a window's session. Every later frame for it is ignored.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_id: JString,
+) {
+    let session_id = get_string(&mut env, &session_id);
+    if let Some(h) = unsafe { handle_ref(handle) } {
+        let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((host, _)) = guard.napplet_context() {
+            host.close(&session_id);
+        }
+    }
+}

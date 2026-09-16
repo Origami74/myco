@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,6 +27,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
@@ -133,6 +135,8 @@ fun MycoApp(
     initialLanEnabled: Boolean = true,
     onLanToggle: (Boolean) -> Unit = {},
     onLaunchNsite: (host: String, title: String) -> Unit,
+    onLaunchNapplet: (pointer: String, title: String) -> Unit,
+    onPinNappletToHome: (pointer: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,
     initialMeshEnabled: Boolean,
@@ -331,7 +335,15 @@ fun MycoApp(
         Surface(modifier = Modifier.padding(padding), color = MaterialTheme.colorScheme.background) {
             NavHost(navController = nav, startDestination = "apps") {
                 composable("apps") {
-                    AppsScreen(state, client, onLaunchNsite = onLaunchNsite, onPinToHome = onPinToHome, onScanned = onScanned)
+                    AppsScreen(
+                        state,
+                        client,
+                        onLaunchNsite = onLaunchNsite,
+                        onLaunchNapplet = onLaunchNapplet,
+                        onPinNappletToHome = onPinNappletToHome,
+                        onPinToHome = onPinToHome,
+                        onScanned = onScanned,
+                    )
                 }
                 composable("circle") {
                     CircleScreen(
@@ -344,7 +356,22 @@ fun MycoApp(
                         },
                     )
                 }
-                composable("discover") { DiscoverScreen(state, client, onLaunchNsite = onLaunchNsite) }
+                composable("discover") {
+                    DiscoverScreen(
+                        state,
+                        client,
+                        onLaunchNsite = onLaunchNsite,
+                        // The review sheet lives on the Apps tab and is driven by
+                        // state.nappletReview, which the fetch has already set.
+                        onShowNappletReview = {
+                            nav.navigate("apps") {
+                                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
+                    )
+                }
                 composable("settings") {
                     SettingsScreen(
                         state = state,
@@ -611,8 +638,8 @@ fun PeersPill(state: AppState) {
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(start = 6.dp, end = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(start = 4.dp, end = 4.dp),
         ) {
             // 1 — mesh master switch: the same slider as the Settings rows,
             // scaled down to pill height.
@@ -625,9 +652,10 @@ fun PeersPill(state: AppState) {
             // onCheckedChange makes the slider a pure indicator and the entire
             // 72×48 block the target. `scale` is a draw transform only, so the
             // slider stays small while the target does not.
-            Box(
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
-                    .size(width = 72.dp, height = 48.dp)
+                    .height(40.dp)
                     .toggleable(
                         value = mesh.enabled,
                         onValueChange = { mesh.toggle(it) },
@@ -636,20 +664,31 @@ fun PeersPill(state: AppState) {
                         // the thing it draws reads as a misaligned button.
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
-                    ),
-                contentAlignment = Alignment.Center,
+                    )
+                    .padding(start = 6.dp),
             ) {
-                androidx.compose.material3.Switch(
-                    checked = mesh.enabled,
-                    onCheckedChange = null,
-                    modifier = Modifier.scale(0.75f),
-                    colors = androidx.compose.material3.SwitchDefaults.colors(
-                        // Off is a fault state here, not a neutral one.
-                        uncheckedTrackColor = MaterialTheme.colorScheme.error,
-                        uncheckedBorderColor = MaterialTheme.colorScheme.error,
-                        uncheckedThumbColor = MaterialTheme.colorScheme.onError,
-                    ),
+                // Named, so the slider is not a mystery switch on every screen.
+                Text(
+                    "mesh",
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.labelMedium,
                 )
+                Box(
+                    modifier = Modifier.size(width = 52.dp, height = 40.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    androidx.compose.material3.Switch(
+                        checked = mesh.enabled,
+                        onCheckedChange = null,
+                        modifier = Modifier.scale(0.7f),
+                        colors = androidx.compose.material3.SwitchDefaults.colors(
+                            // Off is a fault state here, not a neutral one.
+                            uncheckedTrackColor = MaterialTheme.colorScheme.error,
+                            uncheckedBorderColor = MaterialTheme.colorScheme.error,
+                            uncheckedThumbColor = MaterialTheme.colorScheme.onError,
+                        ),
+                    )
+                }
             }
             // 2/3 — the counts, and the whole of them is the panel affordance.
             Row(
@@ -660,7 +699,7 @@ fun PeersPill(state: AppState) {
                         onClick = { sheetOpen = true },
                         onClickLabel = "Show mesh and circle status",
                     )
-                    .padding(start = 2.dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
+                    .padding(start = 2.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
             ) {
                 PillDivider()
                 // Circle: reachable now / total paired.
@@ -684,6 +723,14 @@ fun PeersPill(state: AppState) {
                     "$connected",
                     fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.titleSmall,
+                )
+                // The invitation: the counts are a summary, and this says
+                // there is more behind them.
+                Icon(
+                    Icons.Outlined.Info,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp).padding(start = 1.dp),
+                    tint = LocalContentColor.current.copy(alpha = 0.7f),
                 )
             }
         }

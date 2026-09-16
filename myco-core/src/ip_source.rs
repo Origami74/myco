@@ -1,6 +1,6 @@
 //! `IpPeerSource` — the **online fallback** [`PeerSource`]: fetch an externally-
 //! authored nsite from **public** relays + Blossom over normal IP. This is the
-//! tier-3 source in `docs/design/nsite-layer.md` §5 and, in P2, the way content
+//! tier-3 source in `docs/design/nsite/nsite-layer.md` §5 and, in P2, the way content
 //! enters the device: a user pastes `<npub>.nsite.lol` (or a bare npub) and Myco
 //! downloads the signed manifest + blobs, verifies, and mirrors them locally so
 //! the site then serves offline forever. The FIPS-peer source (P3) implements the
@@ -36,10 +36,18 @@ pub fn default_relays() -> Vec<String> {
 /// Default public Blossom servers, tried after a manifest's own `["server",…]`
 /// hints.
 pub fn default_blossom_servers() -> Vec<String> {
+    // A fixed list is not a resolution policy — a `blossom:sha256:` URI names
+    // no server, and BUD-03 (kind 10063) is how an author says where their
+    // blobs live; reading it is roadmap. Until then the list has to cover the
+    // large public replicas napplets are actually published to: `blssm.us`
+    // and `blossom.ditto.pub` hold the letsmap release set, which none of the
+    // first three do.
     [
         "https://blossom.primal.net",
         "https://cdn.satellite.earth",
         "https://blossom.band",
+        "https://blssm.us",
+        "https://blossom.ditto.pub",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -60,6 +68,16 @@ pub struct IpPeerSource {
     /// manifest REQ reuses the one persistent WS connection to the peer instead of
     /// opening a fresh `query_relay` socket. `None` for a public-relay source.
     peer_relay: Option<(std::sync::Arc<crate::peer_relay::PeerRelayPool>, String)>,
+    /// Fetch manifests of this kind instead of the nsite kind implied by the
+    /// `d` tag. Set for napplets — see [`IpPeerSource::with_kind`].
+    kind_override: Option<u16>,
+    /// How long to keep waiting for other relays after the first answers.
+    /// `None` waits for every relay. See [`IpPeerSource::with_first_answer_grace`].
+    first_answer_grace: Option<Duration>,
+    /// Refuse a blob larger than this while it downloads. `None` accepts any
+    /// size, which is what nsite sync wants — its manifests say what to
+    /// expect. See [`IpPeerSource::with_max_blob_bytes`].
+    max_blob_bytes: Option<usize>,
 }
 
 impl IpPeerSource {
@@ -75,6 +93,9 @@ impl IpPeerSource {
             timeout: Duration::from_secs(8),
             ignore_manifest_servers: false,
             peer_relay: None,
+            kind_override: None,
+            first_answer_grace: None,
+            max_blob_bytes: None,
         }
     }
 
@@ -106,6 +127,47 @@ impl IpPeerSource {
         self.timeout = timeout;
         self
     }
+
+    /// Stop waiting for the remaining relays this long after the first one
+    /// answers.
+    ///
+    /// Without it a fetch takes as long as the *slowest* relay, because every
+    /// relay is queried in parallel and all are awaited. In practice one relay
+    /// answers in a few hundred milliseconds while another holds the connection
+    /// open until the timeout, so the user waits the full timeout for an answer
+    /// that arrived almost immediately.
+    ///
+    /// The grace period is what keeps "newest wins" meaningful: relays that
+    /// hold the event answer at similar speeds, so a short wait after the first
+    /// still collects the others, while a relay that has nothing to say no
+    /// longer sets the pace.
+    pub fn with_first_answer_grace(mut self, grace: Duration) -> Self {
+        self.first_answer_grace = Some(grace);
+        self
+    }
+
+    /// Give up on a blob the moment it is known to exceed `max` bytes — from
+    /// the `Content-Length` when there is one, else as the body streams in.
+    ///
+    /// For fetches a napplet asked for by hash: it names the blob, not the
+    /// size, and a cap checked on the finished body has already paid for the
+    /// body, over BLE if the holder is a peer in the room.
+    pub fn with_max_blob_bytes(mut self, max: usize) -> Self {
+        self.max_blob_bytes = Some(max);
+        self
+    }
+
+    /// Fetch manifests of an explicit kind instead of the nsite kind implied by
+    /// the `d` tag.
+    ///
+    /// NIP-5D napplets share NIP-5A's manifest shape at their own kinds, so the
+    /// fetch is identical but for the number. Without this the source would ask
+    /// for 15128/35128 and find nothing, which looks exactly like a napplet that
+    /// is not published.
+    pub fn with_kind(mut self, kind: u16) -> Self {
+        self.kind_override = Some(kind);
+        self
+    }
 }
 
 /// A [`PeerSource`] that pulls from a specific **holder's** embedded relay +
@@ -118,6 +180,52 @@ impl IpPeerSource {
 /// work for adjacent peers, which is exactly what made this hard to spot.
 pub(crate) fn mesh_relay_url(npub: &str) -> String {
     format!("ws://{npub}.fips:4870")
+}
+
+/// Run every query concurrently, but stop `grace` after the first one comes
+/// back with something.
+///
+/// A relay with nothing to say is indistinguishable from a slow one until it
+/// answers, so waiting for all of them means paying for the worst. Waiting a
+/// little past the first real answer collects the relays that also have the
+/// event without paying for the relays that never will.
+async fn collect_with_grace<F>(
+    queries: impl IntoIterator<Item = F>,
+    grace: Duration,
+) -> Vec<Vec<Event>>
+where
+    F: std::future::Future<Output = Vec<Event>>,
+{
+    use futures_util::stream::{FuturesUnordered, StreamExt};
+
+    let mut pending: FuturesUnordered<F> = queries.into_iter().collect();
+    let mut out = Vec::new();
+    let mut deadline: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+
+    loop {
+        match deadline.as_mut() {
+            None => match pending.next().await {
+                Some(events) => {
+                    let answered = !events.is_empty();
+                    out.push(events);
+                    if answered {
+                        deadline = Some(Box::pin(tokio::time::sleep(grace)));
+                    }
+                }
+                None => break,
+            },
+            Some(sleep) => {
+                tokio::select! {
+                    next = pending.next() => match next {
+                        Some(events) => out.push(events),
+                        None => break,
+                    },
+                    _ = sleep.as_mut() => break,
+                }
+            }
+        }
+    }
+    out
 }
 
 /// A peer's mesh Blossom endpoint, by name. See [`mesh_relay_url`].
@@ -304,13 +412,70 @@ pub(crate) fn random_bytes(n: usize) -> Vec<u8> {
     out
 }
 
+/// Publish one signed event to one relay: connect, send `EVENT`, wait for the
+/// relay's `OK`, close. `Ok(true)` means accepted, `Ok(false)` means the relay
+/// said no (the message is logged), `Err` means it never answered. Bound the
+/// whole call with a timeout at the call site — a dead relay must not hold a
+/// fan-out task open.
+///
+/// One-shot on purpose: the internet pool is written to rarely (a napplet's
+/// publish) and read from through [`query_relay`], so a held-open socket per
+/// public relay would cost more than it saves. The custom-relay backend
+/// (`remote_backend.rs`) keeps one open because the gateway hits it per page.
+pub async fn publish_to_relay(url: &str, event: &Event) -> anyhow::Result<bool> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await?;
+    let frame = serde_json::json!(["EVENT", event]);
+    ws.send(Message::Text(frame.to_string())).await?;
+
+    let wanted = event.id.to_hex();
+    let mut verdict: anyhow::Result<bool> = Err(anyhow::anyhow!("relay closed without an OK"));
+    while let Some(msg) = ws.next().await {
+        match msg {
+            Ok(Message::Text(txt)) => {
+                let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) else {
+                    continue;
+                };
+                if val.get(0).and_then(|v| v.as_str()) != Some("OK")
+                    || val.get(1).and_then(|v| v.as_str()) != Some(wanted.as_str())
+                {
+                    continue; // NOTICE, AUTH, an OK for something else
+                }
+                let accepted = val.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
+                if !accepted {
+                    let why = val.get(3).and_then(|v| v.as_str()).unwrap_or("");
+                    tracing::debug!(url, event = %wanted, why, "relay refused the event");
+                }
+                verdict = Ok(accepted);
+                break;
+            }
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(_) => {} // ping/pong/binary
+        }
+    }
+    let _ = ws.send(Message::Close(None)).await;
+    verdict
+}
+
 /// Query one relay for a single filter, collecting events until EOSE. The whole
 /// call (connect + REQ + read) is hard-bounded by a `timeout` at the call site,
 /// so a dead relay can't hang the sync on a slow TCP/TLS connect.
 pub async fn query_relay(url: &str, filter: serde_json::Value) -> anyhow::Result<Vec<Event>> {
+    query_relay_filters(url, vec![filter]).await
+}
+
+/// As [`query_relay`], with several filters in **one** `REQ` on **one**
+/// connection — how a multi-filter subscription is meant to travel. A
+/// napplet's subscribe hands over a list of filters; opening a socket per
+/// filter per relay was a TLS handshake for each, on a phone.
+pub async fn query_relay_filters(
+    url: &str,
+    filters: Vec<serde_json::Value>,
+) -> anyhow::Result<Vec<Event>> {
     let (mut ws, _) = tokio_tungstenite::connect_async(url).await?;
-    let req = serde_json::json!(["REQ", "myco", filter]);
-    ws.send(Message::Text(req.to_string())).await?;
+    let mut req = vec![serde_json::json!("REQ"), serde_json::json!("myco")];
+    req.extend(filters);
+    ws.send(Message::Text(serde_json::Value::Array(req).to_string()))
+        .await?;
 
     let mut events = Vec::new();
     while let Some(msg) = ws.next().await {
@@ -352,7 +517,7 @@ impl PeerSource for IpPeerSource {
         author: &PublicKey,
         d_tag: Option<&str>,
     ) -> anyhow::Result<Option<Event>> {
-        let kind = kind_for(d_tag);
+        let kind = self.kind_override.unwrap_or_else(|| kind_for(d_tag));
         let mut filter = serde_json::json!({
             "kinds": [kind],
             "authors": [hex::encode(author.to_bytes())],
@@ -377,7 +542,10 @@ impl PeerSource for IpPeerSource {
                     _ => Vec::new(),
                 }
             });
-            join_all(queries).await
+            match self.first_answer_grace {
+                None => join_all(queries).await,
+                Some(grace) => collect_with_grace(queries, grace).await,
+            }
         };
 
         // Pick the newest event matching the requested slot. Signatures were
@@ -423,16 +591,37 @@ impl PeerSource for IpPeerSource {
                 Ok(r) if r.status().is_success() => r,
                 _ => continue,
             };
-            let Ok(bytes) = resp.bytes().await else {
+            let Some(bytes) = read_body_bounded(resp, self.max_blob_bytes).await else {
                 continue;
             };
             // Self-authenticating: only accept bytes that hash to the wanted name.
             if sha256_hex(&bytes) == sha256_hex_want {
-                return Ok(Some(bytes.to_vec()));
+                return Ok(Some(bytes));
             }
         }
         Ok(None)
     }
+}
+
+/// Read a response body, stopping early — `None` — the moment it is known to
+/// exceed `max`: from `Content-Length` when the server sends one, otherwise as
+/// the chunks arrive. `None` for a read error too; the caller tries the next
+/// server either way.
+async fn read_body_bounded(mut resp: reqwest::Response, max: Option<usize>) -> Option<Vec<u8>> {
+    let Some(max) = max else {
+        return resp.bytes().await.ok().map(|b| b.to_vec());
+    };
+    if resp.content_length().is_some_and(|len| len > max as u64) {
+        return None;
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if out.len() + chunk.len() > max {
+            return None;
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Some(out)
 }
 
 fn event_d_tag(event: &Event) -> Option<String> {
@@ -445,7 +634,7 @@ fn event_d_tag(event: &Event) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -500,7 +689,7 @@ mod tests {
 
     /// A mock Blossom: serve `GET /<hash>` from a (hash -> bytes) map. Returns the
     /// `http://` base URL.
-    async fn mock_blossom(blobs: Vec<(String, Vec<u8>)>) -> String {
+    pub(crate) async fn mock_blossom(blobs: Vec<(String, Vec<u8>)>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let map: Arc<std::collections::HashMap<String, Vec<u8>>> =

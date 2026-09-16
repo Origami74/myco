@@ -36,6 +36,23 @@ pub struct AppState {
     pub sites: Vec<crate::content::SiteStatusView>,
     /// Pinned/opened sites.
     pub library: Vec<crate::content::LibraryItem>,
+    /// A napplet that has been fetched and verified but **not installed**,
+    /// waiting on the install-review screen.
+    ///
+    /// Present only between a fetch and the user's answer. It is what makes
+    /// review unskippable: fetching stores bytes and grants nothing, and the
+    /// only thing that writes a grant is the user answering this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub napplet_review: Option<crate::napplet::NappletReview>,
+    /// Whether each installed napplet can open right now — the tile's dim
+    /// state. Keyed by the Library entry's `urlHost`.
+    pub napplet_status: Vec<crate::content::NappletStatusView>,
+    /// The user's cap on how far napplets reach over the mesh (NAP-MESH).
+    pub napplet_mesh_reach: NappletMeshReachView,
+    /// Every capability domain this build can grant a napplet, in the order
+    /// the sheet lists them. The handshake is not among them: it is not a
+    /// grant.
+    pub napplet_domains: Vec<String>,
     /// Local relay/Blossom counts (for the developer screen + cache view).
     pub cache: crate::content::CacheView,
     /// The user's **Circle**: paired peers we pull nsites from over the mesh.
@@ -164,6 +181,17 @@ pub struct PeerDiagnosticView {
     /// Recorded connect attempts against this peer, newest first, capped at 20.
     /// Empty when nothing has been recorded.
     pub attempts: Vec<PeerAttemptView>,
+}
+
+/// The NAP-MESH caps as the Settings screen shows them: the current values and
+/// the most each may be set to.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NappletMeshReachView {
+    pub publish_ttl: u8,
+    pub publish_max: u8,
+    pub subscribe_ttl: u8,
+    pub subscribe_max: u8,
 }
 
 /// One transport path to a peer, as fips's multi-path layer tracks it.
@@ -308,7 +336,7 @@ pub struct BleStatus {
 /// Wi-Fi Aware bulk-lane status — the control/observation plane. The radio
 /// (attach/publish/subscribe/NDP) lives in the Android foreground service;
 /// the byte plane is the ordinary UDP transport over the NDP interface. See
-/// `docs/design/wifi-aware-interop.md`.
+/// `docs/design/fips/wifi-aware-interop.md`.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WifiAwareStatus {

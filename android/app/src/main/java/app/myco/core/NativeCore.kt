@@ -27,6 +27,37 @@ internal object NativeCore {
      * (empty string if none). Blocks while the in-process gateway serves direct
      * from the local relay + Blossom.
      */
+    // --- napplets --------------------------------------------------------
+    // The shell page and the injected object name come from Rust rather than
+    // being written twice, so the page and the code that registers its channel
+    // cannot drift apart.
+
+    external fun nappletShellPage(): String
+    external fun nappletRuntimeObject(): String
+
+    /**
+     * Resolve + verify a napplet and open a session. Returns a JSON result.
+     *
+     * Takes no grant list on purpose: grants are read from the Library on the
+     * Rust side, so an intent that starts [app.myco.NappletActivity] cannot hand
+     * a napplet capabilities the user never approved.
+     */
+    external fun nappletOpen(handle: Long, pointer: String): String
+
+    /** Carry one shell frame; returns a JSON array of frames to send back. */
+    external fun nappletFrame(handle: Long, sessionId: String, frameJson: String): String
+
+    /**
+     * Wait for frames the runtime wants to send unprompted (subscription
+     * deliveries), up to `timeoutMs`. Returns a JSON array, empty on timeout.
+     *
+     * **Blocks** — call it from a background thread, never the UI thread.
+     */
+    external fun nappletNextFrames(handle: Long, sessionId: String, timeoutMs: Long): String
+
+    /** Drop a window's session. */
+    external fun nappletClose(handle: Long, sessionId: String)
+
     external fun gatewayGet(
         handle: Long,
         host: String,
@@ -76,7 +107,7 @@ internal object NativeCore {
     /** Rust → Kotlin pull (blocks up to timeoutMs): >0 len, 0 timeout, -1 closed. */
     external fun bleChannelNextSend(bridgeHandle: Long, chId: Long, out: ByteArray, timeoutMs: Int): Int
 
-    // --- Wi-Fi Aware control bridge (see docs/design/wifi-aware-interop.md) ---
+    // --- Wi-Fi Aware control bridge (see docs/design/fips/wifi-aware-interop.md) ---
     // Control-plane only: no byte bridge. The AwareRadio drives discovery
     // itself and pushes peer reachability into the core's platform peer queue;
     // the bytes ride the ordinary UDP transport over the Aware data-path

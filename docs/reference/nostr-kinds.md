@@ -1,20 +1,23 @@
 # Nostr Event Kinds Reference
 
 The Nostr event kinds Myco reads, stores, serves, and replicates. Myco
-**never authors, signs, or publishes** nsite events — it holds and re-emits
-events authored *elsewhere* (by external nsite tooling) and the
-content-addressed blobs they reference. Two families:
+**never authors, signs, or publishes** nsite or napplet events — it holds and
+re-emits events authored *elsewhere* (by external nsite and napplet tooling) and
+the content-addressed blobs they reference. Three families:
 
 1. **nsite content kinds** — the author-signed site manifests the
    gateway/relay/Blossom layer serves and propagates (kinds `15128`, `35128`).
    These are *established facts*, verified from the nsite protocol and the
    reference implementation.
-2. **FIPS discovery kinds** — used by `fips-core` for *future* public-node
+2. **napplet manifest kinds** — the same manifest shape at kinds `5129` /
+   `15129` / `35129` under NIP-5D, plus the tags that make a napplet a program
+   rather than a document. Read by `myco-napplet-runtime`.
+3. **FIPS discovery kinds** — used by `fips-core` for *future* public-node
    peering over the internet (kinds `37195`, `21059`, `10050`). Not needed for
    the offline BLE demo; documented here so the surface is complete.
 
-Design context: [../design/nsite-layer.md](../design/nsite-layer.md),
-[../design/propagation.md](../design/propagation.md). Protocol sources are
+Design context: [../design/nsite/nsite-layer.md](../design/nsite/nsite-layer.md),
+[../design/nsite/propagation.md](../design/nsite/propagation.md). Protocol sources are
 cited inline.
 
 ---
@@ -26,8 +29,15 @@ cited inline.
 | `15128` | nsite root-site manifest | Replaceable | nsite content | **Used** |
 | `35128` | nsite named-site manifest | Param-replaceable (`d`) | nsite content | **Used** |
 | `34128` | legacy per-file nsite event | Param-replaceable (`d`) | nsite content | **Not used** (legacy) |
-| `10002` | NIP-65 relay list | Replaceable | discovery hint | Online fallback only |
-| `10063` | BUD-03 user Blossom servers | Replaceable | discovery hint | Online fallback only |
+| `5129` | napplet snapshot manifest | Regular | napplet | **Used** |
+| `15129` | napplet root manifest | Replaceable | napplet | **Used** |
+| `35129` | napplet named manifest | Param-replaceable (`d`) | napplet | **Used** |
+| `0` | profile metadata | Replaceable | napplet identity | **Published** — the user key's guest profile, on first napplet use (local relay) |
+| `10002` | NIP-65 relay list | Replaceable | napplet routing | **Published and read** — the user's own (mesh relay first, then the defaults) on first napplet use; other authors' lists drive NAP-OUTBOX plans, fetched and cached when missing |
+| `10063` | BUD-03 user Blossom servers | Replaceable | discovery hint | Not read yet |
+| `9101` / `9102` / `9103` | pair request / accept / remove | Regular | pairing (layer 2) | **Published and read** — signed by the device key, delivered to the peer's auth service `:4873`, never stored in the relay |
+| `14` in `13` in `1059` | NIP-17 rumor, NIP-59 seal and gift wrap | Regular | file sharing (layer 2) | **Published and read** — file offers and control messages between Circle members, gift-wrapped to the device key |
+| `24242` | Blossom auth | Regular | blob store | **Published** — authorises uploads to a custom Blossom server |
 | `37195` | FIPS overlay advert | Param-replaceable (`d`) | FIPS discovery | Future public peering |
 | `21059` | FIPS traversal signaling | Ephemeral | FIPS discovery | Future public peering |
 | `10050` | NIP-17 inbox relay list | Replaceable | FIPS discovery | Future public peering |
@@ -37,10 +47,10 @@ cited inline.
 ## nsite content kinds
 
 Source of truth:
-[../../reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)
+the nsite-deck reference (`docs/nsite-protocol.md`)
 (NIP-5A, "Pubkey Static Websites"), and the reference implementation in
-[../../reference/site-deck/internal/sync/service.go](../../reference/site-deck/internal/sync/service.go)
-and [../../reference/site-deck/internal/gateway/handlers.go](../../reference/site-deck/internal/gateway/handlers.go).
+the nsite-deck reference (`internal/sync/service.go`)
+and the nsite-deck reference (`internal/gateway/handlers.go`).
 
 ### Kind 15128 — root-site manifest
 
@@ -59,7 +69,7 @@ and [../../reference/site-deck/internal/gateway/handlers.go](../../reference/sit
 - **Content:** empty.
 - **URL host:** `<pubkeyB36><dTag>` — the 50-char lowercase-base36 pubkey
   directly followed by the d-tag, no separator. Encoder/decoder + regex:
-  [../../reference/site-deck/internal/gateway/base36.go](../../reference/site-deck/internal/gateway/base36.go).
+  the nsite-deck reference (`internal/gateway/base36.go`).
 
 ### Tag layout (both kinds)
 
@@ -71,6 +81,25 @@ and [../../reference/site-deck/internal/gateway/handlers.go](../../reference/sit
 | `["title", "<text>"]` | no | Human-readable site title (shown in Library / loading page). |
 | `["description", "<text>"]` | no | Short site description. |
 | `["source", "<http-url>"]` | no | Link to the site's source repo/archive. |
+| `["x", "<hex>", "aggregate"]` | no | The NIP-5A **aggregate hash** over the `path` tags — one content address for the whole file set. |
+
+#### The aggregate hash
+
+`sha256` of the `path` tags rendered as `"<sha256> <abs-path>\n"` lines, sorted
+ascending and concatenated as UTF-8, lowercase hex. Only `path` tags feed it.
+
+Hash-checking each blob proves no file is corrupt. Only the aggregate proves the
+set is *whole* — that what is served is the site its author signed, with nothing
+removed by a re-signing intermediary.
+
+Myco verifies it in `nsite_deck::aggregate`. For an **nsite**, a manifest whose
+aggregate disagrees with its own `path` tags is logged and served on its
+per-blob hashes, with no verified aggregate recorded — a warning, not a refusal,
+until the formula has been checked against enough published sites to take one
+off the air on its say-so. A manifest with **no** aggregate tag is accepted:
+most published nsites predate the tag and every blob is individually
+hash-verified anyway. **Napplets** are strict: a mismatch is refused, because
+the recomputed value is their identity — see below.
 
 The site icon is conventionally the blob mapped at `/favicon.ico`. A custom
 not-found page is the blob mapped at `/404.html`.
@@ -125,14 +154,14 @@ not-found page is the blob mapped at `/404.html`.
 
 These run against the **local** relay first (fast path) and, on a miss, against
 the source peer's relay over `.fips` (`ws://<npub>.fips:4870`). See
-[../design/nsite-layer.md §5](../design/nsite-layer.md).
+[../design/nsite/nsite-layer.md §5](../design/nsite/nsite-layer.md).
 
 > **Set reconciliation.** Between two connected relays, Myco reconciles the
 > manifest **event** set with **negentropy ([NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md))**
 > run over these same filters (`NEG-OPEN` → `NEG-MSG` rounds → the missing ids),
 > then pulls only the diff. Blobs are never reconciled — they stay content-addressed
-> pull-by-sha256. See [../design/propagation.md §5](../design/propagation.md) and
-> [../design/nsite-layer.md §2.4](../design/nsite-layer.md).
+> pull-by-sha256. See [../design/nsite/propagation.md §5](../design/nsite/propagation.md) and
+> [../design/nsite/nsite-layer.md §2.4](../design/nsite/nsite-layer.md).
 
 ### Kind 34128 — legacy, NOT used
 
@@ -142,11 +171,63 @@ it — Myco is manifest-based (one `15128`/`35128` event maps all paths).
 Documented only so old `34128` events seen on a relay are recognized and
 ignored. (Source: NIP-5A "Legacy Support".)
 
+---
+
+## napplet manifest kinds
+
+Source of truth: [NIP-5D](https://github.com/nostr-protocol/nips/pull/2303) and
+the [NAP registry](https://github.com/napplet/naps). Design:
+[../design/napplet/napplet-runtime.md](../design/napplet/napplet-runtime.md).
+
+A napplet manifest is a NIP-5A manifest — same `path` / `server` / `title` / `d`
+layout — at three different kinds:
+
+| Kind | Class | Meaning |
+| ---- | ----- | ------- |
+| `5129` | Regular | Snapshot: an immutable point-in-time release. |
+| `15129` | Replaceable | Root: an author's latest unnamed napplet. No `d` tag. |
+| `35129` | Param-replaceable | Named: carries a `d` tag identifier. |
+
+> **Not 35128.** The NAP registry README calls a napplet "a NIP-5A manifest, a
+> Nostr event, kind 35128". That names the parent spec and the parent's kind.
+> `35128` is Myco's **nsite** kind; napplets are `5129` / `15129` / `35129`.
+> Worth a one-line correction upstream.
+
+### Added tags
+
+| Tag | Required | Meaning |
+| --- | --- | --- |
+| `["x", "<hex>", "aggregate"]` | no | Corroborates the aggregate. The runtime **recomputes** the napplet's identity from the `path` tags either way; when the tag is present it must match. |
+| `["requires", "<domain>"]` | no | A NAP capability domain the napplet needs (`relay`, `identity`, `storage`). Shown on the install review screen; grants are recorded per library entry. |
+| `["archetype", "<slug>", "<convention>"]` | no | A role the napplet can be invoked as. The convention is a queryless `napplet:<archetype>/<intent>` identity — NAP-INTENT routes on exact equality over it. |
+| `["config", "<json-schema>"]` | no | Declarative per-napplet configuration. |
+
+**None of the added tags feed the aggregate.** Only `path` tags do. A runtime
+that hashed `requires`, `archetype` or `config` would reject every conformant
+napplet in existence.
+
+### Identity and the single-file rule
+
+A napplet's identity is the `(dTag, aggregateHash)` tuple **computed** by the
+runtime from verified bytes. The napplet never asserts it, and no host or
+gateway supplies it. An `x` tag, when carried, is checked against the computed
+value; it is not the source of it.
+
+Napplets are **single-file** — NIP-5D: *"A napplet is a single self-contained
+`/index.html`."* The runtime injects those bytes as `iframe.srcdoc` under
+`sandbox="allow-scripts"` with no `allow-same-origin`, so the document has an
+opaque origin with nowhere to resolve a relative subresource to. A manifest
+listing more than one file is not a napplet and is rejected at parse, rather than
+inlined at runtime — inlining would assemble bytes the author never signed as a
+unit.
+
+---
+
 > **Note on online-fallback kinds.** When *online*, the sync engine may consult
 > the author's `10002` (NIP-65 relay list) and `10063`
 > ([BUD-03](https://github.com/hzrd149/blossom/blob/master/buds/03.md) user
 > Blossom servers) to find public sources, exactly as the Go reference does
-> ([service.go](../../reference/site-deck/internal/sync/service.go)). On the
+> (`service.go`). On the
 > **offline** BLE path these are irrelevant — the source is a single reachable
 > peer's `.fips` services.
 
@@ -180,9 +261,32 @@ catch-up between connected relays uses **negentropy (NIP-77)** reconciliation so
 peer offers only manifests you lack (events only; blobs stay pull-by-sha256). TTL=5,
 that dedup story, transitive peer discovery, and the privacy question of *which
 manifests you choose to replicate* are all detailed in
-[../design/propagation.md](../design/propagation.md).
+[../design/nsite/propagation.md](../design/nsite/propagation.md).
 
 ---
+
+## Pairing and file-sharing kinds (layer 2)
+
+Layer 2 has its own small vocabulary, all signed by the **device key** and
+carried point-to-point, never gossiped:
+
+| Kind | Name | Carried how |
+| --- | --- | --- |
+| `9101` | pair request — carries the one-time secret from the presented code and the sender's name | HTTP POST to `<npub>.fips:4873/pair`, Noise-encrypted to the presenter |
+| `9102` | pair accept — the presenter's answer, so the requester adds them back | the same service on the requester |
+| `9103` | pair remove — forgetting a peer tells them, so both sides stay symmetric | the same service |
+| `1059` (wrapping `13` wrapping `14`) | file offer / accept / decline / cancel / done, as NIP-17 private messages | the peer's relay over the mesh; the wrap keeps them unreadable to anyone else, and the hub stores them with a zero hop budget so they travel no further |
+
+Design: [identity-pairing.md](../design/core/identity-pairing.md) §6–7,
+`file_transfer.rs`.
+
+## Napplet-published kinds (layer 1)
+
+Signed by the **user key**, on the first napplet run: a `0` guest profile named
+`Myco Guest <5 digits>` and a `10002` relay list naming this phone's mesh relay
+(`ws://<npub>.fips:4870`) first and the configured public relays after it. Both
+go to the local relay only. Whatever a napplet publishes through `relay`,
+`outbox` or `mesh` is signed by the same key with the kind the napplet chose.
 
 ## FIPS discovery kinds (future public-node peering)
 
@@ -225,12 +329,12 @@ and `../../reference/fips/docs/design/fips-nostr-discovery.md`.
 
 ## See also
 
-- [../design/nsite-layer.md](../design/nsite-layer.md) — how the manifest kinds
+- [../design/nsite/nsite-layer.md](../design/nsite/nsite-layer.md) — how the manifest kinds
   are fetched, verified, and served.
-- [../design/propagation.md](../design/propagation.md) — flooding the
+- [../design/nsite/propagation.md](../design/nsite/propagation.md) — flooding the
   author-signed manifests and device-to-device hopping.
 - [./ports.md](./ports.md) — the localhost ports the relay/Blossom listen on.
-- [../../reference/site-deck/docs/nsite-protocol.md](../../reference/site-deck/docs/nsite-protocol.md)
+- the nsite-deck reference (`docs/nsite-protocol.md`)
   — NIP-5A, the authoritative nsite manifest spec.
 - [../../reference/fips/docs/reference/nostr-events.md](../../reference/fips/docs/reference/nostr-events.md)
   — the authoritative FIPS discovery-kind spec.

@@ -71,7 +71,7 @@ const LAN_UDP_PORT: u16 = 4871;
 /// `aware0…aware3` listen on 4872–4875. Both peers bind their own and exchange
 /// over the NDP — symmetric, no listener/dialer roles. UDP is fips's native
 /// transport and the LAN-discovery path (which this reuses) is already UDP +
-/// scoped link-local IPv6. See docs/design/wifi-aware-interop.md.
+/// scoped link-local IPv6. See docs/design/fips/wifi-aware-interop.md.
 ///
 /// **The port is per peer, and that is what makes the pool work.** A phone
 /// advertises, in the Aware identity exchange, the port of the socket it has
@@ -251,6 +251,18 @@ pub struct AppRuntime {
     /// The content layer (embedded relay + Blossom + gateway + Library). `None`
     /// only on a startup error (no valid data dir).
     content: Option<Arc<Content>>,
+    /// Live napplet sessions, one per open window. Built on first use.
+    napplet_host: Option<Arc<crate::napplet::NappletHost>>,
+    /// The relay hub, once the content layer has stood it up. Napplet publishes
+    /// go through it so they fan out to the Circle exactly as a socket-borne
+    /// event does.
+    relay_hub: Arc<std::sync::Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
+    /// A fetched napplet awaiting the user's answer on install review. Written
+    /// by the fetch task, cleared when the user installs or dismisses.
+    napplet_review: Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
+    /// The user's NAP-MESH caps, shared with the napplet mesh sink so a change
+    /// takes effect on a napplet's next call rather than its next launch.
+    napplet_mesh_limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
     /// Latest dev-menu peer speedtest result; written by the spawned run task and
     /// read back into `state()`. Shared so the async task can update it in place.
     speedtest: Arc<std::sync::Mutex<crate::state::SpeedtestView>>,
@@ -347,6 +359,9 @@ impl AppRuntime {
         // fresh device shows it in Apps without pasting a link. A one-shot marker
         // file makes this idempotent and lets a user who removes it stay removed.
         seed_default_sites(&content, &rt, Path::new(data_dir));
+        // The bundled DingDong napplet, pinned with defaults only: what it
+        // declares is reviewed the first time it opens.
+        seed_default_napplets(&content, &rt, Path::new(data_dir));
 
         // Peer state now comes off the node's control socket, so the tick needs
         // somewhere to publish it and somewhere to record whether the feed
@@ -364,6 +379,11 @@ impl AppRuntime {
         // surfaces as a warning. Android-only (the host has no TUN). ports.md.
         #[allow(unused_mut)]
         let mut mesh_warning = String::new();
+        // Filled by the content layer below (Android only, where the servers
+        // run); a napplet publish falls back to storing when it is empty.
+        let relay_hub: Arc<std::sync::Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
         #[cfg(target_os = "android")]
         {
             use std::net::SocketAddr;
@@ -378,7 +398,7 @@ impl AppRuntime {
             // so a chat event a peer pushes over `.fips` reaches the in-app nsite's
             // live subscription on localhost (shared store + live bus + gossiper).
             // The gossiper fans this device's own nsite events out to Circle peers
-            // (docs/design/event-gossip.md).
+            // (docs/design/core/event-gossip.md).
             let gossiper: Arc<dyn crate::mesh_relay::Gossiper> =
                 Arc::new(crate::gossip::MeshGossiper::new(content.clone()));
             // Restrict mesh access to paired (Circle) peers — only the pairing
@@ -388,6 +408,10 @@ impl AppRuntime {
                 Arc::new(crate::content::CircleGate::new(content.clone()));
             let hub =
                 crate::mesh_relay::RelayHub::with_gate(content.relay(), Some(gossiper), Some(gate));
+            // Kept, not only handed to the two servers: a napplet publishing
+            // through a capability has no socket to arrive on, and it must
+            // still reach this device's subscriptions and the mesh.
+            *relay_hub.lock().unwrap() = Some(hub.clone());
 
             // Mesh socket: IPV6_V6ONLY `[::]:4870` so it doesn't collide with the
             // loopback bind and is reachable by peers at `ws://<npub>.fips:4870`.
@@ -587,6 +611,10 @@ impl AppRuntime {
         Ok(Self {
             app_version: app_version.to_string(),
             data_dir: data_dir.to_string(),
+            napplet_host: None,
+            napplet_review: Arc::new(std::sync::Mutex::new(None)),
+            napplet_mesh_limits: Arc::new(std::sync::RwLock::new(settings.napplet_mesh_limits())),
+            relay_hub,
             pending_relay_url: settings.relay_url().unwrap_or_default(),
             pending_blossom_url: settings.blossom_url().unwrap_or_default(),
             aware_data_paths: settings.aware_data_paths,
@@ -622,7 +650,7 @@ impl AppRuntime {
     /// node, so re-enabling needs a new one).
     ///
     /// `wifi_aware` adds a UDP transport instance bound on the NDP interface —
-    /// the Wi-Fi Aware bulk lane's data plane (docs/design/wifi-aware-interop.md).
+    /// the Wi-Fi Aware bulk lane's data plane (docs/design/fips/wifi-aware-interop.md).
     /// Deliberately not Android-gated: the identical UDP path is the lane's
     /// dev/test stand-in on a plain LAN.
     // `aware_slots` sizes the Aware UDP instance pool, which only the Android
@@ -774,6 +802,12 @@ impl AppRuntime {
         Self {
             app_version: app_version.to_string(),
             data_dir: String::new(),
+            napplet_host: None,
+            napplet_review: Arc::new(std::sync::Mutex::new(None)),
+            napplet_mesh_limits: Arc::new(std::sync::RwLock::new(
+                crate::settings_store::Settings::default().napplet_mesh_limits(),
+            )),
+            relay_hub: Arc::new(std::sync::Mutex::new(None)),
             rev: 0,
             error: msg.to_string(),
             pending_relay_url: String::new(),
@@ -859,6 +893,30 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
+            NativeAppAction::FetchNapplet { pointer, holder } => {
+                self.fetch_napplet(&pointer, holder);
+                self.rev += 1;
+            }
+            NativeAppAction::InstallNapplet { pointer, granted } => {
+                self.install_napplet(&pointer, granted);
+                // The question has been answered; the screen goes away.
+                *self.napplet_review.lock().unwrap() = None;
+                self.rev += 1;
+            }
+            NativeAppAction::DismissNappletReview => {
+                *self.napplet_review.lock().unwrap() = None;
+                self.rev += 1;
+            }
+            NativeAppAction::ForgetNapplet { pointer } => {
+                if let (Some(content), Ok(addr)) =
+                    (&self.content, crate::napplet::NappletAddr::parse(&pointer))
+                {
+                    use nostr::nips::nip19::ToBech32;
+                    let npub = addr.author.to_bech32().unwrap_or_default();
+                    content.forget_napplet(&npub, addr.d_tag.as_deref());
+                }
+                self.rev += 1;
+            }
             NativeAppAction::ForgetNsite { link } => {
                 if let (Some(content), Some(addr)) = (&self.content, nsite_deck::parse_link(&link))
                 {
@@ -868,8 +926,28 @@ impl AppRuntime {
             }
             NativeAppAction::CheckNsiteUpdates => {
                 // Poll online relays for newer manifests; stage + apply. Non-blocking.
+                // Napplets ride the same check when any are installed — the
+                // host is only stood up (and a user key only generated) when
+                // there is one to check.
+                let napplets = self.napplet_refresh_targets();
+                let host = if napplets.is_empty() {
+                    None
+                } else {
+                    self.napplet_context().map(|(host, _)| host)
+                };
                 if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    rt.spawn(content.check_updates());
+                    // Napplet authors publish to public relays and the sharer
+                    // is not recorded, so offline-only has nowhere to ask:
+                    // counted as checked, none updated.
+                    let offline_only = content.is_offline_only();
+                    let napplet_check = async move {
+                        let host = host?;
+                        if offline_only {
+                            return Some((0, napplets.len()));
+                        }
+                        Some(crate::napplet::refresh_all(&host, &napplets).await)
+                    };
+                    rt.spawn(content.check_updates_with(napplet_check));
                 }
                 self.rev += 1;
             }
@@ -932,6 +1010,41 @@ impl AppRuntime {
             NativeAppAction::SetOfflineOnly { enabled } => {
                 if let Some(content) = &self.content {
                     content.set_offline_only(enabled);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SetNappletGrant {
+                pointer,
+                domain,
+                allowed,
+            } => {
+                self.set_napplet_grant(&pointer, &domain, allowed);
+                self.rev += 1;
+            }
+            NativeAppAction::SetNappletMeshReach {
+                publish_ttl,
+                subscribe_ttl,
+            } => {
+                let mut settings = crate::settings_store::load(Path::new(&self.data_dir));
+                settings.napplet_mesh_publish_ttl =
+                    Some(publish_ttl.min(crate::settings_store::NAPPLET_MESH_PUBLISH_MAX));
+                settings.napplet_mesh_subscribe_ttl =
+                    Some(subscribe_ttl.min(crate::settings_store::NAPPLET_MESH_SUBSCRIBE_MAX));
+                let limits = settings.napplet_mesh_limits();
+                match crate::settings_store::save(Path::new(&self.data_dir), &settings) {
+                    Ok(()) => {
+                        // Live at once: the sink reads this per call.
+                        *self.napplet_mesh_limits.write().unwrap() = limits;
+                        tracing::info!(
+                            publish = limits.publish_ttl,
+                            subscribe = limits.subscribe_ttl,
+                            "settings: napplet mesh reach saved"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "settings: could not save napplet mesh reach");
+                        self.error = format!("Could not save the mesh reach setting: {e}");
+                    }
                 }
                 self.rev += 1;
             }
@@ -1158,6 +1271,333 @@ impl AppRuntime {
     }
 
     /// Spawn a dev side-load of a bundle directory.
+    /// Allow or withdraw one capability for an installed napplet, and tell
+    /// any open window of it.
+    fn set_napplet_grant(&mut self, pointer: &str, domain: &str, allowed: bool) {
+        use nostr::nips::nip19::ToBech32;
+        if !myco_napplet_runtime::IMPLEMENTED_DOMAINS.contains(&domain)
+            || myco_napplet_runtime::MANDATORY_DOMAINS.contains(&domain)
+        {
+            tracing::warn!(domain, "napplet grant: not a grantable domain");
+            return;
+        }
+        let Ok(addr) = crate::napplet::NappletAddr::parse(pointer) else {
+            tracing::warn!(pointer, "napplet grant: unreadable pointer");
+            return;
+        };
+        let Some(content) = self.content.clone() else {
+            return;
+        };
+        let npub = addr.author.to_bech32().unwrap_or_default();
+        let Some(mut grants) = content.napplet_grants(&npub, addr.d_tag.as_deref()) else {
+            tracing::warn!(pointer, "napplet grant: not installed");
+            return;
+        };
+        // Moved between the two sets, not merely dropped from one: "off" is a
+        // decision the next launch must respect, and only `denied` records it.
+        grants.set(domain, allowed);
+        tracing::info!(
+            pointer,
+            domain,
+            allowed,
+            "napplet grant changed on the sheet"
+        );
+        content.set_napplet_grants(&npub, addr.d_tag.as_deref(), grants.clone());
+        if let (Some(host), Some(rt)) = (self.napplet_host.clone(), self.rt.as_ref()) {
+            let author = addr.author;
+            let d_tag = addr.d_tag.clone();
+            rt.spawn(async move {
+                host.apply_grants(&author, d_tag.as_deref(), grants.granted)
+                    .await
+            });
+        }
+    }
+
+    /// Everything needed to open a napplet, gathered under the runtime lock so
+    /// the resolve itself can run **without** it.
+    ///
+    /// Grants are read from the Library here rather than accepted from the
+    /// caller. The caller is an Activity, and an Activity can be started by an
+    /// intent: taking a grant list across that boundary would let an inbound
+    /// intent hand a napplet capabilities the user never approved. Install
+    /// review and the sheet are the only writers, and this is the only reader.
+    pub fn prepare_open_napplet(&mut self, pointer: &str) -> anyhow::Result<NappletOpenRequest> {
+        use nostr::nips::nip19::ToBech32;
+        let addr = crate::napplet::NappletAddr::parse(pointer)?;
+        let content = self
+            .content
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("content layer is not running"))?;
+        let npub = addr.author.to_bech32().unwrap_or_default();
+        let grants = content.napplet_grants(&npub, addr.d_tag.as_deref());
+        let (host, rt) = self
+            .napplet_context()
+            .ok_or_else(|| anyhow::anyhow!("content layer is not running"))?;
+        Ok(NappletOpenRequest {
+            pointer: pointer.to_string(),
+            addr,
+            npub,
+            grants,
+            content,
+            host,
+            rt,
+            review: self.napplet_review.clone(),
+        })
+    }
+
+    /// Resolve a napplet and open a session — the lock-holding shape, for
+    /// host tests and callers that already own the runtime. The FFI uses
+    /// [`AppRuntime::prepare_open_napplet`] and runs the request with the
+    /// lock released.
+    pub fn open_napplet(&mut self, pointer: &str) -> anyhow::Result<crate::napplet::OpenedNapplet> {
+        let request = self.prepare_open_napplet(pointer)?;
+        let (opened, widened) = request.run()?;
+        if widened {
+            self.rev += 1;
+        }
+        Ok(opened)
+    }
+
+    /// The Library changed under an open (a widened grant); bump `rev` so the
+    /// UI re-reads.
+    pub fn note_library_changed(&mut self) {
+        self.rev += 1;
+    }
+
+    /// Fetch a napplet online, verify it, and store it locally — without
+    /// installing it or granting it anything.
+    ///
+    /// Spawn-not-block, like every other sync path: the FFI returns immediately
+    /// and the result lands in state. What the napplet `requires` is what the
+    /// review screen then asks about.
+    fn fetch_napplet(&mut self, pointer: &str, holder: Option<String>) {
+        tracing::info!("fetching napplet {pointer}");
+
+        // Every failure below ends up in front of the user. Returning quietly
+        // would leave the Add sheet looking like it did nothing, which is
+        // indistinguishable from a tap that never registered — and is exactly
+        // how a broken fetch hides.
+        let holder_for_retry = holder.clone();
+        let fail = |review: &Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
+                    pointer: &str,
+                    message: String| {
+            tracing::warn!("napplet {pointer}: {message}");
+            *review.lock().unwrap() = Some(crate::napplet::NappletReview {
+                pointer: pointer.to_string(),
+                loading: false,
+                grants: Vec::new(),
+                title: String::new(),
+                description: String::new(),
+                requires: Vec::new(),
+                error: message,
+                holder: holder_for_retry.clone(),
+            });
+        };
+
+        let addr = match crate::napplet::NappletAddr::parse(pointer) {
+            Ok(addr) => addr,
+            Err(e) => {
+                fail(&self.napplet_review, pointer, e.to_string());
+                self.rev += 1;
+                return;
+            }
+        };
+        let Some(content) = self.content.clone() else {
+            fail(
+                &self.napplet_review,
+                pointer,
+                "the content layer is not running".to_string(),
+            );
+            self.rev += 1;
+            return;
+        };
+        let Some((host, rt)) = self.napplet_context() else {
+            fail(
+                &self.napplet_review,
+                pointer,
+                "the content layer is not running".to_string(),
+            );
+            self.rev += 1;
+            return;
+        };
+        // Open the screen now, in a loading state. The fetch tries several
+        // relays and can take seconds; leaving the user on an unchanged grid
+        // until it finishes reads as nothing having happened at all.
+        let pointer = pointer.to_string();
+        let review = self.napplet_review.clone();
+        let peer_relays = content.peer_relays();
+        // Read before the spawn, as the update check does: offline-only is a
+        // setting, and a fetch that starts under it does not get to consult
+        // the internet because the switch moved while it was in flight.
+        let offline_only = content.is_offline_only();
+        *review.lock().unwrap() = Some(crate::napplet::NappletReview {
+            pointer: pointer.clone(),
+            loading: true,
+            title: String::new(),
+            description: String::new(),
+            requires: Vec::new(),
+            grants: Vec::new(),
+            error: String::new(),
+            holder: holder.clone(),
+        });
+
+        rt.spawn(async move {
+            // Sources in the order worth trying. The peer who handed it over
+            // comes first: they demonstrably have it, they are in the room, and
+            // a napplet shared by a tap should not need the internet to
+            // arrive. The public relays follow for everything else.
+            let mut sources: Vec<crate::ip_source::IpPeerSource> = Vec::new();
+            if let Some(npub) = holder.as_deref() {
+                match crate::ip_source::mesh_source_for(peer_relays, npub) {
+                    Ok(mesh) => sources.push(mesh.with_kind(addr.kind())),
+                    Err(e) => tracing::warn!("cannot reach the sharer {npub}: {e}"),
+                }
+            }
+            // The pointer's own relay hints first, then the defaults. A napplet
+            // lives where its author published it, which is often not where the
+            // popular aggregators look — searching only the defaults reports a
+            // napplet as missing when it is simply somewhere else.
+            //
+            // Unless offline-only is on: then the sharer's phone is the only
+            // source, as it is for every other acquisition path — mesh-only
+            // mode is how the BLE path gets proven, and a napplet install
+            // that quietly went to the internet would prove nothing.
+            if offline_only {
+                tracing::info!("offline-only: napplet {pointer} is asked of the sharer only");
+            } else {
+                sources.push(addr.public_source());
+            }
+
+            let mut ingested = Err(anyhow::anyhow!(if offline_only && sources.is_empty() {
+                "Offline-only is on and nobody nearby shared this app"
+            } else {
+                "no source had this napplet"
+            }));
+            for source in &sources {
+                ingested = host.ingest(&addr, source).await;
+                if ingested.is_ok() {
+                    break;
+                }
+            }
+
+            let outcome = match ingested {
+                Ok(ingested) => {
+                    let grants = crate::napplet::effective_grants(&ingested.requires);
+                    tracing::info!(
+                        "fetched napplet {pointer}: requires {:?}, would grant {:?}",
+                        ingested.requires,
+                        grants
+                    );
+                    crate::napplet::NappletReview {
+                        pointer: pointer.clone(),
+                        loading: false,
+                        title: ingested.title.unwrap_or_default(),
+                        description: ingested.description.unwrap_or_default(),
+                        requires: ingested.requires,
+                        grants,
+                        error: String::new(),
+                        holder: holder.clone(),
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("could not fetch napplet {pointer}: {e}");
+                    crate::napplet::NappletReview {
+                        pointer: pointer.clone(),
+                        loading: false,
+                        title: String::new(),
+                        description: String::new(),
+                        requires: Vec::new(),
+                        grants: Vec::new(),
+                        error: e.to_string(),
+                        holder: holder.clone(),
+                    }
+                }
+            };
+            settle_napplet_review(&review, outcome);
+            // The ingest happened whether or not the sheet still wants to
+            // hear about it: the napplet is on the phone now.
+            content.refresh_napplet_status().await;
+        });
+    }
+
+    /// Record what install review granted and pin the napplet to the Library.
+    fn install_napplet(&mut self, pointer: &str, granted: Vec<String>) {
+        use nostr::nips::nip19::ToBech32;
+        let Ok(addr) = crate::napplet::NappletAddr::parse(pointer) else {
+            tracing::warn!("not a napplet pointer: {pointer}");
+            return;
+        };
+        let Some(content) = self.content.clone() else {
+            return;
+        };
+        let npub = addr.author.to_bech32().unwrap_or_default();
+        let shell_host =
+            myco_napplet_runtime::host::shell_host(&addr.author.to_bytes(), addr.d_tag.as_deref());
+
+        // The title the fetch already read from the manifest, and the
+        // declared `requires` the sheet showed. Without the title the Library
+        // falls back to the `d` tag, so a napplet called "DingDong" shows up
+        // as "dingdong" — an identifier where a name should be. The requires
+        // list is what this install *reviewed*: a later version declaring
+        // more comes back through the sheet rather than being granted at open.
+        let (title, requires) = {
+            let review = self.napplet_review.lock().unwrap();
+            let review = review.as_ref().filter(|r| r.pointer == pointer);
+            (
+                review
+                    .filter(|r| !r.title.is_empty())
+                    .map(|r| r.title.clone()),
+                review.map(|r| r.requires.clone()).unwrap_or_default(),
+            )
+        };
+
+        tracing::info!(
+            napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
+            ?granted,
+            reviewed = ?requires,
+            title = %title.as_deref().unwrap_or(""),
+            "installing napplet"
+        );
+        content.add_napplet_to_library(
+            &npub,
+            addr.d_tag.as_deref(),
+            title.as_deref(),
+            &shell_host,
+            granted,
+            requires,
+            pointer,
+            crate::content::now_secs(),
+        );
+        if let Some(rt) = self.rt.as_ref() {
+            rt.spawn(async move { content.refresh_napplet_status().await });
+        }
+    }
+
+    /// The installed napplets an update check should ask about, as addresses
+    /// — from the pointer each was added by (its relay hints included), or
+    /// the `(author, d)` pair when there was none.
+    fn napplet_refresh_targets(&self) -> Vec<crate::napplet::NappletAddr> {
+        let Some(content) = self.content.as_ref() else {
+            return Vec::new();
+        };
+        content
+            .library_snapshot()
+            .into_iter()
+            .filter(|i| i.kind == crate::content::LibraryKind::Napplet)
+            .filter_map(|i| {
+                let pointer = if i.pointer.is_empty() {
+                    match &i.d_tag {
+                        Some(d) => format!("{}:{d}", i.author_npub),
+                        None => i.author_npub.clone(),
+                    }
+                } else {
+                    i.pointer.clone()
+                };
+                crate::napplet::NappletAddr::parse(&pointer).ok()
+            })
+            .collect()
+    }
+
     fn import_nsite(&mut self, dir: &str) {
         let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
             return;
@@ -1189,7 +1629,21 @@ impl AppRuntime {
         let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
             return;
         };
-        if let Err(e) = rt.block_on(content.wipe_cache()) {
+        // The user's own profile and relay list are kept — but a wipe never
+        // *generates* a user key: only an existing one is read.
+        let data_dir = Path::new(&self.data_dir);
+        let keep_author = if crate::user_key::exists(data_dir) {
+            match crate::user_key::load_or_generate(data_dir) {
+                Ok(user) => Some(user.keys.public_key()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "user key unreadable; its events are not kept");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = rt.block_on(content.wipe_cache(keep_author)) {
             self.error = format!("cache wipe failed: {e}");
         }
     }
@@ -1200,6 +1654,147 @@ impl AppRuntime {
         let content = self.content.clone()?;
         let handle = self.rt.as_ref()?.handle().clone();
         Some((content, handle))
+    }
+
+    /// The napplet host, over this device's relay and Blossom store, plus the
+    /// Tokio handle to resolve on.
+    ///
+    /// Built on first use rather than at startup: a device that never opens a
+    /// napplet never pays for one, and the host holds nothing but the two seams
+    /// and its open sessions.
+    pub fn napplet_context(
+        &mut self,
+    ) -> Option<(Arc<crate::napplet::NappletHost>, tokio::runtime::Handle)> {
+        let handle = self.rt.as_ref()?.handle().clone();
+        if self.napplet_host.is_none() {
+            let content = self.content.as_ref()?;
+            // The user key is generated here, on first napplet use — not at
+            // install. A device that never opens a napplet never gets a social
+            // identity, and existing installs need no migration.
+            let data_dir = Path::new(&self.data_dir);
+            let first_use = !crate::user_key::exists(data_dir);
+            let user = match crate::user_key::load_or_generate(data_dir) {
+                Ok(user) => user,
+                Err(e) => {
+                    // Every open will say "content layer is not running";
+                    // this is the line that says why.
+                    tracing::error!(error = %e, "user key unreadable; napplets cannot open");
+                    return None;
+                }
+            };
+            let signer = Arc::new(crate::user_key::UserSigner::new(user.keys.clone()));
+
+            if first_use {
+                // A new user is never a bare pubkey. Published to the embedded
+                // store only — `relay_store()`, not `relay()`, which is the
+                // configured custom relay when there is one — and never in
+                // the way of opening a napplet: a profile that failed to
+                // publish is cosmetic, and a launch that waited on the
+                // network would not be. With a custom relay configured there
+                // is no local store to write, and nothing is sent anywhere.
+                //
+                // Beside it, a relay list (kind 10002) naming the configured
+                // relays, so the user's own outbox plan resolves as NIP-65
+                // rather than fallback (§7.4). Never this device's mesh relay:
+                // that URL is the device npub, and a user-key event carrying
+                // it would publish the link between the two for good.
+                match content.relay_store() {
+                    Some(store) => {
+                        let profile = nostr::EventBuilder::new(
+                            nostr::Kind::Metadata,
+                            crate::user_key::guest_profile_json(&user),
+                        )
+                        .sign_with_keys(&user.keys)
+                        .map_err(anyhow::Error::from);
+                        let relay_list = crate::outbox::own_relay_list(&user.keys);
+                        for (what, signed) in
+                            [("guest profile", profile), ("relay list", relay_list)]
+                        {
+                            match signed {
+                                Ok(event) => {
+                                    let store = store.clone();
+                                    handle.spawn(async move {
+                                        use nsite_deck::seams::RelayBackend;
+                                        if let Err(e) = store.publish(event).await {
+                                            tracing::warn!("could not store the {what}: {e}");
+                                        }
+                                    });
+                                }
+                                Err(e) => tracing::warn!("could not sign the {what}: {e}"),
+                            }
+                        }
+                    }
+                    None => tracing::debug!(
+                        "a custom relay is configured; the first-use profile and relay list stay unpublished"
+                    ),
+                }
+                tracing::info!("generated a user key for napplets: {}", user.guest_name());
+            }
+
+            let mesh = Arc::new(crate::napplet::NappletMeshSink::new(
+                self.relay_hub.clone(),
+                content.clone(),
+                self.napplet_mesh_limits.clone(),
+                self.node_live.clone(),
+            ));
+
+            let outbox = Arc::new(crate::outbox::OutboxService::new(
+                content.relay(),
+                self.relay_hub.clone(),
+                content.clone(),
+                self.identity.own_npub.clone(),
+            ));
+
+            let host = Arc::new(
+                crate::napplet::NappletHost::new(myco_napplet_runtime::dispatch::NapContext {
+                    signer,
+                    relay: content.relay(),
+                    // NAP-RELAY's publish, NAP-OUTBOX's lanes and plans: one
+                    // service, so the pool, offline-only and the internet
+                    // breaker are decided in one place.
+                    sink: outbox.clone(),
+                    mesh,
+                    outbox: outbox.clone(),
+                    lanes: outbox,
+                    blobs: content.blobs(),
+                    fetcher: Arc::new(crate::napplet::BlossomFetcher::new(content.clone())),
+                })
+                // Served versions come from the content layer's pins, so a
+                // newer manifest with no blob behind it cannot displace the
+                // one that opens.
+                .with_manifests(content.clone()),
+            );
+
+            // Feed every accepted event to open napplets' subscriptions — this
+            // device's own publishes and anything a peer carried here. Without
+            // it a subscription only ever sees what was already stored when it
+            // was made, which is a query, not a subscription.
+            if let Some(hub) = self.relay_hub.lock().unwrap().clone() {
+                let mut live = hub.live_events();
+                let pump = host.clone();
+                handle.spawn(async move {
+                    loop {
+                        match live.recv().await {
+                            Ok(event) => pump.on_event(event).await,
+                            // Lagged: this consumer fell behind and the channel
+                            // dropped events for it. Keep going — missing some
+                            // deliveries beats ending the pump and missing all
+                            // of them.
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                tracing::warn!(
+                                    dropped = n,
+                                    "napplet delivery fell behind the live bus"
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+            }
+
+            self.napplet_host = Some(host);
+        }
+        Some((self.napplet_host.clone()?, handle))
     }
 
     fn start_node(&mut self) {
@@ -1569,6 +2164,26 @@ impl AppRuntime {
             error: self.error_with_feed_health(),
             app_version: self.app_version.clone(),
             multipath_core: cfg!(feature = "fips-multipath"),
+            napplet_review: self.napplet_review.lock().unwrap().clone(),
+            napplet_status: self
+                .content
+                .as_ref()
+                .map(|c| c.napplet_status_snapshot())
+                .unwrap_or_default(),
+            napplet_domains: myco_napplet_runtime::IMPLEMENTED_DOMAINS
+                .iter()
+                .filter(|d| !myco_napplet_runtime::MANDATORY_DOMAINS.contains(d))
+                .map(|d| d.to_string())
+                .collect(),
+            napplet_mesh_reach: {
+                let limits = *self.napplet_mesh_limits.read().unwrap();
+                crate::state::NappletMeshReachView {
+                    publish_ttl: limits.publish_ttl,
+                    publish_max: crate::settings_store::NAPPLET_MESH_PUBLISH_MAX,
+                    subscribe_ttl: limits.subscribe_ttl,
+                    subscribe_max: crate::settings_store::NAPPLET_MESH_SUBSCRIBE_MAX,
+                }
+            },
             identity: self.identity.clone(),
             node: NodeStatus {
                 running: self.node_running,
@@ -1797,6 +2412,14 @@ impl AppRuntime {
 const DEFAULT_SITES: &[&str] =
     &["4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivbitchat.nsite.lol"];
 
+/// Napplets installed by default on first run: (title, pointer). Pinned with
+/// only the default grants and an empty reviewed list, so what each declares
+/// is put in front of the user the first time it opens.
+const DEFAULT_NAPPLETS: &[(&str, &str)] = &[(
+    "DingDong",
+    "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9hxwer0denstp6v0k",
+)];
+
 /// Pin + start a download for the default apps, once per install. The marker
 /// file in `data_dir` keeps this idempotent and lets a user who removes a seeded
 /// app stay rid of it (we never re-seed). Pinning happens immediately so the app
@@ -1820,6 +2443,98 @@ fn seed_default_sites(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) {
     }
 }
 
+/// Pin the default napplets and start a fetch of each, once per install.
+///
+/// Its own marker, not `seeded-defaults`: a device upgraded from a build
+/// without napplets already carries the nsite marker, and this is its first
+/// run *with* napplets. The semantics are the nsite seed's — once per
+/// install, never re-seeded after removal. The seed does not stand up a
+/// [`crate::napplet::NappletHost`] (that would generate the user key, which
+/// D3 reserves for first napplet use); it fetches over the bare seams.
+fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) {
+    use nostr::nips::nip19::ToBech32;
+
+    let marker = data_dir.join("seeded-napplets");
+    if marker.exists() {
+        return;
+    }
+    for (title, pointer) in DEFAULT_NAPPLETS {
+        let addr = match crate::napplet::NappletAddr::parse(pointer) {
+            Ok(addr) => addr,
+            Err(e) => {
+                tracing::warn!(pointer, error = %e, "default napplet pointer did not parse; skipping seed");
+                continue;
+            }
+        };
+        let npub = addr.author.to_bech32().unwrap_or_default();
+        let shell_host =
+            myco_napplet_runtime::host::shell_host(&addr.author.to_bytes(), addr.d_tag.as_deref());
+
+        // `add_napplet_to_library` replaces the grants and the reviewed list,
+        // and a review the user already gave must not be rewritten by a seed.
+        if content
+            .napplet_grants(&npub, addr.d_tag.as_deref())
+            .is_some()
+        {
+            tracing::info!(title, "default napplet already installed; not re-seeding");
+            continue;
+        }
+
+        // The defaults every napplet gets and nothing else. `reviewed` stays
+        // empty so `open_with` reports every declared, non-default domain as
+        // `unreviewed` and `NappletOpenRequest::run` puts it on the review
+        // sheet at the first tap — the same path an update that declares more
+        // takes.
+        content.add_napplet_to_library(
+            &npub,
+            addr.d_tag.as_deref(),
+            Some(title),
+            &shell_host,
+            crate::napplet::effective_grants(&[]),
+            Vec::new(),
+            pointer,
+            crate::content::now_secs(),
+        );
+
+        let content = content.clone();
+        let addr = addr.clone();
+        rt.spawn(async move {
+            if content.is_offline_only() {
+                // The marker is still written; the tile reads "Not on this
+                // phone — hold to reload", and that reload goes through the
+                // review sheet.
+                tracing::info!(
+                    title,
+                    "offline only; default napplet pinned but not fetched"
+                );
+            } else {
+                let relay = content.relay();
+                let blobs = content.blobs();
+                let source = addr.public_source();
+                match crate::napplet::ingest_into(
+                    relay.as_ref(),
+                    blobs.as_ref(),
+                    &*content,
+                    &addr,
+                    &source,
+                )
+                .await
+                {
+                    Ok(_) => tracing::info!(title, "default napplet fetched"),
+                    // No internet on first run is normal; the tile stays
+                    // dimmed until a reload.
+                    Err(e) => tracing::warn!(title, error = %e, "default napplet fetch failed"),
+                }
+            }
+            // Whichever way it went, the tile state is right.
+            content.refresh_napplet_status().await;
+        });
+    }
+    if let Err(e) = std::fs::write(&marker, b"1\n") {
+        tracing::warn!(error = %e, "could not write default-napplet-seed marker");
+    }
+}
+
 /// Milliseconds since the Unix epoch, passed to `merge_peers` (reserved for
 /// future staleness-based state work; unused by today's merge logic).
 fn now_ms() -> u64 {
@@ -1836,6 +2551,104 @@ const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<AppRuntime>();
 };
+
+/// A napplet open, prepared under the runtime lock and run without it.
+///
+/// The resolve reads the relay and the blob store — a configured custom relay
+/// makes that a network round trip — and it used to run inside the reducer's
+/// mutex on the main thread, queuing every `Tick` behind it. Now the lock is
+/// held only to gather these handles; `run` does the waiting.
+pub struct NappletOpenRequest {
+    /// The pointer the open was asked for, as the Library and the review
+    /// sheet spell it.
+    pointer: String,
+    addr: crate::napplet::NappletAddr,
+    npub: String,
+    grants: Option<crate::content::NappletGrants>,
+    content: Arc<crate::content::Content>,
+    host: Arc<crate::napplet::NappletHost>,
+    rt: tokio::runtime::Handle,
+    /// The review slot, so an update that declares more than was reviewed
+    /// can be put in front of the user.
+    review: Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
+}
+
+impl NappletOpenRequest {
+    /// Resolve, open the session, and record any widening in the Library.
+    /// Returns the opened napplet and whether state the UI reads changed —
+    /// the Library, or the review slot. Blocks the calling thread; never call
+    /// it on a Tokio worker.
+    pub fn run(self) -> anyhow::Result<(crate::napplet::OpenedNapplet, bool)> {
+        let opened = self
+            .rt
+            .block_on(self.host.open_with(&self.addr, self.grants.clone()))?;
+        // The session may have been opened with more than was stored (a
+        // reviewed domain this build newly implements). Record it, so the
+        // sheet says what the app can do and the next open needs no widening.
+        let mut changed = false;
+        if let Some(stored) = self.grants {
+            if opened.grants != stored {
+                self.content.set_napplet_grants(
+                    &self.npub,
+                    self.addr.d_tag.as_deref(),
+                    opened.grants.clone(),
+                );
+                changed = true;
+            }
+        }
+        // The served version declares something the user never saw. It was
+        // not granted; it goes back through the review sheet, which opens on
+        // the Apps screen beside the running window. Install from there
+        // records the new reviewed list and the grants the sheet showed.
+        if !opened.unreviewed.is_empty() {
+            let requires = opened.requires.clone();
+            let grants = crate::napplet::effective_grants(&requires);
+            tracing::info!(
+                napplet = %self.addr.d_tag.as_deref().unwrap_or("<root>"),
+                unreviewed = ?opened.unreviewed,
+                "an update declares more than was reviewed; asking"
+            );
+            *self.review.lock().unwrap() = Some(crate::napplet::NappletReview {
+                pointer: self.pointer.clone(),
+                loading: false,
+                title: opened.title.clone().unwrap_or_default(),
+                description: String::new(),
+                requires,
+                grants,
+                error: String::new(),
+                holder: None,
+            });
+            changed = true;
+        }
+        Ok((opened, changed))
+    }
+}
+
+/// Land a finished napplet fetch in the review slot — but only if the slot
+/// still names the pointer the fetch was for.
+///
+/// The fetch runs for as long as its relays take, and the sheet it opened is
+/// the user's to close: dismiss it, or ask for another napplet, and the slot
+/// moves on (`None`, or another pointer). A result written unconditionally
+/// re-opened a sheet the user had dismissed, or replaced the review of the
+/// napplet they last asked for with an older one — install decisions taken
+/// against the wrong review. Returns whether the outcome was kept.
+fn settle_napplet_review(
+    slot: &std::sync::Mutex<Option<crate::napplet::NappletReview>>,
+    outcome: crate::napplet::NappletReview,
+) -> bool {
+    let mut slot = slot.lock().unwrap();
+    if slot.as_ref().is_some_and(|r| r.pointer == outcome.pointer) {
+        *slot = Some(outcome);
+        true
+    } else {
+        tracing::info!(
+            pointer = %outcome.pointer,
+            "napplet fetch finished after its review was dismissed or moved on; result dropped"
+        );
+        false
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1919,6 +2732,122 @@ mod tests {
             relaunched.state_json().contains("\"slots\":8"),
             "the persisted count must size the pool at the next node start"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bundled DingDong napplet is pinned on first run in the shape that
+    /// makes its first open a review: the defaults granted, nothing reviewed,
+    /// nothing denied. The seed generates no user key (D3), runs once per
+    /// install, and never re-seeds a napplet the user removed.
+    #[test]
+    fn dingdong_is_seeded_once_on_first_run() {
+        use crate::content::LibraryKind;
+
+        let dir = temp_dir("seed-dingdong");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+
+        let dingdongs = |rt: &AppRuntime| {
+            rt.content
+                .as_ref()
+                .expect("host content layer")
+                .library_snapshot()
+                .into_iter()
+                .filter(|i| {
+                    i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("dingdong")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let seeded = dingdongs(&rt);
+        assert_eq!(seeded.len(), 1, "exactly one seeded entry: {seeded:?}");
+        let item = &seeded[0];
+        assert!(item.pinned);
+        assert_eq!(item.title, "DingDong");
+        assert_eq!(item.pointer, DEFAULT_NAPPLETS[0].1);
+        assert_eq!(
+            item.author_npub,
+            "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr"
+        );
+        assert!(
+            item.reviewed.is_empty(),
+            "the seed must not pretend a review happened"
+        );
+        assert!(item.denied.is_empty());
+        assert_eq!(item.granted, crate::napplet::effective_grants(&[]));
+        assert!(dir.join("seeded-napplets").exists());
+        assert!(
+            !crate::user_key::exists(&dir),
+            "seeding must not generate a user key — that is for first napplet use"
+        );
+
+        // A second launch does not duplicate it.
+        let relaunched = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        assert_eq!(dingdongs(&relaunched).len(), 1);
+
+        // Removed by the user, it stays removed.
+        rt.dispatch(NativeAppAction::ForgetNapplet {
+            pointer: DEFAULT_NAPPLETS[0].1.to_string(),
+        });
+        let third = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        assert!(
+            dingdongs(&third).is_empty(),
+            "a removed default was re-seeded"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `add_napplet_to_library` replaces the grants and the reviewed list, so
+    /// a seed that ran over an installed DingDong would rewrite a review the
+    /// user already gave. It must leave that entry alone and only write the
+    /// marker.
+    #[test]
+    fn seeding_leaves_an_installed_napplet_alone() {
+        let dir = temp_dir("seed-installed-napplet");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let content = rt.content.as_ref().expect("host content layer");
+
+        let npub = "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr";
+        let reviewed = crate::content::NappletGrants {
+            granted: vec!["mesh".into()],
+            denied: vec!["relay".into()],
+            reviewed: vec!["mesh".into(), "relay".into()],
+        };
+        // The first launch already seeded it; make it look reviewed. The
+        // reviewed list is written only by install review, so go through
+        // that path, then record the decisions.
+        assert!(content.napplet_grants(npub, Some("dingdong")).is_some());
+        content.add_napplet_to_library(
+            npub,
+            Some("dingdong"),
+            Some("DingDong"),
+            "shell-host",
+            reviewed.granted.clone(),
+            reviewed.reviewed.clone(),
+            DEFAULT_NAPPLETS[0].1,
+            0,
+        );
+        content.set_napplet_grants(npub, Some("dingdong"), reviewed.clone());
+        assert_eq!(
+            content.napplet_grants(npub, Some("dingdong")),
+            Some(reviewed.clone())
+        );
+
+        let marker = dir.join("seeded-napplets");
+        std::fs::remove_file(&marker).unwrap();
+        seed_default_napplets(content, rt.rt.as_ref().unwrap(), &dir);
+
+        assert_eq!(
+            content.napplet_grants(npub, Some("dingdong")),
+            Some(reviewed),
+            "the seed rewrote a review the user already gave"
+        );
+        assert!(marker.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2303,5 +3232,52 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn review_for(pointer: &str, loading: bool) -> crate::napplet::NappletReview {
+        crate::napplet::NappletReview {
+            pointer: pointer.to_string(),
+            loading,
+            title: String::new(),
+            description: String::new(),
+            requires: Vec::new(),
+            grants: Vec::new(),
+            error: String::new(),
+            holder: None,
+        }
+    }
+
+    /// A fetch that finishes after the user dismissed its sheet, or asked for
+    /// another napplet, must not put its result in front of them.
+    #[test]
+    fn a_stale_fetch_does_not_reopen_the_review() {
+        // Dismissed: the slot is empty; the late result stays out of it.
+        let slot = std::sync::Mutex::new(None);
+        assert!(!settle_napplet_review(&slot, review_for("naddr1a", false)));
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "a dismissed sheet stays dismissed"
+        );
+
+        // Moved on: the slot belongs to B now; A's result must not replace it.
+        *slot.lock().unwrap() = Some(review_for("naddr1b", true));
+        assert!(!settle_napplet_review(&slot, review_for("naddr1a", false)));
+        let current = slot.lock().unwrap().clone().unwrap();
+        assert_eq!(current.pointer, "naddr1b");
+        assert!(
+            current.loading,
+            "B's own fetch is still the one on the sheet"
+        );
+
+        // Still ours: the result lands and the sheet stops loading.
+        let mut done = review_for("naddr1b", false);
+        done.title = "B".to_string();
+        assert!(settle_napplet_review(&slot, done));
+        let current = slot.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            (current.pointer.as_str(), current.title.as_str()),
+            ("naddr1b", "B")
+        );
+        assert!(!current.loading);
     }
 }

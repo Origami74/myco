@@ -50,3 +50,6 @@ node_modules/
 .env
 # Standalone mesh exit-node daemon (developed in-tree, not shipped)
 /fips-exitnode/
+
+# GSD planning artifacts stay local
+.planning/

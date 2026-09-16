@@ -39,7 +39,7 @@ Four Rust crates build into the one `cdylib`, `libmyco_core.so`:
 
 - **`myco-core`** — the app crate and only cdylib. Owns device identity (one Nostr keypair, persisted on first launch), embeds the FIPS mesh node, and wires everything together: Tokio multi-thread runtime (`runtime.rs`), TUN packet bridge, `.fips` DNS interception, BLE/Wi-Fi Aware/AP lane bridges, peer diagnostics, and mesh gossip.
 - **`nsite-deck`** — reusable, transport-agnostic nsite host: gateway (manifest → path → sha256 → serve), sync/import engine, propagator. Reaches the outside world only through four trait seams in `seams.rs`: `RelayBackend`, `BlobStore`, `PeerSource`, `FanoutSink`. It names no concrete relay, store, or radio — keep it that way.
-- **`myco-relay`** — embedded NIP-01 relay implementing `RelayBackend` (ws on :4870). Hand-rolled store over rust-nostr `Event` types, deliberately no relay framework: manifests are replaceable/addressable (newest-per-slot, persisted to JSON); regular events (chat) are by-id, ephemeral, memory-only.
+- **`myco-relay`** — embedded NIP-01 relay implementing `RelayBackend` (ws on :4870). Durable events (manifests, replaceable kinds, notes) live in rust-nostr's LMDB store (`nostr-lmdb`, indexed NIP-01 queries, replaceable/addressable and NIP-09 semantics applied by the database); events with a NIP-40 `expiration` (chat) are memory-only by design; deliberately no relay framework in front of it.
 - **`myco-blossom`** — embedded Blossom blob store implementing `BlobStore` (http on :24243). Content-addressed files named by sha256; verifies hash on write (atomic temp+rename), trusts the name on read.
 
 ### The FFI boundary
@@ -61,4 +61,4 @@ Host `cargo test` uses in-memory mocks (`nsite-deck/src/testing.rs`: `MemRelay`,
 - Single-trunk: branch off `main`, PR back into `main`, squash WIP commits.
 - One logical change per PR; no drive-by reformatting or out-of-footprint cleanups.
 - Design-affecting changes update the matching `docs/design/` page; user-visible changes update `README.md`; release notes go in `CHANGELOG.md` under `[Unreleased]`.
-- Many docs in `docs/design/` and `docs/how-to/` were written in forward-looking "proposal voice" before the code existed and mark items **TBD / open** — where a doc and the tree disagree, the tree (justfile, Cargo.toml, build.gradle.kts) is current. `docs/design/concepts.md` is the glossary; start there for terminology (npub/node_addr, `.fips` vs `.nsite`, Pillars of Propagation).
+- Many docs in `docs/design/` and `docs/how-to/` were written in forward-looking "proposal voice" before the code existed and mark items **TBD / open** — where a doc and the tree disagree, the tree (justfile, Cargo.toml, build.gradle.kts) is current. `docs/design/core/concepts.md` is the glossary; start there for terminology (npub/node_addr, `.fips` vs `.nsite`, Pillars of Propagation).

@@ -1,5 +1,5 @@
 //! `MeshGossiper` — the [`Gossiper`] hook that fans an nsite's events out to the
-//! mesh, implementing the **push** plane of `docs/design/event-gossip.md`.
+//! mesh, implementing the **push** plane of `docs/design/core/event-gossip.md`.
 //!
 //! **P2 — multi-hop flood.** An event is pushed to the whole Circle's relays
 //! (`ws://<npub>.fips:4870`) — every member, not just direct neighbours, so a
@@ -7,17 +7,18 @@
 //! decrementing hop budget, carried in the `MESH` envelope:
 //!
 //! - **Local origin** (a loopback publish from the in-app nsite) originates at
-//!   `mesh_wire::EVENT_TTL`.
+//!   `mesh_wire::EVENT_TTL`; a napplet's NAP-MESH publish originates at the
+//!   budget it chose, capped by the user and clamped here to the same maximum.
 //! - **Mesh origin** re-forwards with the budget that rode in,
 //!   **except back to the sender** (split-horizon), until the budget runs out.
 //!
 //! The loop guard is the proxy's own seen-set: the gossiper is only ever called
 //! the first time this device sees an id, so a copy arriving via a second path is
 //! never re-forwarded — and unlike the store's dedup, that holds even after the
-//! event has been GC'd (`docs/design/event-gossip.md` §3–4). Manifest kinds
+//! event has been GC'd (`docs/design/core/event-gossip.md` §3–4). Manifest kinds
 //! (15128/35128) are excluded — they have their own path
-//! (`docs/design/nsite-layer.md` §2.1); everything else is gossip-eligible by
-//! default (`docs/design/nsite-permissions.md`).
+//! (`docs/design/nsite/nsite-layer.md` §2.1); everything else is gossip-eligible by
+//! default (`docs/design/nsite/nsite-permissions.md`).
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -41,7 +42,7 @@ impl MeshGossiper {
 }
 
 /// v1 gossip eligibility: everything except nsite manifests (which propagate via
-/// their own path). See `docs/design/nsite-permissions.md` (`gossip-kinds`).
+/// their own path). See `docs/design/nsite/nsite-permissions.md` (`gossip-kinds`).
 fn is_gossip_eligible(kind: u16) -> bool {
     kind != nsite_deck::KIND_ROOT && kind != nsite_deck::KIND_NAMED
 }
@@ -56,7 +57,7 @@ impl Gossiper for MeshGossiper {
         self.content.handle_file_event(&event).await;
         // nsite manifests propagate over this same push plane (the relay just stored
         // a newer one), but with an interest-aware download-then-forward policy and
-        // the active-version gate. See docs/design/nsite-updates.md §4.
+        // the active-version gate. See docs/design/nsite/nsite-updates.md §4.
         if kind == nsite_deck::KIND_ROOT || kind == nsite_deck::KIND_NAMED {
             self.content.clone().on_manifest_event(event, inbound).await;
             return;
@@ -64,10 +65,12 @@ impl Gossiper for MeshGossiper {
         if !is_gossip_eligible(kind) {
             return;
         }
-        // Effective budget: originate at the default for our own publishes; for a
-        // mesh-received event use the TTL it carried (absent => 0 => don't forward).
+        // Effective budget: our own publishes originate at the default, or at
+        // the budget a napplet chose through NAP-MESH (already capped by the
+        // user; clamped again below regardless). A mesh-received event uses the
+        // TTL it carried (absent => 0 => don't forward).
         let effective = match inbound.origin {
-            Origin::Local => crate::mesh_wire::EVENT_TTL,
+            Origin::Local => inbound.event_ttl.unwrap_or(crate::mesh_wire::EVENT_TTL),
             Origin::Mesh => inbound.event_ttl.unwrap_or(0),
         };
         // A peer we have not granted multihop writes still gets its events
@@ -102,7 +105,8 @@ impl Gossiper for MeshGossiper {
         // per-message connect), skipping the peer it came from (split-horizon). Not
         // just direct neighbours: a Circle peer reachable only multi-hop (you've
         // moved apart) must still get the message — the routed dial handles it, an
-        // offline member's connect fails fast. See `docs/design/event-gossip.md`.
+        // offline member's connect fails fast. See `docs/design/core/event-gossip.md`.
+        let mut fanned = 0usize;
         for npub in self.content.circle_npubs() {
             let ip = match fips::PeerIdentity::from_npub(&npub) {
                 Ok(p) => IpAddr::V6(p.address().to_ipv6()),
@@ -112,7 +116,20 @@ impl Gossiper for MeshGossiper {
                 continue;
             }
             self.content.gossip_to_peer(&npub, frame.clone());
+            fanned += 1;
         }
+
+        // A fan-out to nobody is the quiet failure here: an empty Circle, or a
+        // Circle whose npubs will not parse, looks exactly like a working
+        // gossip from the sending side. Saying how many peers were written to
+        // is what tells "sent" apart from "sent nowhere".
+        tracing::info!(
+            event = %event.id,
+            kind,
+            ttl = out_ttl,
+            peers = fanned,
+            "gossip fan-out"
+        );
     }
 
     /// Pull plane: forward the REQ's

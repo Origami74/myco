@@ -1,5 +1,8 @@
 # Exit-node demo — a BLE-only phone loads google.com
 
+> Status: experimental, Dev-tab only (`exit_proxy`). Not a product feature and
+> not on the roadmap; kept because it is a useful mesh throughput check.
+
 Goal: a phone with **only Bluetooth** peering (no Wi-Fi/cell) browses the public
 internet by tunnelling its web traffic through a mesh **exit node** that egresses
 for it.

@@ -10,25 +10,21 @@
 | :--: | :--: | :--: | :--: | :--: |
 | ![Tap to pair over NFC](docs/images/01-nfc-pairing.png)<br>**Bump phones to pair** | ![Your Circle of paired people](docs/images/02-circle.png)<br>**Your Circle** | ![Share an app with someone](docs/images/03-app-sharing.png)<br>**Share an app** | ![Installed apps on the home screen](docs/images/04-home.png)<br>**Your apps** | ![An installed app running full-screen](docs/images/05-bitchat.png)<br>**Apps run full-screen** |
 
-![Install apps from the people around you](docs/design/diagrams/intro-01-what-it-is.svg)
+![Your apps live on your home screen and open like any app](docs/design/diagrams/intro-01-your-apps.svg)
 
-Myco is a peer-to-peer app-sharing network. Meet someone, **pair** with a quick
-QR scan, and their apps land in your **Library**, ready to use offline. Pairing
-always goes both ways: the code you scan carries a one-time invite, so the moment
-you connect, apps can flow in either direction between you. Anything you install
-you can pass on to the next person — so apps spread from phone to phone, on their
-own, with no servers and no single point that has to stay online.
+Myco is a peer-to-peer app-sharing network. The apps you collect get their own
+home-screen icons, and each one opens full-screen as its own app — no browser,
+no tabs, works offline.
 
-![Get started in 3 steps](docs/design/diagrams/intro-02-get-started.svg)
+Meet someone, **pair** with a bump or a QR scan, and their apps land in your
+**Apps** grid. Pairing always goes both ways: the code carries a one-time
+invite, so the moment you connect, apps can flow in either direction between
+you. Anything you install you can pass on to the next person — so apps spread
+from phone to phone, on their own, with no servers and no single point that has
+to stay online. What you do *inside* an app — a chat, a doorbell — travels the
+same way, to the people you paired with and no one else.
 
-![How apps spread](docs/design/diagrams/intro-03-how-it-spreads.svg)
-
-The apps you collect get their own home-screen icons, and each one opens
-full-screen as its own app:
-
-![Apps you install live on your home screen](docs/design/diagrams/intro-04-on-your-homescreen.svg)
-
-![Every app gets its own window](docs/design/diagrams/intro-05-each-its-own-app.svg)
+![Apps from the people you trust — over whatever mesh is around](docs/design/diagrams/intro-02-what-it-is.svg)
 
 ## How it works (for developers)
 
@@ -43,21 +39,21 @@ FIPS, BLE, and the Android shell.
 
 Full design docs are in **[docs/](docs/README.md)**:
 
-- [Concepts & glossary](docs/design/concepts.md) — start here
-- [Architecture](docs/design/architecture.md)
-- [The nsite layer](docs/design/nsite-layer.md) · [Propagation](docs/design/propagation.md) · [BLE interop](docs/design/ble-interop.md)
-- [Identity & pairing](docs/design/identity-pairing.md) · [Security](docs/design/security.md)
-- [Deep links](docs/design/deep-links.md) — linking to a place inside an app, and what happens when that app isn't installed yet
+- [Concepts & glossary](docs/design/core/concepts.md) — start here
+- [Architecture](docs/design/core/architecture.md)
+- [The nsite layer](docs/design/nsite/nsite-layer.md) · [Propagation](docs/design/nsite/propagation.md) · [BLE interop](docs/design/fips/ble-interop.md)
+- [Identity & pairing](docs/design/core/identity-pairing.md) · [Security](docs/design/core/security.md)
+- [Deep links](docs/design/core/deep-links.md) — linking to a place inside an app, and what happens when that app isn't installed yet
 - [Roadmap](docs/roadmap.md)
 
 ## Status
 
-**Design phase — not yet built.** This repository currently holds the design
-docs and diagrams. The v1 target is a two-device Android demo over Bluetooth,
-fully offline — one phone browses an app installed from the other. See the
-[roadmap](docs/roadmap.md).
+**Built and in daily use on two phones.** Pair by bumping phones (NFC) or
+scanning a QR, and apps flow both ways over Bluetooth, Wi-Fi Aware or the LAN
+with no internet. Two kinds of app run: **nsites** (static sites published on
+Nostr) and **napplets** (sandboxed programs with a permission model — mesh,
+relays, pictures). See the [roadmap](docs/roadmap.md) for what's next and
+[docs/](docs/README.md) for how it works.
 
-> Built on [nostr-vpn](https://github.com/mmalmi/nostr-vpn) (FIPS data plane),
-> reusing the [FIPS](https://github.com/k0sti/fips) mesh, and reimplementing the
-> nsite-deck content layer in Rust.
-
+> Built on the [FIPS](https://github.com/jmcorgan/fips) mesh, with an embedded
+> Nostr relay and Blossom store in Rust and a Compose shell in Kotlin.

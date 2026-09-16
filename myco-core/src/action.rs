@@ -27,7 +27,7 @@ pub enum NativeAppAction {
     /// carries a UDP transport instance (bound socket) for platform-pushed
     /// peers; the Aware radio itself lives in the Android foreground service.
     /// Flipping it while the node runs restarts the node so the transport set
-    /// matches the switch. See docs/design/wifi-aware-interop.md.
+    /// matches the switch. See docs/design/fips/wifi-aware-interop.md.
     SetWifiAwareEnabled { enabled: bool },
 
     // --- site entry / Library (P2) ---
@@ -52,8 +52,52 @@ pub enum NativeAppAction {
     RemoveFromLibrary { link: String },
     /// Forget a single nsite: remove it from the Library and the Apps grid.
     ForgetNsite { link: String },
+    /// Fetch a napplet by `naddr` (or `<npub>:<dtag>`), verify it, and store it
+    /// locally — D9's acquisition path, online once and mesh-replicable after.
+    ///
+    /// Deliberately **not** an install: it reports what the napplet `requires`
+    /// so the review screen can ask, and grants nothing. An `naddr` arriving
+    /// from outside the app routes here, never to a silent install.
+    FetchNapplet {
+        pointer: String,
+        /// The peer who shared it, when it arrived by a tap or a scan.
+        ///
+        /// Their device is tried before the internet, so a napplet handed over
+        /// in a room with no internet still arrives — which is the whole point
+        /// of handing it over that way.
+        #[serde(default)]
+        holder: Option<String>,
+    },
+    /// Record what install review granted, and pin the napplet to the Library.
+    ///
+    /// `granted` replaces whatever was stored: the review screen shows the whole
+    /// set being agreed to, so merging would let a second install accumulate
+    /// capabilities across two screens neither of which showed the total.
+    InstallNapplet {
+        pointer: String,
+        #[serde(default)]
+        granted: Vec<String>,
+    },
+    /// Unpin a napplet and drop its grants.
+    ForgetNapplet { pointer: String },
+    /// Allow or withdraw one capability for an installed napplet, from its
+    /// sheet. Live: an open window sees it on its next call. This and install
+    /// review are the only two writers of a grant.
+    SetNappletGrant {
+        pointer: String,
+        domain: String,
+        allowed: bool,
+    },
+    /// Cap how far a napplet may reach over the mesh (NAP-MESH): the most hops
+    /// a `mesh.publish` and a `mesh.subscribe` backlog pull may ask for.
+    /// Values above what the mesh honours are stored as the maximum. Takes
+    /// effect on a napplet's next call, not its next launch.
+    SetNappletMeshReach { publish_ttl: u8, subscribe_ttl: u8 },
+    /// Close the install-review screen without installing. The fetched bytes
+    /// stay cached; no grant is written, so the napplet has nothing.
+    DismissNappletReview,
     /// Check online relays for newer versions of installed nsites and stage/apply
-    /// them (`docs/design/nsite-updates.md`). Spawn-not-block.
+    /// them (`docs/design/nsite/nsite-updates.md`). Spawn-not-block.
     CheckNsiteUpdates,
     /// Discover nsites on connected Circle peers' relays ("nsites around me"):
     /// query each reachable member's mesh relay for kind 15128/35128 manifests.

@@ -2,7 +2,7 @@
 //! relays — **one socket per peer**, shared by both propagation planes:
 //!
 //! - **push** ([`PeerRelayPool::send`]): fan an `["EVENT", …]` frame to a peer
-//!   (fire-and-forget) — the multi-hop flood of `docs/design/event-gossip.md`.
+//!   (fire-and-forget) — the multi-hop flood of `docs/design/core/event-gossip.md`.
 //! - **pull** ([`PeerRelayPool::request`]): open a `REQ`, collect the peer's
 //!   matching events until `EOSE`/`CLOSED`, then close the subscription.
 //!
@@ -158,11 +158,29 @@ pub struct PeerRelayPool {
     /// spawn its actor — sends drop (push is best-effort) and requests return
     /// empty, exactly as they already do for a dead peer.
     dial_backoff: BackoffMap,
+    /// Whether every dial goes to `ip_source::mesh_relay_url(npub)` regardless
+    /// of the URL handed in. Always on in the app: the pool's connection *is*
+    /// the peer to everything upstream (keepwarm, gossip fan-out, Mesh-lane
+    /// publishes), so a URL that came from a napplet or a relay list must
+    /// never pick where it goes. Off only in host tests, which dial mock
+    /// relays on `127.0.0.1` under placeholder npubs.
+    canonical_urls: bool,
 }
 
 impl PeerRelayPool {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            canonical_urls: true,
+            ..Self::default()
+        }
+    }
+
+    /// Dial the URLs as given — for host tests whose "peers" are mock relays
+    /// on loopback. Never used in the app.
+    #[cfg(test)]
+    fn dialing_as_given(mut self) -> Self {
+        self.canonical_urls = false;
+        self
     }
 
     /// npubs that currently hold a live connected socket (see [`Self::connected`]).
@@ -189,12 +207,30 @@ impl PeerRelayPool {
     /// Get a live command channel for `npub`'s connection at `url`, spawning the
     /// actor (which lazily connects) if there isn't a running one. Returns `None`
     /// while the peer is in dial backoff. Caller holds the map lock.
+    ///
+    /// The actor dials `ip_source::mesh_relay_url(npub)`, not `url`, when the
+    /// two differ: belt to the braces in `validate_relay_url` and
+    /// `relay_list_lanes`. `ws://npub1peer.fips:4870@evil.example/` is userinfo
+    /// on `evil.example` to the WebSocket client, and a pool actor on that
+    /// socket would hand the peer's whole relay view to a stranger.
     fn spawn_or_get(
         &self,
         peers: &mut HashMap<String, mpsc::UnboundedSender<Command>>,
         npub: &str,
         url: &str,
     ) -> Option<mpsc::UnboundedSender<Command>> {
+        let canonical = crate::ip_source::mesh_relay_url(npub);
+        let url = if self.canonical_urls && url != canonical {
+            tracing::warn!(
+                npub,
+                given = url,
+                dialling = %canonical,
+                "peer relay pool: refusing a non-canonical mesh URL"
+            );
+            canonical.as_str()
+        } else {
+            url
+        };
         if let Some(tx) = peers.get(npub) {
             if !tx.is_closed() {
                 return Some(tx.clone());
@@ -562,7 +598,7 @@ mod tests {
     #[tokio::test]
     async fn push_then_pull_over_one_connection() {
         let (store, url) = spawn_relay().await;
-        let pool = PeerRelayPool::new();
+        let pool = PeerRelayPool::new().dialing_as_given();
         let keys = Keys::generate();
         let ev = chat(&keys, "hello mesh");
 
@@ -630,7 +666,7 @@ mod tests {
     /// A request to an unreachable peer returns empty within the timeout (no hang).
     #[tokio::test]
     async fn request_to_dead_peer_times_out_empty() {
-        let pool = PeerRelayPool::new();
+        let pool = PeerRelayPool::new().dialing_as_given();
         // Port 1 is not listening; connect fails fast, actor exits, reply drops.
         let got = pool
             .request(
@@ -648,7 +684,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_connects_and_reports_connected() {
         let (_store, url) = spawn_relay().await;
-        let pool = PeerRelayPool::new();
+        let pool = PeerRelayPool::new().dialing_as_given();
         assert!(!pool.connected_npubs().contains("peerZ"));
         pool.ensure("peerZ", &url);
         let up = tokio::time::timeout(Duration::from_secs(5), async {
@@ -668,9 +704,24 @@ mod tests {
     /// actor exits without inserting into the connected set).
     #[tokio::test]
     async fn ensure_dead_peer_stays_absent() {
-        let pool = PeerRelayPool::new();
+        let pool = PeerRelayPool::new().dialing_as_given();
         pool.ensure("peerNope", "ws://127.0.0.1:1");
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(!pool.connected_npubs().contains("peerNope"));
+    }
+
+    /// The pool as the app builds it dials `ws://<npub>.fips:4870`, whatever
+    /// URL it was handed: a live mock relay named by a foreign URL is never
+    /// reached (H2 of the PR #52 review).
+    #[tokio::test]
+    async fn the_pool_dials_the_canonical_url_not_the_one_it_was_given() {
+        let (_store, url) = spawn_relay().await;
+        let pool = PeerRelayPool::new();
+        pool.ensure("npub1peer", &url);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !pool.connected_npubs().contains("npub1peer"),
+            "the mock relay at {url} must not be dialled for npub1peer"
+        );
     }
 }

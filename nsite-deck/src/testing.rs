@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag};
 
+use crate::aggregate::{compute_aggregate_hash, PathEntry};
 use crate::model::{KIND_NAMED, KIND_ROOT};
 use crate::seams::{BlobStore, RelayBackend};
 use crate::sync::sha256_hex;
@@ -21,9 +22,26 @@ pub struct TestSite {
     pub blobs: Vec<(String, Vec<u8>)>,
 }
 
+/// What aggregate `x` tag a generated manifest should carry — the knob tests
+/// use to exercise the three [`AggregateCheck`](crate::aggregate::AggregateCheck)
+/// outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TestAggregate {
+    /// The correct aggregate over the site's `path` tags.
+    #[default]
+    Valid,
+    /// No `x` tag at all — a publisher whose tooling predates NIP-5A's
+    /// aggregate. nsites still serve; napplets do not.
+    Omitted,
+    /// A well-formed `x` tag over the wrong file set — what a re-signing
+    /// intermediary that dropped a file produces.
+    Corrupt,
+}
+
 /// Build a signed manifest (kind 15128 if `d_tag` is `None`, else 35128) over the
 /// given `(path, bytes)` files, with a throwaway key. The site is *valid*: the
-/// event is signed and every path tag carries the true sha256 of its bytes.
+/// event is signed, every path tag carries the true sha256 of its bytes, and the
+/// aggregate `x` tag matches.
 pub fn build_test_site(
     files: &[(&str, &[u8])],
     d_tag: Option<&str>,
@@ -40,6 +58,17 @@ pub fn build_test_site_with_keys(
     d_tag: Option<&str>,
     title: Option<&str>,
 ) -> TestSite {
+    build_test_site_full(keys, files, d_tag, title, TestAggregate::Valid)
+}
+
+/// As [`build_test_site_with_keys`], with control over the aggregate `x` tag.
+pub fn build_test_site_full(
+    keys: &Keys,
+    files: &[(&str, &[u8])],
+    d_tag: Option<&str>,
+    title: Option<&str>,
+    aggregate: TestAggregate,
+) -> TestSite {
     let mut tags: Vec<Tag> = Vec::new();
     if let Some(d) = d_tag {
         tags.push(Tag::identifier(d.to_string()));
@@ -52,6 +81,31 @@ pub fn build_test_site_with_keys(
     }
     if let Some(t) = title {
         tags.push(Tag::parse(["title", t]).expect("title tag"));
+    }
+
+    let entries: Vec<PathEntry> = files
+        .iter()
+        .map(|(path, bytes)| PathEntry {
+            path: (*path).to_string(),
+            sha256: sha256_hex(bytes),
+        })
+        .collect();
+    match aggregate {
+        TestAggregate::Omitted => {}
+        TestAggregate::Valid => {
+            let hash = compute_aggregate_hash(&entries);
+            tags.push(Tag::parse(["x", hash.as_str(), "aggregate"]).expect("aggregate tag"));
+        }
+        TestAggregate::Corrupt => {
+            // The aggregate of a *different* file set: same shape, wrong answer.
+            let mut fewer = entries.clone();
+            fewer.push(PathEntry {
+                path: "/ghost.html".to_string(),
+                sha256: sha256_hex(b"a file the manifest does not list"),
+            });
+            let hash = compute_aggregate_hash(&fewer);
+            tags.push(Tag::parse(["x", hash.as_str(), "aggregate"]).expect("aggregate tag"));
+        }
     }
 
     let kind = if d_tag.is_some() {

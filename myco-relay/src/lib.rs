@@ -1,25 +1,30 @@
 //! `myco-relay` — a generic embedded **Nostr relay**: a NIP-01 event store
 //! implementing `nsite-deck`'s [`RelayBackend`] seam. See
-//! `docs/design/nsite-layer.md` §2.1 and `docs/design/event-gossip.md`.
+//! `docs/design/nsite/nsite-layer.md` §2.1 and `docs/design/core/event-gossip.md`.
 //!
 //! This crate holds no Myco concepts — no mesh, no ttl, no circles. The
 //! WebSocket front door that applies those is `myco-core::mesh_relay`, which
 //! keeps this store swappable for any other NIP-01 relay
 //! (`reference/thinning-custom-relay.md`).
 //!
-//! Two kinds of event live here:
+//! Two kinds of event live here, in two places:
 //!
-//! - **Replaceable / addressable** (manifests: 15128 replaceable, 35128
-//!   addressable) — newest-per-slot, persisted to a small JSON file. The slot is
-//!   `(kind, author)` for replaceable and `(kind, author, d-tag)` for addressable.
-//! - **Regular** (e.g. kind 9 chat) — kept **by event id** (many per author), so a
-//!   second message does not overwrite the first. These are typically ephemeral
-//!   (a NIP-40 `expiration` tag, `docs/design/event-gossip.md` §5): they are GC'd
-//!   on expiry and **not persisted** — chat is memory-only by design.
+//! - **Durable** events — manifests, a user's replaceable kinds, notes a
+//!   napplet published or pulled — live in an **LMDB** database
+//!   ([`nostr_lmdb`], rust-nostr's store). It indexes by id, kind, author,
+//!   `d` tag, tags and time, so a query is an index walk rather than a scan
+//!   of everything held; it applies NIP-01 replaceable / addressable
+//!   semantics and NIP-09 deletions itself; and it is an mmap, so a read is a
+//!   page-cache hit and an idle store costs nothing. Every write is one small
+//!   ACID transaction — never a rewrite of the whole set, which is what the
+//!   JSON file this replaced did on every event.
+//! - **Expiring** events (a NIP-40 `expiration` tag — chat, pair traffic;
+//!   `docs/design/core/event-gossip.md` §5) stay **in memory**, GC'd on
+//!   expiry and never written to disk. That is a design property, not a
+//!   shortcut: a conversation in the room is not a record on the phone.
 //!
-//! The query surface Myco uses is tiny (`{kinds, authors, #d, limit}`), so this is
-//! a hand-rolled store over the rust-`nostr` `Event` type. Negentropy/NIP-77 is
-//! **not** here (it lands later).
+//! Ephemeral kinds (20000–29999) are stored by neither, as NIP-01 says; the
+//! front door still delivers them live.
 //!
 //! [`RelayBackend`]: nsite_deck::seams::RelayBackend
 
@@ -29,96 +34,306 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use nostr::filter::MatchEventOptions;
 use nostr::{Event, Filter};
+use nostr_database::{NostrDatabase, SaveEventStatus};
+use nostr_lmdb::NostrLMDB;
 use nsite_deck::seams::{AdminBackend, RelayBackend};
 
-/// An embedded NIP-01 event store, keyed by event id, with replaceable/addressable
-/// dedup, NIP-40 expiry, and JSON persistence of the non-expiring (manifest) set.
+/// The LMDB map size: an upper bound on the file, reserved as address space
+/// and grown as sparse pages, not allocated. 1 GiB is far beyond what a
+/// phone's relay should hold and small enough that a 64-bit Android process
+/// reserves it without complaint.
+const MAP_SIZE: usize = 1024 * 1024 * 1024;
+
+/// The JSON file the store persisted to before LMDB. Read once and renamed
+/// aside on the first open that finds it; never written again.
+const LEGACY_FILE: &str = "events.json";
+
+/// An embedded NIP-01 event store: durable events in LMDB, expiring events in
+/// memory. See the crate docs for why the two are apart.
 pub struct RelayStore {
-    path: Option<PathBuf>,
-    events: Mutex<HashMap<[u8; 32], Event>>,
+    /// Durable events. `None` only for a store that failed to open, which
+    /// `open` refuses to construct — so always present in practice; the
+    /// `Option` is what lets `Drop` on a test store remove its directory.
+    db: NostrLMDB,
+    /// Where the LMDB lives, for `wipe` and diagnostics.
+    dir: PathBuf,
+    /// Expiring events, by id. Memory-only by design.
+    expiring: Mutex<HashMap<[u8; 32], Event>>,
+    /// Events read from a pre-LMDB `events.json`, waiting to be saved on the
+    /// first async call. `open` is synchronous and the LMDB save is not, so
+    /// the file is read there and drained here; it is moved aside once
+    /// everything in it is in the database.
+    pending_legacy: Mutex<Vec<Event>>,
+    /// Set once the legacy migration has run. Every async entry point waits
+    /// on it, so a second caller arriving while the first is still saving
+    /// sees the migrated store, not a half-empty one.
+    legacy_flushed: tokio::sync::OnceCell<()>,
+    /// A store made by [`RelayStore::in_memory`] removes its directory when
+    /// dropped: it exists to be as good as no persistence for tests.
+    scratch: bool,
 }
 
 impl RelayStore {
-    /// An in-memory store (no persistence) — for tests.
+    /// A throwaway store — for tests. LMDB has no memory-only mode, so this is
+    /// a fresh directory under the temp dir, removed when the store drops.
     pub fn in_memory() -> Self {
-        Self {
-            path: None,
-            events: Mutex::new(HashMap::new()),
-        }
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "myco-relay-scratch-{}-{}-{n}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut store = Self::open(&dir).expect("open a scratch relay store");
+        store.scratch = true;
+        store
     }
 
-    /// Open a store persisted at `<dir>/events.json`, loading any prior events.
+    /// Open the store under `dir`: the LMDB at `<dir>/lmdb`, and any events a
+    /// pre-LMDB build left in `<dir>/events.json` migrated in on the way.
     pub fn open(dir: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let dir = dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("events.json");
+        Self::open_with_map_size(dir, MAP_SIZE)
+    }
 
-        let mut map: HashMap<[u8; 32], Event> = HashMap::new();
-        if path.is_file() {
-            let raw = std::fs::read(&path)?;
-            match serde_json::from_slice::<Vec<Event>>(&raw) {
-                Ok(events) => {
-                    let now = now_secs();
-                    for event in events {
-                        // Apply the same admission rules on load (newest wins,
-                        // skip expired).
-                        admit(&mut map, event, now);
+    /// [`RelayStore::open`] with an explicit LMDB map size — the production
+    /// path with `MAP_SIZE`; tests shrink it to make a save fail.
+    fn open_with_map_size(dir: impl AsRef<Path>, map_size: usize) -> anyhow::Result<Self> {
+        let dir = dir.as_ref().to_path_buf();
+        let lmdb_dir = dir.join("lmdb");
+        std::fs::create_dir_all(&lmdb_dir)?;
+        let db = NostrLMDB::builder(&lmdb_dir)
+            .map_size(map_size)
+            .build()
+            .map_err(|e| anyhow::anyhow!("open relay store at {}: {e}", lmdb_dir.display()))?;
+        let pending_legacy = read_legacy_file(&dir.join(LEGACY_FILE));
+        Ok(Self {
+            db,
+            dir,
+            expiring: Mutex::new(HashMap::new()),
+            pending_legacy: Mutex::new(pending_legacy),
+            legacy_flushed: tokio::sync::OnceCell::new(),
+            scratch: false,
+        })
+    }
+
+    /// Save whatever `open` read from a pre-LMDB `events.json`, then move the
+    /// file aside so it is read once. Runs at the start of every async entry
+    /// point; the first caller does the work and every concurrent one waits
+    /// for it, so nobody queries LMDB before the saves have landed.
+    ///
+    /// The file is moved aside only when **every** event is accounted for. A
+    /// save that succeeded or was rejected (a duplicate, a superseded
+    /// replaceable) has nothing left to keep; one that errored — LMDB is
+    /// full, an I/O failure, a batch that failed with it — is written back to
+    /// `events.json` so the next launch retries it. Renaming regardless used
+    /// to lose every pinned nsite's manifest to a single failed batch.
+    async fn flush_legacy(&self) {
+        self.legacy_flushed
+            .get_or_init(|| async {
+                let pending = std::mem::take(&mut *self.pending_legacy.lock().unwrap());
+                if pending.is_empty() {
+                    return;
+                }
+                let total = pending.len();
+                let mut moved = 0usize;
+                let mut failed: Vec<Event> = Vec::new();
+                for event in pending {
+                    match self.db.save_event(&event).await {
+                        Ok(SaveEventStatus::Success) => moved += 1,
+                        Ok(SaveEventStatus::Rejected(_)) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, id = %event.id, "relay store: legacy event did not save");
+                            failed.push(event);
+                        }
                     }
                 }
-                Err(e) => tracing::warn!(error = %e, "relay store: ignoring corrupt events.json"),
-            }
-        }
-
-        Ok(Self {
-            path: Some(path),
-            events: Mutex::new(map),
-        })
+                let path = self.dir.join(LEGACY_FILE);
+                if failed.is_empty() {
+                    if let Err(e) = std::fs::rename(&path, path.with_extension("json.migrated")) {
+                        tracing::warn!(error = %e, "relay store: migrated events.json but could not move it aside");
+                    }
+                    tracing::info!(moved, total, "relay store: migrated legacy events.json into LMDB");
+                } else {
+                    tracing::warn!(
+                        moved,
+                        failed = failed.len(),
+                        total,
+                        "relay store: some legacy events did not save; keeping them in events.json for the next launch"
+                    );
+                    if let Err(e) = write_legacy_file(&path, &failed) {
+                        tracing::error!(error = %e, "relay store: could not write the failed legacy events back");
+                    }
+                }
+            })
+            .await;
     }
 
     /// Number of stored (non-expired) events (for diagnostics).
     pub fn count(&self) -> usize {
         let now = now_secs();
-        self.events
+        let pending = self.pending_legacy.lock().unwrap().len();
+        let durable = self
+            .db
+            .count(Filter::new())
+            // The LMDB count is a read transaction with no await inside, so
+            // the future is ready the moment it is made; `now_or_never` is a
+            // poll, not a block.
+            .now_or_never()
+            .and_then(|r| r.ok())
+            .unwrap_or(0);
+        let live = self
+            .expiring
             .lock()
             .unwrap()
             .values()
             .filter(|e| !is_expired(e, now))
-            .count()
+            .count();
+        durable + live + pending
     }
 
-    /// Drop every stored event whose id is **not** in `keep`, then re-persist the
-    /// surviving manifest set. Used by the selective cache wipe to retain the events
-    /// backing pinned nsites while clearing everything else (chat included).
-    pub fn retain_events(&self, keep: &HashSet<[u8; 32]>) {
-        let snapshot = {
-            let mut map = self.events.lock().unwrap();
-            map.retain(|id, _| keep.contains(id));
-            map.values()
-                .filter(|e| expiration(e).is_none())
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        self.persist(&snapshot);
-    }
-
-    /// Persist the current **persistable** (non-expiring) event set — a full
-    /// rewrite (the manifest set is tiny). Expiring events (chat) are memory-only,
-    /// so storing one does not touch disk. Caller must not hold the lock.
-    fn persist(&self, snapshot: &[Event]) {
-        let Some(path) = &self.path else { return };
-        let json = match serde_json::to_vec(snapshot) {
-            Ok(j) => j,
+    /// Drop every stored event whose id is **not** in `keep`. Used by the
+    /// selective cache wipe to retain the events backing pinned apps while
+    /// clearing everything else (chat included).
+    pub async fn retain_events(&self, keep: &HashSet<[u8; 32]>) {
+        self.flush_legacy().await;
+        self.expiring
+            .lock()
+            .unwrap()
+            .retain(|id, _| keep.contains(id));
+        let all = match self.db.query(Filter::new()).await {
+            Ok(events) => events,
             Err(e) => {
-                tracing::error!(error = %e, "relay store: serialize failed");
+                tracing::error!(error = %e, "relay store: retain could not list events");
                 return;
             }
         };
-        let tmp = path.with_extension("json.tmp");
-        if let Err(e) = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path)) {
-            tracing::error!(error = %e, "relay store: persist failed");
+        let drop: Vec<nostr::EventId> = all
+            .into_iter()
+            .filter(|e| !keep.contains(&e.id.to_bytes()))
+            .map(|e| e.id)
+            .collect();
+        if drop.is_empty() {
+            return;
         }
+        // Deleting by id filter; chunked so one filter never carries thousands
+        // of ids.
+        for chunk in drop.chunks(256) {
+            if let Err(e) = self
+                .db
+                .delete(Filter::new().ids(chunk.iter().copied()))
+                .await
+            {
+                tracing::error!(error = %e, "relay store: retain could not delete");
+            }
+        }
+    }
+
+    /// Store an event, reporting whether it was **new** to this store — `false`
+    /// for a duplicate id, an event already superseded in its replaceable slot,
+    /// one already expired, or an ephemeral kind (delivered, never stored).
+    ///
+    /// This answer describes *this store*, and nothing else should be built on
+    /// it. In particular it is not a mesh loop-guard: an id GC'd at NIP-40 expiry
+    /// looks new again on a later pull, so gossip novelty is the proxy's own
+    /// seen-set instead (`reference/thinning-custom-relay.md`, D2). The
+    /// [`RelayBackend`] seam therefore does not expose it — an arbitrary NIP-01
+    /// relay could not answer it anyway.
+    pub async fn admit_event(&self, event: Event) -> anyhow::Result<bool> {
+        self.flush_legacy().await;
+        let now = now_secs();
+        if is_expired(&event, now) || event.kind.is_ephemeral() {
+            return Ok(false);
+        }
+        if expiration(&event).is_some() {
+            let mut map = self.expiring.lock().unwrap();
+            // Opportunistic GC: drop anything that has expired since last touch.
+            map.retain(|_, e| !is_expired(e, now));
+            return Ok(admit_expiring(&mut map, event));
+        }
+        match self
+            .db
+            .save_event(&event)
+            .await
+            .map_err(|e| anyhow::anyhow!("relay store: save failed: {e}"))?
+        {
+            SaveEventStatus::Success => Ok(true),
+            SaveEventStatus::Rejected(_) => Ok(false),
+        }
+    }
+}
+
+impl Drop for RelayStore {
+    fn drop(&mut self) {
+        if self.scratch {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
+/// The still-live, storable events of a pre-LMDB `events.json`, or nothing.
+/// A file that will not parse is left where it is and logged.
+fn read_legacy_file(path: &Path) -> Vec<Event> {
+    if !path.is_file() {
+        return Vec::new();
+    }
+    let events: Vec<Event> = match std::fs::read(path)
+        .map_err(anyhow::Error::from)
+        .and_then(|raw| serde_json::from_slice(&raw).map_err(anyhow::Error::from))
+    {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::warn!(error = %e, "relay store: cannot read legacy events.json; leaving it");
+            return Vec::new();
+        }
+    };
+    let now = now_secs();
+    events
+        .into_iter()
+        .filter(|e| !is_expired(e, now) && !e.kind.is_ephemeral())
+        .collect()
+}
+
+/// Write `events` back to the legacy file atomically (temp + rename), so a
+/// kill mid-write leaves the previous file, not a truncated one.
+fn write_legacy_file(path: &Path, events: &[Event]) -> anyhow::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(events)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Admit an expiring event into the in-memory map, applying replaceable /
+/// addressable dedup (newest wins) and skipping a stale duplicate. Returns
+/// `true` if the event is now stored as new.
+fn admit_expiring(map: &mut HashMap<[u8; 32], Event>, event: Event) -> bool {
+    let kind = event.kind.as_u16();
+    if is_replaceable(kind) || is_addressable(kind) {
+        let slot = slot_of(&event);
+        let existing = map
+            .iter()
+            .find(|(_, e)| slot_of(e) == slot)
+            .map(|(id, e)| (*id, e.created_at));
+        match existing {
+            Some((_, ts)) if ts >= event.created_at => return false,
+            Some((old_id, _)) => {
+                map.remove(&old_id);
+            }
+            None => {}
+        }
+        map.insert(event.id.to_bytes(), event);
+        true
+    } else {
+        if map.contains_key(&event.id.to_bytes()) {
+            return false;
+        }
+        map.insert(event.id.to_bytes(), event);
+        true
     }
 }
 
@@ -142,8 +357,7 @@ fn event_d_tag(event: &Event) -> Option<String> {
 }
 
 /// The replaceable/addressable slot an event collapses into: `(kind, author, d)`,
-/// with `d` only for addressable kinds. Regular kinds do not use a slot (kept by
-/// id), so this is only consulted for replaceable/addressable events.
+/// with `d` only for addressable kinds.
 fn slot_of(event: &Event) -> (u16, [u8; 32], Option<String>) {
     let kind = event.kind.as_u16();
     let d = if is_addressable(kind) {
@@ -172,83 +386,10 @@ pub fn is_expired(event: &Event, now: u64) -> bool {
     expiration(event).is_some_and(|exp| exp <= now)
 }
 
-/// Does an event satisfy a NIP-01 filter? Used by both the stored `query` and the
-/// proxy's live-subscription forwarding.
-///
-/// Delegates to the `nostr` crate rather than hand-rolling a subset, so `since`,
-/// `until`, ids, and general tag matching behave the way any other relay would.
+/// Does an event satisfy a NIP-01 filter? Used by the in-memory half of the
+/// store and by the WebSocket front door for live-subscription matching.
 pub fn matches_filter(event: &Event, filter: &Filter) -> bool {
     filter.match_event(event, MatchEventOptions::new())
-}
-
-/// Admit an event into `map`, applying replaceable/addressable dedup (newest wins)
-/// and skipping anything already expired or a stale duplicate. Returns `true` if
-/// the event is now stored as new (so the caller can persist / fan it out).
-fn admit(map: &mut HashMap<[u8; 32], Event>, event: Event, now: u64) -> bool {
-    if is_expired(&event, now) {
-        return false;
-    }
-    let kind = event.kind.as_u16();
-    if is_replaceable(kind) || is_addressable(kind) {
-        let slot = slot_of(&event);
-        // Find the current holder of this slot, if any.
-        let existing = map
-            .iter()
-            .find(|(_, e)| slot_of(e) == slot)
-            .map(|(id, e)| (*id, e.created_at));
-        match existing {
-            Some((_, ts)) if ts >= event.created_at => return false,
-            Some((old_id, _)) => {
-                map.remove(&old_id);
-            }
-            None => {}
-        }
-        map.insert(event.id.to_bytes(), event);
-        true
-    } else {
-        // Regular (and any other) kind: keyed by id, many per author.
-        if map.contains_key(&event.id.to_bytes()) {
-            return false;
-        }
-        map.insert(event.id.to_bytes(), event);
-        true
-    }
-}
-
-impl RelayStore {
-    /// Store an event, reporting whether it was **new** to this store — `false`
-    /// for a duplicate id or an event already superseded in its replaceable slot.
-    ///
-    /// This answer describes *this store*, and nothing else should be built on
-    /// it. In particular it is not a mesh loop-guard: an id GC'd at NIP-40 expiry
-    /// looks new again on a later pull, so gossip novelty is the proxy's own
-    /// seen-set instead (`reference/thinning-custom-relay.md`, D2). The
-    /// [`RelayBackend`] seam therefore does not expose it — an arbitrary NIP-01
-    /// relay could not answer it anyway.
-    pub async fn admit_event(&self, event: Event) -> anyhow::Result<bool> {
-        let now = now_secs();
-        let persistable = expiration(&event).is_none();
-        let snapshot = {
-            let mut map = self.events.lock().unwrap();
-            // Opportunistic GC: drop anything that has expired since last touch.
-            map.retain(|_, e| !is_expired(e, now));
-            if !admit(&mut map, event, now) {
-                return Ok(false);
-            }
-            // Only the non-expiring (manifest) set is persisted; expiring chat
-            // events stay in memory, so they never hit disk.
-            persistable.then(|| {
-                map.values()
-                    .filter(|e| expiration(e).is_none())
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-        };
-        if let Some(snapshot) = snapshot {
-            self.persist(&snapshot);
-        }
-        Ok(true)
-    }
 }
 
 #[async_trait]
@@ -258,13 +399,37 @@ impl RelayBackend for RelayStore {
     }
 
     async fn query(&self, filters: &[Filter]) -> anyhow::Result<Vec<Event>> {
+        self.flush_legacy().await;
         let now = now_secs();
-        let map = self.events.lock().unwrap();
-        let mut out: Vec<Event> = map
-            .values()
-            .filter(|e| !is_expired(e, now) && filters.iter().any(|f| matches_filter(e, f)))
-            .cloned()
-            .collect();
+        let mut out: Vec<Event> = Vec::new();
+        let mut seen: HashSet<[u8; 32]> = HashSet::new();
+        // Several filters are an any-match, as a multi-filter REQ is: each is
+        // run against the index on its own (with its own limit), and the
+        // results are merged by id.
+        for filter in filters {
+            let durable = self
+                .db
+                .query(filter.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("relay store: query failed: {e}"))?;
+            for event in durable {
+                if seen.insert(event.id.to_bytes()) {
+                    out.push(event);
+                }
+            }
+        }
+        {
+            let map = self.expiring.lock().unwrap();
+            for event in map.values() {
+                if is_expired(event, now) || seen.contains(&event.id.to_bytes()) {
+                    continue;
+                }
+                if filters.iter().any(|f| matches_filter(event, f)) {
+                    seen.insert(event.id.to_bytes());
+                    out.push(event.clone());
+                }
+            }
+        }
         out.sort_by_key(|e| std::cmp::Reverse(e.created_at));
         // Honour the smallest limit any filter asked for, matching how a relay
         // caps a multi-filter REQ.
@@ -278,11 +443,13 @@ impl RelayBackend for RelayStore {
 #[async_trait]
 impl AdminBackend for RelayStore {
     async fn wipe(&self) -> anyhow::Result<()> {
-        self.events.lock().unwrap().clear();
-        if let Some(path) = &self.path {
-            let _ = std::fs::remove_file(path);
-        }
-        Ok(())
+        self.pending_legacy.lock().unwrap().clear();
+        let _ = std::fs::remove_file(self.dir.join(LEGACY_FILE));
+        self.expiring.lock().unwrap().clear();
+        self.db
+            .wipe()
+            .await
+            .map_err(|e| anyhow::anyhow!("relay store: wipe failed: {e}"))
     }
 }
 
@@ -488,5 +655,156 @@ mod tests {
         store.wipe().await.unwrap();
         assert_eq!(store.count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store written by a pre-LMDB build is brought in on the first open:
+    /// its manifests are served, and the file is moved aside so it is read
+    /// once.
+    #[tokio::test]
+    async fn a_legacy_events_json_is_migrated_once() {
+        let dir = tmp("legacy-migrate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let keys = Keys::generate();
+        let site = build_test_site_with_keys(&keys, &[("/index.html", b"x")], None, None);
+        let expired = chat_event(&keys, "mesh", "old", Some(1));
+        std::fs::write(
+            dir.join(LEGACY_FILE),
+            serde_json::to_vec(&vec![site.manifest.clone(), expired]).unwrap(),
+        )
+        .unwrap();
+
+        let store = RelayStore::open(&dir).unwrap();
+        assert_eq!(
+            store.count(),
+            1,
+            "the manifest came across, the expired chat did not"
+        );
+        let got = nsite_deck::seams::newest_in_slot(&store, KIND_ROOT, &keys.public_key(), None)
+            .await
+            .unwrap();
+        assert_eq!(got.map(|e| e.id), Some(site.manifest.id));
+        assert_eq!(store.count(), 1, "counted twice across the migration");
+        assert!(
+            !dir.join(LEGACY_FILE).exists(),
+            "the legacy file was left in place"
+        );
+        assert!(dir.join("events.json.migrated").exists());
+        drop(store);
+
+        // Reopening finds the LMDB, not the file — nothing to migrate again.
+        let store = RelayStore::open(&dir).unwrap();
+        assert_eq!(store.count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A legacy save that errors does not cost the event. With the LMDB map
+    /// shrunk until it overflows, `events.json` stays in place holding what
+    /// did not land, and the next open — with a map that fits — migrates the
+    /// rest and moves the file aside.
+    ///
+    /// The "next open" happens in a second directory: heed keeps every
+    /// environment this process opened in a global cache for the process's
+    /// life (only `prepare_for_closing` releases it, and `nostr-lmdb` never
+    /// calls it), so the same path cannot be reopened with a different map
+    /// size. Carrying the kept file across is the same launch-after-failure
+    /// path — the file is what survives, and the file is what is read.
+    #[tokio::test]
+    async fn a_failed_legacy_save_keeps_the_file() {
+        let dir = tmp("legacy-failed-save");
+        let next = tmp("legacy-failed-save-next-launch");
+        for d in [&dir, &next] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let keys = Keys::generate();
+        // 300 notes of 8 KiB: 2.4 MiB against a 1 MiB map. Fewer, larger
+        // notes rather than thousands of small ones — every save is its own
+        // synced LMDB commit, and the point is the overflow, not the count.
+        let body = "x".repeat(8 * 1024);
+        let notes: Vec<Event> = (0..300)
+            .map(|i| {
+                EventBuilder::text_note(format!("{i}:{body}"))
+                    .sign_with_keys(&keys)
+                    .unwrap()
+            })
+            .collect();
+        std::fs::write(dir.join(LEGACY_FILE), serde_json::to_vec(&notes).unwrap()).unwrap();
+
+        let store = RelayStore::open_with_map_size(&dir, 1024 * 1024).unwrap();
+        let landed = store.query(&[Filter::new()]).await.unwrap().len();
+        assert!(
+            landed < notes.len(),
+            "the map was meant to overflow; every note saved"
+        );
+        assert!(
+            landed > 0,
+            "nothing saved at all; the map is not the failure"
+        );
+        assert!(
+            dir.join(LEGACY_FILE).exists(),
+            "events.json was moved aside with saves still failed"
+        );
+        assert!(!dir.join("events.json.migrated").exists());
+        let kept = read_legacy_file(&dir.join(LEGACY_FILE));
+        assert_eq!(
+            kept.len() + landed,
+            notes.len(),
+            "the file does not hold exactly what failed"
+        );
+        drop(store);
+
+        // The next launch, with a map that fits: what the file kept migrates,
+        // and the file moves aside.
+        std::fs::copy(dir.join(LEGACY_FILE), next.join(LEGACY_FILE)).unwrap();
+        let store = RelayStore::open(&next).unwrap();
+        let all = store.query(&[Filter::new()]).await.unwrap();
+        assert_eq!(all.len(), kept.len(), "not every kept note came across");
+        assert!(!next.join(LEGACY_FILE).exists());
+        assert!(next.join("events.json.migrated").exists());
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&next);
+    }
+
+    /// Durable regular events — a napplet's note — persist across reopen now
+    /// that the store is a database rather than a rewritten file, and a NIP-09
+    /// deletion by the author removes one.
+    #[tokio::test]
+    async fn notes_persist_and_deletions_apply() {
+        let dir = tmp("notes-persist");
+        let _ = std::fs::remove_dir_all(&dir);
+        let keys = Keys::generate();
+        let note = EventBuilder::text_note("kept")
+            .sign_with_keys(&keys)
+            .unwrap();
+        {
+            let store = RelayStore::open(&dir).unwrap();
+            assert!(store.admit_event(note.clone()).await.unwrap());
+        }
+        let store = RelayStore::open(&dir).unwrap();
+        assert_eq!(store.count(), 1, "a durable note did not survive reopen");
+
+        let deletion =
+            EventBuilder::delete(nostr::nips::nip09::EventDeletionRequest::new().id(note.id))
+                .sign_with_keys(&keys)
+                .unwrap();
+        store.admit_event(deletion).await.unwrap();
+        let left = store.query(&[Filter::new().id(note.id)]).await.unwrap();
+        assert!(left.is_empty(), "the author's deletion was not applied");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An ephemeral kind is neither stored nor an error: the front door still
+    /// delivers it live, the store simply has nothing to keep.
+    #[tokio::test]
+    async fn ephemeral_kinds_are_not_stored() {
+        let store = RelayStore::in_memory();
+        let keys = Keys::generate();
+        let ping = EventBuilder::new(Kind::from(20_666u16), "ding")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert!(!store.admit_event(ping).await.unwrap());
+        assert_eq!(store.count(), 0);
     }
 }

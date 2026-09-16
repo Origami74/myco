@@ -1,0 +1,1027 @@
+//! NAP-RELAY — reading and publishing Nostr events on the user's behalf.
+//!
+//! This is the domain where a napplet acts *as* the user, and the one place the
+//! user key is used. The napplet never holds it: it describes an event, the
+//! runtime fills in the identity, signs, and publishes. There is no path here
+//! that returns key material and none that signs something the runtime did not
+//! construct itself.
+//!
+//! ## What the napplet does not get to choose
+//!
+//! A publish template arrives from untrusted code, so the runtime owns the
+//! fields that decide *who* published and *when*:
+//!
+//! - **`pubkey`** is always the user key. A napplet naming an author would be
+//!   asking the runtime to forge one.
+//! - **`created_at`** is always now. Accepting the napplet's would let it
+//!   backdate an event into a conversation that has already happened, or
+//!   postdate one to sit at the top of a feed indefinitely.
+//! - **`id` and `sig`** are computed, never copied.
+//!
+//! Everything that is genuinely the napplet's message — `kind`, `content`,
+//! `tags` — is taken as given. The runtime is a notary, not an editor.
+//!
+//! ## The grant is per call
+//!
+//! A `relay` grant covers publishing with no per-event prompt (D8), which means
+//! a granted napplet can publish as you at will. That is why the install screen
+//! says so in words, and why the grant is checked on every call rather than
+//! cached at handshake — revoking it stops the next publish, not the next
+//! launch.
+//!
+//! ## Interim: the kinds that reshape the user are refused
+//!
+//! Until the permission model has per-event prompts, `sign_template` refuses
+//! the kinds that rewrite who the user *is* rather than what they say: kind 0
+//! (profile), 3 (contacts), 5 (deletion) and 10000–19999 (the replaceable
+//! range, kind 10002 among them). A napplet that could publish a kind 10002
+//! under the default grant would make its own relay the user's newest relay
+//! list, and every later outbox publish would fan the user's signed events to
+//! it. The refusal is per call and surfaces as `ok: false` with the reason on
+//! the `.result` frame, never silently. See `REFUSED_KINDS`.
+
+use nostr::{Filter, JsonUtil, Kind, Tag, Timestamp, UnsignedEvent};
+
+use crate::dispatch::NapContext;
+use crate::seams::{Direction, Envelope, RelayLane};
+
+/// Kinds a napplet may not publish under the `relay` grant until per-event
+/// prompts exist: profile (0), contacts (3) and deletion (5). The replaceable
+/// range 10000–19999 (relay list 10002 among them) is refused as well, by
+/// `kind_needs_a_prompt`. Interim policy pending the unified permission model;
+/// the runtime's own first-use kind 0 / 10002 do not go through `sign_template`.
+pub const REFUSED_KINDS: &[u16] = &[0, 3, 5];
+
+/// Whether publishing `kind` as the user needs a prompt this build cannot show.
+fn kind_needs_a_prompt(kind: u16) -> bool {
+    REFUSED_KINDS.contains(&kind) || (10_000..=19_999).contains(&kind)
+}
+
+/// Handle an inbound `relay.*` message.
+pub async fn handle(
+    ctx: &NapContext,
+    session: &mut crate::session::Session,
+    message: &Envelope,
+) -> Vec<Envelope> {
+    match message.action() {
+        "query" => vec![query(ctx, message).await],
+        "publish" => vec![publish(ctx, message).await],
+        "subscribe" => subscribe(ctx, session, message).await,
+        "close" => {
+            if let Some(sub_id) = message.field("subId").and_then(|v| v.as_str()) {
+                session.unsubscribe(sub_id);
+            }
+            Vec::new()
+        }
+        // Encryption is not wired up yet. Saying so beats a silent drop, which
+        // a napplet would wait on forever.
+        "publishEncrypted" => vec![message
+            .to_result()
+            .with_field("ok", false)
+            .with_field("error", "encrypted publishing is not available yet")],
+        _ => Vec::new(),
+    }
+}
+
+/// `relay.query` — collect stored events matching the filters.
+///
+/// "The shell queries its relay pool": this device's relay and the
+/// configured relays when reachable — the policy plan — each bounded, merged
+/// and deduplicated by id. No relay selection by author here; that is
+/// NAP-OUTBOX's, and a napplet that wants it asks there.
+async fn query(ctx: &NapContext, message: &Envelope) -> Envelope {
+    let filters = match filters_from(message) {
+        Ok(filters) => filters,
+        Err(e) => return message.to_error(e),
+    };
+
+    let lanes = pool_lanes(ctx).await;
+    let answers = ctx.lanes.query(&lanes, &filters, POOL_QUERY_TIMEOUT).await;
+    let mut by_id: std::collections::HashMap<nostr::EventId, nostr::Event> =
+        std::collections::HashMap::new();
+    let mut reached_any = false;
+    for (_, events) in answers {
+        let Some(events) = events else { continue };
+        reached_any = true;
+        for event in events {
+            by_id.entry(event.id).or_insert(event);
+        }
+    }
+    if !reached_any {
+        return message.to_error("query failed: no relay answered");
+    }
+    let mut events: Vec<nostr::Event> = by_id.into_values().collect();
+    events.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+    let results: Vec<serde_json::Value> = events.iter().map(result_of).collect();
+    message
+        .to_result()
+        .with_field("events", serde_json::Value::Array(results))
+}
+
+/// How long a pool query waits for its lanes. The local lane answers at once;
+/// this bounds the internet ones.
+const POOL_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The shell's relay pool as lanes: the policy plan, which always starts with
+/// the local relay.
+async fn pool_lanes(ctx: &NapContext) -> Vec<RelayLane> {
+    let mut lanes = vec![RelayLane::Local];
+    for lane in ctx.outbox.plan(Direction::Read, &[]).await.lanes {
+        if !lanes.contains(&lane) {
+            lanes.push(lane);
+        }
+    }
+    lanes
+}
+
+/// `relay.subscribe` — register the subscription, deliver what is stored, then
+/// EOSE; and pull the rest of the pool into the local relay behind it.
+///
+/// Registering is the part that makes it a subscription rather than a query
+/// wearing the name. Everything the relay already holds goes out first, which
+/// is what a napplet rendering a feed waits on; everything arriving afterwards
+/// is matched against the registered filters and pushed, whether it was
+/// published on this device, carried here from a peer, or pulled from a relay
+/// in the pool — the pull lands in the local relay, and the local relay is
+/// what delivers. `EOSE` therefore marks the end of *this device's* backlog.
+///
+/// A top-level `relay` field targets one relay instead of the pool (NIP-29
+/// groups are the spec's example). That is how the vendored shim sends it
+/// (`subscribe5` spreads `options.relay` to the top of the frame and never
+/// sends `options`); `options.relay` is read as a fallback for a client that
+/// spells it the other way. It is validated like any napplet-named relay,
+/// and the local backlog is skipped — the napplet asked for that relay's
+/// view.
+///
+/// Every refusal after the `subId` is known goes out as `relay.closed` with
+/// that id and a reason: it is the one frame the shim's `subscribe5` listens
+/// for, so a `.result` carrying an error would be dropped on the floor and
+/// the napplet's listener would wait for the page's life. A frame with no
+/// `subId` has nothing to close and keeps the generic error.
+///
+/// The filters are registered **before** the stored events are read, so an
+/// event that lands between the two is delivered by the live path rather than
+/// falling through the gap between them. A napplet may see it twice; Nostr
+/// subscriptions are at-least-once and a duplicate id is something every client
+/// already handles, whereas a missed event is invisible.
+async fn subscribe(
+    ctx: &NapContext,
+    session: &mut crate::session::Session,
+    message: &Envelope,
+) -> Vec<Envelope> {
+    let sub_id = match message.field("subId").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => return vec![message.to_error("subscribe needs a subId")],
+    };
+
+    let filters = match filters_from(message) {
+        Ok(filters) => filters,
+        Err(e) => {
+            return vec![Envelope::new("relay.closed")
+                .with_field("subId", sub_id)
+                .with_field("reason", e)]
+        }
+    };
+
+    // A named relay, or the pool. The shim sends `relay` at the top level;
+    // `options.relay` is the fallback spelling.
+    let named = message.field("relay").and_then(|v| v.as_str()).or_else(|| {
+        message
+            .field("options")
+            .and_then(|o| o.get("relay"))
+            .and_then(|v| v.as_str())
+    });
+    let target = match named {
+        Some(url) => match crate::nap::outbox::validate_relay_url(url) {
+            Ok(lane) => Some(lane),
+            Err(e) => {
+                return vec![Envelope::new("relay.closed")
+                    .with_field("subId", sub_id)
+                    .with_field("reason", e)]
+            }
+        },
+        None => None,
+    };
+
+    // A named relay skips the local backlog — the napplet asked for that
+    // relay's view — but the subscription is registered either way, since the
+    // pull lands in the local relay and is delivered from there.
+    let mut out = match target {
+        Some(_) => {
+            if let Err(reason) = session.subscribe(sub_id.clone(), filters.clone()) {
+                return vec![Envelope::new("relay.closed")
+                    .with_field("subId", sub_id)
+                    .with_field("reason", reason)];
+            }
+            Vec::new()
+        }
+        None => {
+            match crate::nap::open_subscription(ctx, session, "relay", &sub_id, filters.clone())
+                .await
+            {
+                Ok(backlog) => backlog,
+                Err(reason) => {
+                    return vec![Envelope::new("relay.closed")
+                        .with_field("subId", sub_id)
+                        .with_field("reason", reason)]
+                }
+            }
+        }
+    };
+
+    let remote: Vec<RelayLane> = match target {
+        Some(lane) => vec![lane],
+        None => pool_lanes(ctx)
+            .await
+            .into_iter()
+            .filter(|l| *l != RelayLane::Local)
+            .collect(),
+    };
+    if !remote.is_empty() {
+        if let Err(e) = ctx.lanes.pull_into_local(&remote, &filters).await {
+            tracing::warn!(sub_id, error = %e, "relay pool pull could not be started");
+        }
+    }
+
+    out.push(Envelope::new("relay.eose").with_field("subId", sub_id));
+    out
+}
+
+/// `relay.publish` — sign the napplet's template as the user, and store it.
+async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
+    let signed = match sign_template(ctx, message).await {
+        Ok(event) => event,
+        Err(e) => return failed(message, e),
+    };
+
+    // Accepted, not merely stored: this is what wakes local subscriptions and
+    // hands the event to the relay pool. The pool, not the mesh — flooding the
+    // Circle is NAP-MESH's, behind its own grant and the user's hop cap.
+    if let Err(e) = ctx.sink.accept(signed.clone()).await {
+        return failed(message, format!("could not publish: {e}"));
+    }
+
+    let id = signed.id.to_hex();
+    tracing::info!(kind = %signed.kind.as_u16(), event = %id, "napplet published");
+    message
+        .to_result()
+        .with_field("ok", true)
+        .with_field("event", event_json(&signed))
+        .with_field("eventId", id)
+}
+
+/// Sign the `event` template on `message` as the user.
+///
+/// Shared with NAP-MESH and NAP-OUTBOX, whose templates are NAP-RELAY's
+/// `EventTemplate` by declared wire dependency — one parser, so the three
+/// domains cannot disagree about what a napplet may and may not set. The rules
+/// are the module's: `kind`, `content` and `tags` are the napplet's; `pubkey`,
+/// `created_at`, `id` and `sig` are the runtime's — and the kinds in
+/// `REFUSED_KINDS` and the 1xxxx replaceable range are refused outright
+/// (interim, see the module docs).
+pub(crate) async fn sign_template(
+    ctx: &NapContext,
+    message: &Envelope,
+) -> Result<nostr::Event, String> {
+    let Some(template) = message.field("event").and_then(|v| v.as_object()) else {
+        return Err("publish needs an event template".to_string());
+    };
+
+    let kind = match template.get("kind").and_then(|v| v.as_u64()) {
+        Some(kind) if kind <= u16::MAX as u64 => kind as u16,
+        _ => return Err("the event template needs a kind".to_string()),
+    };
+    if kind_needs_a_prompt(kind) {
+        return Err(format!(
+            "kind {kind} rewrites the user's profile, contacts, relay list or deletes their \
+             events; not allowed under the relay grant until per-event prompts exist"
+        ));
+    }
+    let kind = Kind::from(kind);
+    let content = template
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut tags = Vec::new();
+    if let Some(raw) = template.get("tags").and_then(|v| v.as_array()) {
+        for entry in raw {
+            let Some(parts) = entry.as_array() else {
+                return Err("every tag must be an array of strings".to_string());
+            };
+            let mut values = Vec::with_capacity(parts.len());
+            for part in parts {
+                match part.as_str() {
+                    Some(s) => values.push(s.to_string()),
+                    None => return Err("every tag value must be a string".to_string()),
+                }
+            }
+            match Tag::parse(values) {
+                Ok(tag) => tags.push(tag),
+                Err(e) => return Err(format!("unusable tag: {e}")),
+            }
+        }
+    }
+
+    let Ok(pubkey) = ctx.signer.public_key().await else {
+        return Err("there is no user key on this device yet".to_string());
+    };
+
+    // The runtime owns author and time; the napplet owns the message.
+    let unsigned = UnsignedEvent::new(pubkey, Timestamp::now(), kind, tags, content);
+
+    ctx.signer
+        .sign(unsigned)
+        .await
+        .map_err(|e| format!("could not sign: {e}"))
+}
+
+/// An event as the JSON a napplet reads.
+pub(crate) fn event_json(event: &nostr::Event) -> serde_json::Value {
+    serde_json::from_str::<serde_json::Value>(&event.as_json()).unwrap_or(serde_json::Value::Null)
+}
+
+/// The `relay.event` frames a session should receive for an arriving event.
+///
+/// Called for every event this device accepts — its own publishes and anything
+/// carried here from a peer — so a napplet's subscription behaves the same
+/// whichever side of the mesh the event came from. Empty when nothing matches,
+/// which is the common case and deliberately cheap.
+pub fn deliveries_for(session: &crate::session::Session, event: &nostr::Event) -> Vec<Envelope> {
+    crate::nap::deliveries_in(session, "relay", event)
+}
+
+/// A publish failure, in the shape NAP-RELAY gives it: `ok` false beside the
+/// reason, so a napplet reads one field to branch on.
+fn failed(message: &Envelope, error: impl Into<String>) -> Envelope {
+    message
+        .to_result()
+        .with_field("ok", false)
+        .with_field("error", error.into())
+}
+
+/// A `RelayEventResult`: the raw event, and no sidecar we can honestly fill in.
+pub(crate) fn result_of(event: &nostr::Event) -> serde_json::Value {
+    serde_json::json!({ "event": event_json(event) })
+}
+
+/// The `filters` field, as NIP-01 filters.
+///
+/// Filters come from untrusted code, so an unreadable one is refused rather
+/// than quietly dropped — a napplet that asked for something specific and got
+/// everything, or nothing, would have no way to tell.
+pub(crate) fn filters_from(message: &Envelope) -> Result<Vec<Filter>, String> {
+    let Some(raw) = message.field("filters") else {
+        return Err("this call needs filters".to_string());
+    };
+    // One filter or a list of them; the spec allows both.
+    let list = match raw {
+        serde_json::Value::Array(items) => items.clone(),
+        object @ serde_json::Value::Object(_) => vec![object.clone()],
+        _ => return Err("filters must be an object or a list of objects".to_string()),
+    };
+
+    let mut out = Vec::with_capacity(list.len());
+    for item in list {
+        match serde_json::from_value::<Filter>(item) {
+            Ok(filter) => out.push(filter),
+            Err(e) => return Err(format!("unreadable filter: {e}")),
+        }
+    }
+    if out.is_empty() {
+        return Err("this call needs at least one filter".to_string());
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dispatch::dispatch;
+    use crate::session::{NappletIdentity, Session};
+    use crate::testing::test_context;
+    use nostr::{EventBuilder, Keys};
+    use serde_json::json;
+
+    fn granted() -> Session {
+        let mut s = Session::new(NappletIdentity::new("chat", "aggregate"), ["relay"]);
+        s.on_ready();
+        s
+    }
+
+    async fn call(ctx: &NapContext, envelope: Envelope) -> Vec<Envelope> {
+        dispatch(ctx, &mut granted(), &envelope)
+            .await
+            .envelopes()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn publishes_as_the_user_and_stores_the_event() {
+        let (ctx, signer) = test_context();
+        let out = call(
+            &ctx,
+            Envelope::new("relay.publish").with_id("b2").with_field(
+                "event",
+                json!({"kind": 1, "content": "hello world", "tags": [["t", "myco"]]}),
+            ),
+        )
+        .await;
+
+        assert_eq!(out.len(), 1);
+        let reply = &out[0];
+        assert_eq!(reply.msg_type, "relay.publish.result");
+        assert_eq!(reply.id.as_deref(), Some("b2"));
+        assert_eq!(reply.field("ok").unwrap(), &json!(true));
+
+        let event = reply.field("event").unwrap();
+        assert_eq!(event["content"], "hello world");
+        assert_eq!(event["kind"], 1);
+        assert_eq!(event["tags"], json!([["t", "myco"]]));
+        // Signed as the user, by the runtime.
+        assert_eq!(event["pubkey"], json!(signer.public_key().to_hex()));
+        assert!(!event["sig"].as_str().unwrap().is_empty());
+        assert_eq!(reply.field("eventId").unwrap(), &event["id"]);
+
+        // And it is actually in the relay, not merely signed.
+        let stored = ctx
+            .relay
+            .query(&[Filter::new().author(signer.public_key())])
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].content, "hello world");
+    }
+
+    /// The napplet writes the message; the runtime writes who and when. A
+    /// template naming another author, or a time of its choosing, must not
+    /// carry through — that is forgery with extra steps.
+    #[tokio::test]
+    async fn the_napplet_cannot_choose_the_author_or_the_time() {
+        let (ctx, signer) = test_context();
+        let impostor = Keys::generate();
+        let long_ago = 1_000_000_000u64;
+
+        let out = call(
+            &ctx,
+            Envelope::new("relay.publish").with_id("b2").with_field(
+                "event",
+                json!({
+                    "kind": 1,
+                    "content": "not mine",
+                    "tags": [],
+                    "pubkey": impostor.public_key().to_hex(),
+                    "created_at": long_ago,
+                    "id": "0".repeat(64),
+                    "sig": "0".repeat(128),
+                }),
+            ),
+        )
+        .await;
+
+        let event = out[0].field("event").unwrap();
+        assert_eq!(event["pubkey"], json!(signer.public_key().to_hex()));
+        assert_ne!(event["pubkey"], json!(impostor.public_key().to_hex()));
+        assert!(
+            event["created_at"].as_u64().unwrap() > long_ago,
+            "the napplet backdated its event"
+        );
+        assert_ne!(event["id"], json!("0".repeat(64)));
+        assert_ne!(event["sig"], json!("0".repeat(128)));
+    }
+
+    #[tokio::test]
+    async fn queries_return_stored_events() {
+        let (ctx, _signer) = test_context();
+        let author = Keys::generate();
+        let note = EventBuilder::text_note("stored already")
+            .sign_with_keys(&author)
+            .unwrap();
+        ctx.relay.publish(note).await.unwrap();
+
+        let out = call(
+            &ctx,
+            Envelope::new("relay.query")
+                .with_id("c3")
+                .with_field("filters", json!([{"kinds": [1], "limit": 10}])),
+        )
+        .await;
+
+        assert_eq!(out[0].msg_type, "relay.query.result");
+        let events = out[0].field("events").unwrap().as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event"]["content"], "stored already");
+    }
+
+    /// Subscribe delivers what the relay holds, then EOSE — the shape a napplet
+    /// waits on before it renders.
+    #[tokio::test]
+    async fn subscribe_delivers_then_reaches_eose() {
+        let (ctx, _signer) = test_context();
+        // Two authors, because the in-memory relay keeps one slot per
+        // (kind, author) — two notes from one author would overwrite.
+        for content in ["one", "two"] {
+            let note = EventBuilder::text_note(content)
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            ctx.relay.publish(note).await.unwrap();
+        }
+
+        let out = call(
+            &ctx,
+            Envelope::new("relay.subscribe")
+                .with_id("a1")
+                .with_field("subId", "sub-1")
+                .with_field("filters", json!([{"kinds": [1]}])),
+        )
+        .await;
+
+        let (events, rest): (Vec<_>, Vec<_>) =
+            out.iter().partition(|e| e.msg_type == "relay.event");
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.field("subId").unwrap() == "sub-1"));
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].msg_type, "relay.eose");
+        assert_eq!(rest[0].field("subId").unwrap(), "sub-1");
+    }
+
+    /// "The shell queries its relay pool": a query reaches the configured
+    /// relays as well as the local one, and the same event on both is one
+    /// result.
+    #[tokio::test]
+    async fn query_reads_the_whole_pool_and_dedupes() {
+        use crate::seams::RelayBackend as _;
+        use crate::testing::test_context_with_outbox;
+
+        let (ctx, fx, _signer) = test_context_with_outbox();
+        fx.set_fallback(&["wss://pool-a.example", "wss://pool-b.example"]);
+        let keys = Keys::generate();
+        let local_only = EventBuilder::text_note("here")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let everywhere = EventBuilder::text_note("everywhere")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let remote_only = EventBuilder::text_note("out there")
+            .sign_with_keys(&keys)
+            .unwrap();
+        ctx.relay.publish(local_only.clone()).await.unwrap();
+        ctx.relay.publish(everywhere.clone()).await.unwrap();
+        fx.relay("wss://pool-a.example")
+            .publish(everywhere.clone())
+            .await
+            .unwrap();
+        fx.relay("wss://pool-b.example")
+            .publish(remote_only.clone())
+            .await
+            .unwrap();
+
+        let mut s = granted();
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.query")
+                .with_id("q1")
+                .with_field("filters", json!({"kinds": [1]})),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        let r = serde_json::to_value(&out[0]).unwrap();
+        let ids: std::collections::BTreeSet<String> = r["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["event"]["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            [&local_only, &everywhere, &remote_only]
+                .iter()
+                .map(|e| e.id.to_hex())
+                .collect()
+        );
+        assert_eq!(
+            r["events"].as_array().unwrap().len(),
+            3,
+            "a duplicate slipped through"
+        );
+        let asked = fx.queried();
+        assert!(asked.contains(&RelayLane::Local));
+        assert!(asked.contains(&RelayLane::Internet {
+            url: "wss://pool-a.example".into()
+        }));
+    }
+
+    /// A subscription answers the local backlog, then pulls the rest of the
+    /// pool into the local relay; a named `relay` — top-level, as the shim
+    /// sends it — pulls that relay alone and skips the local backlog. The
+    /// `options.relay` spelling is accepted too.
+    #[tokio::test]
+    async fn subscribe_pulls_the_pool_or_the_named_relay() {
+        use crate::testing::test_context_with_outbox;
+
+        let (ctx, fx, _signer) = test_context_with_outbox();
+        fx.set_fallback(&["wss://pool.example"]);
+        let keys = Keys::generate();
+        let stored = EventBuilder::text_note("stored")
+            .sign_with_keys(&keys)
+            .unwrap();
+        ctx.relay.publish(stored.clone()).await.unwrap();
+
+        let mut s = granted();
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s1")
+                .with_field("subId", "pool")
+                .with_field("filters", json!({"kinds": [1]})),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].msg_type, "relay.event");
+        assert_eq!(out[1].msg_type, "relay.eose");
+        let pulled = fx.pulled();
+        assert_eq!(pulled.len(), 1);
+        assert_eq!(
+            pulled[0].0,
+            vec![RelayLane::Internet {
+                url: "wss://pool.example".into()
+            }],
+            "the local lane is answered directly, not pulled"
+        );
+
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s2")
+                .with_field("subId", "group")
+                .with_field("filters", json!({"kinds": [9]}))
+                .with_field("relay", "wss://groups.example"),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert_eq!(out.len(), 1, "a named relay skips the local backlog");
+        assert_eq!(out[0].msg_type, "relay.eose");
+        let pulled = fx.pulled();
+        assert_eq!(pulled.len(), 2);
+        assert_eq!(
+            pulled[1].0,
+            vec![RelayLane::Internet {
+                url: "wss://groups.example".into()
+            }]
+        );
+
+        // The other spelling still targets the named relay.
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s2b")
+                .with_field("subId", "group-options")
+                .with_field("filters", json!({"kinds": [9]}))
+                .with_field("options", json!({"relay": "wss://other-groups.example"})),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert_eq!(out.len(), 1, "options.relay skips the local backlog too");
+        assert_eq!(out[0].msg_type, "relay.eose");
+        let pulled = fx.pulled();
+        assert_eq!(pulled.len(), 3);
+        assert_eq!(
+            pulled[2].0,
+            vec![RelayLane::Internet {
+                url: "wss://other-groups.example".into()
+            }]
+        );
+
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s3")
+                .with_field("subId", "bad")
+                .with_field("filters", json!({"kinds": [9]}))
+                .with_field("relay", "ws://127.0.0.1:4870"),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert_eq!(out[0].msg_type, "relay.closed");
+        assert_eq!(
+            s.subscription_count(),
+            3,
+            "a refused subscribe was registered"
+        );
+    }
+
+    /// An unreadable filter closes the subscription on the frame the shim
+    /// listens for, carrying the id it asked with; nothing is registered.
+    /// A `.result` with an error would be dropped by `subscribe5` and leave
+    /// its listener waiting forever — L1 of the PR #52 review.
+    #[tokio::test]
+    async fn a_bad_filter_closes_the_subscription() {
+        let (ctx, _signer) = test_context();
+        let mut s = granted();
+
+        for filters in [json!("everything"), json!([]), json!([{"kinds": "one"}])] {
+            let out = dispatch(
+                &ctx,
+                &mut s,
+                &Envelope::new("relay.subscribe")
+                    .with_id("s1")
+                    .with_field("subId", "sub-bad")
+                    .with_field("filters", filters.clone()),
+            )
+            .await
+            .envelopes()
+            .to_vec();
+            assert_eq!(out.len(), 1, "{filters}");
+            assert_eq!(out[0].msg_type, "relay.closed", "{filters}");
+            assert_eq!(out[0].field("subId").unwrap(), "sub-bad", "{filters}");
+            assert!(
+                out[0]
+                    .field("reason")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|r| !r.is_empty()),
+                "{filters}: no reason given"
+            );
+            assert_eq!(s.subscription_count(), 0, "{filters}: registered anyway");
+        }
+
+        // No filters at all, the same way.
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s2")
+                .with_field("subId", "sub-none"),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert_eq!(out[0].msg_type, "relay.closed");
+        assert_eq!(out[0].field("subId").unwrap(), "sub-none");
+        assert_eq!(s.subscription_count(), 0);
+
+        // Without a subId there is nothing to close: the generic error stays.
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s3")
+                .with_field("filters", json!({"kinds": [1]})),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert!(out[0].field("error").is_some());
+        assert_ne!(out[0].msg_type, "relay.closed");
+    }
+
+    /// A single filter object, not only a list — the spec allows both.
+    #[tokio::test]
+    async fn a_lone_filter_object_is_accepted() {
+        let (ctx, _signer) = test_context();
+        let out = call(
+            &ctx,
+            Envelope::new("relay.query")
+                .with_id("c3")
+                .with_field("filters", json!({"kinds": [1]})),
+        )
+        .await;
+        assert!(out[0].field("events").is_some());
+    }
+
+    /// Unreadable input is refused rather than silently treated as "everything"
+    /// or "nothing" — a napplet could not tell those apart from a real answer.
+    #[tokio::test]
+    async fn unusable_input_is_refused_not_guessed() {
+        let (ctx, _signer) = test_context();
+
+        for envelope in [
+            Envelope::new("relay.query").with_id("x"),
+            Envelope::new("relay.query")
+                .with_id("x")
+                .with_field("filters", json!("everything")),
+            Envelope::new("relay.query")
+                .with_id("x")
+                .with_field("filters", json!([])),
+        ] {
+            let out = call(&ctx, envelope).await;
+            assert!(
+                out[0].field("error").is_some(),
+                "guessed instead of refusing"
+            );
+        }
+
+        // A publish with no template, and one whose tags are not strings.
+        for envelope in [
+            Envelope::new("relay.publish").with_id("x"),
+            Envelope::new("relay.publish")
+                .with_id("x")
+                .with_field("event", json!({"kind": 1, "tags": [[1, 2]]})),
+        ] {
+            let out = call(&ctx, envelope).await;
+            assert_eq!(out[0].field("ok").unwrap(), &json!(false));
+            assert!(out[0].field("error").is_some());
+        }
+    }
+
+    /// Encryption is not built yet. A napplet is told so, rather than left
+    /// waiting on a reply that never comes.
+    #[tokio::test]
+    async fn encrypted_publishing_says_it_is_unavailable() {
+        let (ctx, _signer) = test_context();
+        let out = call(
+            &ctx,
+            Envelope::new("relay.publishEncrypted")
+                .with_id("f6")
+                .with_field("event", json!({"kind": 4, "content": "secret"}))
+                .with_field("recipient", "abc"),
+        )
+        .await;
+        assert_eq!(out[0].field("ok").unwrap(), &json!(false));
+        assert!(out[0].field("error").is_some());
+    }
+
+    /// A published event must be *handed on*, not only written. Storing alone
+    /// leaves it invisible: nothing on this device redraws, and no relay ever
+    /// hears it — which is exactly how a note that posts nowhere looks.
+    #[tokio::test]
+    async fn a_published_event_reaches_the_sink() {
+        use crate::testing::RecordingSink;
+        use std::sync::Arc;
+
+        let (base, signer) = test_context();
+        let sink = Arc::new(RecordingSink::new());
+        let ctx = NapContext {
+            signer: base.signer.clone(),
+            relay: base.relay.clone(),
+            sink: sink.clone(),
+            mesh: base.mesh.clone(),
+            outbox: base.outbox.clone(),
+            lanes: base.lanes.clone(),
+            blobs: base.blobs.clone(),
+            fetcher: base.fetcher.clone(),
+        };
+
+        call(
+            &ctx,
+            Envelope::new("relay.publish")
+                .with_id("b2")
+                .with_field("event", json!({"kind": 1, "content": "ding", "tags": []})),
+        )
+        .await;
+
+        let accepted = sink.accepted();
+        assert_eq!(accepted.len(), 1, "the event was never handed on");
+        assert_eq!(accepted[0].content, "ding");
+        assert_eq!(accepted[0].pubkey, signer.public_key());
+    }
+
+    /// A refused publish hands on nothing. The grant is checked before the
+    /// event is signed, so there is nothing to leak downstream either.
+    #[tokio::test]
+    async fn a_refused_publish_reaches_no_sink() {
+        use crate::testing::RecordingSink;
+        use std::sync::Arc;
+
+        let (base, _signer) = test_context();
+        let sink = Arc::new(RecordingSink::new());
+        let ctx = NapContext {
+            signer: base.signer.clone(),
+            relay: base.relay.clone(),
+            sink: sink.clone(),
+            mesh: base.mesh.clone(),
+            outbox: base.outbox.clone(),
+            lanes: base.lanes.clone(),
+            blobs: base.blobs.clone(),
+            fetcher: base.fetcher.clone(),
+        };
+
+        let mut ungranted = Session::new(
+            NappletIdentity::new("chat", "aggregate"),
+            Vec::<String>::new(),
+        );
+        ungranted.on_ready();
+        let msg = Envelope::new("relay.publish")
+            .with_id("b2")
+            .with_field("event", json!({"kind": 1, "content": "ding", "tags": []}));
+        dispatch(&ctx, &mut ungranted, &msg).await;
+
+        assert!(
+            sink.accepted().is_empty(),
+            "a refused publish was handed on"
+        );
+    }
+
+    /// Without the grant, nothing publishes — and the refusal never signs.
+    #[tokio::test]
+    async fn an_ungranted_napplet_cannot_publish() {
+        let (ctx, signer) = test_context();
+        let mut ungranted = Session::new(
+            NappletIdentity::new("chat", "aggregate"),
+            Vec::<String>::new(),
+        );
+        ungranted.on_ready();
+
+        let msg = Envelope::new("relay.publish").with_id("b2").with_field(
+            "event",
+            json!({"kind": 1, "content": "should not appear", "tags": []}),
+        );
+        let out = dispatch(&ctx, &mut ungranted, &msg)
+            .await
+            .envelopes()
+            .to_vec();
+
+        assert_eq!(out.len(), 1);
+        assert!(out[0].field("error").is_some());
+        assert!(out[0].field("event").is_none());
+
+        let stored = ctx
+            .relay
+            .query(&[Filter::new().author(signer.public_key())])
+            .await
+            .unwrap();
+        assert!(stored.is_empty(), "a refused publish still wrote an event");
+    }
+
+    /// Interim M11: a granted napplet may post as the user, but not rewrite
+    /// who the user is. Profile, contacts, deletion and the replaceable range
+    /// are refused per call with a reason on the `.result` frame, and nothing
+    /// reaches the sink or the store; ordinary kinds still sign.
+    #[tokio::test]
+    async fn identity_shaping_kinds_are_refused_under_the_relay_grant() {
+        use crate::testing::RecordingSink;
+        use std::sync::Arc;
+
+        let (base, signer) = test_context();
+        let sink = Arc::new(RecordingSink::new());
+        let ctx = NapContext {
+            signer: base.signer.clone(),
+            relay: base.relay.clone(),
+            sink: sink.clone(),
+            mesh: base.mesh.clone(),
+            outbox: base.outbox.clone(),
+            lanes: base.lanes.clone(),
+            blobs: base.blobs.clone(),
+            fetcher: base.fetcher.clone(),
+        };
+
+        for kind in [0u16, 3, 5, 10002, 10050, 19999] {
+            let out = call(
+                &ctx,
+                Envelope::new("relay.publish").with_id("k").with_field(
+                    "event",
+                    json!({"kind": kind, "content": "", "tags": [["r", "wss://attacker.example"]]}),
+                ),
+            )
+            .await;
+            assert_eq!(out.len(), 1, "kind {kind}");
+            let reply = &out[0];
+            assert_eq!(reply.msg_type, "relay.publish.result", "kind {kind}");
+            assert_eq!(reply.field("ok").unwrap(), &json!(false), "kind {kind}");
+            let reason = reply.field("error").unwrap().as_str().unwrap();
+            assert!(
+                reason.starts_with(&format!("kind {kind} rewrites the user's")),
+                "kind {kind}: {reason}"
+            );
+            assert!(reply.field("event").is_none(), "kind {kind} was signed");
+        }
+        assert!(
+            sink.accepted().is_empty(),
+            "a refused kind reached the sink"
+        );
+        assert!(
+            ctx.relay
+                .query(&[Filter::new().author(signer.public_key())])
+                .await
+                .unwrap()
+                .is_empty(),
+            "a refused kind was stored"
+        );
+
+        for kind in [1u16, 9, 20666, 30023] {
+            let out = call(
+                &ctx,
+                Envelope::new("relay.publish").with_id("k").with_field(
+                    "event",
+                    json!({"kind": kind, "content": "fine", "tags": [["d", "x"]]}),
+                ),
+            )
+            .await;
+            let reply = &out[0];
+            assert_eq!(reply.field("ok").unwrap(), &json!(true), "kind {kind}");
+            assert_eq!(reply.field("event").unwrap()["kind"], kind, "kind {kind}");
+        }
+        assert_eq!(sink.accepted().len(), 4);
+    }
+}

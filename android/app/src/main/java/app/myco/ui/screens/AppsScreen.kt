@@ -6,6 +6,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.HomeMax
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
@@ -41,6 +43,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -66,6 +69,9 @@ import app.myco.NsiteIcons
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
+import app.myco.core.LibraryItem
+import app.myco.core.LibraryKind
+import app.myco.core.NappletReview
 import app.myco.core.SiteStatus
 import app.myco.nfc.NfcReader
 import app.myco.nfc.PairPresent
@@ -87,6 +93,8 @@ fun AppsScreen(
     state: AppState,
     client: AppCoreClient,
     onLaunchNsite: (host: String, title: String) -> Unit,
+    onLaunchNapplet: (pointer: String, title: String) -> Unit,
+    onPinNappletToHome: (pointer: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,
 ) {
@@ -95,6 +103,9 @@ fun AppsScreen(
     var shareFor by remember { mutableStateOf<ShareTarget?>(null) }
     var confirmRemove by remember { mutableStateOf<SiteStatus?>(null) }
     var showAdd by remember { mutableStateOf(false) }
+    var nappletSheetFor by remember { mutableStateOf<LibraryItem?>(null) }
+    var permissionsFor by remember { mutableStateOf<LibraryItem?>(null) }
+    var confirmForgetNapplet by remember { mutableStateOf<LibraryItem?>(null) }
 
     // One-shot toast with the result of a "Check for updates" run (fires when the
     // core bumps the check generation), so the user gets explicit feedback.
@@ -109,9 +120,15 @@ fun AppsScreen(
         }
     }
 
-    val apps = state.sites.filter {
-        query.isBlank() || it.title.contains(query, true) || it.host.contains(query, true)
-    }.sortedBy { it.title.ifEmpty { it.host }.lowercase() }
+    // nsites and napplets share one grid — they arrive the same way and open the
+    // same way. What differs is the trust model, and the badge says which.
+    val napplets = state.library.filter { it.kind == LibraryKind.Napplet }
+    val apps: List<AppEntry> = buildList {
+        state.sites.forEach { add(AppEntry.Nsite(it)) }
+        napplets.forEach { add(AppEntry.Napplet(it)) }
+    }.filter {
+        query.isBlank() || it.title.contains(query, true) || it.searchKey.contains(query, true)
+    }.sortedBy { it.title.ifEmpty { it.searchKey }.lowercase() }
 
     LazyVerticalGrid(
         columns = GridCells.Fixed(4),
@@ -128,15 +145,27 @@ fun AppsScreen(
                 Spacer(Modifier.height(4.dp))
             }
         }
-        items(apps, key = { it.host }) { site ->
-            NsiteTile(
-                client = client,
-                site = site,
-                modifier = Modifier.animateItem(),
-                // Ready → open the app; still downloading → its live status page.
-                onClick = { onLaunchNsite(site.host, site.title) },
-                onLongClick = { sheetFor = site },
-            )
+        items(apps, key = { it.key }) { entry ->
+            when (entry) {
+                is AppEntry.Nsite -> NsiteTile(
+                    client = client,
+                    site = entry.site,
+                    modifier = Modifier.animateItem(),
+                    // Ready → open the app; still downloading → its live status page.
+                    onClick = { onLaunchNsite(entry.site.host, entry.site.title) },
+                    onLongClick = { sheetFor = entry.site },
+                )
+                is AppEntry.Napplet -> NappletTile(
+                    item = entry.item,
+                    // Unknown counts as ready: the status is computed a moment
+                    // after startup, and a tile that dims for that moment reads
+                    // as a broken app.
+                    status = state.nappletStatus[entry.item.urlHost],
+                    modifier = Modifier.animateItem(),
+                    onClick = { onLaunchNapplet(entry.item.nappletPointer, entry.item.title) },
+                    onLongClick = { nappletSheetFor = entry.item },
+                )
+            }
         }
         item {
             AddTile { showAdd = true }
@@ -189,6 +218,114 @@ fun AppsScreen(
             siteCount = state.sites.size,
             onScanned = { showAdd = false; onScanned(it) },
             onDismiss = { showAdd = false },
+        )
+    }
+
+    // Review is driven by state, not by a local flag: a fetch may finish while
+    // the user is elsewhere, and the question should still be waiting.
+    state.nappletReview?.let { review ->
+        NappletReviewSheet(
+            review = review,
+            onInstall = { granted ->
+                client.dispatch(NativeActions.installNapplet(review.pointer, granted))
+            },
+            // The same fetch again, sharer first — a tap in a room with no
+            // internet fails when the sharer's link is still coming up, and
+            // that is the case a retry is for.
+            onRetry = { client.dispatch(NativeActions.fetchNapplet(review.pointer, review.holder)) },
+            onDismiss = { client.dispatch(NativeActions.dismissNappletReview()) },
+        )
+    }
+
+    nappletSheetFor?.let { picked ->
+        // Read the live entry, not the snapshot the long-press captured: a
+        // switch on this sheet changes the grants, and the sheet shows them.
+        val item = state.library.firstOrNull { it.nappletPointer == picked.nappletPointer } ?: picked
+        ModalBottomSheet(onDismissRequest = { nappletSheetFor = null }) {
+            NappletSheet(
+                item = item,
+                onManagePermissions = {
+                    nappletSheetFor = null
+                    permissionsFor = item
+                },
+                onOpen = {
+                    nappletSheetFor = null
+                    onLaunchNapplet(item.nappletPointer, item.title)
+                },
+                onShare = {
+                    // Same surface an nsite share uses: a QR, and an NDEF tag
+                    // presented while the sheet is up so the phones can just be
+                    // tapped together. The payload carries the naddr, so the
+                    // author's relay hints travel with it.
+                    shareFor = ShareTarget(
+                        uri = NsiteShare.buildNappletShareUri(
+                            nappletPointer = item.nappletPointer,
+                            deviceNpub = state.ownNpub,
+                            deviceName = NsiteShare.deviceName(state.ownNpub),
+                            pairSecret = NsiteShare.newPairSecret(),
+                        ),
+                        title = item.title.ifEmpty { item.dTag ?: "napplet" },
+                    )
+                    nappletSheetFor = null
+                },
+                onPinToHome = {
+                    nappletSheetFor = null
+                    onPinNappletToHome(item.nappletPointer, item.title)
+                },
+                onCheckUpdates = {
+                    nappletSheetFor = null
+                    client.dispatch(NativeActions.checkNsiteUpdates())
+                    android.widget.Toast.makeText(context, "Checking for updates…", android.widget.Toast.LENGTH_SHORT).show()
+                },
+                onReload = {
+                    nappletSheetFor = null
+                    // Same path a fresh add takes: fetch, verify, then the
+                    // review screen — so a reload can also correct what the app
+                    // is allowed to do, and never widens it silently.
+                    client.dispatch(NativeActions.fetchNapplet(item.nappletPointer))
+                },
+                onRemove = {
+                    nappletSheetFor = null
+                    confirmForgetNapplet = item
+                },
+            )
+        }
+    }
+
+    permissionsFor?.let { picked ->
+        // Live entry, not the snapshot: the switches change what this shows.
+        val item = state.library.firstOrNull { it.nappletPointer == picked.nappletPointer } ?: picked
+        ModalBottomSheet(onDismissRequest = { permissionsFor = null }) {
+            PermissionsSheet(
+                item = item,
+                domains = state.nappletDomains,
+                onGrant = { domain, allowed ->
+                    client.dispatch(NativeActions.setNappletGrant(item.nappletPointer, domain, allowed))
+                },
+            )
+        }
+    }
+
+    confirmForgetNapplet?.let { item ->
+        AlertDialog(
+            onDismissRequest = { confirmForgetNapplet = null },
+            confirmButton = {
+                TextButton(onClick = {
+                    client.dispatch(NativeActions.forgetNapplet(item.nappletPointer))
+                    confirmForgetNapplet = null
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmForgetNapplet = null }) { Text("Cancel") }
+            },
+            title = { Text("Remove napplet?") },
+            text = {
+                Text(
+                    "“${item.title.ifEmpty { item.dTag ?: item.authorNpub.take(12) }}” will be " +
+                        "removed, along with everything you granted it. Adding it again will " +
+                        "ask you afresh."
+                )
+            },
         )
     }
 
@@ -327,6 +464,412 @@ private fun NsiteTile(
             style = MaterialTheme.typography.labelMedium,
             color = if (syncing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
             textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/**
+ * One tile in the Apps grid. nsites and napplets sit side by side: they arrive
+ * the same way and open the same way, and what differs — the trust model — is
+ * what the badge says.
+ */
+private sealed interface AppEntry {
+    val title: String
+
+    /** What the search box matches besides the title. */
+    val searchKey: String
+
+    /** Stable across recomposition, and distinct between the two kinds. */
+    val key: String
+
+    data class Nsite(val site: SiteStatus) : AppEntry {
+        override val title get() = site.title
+        override val searchKey get() = site.host
+        override val key get() = "nsite:${site.host}"
+    }
+
+    data class Napplet(val item: LibraryItem) : AppEntry {
+        override val title get() = item.title
+        override val searchKey get() = item.nappletPointer
+        override val key get() = "napplet:${item.nappletPointer}"
+    }
+}
+
+/**
+ * A napplet's tile.
+ *
+ * No progress ring: a napplet is a single file that was fetched and verified
+ * before it ever reached the Library, so there is no partial state to show.
+ */
+/**
+ * The long-press sheet for a napplet — the same pull-up an nsite gets, because
+ * from the grid they are both just apps.
+ *
+ * What differs is what is on it. A napplet has no files to sync and no update
+ * check, and it does have something an nsite never has: capabilities someone
+ * agreed to, which they should be able to see and take back. That is what makes
+ * the grant reachable rather than a decision made once and buried.
+ */
+@Composable
+private fun NappletSheet(
+    item: LibraryItem,
+    onManagePermissions: () -> Unit,
+    onOpen: () -> Unit,
+    onShare: () -> Unit,
+    onPinToHome: () -> Unit,
+    onCheckUpdates: () -> Unit,
+    onReload: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(tileColorFor(item.nappletPointer)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    item.title.take(1).uppercase().ifEmpty { "N" },
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Spacer(Modifier.size(12.dp))
+            Column {
+                Text(
+                    item.title.ifEmpty { item.dTag ?: item.authorNpub.take(12) },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    "napplet",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        SheetAction(Icons.Filled.HomeMax, "Open") { onOpen() }
+        SheetAction(Icons.Filled.Share, "Share") { onShare() }
+        // What this app may do, on its own page: the wording is long and the
+        // switches want room.
+        SheetAction(Icons.Filled.Lock, "Manage permissions") { onManagePermissions() }
+        SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
+
+        // The same check the nsite sheet offers: every installed app, napplets
+        // included, asked for a newer version; the toast says what came of it.
+        SheetAction(Icons.Filled.Refresh, "Check for updates") { onCheckUpdates() }
+        // Fetches the app again and shows the same screen it was added with.
+        // The way to revisit what it is allowed to do without removing it and
+        // finding its link again — or to force a re-fetch when a check found
+        // nothing but the app still misbehaves.
+        SheetAction(Icons.Filled.Refresh, "Reload app") { onReload() }
+        Spacer(Modifier.height(8.dp))
+
+        SheetAction(Icons.Filled.Delete, "Remove app", tint = MaterialTheme.colorScheme.error) {
+            onRemove()
+        }
+        SheetAction(Icons.Filled.Info, item.dTag ?: item.authorNpub.take(16)) { }
+    }
+}
+
+/**
+ * What a napplet may do, in the same words the install sheet used, with a
+ * switch for each. A napplet's own declaration is a statement of intent its
+ * toolchain may have dropped; the user is the one who gets to say. A change
+ * is live — an open window of the app is restarted so its startup calls are
+ * made again under the new grants.
+ */
+@Composable
+private fun PermissionsSheet(
+    item: LibraryItem,
+    domains: List<String>,
+    onGrant: (domain: String, allowed: Boolean) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
+        Text(
+            item.title.ifEmpty { item.dTag ?: "This app" },
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+        )
+        Text(
+            "What it's allowed to do. Changing one restarts the app if it's open.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(12.dp))
+        val listed = (domains + item.granted.filter { it !in domains }).distinct()
+        listed.forEach { domain ->
+            val allowed = domain in item.granted
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            ) {
+                CapabilityRow(domain, dimmed = !allowed, modifier = Modifier.weight(1f))
+                Spacer(Modifier.size(12.dp))
+                Switch(checked = allowed, onCheckedChange = { onGrant(domain, it) })
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun NappletTile(
+    item: LibraryItem,
+    status: app.myco.core.NappletStatus?,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
+    val ready = status?.ready ?: true
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(18.dp))
+                // Dimmed like an nsite that is not downloaded: the app is in
+                // the Library but not on the phone — after a cache wipe, say.
+                .alpha(if (ready) 1f else 0.35f)
+                .background(tileColorFor(item.nappletPointer)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                item.title.take(1).uppercase().ifEmpty { "N" },
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleLarge,
+            )
+            // The duck marks a napplet: a program Myco hosts, as against an
+            // nsite, which is a document Myco serves. On its own chip, so it
+            // reads against any tile colour rather than sinking into a green
+            // or yellow one.
+            NappletBadge(modifier = Modifier.align(Alignment.TopEnd).padding(4.dp))
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            item.title.ifEmpty { item.dTag ?: item.authorNpub.take(8) },
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center,
+        )
+        if (!ready) {
+            Text(
+                status?.message.orEmpty().ifEmpty { "Not on this phone" },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+/** The napplet mark: a duck on a small light chip with a dark rim, legible on every tile colour. */
+@Composable
+internal fun NappletBadge(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(22.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .background(Color.White.copy(alpha = 0.92f))
+            .border(1.dp, Color.Black.copy(alpha = 0.35f), RoundedCornerShape(7.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("\uD83E\uDD86", style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+/**
+ * The install-review screen: what a napplet is asking for, before it has it.
+ *
+ * This is the only place a grant is written. Fetching a napplet stores its
+ * bytes and grants nothing, so a napplet that is never reviewed can do nothing
+ * but complete the handshake.
+ *
+ * The wording matters more than usual. A granted `relay` covers publishing with
+ * no per-event prompt, which means the napplet can publish as you at will — so
+ * the screen says that in words, rather than showing a domain name and hoping.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NappletReviewSheet(
+    review: NappletReview,
+    onInstall: (List<String>) -> Unit,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
+            if (review.loading) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(84.dp),
+                        strokeWidth = 6.dp,
+                    )
+                    Spacer(Modifier.height(28.dp))
+                    Text("Looking for this app", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "This can take a few seconds.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                return@Column
+            }
+
+            if (review.error.isNotEmpty()) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth().padding(top = 24.dp),
+                ) {
+                    Text("Couldn't find this app", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        // Plain words. The reason underneath is for a log, not
+                        // for someone holding a phone.
+                        "It might not be shared any more, or the link might be wrong.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    Button(onClick = onRetry) { Text("Try again") }
+                    Spacer(Modifier.height(4.dp))
+                    TextButton(onClick = onDismiss) { Text("Close") }
+                }
+                return@Column
+            }
+
+            // The app's mark, where the spinner was — so finding it resolves
+            // into the thing itself rather than swapping one block of text for
+            // another.
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(84.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(tileColorFor(review.pointer)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        review.title.take(1).uppercase().ifEmpty { "N" },
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.headlineMedium,
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    review.title.ifEmpty { "Untitled app" },
+                    style = MaterialTheme.typography.titleMedium,
+                    textAlign = TextAlign.Center,
+                )
+                if (review.description.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        review.description,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(28.dp))
+
+            // What is listed is what is granted — including the defaults every
+            // app gets. A default that was not shown would be a grant nobody
+            // made, and one of them lets an app post as you.
+            if (review.grants.isEmpty()) {
+                Text(
+                    "This app runs on its own. It can't reach the internet, " +
+                        "save anything, or use your account.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                Text("This app will be able to:", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(10.dp))
+                review.grants.forEach { domain ->
+                    CapabilityRow(domain)
+                    Spacer(Modifier.height(10.dp))
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "You can change your mind later — press and hold the app.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Spacer(Modifier.height(28.dp))
+            Row {
+                TextButton(onClick = onDismiss) { Text("Not now") }
+                Spacer(Modifier.weight(1f))
+                Button(onClick = { onInstall(review.grants) }) { Text("Add to my apps") }
+            }
+        }
+    }
+}
+
+/**
+ * A NAP domain in words a person can act on.
+ *
+ * Unknown domains are shown verbatim rather than hidden: a napplet asking for
+ * something this build has never heard of is exactly what the user should see,
+ * and dropping it from the list would understate what is being agreed to.
+ */
+/** A capability as a person reads it: a name, and what allowing it means. */
+private data class Capability(val title: String, val detail: String)
+
+private fun capabilityWording(domain: String): Capability = when (domain) {
+    "relay" -> Capability("Relays", "Read and post as you on your relays, without asking each time")
+    "outbox" -> Capability("Outbox", "Post as you to your relays and to other people's, and read from theirs")
+    "mesh" -> Capability("Mesh", "Send and receive data within your Circle, without the internet")
+    "identity" -> Capability("Identity", "See your name and profile")
+    "resource" -> Capability("Pictures & files", "Load pictures and files by their content hash")
+    "storage" -> Capability("Storage", "Save things on this phone")
+    "intent" -> Capability("Other apps", "Open your other apps")
+    "inc" -> Capability("App to app", "Talk to your other open apps")
+    "notify" -> Capability("Notifications", "Send you notifications")
+    "theme" -> Capability("Theme", "Match your colours")
+    "link" -> Capability("Links", "Open links outside Myco")
+    "config" -> Capability("Settings", "Have settings you can change")
+    "shell" -> Capability("Start up", "Every app does this")
+    else -> Capability(domain, "Something this version of Myco doesn't know about")
+}
+
+/** One capability, as a title with its meaning underneath. */
+@Composable
+private fun CapabilityRow(domain: String, dimmed: Boolean = false, modifier: Modifier = Modifier) {
+    val c = capabilityWording(domain)
+    Column(modifier = modifier) {
+        Text(
+            c.title,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = if (dimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            c.detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

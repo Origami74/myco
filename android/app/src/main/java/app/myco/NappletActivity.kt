@@ -1,0 +1,553 @@
+package app.myco
+
+import android.annotation.SuppressLint
+import android.graphics.Color
+import android.net.Uri
+import android.os.Bundle
+import android.util.Log
+import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.addCallback
+import androidx.activity.enableEdgeToEdge
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import app.myco.core.AppCoreClient
+import app.myco.core.MycoCore
+import app.myco.core.NappletOpen
+import java.io.ByteArrayInputStream
+
+/**
+ * Hosts one napplet: a chrome-less WebView running the **shell**, which in turn
+ * runs the napplet in a sandboxed iframe.
+ *
+ * A separate Activity from [NsiteActivity] on purpose. The two share a look, not
+ * a codebase: their intent contracts, request interception, navigation policy,
+ * lifecycle and trust boundaries all differ, and merging them would put
+ * capability plumbing inside the class that renders untrusted nsite documents.
+ * What is genuinely shared is chrome-less task plumbing, and that is
+ * [ChromelessChrome] — a helper, not a base class, so nsite semantics cannot
+ * arrive here by inheritance.
+ *
+ * ## What runs where
+ *
+ * ```text
+ *   WebView  ->  the shell page at <label>.napplet.localhost   (ours, trusted)
+ *                  └─ iframe sandbox="allow-scripts", srcdoc   (the napplet, untrusted)
+ * ```
+ *
+ * The napplet is never the WebView's top-level document. Loaded that way it
+ * would *be* the shell origin — with the shell's storage, inside the origin the
+ * capability channel is scoped to. Its only home is the opaque origin the
+ * sandboxed iframe gives it.
+ *
+ * ## The capability channel
+ *
+ * `addWebMessageListener`, registered against this window's shell origin alone
+ * and never a wildcard. The napplet's iframe has an opaque origin, so it matches
+ * no rule and never receives the injected object. `addJavascriptInterface` is
+ * not used and must not be: its object lands in *every* frame with JavaScript
+ * enabled, including the napplet's, which would hand the sandboxed napplet the
+ * bridge and make the whole capability seam decorative.
+ *
+ * Verification, policy and every capability live in Rust. This class is a pipe.
+ */
+class NappletActivity : ComponentActivity() {
+    private lateinit var client: AppCoreClient
+    private lateinit var webView: WebView
+    private lateinit var root: FrameLayout
+
+    /**
+     * The per-window session id Rust keyed this napplet's session by.
+     *
+     * Written by the opener off the main thread and read by [onDestroy] on it,
+     * both under [sessionLock] together with [windowGone]: exactly one of the
+     * two sides sees the other's mark and closes the session. See [onCreate].
+     */
+    private var sessionId: String = ""
+
+    /** Set by [onDestroy]; a session opened after this is closed by its opener. */
+    private var windowGone = false
+    private val sessionLock = Any()
+
+    /** This window's shell origin — the only origin the channel is scoped to. */
+    private var shellHost: String = ""
+
+    /** Whether the shell page asked for the status-bar region. See [ChromelessChrome]. */
+    private var pageOptedIntoFullHeight = false
+
+    /**
+     * The channel back into the shell, kept between messages.
+     *
+     * `addWebMessageListener` hands one of these to every inbound message and
+     * it stays usable afterwards, which is what lets the runtime speak first —
+     * a subscription delivering an event nobody asked for at that moment.
+     */
+    private var replyChannel: androidx.webkit.JavaScriptReplyProxy? = null
+
+    /** Drains runtime-initiated frames while the window is open. */
+    private var drainJob: kotlinx.coroutines.Job? = null
+    /**
+     * Frames from the shell, in arrival order, consumed off the main thread.
+     *
+     * Bounded. [inFlight] bounds how many calls hold an FFI thread at once;
+     * this bounds how much a napplet can queue behind them. A page looping
+     * `postMessage` faster than the runtime answers used to grow this without
+     * limit until the process died; now the frame past the cap is dropped
+     * and logged, and the shim's own per-call timeout answers the call.
+     */
+    private val inbound = kotlinx.coroutines.channels.Channel<String>(INBOUND_CAPACITY)
+    private var frameJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Drive one frame through the runtime and post its replies to the shell.
+     * Returns true when a reply was `shell.init` — the handshake has answered
+     * and later frames may overlap.
+     */
+    private suspend fun relay(frame: String): Boolean {
+        val replies = runCatching { client.nappletFrame(sessionId, frame) }.getOrDefault(emptyList())
+        var init = false
+        withContext(Dispatchers.Main) {
+            for (reply in replies) {
+                if (relayedType(reply) == "shell.init") init = true
+                replyChannel?.postMessage(reply)
+            }
+        }
+        return init
+    }
+
+    /**
+     * At most this many capability calls in flight per window. Each one holds a
+     * background thread in the FFI for as long as its relays take to answer, and
+     * a napplet that fires a hundred queries at dead relays would otherwise pin
+     * the whole IO pool and stall the rest of the app behind it.
+     */
+    private val inFlight = Semaphore(MAX_IN_FLIGHT)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        client = MycoCore.client(this)
+
+        val pointer = intent.getStringExtra(EXTRA_POINTER).orEmpty()
+        if (pointer.isEmpty()) {
+            finish()
+            return
+        }
+
+        // Resolve and verify before anything is shown. A napplet that fails any
+        // check gets no session and no window — there is no partial render to
+        // fall back to, by design. Off the main thread: the resolve reads the
+        // relay and the blob store, and with a custom relay configured that is
+        // a network round trip. The splash screen covers the wait.
+        //
+        // The open is not cancellable, and it settles its own session. Back
+        // during the splash used to cancel this coroutine mid-call: `onDestroy`
+        // ran with `sessionId` still empty and skipped `nappletClose`, and when
+        // the JNI call returned the assignment below never ran — the session
+        // (the assembled HTML, its outbox channel) sat in `NappletHost.sessions`
+        // forever. `NonCancellable` lets the call finish; the hand-off under
+        // [sessionLock] is what closes the leak. It happens *inside* the IO
+        // block on purpose: a result crossing back to the main thread is
+        // discarded when the scope was cancelled meanwhile (prompt
+        // cancellation), so anything after `withContext` may never run.
+        lifecycleScope.launch {
+            val opened = withContext(Dispatchers.IO + NonCancellable) {
+                val opened = client.nappletOpen(pointer)
+                if (opened.ok) {
+                    val orphaned = synchronized(sessionLock) {
+                        if (windowGone) true else { sessionId = opened.sessionId; false }
+                    }
+                    if (orphaned) {
+                        Log.i(TAG, "napplet $pointer opened after its window closed; session closed")
+                        client.nappletClose(opened.sessionId)
+                    }
+                }
+                opened
+            }
+            if (!opened.ok) {
+                Log.w(TAG, "napplet $pointer did not open: ${opened.error}")
+                // Said out loud: a window that closes on its own reads as a tap
+                // that did not register, and hides that the app is gone.
+                Toast.makeText(
+                    this@NappletActivity,
+                    "Couldn't open this app: ${opened.error.orEmpty().ifEmpty { "it isn't on this phone" }}",
+                    Toast.LENGTH_LONG,
+                ).show()
+                finish()
+                return@launch
+            }
+            shellHost = opened.shellHost
+            mountShell()
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun mountShell() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            // WebView 88+ carries this. Older ones need the WebMessagePort
+            // fallback, which is not built yet — refuse rather than run a
+            // napplet with no way to reach its capabilities.
+            Log.w(TAG, "WebView is too old for the capability channel")
+            client.nappletClose(sessionId)
+            finish()
+            return
+        }
+
+        webView = WebView(this).apply {
+            setBackgroundColor(Color.BLACK)
+            settings.javaScriptEnabled = true
+            // The shell keeps no state of its own, and the napplet must not have
+            // any: its storage is a capability, mediated in Rust, not something
+            // the browser hands it. The opaque origin already denies it, and
+            // this denies the shell too.
+            settings.domStorageEnabled = false
+            settings.allowFileAccess = false
+            settings.allowContentAccess = false
+            settings.mediaPlaybackRequiresUserGesture = false
+            webViewClient = NappletWebViewClient(
+                client = client,
+                shellHost = shellHost,
+                onContentVisible = { syncChrome() },
+                onRendererGone = { finish() },
+            )
+        }
+
+        // The capability channel. `allowedOriginRules` is this one origin,
+        // exactly — a wildcard here would inject the object into every frame the
+        // rule matched, which is the failure `addJavascriptInterface` has by
+        // construction and this API exists to avoid.
+        WebViewCompat.addWebMessageListener(
+            webView,
+            client.nappletRuntimeObject(),
+            setOf("http://$shellHost"),
+        ) { _, message, _, isMainFrame, replyProxy ->
+            // Only the shell's own frame speaks on this channel. The napplet's
+            // iframe cannot reach it, but a nested frame in the shell would be a
+            // bug worth refusing rather than trusting.
+            if (!isMainFrame) return@addWebMessageListener
+            replyChannel = replyProxy
+            val frame = message.data ?: return@addWebMessageListener
+            // Never on this thread: a capability call can wait on the network
+            // for seconds, and this is the main thread. Queued in arrival
+            // order; the consumer decides what may overlap. A full queue drops
+            // the frame rather than the memory: see [inbound].
+            val queued = inbound.trySend(frame)
+            if (queued.isFailure && !queued.isClosed) {
+                Log.w(TAG, "napplet frame queue full; frame dropped")
+            }
+        }
+
+        // The inbound frames, driven off the main thread. Until the handshake
+        // has answered, frames run one at a time in order — `shell.ready` must
+        // land before the first capability call, or that call is refused as
+        // "not established". After it, each frame gets its own coroutine, so
+        // a relay query waiting on a slow relay does not hold up the publish
+        // behind it. Rust holds the session only for calls that change it.
+        frameJob = lifecycleScope.launch(Dispatchers.IO) {
+            var established = false
+            for (frame in inbound) {
+                if (established) {
+                    launch { inFlight.withPermit { relay(frame) } }
+                } else {
+                    if (relay(frame)) established = true
+                }
+            }
+        }
+
+        // Runtime-initiated frames. A long poll on a background thread rather
+        // than a callback into Kotlin: the FFI only runs when called, so the
+        // waiting happens on this side — the same shape the BLE and TUN bridges
+        // use. Bound to the window's lifecycle, so it stops when the napplet
+        // closes rather than outliving it.
+        drainJob = lifecycleScope.launch {
+            while (isActive) {
+                val frames = withContext(Dispatchers.IO) {
+                    runCatching { client.nappletNextFrames(sessionId, DRAIN_WAIT_MS) }
+                        .getOrDefault(emptyList())
+                }
+                // postMessage is main-thread work; the wait above was not.
+                for (frame in frames) {
+                    // A grant changed on the app's sheet: this window's napplet
+                    // made its startup calls under the old grants, so start it
+                    // over — new session, fresh handshake. Never in place: the
+                    // shell runs one napplet for one lifetime.
+                    if (channelOf(frame) == "relaunch") {
+                        recreate()
+                        break
+                    }
+                    replyChannel?.postMessage(frame)
+                }
+            }
+        }
+
+        root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        root.addView(
+            webView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        setContentView(root)
+        ChromelessChrome.applyInsets(root) { pageOptedIntoFullHeight }
+
+        ChromelessChrome.applyTaskDescription(
+            this,
+            intent.getStringExtra(EXTRA_TITLE).orEmpty().ifEmpty { "napplet" },
+            null,
+        )
+
+        // Back leaves the napplet. There is no history to walk: the shell never
+        // navigates, and the napplet cannot navigate the top-level document.
+        onBackPressedDispatcher.addCallback(this) { finish() }
+
+        webView.loadUrl("http://$shellHost/")
+    }
+
+    private fun syncChrome() {
+        ChromelessChrome.syncBarContrast(this, webView)
+        ChromelessChrome.probeFullHeight(webView) { wants ->
+            if (wants != pageOptedIntoFullHeight) {
+                pageOptedIntoFullHeight = wants
+                ChromelessChrome.requestInsets(root)
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        drainJob?.cancel()
+        frameJob?.cancel()
+        inbound.close()
+        replyChannel = null
+        // Drop the session with the window. Rust ignores every later frame for
+        // it, so a leaked WebView cannot keep a capability session alive. An
+        // open still in flight sees [windowGone] and closes its own session.
+        val toClose = synchronized(sessionLock) {
+            windowGone = true
+            sessionId
+        }
+        if (toClose.isNotEmpty()) client.nappletClose(toClose)
+        // Fine on a view a renderer crash already detached: `destroy` wants the
+        // view out of the hierarchy, not in it.
+        if (this::webView.isInitialized) webView.destroy()
+        super.onDestroy()
+    }
+
+    companion object {
+        private const val TAG = "NappletActivity"
+
+        /**
+         * How long one drain call waits before coming back empty.
+         *
+         * Long enough that an idle napplet is not spinning across the FFI,
+         * short enough that closing the window is not held up by a call already
+         * in flight.
+         */
+        private const val DRAIN_WAIT_MS = 20_000L
+
+        /** See [inFlight]. */
+        private const val MAX_IN_FLIGHT = 8
+
+        /** See [inbound]. */
+        private const val INBOUND_CAPACITY = 64
+
+        /** The top-level `channel` of a runtime frame, or null if it is not one. */
+        private fun channelOf(frame: String): String? =
+            runCatching { JSONObject(frame).optString("channel") }.getOrNull()?.ifEmpty { null }
+
+        /**
+         * The `type` of a napplet-bound message inside a runtime frame, or null.
+         * Parsed rather than searched for: the message body carries text the
+         * napplet — or a stranger whose event it subscribed to — chose.
+         */
+        private fun relayedType(frame: String): String? =
+            runCatching {
+                val obj = JSONObject(frame)
+                if (obj.optString("channel") != "napplet") return null
+                obj.optJSONObject("message")?.optString("type")
+            }.getOrNull()?.ifEmpty { null }
+
+        /** `naddr1…`, or the `<npub>:<dtag>` shorthand. */
+        const val EXTRA_POINTER = "app.myco.extra.NAPPLET_POINTER"
+        const val EXTRA_TITLE = "app.myco.extra.NAPPLET_TITLE"
+
+        /**
+         * A per-napplet document URI, so re-opening one re-surfaces its task.
+         *
+         * Keyed on the addressable pointer rather than the napplet's identity: a
+         * napplet's identity is its aggregate hash and changes on every build, so
+         * keying the *task* on it would strand the old Recents card on every
+         * update. The session still pins the hash — see the design doc §7.8.
+         */
+        fun documentUri(pointer: String): Uri = Uri.parse("myco://napplet/$pointer")
+    }
+}
+
+/**
+ * Serves the shell page, and nothing else.
+ *
+ * The napplet's own bytes never pass through here — they are pushed over the
+ * capability channel and assigned to `srcdoc`. Serving them at this origin would
+ * make them reachable by URL, and anything navigating to that URL would run the
+ * napplet as the shell origin.
+ *
+ * Shell bytes land in the **main frame only**, and that is enforced here in
+ * [shouldInterceptRequest], not only in [shouldOverrideUrlLoading]: Chromium
+ * does not offer subframe http(s) navigations to the latter, so a napplet
+ * setting `location.href` to the shell URL arrives here as a subframe request
+ * and is refused. Inert while the sandbox keeps the frame's origin opaque, but
+ * the invariant is checked rather than assumed.
+ *
+ * @param onRendererGone the renderer process died; the window closes itself.
+ */
+private class NappletWebViewClient(
+    private val client: AppCoreClient,
+    private val shellHost: String,
+    private val onContentVisible: () -> Unit,
+    private val onRendererGone: () -> Unit,
+) : WebViewClient() {
+
+    override fun onPageCommitVisible(view: WebView, url: String) = onContentVisible()
+
+    override fun onPageFinished(view: WebView, url: String) = onContentVisible()
+
+    /**
+     * The renderer died — a napplet that allocated until OOM, or any crash in
+     * the page. Returning `true` is what keeps WebView from killing the app
+     * process (its default on API 26+): the mesh node, the relay, the blob
+     * store and every other window stay up, and only this window closes.
+     * The dead view leaves the hierarchy first so nothing paints or scripts
+     * against it; the Activity's `onDestroy` still calls `destroy()` on it.
+     */
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        Log.w(
+            "NappletActivity",
+            "napplet renderer gone: crashed=${detail.didCrash()} " +
+                "priority=${detail.rendererPriorityAtExit()}; closing the window",
+        )
+        (view.parent as? ViewGroup)?.removeView(view)
+        onRendererGone()
+        return true
+    }
+
+    /**
+     * The shell never navigates, and the napplet's frame never leaves.
+     *
+     * This is the boundary that keeps the shell origin the shell's: a navigation
+     * away and back, or into an nsite host, would put other content inside the
+     * origin the capability channel is scoped to.
+     *
+     * The napplet's iframe is `sandbox="allow-scripts"`, which still lets it
+     * navigate *itself* — `location.href = …` — and this callback fires for
+     * that too. Refused outright: a subframe navigation is either the napplet
+     * trying to reach the network around its CSP, or trying to fire a system
+     * intent (`intent:`, `tel:`, a browser) with no one having tapped anything.
+     * A link the shell itself would open externally needs a gesture behind it.
+     */
+    override fun shouldOverrideUrlLoading(
+        view: WebView,
+        request: WebResourceRequest,
+    ): Boolean {
+        val uri = request.url
+        // The shell's own initial load is not a navigation request.
+        if (request.isForMainFrame &&
+            uri.host?.equals(shellHost, ignoreCase = true) == true &&
+            uri.path == "/"
+        ) {
+            return false
+        }
+        if (!request.isForMainFrame) {
+            Log.w("NappletActivity", "napplet frame tried to navigate to $uri; refused")
+            return true
+        }
+        if (ExternalNavigation.staysInPage(uri)) return true
+        if (!request.hasGesture()) {
+            Log.w("NappletActivity", "shell navigation to $uri without a gesture; refused")
+            return true
+        }
+        return ExternalNavigation.openExternally(view.context, uri, "NappletActivity")
+    }
+
+    override fun shouldInterceptRequest(
+        view: WebView,
+        request: WebResourceRequest,
+    ): WebResourceResponse? {
+        val uri = request.url
+        val host = uri.host.orEmpty()
+
+        // This window's shell origin, and only it. Everything else is answered
+        // with a refusal rather than handed to the network: the shell loads
+        // nothing external, and the napplet's CSP already forbids it — this is
+        // the belt to that braces, so a request that slips past the CSP (a
+        // frame navigation, a WebView quirk) still reaches nothing. Another
+        // napplet's shell origin is refused here just as firmly as an nsite
+        // host: each window serves itself.
+        if (!host.equals(shellHost, ignoreCase = true)) {
+            return WebResourceResponse(
+                "text/plain",
+                "utf-8",
+                403,
+                "Forbidden",
+                emptyMap(),
+                ByteArrayInputStream(ByteArray(0)),
+            )
+        }
+
+        // The shell page is a main-frame document, never a subframe's. The
+        // napplet's iframe navigating itself here would otherwise be handed
+        // the trusted shell page, and `shouldOverrideUrlLoading` never sees
+        // that navigation (see the class doc).
+        if (!request.isForMainFrame) {
+            Log.w("NappletActivity", "subframe request for shell path ${uri.path}; refused")
+            return WebResourceResponse(
+                "text/plain",
+                "utf-8",
+                403,
+                "Forbidden",
+                emptyMap(),
+                ByteArrayInputStream(ByteArray(0)),
+            )
+        }
+
+        val path = uri.path?.ifEmpty { "/" } ?: "/"
+        if (path != "/" && path != "/index.html") {
+            return WebResourceResponse(
+                "text/plain",
+                "utf-8",
+                404,
+                "Not Found",
+                emptyMap(),
+                ByteArrayInputStream(ByteArray(0)),
+            )
+        }
+
+        return WebResourceResponse(
+            "text/html",
+            "utf-8",
+            200,
+            "OK",
+            // No caching: the shell is compiled into the binary and changes with
+            // the app, and a stale one would be a stale capability channel.
+            mapOf("Cache-Control" to "no-store"),
+            ByteArrayInputStream(client.nappletShellPage().toByteArray()),
+        )
+    }
+}

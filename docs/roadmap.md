@@ -1,382 +1,229 @@
 # Roadmap
 
-The phased plan for **Myco**, from scaffolding to the v1 two-device offline
-BLE demo and beyond. Each phase has a one-line goal and an explicit **Exit
-criterion** — the observable condition that says the phase is done. Phases are
-roughly sequential, but P2 can begin once the scaffold (P0) lands.
+Where **Myco** is and where it goes next. The first plan (P0–P6, a two-phone
+offline BLE demo) is done; this page is the second one. Each item has a
+one-line goal and an **exit criterion** — the observable condition that says
+it is done. Detail lives in the linked design docs; the day-to-day record is
+[CHANGELOG.md](../CHANGELOG.md).
 
-> Design doc for a not-yet-built app, written in proposal voice. Phase
-> boundaries and ordering are **proposed**; open questions inside each phase are
-> tracked in the linked design docs and marked **TBD / open** there.
-
-For orientation see [getting-started.md](./getting-started.md); for the doc map
-see the [index](./README.md). **P1 is the first de-risk milestone** — two
-devices forming a FIPS BLE link offline — and the v1 product headline is the
-[two-device offline browse demo](./how-to/run-two-device-demo.md) at **P4**.
+For orientation see [getting-started.md](./getting-started.md); for the doc
+map, the [index](./README.md).
 
 ---
 
-## Status — 2026-06-16
+## Status — 2026-09-15
 
-P0–P3 are built and the **device-to-device offline pull works**: device B scans
-A's share QR, pulls A's nsite straight off A's phone over the FIPS BLE mesh (no
-internet), and browses it as a fullscreen app. Two product features shipped
-**beyond** the original P3 scope:
+**Shipped** (v0.6.0, plus the unreleased `feat/napplet-runtime` branch):
 
-- **Circle** — a persisted contact list of paired peers (added by scanning their
-  share QR). A Circle member's device doubles as a relay we pull from; `open_site`
-  tries the explicit holder, then any connected Circle member, then the IP fallback.
-- **Discovery** ("nsites around me") — query connected Circle peers' mesh relays
-  for the nsite manifests they host (kind 15128/35128), no QR needed; opening a
-  result pulls from that holder.
+- **The mesh.** BLE L2CAP with per-peer PSM discovery, Wi-Fi Aware (several
+  phones per lane), the LAN lane (mDNS), TCP when online; multi-path per peer
+  with standby links; an app-owned TUN scoped to Myco's uid; `.fips` DNS. The
+  Dev tab shows every peer, lane, RTT and connect attempt.
+- **Pairing and the Circle.** Mutual, signed pairing by NFC bump or QR over
+  the auth service; single-use invite secrets; unpairing that reaches the other
+  phone; the Circle gate on the relay and Blossom; per-peer permissions stored
+  (no UI yet). Native encrypted file sharing between Circle members.
+- **nsites.** Paste a link or scan a share; holder-first pull over the mesh,
+  then any Circle member, then the internet; staged updates; discovery ("around
+  me"); home-screen pins; deep links (`myco://app/<host>/<path>`); a custom relay
+  or Blossom instead of the embedded ones.
+- **Gossip.** Hop-limited push (3) and pull (2) between Circle members, the
+  `MESH` envelope, seen-set loop safety, backlog replay on reconnect.
+- **Napplets** (unreleased). NIP-5D manifests fetched by `naddr` or shared by
+  bump; verified resolve into a sandboxed iframe; a user key with a guest
+  profile and relay list; install review and per-app permission switches;
+  NAPs: `shell`, `identity`, `relay` (pool reads, relay-pool publish), `outbox`
+  (NIP-65 plans over local/mesh/internet lanes), `mesh` (hop-limited
+  publish/subscribe, user-capped — Myco's own, [NAP-MESH](./design/napplet/NAP-MESH.md)),
+  `resource` (`blossom:` only, local store first, fetched blobs kept).
 
-The **app-owned TUN** (`VpnService`, opt-in, **scoped to Myco's uid** via
-`addAllowedApplication` so other apps keep their normal internet) landed here
-rather than P2; content entry became **paste-a-link over IP** (then serve
-offline), and the in-app WebView serves TUN-independently via
-`shouldInterceptRequest`.
-
-**Deferred** (not yet built): the mutual pairing-secret echo — pairing is
-currently **one-directional** (the scanner adds the sharer); the nsite-deck
-**propagator** (both-way manifest gossip), **NIP-77 negentropy** reconcile, and
-**eager pinned-refresh** (P3's ambitious sync sub-goals — pushed toward P5); the
-formal **airplane-mode P4** teeth-check; **system-wide browsing** for external
-browsers (the NAT46 "Later" item); **faster reconnect** after an app restart; an
-always-on/lockdown warning.
-
-**Next: a product UX pass (P3.5)** — turn the single developer screen into a real
-consumer UI before widening capability further.
-
----
-
-## Phase overview
-
-| Phase | Goal | Exit criterion |
-| --- | --- | --- |
-| **P0** ✅ | Minimal scaffold + FIPS up | arm64 / minSdk 29 APK builds (plus the macOS core build); app persists an nsec and shows its npub; no relay/Blossom/nsite/TUN yet. |
-| **P1** ✅ | BLE peering over FIPS + developer UI (the de-risk milestone) | Two devices (Android↔Android and/or Android↔Mac), offline, form a FIPS BLE link via universal per-peer PSM discovery; each shows the other connected in the developer UI. |
-| **P2** ✅ | Relay + Blossom + gateway (serve-direct) | A nsite (entered by paste-a-link over IP) launches as a fullscreen `NsiteActivity` (its own task), served direct from the local relay + Blossom over the in-app gateway. |
-| **P3** ✅\* | Pairing + sync over the mesh — **\*plus Circle + Discovery; propagator/negentropy/mutual-echo deferred** | B scans A's share QR and pulls A's nsite over the FIPS BLE mesh, opening it as a fullscreen app; A's events/blobs are mirrored on B. |
-| **P3.5** 🔜 | **Product UX (UI pass)** | A non-developer can pair, find, open, and manage nsites in a real consumer UI — no raw npubs/cache counters. |
-| **P4** | Full offline browse demo (the v1 headline) | Two Androids in airplane mode + BLE: B browses A's nsite offline. |
-| **P5** | Propagation at scale (set-recon + transitive + eviction) | A cached site survives the origin going offline; reach goes transitive. |
-| **P6** | Linux interop | An Android and a Linux peer form a FIPS BLE link via per-peer PSM discovery and sync an nsite. |
-| **Later** | htdocs serving cache, home-screen pinning + app-shortcuts, Wi-Fi Aware, public-node peering, nsite capability API, open nsite links, relay read-auth, NAT46 | (see below — each is its own milestone) |
+**Not built**, from the first plan: NIP-77 negentropy reconcile; LRU eviction
+with a size cap (Storage shows counts and offers "delete cache"; nothing
+evicts on its own); transitive peer-list polling (reach is the Circle, plus
+gossip hops); Linux interop (P6) as a tested pair; external-browser access
+(NAT46). All still on the list below.
 
 ---
 
-## P0 — Minimal scaffold + FIPS up
+## Next
 
-**Goal.** Stand up the Myco app shell (Kotlin/Compose) and the Rust workspace
-(`myco-core` + `nsite-deck` + `myco-relay` + `myco-blossom`, one `.so`, one
-JNI/JSON FFI surface), fork nostr-vpn's app scaffolding, and **strip the
-nostr-vpn net layer** — exit-node, WireGuard upstream egress, roster/admin
-membership (kind 30388), join-requests-as-membership, `.nvpn` MagicDNS, and
-LAN-multicast pairing. Depend on the **canonical upstream `fips` crate** (single
-crate, one `patch.crates-io.fips` override) and **embed FIPS via
-`Node::new(Config)`**. Generate and persist the single Nostr identity in
-`filesDir` and show its npub. **No relay, Blossom, nsite, or TUN yet** — those
-arrive later (the app-owned TUN patch is first needed at P2). **Also stand up the
-macOS core build** so the same Rust core compiles and runs on macOS for
-development/test, alongside the Android target.
+Ordered by what unblocks what. Each is its own PR or short series.
 
-**Exit criterion.** `just build` (or `./gradlew assembleDebug`) produces a single
-arm64 / minSdk 29 APK; the app launches, generates and persists an nsec, and
-shows its own npub; the macOS core build also compiles; none of the stripped
-net/roster/exit features remain.
+### N1 — Login
 
-**Design docs.** [architecture.md](./design/architecture.md) (reused-vs-net-new) ·
-[concepts.md](./design/concepts.md) (what we dropped vs keep) ·
-[identity-pairing.md](./design/identity-pairing.md) (identity storage) ·
-[config.md](./reference/config.md) (what is stripped from the config) ·
-[ffi-surface.md](./reference/ffi-surface.md) (the reducer + build path) ·
-[build.md](./how-to/build.md) (toolchain, local-fips wiring).
+**Goal.** Let a person bring their own Nostr identity instead of the generated
+guest user key, so what a napplet publishes is *them*. Two ways, one seam
+behind the runtime's `Signer`:
 
-## P1 — BLE peering over FIPS + developer UI (the de-risk milestone)
+- **Paste an `nsec`** (or scan it) into Settings › Identity. Stored like the
+  device key; replaces the guest user key; the guest profile is not re-published.
+- **Amber** (NIP-55, `nostrsigner:` intents): the key never enters Myco.
+  `Signer::sign` and `public_key` round-trip through the Amber app;
+  `publishEncrypted` becomes possible the same way. Falls back to the guest key
+  when Amber is absent or declines.
 
-**Goal.** The de-risk milestone: prove two devices can form a FIPS BLE link
-offline. Implement native `AndroidBleIo` (Kotlin owns the radio and hands raw
-bytes to Rust; FIPS keeps the pool, the cross-probe tiebreaker, the pubkey
-exchange, and Noise) and reuse the **macOS `BluestIo`** backend (the `bluest`
-CoreBluetooth crate; the fips branch `macos-ble-rebased` commit `0ae9e01`;
-`ble-macos` cargo feature; 2-byte length-prefix L2CAP framing) as the dev/test
-backend. Land **custom `BleIo` injection** (upstream `fips` hardwires `BluerIo`
-in `Node::new`; the seam is `BleTransport::new(.., io, ..)`). Solve the PSM
-problem with **universal per-peer PSM discovery**: every node advertises its
-OS-assigned listener PSM (service-data and/or a readable GATT characteristic)
-and every dialer reads the peer's PSM before `connect()` — symmetric, no fixed
-well-known PSM, and the smaller-`node_addr` tiebreaker works normally (no
-"Android must be central" constraint). Build a **debug Compose screen** — a
-diagnostic surface distinct from Library/Pair/Discover/Settings — that renders
-`BleStatus`/`BlePeer` from the existing FFI `ble` + `blePeers` state (adapter /
-scanning; per peer: `node_addr`, `npub` once Noise completes, connected, `psm`,
-`rssi`). No relay/Blossom/nsite/sync yet — this phase is purely the BLE link and
-its diagnostics.
+**Exit criterion.** A napplet's `identity.getPublicKey()` returns the chosen
+key; `relay.publish` produces an event signed by it; switching back to guest
+works; with Amber, no key material is ever on disk or in memory in Myco.
 
-**Exit criterion.** Two devices (Android↔Android and/or Android↔Mac), fully
-offline, form a FIPS BLE link via universal per-peer PSM discovery, and each
-shows the other connected in the developer UI (the peer's `node_addr`, then its
-`npub` once Noise completes).
+**Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.1
+(two identities) · [identity-pairing.md](./design/core/identity-pairing.md) §2 (storage).
 
-**Design docs.** [ble-interop.md](./design/ble-interop.md) (the BLE backends, the
-PSM problem, per-peer PSM discovery) ·
-[ffi-surface.md](./reference/ffi-surface.md) (the BLE byte-bridge, `ble` /
-`blePeers` state, the developer UI) ·
-[build.md § 4c](./how-to/build.md) (custom `BleIo` injection, per-peer PSM patch,
-reused macOS `BleIo`) ·
-[diagrams/01-system-layering.svg](./design/diagrams/01-system-layering.svg).
+### N2 — Drop mesh from nsites
 
-## P2 — Relay + Blossom + gateway (serve-direct)
+**Goal.** An nsite talks to `ws://localhost:4870` like any relay; today an
+event it publishes there is also flooded to the Circle at the default hop
+budget, and its `REQ`s are recreated against Circle members. That made sense
+before napplets; now the mesh is a *granted* capability (NAP-MESH) with a user
+cap, and an nsite has no grant and no review screen. Make the loopback relay
+socket **local-only**: nsite publishes are stored and shown here, forwarded
+nowhere; nsite subscriptions are not replayed to peers. Reaching the room is
+what a napplet is for.
 
-**Goal.** Embed, in Rust inside `myco-core`, both the relay and Blossom from day
-one — they are simple. **Blossom is always embedded** (`http://localhost:24243`,
-a small content-addressed HTTP store: `GET /<sha256>`, `PUT /upload`, `HEAD`);
-there is no good Android Blossom app to forward to. **The relay (`myco-relay`) is
-embedded too** (`ws://localhost:4870`) — a plain NIP-01 store + socket, with no
-forwarding behavior of its own — but the relay *backend* is a pluggable seam:
-default = embedded; optional = forward to a local relay app (e.g. Citrine) for
-devs who already run one. Add the localhost HTTP gateway on `127.0.0.1:80`,
-**serving direct** from the local relay + Blossom: per request for
-`http://<host>.nsite/<path>`, look up the manifest event (kinds 15128/35128) on
-the local relay, map `<path> → sha256`, fetch that blob from local Blossom,
-verify, and serve with a content-type inferred from the path extension — plus an
-"are all referenced blobs present?" check before serving (else the site is still
-syncing). The `*.nsite → 127.0.0.1` DNS interceptor plus binding loopback `:80`
-let `http://<host>.nsite` (no port) resolve in any browser on the device; the
-fallback is a high port for the in-app WebView only. No version dirs, no atomic
-swap, no sha→name file writing in v0. Open an nsite by launching a fullscreen
-`NsiteActivity` — a `WebView` filling the screen, no Myco chrome — in its own
-task. Add a minimal site-entry path — a one-time side-load/import of an
-externally-authored nsite (its already-signed manifest event + blobs) into the
-local stores — so there is something to load. The app never authors, signs, or
-publishes nsites; it only stores and serves events authored elsewhere. **The
-app-owned TUN patch** (the `VpnService` owns the fd; FIPS exchanges packet bytes
-over a channel; route only `fd00::/8`, DNS-intercept `*.fips`/`*.nsite`) is
-**first needed here** — sync over `.fips` arrives in P3 — landed as an upstream
-`fips` contribution with nostr-vpn's fork as the reference
-([build.md § 4c](./how-to/build.md)).
+**Exit criterion.** An nsite's publish is not seen on a paired phone; a
+napplet's `mesh.publish` still is; the chat nsite in the demo set is either
+ported to a napplet or documented as local-only.
 
-**Exit criterion.** A side-loaded nsite (authored by external tooling) launches
-as a fullscreen `NsiteActivity` (its own task) and loads end-to-end from
-`http://<host>.nsite` over the localhost gateway, served **direct** from the
-local relay + Blossom with hash verification — no htdocs cache, no network
-involved.
+**Design docs.** [event-gossip.md](./design/core/event-gossip.md) §0, §2.6 ·
+[nsite-permissions.md](./design/nsite/nsite-permissions.md) §3 (the `Origin`
+question this closes).
 
-**Design docs.** [nsite-layer.md](./design/nsite-layer.md) (the whole content
-layer) · [nostr-kinds.md](./reference/nostr-kinds.md) (manifest kinds + tags) ·
-[ports.md](./reference/ports.md) (localhost ports, the `:80` gateway,
-`*.nsite → 127.0.0.1`) · [build.md § 4c](./how-to/build.md) (the app-owned TUN
-patch) ·
-[diagrams/04-nsite-browse-flow.svg](./design/diagrams/04-nsite-browse-flow.svg).
+### N3 — Notifications
 
-## P3 — Handshake-mandatory pairing + sync + nsite-deck propagator
+**Goal.** NAP-NOTIFY for napplets — `notify.show` from a napplet becomes an
+Android notification in Myco's channel, tapping it deep-links back into the
+napplet — with the grant on the review screen and the permissions sheet. The
+Kotlin half exists for file offers (`FileOfferNotifier`); this generalises it.
+A closed napplet cannot notify (no background execution); a doorbell that
+should ring while the app is closed needs a Myco-side subscription, which is a
+later item.
 
-**Status (2026-06-16).** The exit-criterion path is **done** — B scans A's share
-QR and pulls A's nsite over the FIPS BLE mesh, opening it fullscreen, with A's
-events/blobs mirrored on B. What shipped is a **leaner** slice than the goal below
-plus two extras: the in-app **Circle** (paired peers as pull sources) and
-**Discovery** ("nsites around me"). **Deferred:** the mutual `pairSecret` echo
-(pairing is one-directional for now), the nsite-deck **propagator** (both-way
-gossip), **NIP-77 negentropy** reconcile, and **eager pinned-refresh** — pushed
-toward P5. The ambitious original scope is retained below as the target.
+**Exit criterion.** A napplet with `notify` granted posts a notification while
+its window is open; without the grant the call is refused; the notification
+opens the napplet.
 
-**Goal.** Reuse nostr-vpn's QR machinery (CameraX + ML Kit, deep-link intent),
-re-pointed at the `myco://pair/<base64>` payload, which now carries JSON
-`{ npub, name, pairSecret }`. **Pairing is handshake-mandatory and always
-mutual:** scanning initiates the **invite-pairing handshake**
-([identity-pairing.md § 6.1](./design/identity-pairing.md)) against the inviter's
-on-device `<npub>.fips` endpoint — the scanner echoes `pairSecret` back over that
-already Noise-encrypted channel, the inviter matches it and the user taps OK.
-`pairSecret` is a long, single-use random string that proves the peer scanned this
-invite (but grants no membership/admin authority); completion makes each device a
-mutual source. There
-is no one-way fetch-only scan. Wire the sync engine to pull a peer's manifest +
-blobs from `<npub>.fips:4870` / `:24243`, verify, and mirror into the local
-stores — running **over the BLE link from P1, or over IP**. **Stand up the
-nsite-deck propagator:** a separate **propagator** process inside `nsite-deck`
-(not the relay — `myco-relay` stays a plain store + socket) does all forwarding
-by **subscribing** to the relevant relays (local + connected peers) and
-**publishing** (`EVENT`) to peer relays, so manifests gossip **both ways**, not
-just A→B pull — with the minimal loop/dup guard (seen-set on the 16-byte
-SHA-256 event id + TTL 5). The same propagator keeps an internal subscription for
-kinds 15128/35128 and runs **eager pinned-refresh**: when a newer manifest for a
-Library-pinned `(author, dTag)` arrives, it auto-runs the blob pull in the
-background so pinned apps stay current and offline-ready before next open. Blobs
-stay pull-only. **Pull a basic negentropy (NIP-77) reconcile into this phase
-too**, so a (re)connecting peer efficiently catches up on missing manifests
-(`NEG-OPEN` on a manifest filter → fetch the diff), not by live forwarding alone
-— events only. See [nsite-layer.md § 2.1, § 2.4](./design/nsite-layer.md) and
-[propagation.md § 2, § 5](./design/propagation.md).
+**Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) S3 ·
+[NAP-NOTIFY](https://github.com/napplet/naps/pull/11) (registry draft).
 
-**Exit criterion.** Device B scans A's invite and completes the mandatory
-secret-echo handshake (both now mutual sources); over the BLE link from P1 (or an IP-based
-FIPS path), B syncs and opens A's nsite as a fullscreen app (its own task); B's
-local relay + Blossom now hold A's events and blobs; **a manifest accepted by
-either relay appears on the other via the propagator** (source-excluded, not
-re-echoed); **a peer that missed events catches up via a basic negentropy
-(NIP-77) reconcile** rather than re-pulling the full set; **and a newer manifest
-for a Library-pinned site triggers an automatic background blob pull**.
+### N4 — Amber login
 
-**Design docs.** [identity-pairing.md § 6.1](./design/identity-pairing.md) (the
-invite-pairing handshake, `pairSecret`, peer-as-source) ·
-[nsite-layer.md](./design/nsite-layer.md) (§5 sync over FIPS) ·
-[propagation.md](./design/propagation.md) (the propagator, fanout, eager
-pinned-refresh) · [ports.md](./reference/ports.md) (`.fips` vs `.nsite`, FSP
-port-mux) · [security.md](./design/security.md) (scan-and-confirm pairing,
-self-authenticating data) ·
-[diagrams/02-pairing-transitive-discovery.svg](./design/diagrams/02-pairing-transitive-discovery.svg).
+Folded into N1 as its second path; listed here because it is the one that
+matters to people who already have an identity. Ships after the paste path,
+on the same `Signer` seam.
 
-## P3.5 — Product UX (UI pass)
+### N5 — An app store napplet in place of the Discover tab
 
-**Goal.** Everything through P3 lives on a single scrolling **developer screen**
-(identity, BLE diagnostics, Circle, Discover, nsites, cache). Turn it into a real
-consumer UI **without changing the underlying FFI/state**: a home/Library of
-installed nsites, the Circle and Discover surfaces as first-class screens, the
-share / scan / pair flows as guided actions, and a cleaner nsite viewer. The
-developer screen stays reachable as a diagnostics view. Scope is **UI/UX only** —
-no new transport or sync behavior. Exact screens, navigation, and visual design
-to be scoped with the design pass.
+**Goal.** Retire the built-in Discover tab and ship "around me" as a
+**napplet** — the first-party app store. It lists what your Circle holds
+(nsites and napplets), shows who has each one, lets you install with one tap,
+and surfaces new arrivals — all through the NAPs everyone else gets: `mesh`
+for the room, `outbox` for reach beyond it, `resource` for icons, `intent`
+(N6+) to hand an install to Myco. Dogfoods the runtime on the one feature that
+needs every mesh capability, and lets the store evolve like any other app —
+shared, updated and forked over the mesh — instead of being frozen into a
+release.
 
-**Exit criterion.** A non-developer can pair with a peer, find an nsite (via a
-scanned QR or Discovery), open it, and manage their Library + Circle — without
-ever reading a raw npub or cache counter. (Specifics filled in as the UX is
-scoped.)
+**Exit criterion.** The Discover tab is gone; the store napplet ships
+preinstalled, lists the same holders and apps the tab did, installs from the
+list, and works with no internet. Needs an install intent (a napplet asking
+Myco to fetch and review an app by pointer) that cannot skip the review
+screen.
 
-**Design docs.** [app-shell.md](./design/app-shell.md) (screens + navigation) ·
-[ffi-surface.md](./reference/ffi-surface.md) (the state the UI renders — unchanged).
+**Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2b
+(intents) · [NAP-MESH](./design/napplet/NAP-MESH.md) · [circle.md](./design/circle/circle.md).
 
-## P4 — Full offline browse demo (the v1 headline)
+### N6 — Release the napplet runtime
 
-**Goal.** The v1 product headline. With the BLE link (P1), serve-direct gateway
-(P2), and handshake-mandatory pairing + sync (P3) all in place, run the whole
-relay/Blossom/sync stack over the BLE transport with **both devices in airplane
-mode, BLE on** — no IP path available. B pairs to A offline, syncs A's nsite
-over BLE, and browses it as a fullscreen app while both radios are dark.
+**Goal.** Cut v0.7.0 from `feat/napplet-runtime` after the two-phone checks:
+share a napplet by bump with no internet; doorbell rings across phones; a
+picture loads by `blossom:` from the other phone's store; permissions switch
+live. README and the intro diagrams updated to say "apps", not "sites".
 
-**Exit criterion.** Two Android phones, fully offline (airplane mode), form a
-one-hop BLE link; B opens A's nsite as a fullscreen app (its own task), A's
-events/blobs are cached on B, and `<npubA>.fips` resolves on B over the mesh DNS
-interceptor. This is the
-[run-two-device-demo.md](./how-to/run-two-device-demo.md) success condition.
-
-**Design docs.** [run-two-device-demo.md](./how-to/run-two-device-demo.md) (the
-runbook) · [ble-interop.md](./design/ble-interop.md) (the BLE transport under
-load) · [nsite-layer.md](./design/nsite-layer.md) (sync + serve over BLE) ·
-[ffi-surface.md](./reference/ffi-surface.md) (`siteStatus` / sync-state copy) ·
-[diagrams/01-system-layering.svg](./design/diagrams/01-system-layering.svg).
-
-## P5 — Propagation at scale (set-reconciliation + transitive discovery)
-
-**Goal.** Make a node a durable **new source** that survives the origin going
-offline, and scale the P3 propagator's per-link manifest forwarding across the
-pairing graph. The per-link manifest fanout and a basic negentropy reconcile
-already exist (P3); P5 adds the harder pieces: **negentropy (NIP-77)
-set-reconciliation at scale** (harden the P3 reconcile across the pairing graph
-— efficiently catching up on "what events do you have that I don't" rather than
-relying on live forwarding alone), the pairing-gated **transitive peer-list poll**
-so reach grows past directly paired peers, and **LRU eviction** (default 2 GB)
-with Library-pinned sites exempt. Blobs remain **pull-only**, now
-**pull-from-many** (any holder, verified by sig/hash).
-
-**Exit criterion.** With the origin (A) gone, a third device pulls A's site from
-a node (B) that only cached it earlier — verified by signature/hash — and a
-node receives flooded manifests for, and pulls from, a peer it never directly
-paired with.
-
-**Design docs.** [propagation.md](./design/propagation.md) (the whole phase) ·
-[nostr-kinds.md](./reference/nostr-kinds.md) (manifest kinds 15128/35128) ·
-[identity-pairing.md](./design/identity-pairing.md) (§6 transitive authorization) ·
-[security.md](./design/security.md) (why any source is trustworthy; propagation
-privacy) ·
-[diagrams/03-offline-propagation.svg](./design/diagrams/03-offline-propagation.svg).
-
-## P6 — Linux interop
-
-**Goal.** Validate wire compatibility against the reference `BluerIo`: an Android
-peer and a Linux peer form a FIPS BLE link, run the 33-byte pubkey pre-handshake
-and Noise IK, and sync an nsite — proving the Android and Linux backends match
-byte-for-byte. **Both directions work via universal per-peer PSM discovery:** the
-Linux node advertises its OS-assigned listener PSM the same as everyone else, and
-each dialer reads the peer's PSM before `connect()`. BlueZ is the outlier that
-*can* bind a fixed PSM, but Myco does not rely on it — **fixed-`0x0085` wire
-compat is intentionally dropped** (`0x0085` is only a legacy default), so there is
-no "Android dials `0x0085`" constraint and no deferred Linux-dials-Android special
-case. The per-peer PSM patch (advertise own PSM + read peer's PSM into
-`connect()`, across all backends) already landed at P1.
-
-**Exit criterion.** An Android phone and a Linux machine running `BluerIo` with
-per-peer PSM advertising form a FIPS BLE link (each reads the other's advertised
-PSM), and the Android browses an nsite hosted on the Linux peer (or vice-versa).
-
-**Design docs.** [ble-interop.md](./design/ble-interop.md) (Android↔Linux via
-per-peer PSM discovery) ·
-[build.md § 4c](./how-to/build.md) (the per-peer PSM patch, all backends).
+**Exit criterion.** Tagged, on GitHub Releases and Zapstore
+([publish.md](./how-to/publish.md)); the demo runbook passes on two phones.
 
 ---
 
 ## Later
 
-Out of scope for v1; each is its own milestone with its own design pass.
+Each its own milestone with its own design pass. Roughly in order of pull.
 
-- **htdocs serving cache.** A speed optimization on top of v0's serve-direct
-  gateway (nsite-deck's approach): write each referenced blob out as a path-named
-  file under a `current/` dir for fast static serving, rather than resolving
-  `<path> → sha256 →` blob per request. The content-addressed Blossom blob store
-  stays the retained store-and-forward source (and what the LRU 2 GB cap governs);
-  htdocs is a derived, path-named cache layered on top, not needed for v0 —
-  [nsite-layer.md](./design/nsite-layer.md).
-- **Home-screen pinning + app-shortcuts.** Offer "Add to home screen" for an
-  nsite via `ShortcutManager.requestPinShortcut()` (always user-confirmed — Android
-  shows a system dialog per pin; Myco cannot silently pin), plus dynamic
-  app-shortcuts. Knowing whether an nsite is pinned is best-effort only
-  (`getPinnedShortcuts()` is a soft hint; removal is under-reported and has no
-  callback), so the Library stays the source of truth for "installed" —
-  [nsite-layer.md](./design/nsite-layer.md),
-  [identity-pairing.md](./design/identity-pairing.md).
-- **Wi-Fi Aware bulk-lane transport.** A higher-throughput offline lane raised
-  beside BLE for larger nsites (measured BLE ceiling ~22 KB/s). Design in
-  [wifi-aware-interop.md](./design/wifi-aware-interop.md) — Wi-Fi Direct, this
-  bullet's original name, is demoted to fallback there.
-- **Public-node peering via Nostr discovery.** The online path: find and
-  rendezvous with peers over the internet using FIPS discovery kinds (37195
-  overlay advert, 21059 traversal signaling, 10050 inbox relays) and NAT
-  traversal. Documented but unused in v1 —
-  [nostr-kinds.md](./reference/nostr-kinds.md) (FIPS discovery kinds),
-  [config.md](./reference/config.md) (online relay set / bootstrap, TBD).
-- **nsite capability API.** Give nsite JavaScript a scoped capability surface
-  (e.g. query peers) beyond v1's pure-static content. A large trust escalation
-  needing a per-capability permission model — see
-  [security.md](./design/security.md) (§5) and
-  [nsite-layer.md](./design/nsite-layer.md) (§7).
-- **Open `*.nsite` / `*.nsite.lol` links in Myco.** Register intent filters for
-  nsite hostnames (the `.nsite` TLD and public gateways like `nsite.lol`) so tapping
-  such a link anywhere opens it in Myco — **downloading the nsite if not already
-  held** (source order in [nsite-layer.md](./design/nsite-layer.md) §5) — instead of
-  a browser. Cross-nsite links open each site as its own task
-  ([app-shell.md](./design/app-shell.md) §4).
-- **NAT46 for external browsers.** Let a browser *outside* the app (system
-  Chrome, etc.) reach mesh-hosted content, bridging the IPv4/IPv6 split beyond
-  the localhost gateway each `NsiteActivity` WebView uses —
-  [ports.md](./reference/ports.md),
-  [concepts.md](./design/concepts.md) (`.fips` vs `.nsite`).
-- **Multi-persona identity.** More than one keypair per device (independent
-  node_addr / ULA / Library) — [identity-pairing.md](./design/identity-pairing.md)
-  (§3).
-- **Relay / Blossom read-auth.** v0 is **open-read** — any connected peer can
-  `REQ` your relay and `GET` any blob, which lets a peer enumerate your manifest
-  set (what you hold / installed). Restrict it with NIP-42 `AUTH` on the relay,
-  per-peer read-scoping, and **unlisted/private nsites** + selective replication.
-  All additive (NIP-42 is non-breaking on the wire) —
-  [security.md](./design/security.md) (§3).
-- **Re-surfacing the FIPS peer ACL** as a "block this peer" control —
-  [security.md](./design/security.md) (§3).
+- **Eviction.** An LRU cap on the Blossom store (default 2 GB) with pinned apps
+  exempt; today the cache only shrinks when the user asks —
+  [nsite-layer.md](./design/nsite/nsite-layer.md) §6.
+- **Set reconciliation (NIP-77 negentropy)** between Circle members, so backlog
+  catch-up is a sync rather than a replay of every open subscription —
+  [propagation.md](./design/nsite/propagation.md) §5.
+- **Transitive reach.** Poll a Circle member's Circle (with their consent) so
+  discovery and pulls go past direct pairings —
+  [identity-pairing.md](./design/core/identity-pairing.md) §6.
+- **Peer permissions UI.** The per-peer record exists (`relay_write`,
+  `relay_read_multihop`, …) with defaults for everyone; a switch per Circle
+  member — [nsite-permissions.md](./design/nsite/nsite-permissions.md) §2.
+- **BUD-03 blob resolution.** A `blossom:sha256:` URI names no server, and
+  Myco resolves it against a fixed list of public replicas. Read the kind
+  10063 server lists of the authors a napplet has been reading from (cached
+  in the local relay like 10002), and the napplet manifest's `server` tags,
+  before the defaults — [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
+- **Blob privacy over the mesh.** Whether a napplet's `blossom:` miss should
+  ask every Circle member, or only the peer whose event referenced it —
+  [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
+- **One permission model for apps and peers.** Napplet grants (per capability,
+  per app) and Circle permissions (per peer) grew up apart. Bring them under
+  one structure, and use it to answer what a blanket `relay` grant leaves
+  open today: a napplet signs any kind as the user — profile (0), contacts
+  (3), relay list (10002), deletions (5) — with no prompt. Sensitive
+  replaceable kinds want a separate grant or a per-event confirmation; a
+  napplet naming its own relays (`options.relay`, conformant under shell
+  policy — [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2)
+  may want an allowlist or a grant of its own.
+- **Mesh rate limits and a trust model.** A napplet with the `mesh` grant can
+  publish or pull as often as it likes; each pull is a Circle-wide flood at
+  the user's hop cap, and one misbehaving app saturates the BLE lane for the
+  room. Nsites can already do this through the loopback relay. A per-session
+  token bucket is the cheap fix; what the mesh should trust from whom — apps,
+  peers, peers' peers — is the design pass behind it.
+- **Napplet replication and Discover.** Napplet manifests are gossip-eligible
+  as plain events; no download-then-forward, no Discover listing. An
+  installed napplet reaches another phone by the share handoff and the public
+  relays — [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.3.
+- **More NAPs.** `storage` (per-napplet key-value), `intent` + `inc` (open
+  another napplet by role; napplet-to-napplet channels), `theme`, `link`,
+  `config`; `resource` beyond `blossom:` (`https:`, `nostr:`, SVG
+  rasterization) — [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2b–S4.
+- **Background subscriptions.** A Myco-side subscription that survives the
+  napplet's window closing, so a doorbell can ring with the app closed. Needs
+  the notification path (N3) and a battery story.
+- **Relay read-auth.** The relay is open-read to Circle members; NIP-42 `AUTH`
+  and per-peer read scoping would let a member hold private apps —
+  [security.md](./design/core/security.md) §3.
+- **External browsers (NAT46 / `.nsite`).** Let system Chrome reach a site;
+  the in-process gateway serves only Myco's own WebViews —
+  [ports.md](./reference/ports.md) §3.
+- **Linux interop.** An Android phone and a Linux `BluerIo` node as a tested
+  BLE pair; the per-peer PSM patch already makes it possible —
+  [ble-interop.md](./design/fips/ble-interop.md).
+- **USB transport** for seeding large sites —
+  [usb-transport.md](./design/fips/usb-transport.md) (not started).
+- **Multi-persona.** More than one device key per phone —
+  [identity-pairing.md](./design/core/identity-pairing.md) §3.
+- **Public-node peering** over the internet via FIPS discovery kinds —
+  [nostr-kinds.md](./reference/nostr-kinds.md).
 
 ---
 
-## See also
+## The first plan, for the record
 
-- [getting-started.md](./getting-started.md) — orientation and the v1 demo in
-  three sentences.
-- [README.md](./README.md) — the full documentation index.
-- [how-to/build.md](./how-to/build.md) · [how-to/run-two-device-demo.md](./how-to/run-two-device-demo.md)
-  — the build and demo runbooks.
+| Phase | Was | Landed |
+| --- | --- | --- |
+| P0 | scaffold, FIPS up, identity persisted | v0.1 |
+| P1 | BLE peering with per-peer PSM discovery, developer UI | v0.1 |
+| P2 | relay + Blossom + gateway, an nsite as a full-screen task | v0.2 |
+| P3 | pairing + sync over the mesh; Circle; discovery | v0.3 |
+| P3.5 | the consumer UI (bottom-nav shell, sheets, intro, names) | v0.4 |
+| P4 | the two-phone airplane-mode demo | v0.4 |
+| P5 | propagation at scale | partly: gossip planes, backlog replay; not eviction or negentropy |
+| P6 | Linux interop | not as a tested pair |
+
+Beyond it: Wi-Fi Aware and the LAN lane (v0.5–0.6), multi-path (v0.6), file
+sharing, NFC, deep links, custom stores, and the napplet runtime (unreleased).

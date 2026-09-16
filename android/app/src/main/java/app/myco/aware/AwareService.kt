@@ -28,7 +28,7 @@ import app.myco.core.NativeActions
  * On stop it disables the lane (dropping the UDP transport) and shuts the radio
  * down, but deliberately does **not** stop the node — [app.myco.ble.BleService]
  * or the app may still want it. Node-lifecycle coordination between the two
- * radio services is intentionally simple; see docs/design/wifi-aware-interop.md.
+ * radio services is intentionally simple; see docs/design/fips/wifi-aware-interop.md.
  */
 class AwareService : Service() {
     private var radio: AwareRadio? = null

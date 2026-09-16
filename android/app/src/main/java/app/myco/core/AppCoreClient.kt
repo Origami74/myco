@@ -1,5 +1,6 @@
 package app.myco.core
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** A peer seen/connected over BLE (keyed by node_addr, not MAC). */
@@ -19,6 +20,11 @@ data class BleAdvert(
 )
 
 /** Per-site sync/readiness for an `OpenNsite` (keyed by the `<host>` label). */
+/** Whether an installed napplet can open: `ready`, or `missing` with a reason. */
+data class NappletStatus(val state: String, val message: String) {
+    val ready: Boolean get() = state == "ready"
+}
+
 data class SiteStatus(
     val host: String,
     val authorNpub: String,
@@ -37,13 +43,67 @@ data class SiteStatus(
 )
 
 /** A pinned/opened Library entry. */
+/**
+ * A napplet fetched and verified but **not installed**, waiting on review.
+ *
+ * Carries what the napplet *asked for*, never what it was given — a grant
+ * exists only once the user answers.
+ */
+/**
+ * The user's caps on NAP-MESH: the most hops a napplet's mesh publish and
+ * mesh subscribe may ask for. `0` means this phone only.
+ */
+data class NappletMeshReach(
+    val publishTtl: Int = 3,
+    val publishMax: Int = 3,
+    val subscribeTtl: Int = 2,
+    val subscribeMax: Int = 2,
+)
+
+data class NappletReview(
+    val pointer: String,
+    /** The fetch is still running; the sheet shows progress rather than a question. */
+    val loading: Boolean,
+    val title: String,
+    val description: String,
+    /** What it declared it needs — a statement of intent, not what it gets. */
+    val requires: List<String>,
+    /** What installing it would actually grant, defaults included. */
+    val grants: List<String>,
+    /** Non-empty when the fetch failed; show this instead of asking. */
+    val error: String,
+    /** The peer who shared it, if any — so a retry tries their phone first again. */
+    val holder: String? = null,
+)
+
+/** What kind of app a Library entry is. Unknown values read as [Nsite]. */
+enum class LibraryKind { Nsite, Napplet }
+
 data class LibraryItem(
     val authorNpub: String,
     val dTag: String?,
     val title: String,
     val urlHost: String,
     val pinned: Boolean,
-)
+    /** Defaults to [LibraryKind.Nsite], so entries written before napplets read back as what they are. */
+    val kind: LibraryKind = LibraryKind.Nsite,
+    /** Capability domains install review granted. Napplets only. */
+    val granted: List<String> = emptyList(),
+    /** The pointer it was added by — an `naddr` when there was one. */
+    val pointer: String = "",
+) {
+    /**
+     * How to reach this napplet again.
+     *
+     * The stored `naddr` when there is one, because it carries the author's own
+     * relay hints — often the only relays that hold the napplet. Falling back
+     * to `<npub>:<dtag>` loses them and searches blind.
+     */
+    val nappletPointer: String
+        get() = pointer.ifEmpty {
+            if (dTag.isNullOrEmpty()) authorNpub else "$authorNpub:$dTag"
+        }
+}
 
 /** Local relay/Blossom counts. */
 data class CacheStatus(
@@ -250,6 +310,17 @@ data class AppState(
     val wifiAwareScanningKnown: Boolean = false,
     val sites: List<SiteStatus>,
     val library: List<LibraryItem>,
+    /** A fetched napplet awaiting install review, or null. */
+    val nappletReview: NappletReview? = null,
+    /**
+     * Whether each installed napplet can open right now, keyed by the Library
+     * entry's `urlHost`. Missing from the map means not yet computed.
+     */
+    val nappletStatus: Map<String, NappletStatus> = emptyMap(),
+    /** How far napplets may reach over the mesh (NAP-MESH), and the most each cap may be. */
+    val nappletMeshReach: NappletMeshReach = NappletMeshReach(),
+    /** Every capability Myco can grant a napplet, in sheet order. */
+    val nappletDomains: List<String> = emptyList(),
     val cache: CacheStatus,
     val circle: List<CircleContact>,
     /** Circle members with a live mesh relay connection right now — reachable
@@ -331,6 +402,22 @@ data class AppState(
                     }
                 }
             }
+            val reviewJson = o.optJSONObject("nappletReview")
+            val nappletReview = if (reviewJson == null) null else NappletReview(
+                pointer = reviewJson.optString("pointer"),
+                loading = reviewJson.optBoolean("loading"),
+                title = reviewJson.optString("title"),
+                description = reviewJson.optString("description"),
+                requires = reviewJson.optJSONArray("requires")?.let { r ->
+                    (0 until r.length()).map { r.optString(it) }
+                }.orEmpty(),
+                grants = reviewJson.optJSONArray("grants")?.let { g ->
+                    (0 until g.length()).map { g.optString(it) }
+                }.orEmpty(),
+                error = reviewJson.optString("error"),
+                holder = reviewJson.optString("holder").ifEmpty { null },
+            )
+
             val libraryJson = o.optJSONArray("library")
             val library = buildList {
                 if (libraryJson != null) {
@@ -343,6 +430,18 @@ data class AppState(
                                 title = l.optString("title"),
                                 urlHost = l.optString("urlHost"),
                                 pinned = l.optBoolean("pinned"),
+                                // Anything unrecognised reads as an nsite — the
+                                // conservative default, and what every entry
+                                // written before napplets existed is.
+                                kind = if (l.optString("kind") == "napplet") {
+                                    LibraryKind.Napplet
+                                } else {
+                                    LibraryKind.Nsite
+                                },
+                                granted = l.optJSONArray("granted")?.let { g ->
+                                    (0 until g.length()).map { g.optString(it) }
+                                }.orEmpty(),
+                                pointer = l.optString("pointer"),
                             )
                         )
                     }
@@ -549,6 +648,29 @@ data class AppState(
                 wifiAwareScanningKnown = wifiAware.optBoolean("scanningKnown"),
                 sites = sites,
                 library = library,
+                nappletReview = nappletReview,
+                nappletStatus = o.optJSONArray("nappletStatus")?.let { arr ->
+                    buildMap {
+                        for (i in 0 until arr.length()) {
+                            val st = arr.optJSONObject(i) ?: continue
+                            val host = st.optString("host")
+                            if (host.isNotEmpty()) {
+                                put(host, NappletStatus(st.optString("state"), st.optString("message")))
+                            }
+                        }
+                    }
+                }.orEmpty(),
+                nappletDomains = o.optJSONArray("nappletDomains")?.let { d ->
+                    (0 until d.length()).map { d.optString(it) }
+                }.orEmpty(),
+                nappletMeshReach = o.optJSONObject("nappletMeshReach")?.let { r ->
+                    NappletMeshReach(
+                        publishTtl = r.optInt("publishTtl", 3),
+                        publishMax = r.optInt("publishMax", 3),
+                        subscribeTtl = r.optInt("subscribeTtl", 2),
+                        subscribeMax = r.optInt("subscribeMax", 2),
+                    )
+                } ?: NappletMeshReach(),
                 cache = cache,
                 circle = circle,
                 reachableNpubs = buildSet {
@@ -652,6 +774,57 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
         return GatewayResult.decode(framed)
     }
 
+    // --- napplets --------------------------------------------------------
+
+    /**
+     * Resolve and verify a napplet, and open a session for one window.
+     *
+     * Grants come from the Library, read on the Rust side — not passed from
+     * here, so an intent cannot supply them. A napplet that fails verification
+     * returns an error rather than a session; there is no partial success.
+     */
+    fun nappletOpen(pointer: String): NappletOpen =
+        NappletOpen.parse(NativeCore.nappletOpen(requireHandle(), pointer))
+
+    /**
+     * Carry one frame from a window's shell to Rust, and return the frames to
+     * send back. Empty is normal — a duplicate handshake, or an unrecognized
+     * message that NIP-5D says to ignore in silence.
+     */
+    fun nappletFrame(sessionId: String, frameJson: String): List<String> {
+        val raw = NativeCore.nappletFrame(requireHandle(), sessionId, frameJson)
+        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+        return (0 until array.length()).map { array.getJSONObject(it).toString() }
+    }
+
+    /**
+     * Wait for frames the runtime wants to send this window unprompted — a
+     * subscription delivering an event that arrived after the napplet
+     * subscribed, whether published here or carried from a peer.
+     *
+     * **Blocks** for up to [timeoutMs]. Background thread only.
+     */
+    fun nappletNextFrames(sessionId: String, timeoutMs: Long): List<String> {
+        val raw = NativeCore.nappletNextFrames(requireHandle(), sessionId, timeoutMs)
+        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+        return (0 until array.length()).map { array.getJSONObject(it).toString() }
+    }
+
+    /** Drop a window's session. Rust ignores every later frame for it. */
+    fun nappletClose(sessionId: String) {
+        NativeCore.nappletClose(requireHandle(), sessionId)
+    }
+
+    /** The shell page — trusted HTML compiled into the runtime, not an asset. */
+    fun nappletShellPage(): String = NativeCore.nappletShellPage()
+
+    /**
+     * The name the capability channel is injected under. Read from Rust rather
+     * than written twice, so the shell page and the code registering its channel
+     * cannot disagree about it.
+     */
+    fun nappletRuntimeObject(): String = NativeCore.nappletRuntimeObject()
+
     override fun close() {
         val current = handle
         if (current != 0L) {
@@ -747,6 +920,56 @@ object NativeActions {
     fun forgetNsite(link: String): JSONObject =
         JSONObject().put("type", "forget_nsite").put("link", link)
     fun checkNsiteUpdates(): JSONObject = JSONObject().put("type", "check_nsite_updates")
+
+    /**
+     * Fetch + verify a napplet without installing it. Reports what it
+     * `requires` so the review screen can ask; grants nothing on its own.
+     */
+    fun fetchNapplet(pointer: String, holder: String? = null): JSONObject =
+        JSONObject()
+            .put("type", "fetch_napplet")
+            .put("pointer", pointer)
+            .apply { if (!holder.isNullOrEmpty()) put("holder", holder) }
+
+    /** Record what review granted, and pin the napplet to the Library. */
+    fun installNapplet(pointer: String, granted: List<String>): JSONObject {
+        val list = JSONArray()
+        for (domain in granted) list.put(domain)
+        return JSONObject()
+            .put("type", "install_napplet")
+            .put("pointer", pointer)
+            .put("granted", list)
+    }
+
+    /** Unpin a napplet and drop its grants. */
+    /**
+     * Cap how far napplets reach over the mesh: the most hops a `mesh.publish`
+     * and a `mesh.subscribe` backlog pull may ask for. Live at once — the next
+     * call a napplet makes sees it.
+     */
+    fun setNappletMeshReach(publishTtl: Int, subscribeTtl: Int): JSONObject =
+        JSONObject()
+            .put("type", "set_napplet_mesh_reach")
+            .put("publishTtl", publishTtl)
+            .put("subscribeTtl", subscribeTtl)
+
+    /**
+     * Allow or withdraw one capability for an installed napplet. Live: an open
+     * window sees it on its next call.
+     */
+    fun setNappletGrant(pointer: String, domain: String, allowed: Boolean): JSONObject =
+        JSONObject()
+            .put("type", "set_napplet_grant")
+            .put("pointer", pointer)
+            .put("domain", domain)
+            .put("allowed", allowed)
+
+    fun forgetNapplet(pointer: String): JSONObject =
+        JSONObject().put("type", "forget_napplet").put("pointer", pointer)
+
+    /** Close review without installing. Nothing is granted. */
+    fun dismissNappletReview(): JSONObject =
+        JSONObject().put("type", "dismiss_napplet_review")
     fun wipeStores(): JSONObject = JSONObject().put("type", "wipe_stores")
     /** Clear cached relay/Blossom data but keep pinned nsites (Storage → "Delete cache"). */
     fun wipeCache(): JSONObject = JSONObject().put("type", "wipe_cache")
@@ -836,4 +1059,32 @@ object NativeActions {
 
     fun forgetFileTransfer(transferId: String): JSONObject =
         JSONObject().put("type", "forget_file_transfer").put("transferId", transferId)
+}
+
+/**
+ * The result of asking Rust to open a napplet.
+ *
+ * A failure carries [error] and nothing else — no session was created, so there
+ * is nothing to render or clean up.
+ */
+data class NappletOpen(
+    val ok: Boolean,
+    val sessionId: String,
+    val shellHost: String,
+    val title: String?,
+    val error: String?,
+) {
+    companion object {
+        fun parse(json: String): NappletOpen {
+            val o = runCatching { JSONObject(json) }.getOrNull()
+                ?: return NappletOpen(false, "", "", null, "unreadable native response")
+            return NappletOpen(
+                ok = o.optBoolean("ok", false),
+                sessionId = o.optString("sessionId"),
+                shellHost = o.optString("shellHost"),
+                title = o.optString("title").ifEmpty { null },
+                error = o.optString("error").ifEmpty { null },
+            )
+        }
+    }
 }

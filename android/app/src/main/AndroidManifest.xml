@@ -13,7 +13,7 @@
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <!-- Wi-Fi Aware bulk lane (docs/design/wifi-aware-interop.md). Runtime
+    <!-- Wi-Fi Aware bulk lane (docs/design/fips/wifi-aware-interop.md). Runtime
          permission on API 33+; declares it never derives location. -->
     <uses-permission
         android:name="android.permission.NEARBY_WIFI_DEVICES"
@@ -103,6 +103,23 @@
              `always` would (wrongly) spawn a new task every launch. -->
         <activity
             android:name=".NsiteActivity"
+            android:exported="false"
+            android:documentLaunchMode="intoExisting"
+            android:autoRemoveFromRecents="false"
+            android:theme="@style/Theme.Myco.Splash"
+            android:windowSoftInputMode="adjustResize"
+            android:label="@string/app_name" />
+
+        <!--
+          One napplet per task, like an nsite — but its own Activity, because the
+          trust boundary differs: this one hosts a capability channel and runs
+          untrusted code in a sandboxed iframe. Not exported: a napplet is opened
+          from the Apps panel or through Myco's own deep-link handler, never by
+          another app addressing this class directly. An inbound intent may open
+          a napplet and carry a payload; it may never grant a capability.
+        -->
+        <activity
+            android:name=".NappletActivity"
             android:exported="false"
             android:documentLaunchMode="intoExisting"
             android:autoRemoveFromRecents="false"
