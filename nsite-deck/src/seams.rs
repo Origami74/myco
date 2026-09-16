@@ -105,6 +105,16 @@ pub trait BlobStore: Send + Sync {
     /// the bytes hash to `sha256_hex` and treat a mismatch as absent/corrupt.
     async fn get(&self, sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>>;
 
+    /// The size in bytes of a stored blob; `None` if absent.
+    ///
+    /// Lets a caller with a size cap refuse a blob before reading it. The
+    /// default reads the blob and measures it, which is correct for a store
+    /// that holds bytes in memory anyway; a store on disk should answer from
+    /// metadata instead.
+    async fn size(&self, sha256_hex: &str) -> anyhow::Result<Option<u64>> {
+        Ok(self.get(sha256_hex).await?.map(|bytes| bytes.len() as u64))
+    }
+
     /// Store bytes, keyed by `sha256(bytes)`; returns the sha256 hex.
     async fn put(&self, bytes: &[u8]) -> anyhow::Result<String>;
 

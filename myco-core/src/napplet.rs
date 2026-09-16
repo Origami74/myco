@@ -61,10 +61,21 @@ impl NappletAddr {
     /// The scheme is stripped rather than interpreted: what identifies a napplet
     /// is the `naddr` inside it, and a `napplet:` URI wrapping something that is
     /// not one is not a napplet however it is spelled.
+    ///
+    /// An alphanumeric-mode QR code yields `NOSTR:NADDR1…`. Bech32 is valid
+    /// all-upper or all-lower (mixed case is not), so an upper-case `naddr`
+    /// or `npub` is lowered before decoding; the `d` tag of the shorthand is
+    /// never touched — it is a name, not an encoding.
     pub fn parse(pointer: &str) -> anyhow::Result<Self> {
         let pointer = Self::strip_scheme(pointer.trim());
-        if pointer.starts_with("naddr1") {
-            let coordinate = nostr::nips::nip19::Nip19Coordinate::from_bech32(pointer)
+        // `get`, not a byte slice: the prefix test must not cut a multibyte
+        // character (H1's rule).
+        if pointer
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("naddr1"))
+        {
+            let lowered = pointer.to_ascii_lowercase();
+            let coordinate = nostr::nips::nip19::Nip19Coordinate::from_bech32(&lowered)
                 .map_err(|e| anyhow::anyhow!("not a valid naddr: {e}"))?;
             let kind = coordinate.coordinate.kind.as_u16();
             anyhow::ensure!(
@@ -83,7 +94,7 @@ impl NappletAddr {
             Some((npub, d)) => (npub, (!d.is_empty()).then(|| d.to_string())),
             None => (pointer, None),
         };
-        let author = PublicKey::from_bech32(npub)
+        let author = PublicKey::from_bech32(&npub.to_ascii_lowercase())
             .map_err(|e| anyhow::anyhow!("not a valid npub or naddr: {e}"))?;
         Ok(Self {
             author,
@@ -1891,6 +1902,35 @@ mod tests {
                 "{pointer:?} should be refused"
             );
         }
+    }
+
+    /// An alphanumeric-mode QR code carries the pointer upper-cased. Bech32
+    /// decodes either case, and Kotlin already routes `NOSTR:NADDR1…` here —
+    /// L4 of the PR #52 review, where Rust then refused it.
+    #[test]
+    fn an_upper_case_naddr_from_an_alphanumeric_qr_parses() {
+        let naddr = "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyxhwumn8ghj7mn0wvhxcmmvqy2hwumn8ghj7un9d3shjtnyd968gmewwp6kyqqgv35kuemydahxwmmmsd2";
+        let lower = NappletAddr::parse(naddr).unwrap();
+        let upper = naddr.to_uppercase();
+        assert_eq!(NappletAddr::parse(&upper).unwrap(), lower);
+        assert_eq!(
+            NappletAddr::parse(&format!("NOSTR:{upper}")).unwrap(),
+            lower
+        );
+        assert_eq!(
+            NappletAddr::parse(&format!("NAPPLET://{upper}")).unwrap(),
+            lower
+        );
+
+        // The shorthand: the npub is lowered, the d tag is kept as given.
+        let keys = nostr::Keys::generate();
+        let npub = keys.public_key().to_bech32().unwrap().to_uppercase();
+        let named = NappletAddr::parse(&format!("{npub}:MixedCase")).unwrap();
+        assert_eq!(named.author, keys.public_key());
+        assert_eq!(named.d_tag.as_deref(), Some("MixedCase"));
+        let root = NappletAddr::parse(&npub).unwrap();
+        assert_eq!(root.author, keys.public_key());
+        assert_eq!(root.d_tag, None);
     }
 
     /// An naddr naming an nsite is not a napplet. Distinct kinds are what keep

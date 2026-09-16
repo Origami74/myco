@@ -26,7 +26,10 @@
 //! message reaches the napplet, which is what the vendored shim resolves
 //! `resource.bytes()` with. `mime` is sniffed from the bytes here, never
 //! taken from anyone's header — and raw SVG is refused rather than delivered,
-//! since this runtime has no sandboxed rasterizer to make it safe.
+//! since this runtime has no sandboxed rasterizer to make it safe. The sniff
+//! looks for `<svg` across the whole body, not a leading window, so a prolog
+//! or comment long enough to push it past the first kilobyte does not
+//! smuggle it through as XML.
 
 use base64::Engine;
 use nsite_deck::sync::sha256_hex;
@@ -178,6 +181,23 @@ impl Failure {
 /// Resolve one URL: parse, local store, fetcher, verify, store, classify.
 async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
     let sha = parse_blossom_url(url)?;
+
+    // Size before read: the local store may hold an nsite asset far over the
+    // cap (Blossom accepts uploads to 64 MiB), and a `bytesMany` naming it a
+    // hundred times must not read it a hundred times to say `too-large`.
+    let local_size = ctx
+        .blobs
+        .size(&sha)
+        .await
+        .map_err(|e| Failure::new("network-error", format!("local store: {e}")))?;
+    if let Some(size) = local_size {
+        if size > MAX_BYTES as u64 {
+            return Err(Failure::new(
+                "too-large",
+                format!("{size} bytes, cap is {MAX_BYTES}"),
+            ));
+        }
+    }
 
     let stored = ctx
         .blobs
@@ -341,13 +361,20 @@ pub fn sniff_mime(bytes: &[u8]) -> &'static str {
     }
 
     // Text. Look for SVG before anything else claims it: an SVG is XML, and
-    // XML is text, and text would be delivered.
+    // XML is text, and text would be delivered. Whether the body is text is
+    // decided on its first kilobyte — a multibyte character cut by the window
+    // is tolerated — and the search then runs over the **whole** body: an XML
+    // prolog or a comment can put `<svg` anywhere. Byte windows, no
+    // allocation, O(n) over at most `MAX_BYTES`.
     let head = &bytes[..bytes.len().min(1024)];
-    if let Ok(text) = std::str::from_utf8(head) {
-        let lower = text.to_ascii_lowercase();
-        if lower.contains("<svg") {
-            return "image/svg+xml";
-        }
+    let head_is_text = match std::str::from_utf8(head) {
+        Ok(_) => true,
+        // `error_len() == None` is an incomplete sequence at the very end of
+        // the window — a character the cut split, not bad UTF-8.
+        Err(e) => e.error_len().is_none() && head.len() - e.valid_up_to() < 4,
+    };
+    if head_is_text && bytes.windows(4).any(|w| w.eq_ignore_ascii_case(b"<svg")) {
+        return "image/svg+xml";
     }
     if let Ok(text) = std::str::from_utf8(bytes) {
         let trimmed = text.trim_start();
@@ -530,6 +557,120 @@ mod tests {
         )
         .await;
         assert_eq!(r["error"], "blocked-by-policy");
+    }
+
+    /// `<svg` past the first kilobyte is still SVG: the sniff runs over the
+    /// whole body, so a long prolog or comment cannot turn it into deliverable
+    /// XML — L6 of the PR #52 review.
+    #[tokio::test]
+    async fn an_svg_past_the_first_kilobyte_is_still_svg() {
+        let mut svg = b"<?xml version=\"1.0\"?>\n<!-- ".to_vec();
+        svg.extend(std::iter::repeat_n(b'x', 1_100));
+        svg.extend_from_slice(
+            b" -->\n<svg xmlns=\"http://www.w3.org/2000/svg\"><script>1</script></svg>",
+        );
+        assert_eq!(sniff_mime(&svg), "image/svg+xml");
+        // Case does not hide it either.
+        let shouted = String::from_utf8(svg.clone())
+            .unwrap()
+            .replace("<svg", "<SVG");
+        assert_eq!(sniff_mime(shouted.as_bytes()), "image/svg+xml");
+        // A split multibyte character at the window's edge is still text.
+        let mut split = vec![b' '; 1_023];
+        split.extend_from_slice("é".as_bytes());
+        split.extend_from_slice(b"<svg/>");
+        assert_eq!(sniff_mime(&split), "image/svg+xml");
+        // And XML without an svg stays XML.
+        let mut xml = b"<?xml version=\"1.0\"?><!-- ".to_vec();
+        xml.extend(std::iter::repeat_n(b'x', 1_100));
+        xml.extend_from_slice(b" --><doc/>");
+        assert_eq!(sniff_mime(&xml), "application/xml");
+
+        let (ctx, _fetcher) = test_context_with_fetcher();
+        let sha = ctx.blobs.put(&svg).await.unwrap();
+        let r = call(
+            &ctx,
+            Envelope::new("resource.bytes")
+                .with_id("b1")
+                .with_field("url", format!("blossom:sha256:{sha}")),
+        )
+        .await;
+        assert_eq!(r["type"], "resource.bytes.error");
+        assert_eq!(r["error"], "blocked-by-policy");
+    }
+
+    /// A [`BlobStore`](nsite_deck::seams::BlobStore) that counts reads, so a
+    /// test can prove a blob was refused from its size alone.
+    struct CountingBlobs {
+        inner: nsite_deck::testing::MemBlobs,
+        gets: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl nsite_deck::seams::BlobStore for CountingBlobs {
+        async fn has(&self, sha256_hex: &str) -> bool {
+            self.inner.has(sha256_hex).await
+        }
+        async fn get(&self, sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
+            self.gets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.get(sha256_hex).await
+        }
+        async fn size(&self, sha256_hex: &str) -> anyhow::Result<Option<u64>> {
+            self.inner.size(sha256_hex).await
+        }
+        async fn put(&self, bytes: &[u8]) -> anyhow::Result<String> {
+            self.inner.put(bytes).await
+        }
+        async fn wipe(&self) -> anyhow::Result<()> {
+            self.inner.wipe().await
+        }
+    }
+
+    /// An oversized blob already in the local store is refused from its size
+    /// and never read: `bytesMany` naming one 64 MiB asset a hundred times
+    /// must not allocate it a hundred times to say `too-large` — L8 of the
+    /// PR #52 review.
+    #[tokio::test]
+    async fn an_oversized_local_blob_is_refused_without_being_read() {
+        use nsite_deck::seams::BlobStore as _;
+
+        let (mut ctx, fetcher) = test_context_with_fetcher();
+        let counting = std::sync::Arc::new(CountingBlobs {
+            inner: nsite_deck::testing::MemBlobs::new(),
+            gets: std::sync::atomic::AtomicUsize::new(0),
+        });
+        ctx.blobs = counting.clone();
+        let big = vec![9u8; MAX_BYTES + 1];
+        let sha = counting.put(&big).await.unwrap();
+        let small = counting.put(PNG).await.unwrap();
+
+        let r = call(
+            &ctx,
+            Envelope::new("resource.bytesMany")
+                .with_id("m1")
+                .with_field(
+                    "urls",
+                    json!([
+                        format!("blossom:sha256:{sha}"),
+                        format!("blossom:sha256:{sha}"),
+                        format!("blossom:sha256:{small}"),
+                    ]),
+                ),
+        )
+        .await;
+        let items = r["items"].as_array().unwrap();
+        assert_eq!(items[0]["error"], "too-large");
+        assert_eq!(items[1]["error"], "too-large");
+        assert_eq!(
+            items[2]["ok"], true,
+            "the small blob beside it is delivered"
+        );
+        assert_eq!(
+            counting.gets.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the oversized blob was read"
+        );
+        assert!(fetcher.asked().is_empty(), "a stored blob was fetched");
     }
 
     /// Bulk: order and length preserved, one failure beside its successful

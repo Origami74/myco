@@ -21,13 +21,11 @@ pub async fn handle(ctx: &NapContext, message: &Envelope) -> Vec<Envelope> {
     match message.action() {
         "getPublicKey" => vec![get_public_key(ctx, message).await],
         "getProfile" => vec![get_profile(ctx, message).await],
+        "getRelays" => vec![get_relays(ctx, message).await],
         // Every other query is defined by the NAP but not answered yet. An
         // empty answer is the truthful one for a runtime with nothing to say —
         // and it is the shape the spec gives for "nothing found", so a napplet
         // handles it on a path it already has.
-        "getRelays" => vec![message
-            .to_result()
-            .with_field("relays", serde_json::json!({}))],
         "getFollows" | "getMutes" | "getBlocked" | "getBadges" | "getZaps" | "getList" => {
             vec![message
                 .to_result()
@@ -77,6 +75,56 @@ async fn get_profile(ctx: &NapContext, message: &Envelope) -> Envelope {
         .unwrap_or(serde_json::Value::Null);
 
     message.to_result().with_field("profile", profile)
+}
+
+/// The user's NIP-65 relay list, in the NIP-07 shape:
+/// `{ "<url>": { "read": bool, "write": bool } }`, `{}` when there is none.
+///
+/// Read from the user's newest kind 10002 — the one the runtime publishes at
+/// first use and `outbox.resolveRelays` plans by — so a napplet that asks
+/// here first sees the same relays the outbox will use, not an empty map
+/// that says the user has none. An `r` tag with no marker is read and
+/// write; `read` or `write` narrows it to that side.
+async fn get_relays(ctx: &NapContext, message: &Envelope) -> Envelope {
+    let Ok(pubkey) = ctx.signer.public_key().await else {
+        return message
+            .to_result()
+            .with_field("relays", serde_json::json!({}));
+    };
+
+    let filter = Filter::new().kind(Kind::RelayList).author(pubkey).limit(1);
+    let newest = ctx
+        .relay
+        .query(&[filter])
+        .await
+        .ok()
+        .and_then(|events| events.into_iter().max_by_key(|e| e.created_at));
+
+    let mut relays = serde_json::Map::new();
+    if let Some(event) = newest {
+        for tag in event.tags.iter() {
+            let parts = tag.as_slice();
+            if parts.first().map(String::as_str) != Some("r") {
+                continue;
+            }
+            let Some(url) = parts.get(1).filter(|u| !u.is_empty()) else {
+                continue;
+            };
+            let (read, write) = match parts.get(2).map(String::as_str) {
+                Some("read") => (true, false),
+                Some("write") => (false, true),
+                _ => (true, true),
+            };
+            relays.insert(
+                url.clone(),
+                serde_json::json!({ "read": read, "write": write }),
+            );
+        }
+    }
+
+    message
+        .to_result()
+        .with_field("relays", serde_json::Value::Object(relays))
 }
 
 #[cfg(test)]
@@ -173,6 +221,58 @@ mod tests {
         };
         let reply = call(&ctx, "getProfile").await;
         assert_eq!(reply.field("profile").unwrap()["name"], "Myco Guest 01234");
+    }
+
+    /// `getRelays` answers the user's kind 10002 in the NIP-07 shape, and
+    /// `{}` when none was published — L7 of the PR #52 review, where it
+    /// always answered `{}` and a napplet concluded the user had no relays.
+    #[tokio::test]
+    async fn get_relays_reflects_the_users_relay_list() {
+        let keys = Keys::generate();
+        let relay = Arc::new(MemRelay::new());
+        let ctx = NapContext {
+            signer: Arc::new(TestSigner::with_keys(keys.clone())),
+            relay: relay.clone(),
+            sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
+            mesh: Arc::new(crate::testing::MemMesh::new(
+                relay.clone(),
+                crate::seams::MeshLimits {
+                    publish_ttl: 3,
+                    subscribe_ttl: 2,
+                },
+            )),
+            outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
+            lanes: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
+            blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
+            fetcher: Arc::new(crate::seams::NoFetcher),
+        };
+
+        let reply = call(&ctx, "getRelays").await;
+        assert_eq!(reply.field("relays").unwrap(), &serde_json::json!({}));
+
+        let list = EventBuilder::new(nostr::Kind::RelayList, "")
+            .tags([
+                nostr::Tag::parse(["r", "wss://a"]).unwrap(),
+                nostr::Tag::parse(["r", "wss://b", "read"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        relay.publish(list).await.unwrap();
+        // Somebody else's list is not the user's.
+        let other = EventBuilder::new(nostr::Kind::RelayList, "")
+            .tags([nostr::Tag::parse(["r", "wss://theirs"]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        relay.publish(other).await.unwrap();
+
+        let reply = call(&ctx, "getRelays").await;
+        assert_eq!(
+            reply.field("relays").unwrap(),
+            &serde_json::json!({
+                "wss://a": { "read": true, "write": true },
+                "wss://b": { "read": true, "write": false },
+            })
+        );
     }
 
     #[tokio::test]

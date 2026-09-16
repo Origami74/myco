@@ -148,6 +148,18 @@ impl BlobStore for FsBlobStore {
         }
     }
 
+    /// From the file's metadata: a size question must not cost a read of
+    /// the whole blob, which is exactly what a caller with a cap asks it to
+    /// avoid.
+    async fn size(&self, sha256_hex: &str) -> anyhow::Result<Option<u64>> {
+        let path = self.blob_path(&sha256_hex.to_ascii_lowercase());
+        match std::fs::metadata(&path) {
+            Ok(meta) => Ok(Some(meta.len())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn put(&self, bytes: &[u8]) -> anyhow::Result<String> {
         let hash = sha256_hex(bytes);
         let dest = self.blob_path(&hash);
@@ -179,6 +191,25 @@ mod tests {
 
     fn tmp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("myco-blossom-test-{}-{}", std::process::id(), tag))
+    }
+
+    /// `size` answers from metadata, and agrees with what was put.
+    #[tokio::test]
+    async fn size_matches_what_was_put() {
+        let dir = tmp("size");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = FsBlobStore::open(&dir).unwrap();
+
+        let bytes = vec![3u8; 12_345];
+        let hash = store.put(&bytes).await.unwrap();
+        assert_eq!(store.size(&hash).await.unwrap(), Some(12_345));
+        assert_eq!(
+            store.size(&hash.to_ascii_uppercase()).await.unwrap(),
+            Some(12_345)
+        );
+        assert_eq!(store.size(&"0".repeat(64)).await.unwrap(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

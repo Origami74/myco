@@ -122,9 +122,19 @@ async fn pool_lanes(ctx: &NapContext) -> Vec<RelayLane> {
 /// in the pool — the pull lands in the local relay, and the local relay is
 /// what delivers. `EOSE` therefore marks the end of *this device's* backlog.
 ///
-/// `options.relay` targets one relay instead of the pool (NIP-29 groups are
-/// the spec's example). It is validated like any napplet-named relay, and the
-/// local backlog is skipped — the napplet asked for that relay's view.
+/// A top-level `relay` field targets one relay instead of the pool (NIP-29
+/// groups are the spec's example). That is how the vendored shim sends it
+/// (`subscribe5` spreads `options.relay` to the top of the frame and never
+/// sends `options`); `options.relay` is read as a fallback for a client that
+/// spells it the other way. It is validated like any napplet-named relay,
+/// and the local backlog is skipped — the napplet asked for that relay's
+/// view.
+///
+/// Every refusal after the `subId` is known goes out as `relay.closed` with
+/// that id and a reason: it is the one frame the shim's `subscribe5` listens
+/// for, so a `.result` carrying an error would be dropped on the floor and
+/// the napplet's listener would wait for the page's life. A frame with no
+/// `subId` has nothing to close and keeps the generic error.
 ///
 /// The filters are registered **before** the stored events are read, so an
 /// event that lands between the two is delivered by the live path rather than
@@ -143,15 +153,22 @@ async fn subscribe(
 
     let filters = match filters_from(message) {
         Ok(filters) => filters,
-        Err(e) => return vec![message.to_error(e)],
+        Err(e) => {
+            return vec![Envelope::new("relay.closed")
+                .with_field("subId", sub_id)
+                .with_field("reason", e)]
+        }
     };
 
-    // A named relay, or the pool.
-    let target = match message
-        .field("options")
-        .and_then(|o| o.get("relay"))
-        .and_then(|v| v.as_str())
-    {
+    // A named relay, or the pool. The shim sends `relay` at the top level;
+    // `options.relay` is the fallback spelling.
+    let named = message.field("relay").and_then(|v| v.as_str()).or_else(|| {
+        message
+            .field("options")
+            .and_then(|o| o.get("relay"))
+            .and_then(|v| v.as_str())
+    });
+    let target = match named {
         Some(url) => match crate::nap::outbox::validate_relay_url(url) {
             Ok(lane) => Some(lane),
             Err(e) => {
@@ -566,8 +583,9 @@ mod tests {
     }
 
     /// A subscription answers the local backlog, then pulls the rest of the
-    /// pool into the local relay; `options.relay` pulls that relay alone and
-    /// skips the local backlog.
+    /// pool into the local relay; a named `relay` — top-level, as the shim
+    /// sends it — pulls that relay alone and skips the local backlog. The
+    /// `options.relay` spelling is accepted too.
     #[tokio::test]
     async fn subscribe_pulls_the_pool_or_the_named_relay() {
         use crate::testing::test_context_with_outbox;
@@ -612,7 +630,7 @@ mod tests {
                 .with_id("s2")
                 .with_field("subId", "group")
                 .with_field("filters", json!({"kinds": [9]}))
-                .with_field("options", json!({"relay": "wss://groups.example"})),
+                .with_field("relay", "wss://groups.example"),
         )
         .await
         .envelopes()
@@ -628,6 +646,30 @@ mod tests {
             }]
         );
 
+        // The other spelling still targets the named relay.
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s2b")
+                .with_field("subId", "group-options")
+                .with_field("filters", json!({"kinds": [9]}))
+                .with_field("options", json!({"relay": "wss://other-groups.example"})),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert_eq!(out.len(), 1, "options.relay skips the local backlog too");
+        assert_eq!(out[0].msg_type, "relay.eose");
+        let pulled = fx.pulled();
+        assert_eq!(pulled.len(), 3);
+        assert_eq!(
+            pulled[2].0,
+            vec![RelayLane::Internet {
+                url: "wss://other-groups.example".into()
+            }]
+        );
+
         let out = dispatch(
             &ctx,
             &mut s,
@@ -635,7 +677,7 @@ mod tests {
                 .with_id("s3")
                 .with_field("subId", "bad")
                 .with_field("filters", json!({"kinds": [9]}))
-                .with_field("options", json!({"relay": "ws://127.0.0.1:4870"})),
+                .with_field("relay", "ws://127.0.0.1:4870"),
         )
         .await
         .envelopes()
@@ -643,9 +685,73 @@ mod tests {
         assert_eq!(out[0].msg_type, "relay.closed");
         assert_eq!(
             s.subscription_count(),
-            2,
+            3,
             "a refused subscribe was registered"
         );
+    }
+
+    /// An unreadable filter closes the subscription on the frame the shim
+    /// listens for, carrying the id it asked with; nothing is registered.
+    /// A `.result` with an error would be dropped by `subscribe5` and leave
+    /// its listener waiting forever — L1 of the PR #52 review.
+    #[tokio::test]
+    async fn a_bad_filter_closes_the_subscription() {
+        let (ctx, _signer) = test_context();
+        let mut s = granted();
+
+        for filters in [json!("everything"), json!([]), json!([{"kinds": "one"}])] {
+            let out = dispatch(
+                &ctx,
+                &mut s,
+                &Envelope::new("relay.subscribe")
+                    .with_id("s1")
+                    .with_field("subId", "sub-bad")
+                    .with_field("filters", filters.clone()),
+            )
+            .await
+            .envelopes()
+            .to_vec();
+            assert_eq!(out.len(), 1, "{filters}");
+            assert_eq!(out[0].msg_type, "relay.closed", "{filters}");
+            assert_eq!(out[0].field("subId").unwrap(), "sub-bad", "{filters}");
+            assert!(
+                out[0]
+                    .field("reason")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|r| !r.is_empty()),
+                "{filters}: no reason given"
+            );
+            assert_eq!(s.subscription_count(), 0, "{filters}: registered anyway");
+        }
+
+        // No filters at all, the same way.
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s2")
+                .with_field("subId", "sub-none"),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert_eq!(out[0].msg_type, "relay.closed");
+        assert_eq!(out[0].field("subId").unwrap(), "sub-none");
+        assert_eq!(s.subscription_count(), 0);
+
+        // Without a subId there is nothing to close: the generic error stays.
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("relay.subscribe")
+                .with_id("s3")
+                .with_field("filters", json!({"kinds": [1]})),
+        )
+        .await
+        .envelopes()
+        .to_vec();
+        assert!(out[0].field("error").is_some());
+        assert_ne!(out[0].msg_type, "relay.closed");
     }
 
     /// A single filter object, not only a list — the spec allows both.
