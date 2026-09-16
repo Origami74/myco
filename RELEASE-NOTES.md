@@ -1,109 +1,155 @@
-# Myco v0.6.0
+# Myco v0.7.0
 
-**Released**: 2026-08-19
+**Released**: 2026-09-16
 
-v0.6.0 is the release where the previous one's instrumentation pays off. v0.5.0
-could tell you *that* peers were failing; this one identifies why the fastest
-lane kept collapsing and fixes it. Alongside that, Myco's data stops being locked
-inside the app: you can point it at a Nostr relay you run and keep using it
-exactly as before.
+v0.7.0 is three releases in one. Myco turns from an nsite viewer into an app
+runtime: alongside nsites it runs **napplets** — single-file programs published
+on Nostr — each in its own sandbox, with the capabilities it uses granted by
+you. You can **send a file to a friend's phone** from any app, encrypted over
+the mesh, no hotspot and no internet. And **peers stay connected**: the mesh now
+holds every link it has to a phone and switches between them, which on real
+phones in a real room is the difference between a peer that flickers and one
+that stays.
 
-**This release changes the mesh wire format.** Two phones must both be on v0.6.0
-to exchange anything — an older build and this one will not pass events or pair.
-Everything on the device upgrades in place with no data loss.
+**No wire-format change from v0.6.x.** A v0.7.0 phone and a v0.6.1 phone still
+exchange apps and messages and pair. The new multi-path link messages are
+ignored by an older phone, which keeps linking over a single path as before.
+Everything on the device upgrades in place; the event store is migrated on
+first open.
 
 ## At a glance
 
-- **Wi-Fi Aware links stop dying every minute.** The fast lane was being torn
-  down by phone firmware on a 64-second cycle. It turned out to be Myco's own
-  doing, not radio interference, and teardowns are now roughly one in seven
-  minutes.
-- **Your data can live on a relay you run.** Settings → Storage → Advanced takes
-  a relay URL — [Citrine](https://github.com/greenart7c3/Citrine) on the same
-  phone, or a relay on your own network — and Myco uses it as its store. A
-  Blossom server for app files can be set the same way. Both are optional and off
-  by default.
-- **Pairing has its own door.** Devices you have not paired with can no longer
-  reach the port that serves your apps and messages at all.
-- **Nobody can add themselves to your Circle.** A pairing acceptance is only
-  acted on if it answers an invitation you actually sent.
-- **Apps open without waiting on a slow phone in the room.**
+- **Peers stay connected.** A phone next to you is usually reachable more than
+  one way; Myco now keeps every path, probes the spares, and moves traffic when
+  the active one degrades instead of dropping the peer and finding it again
+  from scratch. Built on fips's multi-path branch. The status panel shows each
+  link, the active one lit.
+- **Send a file.** Share anything from another app, pick a paired phone, and it
+  arrives encrypted over the mesh — or tap a contact on the Circle tab. The
+  other phone is asked first; the file lands in Downloads/Myco. Two phones on
+  the same Wi-Fi move it in seconds rather than minutes.
+- **Napplets.** Add one by pasting an `naddr`, scanning a QR, or bumping a
+  friend's phone — the friend's phone is asked first, so it arrives with no
+  internet. Review what it asks for, and it lands on the Apps grid with a 🦆
+  badge and its own full-screen window. Discover suggests three to start with,
+  and DingDong comes preinstalled.
+- **Permissions you can see and change.** The install sheet lists everything a
+  napplet will be able to do before you agree. Hold a tile → Manage permissions
+  to switch each capability off or on; a change is live. An update that asks for
+  more than you were shown goes back through the sheet first.
+- **Same-Wi-Fi discovery has a switch,** and peers that dropped off the network
+  come back on their own.
+- **A crashed page cannot take Myco down.** A window whose renderer dies closes
+  on its own; the mesh, the relay and your other windows keep running.
 
-## The 64-second death
+## Napplets
 
-Wi-Fi Aware is the fast lane: two phones talking directly over Wi-Fi with no
-router and no internet. It had a habit of coming up, carrying traffic for about a
-minute, and being killed by the phone's own firmware — then repeating, forever.
+An nsite is a website Myco serves from the mesh. A napplet is a program: one
+HTML file, signed by its author, that asks the phone running it for things —
+who you are, what your relays hold, what is on the phones around you, a picture
+by its hash. NIP-5D defines the shape; Myco implements the runtime.
 
-Radio interference was the obvious suspect. Wi-Fi and Bluetooth share one chip
-and one antenna on these phones, so a Bluetooth scan drowning out a Wi-Fi data
-path is exactly the sort of thing that happens. Backing the Bluetooth scan right
-off changed nothing at all: the teardowns kept coming on the same cycle.
+Each napplet runs in a sandboxed frame inside a trusted page Myco ships. It has
+no network of its own: no fetch, no WebSocket, no storage. Everything it does
+goes through a message channel to Myco, which checks the request against what
+you granted and does the work on the napplet's behalf. This release implements
+five capability families, in the words the install sheet uses:
 
-The real cause was Myco arguing with itself. It kept re-establishing the same
-peer alternately over Bluetooth and over Wi-Fi Aware, and the firmware answered
-that churn by ending the data path. Myco now leaves a peer alone on Aware instead
-of also dialling it over Bluetooth — and with *both* radios scanning harder than
-before, teardowns dropped from one a minute to one in seven. That the fix works
-while Bluetooth is busiest is what rules interference out for good.
+- **Identity** — a user key, separate from the mesh device key, created the first
+  time a napplet opens. Napplets learn who you are socially; the device is never
+  named in anything signed by that key.
+- **Relays** — read and post as you on the relay pool: this phone's relay and the
+  public relays when reachable. Posting excludes your profile, contacts, relay
+  list and deletions for now; a napplet that tries gets a refusal, not a silent
+  drop.
+- **Outbox** — an author's notes from the relays they publish to, whether that is
+  a phone across the room or a public relay, with an honest `incomplete` when a
+  relay never answered.
+- **Mesh** — Myco's own: publish to everyone nearby with a chosen hop count and
+  pull what was missed. Settings › App reach caps how far apps may send and look.
+- **Pictures and files** — by content hash: this phone first, then a friend's
+  phone over the mesh, then the public servers. What is fetched is kept for the
+  next app and the next phone in the room.
 
-Some churn remains in the first few minutes after launch, when Bluetooth
-legitimately connects a peer before Aware is ready.
+Versions are pinned to bytes: the napplet you open is always the one whose file
+is on your phone, and a newer manifest with nothing behind it cannot take an
+app off the air. "Check for updates" refreshes napplets beside the nsite check.
 
-## Your data, your relay
+## Send a file
 
-Myco keeps everything in a small Nostr relay and blob store built into the app.
-That is still the default and still what most people should use. But it meant
-your apps and messages lived somewhere only Myco could reach.
+Share a photo, a document, anything, from any app on the phone: Myco appears in
+the system Sharesheet, you pick one of your paired phones, and the file goes
+out over the mesh — encrypted to that phone's key, over whichever path reaches
+it, with no hotspot and no internet. The Circle tab has the same door: tap a
+contact and choose **Send a file**.
 
-The reason it had to be Myco's own relay was that Myco wrote its mesh
-bookkeeping — how far a message should travel, which query it belongs to — *into*
-the messages themselves. Any relay holding that data had to understand Myco. That
-bookkeeping now travels alongside messages rather than inside them, so what gets
-stored is ordinary Nostr, and an ordinary relay can hold it.
+The receiving phone is asked before anything is transferred and can say no. A
+transfer in flight shows on the Circle tab beside pairing requests, so a send
+that is still waiting is visible from anywhere in the app and can be cancelled;
+an offer nobody answers gives up after ten minutes. Received files land in
+Downloads/Myco.
 
-Under **Settings → Storage → Advanced** you can now point Myco at a relay you
-run. It has been confirmed working with Citrine on the same phone. If the relay
-becomes unreachable, Myco says so plainly — with a warning on the Settings screen
-rather than apps that silently refuse to load.
+Two phones on the same Wi-Fi now find each other over the network rather than
+Bluetooth — Myco announces itself on the local network the way a fips node
+does — and a file that took minutes over Bluetooth takes seconds over UDP.
+Bluetooth still works when there is no shared network; it is just slower.
 
-Two things are worth knowing before you switch. Myco trusts a relay you choose to
-check signatures, so only use one you control. And *Delete* only ever clears
-what is on this device; a relay you run is not Myco's to empty, and it says so.
+A transfer survives a flaky link. If a control message — the offer, the accept,
+the "ready" — is lost while Bluetooth is re-dialling, each side keeps re-sending
+what it is waiting to hear until the transfer moves on, and a large file over a
+slow hop is only given up when nothing has arrived for thirty seconds, not on a
+fixed clock.
 
-## Pairing became its own thing
+## The mesh holds more than one link
 
-Pairing is what creates your Circle, and your Circle is what grants access to
-everything else. Until now it arrived on the same port that serves your apps —
-which meant that port had to stay open to strangers, and every pairing request
-was written into your event store as a side effect.
+This is the change that matters most in a room. A phone next to you is usually
+reachable more than one way — Bluetooth and Wi-Fi Aware, or Bluetooth and the
+local network. Until now Myco used one and forgot the other, and when that one
+failed the peer was gone until it was found again from scratch: a Bluetooth
+hiccup, a Wi-Fi Aware teardown, a phone walking behind a wall, each one a
+disconnect and a re-discovery.
 
-Pairing now has a service of its own, and it is the only thing an unpaired device
-can reach. The ports that serve your content refuse anyone you have not paired
-with before a connection is even established.
+The mesh now keeps every path to a peer, probes the standbys so they are known
+to work before they are needed, and switches when the active one degrades. Two
+connected phones stay connected through the hiccups that used to drop them,
+without re-pairing or re-discovering. In testing on real phones this is the
+largest single reliability gain Myco has had; the peers pill stops flickering.
 
-While separating it, one weakness became obvious and is fixed here: a pairing
-*acceptance* used to be taken at face value, so a device could send one unasked
-and land in your Circle. Myco now only acts on an acceptance that answers an
-invitation you actually sent, and that was addressed to your device.
+The status panel shows it directly: one icon per lane, the lit one carrying
+traffic, the standbys faded. A phone on Bluetooth and Wi-Fi at once is listed
+under both, and peers that never told us a name are shown by their shortened
+npub instead of a placeholder.
+
+This is the first release built on fips's `feat/multi-path-switchover` branch,
+which is experimental upstream. The link messages it adds are ignored by older
+nodes, so mixed rooms keep working; the multi-path link itself only forms
+between two v0.7.0 phones.
+
+## Storage
+
+The relay Myco keeps inside the app is now an LMDB database. Queries are
+indexed, writes are one small transaction per event, and the store is ready for
+the mesh sync that comes next. Chat and other expiring messages stay in memory
+and never touch disk, as before. A store from an earlier version is migrated on
+first open; if any event fails to migrate, the old file is kept and nothing is
+lost.
 
 ## Known issues
 
 - **A phone in your pocket finds nobody.** Myco winds its radios down when it is
   not on screen, so two idle phones in a room will not discover each other until
-  one is opened. This is the largest remaining gap between how the mesh behaves
-  in a test and how it behaves in a day.
+  one is opened.
 - **Wi-Fi Aware is shut off entirely by deep Doze** on Android 13 and later after
   a long idle period —
-  [#30](https://github.com/Origami74/myco/issues/30), separate from the teardown
-  fixed above.
-- **Aware links still churn for the first few minutes** after launch.
-- **A custom Blossom server has not been tested against a third-party
-  implementation.** The relay side has been confirmed with Citrine; the blob side
-  has only been run against Myco's own.
-- **A relay shared with another Nostr app will not deliver its messages live.**
-  They arrive when a screen is reopened rather than as they happen. Only affects
-  a relay something else also writes to.
+  [#30](https://github.com/Origami74/myco/issues/30).
+- **A napplet's relay access is all-or-nothing.** The `relay` grant lets a napplet
+  read everything your relay holds, including what other napplets stored. A
+  finer permission model is next on the roadmap.
+- **A napplet may name its own relays.** With the outbox grant it can ask Myco to
+  talk to a relay it chooses; that is by the specification, and it is an
+  exfiltration channel. Review the install sheet.
+- **Napplets do not replicate over the mesh yet.** A friend's phone can hand you
+  one at install time; keeping them in sync afterwards is roadmap.
 - Phones still do not always connect to every peer around them.
 - The interface can lag while the mesh is syncing.
 - Exit-node mode still covers proxy-aware apps only; other apps and QUIC/UDP
@@ -112,15 +158,15 @@ invitation you actually sent, and that was addressed to your device.
 ## Getting it
 
 - **Android**: install the APK from the
-  [v0.6.0 release](https://github.com/Origami74/myco/releases/tag/v0.6.0),
+  [v0.7.0 release](https://github.com/Origami74/myco/releases/tag/v0.7.0),
   or via [zapstore](https://zapstore.dev/apps/app.myco).
 - **From source**: `cd android && ./gradlew assembleDebug` from a checkout of
-  the v0.6.0 tag. See
+  the v0.7.0 tag, with fips on its `feat/multi-path-switchover` branch. See
   [CONTRIBUTING.md](https://github.com/Origami74/myco/blob/main/CONTRIBUTING.md)
   for build prerequisites.
 
-**Update every phone together.** The mesh wire format changed, so a v0.6.0 phone
-and an older one cannot exchange events or pair.
+Phones do not need updating together, but the multi-path link only forms
+between two phones on v0.7.0.
 
 The full per-release change history lives in
 [CHANGELOG.md](https://github.com/Origami74/myco/blob/main/CHANGELOG.md).
@@ -128,8 +174,8 @@ Issues and discussion at [github.com/Origami74/myco](https://github.com/Origami7
 
 ## Contributors
 
-Thanks to everyone running builds on real phones — the Wi-Fi Aware teardown was
-found and narrowed by watching two devices rather than by any test — and to
+Thanks to the napplet authors whose apps were the test bed — Mapplets found
+two runtime gaps on the first run — and to
 [@Origami74](https://github.com/Origami74) for maintaining the project.
 
 <!--

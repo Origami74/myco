@@ -12,12 +12,13 @@ env:
   # `fips` is a gitignored local path dep (reference/fips). A fresh checkout has no
   # reference/ at all, so clone it here.
   #
-  # The mobile seams this app builds on — Android BLE as a backend behind the
-  # existing `BleIo` trait, per-instance transport addressing (the LAN and
-  # Wi-Fi Aware lanes need one UDP socket each), the app-owned TUN/UDP/radio
-  # seams — are upstream on master now, so master is what we build against.
+  # The mobile seams this app builds on are upstream on master. Multi-path
+  # peering (several links to one peer, probed standbys, switchover) is not
+  # yet: it lives on the `feat/multi-path-switchover` branch, which is what
+  # the multi-path peer view and v0.7.0 build against. Back to master once
+  # it merges.
   FIPS_REPO: https://github.com/jmcorgan/fips.git
-  FIPS_REF: master
+  FIPS_REF: feat/multi-path-switchover
   NDK_VERSION: 26.1.10909125
   CARGO_TERM_COLOR: always
 
