@@ -96,6 +96,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Discover suggests napplets beside its nsites — Mappy, Minesweeper and DingDong.
   A tap fetches the napplet and opens install review on the Apps tab; nothing is
   granted until you say so there.
+- DingDong comes preinstalled, like bitchat: pinned on first run with only the
+  default grants, and what it declares is put in front of you the first time it
+  opens.
 
 ### Changed
 

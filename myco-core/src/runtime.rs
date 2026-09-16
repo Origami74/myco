@@ -359,6 +359,9 @@ impl AppRuntime {
         // fresh device shows it in Apps without pasting a link. A one-shot marker
         // file makes this idempotent and lets a user who removes it stay removed.
         seed_default_sites(&content, &rt, Path::new(data_dir));
+        // The bundled DingDong napplet, pinned with defaults only: what it
+        // declares is reviewed the first time it opens.
+        seed_default_napplets(&content, &rt, Path::new(data_dir));
 
         // Peer state now comes off the node's control socket, so the tick needs
         // somewhere to publish it and somewhere to record whether the feed
@@ -2409,6 +2412,14 @@ impl AppRuntime {
 const DEFAULT_SITES: &[&str] =
     &["4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivbitchat.nsite.lol"];
 
+/// Napplets installed by default on first run: (title, pointer). Pinned with
+/// only the default grants and an empty reviewed list, so what each declares
+/// is put in front of the user the first time it opens.
+const DEFAULT_NAPPLETS: &[(&str, &str)] = &[(
+    "DingDong",
+    "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9hxwer0denstp6v0k",
+)];
+
 /// Pin + start a download for the default apps, once per install. The marker
 /// file in `data_dir` keeps this idempotent and lets a user who removes a seeded
 /// app stay rid of it (we never re-seed). Pinning happens immediately so the app
@@ -2429,6 +2440,98 @@ fn seed_default_sites(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) {
     }
     if let Err(e) = std::fs::write(&marker, b"1\n") {
         tracing::warn!(error = %e, "could not write default-seed marker");
+    }
+}
+
+/// Pin the default napplets and start a fetch of each, once per install.
+///
+/// Its own marker, not `seeded-defaults`: a device upgraded from a build
+/// without napplets already carries the nsite marker, and this is its first
+/// run *with* napplets. The semantics are the nsite seed's — once per
+/// install, never re-seeded after removal. The seed does not stand up a
+/// [`crate::napplet::NappletHost`] (that would generate the user key, which
+/// D3 reserves for first napplet use); it fetches over the bare seams.
+fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) {
+    use nostr::nips::nip19::ToBech32;
+
+    let marker = data_dir.join("seeded-napplets");
+    if marker.exists() {
+        return;
+    }
+    for (title, pointer) in DEFAULT_NAPPLETS {
+        let addr = match crate::napplet::NappletAddr::parse(pointer) {
+            Ok(addr) => addr,
+            Err(e) => {
+                tracing::warn!(pointer, error = %e, "default napplet pointer did not parse; skipping seed");
+                continue;
+            }
+        };
+        let npub = addr.author.to_bech32().unwrap_or_default();
+        let shell_host =
+            myco_napplet_runtime::host::shell_host(&addr.author.to_bytes(), addr.d_tag.as_deref());
+
+        // `add_napplet_to_library` replaces the grants and the reviewed list,
+        // and a review the user already gave must not be rewritten by a seed.
+        if content
+            .napplet_grants(&npub, addr.d_tag.as_deref())
+            .is_some()
+        {
+            tracing::info!(title, "default napplet already installed; not re-seeding");
+            continue;
+        }
+
+        // The defaults every napplet gets and nothing else. `reviewed` stays
+        // empty so `open_with` reports every declared, non-default domain as
+        // `unreviewed` and `NappletOpenRequest::run` puts it on the review
+        // sheet at the first tap — the same path an update that declares more
+        // takes.
+        content.add_napplet_to_library(
+            &npub,
+            addr.d_tag.as_deref(),
+            Some(title),
+            &shell_host,
+            crate::napplet::effective_grants(&[]),
+            Vec::new(),
+            pointer,
+            crate::content::now_secs(),
+        );
+
+        let content = content.clone();
+        let addr = addr.clone();
+        rt.spawn(async move {
+            if content.is_offline_only() {
+                // The marker is still written; the tile reads "Not on this
+                // phone — hold to reload", and that reload goes through the
+                // review sheet.
+                tracing::info!(
+                    title,
+                    "offline only; default napplet pinned but not fetched"
+                );
+            } else {
+                let relay = content.relay();
+                let blobs = content.blobs();
+                let source = addr.public_source();
+                match crate::napplet::ingest_into(
+                    relay.as_ref(),
+                    blobs.as_ref(),
+                    &*content,
+                    &addr,
+                    &source,
+                )
+                .await
+                {
+                    Ok(_) => tracing::info!(title, "default napplet fetched"),
+                    // No internet on first run is normal; the tile stays
+                    // dimmed until a reload.
+                    Err(e) => tracing::warn!(title, error = %e, "default napplet fetch failed"),
+                }
+            }
+            // Whichever way it went, the tile state is right.
+            content.refresh_napplet_status().await;
+        });
+    }
+    if let Err(e) = std::fs::write(&marker, b"1\n") {
+        tracing::warn!(error = %e, "could not write default-napplet-seed marker");
     }
 }
 
@@ -2629,6 +2732,122 @@ mod tests {
             relaunched.state_json().contains("\"slots\":8"),
             "the persisted count must size the pool at the next node start"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bundled DingDong napplet is pinned on first run in the shape that
+    /// makes its first open a review: the defaults granted, nothing reviewed,
+    /// nothing denied. The seed generates no user key (D3), runs once per
+    /// install, and never re-seeds a napplet the user removed.
+    #[test]
+    fn dingdong_is_seeded_once_on_first_run() {
+        use crate::content::LibraryKind;
+
+        let dir = temp_dir("seed-dingdong");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+
+        let dingdongs = |rt: &AppRuntime| {
+            rt.content
+                .as_ref()
+                .expect("host content layer")
+                .library_snapshot()
+                .into_iter()
+                .filter(|i| {
+                    i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("dingdong")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let seeded = dingdongs(&rt);
+        assert_eq!(seeded.len(), 1, "exactly one seeded entry: {seeded:?}");
+        let item = &seeded[0];
+        assert!(item.pinned);
+        assert_eq!(item.title, "DingDong");
+        assert_eq!(item.pointer, DEFAULT_NAPPLETS[0].1);
+        assert_eq!(
+            item.author_npub,
+            "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr"
+        );
+        assert!(
+            item.reviewed.is_empty(),
+            "the seed must not pretend a review happened"
+        );
+        assert!(item.denied.is_empty());
+        assert_eq!(item.granted, crate::napplet::effective_grants(&[]));
+        assert!(dir.join("seeded-napplets").exists());
+        assert!(
+            !crate::user_key::exists(&dir),
+            "seeding must not generate a user key — that is for first napplet use"
+        );
+
+        // A second launch does not duplicate it.
+        let relaunched = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        assert_eq!(dingdongs(&relaunched).len(), 1);
+
+        // Removed by the user, it stays removed.
+        rt.dispatch(NativeAppAction::ForgetNapplet {
+            pointer: DEFAULT_NAPPLETS[0].1.to_string(),
+        });
+        let third = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        assert!(
+            dingdongs(&third).is_empty(),
+            "a removed default was re-seeded"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `add_napplet_to_library` replaces the grants and the reviewed list, so
+    /// a seed that ran over an installed DingDong would rewrite a review the
+    /// user already gave. It must leave that entry alone and only write the
+    /// marker.
+    #[test]
+    fn seeding_leaves_an_installed_napplet_alone() {
+        let dir = temp_dir("seed-installed-napplet");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let content = rt.content.as_ref().expect("host content layer");
+
+        let npub = "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr";
+        let reviewed = crate::content::NappletGrants {
+            granted: vec!["mesh".into()],
+            denied: vec!["relay".into()],
+            reviewed: vec!["mesh".into(), "relay".into()],
+        };
+        // The first launch already seeded it; make it look reviewed. The
+        // reviewed list is written only by install review, so go through
+        // that path, then record the decisions.
+        assert!(content.napplet_grants(npub, Some("dingdong")).is_some());
+        content.add_napplet_to_library(
+            npub,
+            Some("dingdong"),
+            Some("DingDong"),
+            "shell-host",
+            reviewed.granted.clone(),
+            reviewed.reviewed.clone(),
+            DEFAULT_NAPPLETS[0].1,
+            0,
+        );
+        content.set_napplet_grants(npub, Some("dingdong"), reviewed.clone());
+        assert_eq!(
+            content.napplet_grants(npub, Some("dingdong")),
+            Some(reviewed.clone())
+        );
+
+        let marker = dir.join("seeded-napplets");
+        std::fs::remove_file(&marker).unwrap();
+        seed_default_napplets(content, rt.rt.as_ref().unwrap(), &dir);
+
+        assert_eq!(
+            content.napplet_grants(npub, Some("dingdong")),
+            Some(reviewed),
+            "the seed rewrote a review the user already gave"
+        );
+        assert!(marker.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

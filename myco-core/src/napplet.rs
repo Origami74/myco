@@ -655,40 +655,65 @@ impl NappletHost {
         addr: &NappletAddr,
         source: &dyn PeerSource,
     ) -> anyhow::Result<IngestedNapplet> {
-        let event = source
-            .fetch_manifest(&addr.author, addr.d_tag.as_deref())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("no napplet manifest at that address"))?;
-
-        // Resolving against a view onto the *source* means the bytes are
-        // verified where they arrive, before anything is written here.
-        let view = SourceBlobs {
+        ingest_into(
+            self.relay.as_ref(),
+            self.blobs.as_ref(),
+            self.manifests.as_ref(),
+            addr,
             source,
-            servers: servers_from(&event),
-        };
-        let resolved = resolve(event.clone(), &view)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        // Blob first, manifest last, pin last of all: a half-written napplet
-        // is then one the local relay has no manifest for, rather than a
-        // manifest whose bytes are missing — and the served version moves only
-        // once the new bytes are here. The bytes are the ones `resolve` already
-        // fetched and verified: `index_html` decoded as UTF-8 without loss, so
-        // re-encoding it is the original blob, and the source — a peer over
-        // BLE, often — is not asked for it twice.
-        self.blobs.put(resolved.index_html.as_bytes()).await?;
-        self.relay.publish(event.clone()).await?;
-        self.manifests.pin(&event);
-
-        Ok(IngestedNapplet {
-            requires: resolved.manifest.requires.clone(),
-            title: resolved.manifest.title.clone(),
-            description: resolved.manifest.description.clone(),
-            d_tag: resolved.d_tag.clone(),
-            aggregate: resolved.aggregate.clone(),
-        })
+        )
+        .await
     }
+}
+
+/// The same untrusted-source, verify-before-keep path as
+/// [`NappletHost::ingest`], for a caller that has the three seams but no host.
+///
+/// The first-run seed is that caller: it runs before any napplet has opened,
+/// and standing up a host through `AppRuntime::napplet_context` would
+/// generate the user key, which D3 reserves for first napplet use. `source`
+/// is not trusted — every byte it returns is hashed and the signature and
+/// aggregate checked before any of it is kept.
+pub async fn ingest_into(
+    relay: &dyn RelayBackend,
+    blobs: &dyn BlobStore,
+    manifests: &dyn ManifestStore,
+    addr: &NappletAddr,
+    source: &dyn PeerSource,
+) -> anyhow::Result<IngestedNapplet> {
+    let event = source
+        .fetch_manifest(&addr.author, addr.d_tag.as_deref())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no napplet manifest at that address"))?;
+
+    // Resolving against a view onto the *source* means the bytes are
+    // verified where they arrive, before anything is written here.
+    let view = SourceBlobs {
+        source,
+        servers: servers_from(&event),
+    };
+    let resolved = resolve(event.clone(), &view)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Blob first, manifest last, pin last of all: a half-written napplet
+    // is then one the local relay has no manifest for, rather than a
+    // manifest whose bytes are missing — and the served version moves only
+    // once the new bytes are here. The bytes are the ones `resolve` already
+    // fetched and verified: `index_html` decoded as UTF-8 without loss, so
+    // re-encoding it is the original blob, and the source — a peer over
+    // BLE, often — is not asked for it twice.
+    blobs.put(resolved.index_html.as_bytes()).await?;
+    relay.publish(event.clone()).await?;
+    manifests.pin(&event);
+
+    Ok(IngestedNapplet {
+        requires: resolved.manifest.requires.clone(),
+        title: resolved.manifest.title.clone(),
+        description: resolved.manifest.description.clone(),
+        d_tag: resolved.d_tag.clone(),
+        aggregate: resolved.aggregate.clone(),
+    })
 }
 
 impl NappletHost {
@@ -1435,6 +1460,30 @@ mod tests {
         let opened = host.open_with(&addr, Some(decided)).await.unwrap();
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
         assert!(!opened.granted().contains(&"mesh".to_string()));
+    }
+
+    /// The shape the first-run seed writes — the defaults granted, nothing
+    /// reviewed — pins to "asks at first open": every declared, non-default
+    /// domain comes back as unreviewed for the sheet, and the window opens
+    /// with the defaults and nothing more.
+    #[tokio::test]
+    async fn a_seeded_napplet_reviews_what_it_declares_on_first_open() {
+        let (host, addr) = host_with(NappletBuilder::new().requires(&["relay", "mesh"])).await;
+
+        let seeded = crate::content::NappletGrants {
+            granted: effective_grants(&[]),
+            denied: vec![],
+            reviewed: vec![],
+        };
+        let opened = host.open_with(&addr, Some(seeded)).await.unwrap();
+        assert_eq!(opened.unreviewed, vec!["mesh".to_string()]);
+        let mut granted = opened.granted().to_vec();
+        granted.sort();
+        assert_eq!(granted, effective_grants(&[]));
+        assert!(
+            !granted.contains(&"mesh".to_string()),
+            "a seed granted a domain nobody reviewed"
+        );
     }
 
     /// The version served is the one whose bytes are here. A newer manifest
