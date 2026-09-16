@@ -19,7 +19,7 @@ on:
 
 env:
   FIPS_REPO: https://github.com/jmcorgan/fips.git
-  FIPS_REF: master
+  FIPS_REF: feat/multi-path-switchover
   NDK_VERSION: 26.1.10909125
 
 jobs:

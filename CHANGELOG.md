@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-16
+
 ### Added
 
 - **Napplets.** Myco runs napplets — single-file NIP-5D programs published
@@ -102,11 +104,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Wi-Fi Aware carries several phones at once instead of one. The lane ran a
-  single UDP socket, and Android lets a socket serve only one Wi-Fi Aware
-  connection, so a second phone's link came up and then went quiet — the
-  hardware was never the limit. Each phone now gets a socket of its own, up to
-  four at a time.
 - The relay store is an LMDB database (`nostr-lmdb`): indexed queries, one
   small write per event, and negentropy items ready for mesh sync. Chat and
   other expiring events stay in memory and never touch disk, as before. A
@@ -148,6 +145,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minutes in total, which a few megabytes over a slow hop exceeds while still
   arriving; it now only gives up when nothing has arrived for thirty seconds,
   and a connection that drops mid-file is tried again a few times first.
+
+## [0.6.1] - 2026-08-21
+
+### Fixed
+
+- Wi-Fi Aware carries several phones at once instead of one. The lane ran a
+  single UDP socket, and Android lets a socket serve only one Wi-Fi Aware
+  connection, so a second phone's link came up and then went quiet — the
+  hardware was never the limit. Each phone now gets a socket of its own, as many
+  as the phone's chipset says it can hold.
 
 ## [0.6.0] - 2026-08-19
 
