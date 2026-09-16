@@ -59,10 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and "Try again" on the review sheet fetch it again, the sharer's phone
   first.
 
-- The relay store is an LMDB database (`nostr-lmdb`): indexed queries, one
-  small write per event, and negentropy items ready for mesh sync. Chat and
-  other expiring events stay in memory and never touch disk, as before. A
-  store from an earlier version is migrated on first open.
 - Nsite manifests declaring a NIP-5A aggregate hash are checked against it;
   a mismatch is logged and the site is served on its per-blob hashes
   (napplets, whose identity the aggregate is, are refused instead).
@@ -83,6 +79,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and they go out the same encrypted mesh transfer the system Sharesheet
   uses — to the contact's npub, over whatever path reaches them, without
   needing a shared Wi-Fi.
+- Phones on the same Wi-Fi now find each other over the network instead of
+  Bluetooth. Myco announces itself on the local network the same way a fips
+  node does, so two phones — or a phone and a desktop — on one Wi-Fi connect
+  over UDP, which moves a file in seconds rather than minutes.
+- Send a file straight to a paired phone. Share anything from another app, pick
+  one of your paired phones, and it arrives encrypted over the mesh — no
+  hotspot, no internet. The receiving phone is asked first and can say no, and
+  the file lands in Downloads/Myco.
+- Transfers appear on the Circle tab alongside pairing requests, so a send that
+  is still waiting is visible from anywhere in the app and can be cancelled.
+  An offer nobody answers gives up after ten minutes instead of waiting forever.
+
 ### Changed
 
 - Wi-Fi Aware carries several phones at once instead of one. The lane ran a
@@ -90,6 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection, so a second phone's link came up and then went quiet — the
   hardware was never the limit. Each phone now gets a socket of its own, up to
   four at a time.
+- The relay store is an LMDB database (`nostr-lmdb`): indexed queries, one
+  small write per event, and negentropy items ready for mesh sync. Chat and
+  other expiring events stay in memory and never touch disk, as before. A
+  store from an earlier version is migrated on first open.
 
 ### Fixed
 
@@ -112,22 +124,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Same-Wi-Fi peers that dropped off mDNS now reconnect on their own: the
   discovery browse restarts periodically so a peer the phone quietly stopped
   reporting is found again, instead of the connection staying dead.
-
-### Added
-- Phones on the same Wi-Fi now find each other over the network instead of
-  Bluetooth. Myco announces itself on the local network the same way a fips
-  node does, so two phones — or a phone and a desktop — on one Wi-Fi connect
-  over UDP, which moves a file in seconds rather than minutes.
-- Send a file straight to a paired phone. Share anything from another app, pick
-  one of your paired phones, and it arrives encrypted over the mesh — no
-  hotspot, no internet. The receiving phone is asked first and can say no, and
-  the file lands in Downloads/Myco.
-- Transfers appear on the Circle tab alongside pairing requests, so a send that
-  is still waiting is visible from anywhere in the app and can be cancelled.
-  An offer nobody answers gives up after ten minutes instead of waiting forever.
-
-### Fixed
-
 - A file transfer no longer gets stuck when a control message is lost. An
   accept (or offer, or ready) sent while the Bluetooth link was re-dialling
   was dropped, and the other side waited the full ten minutes before giving
