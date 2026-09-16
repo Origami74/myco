@@ -22,25 +22,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Capabilities this version implements, in the words the install sheet
   uses:
-  - **Identity** — a user key, separate from the mesh device key, generated
-    the first time a napplet opens and seeded with a guest profile and a
-    relay list of the configured relays. The device is never named in
-    anything signed by that key.
-  - **Relays** — read and post as you on the relay pool: this phone's relay
-    and the public relays when reachable. Subscriptions are live. Posting
-    excludes your profile, contacts, relay list and deletions for now; a
-    napplet that tries gets a refusal, not a silent drop.
-  - **Outbox** — an author's notes from the relays they publish to, whether
-    that is a phone across the room over the mesh or a public relay over the
-    internet, deduplicated, with `incomplete` when a relay never answered.
-  - **Mesh** (Myco's own) — publish to everyone nearby with a chosen hop
-    count and pull what was missed. Settings › App reach caps how far apps
-    may send (default 3 hops) and look (default 2); zero keeps an app on
-    your phone.
-  - **Pictures and files** (`blossom:` only) — by content hash, this phone
-    first, then a friend's phone over the mesh, then the public servers;
-    what is fetched is kept for the next app and the next phone in the room,
-    bounded per blob and per request.
+  - **Identity** (NAP-IDENTITY) — a user key, separate from the mesh device
+    key, generated the first time a napplet opens and seeded with a guest
+    profile and a relay list of the configured relays. The device is never
+    named in a user-key event.
+  - **Relays** (NAP-RELAY) — read and post as you on the relay pool: this
+    phone's relay and the public relays when reachable. A granted `relay`
+    posts without asking each time. Subscriptions are live; what the pool
+    holds streams in behind the local backlog. Posting excludes kinds 0, 3,
+    5 and 10000–19999 for now — profile, contacts, deletions, relay list —
+    a napplet that tries gets a refusal, not a silent drop.
+  - **Outbox** (NAP-OUTBOX) — outbox-model routing: an author's notes from
+    their NIP-65 relays, a phone across the room over the mesh or a public
+    relay over the internet, deduplicated, with `incomplete` when a relay
+    never answered. Inbox delivery is refused rather than misrouted when a
+    relay list is missing.
+  - **Mesh** (NAP-MESH, Myco's own, in the registry's form) — publish to
+    everyone nearby with a chosen hop count and pull what was missed.
+    Settings › App reach caps how far apps may send (default 3 hops) and
+    look (default 2); zero keeps an app on your phone.
+  - **Pictures and files** (NAP-RESOURCE, `blossom:` only) — by content
+    hash, this phone first, then a friend's phone over the mesh, then the
+    public servers; what is fetched is kept for the next app and the next
+    phone in the room, bounded per blob and per request.
 
   Permissions: the install sheet lists everything a napplet will be able
   to do — what it declares plus the defaults (identity, relays, pictures)
@@ -98,9 +102,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under both. Peers that never told us a name are shown by their shortened
   npub there instead of a generated placeholder name.
 
-- Nsite manifests that declare a NIP-5A aggregate hash are checked against
-  it. An nsite whose hash does not match is still served on its per-file
-  hashes; a napplet, whose identity the aggregate is, is refused.
+- Nsite manifests declaring a NIP-5A aggregate hash are checked against it;
+  a mismatch is logged and the site is served on its per-blob hashes
+  (napplets, whose identity the aggregate is, are refused instead).
 - A Nix flake for the toolchain (`nix develop` for the Rust host shell,
   `nix develop .#android` for the Android SDK/NDK/JDK 17/Gradle/adb shell), so a
   NixOS or nix-enabled machine gets a working build environment without a manual
@@ -108,10 +112,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The relay store is an LMDB database: indexed queries, one small write per
-  event, and ready for mesh sync. Chat and other expiring events stay in
-  memory and never touch disk, as before. A store from an earlier version is
-  migrated on first open; if anything fails to migrate, the old file is kept.
+- The relay store is an LMDB database (`nostr-lmdb`): indexed NIP-01
+  queries, one small write per event, and negentropy items ready for mesh
+  sync. Chat and other NIP-40 expiring events stay in memory and never touch
+  disk, as before. `events.json` from an earlier version is migrated on
+  first open; if any event fails to migrate, the file is kept.
 
 ### Fixed
 
