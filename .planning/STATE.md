@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-02)
 Phase: 1 of 5 (Make Peering Observable)
 Plan: 0 of 2 in current phase
 Status: Ready to execute
-Last activity: 2026-09-15 - Completed quick task 260915-nwh: napplet review remediation
+Last activity: 2026-09-16 - Completed quick task 260916-d9i: PR #52 adversarial review remediation (29 findings)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -103,6 +103,7 @@ None yet. Field TODOs are tracked separately in `reference/FIX-TODOS.md`.
 | 260915-l9d | Per-app capability switches on the napplet sheet, live in open windows (`SetNappletGrant`, `apply_grants`) | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-l9d-per-app-capability-switches-on-the-nappl/260915-l9d-SUMMARY.md` |
 | 260915-lwj | Docs overhaul: four-layer restructure, Circle doc, code-aligned reference docs, nostr-vpn dropped, roadmap rewritten with login/notifications/nsite-mesh items | 2026-09-15 | `feat/napplet-runtime` | `.planning/quick/260915-lwj-docs-overhaul-align-with-code-drop-nostr/260915-lwj-SUMMARY.md` |
 | 260915-nwh | Napplet review remediation: blockers, security, reliability, active gate, LMDB relay store, dedupe, tests | 2026-09-15 | feat/napplet-runtime | [260915-nwh](./quick/260915-nwh-napplet-review-remediation-blockers-secu/260915-nwh-SUMMARY.md) |
+| 260916-d9i | PR #52 adversarial review remediation: all 29 findings (H1–H2, M1–M12, L1–L15) — mesh URL rebuild, private-host bypasses, kind-aware Library, render-crash isolation, grant widening back through review, LMDB migration keeps failures, interim kind refusal | 2026-09-16 | `feat/napplet-runtime` | `.planning/quick/260916-d9i-remediate-pr-52-adversarial-review-findi/260916-d9i-SUMMARY.md` |
 
 ## Deferred Items
 
