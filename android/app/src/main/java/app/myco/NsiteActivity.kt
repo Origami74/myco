@@ -6,7 +6,9 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -95,6 +97,7 @@ class NsiteActivity : ComponentActivity() {
                 client,
                 "$hostLabel.localhost",
                 onContentVisible = { syncBarContrast(); syncTopInset() },
+                onRendererGone = { finish() },
             )
         }
         // Host the WebView in a container we can inset. We draw edge-to-edge and
@@ -158,6 +161,8 @@ class NsiteActivity : ComponentActivity() {
 
     override fun onDestroy() {
         // Detach the WebView so the process-shared core isn't retained by it.
+        // Fine on a view a renderer crash already detached: `destroy` wants
+        // the view out of the hierarchy, not in it.
         if (this::webView.isInitialized) {
             webView.destroy()
         }
@@ -227,11 +232,13 @@ class NsiteActivity : ComponentActivity() {
  *
  * @param nsiteHost the host this nsite *is* (`<host>.nsite`); navigations to it
  *   stay inside the WebView, everything else is handed off to the system.
+ * @param onRendererGone the renderer process died; the window closes itself.
  */
 private class NsiteWebViewClient(
     private val client: AppCoreClient,
     private val nsiteHost: String,
     private val onContentVisible: () -> Unit,
+    private val onRendererGone: () -> Unit,
 ) : WebViewClient() {
     // First paint (early) and full load (catches late theme-color/background) both
     // re-sync the system-bar icon contrast to whatever the page is showing.
@@ -241,6 +248,25 @@ private class NsiteWebViewClient(
 
     override fun onPageFinished(view: WebView, url: String) {
         onContentVisible()
+    }
+
+    /**
+     * The renderer died — a page that allocated until OOM, or any crash in it.
+     * Returning `true` is what keeps WebView from killing the app process (its
+     * default on API 26+): the mesh node, the relay, the blob store and every
+     * other window stay up, and only this window closes. The dead view leaves
+     * the hierarchy first so nothing paints or scripts against it; the
+     * Activity's `onDestroy` still calls `destroy()` on it.
+     */
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        Log.w(
+            "NsiteActivity",
+            "nsite renderer gone: crashed=${detail.didCrash()} " +
+                "priority=${detail.rendererPriorityAtExit()}; closing the window",
+        )
+        (view.parent as? ViewGroup)?.removeView(view)
+        onRendererGone()
+        return true
     }
 
     /**

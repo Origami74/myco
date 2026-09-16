@@ -905,6 +905,11 @@ class MainActivity : ComponentActivity() {
      * icon for an app they said no to, or one that never arrived, is worse than
      * no icon. Asked once per napplet, so declining is not re-asked on every
      * later share.
+     *
+     * Only a transition from absent to present counts. A share of a napplet
+     * that is already installed is not an install: it gets no dialog, and it
+     * is not marked as asked — that mark belongs to the install that never
+     * happened here.
      */
     private fun offerHomeScreenWhenNappletInstalled(pointer: String) {
         if (pointer.isEmpty()) return
@@ -913,15 +918,18 @@ class MainActivity : ComponentActivity() {
         if (key in asked) return
 
         lifecycleScope.launch {
+            fun List<app.myco.core.LibraryItem>.napplet() = firstOrNull {
+                it.kind == app.myco.core.LibraryKind.Napplet &&
+                    it.nappletPointer == pointer
+            }
+            // Already here before we started watching: nothing to offer.
+            if (withContext(Dispatchers.IO) { core.state() }.library.napplet() != null) return@launch
+
             // Give up rather than watch forever: the user is reviewing, and if
             // they have not decided in this long they have moved on.
             val deadline = SystemClock.elapsedRealtime() + HOME_OFFER_TIMEOUT_MS
             while (SystemClock.elapsedRealtime() < deadline) {
-                val installed = withContext(Dispatchers.IO) { core.state() }
-                    .library.firstOrNull {
-                        it.kind == app.myco.core.LibraryKind.Napplet &&
-                            it.nappletPointer == pointer
-                    }
+                val installed = withContext(Dispatchers.IO) { core.state() }.library.napplet()
                 if (installed != null) {
                     prefs.edit().putStringSet(PREF_HOME_OFFERED, asked + key).apply()
                     pinNappletToHomeScreen(pointer, installed.title)

@@ -1491,7 +1491,9 @@ impl AppRuntime {
                     }
                 }
             };
-            *review.lock().unwrap() = Some(outcome);
+            settle_napplet_review(&review, outcome);
+            // The ingest happened whether or not the sheet still wants to
+            // hear about it: the napplet is on the phone now.
             content.refresh_napplet_status().await;
         });
     }
@@ -2427,6 +2429,32 @@ impl NappletOpenRequest {
     }
 }
 
+/// Land a finished napplet fetch in the review slot — but only if the slot
+/// still names the pointer the fetch was for.
+///
+/// The fetch runs for as long as its relays take, and the sheet it opened is
+/// the user's to close: dismiss it, or ask for another napplet, and the slot
+/// moves on (`None`, or another pointer). A result written unconditionally
+/// re-opened a sheet the user had dismissed, or replaced the review of the
+/// napplet they last asked for with an older one — install decisions taken
+/// against the wrong review. Returns whether the outcome was kept.
+fn settle_napplet_review(
+    slot: &std::sync::Mutex<Option<crate::napplet::NappletReview>>,
+    outcome: crate::napplet::NappletReview,
+) -> bool {
+    let mut slot = slot.lock().unwrap();
+    if slot.as_ref().is_some_and(|r| r.pointer == outcome.pointer) {
+        *slot = Some(outcome);
+        true
+    } else {
+        tracing::info!(
+            pointer = %outcome.pointer,
+            "napplet fetch finished after its review was dismissed or moved on; result dropped"
+        );
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2893,5 +2921,52 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn review_for(pointer: &str, loading: bool) -> crate::napplet::NappletReview {
+        crate::napplet::NappletReview {
+            pointer: pointer.to_string(),
+            loading,
+            title: String::new(),
+            description: String::new(),
+            requires: Vec::new(),
+            grants: Vec::new(),
+            error: String::new(),
+            holder: None,
+        }
+    }
+
+    /// A fetch that finishes after the user dismissed its sheet, or asked for
+    /// another napplet, must not put its result in front of them.
+    #[test]
+    fn a_stale_fetch_does_not_reopen_the_review() {
+        // Dismissed: the slot is empty; the late result stays out of it.
+        let slot = std::sync::Mutex::new(None);
+        assert!(!settle_napplet_review(&slot, review_for("naddr1a", false)));
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "a dismissed sheet stays dismissed"
+        );
+
+        // Moved on: the slot belongs to B now; A's result must not replace it.
+        *slot.lock().unwrap() = Some(review_for("naddr1b", true));
+        assert!(!settle_napplet_review(&slot, review_for("naddr1a", false)));
+        let current = slot.lock().unwrap().clone().unwrap();
+        assert_eq!(current.pointer, "naddr1b");
+        assert!(
+            current.loading,
+            "B's own fetch is still the one on the sheet"
+        );
+
+        // Still ours: the result lands and the sheet stops loading.
+        let mut done = review_for("naddr1b", false);
+        done.title = "B".to_string();
+        assert!(settle_napplet_review(&slot, done));
+        let current = slot.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            (current.pointer.as_str(), current.title.as_str()),
+            ("naddr1b", "B")
+        );
+        assert!(!current.loading);
     }
 }

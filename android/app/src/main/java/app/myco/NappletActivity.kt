@@ -5,6 +5,8 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -19,6 +21,7 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -70,8 +73,18 @@ class NappletActivity : ComponentActivity() {
     private lateinit var webView: WebView
     private lateinit var root: FrameLayout
 
-    /** The per-window session id Rust keyed this napplet's session by. */
+    /**
+     * The per-window session id Rust keyed this napplet's session by.
+     *
+     * Written by the opener off the main thread and read by [onDestroy] on it,
+     * both under [sessionLock] together with [windowGone]: exactly one of the
+     * two sides sees the other's mark and closes the session. See [onCreate].
+     */
     private var sessionId: String = ""
+
+    /** Set by [onDestroy]; a session opened after this is closed by its opener. */
+    private var windowGone = false
+    private val sessionLock = Any()
 
     /** This window's shell origin — the only origin the channel is scoped to. */
     private var shellHost: String = ""
@@ -144,8 +157,31 @@ class NappletActivity : ComponentActivity() {
         // fall back to, by design. Off the main thread: the resolve reads the
         // relay and the blob store, and with a custom relay configured that is
         // a network round trip. The splash screen covers the wait.
+        //
+        // The open is not cancellable, and it settles its own session. Back
+        // during the splash used to cancel this coroutine mid-call: `onDestroy`
+        // ran with `sessionId` still empty and skipped `nappletClose`, and when
+        // the JNI call returned the assignment below never ran — the session
+        // (the assembled HTML, its outbox channel) sat in `NappletHost.sessions`
+        // forever. `NonCancellable` lets the call finish; the hand-off under
+        // [sessionLock] is what closes the leak. It happens *inside* the IO
+        // block on purpose: a result crossing back to the main thread is
+        // discarded when the scope was cancelled meanwhile (prompt
+        // cancellation), so anything after `withContext` may never run.
         lifecycleScope.launch {
-            val opened = withContext(Dispatchers.IO) { client.nappletOpen(pointer) }
+            val opened = withContext(Dispatchers.IO + NonCancellable) {
+                val opened = client.nappletOpen(pointer)
+                if (opened.ok) {
+                    val orphaned = synchronized(sessionLock) {
+                        if (windowGone) true else { sessionId = opened.sessionId; false }
+                    }
+                    if (orphaned) {
+                        Log.i(TAG, "napplet $pointer opened after its window closed; session closed")
+                        client.nappletClose(opened.sessionId)
+                    }
+                }
+                opened
+            }
             if (!opened.ok) {
                 Log.w(TAG, "napplet $pointer did not open: ${opened.error}")
                 // Said out loud: a window that closes on its own reads as a tap
@@ -158,7 +194,6 @@ class NappletActivity : ComponentActivity() {
                 finish()
                 return@launch
             }
-            sessionId = opened.sessionId
             shellHost = opened.shellHost
             mountShell()
         }
@@ -191,6 +226,7 @@ class NappletActivity : ComponentActivity() {
                 client = client,
                 shellHost = shellHost,
                 onContentVisible = { syncChrome() },
+                onRendererGone = { finish() },
             )
         }
 
@@ -302,8 +338,15 @@ class NappletActivity : ComponentActivity() {
         inbound.close()
         replyChannel = null
         // Drop the session with the window. Rust ignores every later frame for
-        // it, so a leaked WebView cannot keep a capability session alive.
-        if (sessionId.isNotEmpty()) client.nappletClose(sessionId)
+        // it, so a leaked WebView cannot keep a capability session alive. An
+        // open still in flight sees [windowGone] and closes its own session.
+        val toClose = synchronized(sessionLock) {
+            windowGone = true
+            sessionId
+        }
+        if (toClose.isNotEmpty()) client.nappletClose(toClose)
+        // Fine on a view a renderer crash already detached: `destroy` wants the
+        // view out of the hierarchy, not in it.
         if (this::webView.isInitialized) webView.destroy()
         super.onDestroy()
     }
@@ -365,16 +408,45 @@ class NappletActivity : ComponentActivity() {
  * capability channel and assigned to `srcdoc`. Serving them at this origin would
  * make them reachable by URL, and anything navigating to that URL would run the
  * napplet as the shell origin.
+ *
+ * Shell bytes land in the **main frame only**, and that is enforced here in
+ * [shouldInterceptRequest], not only in [shouldOverrideUrlLoading]: Chromium
+ * does not offer subframe http(s) navigations to the latter, so a napplet
+ * setting `location.href` to the shell URL arrives here as a subframe request
+ * and is refused. Inert while the sandbox keeps the frame's origin opaque, but
+ * the invariant is checked rather than assumed.
+ *
+ * @param onRendererGone the renderer process died; the window closes itself.
  */
 private class NappletWebViewClient(
     private val client: AppCoreClient,
     private val shellHost: String,
     private val onContentVisible: () -> Unit,
+    private val onRendererGone: () -> Unit,
 ) : WebViewClient() {
 
     override fun onPageCommitVisible(view: WebView, url: String) = onContentVisible()
 
     override fun onPageFinished(view: WebView, url: String) = onContentVisible()
+
+    /**
+     * The renderer died — a napplet that allocated until OOM, or any crash in
+     * the page. Returning `true` is what keeps WebView from killing the app
+     * process (its default on API 26+): the mesh node, the relay, the blob
+     * store and every other window stay up, and only this window closes.
+     * The dead view leaves the hierarchy first so nothing paints or scripts
+     * against it; the Activity's `onDestroy` still calls `destroy()` on it.
+     */
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        Log.w(
+            "NappletActivity",
+            "napplet renderer gone: crashed=${detail.didCrash()} " +
+                "priority=${detail.rendererPriorityAtExit()}; closing the window",
+        )
+        (view.parent as? ViewGroup)?.removeView(view)
+        onRendererGone()
+        return true
+    }
 
     /**
      * The shell never navigates, and the napplet's frame never leaves.
@@ -429,6 +501,22 @@ private class NappletWebViewClient(
         // napplet's shell origin is refused here just as firmly as an nsite
         // host: each window serves itself.
         if (!host.equals(shellHost, ignoreCase = true)) {
+            return WebResourceResponse(
+                "text/plain",
+                "utf-8",
+                403,
+                "Forbidden",
+                emptyMap(),
+                ByteArrayInputStream(ByteArray(0)),
+            )
+        }
+
+        // The shell page is a main-frame document, never a subframe's. The
+        // napplet's iframe navigating itself here would otherwise be handed
+        // the trusted shell page, and `shouldOverrideUrlLoading` never sees
+        // that navigation (see the class doc).
+        if (!request.isForMainFrame) {
+            Log.w("NappletActivity", "subframe request for shell path ${uri.path}; refused")
             return WebResourceResponse(
                 "text/plain",
                 "utf-8",
