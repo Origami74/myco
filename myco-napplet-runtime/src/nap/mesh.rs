@@ -485,7 +485,8 @@ mod tests {
             "mesh",
             "sub-1",
             vec![nostr::Filter::new().kind(nostr::Kind::from(20666u16))],
-        );
+        )
+        .unwrap();
         let keys = Keys::generate();
         let doorbell = EventBuilder::new(nostr::Kind::from(20666u16), "ding")
             .sign_with_keys(&keys)

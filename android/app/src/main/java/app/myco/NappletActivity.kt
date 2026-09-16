@@ -90,8 +90,16 @@ class NappletActivity : ComponentActivity() {
 
     /** Drains runtime-initiated frames while the window is open. */
     private var drainJob: kotlinx.coroutines.Job? = null
-    /** Frames from the shell, in arrival order, consumed off the main thread. */
-    private val inbound = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    /**
+     * Frames from the shell, in arrival order, consumed off the main thread.
+     *
+     * Bounded. [inFlight] bounds how many calls hold an FFI thread at once;
+     * this bounds how much a napplet can queue behind them. A page looping
+     * `postMessage` faster than the runtime answers used to grow this without
+     * limit until the process died; now the frame past the cap is dropped
+     * and logged, and the shim's own per-call timeout answers the call.
+     */
+    private val inbound = kotlinx.coroutines.channels.Channel<String>(INBOUND_CAPACITY)
     private var frameJob: kotlinx.coroutines.Job? = null
 
     /**
@@ -203,8 +211,12 @@ class NappletActivity : ComponentActivity() {
             val frame = message.data ?: return@addWebMessageListener
             // Never on this thread: a capability call can wait on the network
             // for seconds, and this is the main thread. Queued in arrival
-            // order; the consumer decides what may overlap.
-            inbound.trySend(frame)
+            // order; the consumer decides what may overlap. A full queue drops
+            // the frame rather than the memory: see [inbound].
+            val queued = inbound.trySend(frame)
+            if (queued.isFailure && !queued.isClosed) {
+                Log.w(TAG, "napplet frame queue full; frame dropped")
+            }
         }
 
         // The inbound frames, driven off the main thread. Until the handshake
@@ -310,6 +322,9 @@ class NappletActivity : ComponentActivity() {
 
         /** See [inFlight]. */
         private const val MAX_IN_FLIGHT = 8
+
+        /** See [inbound]. */
+        private const val INBOUND_CAPACITY = 64
 
         /** The top-level `channel` of a runtime frame, or null if it is not one. */
         private fun channelOf(frame: String): String? =

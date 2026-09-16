@@ -65,6 +65,10 @@ pub struct OutboxService {
     /// Authors whose stale list is being refreshed right now, so a burst of
     /// calls spawns one fetch rather than one per call.
     refreshing: Arc<Mutex<std::collections::HashSet<PublicKey>>>,
+    /// Whether an Internet lane is resolved and refused when its name points
+    /// at a private address (see [`dials_public`]). Always on, except in
+    /// host tests that dial a mock relay on `127.0.0.1` as an Internet lane.
+    guard_private_dials: bool,
 }
 
 /// What a lookup found, and how fresh it is.
@@ -92,6 +96,7 @@ impl OutboxService {
             configured: crate::ip_source::default_relays(),
             misses: Arc::new(Mutex::new(std::collections::HashMap::new())),
             refreshing: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            guard_private_dials: true,
         }
     }
 
@@ -100,6 +105,14 @@ impl OutboxService {
     #[cfg(test)]
     pub fn with_configured_relays(mut self, relays: Vec<String>) -> Self {
         self.configured = relays;
+        self
+    }
+
+    /// Dial Internet lanes that resolve to a private address — for tests
+    /// whose "internet relay" is a mock on `127.0.0.1`.
+    #[cfg(test)]
+    pub fn allowing_private_dials(mut self) -> Self {
+        self.guard_private_dials = false;
         self
     }
 
@@ -114,7 +127,24 @@ impl OutboxService {
             configured: self.configured.clone(),
             misses: self.misses.clone(),
             refreshing: self.refreshing.clone(),
+            guard_private_dials: self.guard_private_dials,
         })
+    }
+
+    /// Whether an Internet lane may be dialled: the guard is off, or its
+    /// name resolves to public addresses only.
+    async fn may_dial(&self, url: &str) -> bool {
+        if !self.guard_private_dials {
+            return true;
+        }
+        if dials_public(url).await {
+            return true;
+        }
+        tracing::debug!(
+            url,
+            "outbox: internet lane resolves to a private address; not dialled"
+        );
+        false
     }
 
     /// Where a relay list might be found: the configured relays unless
@@ -272,19 +302,23 @@ impl OutboxService {
             }
             RelayLane::Internet { url } => {
                 // One connection, one REQ carrying every filter; verified at
-                // ingress by `query_relay_filters`.
+                // ingress by `query_relay_filters`. The resolve-and-refuse
+                // guard runs inside the same timeout, so a slow resolver
+                // cannot hold the round past what the caller allowed.
                 let values: Vec<serde_json::Value> = filters
                     .iter()
                     .filter_map(|f| serde_json::to_value(f).ok())
                     .collect();
-                match tokio::time::timeout(
-                    timeout,
-                    crate::ip_source::query_relay_filters(url, values),
-                )
-                .await
-                {
-                    Ok(Ok(events)) => Some(events),
-                    Ok(Err(e)) => {
+                let dial = async {
+                    if !self.may_dial(url).await {
+                        return None;
+                    }
+                    Some(crate::ip_source::query_relay_filters(url, values).await)
+                };
+                match tokio::time::timeout(timeout, dial).await {
+                    Ok(None) => None,
+                    Ok(Some(Ok(events))) => Some(events),
+                    Ok(Some(Err(e))) => {
                         tracing::debug!(url, error = %e, "outbox: relay query failed");
                         None
                     }
@@ -320,12 +354,69 @@ impl OutboxService {
                 pool.send(&npub, &crate::ip_source::mesh_relay_url(&npub), frame);
                 true
             }
-            RelayLane::Internet { url } => matches!(
-                tokio::time::timeout(timeout, crate::ip_source::publish_to_relay(url, event)).await,
-                Ok(Ok(true))
-            ),
+            RelayLane::Internet { url } => {
+                let dial = async {
+                    if !self.may_dial(url).await {
+                        return false;
+                    }
+                    matches!(
+                        crate::ip_source::publish_to_relay(url, event).await,
+                        Ok(true)
+                    )
+                };
+                matches!(tokio::time::timeout(timeout, dial).await, Ok(true))
+            }
         }
     }
+}
+
+/// Whether `url` names only public addresses right now — the dial-site half
+/// of the private-host refusal.
+///
+/// `validate_relay_url` judges the host as written; a public *name* can
+/// still resolve to `127.0.0.1` (the ungated loopback relay) or a LAN
+/// address, by a hostile zone or a rebinding trick. So the name is resolved
+/// here, with the port the URL names or the scheme's default, and the lane
+/// is refused if the lookup fails or **any** answer is
+/// [`myco_napplet_runtime::nap::outbox::is_private_ip`]. Userinfo is
+/// refused again for the same reason it is refused there.
+///
+/// Lives in this crate because the resolve is async and the runtime crate
+/// has no tokio. Known gap: `connect_async` resolves the name again, so an
+/// answer that changes between the two is not caught (TOCTOU). Accepted for
+/// now; the follow-up is to connect to the checked address ourselves and
+/// hand the stream to `client_async_tls_with_config`.
+pub(crate) async fn dials_public(url: &str) -> bool {
+    let Ok(parsed) = nostr::Url::parse(url) else {
+        return false;
+    };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let port = match parsed.port_or_known_default() {
+        Some(port) => port,
+        None => match parsed.scheme() {
+            "wss" => 443,
+            _ => 80,
+        },
+    };
+    // `lookup_host` wants a bare host; the parser keeps the brackets on a v6
+    // literal.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let Ok(addrs) = tokio::net::lookup_host((host, port)).await else {
+        return false;
+    };
+    let mut any = false;
+    for addr in addrs {
+        any = true;
+        if myco_napplet_runtime::nap::outbox::is_private_ip(addr.ip()) {
+            return false;
+        }
+    }
+    any
 }
 
 impl OutboxService {
@@ -785,7 +876,8 @@ mod tests {
             Arc::new(Mutex::new(Some(hub))),
             content,
             "npub1me".to_string(),
-        );
+        )
+        .allowing_private_dials();
 
         let keys = Keys::generate();
         let event = EventBuilder::text_note("to my relays")
@@ -825,6 +917,7 @@ mod tests {
             content.clone(),
             "npub1me".to_string(),
         )
+        .allowing_private_dials()
         .with_configured_relays(vec![url.clone()]);
         let keys = Keys::generate();
         let event = EventBuilder::text_note("hello internet")
@@ -861,6 +954,7 @@ mod tests {
             content,
             "npub1me".to_string(),
         )
+        .allowing_private_dials()
         .with_configured_relays(vec!["ws://127.0.0.1:1".to_string()]);
         dead.accept(event).await.unwrap();
     }
@@ -881,6 +975,7 @@ mod tests {
             content.clone(),
             "npub1me".to_string(),
         )
+        .allowing_private_dials()
         .with_configured_relays(vec![url.clone()]);
 
         let alice = Keys::generate();
@@ -945,6 +1040,7 @@ mod tests {
             content.clone(),
             "npub1me".to_string(),
         )
+        .allowing_private_dials()
         .with_configured_relays(vec![url.clone()]);
 
         // Alice's list lives only on the internet relay.
@@ -1011,6 +1107,7 @@ mod tests {
             content.clone(),
             "npub1me".to_string(),
         )
+        .allowing_private_dials()
         .with_configured_relays(vec![url.clone()]);
 
         let alice = Keys::generate();
@@ -1069,7 +1166,8 @@ mod tests {
             Arc::new(Mutex::new(Some(hub))),
             content,
             "npub1me".to_string(),
-        );
+        )
+        .allowing_private_dials();
 
         let remote = Arc::new(myco_relay::RelayStore::in_memory());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1126,7 +1224,8 @@ mod tests {
             Arc::new(Mutex::new(None)),
             content.clone(),
             "npub1me".to_string(),
-        );
+        )
+        .allowing_private_dials();
         let dead = RelayLane::Internet {
             url: "ws://127.0.0.1:1".to_string(),
         };
@@ -1160,5 +1259,57 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An Internet lane whose name resolves to a private address is not
+    /// dialled: `validate_relay_url` judges the host as written, and a public
+    /// name pointing at `127.0.0.1` — the ungated loopback relay — or the LAN
+    /// is caught here, at the dial. Tests that mean to dial a mock on
+    /// loopback opt out with `allowing_private_dials`.
+    #[tokio::test]
+    async fn an_internet_lane_that_resolves_private_is_not_dialled() {
+        let content = scratch_content("private-dial");
+        let svc = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content,
+            "npub1me".to_string(),
+        );
+        let keys = Keys::generate();
+        let note = EventBuilder::text_note("stays home")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let filters = [Filter::new().kind(Kind::TextNote)];
+
+        for url in ["ws://localhost:1", "ws://127.0.0.1:1", "ws://[::1]:1"] {
+            let lane = RelayLane::Internet {
+                url: url.to_string(),
+            };
+            let started = std::time::Instant::now();
+            assert!(
+                svc.query_lane(&lane, &filters, Duration::from_secs(10))
+                    .await
+                    .is_none(),
+                "{url} was queried"
+            );
+            assert!(
+                !svc.publish_lane(&lane, &note, Duration::from_secs(10))
+                    .await,
+                "{url} was published to"
+            );
+            // Refused at the resolve, not by a connect that failed or timed
+            // out: nothing near the lane timeout was spent.
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{url} took {:?} — it was dialled",
+                started.elapsed()
+            );
+        }
+
+        // The predicate itself, on what a lookup hands back.
+        assert!(!dials_public("ws://user@relay.example").await);
+        assert!(!dials_public("not a url").await);
+        assert!(!dials_public("ws://[::ffff:127.0.0.1]:4870").await);
+        assert!(!dials_public("ws://100.64.0.1").await);
     }
 }

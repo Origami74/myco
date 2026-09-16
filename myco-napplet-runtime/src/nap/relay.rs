@@ -168,7 +168,11 @@ async fn subscribe(
     // pull lands in the local relay and is delivered from there.
     let mut out = match target {
         Some(_) => {
-            session.subscribe(sub_id.clone(), filters.clone());
+            if let Err(reason) = session.subscribe(sub_id.clone(), filters.clone()) {
+                return vec![Envelope::new("relay.closed")
+                    .with_field("subId", sub_id)
+                    .with_field("reason", reason)];
+            }
             Vec::new()
         }
         None => {

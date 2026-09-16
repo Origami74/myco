@@ -214,7 +214,7 @@ mod tests {
             ["relay", "mesh", "outbox", "resource", "identity"],
         );
         s.on_ready();
-        s.subscribe("keep", vec![nostr::Filter::new()]);
+        s.subscribe("keep", vec![nostr::Filter::new()]).unwrap();
         let before = s.clone();
         for (t, fields) in [
             ("relay.query", json!({"filters": {"kinds": [1]}})),

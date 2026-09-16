@@ -46,6 +46,10 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// can be allowed while still working.
 pub const DEFAULT_GRANTS: &[&str] = &["identity", "relay", "resource"];
 
+/// The most live subscriptions one session may hold, across `relay`, `mesh`
+/// and `outbox`. See [`Session::subscribe_in`].
+pub const MAX_SUBSCRIPTIONS: usize = 64;
+
 /// A napplet's identity: the `(dTag, aggregateHash)` tuple NIP-5D defines,
 /// computed by the runtime from verified bytes — plus the author who signed
 /// the manifest, so a host can tell two authors' napplets apart when they
@@ -205,21 +209,38 @@ impl Session {
         self.established && self.offers(domain) && self.is_granted(domain)
     }
 
-    /// Register a live `relay` subscription, replacing any with the same `subId`.
-    pub fn subscribe(&mut self, sub_id: impl Into<String>, filters: Vec<Filter>) {
-        self.subscribe_in("relay", sub_id, filters);
+    /// Register a live `relay` subscription, replacing any with the same
+    /// `subId`. See [`Session::subscribe_in`] for the cap.
+    pub fn subscribe(
+        &mut self,
+        sub_id: impl Into<String>,
+        filters: Vec<Filter>,
+    ) -> Result<(), String> {
+        self.subscribe_in("relay", sub_id, filters)
     }
 
     /// Register a live subscription in `domain`, replacing any with the same
     /// `subId` in that domain.
+    ///
+    /// Capped at [`MAX_SUBSCRIPTIONS`] across domains: every live filter set
+    /// is evaluated against every event this device accepts, and each new
+    /// one starts a pull to every lane. A napplet looping over fresh ids
+    /// would otherwise grow both without bound. Replacing an id already
+    /// registered is always allowed — the count does not change.
     pub fn subscribe_in(
         &mut self,
         domain: impl Into<String>,
         sub_id: impl Into<String>,
         filters: Vec<Filter>,
-    ) {
-        self.subscriptions
-            .insert((domain.into(), sub_id.into()), filters);
+    ) -> Result<(), String> {
+        let key = (domain.into(), sub_id.into());
+        if self.subscriptions.len() >= MAX_SUBSCRIPTIONS && !self.subscriptions.contains_key(&key) {
+            return Err(format!(
+                "too many live subscriptions ({MAX_SUBSCRIPTIONS}); close one first"
+            ));
+        }
+        self.subscriptions.insert(key, filters);
+        Ok(())
     }
 
     /// Drop a `relay` subscription. Unknown ids are ignored: a napplet closing

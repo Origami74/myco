@@ -1335,10 +1335,16 @@ impl Content {
         save_library(&self.library_path, &snapshot);
     }
 
+    /// Drop an **nsite** from the Library. Kind-aware: an author may publish
+    /// an nsite and a napplet under one `d` tag, and forgetting the site must
+    /// leave the napplet — and its grants and pointer — where they are.
+    /// `forget_napplet` is the napplet's remover.
     pub fn remove_from_library(&self, addr: &SiteAddr) {
         let npub = addr.author.to_bech32().unwrap_or_default();
         let mut lib = self.library.lock().unwrap();
-        lib.retain(|i| !(i.author_npub == npub && i.d_tag == addr.d_tag));
+        lib.retain(|i| {
+            !(i.kind == LibraryKind::Nsite && i.author_npub == npub && i.d_tag == addr.d_tag)
+        });
         let snapshot = lib.clone();
         drop(lib);
         save_library(&self.library_path, &snapshot);
@@ -3659,15 +3665,18 @@ impl Content {
         }
     }
 
-    /// Whether a site is in our Library (we "run" it, so we're interested in its
-    /// updates — download before forwarding).
+    /// Whether an **nsite** is in our Library (we "run" it, so we're interested
+    /// in its updates — download before forwarding). Kind-aware: a napplet
+    /// entry under the same `(author, d)` is not the nsite, and must not make
+    /// the nsite's manifest look installed — that staged every blob of an
+    /// uninstalled site and put its tile on the grid.
     fn is_in_library(&self, addr: &SiteAddr) -> bool {
         let npub = addr.author.to_bech32().unwrap_or_default();
         self.library
             .lock()
             .unwrap()
             .iter()
-            .any(|i| i.author_npub == npub && i.d_tag == addr.d_tag)
+            .any(|i| i.kind == LibraryKind::Nsite && i.author_npub == npub && i.d_tag == addr.d_tag)
     }
 
     // --- wipe ---
@@ -5275,6 +5284,83 @@ mod library_kind_tests {
             vec!["relay".to_string()],
             "re-adding the nsite touched the napplet's grants"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Forgetting the nsite half of a shared `d` tag leaves the napplet half:
+    /// its entry, its grants and its pointer. `remove_from_library` used to
+    /// match on `(author, d)` alone and took both.
+    #[tokio::test]
+    async fn forgetting_the_nsite_keeps_its_napplet_twin() {
+        let dir = tmp("library-forget-twin");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        let author = nostr::Keys::generate().public_key();
+        let npub = author.to_bech32().unwrap();
+        let addr = SiteAddr {
+            author,
+            d_tag: Some("bitchat".into()),
+        };
+
+        content.add_to_library(&addr, Some("Bitchat site"), 1);
+        content.add_napplet_to_library(
+            &npub,
+            Some("bitchat"),
+            Some("Bitchat app"),
+            "bitchat.napplet.localhost",
+            vec!["relay".into()],
+            "naddr1x",
+            2,
+        );
+        assert_eq!(content.library_snapshot().len(), 2);
+
+        content.forget_site(&addr);
+
+        let lib = content.library_snapshot();
+        assert_eq!(lib.len(), 1, "forgetting the nsite took the napplet too");
+        let app = &lib[0];
+        assert_eq!(app.kind, LibraryKind::Napplet);
+        assert_eq!(app.granted, vec!["relay".to_string()]);
+        assert_eq!(app.pointer, "naddr1x");
+        assert!(
+            content.napplet_grants(&npub, Some("bitchat")).is_some(),
+            "the napplet's grants went with the nsite"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A napplet-only Library does not make the same-slot nsite "installed":
+    /// `is_in_library` is what decides whether a manifest arriving from a
+    /// peer gets every blob staged and a tile on the grid.
+    #[tokio::test]
+    async fn a_napplet_entry_does_not_make_the_nsite_twin_installed() {
+        let dir = tmp("library-napplet-only");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        let author = nostr::Keys::generate().public_key();
+        let npub = author.to_bech32().unwrap();
+
+        content.add_napplet_to_library(
+            &npub,
+            Some("bitchat"),
+            Some("Bitchat app"),
+            "bitchat.napplet.localhost",
+            vec!["relay".into()],
+            "naddr1x",
+            2,
+        );
+        let addr = SiteAddr {
+            author,
+            d_tag: Some("bitchat".into()),
+        };
+        assert!(
+            !content.is_in_library(&addr),
+            "a napplet entry passed for the nsite twin"
+        );
+
+        // And the nsite itself still counts once it is added.
+        content.add_to_library(&addr, Some("Bitchat site"), 3);
+        assert!(content.is_in_library(&addr));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

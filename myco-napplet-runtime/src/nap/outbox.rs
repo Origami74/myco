@@ -384,8 +384,14 @@ fn dedupe(lanes: impl IntoIterator<Item = RelayLane>) -> Vec<RelayLane> {
         .collect()
 }
 
+/// The most relays a napplet may name in one call. Every lane is dialled at
+/// once and held for up to `MAX_TIMEOUT`; NIP-65 practice is a handful, and
+/// ten is already more than any real list.
+pub const MAX_HINT_RELAYS: usize = 10;
+
 /// `options.relays`, validated. A napplet may name relays; it may not make the
-/// shell connect to a loopback or private-network address.
+/// shell connect to a loopback or private-network address, and it may not
+/// name so many that one call opens thousands of sockets.
 fn hint_lanes(
     options: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Vec<RelayLane>, String> {
@@ -395,6 +401,9 @@ fn hint_lanes(
     let Some(items) = raw.as_array() else {
         return Err("relays must be a list of URLs".to_string());
     };
+    if items.len() > MAX_HINT_RELAYS {
+        return Err(format!("at most {MAX_HINT_RELAYS} relays may be named"));
+    }
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let Some(url) = item.as_str() else {
@@ -408,26 +417,34 @@ fn hint_lanes(
 /// Accept `ws://` and `wss://` URLs to public hosts and to `.fips` mesh
 /// peers; refuse anything that would point the shell at itself or at a
 /// private network.
+///
+/// Parsed by the `url` crate — the same parser the WebSocket client uses —
+/// so the host *we* judge is the host *it* dials. Hand-splitting the
+/// authority read `ws://x@127.0.0.1:4870` as host `x`; the client reads it
+/// as userinfo on `127.0.0.1`, which is the ungated loopback relay. The
+/// parser also normalises `127.1`, `2130706433`, `0x7f000001` and
+/// `0177.0.0.1` to `127.0.0.1` before we look, so no shorthand slips past.
+///
+/// An Internet lane keeps the URL as given; a `.fips` lane is rebuilt from
+/// its npub and never carries the napplet's string (see [`mesh_relay_npub`]).
+/// What a public *name* resolves to is checked again at the dial site, since
+/// resolving is the dialler's, not this crate's.
 pub fn validate_relay_url(url: &str) -> Result<RelayLane, String> {
-    let rest = url
-        .strip_prefix("wss://")
-        .or_else(|| url.strip_prefix("ws://"))
-        .ok_or_else(|| format!("relay URL must be ws:// or wss://: {url}"))?;
-    let authority = rest.split('/').next().unwrap_or("");
-    let host = authority
-        .strip_prefix('[')
-        .and_then(|h| h.split(']').next())
-        .unwrap_or_else(|| authority.split(':').next().unwrap_or(""));
-    if host.is_empty() {
-        return Err(format!("relay URL has no host: {url}"));
+    use nostr::types::url::Host;
+    let parsed =
+        nostr::Url::parse(url).map_err(|e| format!("relay URL is not a URL: {url} ({e})"))?;
+    if !matches!(parsed.scheme(), "ws" | "wss") {
+        return Err(format!("relay URL must be ws:// or wss://: {url}"));
     }
-    // Classified leniently (a `?` or `#` glued to the host counts too) so a
-    // malformed `.fips` URL is refused below rather than falling through to
-    // the Internet branch.
-    if host.ends_with(".fips") || is_mesh_relay_url(url) {
+    // Classified leniently (a `?`, `#` or `@` glued to the host counts too)
+    // so a malformed `.fips` URL is refused here, with the mesh shape named
+    // as the reason, rather than falling through to the Internet branch.
+    let looks_mesh = is_mesh_relay_url(url)
+        || matches!(parsed.host(), Some(Host::Domain(d)) if d.ends_with(".fips"));
+    if looks_mesh {
         // Never carry the string as given: the lane holds the canonical
-        // `ws://<npub>.fips:4870` rebuilt from the npub, so no userinfo,
-        // port or path a napplet wrote can reach the peer pool.
+        // `ws://<npub>.fips:4870` rebuilt from the npub, so no userinfo, port
+        // or path a napplet wrote can reach the peer pool.
         let npub = mesh_relay_npub(url).ok_or_else(|| {
             "mesh relay URL must be ws://<npub>.fips:4870 with no userinfo or path".to_string()
         })?;
@@ -435,34 +452,76 @@ pub fn validate_relay_url(url: &str) -> Result<RelayLane, String> {
             url: mesh_relay_url(&npub),
         });
     }
-    if is_private_host(host) {
-        return Err(format!("relay URL is not allowed: {url}"));
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("relay URL must not carry userinfo: {url}"));
+    }
+    let Some(host) = parsed.host() else {
+        return Err(format!("relay URL has no host: {url}"));
+    };
+    match host {
+        Host::Domain(domain) => {
+            if is_private_name(domain) {
+                return Err(format!("relay URL is not allowed: {url}"));
+            }
+        }
+        Host::Ipv4(v4) => {
+            if is_private_ip(std::net::IpAddr::V4(v4)) {
+                return Err(format!("relay URL is not allowed: {url}"));
+            }
+        }
+        Host::Ipv6(v6) => {
+            if is_private_ip(std::net::IpAddr::V6(v6)) {
+                return Err(format!("relay URL is not allowed: {url}"));
+            }
+        }
     }
     Ok(RelayLane::Internet {
         url: url.to_string(),
     })
 }
 
-fn is_private_host(host: &str) -> bool {
+/// A hostname that names this device or its LAN by convention rather than
+/// by address: `localhost`, anything under it, and mDNS `.local`.
+fn is_private_name(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
-    if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") {
-        return true;
+    lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local")
+}
+
+/// Whether an address is one a napplet must not make the shell dial: this
+/// device, its LAN, or nowhere in particular.
+///
+/// v4: loopback, RFC 1918, link-local, unspecified, broadcast, multicast,
+/// `0.0.0.0/8` and CGNAT (`100.64.0.0/10`, hand-rolled — `Ipv4Addr::is_shared`
+/// is not stable). v6: loopback, unspecified, unique-local, link-local,
+/// multicast, and a v4-mapped address is judged as its v4 —
+/// `::ffff:192.168.1.2` is `192.168.1.2` to the socket. Not `to_ipv4()`, which
+/// also maps `::1` to `0.0.0.1` and would misjudge the v6 loopback.
+///
+/// Also the predicate the dial site applies to what a public name resolves to.
+pub fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || o[0] == 0
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_ip(std::net::IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
+        }
     }
-    if let Ok(v4) = lower.parse::<std::net::Ipv4Addr>() {
-        return v4.is_loopback()
-            || v4.is_private()
-            || v4.is_link_local()
-            || v4.is_unspecified()
-            || v4.is_broadcast();
-    }
-    if let Ok(v6) = lower.parse::<std::net::Ipv6Addr>() {
-        let segs = v6.segments();
-        return v6.is_loopback()
-            || v6.is_unspecified()
-            || (segs[0] & 0xfe00) == 0xfc00 // unique local
-            || (segs[0] & 0xffc0) == 0xfe80; // link local
-    }
-    false
 }
 
 fn timeout_in(
@@ -880,9 +939,54 @@ mod tests {
             "ws://[fe80::1]:4870",
             "wss://relay.local",
             "wss://",
+            // Userinfo: the WebSocket client dials the host after the `@`.
+            "ws://x@127.0.0.1:4870",
+            "ws://user:pw@relay.example",
+            // v4-mapped v6 is the v4 to the socket.
+            "ws://[::ffff:192.168.1.2]:4870",
+            "ws://[::ffff:127.0.0.1]",
+            // Shorthand the resolver would have accepted; the parser
+            // normalises all of these to 127.0.0.1 before we look.
+            "ws://127.1",
+            "ws://2130706433",
+            "ws://0x7f000001",
+            "ws://0177.0.0.1",
+            // CGNAT, multicast, "this network".
+            "ws://100.64.0.1",
+            "ws://100.127.255.254",
+            "ws://224.0.0.1",
+            "ws://[ff02::1]",
+            "ws://0.0.0.0",
+            "ws://0.1.2.3",
+            "ws://255.255.255.255",
         ] {
             assert!(validate_relay_url(bad).is_err(), "accepted {bad}");
         }
+        // The parser's normalisation is what the shorthand refusals rest on.
+        assert_eq!(
+            nostr::Url::parse("ws://0x7f000001").unwrap().host_str(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            nostr::Url::parse("ws://2130706433").unwrap().host_str(),
+            Some("127.0.0.1")
+        );
+        // Public addresses and the CGNAT range's neighbours still pass.
+        for ok in [
+            "wss://relay.example",
+            "ws://100.63.255.255",
+            "ws://100.128.0.1",
+            "ws://[2001:db8::1]:4870",
+            "ws://8.8.8.8",
+        ] {
+            assert!(validate_relay_url(ok).is_ok(), "refused {ok}");
+        }
+        assert!(
+            validate_relay_url("ws://x@127.0.0.1:4870")
+                .unwrap_err()
+                .contains("userinfo"),
+            "userinfo must be named as the reason"
+        );
         assert_eq!(
             validate_relay_url("wss://relay.damus.io").unwrap(),
             RelayLane::Internet {
@@ -931,6 +1035,36 @@ mod tests {
                 "{loose} should be rebuilt as {canonical}"
             );
         }
+    }
+
+    /// One call may name a handful of relays, not a fan-out of thousands:
+    /// every lane is dialled at once and held for up to the timeout.
+    #[test]
+    fn too_many_named_relays_are_refused() {
+        let urls = |n: usize| -> serde_json::Map<String, serde_json::Value> {
+            let list: Vec<serde_json::Value> = (0..n)
+                .map(|i| json!(format!("wss://relay{i}.example")))
+                .collect();
+            let mut m = serde_json::Map::new();
+            m.insert("relays".into(), serde_json::Value::Array(list));
+            m
+        };
+        let ten = urls(MAX_HINT_RELAYS);
+        assert_eq!(hint_lanes(Some(&ten)).unwrap().len(), MAX_HINT_RELAYS);
+        let eleven = urls(MAX_HINT_RELAYS + 1);
+        let err = hint_lanes(Some(&eleven)).unwrap_err();
+        assert_eq!(err, "at most 10 relays may be named");
+        // Refused before any URL is looked at: a list that is too long *and*
+        // full of private hosts is refused for its length.
+        let mut too_many_private = serde_json::Map::new();
+        too_many_private.insert(
+            "relays".into(),
+            json!(vec!["ws://127.0.0.1"; MAX_HINT_RELAYS + 1]),
+        );
+        assert_eq!(
+            hint_lanes(Some(&too_many_private)).unwrap_err(),
+            "at most 10 relays may be named"
+        );
     }
 
     /// Subscribe: local backlog now, remote lanes pulled into the local relay,
