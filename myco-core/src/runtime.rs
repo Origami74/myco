@@ -1331,12 +1331,14 @@ impl AppRuntime {
             .napplet_context()
             .ok_or_else(|| anyhow::anyhow!("content layer is not running"))?;
         Ok(NappletOpenRequest {
+            pointer: pointer.to_string(),
             addr,
             npub,
             grants,
             content,
             host,
             rt,
+            review: self.napplet_review.clone(),
         })
     }
 
@@ -1421,6 +1423,10 @@ impl AppRuntime {
         let pointer = pointer.to_string();
         let review = self.napplet_review.clone();
         let peer_relays = content.peer_relays();
+        // Read before the spawn, as the update check does: offline-only is a
+        // setting, and a fetch that starts under it does not get to consult
+        // the internet because the switch moved while it was in flight.
+        let offline_only = content.is_offline_only();
         *review.lock().unwrap() = Some(crate::napplet::NappletReview {
             pointer: pointer.clone(),
             loading: true,
@@ -1448,9 +1454,22 @@ impl AppRuntime {
             // lives where its author published it, which is often not where the
             // popular aggregators look — searching only the defaults reports a
             // napplet as missing when it is simply somewhere else.
-            sources.push(addr.public_source());
+            //
+            // Unless offline-only is on: then the sharer's phone is the only
+            // source, as it is for every other acquisition path — mesh-only
+            // mode is how the BLE path gets proven, and a napplet install
+            // that quietly went to the internet would prove nothing.
+            if offline_only {
+                tracing::info!("offline-only: napplet {pointer} is asked of the sharer only");
+            } else {
+                sources.push(addr.public_source());
+            }
 
-            let mut ingested = Err(anyhow::anyhow!("no source had this napplet"));
+            let mut ingested = Err(anyhow::anyhow!(if offline_only && sources.is_empty() {
+                "Offline-only is on and nobody nearby shared this app"
+            } else {
+                "no source had this napplet"
+            }));
             for source in &sources {
                 ingested = host.ingest(&addr, source).await;
                 if ingested.is_ok() {
@@ -1512,20 +1531,27 @@ impl AppRuntime {
         let shell_host =
             myco_napplet_runtime::host::shell_host(&addr.author.to_bytes(), addr.d_tag.as_deref());
 
-        // The title the fetch already read from the manifest. Without it the
-        // Library falls back to the `d` tag, so a napplet called "DingDong"
-        // shows up as "dingdong" — an identifier where a name should be.
-        let title = self
-            .napplet_review
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|r| r.pointer == pointer && !r.title.is_empty())
-            .map(|r| r.title.clone());
+        // The title the fetch already read from the manifest, and the
+        // declared `requires` the sheet showed. Without the title the Library
+        // falls back to the `d` tag, so a napplet called "DingDong" shows up
+        // as "dingdong" — an identifier where a name should be. The requires
+        // list is what this install *reviewed*: a later version declaring
+        // more comes back through the sheet rather than being granted at open.
+        let (title, requires) = {
+            let review = self.napplet_review.lock().unwrap();
+            let review = review.as_ref().filter(|r| r.pointer == pointer);
+            (
+                review
+                    .filter(|r| !r.title.is_empty())
+                    .map(|r| r.title.clone()),
+                review.map(|r| r.requires.clone()).unwrap_or_default(),
+            )
+        };
 
         tracing::info!(
             napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
             ?granted,
+            reviewed = ?requires,
             title = %title.as_deref().unwrap_or(""),
             "installing napplet"
         );
@@ -1535,6 +1561,7 @@ impl AppRuntime {
             title.as_deref(),
             &shell_host,
             granted,
+            requires,
             pointer,
             crate::content::now_secs(),
         );
@@ -1599,7 +1626,21 @@ impl AppRuntime {
         let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
             return;
         };
-        if let Err(e) = rt.block_on(content.wipe_cache()) {
+        // The user's own profile and relay list are kept — but a wipe never
+        // *generates* a user key: only an existing one is read.
+        let data_dir = Path::new(&self.data_dir);
+        let keep_author = if crate::user_key::exists(data_dir) {
+            match crate::user_key::load_or_generate(data_dir) {
+                Ok(user) => Some(user.keys.public_key()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "user key unreadable; its events are not kept");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = rt.block_on(content.wipe_cache(keep_author)) {
             self.error = format!("cache wipe failed: {e}");
         }
     }
@@ -1629,40 +1670,60 @@ impl AppRuntime {
             // identity, and existing installs need no migration.
             let data_dir = Path::new(&self.data_dir);
             let first_use = !crate::user_key::exists(data_dir);
-            let user = crate::user_key::load_or_generate(data_dir).ok()?;
+            let user = match crate::user_key::load_or_generate(data_dir) {
+                Ok(user) => user,
+                Err(e) => {
+                    // Every open will say "content layer is not running";
+                    // this is the line that says why.
+                    tracing::error!(error = %e, "user key unreadable; napplets cannot open");
+                    return None;
+                }
+            };
             let signer = Arc::new(crate::user_key::UserSigner::new(user.keys.clone()));
 
             if first_use {
-                // A new user is never a bare pubkey. Published to the local
-                // relay only, and never in the way of opening a napplet — a
-                // profile that failed to publish is cosmetic, and a launch that
-                // waited on the network would not be.
+                // A new user is never a bare pubkey. Published to the embedded
+                // store only — `relay_store()`, not `relay()`, which is the
+                // configured custom relay when there is one — and never in
+                // the way of opening a napplet: a profile that failed to
+                // publish is cosmetic, and a launch that waited on the
+                // network would not be. With a custom relay configured there
+                // is no local store to write, and nothing is sent anywhere.
                 //
                 // Beside it, a relay list (kind 10002) naming the configured
                 // relays, so the user's own outbox plan resolves as NIP-65
                 // rather than fallback (§7.4). Never this device's mesh relay:
                 // that URL is the device npub, and a user-key event carrying
                 // it would publish the link between the two for good.
-                let relay = content.relay();
-                let profile = nostr::EventBuilder::new(
-                    nostr::Kind::Metadata,
-                    crate::user_key::guest_profile_json(&user),
-                )
-                .sign_with_keys(&user.keys)
-                .map_err(anyhow::Error::from);
-                let relay_list = crate::outbox::own_relay_list(&user.keys);
-                for (what, signed) in [("guest profile", profile), ("relay list", relay_list)] {
-                    match signed {
-                        Ok(event) => {
-                            let relay = relay.clone();
-                            handle.spawn(async move {
-                                if let Err(e) = relay.publish(event).await {
-                                    tracing::warn!("could not publish the {what}: {e}");
+                match content.relay_store() {
+                    Some(store) => {
+                        let profile = nostr::EventBuilder::new(
+                            nostr::Kind::Metadata,
+                            crate::user_key::guest_profile_json(&user),
+                        )
+                        .sign_with_keys(&user.keys)
+                        .map_err(anyhow::Error::from);
+                        let relay_list = crate::outbox::own_relay_list(&user.keys);
+                        for (what, signed) in
+                            [("guest profile", profile), ("relay list", relay_list)]
+                        {
+                            match signed {
+                                Ok(event) => {
+                                    let store = store.clone();
+                                    handle.spawn(async move {
+                                        use nsite_deck::seams::RelayBackend;
+                                        if let Err(e) = store.publish(event).await {
+                                            tracing::warn!("could not store the {what}: {e}");
+                                        }
+                                    });
                                 }
-                            });
+                                Err(e) => tracing::warn!("could not sign the {what}: {e}"),
+                            }
                         }
-                        Err(e) => tracing::warn!("could not sign the {what}: {e}"),
                     }
+                    None => tracing::debug!(
+                        "a custom relay is configured; the first-use profile and relay list stay unpublished"
+                    ),
                 }
                 tracing::info!("generated a user key for napplets: {}", user.guest_name());
             }
@@ -2395,26 +2456,33 @@ const _: fn() = || {
 /// mutex on the main thread, queuing every `Tick` behind it. Now the lock is
 /// held only to gather these handles; `run` does the waiting.
 pub struct NappletOpenRequest {
+    /// The pointer the open was asked for, as the Library and the review
+    /// sheet spell it.
+    pointer: String,
     addr: crate::napplet::NappletAddr,
     npub: String,
     grants: Option<crate::content::NappletGrants>,
     content: Arc<crate::content::Content>,
     host: Arc<crate::napplet::NappletHost>,
     rt: tokio::runtime::Handle,
+    /// The review slot, so an update that declares more than was reviewed
+    /// can be put in front of the user.
+    review: Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
 }
 
 impl NappletOpenRequest {
     /// Resolve, open the session, and record any widening in the Library.
-    /// Returns the opened napplet and whether the Library changed. Blocks the
-    /// calling thread; never call it on a Tokio worker.
+    /// Returns the opened napplet and whether state the UI reads changed —
+    /// the Library, or the review slot. Blocks the calling thread; never call
+    /// it on a Tokio worker.
     pub fn run(self) -> anyhow::Result<(crate::napplet::OpenedNapplet, bool)> {
         let opened = self
             .rt
             .block_on(self.host.open_with(&self.addr, self.grants.clone()))?;
         // The session may have been opened with more than was stored (a
-        // declared domain this build newly implements). Record it, so the
+        // reviewed domain this build newly implements). Record it, so the
         // sheet says what the app can do and the next open needs no widening.
-        let mut widened = false;
+        let mut changed = false;
         if let Some(stored) = self.grants {
             if opened.grants != stored {
                 self.content.set_napplet_grants(
@@ -2422,10 +2490,34 @@ impl NappletOpenRequest {
                     self.addr.d_tag.as_deref(),
                     opened.grants.clone(),
                 );
-                widened = true;
+                changed = true;
             }
         }
-        Ok((opened, widened))
+        // The served version declares something the user never saw. It was
+        // not granted; it goes back through the review sheet, which opens on
+        // the Apps screen beside the running window. Install from there
+        // records the new reviewed list and the grants the sheet showed.
+        if !opened.unreviewed.is_empty() {
+            let requires = opened.requires.clone();
+            let grants = crate::napplet::effective_grants(&requires);
+            tracing::info!(
+                napplet = %self.addr.d_tag.as_deref().unwrap_or("<root>"),
+                unreviewed = ?opened.unreviewed,
+                "an update declares more than was reviewed; asking"
+            );
+            *self.review.lock().unwrap() = Some(crate::napplet::NappletReview {
+                pointer: self.pointer.clone(),
+                loading: false,
+                title: opened.title.clone().unwrap_or_default(),
+                description: String::new(),
+                requires,
+                grants,
+                error: String::new(),
+                holder: None,
+            });
+            changed = true;
+        }
+        Ok((opened, changed))
     }
 }
 

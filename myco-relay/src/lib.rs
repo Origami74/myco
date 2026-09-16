@@ -67,6 +67,10 @@ pub struct RelayStore {
     /// the file is read there and drained here; it is moved aside once
     /// everything in it is in the database.
     pending_legacy: Mutex<Vec<Event>>,
+    /// Set once the legacy migration has run. Every async entry point waits
+    /// on it, so a second caller arriving while the first is still saving
+    /// sees the migrated store, not a half-empty one.
+    legacy_flushed: tokio::sync::OnceCell<()>,
     /// A store made by [`RelayStore::in_memory`] removes its directory when
     /// dropped: it exists to be as good as no persistence for tests.
     scratch: bool,
@@ -94,11 +98,17 @@ impl RelayStore {
     /// Open the store under `dir`: the LMDB at `<dir>/lmdb`, and any events a
     /// pre-LMDB build left in `<dir>/events.json` migrated in on the way.
     pub fn open(dir: impl AsRef<Path>) -> anyhow::Result<Self> {
+        Self::open_with_map_size(dir, MAP_SIZE)
+    }
+
+    /// [`RelayStore::open`] with an explicit LMDB map size — the production
+    /// path with `MAP_SIZE`; tests shrink it to make a save fail.
+    fn open_with_map_size(dir: impl AsRef<Path>, map_size: usize) -> anyhow::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         let lmdb_dir = dir.join("lmdb");
         std::fs::create_dir_all(&lmdb_dir)?;
         let db = NostrLMDB::builder(&lmdb_dir)
-            .map_size(MAP_SIZE)
+            .map_size(map_size)
             .build()
             .map_err(|e| anyhow::anyhow!("open relay store at {}: {e}", lmdb_dir.display()))?;
         let pending_legacy = read_legacy_file(&dir.join(LEGACY_FILE));
@@ -107,32 +117,61 @@ impl RelayStore {
             dir,
             expiring: Mutex::new(HashMap::new()),
             pending_legacy: Mutex::new(pending_legacy),
+            legacy_flushed: tokio::sync::OnceCell::new(),
             scratch: false,
         })
     }
 
     /// Save whatever `open` read from a pre-LMDB `events.json`, then move the
     /// file aside so it is read once. Runs at the start of every async entry
-    /// point and is a no-op after the first.
+    /// point; the first caller does the work and every concurrent one waits
+    /// for it, so nobody queries LMDB before the saves have landed.
+    ///
+    /// The file is moved aside only when **every** event is accounted for. A
+    /// save that succeeded or was rejected (a duplicate, a superseded
+    /// replaceable) has nothing left to keep; one that errored — LMDB is
+    /// full, an I/O failure, a batch that failed with it — is written back to
+    /// `events.json` so the next launch retries it. Renaming regardless used
+    /// to lose every pinned nsite's manifest to a single failed batch.
     async fn flush_legacy(&self) {
-        let pending = std::mem::take(&mut *self.pending_legacy.lock().unwrap());
-        if pending.is_empty() {
-            return;
-        }
-        let mut moved = 0usize;
-        for event in pending {
-            if matches!(
-                self.db.save_event(&event).await,
-                Ok(SaveEventStatus::Success)
-            ) {
-                moved += 1;
-            }
-        }
-        let path = self.dir.join(LEGACY_FILE);
-        if let Err(e) = std::fs::rename(&path, path.with_extension("json.migrated")) {
-            tracing::warn!(error = %e, "relay store: migrated events.json but could not move it aside");
-        }
-        tracing::info!(moved, "relay store: migrated legacy events.json into LMDB");
+        self.legacy_flushed
+            .get_or_init(|| async {
+                let pending = std::mem::take(&mut *self.pending_legacy.lock().unwrap());
+                if pending.is_empty() {
+                    return;
+                }
+                let total = pending.len();
+                let mut moved = 0usize;
+                let mut failed: Vec<Event> = Vec::new();
+                for event in pending {
+                    match self.db.save_event(&event).await {
+                        Ok(SaveEventStatus::Success) => moved += 1,
+                        Ok(SaveEventStatus::Rejected(_)) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, id = %event.id, "relay store: legacy event did not save");
+                            failed.push(event);
+                        }
+                    }
+                }
+                let path = self.dir.join(LEGACY_FILE);
+                if failed.is_empty() {
+                    if let Err(e) = std::fs::rename(&path, path.with_extension("json.migrated")) {
+                        tracing::warn!(error = %e, "relay store: migrated events.json but could not move it aside");
+                    }
+                    tracing::info!(moved, total, "relay store: migrated legacy events.json into LMDB");
+                } else {
+                    tracing::warn!(
+                        moved,
+                        failed = failed.len(),
+                        total,
+                        "relay store: some legacy events did not save; keeping them in events.json for the next launch"
+                    );
+                    if let Err(e) = write_legacy_file(&path, &failed) {
+                        tracing::error!(error = %e, "relay store: could not write the failed legacy events back");
+                    }
+                }
+            })
+            .await;
     }
 
     /// Number of stored (non-expired) events (for diagnostics).
@@ -258,6 +297,15 @@ fn read_legacy_file(path: &Path) -> Vec<Event> {
         .into_iter()
         .filter(|e| !is_expired(e, now) && !e.kind.is_ephemeral())
         .collect()
+}
+
+/// Write `events` back to the legacy file atomically (temp + rename), so a
+/// kill mid-write leaves the previous file, not a truncated one.
+fn write_legacy_file(path: &Path, events: &[Event]) -> anyhow::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(events)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// Admit an expiring event into the in-memory map, applying replaceable /
@@ -648,6 +696,75 @@ mod tests {
         let store = RelayStore::open(&dir).unwrap();
         assert_eq!(store.count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A legacy save that errors does not cost the event. With the LMDB map
+    /// shrunk until it overflows, `events.json` stays in place holding what
+    /// did not land, and the next open — with a map that fits — migrates the
+    /// rest and moves the file aside.
+    ///
+    /// The "next open" happens in a second directory: heed keeps every
+    /// environment this process opened in a global cache for the process's
+    /// life (only `prepare_for_closing` releases it, and `nostr-lmdb` never
+    /// calls it), so the same path cannot be reopened with a different map
+    /// size. Carrying the kept file across is the same launch-after-failure
+    /// path — the file is what survives, and the file is what is read.
+    #[tokio::test]
+    async fn a_failed_legacy_save_keeps_the_file() {
+        let dir = tmp("legacy-failed-save");
+        let next = tmp("legacy-failed-save-next-launch");
+        for d in [&dir, &next] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let keys = Keys::generate();
+        // 300 notes of 8 KiB: 2.4 MiB against a 1 MiB map. Fewer, larger
+        // notes rather than thousands of small ones — every save is its own
+        // synced LMDB commit, and the point is the overflow, not the count.
+        let body = "x".repeat(8 * 1024);
+        let notes: Vec<Event> = (0..300)
+            .map(|i| {
+                EventBuilder::text_note(format!("{i}:{body}"))
+                    .sign_with_keys(&keys)
+                    .unwrap()
+            })
+            .collect();
+        std::fs::write(dir.join(LEGACY_FILE), serde_json::to_vec(&notes).unwrap()).unwrap();
+
+        let store = RelayStore::open_with_map_size(&dir, 1024 * 1024).unwrap();
+        let landed = store.query(&[Filter::new()]).await.unwrap().len();
+        assert!(
+            landed < notes.len(),
+            "the map was meant to overflow; every note saved"
+        );
+        assert!(
+            landed > 0,
+            "nothing saved at all; the map is not the failure"
+        );
+        assert!(
+            dir.join(LEGACY_FILE).exists(),
+            "events.json was moved aside with saves still failed"
+        );
+        assert!(!dir.join("events.json.migrated").exists());
+        let kept = read_legacy_file(&dir.join(LEGACY_FILE));
+        assert_eq!(
+            kept.len() + landed,
+            notes.len(),
+            "the file does not hold exactly what failed"
+        );
+        drop(store);
+
+        // The next launch, with a map that fits: what the file kept migrates,
+        // and the file moves aside.
+        std::fs::copy(dir.join(LEGACY_FILE), next.join(LEGACY_FILE)).unwrap();
+        let store = RelayStore::open(&next).unwrap();
+        let all = store.query(&[Filter::new()]).await.unwrap();
+        assert_eq!(all.len(), kept.len(), "not every kept note came across");
+        assert!(!next.join(LEGACY_FILE).exists());
+        assert!(next.join("events.json.migrated").exists());
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&next);
     }
 
     /// Durable regular events — a napplet's note — persist across reopen now

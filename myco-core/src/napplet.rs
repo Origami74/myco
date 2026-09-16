@@ -192,10 +192,17 @@ pub struct OpenedNapplet {
     pub shell_host: String,
     pub title: Option<String>,
     /// What the session was actually opened with: the stored grants, widened
-    /// by any domain the napplet declared that this build implements, an
-    /// earlier one did not, and the user has not switched off. See
-    /// [`NappletHost::open_with`].
+    /// by any **reviewed** domain the napplet declared that this build
+    /// implements, an earlier one did not, and the user has not switched off.
+    /// See [`NappletHost::open_with`].
     pub grants: crate::content::NappletGrants,
+    /// What the served manifest declares with `requires` — the list a review
+    /// sheet for this version would show.
+    pub requires: Vec<String>,
+    /// Declared domains this build implements that the user has never seen:
+    /// not on the reviewed list, not granted, not denied. Never granted here;
+    /// the caller routes a non-empty list back through the review sheet.
+    pub unreviewed: Vec<String>,
 }
 
 impl OpenedNapplet {
@@ -282,34 +289,51 @@ impl NappletHost {
         self
     }
 
-    /// As [`NappletHost::open_with`], for a napplet with nothing switched off:
+    /// As [`NappletHost::open_with`], for a napplet with nothing switched off
+    /// whose review showed exactly what the served manifest declares:
     /// `granted` is what the user approved, or `None` for one not installed.
+    /// A test convenience — the device always goes through `open_with` with
+    /// what the Library recorded.
     pub async fn open(
         &self,
         addr: &NappletAddr,
         granted: Option<Vec<String>>,
     ) -> anyhow::Result<OpenedNapplet> {
-        self.open_with(
+        self.open_inner(
             addr,
             granted.map(|granted| crate::content::NappletGrants {
                 granted,
                 denied: Vec::new(),
+                reviewed: Vec::new(),
             }),
+            true,
         )
         .await
     }
 
     /// Resolve a napplet from the local stores and open a session for it.
     ///
-    /// `grants` is what the Library records — what the user allowed and what
-    /// they switched off — or `None` for a napplet that is not installed,
-    /// which opens with nothing but the handshake. A napplet that fails
-    /// verification never gets a session: the error propagates and no window
-    /// opens.
+    /// `grants` is what the Library records — what the user allowed, what
+    /// they switched off, and what the review sheet showed them — or `None`
+    /// for a napplet that is not installed, which opens with nothing but the
+    /// handshake. A napplet that fails verification never gets a session: the
+    /// error propagates and no window opens.
     pub async fn open_with(
         &self,
         addr: &NappletAddr,
         grants: Option<crate::content::NappletGrants>,
+    ) -> anyhow::Result<OpenedNapplet> {
+        self.open_inner(addr, grants, false).await
+    }
+
+    /// The open behind both entry points. `reviewed_is_declared` stands in
+    /// for a reviewed list equal to the served manifest's `requires` — what
+    /// [`NappletHost::open`] promises.
+    async fn open_inner(
+        &self,
+        addr: &NappletAddr,
+        grants: Option<crate::content::NappletGrants>,
+        reviewed_is_declared: bool,
     ) -> anyhow::Result<OpenedNapplet> {
         let event = self
             .manifests
@@ -331,27 +355,54 @@ impl NappletHost {
         // (`effective_grants`), so a napplet installed before a domain existed
         // here has no grant for it however plainly it declared the need — and
         // fails on the first call, with no screen ever having said no. What
-        // the user agreed to was "what it declares, plus the defaults"; this
-        // build implementing more of that list does not change the agreement,
-        // so the session is opened with the declared set as of now.
+        // the user agreed to was the list the review sheet showed them, plus
+        // the defaults — the **reviewed** list, recorded in the Library. This
+        // build implementing more of *that* list does not change the
+        // agreement, so those domains are granted at open.
         //
-        // Except what the user switched off. A domain in `denied` is a
-        // decision, and a launch does not get to overrule it — that is the
+        // The served manifest is not the agreement. It is whatever version
+        // the update check pinned, and an update check shows no screen: a v2
+        // that declares more than the v1 the user reviewed does not get the
+        // extra on the strength of having been pinned. Those domains are
+        // returned as `unreviewed`, ungranted, and the caller puts them in
+        // front of the user; installing from that sheet records the new
+        // reviewed list. An entry with an empty reviewed list — written by
+        // this branch before the list existed, never released — widens over
+        // the defaults only, and anything more it declares is reviewed once.
+        //
+        // And what the user switched off stays off. A domain in `denied` is
+        // a decision, and a launch does not get to overrule it — that is the
         // difference between "never decided" and "said no", and why the two
         // are stored apart. Nothing undeclared is added, nothing is added to a
         // napplet that was never installed, and the long-press sheet shows
         // the result.
+        let requires = resolved.manifest.requires.clone();
+        let mut unreviewed: Vec<String> = Vec::new();
         let grants = match grants {
             None => crate::content::NappletGrants::default(),
             Some(mut grants) => {
-                for domain in effective_grants(&resolved.manifest.requires) {
+                let reviewed = if reviewed_is_declared {
+                    effective_grants(&requires)
+                } else {
+                    effective_grants(&grants.reviewed)
+                };
+                for domain in effective_grants(&requires) {
                     if grants.granted.contains(&domain) || grants.denied.contains(&domain) {
+                        continue;
+                    }
+                    if !reviewed.contains(&domain) {
+                        tracing::info!(
+                            napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
+                            %domain,
+                            "the served manifest declares a capability the user never reviewed; not granted"
+                        );
+                        unreviewed.push(domain);
                         continue;
                     }
                     tracing::info!(
                         napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
                         %domain,
-                        "granting a declared capability this build newly implements"
+                        "granting a reviewed capability this build newly implements"
                     );
                     grants.granted.push(domain);
                 }
@@ -363,6 +414,7 @@ impl NappletHost {
             napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
             granted = ?grants.granted,
             denied = ?grants.denied,
+            ?unreviewed,
             "opening napplet"
         );
         let session = Session::new(
@@ -404,6 +456,8 @@ impl NappletHost {
             shell_host,
             title,
             grants,
+            requires,
+            unreviewed,
         })
     }
 
@@ -1053,7 +1107,13 @@ mod tests {
     }
 
     async fn host_with_fixture() -> (NappletHost, NappletAddr) {
-        let napplet = NappletBuilder::new().build();
+        host_with(NappletBuilder::new()).await
+    }
+
+    /// A host over in-memory seams serving the napplet `builder` makes, which
+    /// must keep the fixture's `d` tag.
+    async fn host_with(builder: NappletBuilder) -> (NappletHost, NappletAddr) {
+        let napplet = builder.build();
         let relay = Arc::new(MemRelay::new());
         let blobs = Arc::new(MemBlobs::new());
         for (_, bytes) in &napplet.blobs {
@@ -1279,12 +1339,19 @@ mod tests {
     }
 
     /// An installed napplet whose stored grants predate a domain this build
-    /// implements gets that domain if it declared it — and a napplet that was
-    /// never installed gets nothing whatever it declares.
+    /// implements gets that domain if it declared it **and the user reviewed
+    /// it** — and a napplet that was never installed gets nothing whatever it
+    /// declares.
     #[tokio::test]
     async fn an_installed_napplets_grants_widen_to_what_it_declared() {
         let (host, addr) = host_with_fixture().await; // declares shell, relay
-        let opened = host.open(&addr, Some(vec![])).await.unwrap();
+        let stored = crate::content::NappletGrants {
+            granted: vec![],
+            denied: vec![],
+            reviewed: vec!["shell".into(), "relay".into()],
+        };
+        let opened = host.open_with(&addr, Some(stored)).await.unwrap();
+        assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
         let mut granted = opened.granted().to_vec();
         granted.sort();
         let mut expected: Vec<String> = effective_grants(&["shell".into(), "relay".into()]);
@@ -1301,6 +1368,62 @@ mod tests {
             stranger.granted().is_empty(),
             "an uninstalled napplet was granted something"
         );
+        assert!(
+            stranger.unreviewed.is_empty(),
+            "an uninstalled napplet has nothing to review at open"
+        );
+    }
+
+    /// A pinned update that declares more than the version the user reviewed
+    /// does not get the extra at open: the update check showed no screen. The
+    /// domain comes back as unreviewed for the sheet, and is granted only
+    /// once a review that showed it has been recorded.
+    #[tokio::test]
+    async fn an_update_that_declares_more_is_not_granted_until_reviewed() {
+        let (host, addr) = host_with(NappletBuilder::new().requires(&["relay", "mesh"])).await;
+
+        // v1 was reviewed with `relay`; the served v2 now also declares `mesh`.
+        let stored = crate::content::NappletGrants {
+            granted: vec![],
+            denied: vec![],
+            reviewed: vec!["relay".into()],
+        };
+        let opened = host.open_with(&addr, Some(stored)).await.unwrap();
+        assert!(
+            opened.granted().contains(&"relay".to_string()),
+            "a reviewed, declared domain was not granted"
+        );
+        assert!(
+            !opened.granted().contains(&"mesh".to_string()),
+            "an update granted itself a domain nobody reviewed"
+        );
+        assert_eq!(opened.unreviewed, vec!["mesh".to_string()]);
+        assert_eq!(
+            opened.requires,
+            vec!["relay".to_string(), "mesh".to_string()]
+        );
+
+        // Reviewed again, with the new list: now it is granted.
+        let reviewed = crate::content::NappletGrants {
+            granted: vec![],
+            denied: vec![],
+            reviewed: vec!["relay".into(), "mesh".into()],
+        };
+        let opened = host.open_with(&addr, Some(reviewed)).await.unwrap();
+        assert!(opened.granted().contains(&"mesh".to_string()));
+        assert!(opened.unreviewed.is_empty());
+
+        // And a decision already made is not "unreviewed", whatever the list
+        // says: an entry that predates the reviewed list keeps its grants and
+        // is not asked about a domain it already switched off.
+        let decided = crate::content::NappletGrants {
+            granted: vec!["relay".into()],
+            denied: vec!["mesh".into()],
+            reviewed: vec![],
+        };
+        let opened = host.open_with(&addr, Some(decided)).await.unwrap();
+        assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
+        assert!(!opened.granted().contains(&"mesh".to_string()));
     }
 
     /// The version served is the one whose bytes are here. A newer manifest
@@ -1390,6 +1513,7 @@ mod tests {
         let stored = crate::content::NappletGrants {
             granted: vec!["identity".into()],
             denied: vec!["relay".into(), "resource".into()],
+            reviewed: vec!["shell".into(), "relay".into()],
         };
         let opened = host.open_with(&addr, Some(stored.clone())).await.unwrap();
         assert!(

@@ -134,16 +134,30 @@ pub struct LibraryItem {
     /// away and search blind.
     #[serde(default)]
     pub pointer: String,
+    /// The `requires` list the review sheet showed when this napplet was
+    /// installed — what the user actually saw and agreed to. Napplets only.
+    ///
+    /// Bounds what a launch may widen `granted` to: a domain this build newly
+    /// implements is granted at open only if it was on this list. A later
+    /// manifest declaring more than was reviewed goes back through the review
+    /// sheet rather than being granted on the strength of an update check the
+    /// user never saw. Kotlin ignores the key.
+    #[serde(default)]
+    pub reviewed: Vec<String>,
 }
 
-/// A napplet's grants as the Library records them: what the user allowed, and
-/// what the user switched off. A domain in neither set was never decided —
-/// which is what lets a launch grant a declared domain this build newly
-/// implements without overriding a decision the user did make.
+/// A napplet's grants as the Library records them: what the user allowed, what
+/// the user switched off, and what the review sheet showed them. A domain in
+/// neither `granted` nor `denied` was never decided — which is what lets a
+/// launch grant a declared domain this build newly implements, provided it was
+/// on the `reviewed` list, without overriding a decision the user did make.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NappletGrants {
     pub granted: Vec<String>,
     pub denied: Vec<String>,
+    /// The declared `requires` the user reviewed at install. See
+    /// [`LibraryItem::reviewed`].
+    pub reviewed: Vec<String>,
 }
 
 /// Whether an installed napplet can open, for its tile.
@@ -1210,6 +1224,7 @@ impl Content {
                 granted: Vec::new(),
                 denied: Vec::new(),
                 pointer: String::new(),
+                reviewed: Vec::new(),
             });
         }
         let snapshot = lib.clone();
@@ -1224,7 +1239,8 @@ impl Content {
     /// than merging: the review screen shows the whole set the user is agreeing
     /// to, so what they saw is what is stored. Merging would let a second
     /// install quietly accumulate capabilities across two screens neither of
-    /// which showed the total.
+    /// which showed the total. `requires` is the declared list that screen
+    /// showed; it is recorded as [`LibraryItem::reviewed`].
     #[allow(clippy::too_many_arguments)]
     pub fn add_napplet_to_library(
         &self,
@@ -1233,6 +1249,7 @@ impl Content {
         title: Option<&str>,
         shell_host: &str,
         granted: Vec<String>,
+        requires: Vec<String>,
         pointer: &str,
         added_at: u64,
     ) {
@@ -1245,8 +1262,10 @@ impl Content {
             item.pinned = true;
             item.granted = granted;
             // A fresh review is a fresh decision: what was switched off before
-            // is on the table again, and the screen showed the whole set.
+            // is on the table again, and the screen showed the whole set —
+            // which is also the new reviewed list.
             item.denied = Vec::new();
+            item.reviewed = requires;
             item.url_host = shell_host.to_string();
             if !pointer.is_empty() {
                 item.pointer = pointer.to_string();
@@ -1266,6 +1285,7 @@ impl Content {
                 granted,
                 denied: Vec::new(),
                 pointer: pointer.to_string(),
+                reviewed: requires,
             });
         }
         let snapshot = lib.clone();
@@ -1273,9 +1293,10 @@ impl Content {
         save_library(&self.library_path, &snapshot);
     }
 
-    /// Replace a napplet's recorded grants — both sets. Used when an open
-    /// widened them to a declared domain this build newly implements, and when
-    /// a switch on the sheet moves a domain between the two.
+    /// Replace a napplet's recorded grants — both decision sets. Used when an
+    /// open widened them to a reviewed domain this build newly implements, and
+    /// when a switch on the sheet moves a domain between the two. The reviewed
+    /// list is left alone: only install review rewrites it.
     pub fn set_napplet_grants(
         &self,
         author_npub: &str,
@@ -1316,6 +1337,7 @@ impl Content {
             .map(|i| NappletGrants {
                 granted: i.granted.clone(),
                 denied: i.denied.clone(),
+                reviewed: i.reviewed.clone(),
             })
     }
 
@@ -3724,7 +3746,13 @@ impl Content {
     /// each pinned site and every blob it references survive, so installed apps keep
     /// working offline; everything else — unpinned opened sites, discovered
     /// listings, staged updates — is dropped. Identity and Circle are untouched.
-    pub async fn wipe_cache(&self) -> anyhow::Result<()> {
+    ///
+    /// `keep_author` is the user key's pubkey, when there is one: its kind 0
+    /// and kind 10002 survive too. They were published once, at first napplet
+    /// use, and are never republished — `user.nsec` still exists after a wipe,
+    /// so nothing regenerates them — and without them the user's own outbox
+    /// plan falls back and every napplet sees a bare pubkey.
+    pub async fn wipe_cache(&self, keep_author: Option<PublicKey>) -> anyhow::Result<()> {
         // Pinned Library entries are the apps we must keep working.
         let pinned: Vec<LibraryItem> = self
             .library
@@ -3778,6 +3806,22 @@ impl Content {
         }
 
         if let Some(store) = &self.relay_store {
+            // The user's own profile and relay list, by the pubkey alone: the
+            // store keeps one of each per author, so this is at most two
+            // events. Read from the embedded store itself — it is the only
+            // thing being retained.
+            if let Some(pk) = keep_author {
+                let own = Filter::new()
+                    .author(pk)
+                    .kinds([Kind::Metadata, Kind::RelayList]);
+                match store.query(&[own]).await {
+                    Ok(events) => keep_events.extend(events.iter().map(|e| e.id.to_bytes())),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "wipe_cache: could not read the user's own profile and relay list; they will go"
+                    ),
+                }
+            }
             store.retain_events(&keep_events).await;
         }
         if let Some(store) = &self.blobs_local {
@@ -4782,7 +4826,7 @@ mod tests {
         std::fs::write(&outbox, b"ciphertext").unwrap();
         content.insert_file_transfer(incoming_record("t1", u64::MAX));
 
-        content.wipe_cache().await.unwrap();
+        content.wipe_cache(None).await.unwrap();
 
         assert!(
             !staged.exists(),
@@ -4976,7 +5020,7 @@ mod tests {
             author: drop.author,
             d_tag: None,
         });
-        content.wipe_cache().await.unwrap();
+        content.wipe_cache(None).await.unwrap();
 
         // The pinned site still serves from local stores; the unpinned one is gone.
         assert_eq!(content.cache_view().relay_events, 1);
@@ -4985,6 +5029,47 @@ mod tests {
         assert_eq!(content.gateway_get(&drop_host, "/", None).await.status, 503);
         assert_eq!(content.library_snapshot().len(), 1);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Delete cache" keeps the user's own profile and relay list. They are
+    /// published once, at first napplet use, and `user.nsec` outlives the
+    /// wipe, so nothing would ever publish them again: without this the
+    /// user's outbox plan degrades to fallback and napplets see a bare
+    /// pubkey. The same kinds by anyone else are cache, and go.
+    #[tokio::test]
+    async fn wipe_cache_keeps_the_users_profile_and_relay_list() {
+        let dir = tmp("wipe-own-profile");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+
+        let user = Keys::generate();
+        let other = Keys::generate();
+        let mut own = Vec::new();
+        let mut theirs = Vec::new();
+        for (keys, out) in [(&user, &mut own), (&other, &mut theirs)] {
+            let profile = EventBuilder::new(Kind::Metadata, r#"{"name":"x"}"#)
+                .sign_with_keys(keys)
+                .unwrap();
+            let relays = crate::outbox::own_relay_list(keys).unwrap();
+            for event in [profile, relays] {
+                content.relay().publish(event.clone()).await.unwrap();
+                out.push(event.id);
+            }
+        }
+        assert_eq!(content.cache_view().relay_events, 4);
+
+        content.wipe_cache(Some(user.public_key())).await.unwrap();
+
+        let left = content.relay().query(&[Filter::new()]).await.unwrap();
+        let left: Vec<nostr::EventId> = left.into_iter().map(|e| e.id).collect();
+        for id in &own {
+            assert!(left.contains(id), "the user's own event was wiped");
+        }
+        for id in &theirs {
+            assert!(!left.contains(id), "another author's profile survived");
+        }
+        assert_eq!(left.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5226,6 +5311,7 @@ mod library_kind_tests {
             granted: Vec::new(),
             denied: Vec::new(),
             pointer: String::new(),
+            reviewed: Vec::new(),
         }
     }
 
@@ -5261,6 +5347,7 @@ mod library_kind_tests {
             Some("bitchat"),
             Some("Bitchat app"),
             "bitchat.napplet.localhost",
+            vec!["relay".into()],
             vec!["relay".into()],
             "naddr1x",
             2,
@@ -5309,6 +5396,7 @@ mod library_kind_tests {
             Some("Bitchat app"),
             "bitchat.napplet.localhost",
             vec!["relay".into()],
+            vec!["relay".into()],
             "naddr1x",
             2,
         );
@@ -5345,6 +5433,7 @@ mod library_kind_tests {
             Some("bitchat"),
             Some("Bitchat app"),
             "bitchat.napplet.localhost",
+            vec!["relay".into()],
             vec!["relay".into()],
             "naddr1x",
             2,
@@ -5393,10 +5482,11 @@ mod library_kind_tests {
             Some("Ding"),
             "ding.napplet.localhost",
             vec![],
+            vec![],
             "naddr1ding",
             1,
         );
-        content.wipe_cache().await.unwrap();
+        content.wipe_cache(None).await.unwrap();
 
         assert_eq!(
             content.cache_view().relay_events,

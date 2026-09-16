@@ -114,14 +114,34 @@ fn draw_guest_number(keys: &Keys) -> String {
     format!("{n:05}")
 }
 
-/// Write a secret with an owner-only mode where the platform has one.
+/// Write a secret atomically, with an owner-only mode where the platform has
+/// one.
+///
+/// Temp file + rename, like `settings_store::save` and `save_library`: a kill
+/// between truncate and write used to leave an empty `user.nsec`, which the
+/// next launch read as "no key" and answered with a new social identity. The
+/// mode is set on the temp file at creation (`OpenOptionsExt::mode`), so the
+/// secret is never on disk world-readable, not even between a write and a
+/// `chmod`. A stale temp file from an interrupted write is removed and the
+/// new one created exclusively — never read, and never inherited with
+/// whatever mode it had.
 fn write_private(path: &PathBuf, contents: &str) -> anyhow::Result<()> {
-    std::fs::write(path, contents)?;
+    use std::io::Write;
+
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    let mut file = options.open(&tmp)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -159,8 +179,13 @@ mod tests {
     use super::*;
 
     fn temp_dir() -> PathBuf {
+        // A counter beside the clock: tests run in parallel, and two that
+        // drew the same nanosecond shared a directory.
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "myco-user-key-{}",
+            "myco-user-key-{}-{}-{n}",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -203,6 +228,31 @@ mod tests {
         assert_eq!(profile["name"], user.guest_name());
         // Every event a guest publishes carries an invitation.
         assert!(profile["about"].as_str().unwrap().contains("zapstore"));
+    }
+
+    /// The secret lands by rename, owner-only from the first byte: no temp
+    /// file is left behind, the mode is 0600 on unix, and a temp file planted
+    /// by an interrupted earlier write is overwritten rather than read.
+    #[test]
+    fn the_key_is_written_atomically_and_private() {
+        let dir = temp_dir();
+        let key = dir.join(KEY_FILE);
+        let tmp = key.with_extension("tmp");
+        std::fs::write(&tmp, "not a key").unwrap();
+
+        let user = load_or_generate(&dir).unwrap();
+
+        assert!(key.is_file(), "the key was not written");
+        assert!(!tmp.exists(), "the temp file was left behind");
+        let stored = std::fs::read_to_string(&key).unwrap();
+        assert_eq!(stored.trim(), user.keys.secret_key().to_secret_hex());
+        assert_ne!(stored.trim(), "not a key", "the planted temp file was read");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the key is readable by others: {mode:o}");
+        }
     }
 
     /// A label that survives losing its sidecar, rather than a launch that fails.
