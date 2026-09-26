@@ -3500,11 +3500,7 @@ impl Content {
             .download_and_activate(addr, candidate.clone(), sources, true)
             .await;
         if activated {
-            self.forward_manifest(
-                &candidate,
-                crate::mesh_wire::EVENT_TTL.saturating_sub(1),
-                None,
-            );
+            self.forward_updated_manifest(&candidate);
         }
         activated
     }
@@ -3585,6 +3581,30 @@ impl Content {
         }
     }
 
+    /// How many hops a pushed manifest — an nsite's or a napplet's — may still
+    /// travel from here. 0 means stop here.
+    ///
+    /// Mirrors chat: a local publish originates at the default — or at the
+    /// budget a napplet chose through NAP-MESH, where `Some(0)` means "store
+    /// here, send nowhere" — and a mesh push at the ttl that rode in, clamped
+    /// so a peer can't over-extend us. The same per-peer clamp the chat push
+    /// plane applies: a peer we have not granted multihop writes still gets
+    /// its manifest stored and served here, it simply travels no further
+    /// through us. Manifests were missing this check, so that grant was
+    /// enforced on one plane but not the other (D10).
+    fn manifest_forward_budget(&self, inbound: &Inbound) -> u8 {
+        let peer_cap = match inbound.sender {
+            Some(ip) if !self.may_forward_from(ip) => 0,
+            _ => crate::mesh_wire::EVENT_TTL,
+        };
+        match inbound.origin {
+            Origin::Local => inbound.event_ttl.unwrap_or(crate::mesh_wire::EVENT_TTL),
+            Origin::Mesh => inbound.event_ttl.unwrap_or(0),
+        }
+        .min(crate::mesh_wire::EVENT_TTL)
+        .min(peer_cap)
+    }
+
     /// A manifest landed in our relay over the mesh (a peer's push, forwarded by
     /// the gossiper). Propagate it like any event (`docs/design/nsite/nsite-updates.md`
     /// §4); if it's one of our installed sites, download its blobs from the sender
@@ -3596,22 +3616,7 @@ impl Content {
             d_tag: d,
         };
 
-        // Forward budget (mirrors chat): originate at the default for a local
-        // publish, else the ttl that rode in. Clamp so a peer can't over-extend us.
-        // The same per-peer clamp the chat push plane applies: a peer we have not
-        // granted multihop writes still gets its manifest stored and served here,
-        // it simply travels no further through us. Manifests were missing this
-        // check, so that grant was enforced on one plane but not the other (D10).
-        let peer_cap = match inbound.sender {
-            Some(ip) if !self.may_forward_from(ip) => 0,
-            _ => crate::mesh_wire::EVENT_TTL,
-        };
-        let effective = match inbound.origin {
-            Origin::Local => crate::mesh_wire::EVENT_TTL,
-            Origin::Mesh => inbound.event_ttl.unwrap_or(0),
-        }
-        .min(crate::mesh_wire::EVENT_TTL)
-        .min(peer_cap);
+        let effective = self.manifest_forward_budget(&inbound);
         let out_ttl = effective.saturating_sub(1);
 
         if !self.is_in_library(&addr) {
@@ -3624,29 +3629,7 @@ impl Content {
 
         // Our app: best-effort download from the sender (its mesh Blossom) first,
         // then the online fallback unless mesh-only. Activate when complete.
-        let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
-        if let Some(IpAddr::V6(ip)) = inbound.sender {
-            // The one place a bare mesh address is right: this is whoever just
-            // sent us the event, known only as a transport address — an address
-            // does not reduce back to an npub. It is safe here precisely because
-            // they just reached us, so the node already holds their identity;
-            // everywhere else, peers are addressed as `<npub>.fips` so that
-            // resolving the name registers that identity (see
-            // `ip_source::mesh_relay_url`).
-            sources.push(Arc::new(
-                crate::ip_source::IpPeerSource::new(
-                    vec![format!("ws://[{ip}]:4870")],
-                    vec![format!("http://[{ip}]:24243")],
-                )
-                .ignoring_manifest_servers(),
-            ));
-        }
-        if !self.is_offline_only() {
-            sources.push(Arc::new(crate::ip_source::IpPeerSource::new(
-                crate::ip_source::default_relays(),
-                crate::ip_source::default_blossom_servers(),
-            )));
-        }
+        let sources = self.manifest_push_sources(inbound.sender, None);
         // Manifest is already in our relay (NIP-01), so don't re-store.
         let _ = Arc::clone(&self)
             .download_and_activate(addr, event.clone(), sources, false)
@@ -3655,6 +3638,237 @@ impl Content {
         if effective > 0 {
             self.forward_manifest(&event, out_ttl, inbound.sender);
         }
+    }
+
+    /// Where to fetch the bytes of a manifest pushed to us, in order: the peer
+    /// that sent it (its mesh Blossom), then the public Blossom servers unless
+    /// offline-only. The same for nsites and napplets.
+    ///
+    /// `max_blob_bytes` caps each blob as it streams in, before the hash check
+    /// has anything to say: whoever pushed the manifest also chose what it
+    /// references. Napplets pass NAP-RESOURCE's cap; nsites have no agreed
+    /// per-blob limit yet and pass `None`.
+    fn manifest_push_sources(
+        &self,
+        sender: Option<IpAddr>,
+        max_blob_bytes: Option<usize>,
+    ) -> Vec<Arc<dyn PeerSource>> {
+        let cap = |source: crate::ip_source::IpPeerSource| match max_blob_bytes {
+            Some(max) => source.with_max_blob_bytes(max),
+            None => source,
+        };
+        let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
+        if let Some(IpAddr::V6(ip)) = sender {
+            // The one place a bare mesh address is right: this is whoever just
+            // sent us the event, known only as a transport address — an address
+            // does not reduce back to an npub. It is safe here precisely because
+            // they just reached us, so the node already holds their identity;
+            // everywhere else, peers are addressed as `<npub>.fips` so that
+            // resolving the name registers that identity (see
+            // `ip_source::mesh_relay_url`).
+            sources.push(Arc::new(cap(crate::ip_source::IpPeerSource::new(
+                vec![format!("ws://[{ip}]:4870")],
+                vec![format!("http://[{ip}]:24243")],
+            )
+            .ignoring_manifest_servers())));
+        }
+        if !self.is_offline_only() {
+            sources.push(Arc::new(cap(crate::ip_source::IpPeerSource::new(
+                crate::ip_source::default_relays(),
+                crate::ip_source::default_blossom_servers(),
+            ))));
+        }
+        sources
+    }
+
+    /// Send a manifest this device just brought in by an update check to the
+    /// Circle: we now hold its bytes, so we are a source for the next hop.
+    /// Originates at the default budget, like any local publish.
+    pub fn forward_updated_manifest(&self, manifest: &Event) {
+        self.forward_manifest(
+            manifest,
+            crate::mesh_wire::EVENT_TTL.saturating_sub(1),
+            None,
+        );
+    }
+
+    /// A napplet manifest (`15129` / `35129`) landed in our relay over the push
+    /// plane. The napplet counterpart of [`Content::on_manifest_event`]: the same
+    /// interest-aware download-then-forward policy, hop budget, split-horizon
+    /// and multihop clamp, with the napplet's own checks in front
+    /// (`docs/design/napplet/napplet-runtime.md` §7.3).
+    ///
+    /// Snapshots (`5129`) never come here — they are immutable builds that no
+    /// Library entry resolves by, so there is nothing to update, and they stay
+    /// on the plain gossip path.
+    pub async fn on_napplet_manifest_event(&self, event: Event, inbound: Inbound) {
+        // A napplet is one `index.html`; nothing it may reference is bigger
+        // than what a napplet may fetch by hash.
+        let sources = self.manifest_push_sources(
+            inbound.sender,
+            Some(myco_napplet_runtime::nap::resource::MAX_BYTES),
+        );
+        let id = event.id;
+        let outcome = self
+            .handle_napplet_manifest(event, &inbound, &sources, |manifest, ttl| {
+                self.forward_manifest(manifest, ttl, inbound.sender)
+            })
+            .await;
+        tracing::info!(event = %id, ?outcome, "napplet manifest push");
+    }
+
+    /// The policy behind [`Content::on_napplet_manifest_event`], with the
+    /// sources and the fan-out handed in so it can be exercised without a
+    /// mesh. `forward` is called at most once, with the outbound hop budget,
+    /// and only after any download has finished.
+    ///
+    /// - Not a valid, signed NIP-5D manifest, or older than the version this
+    ///   relay already keeps for the slot: stopped here, not passed on.
+    /// - Not installed here: passed on at once, nothing fetched — as an nsite
+    ///   we don't run.
+    /// - Installed, but not newer than the pinned version: a replay or a
+    ///   downgrade, stopped here.
+    /// - Installed and newer: the bytes are fetched from `sources` in order,
+    ///   verified, stored and pinned (the pin never moves back, see
+    ///   [`Content::set_active_if_newer`]) — the next launch opens it, an open
+    ///   window keeps its session — and then it is passed on. A download that
+    ///   fails still passes it on, so the wave never stalls on one phone.
+    ///
+    /// Nothing here touches grants. The Library entry keeps what the user
+    /// reviewed; a version declaring more comes back through the review sheet
+    /// at its next open (`NappletHost::open_with`).
+    pub(crate) async fn handle_napplet_manifest(
+        &self,
+        event: Event,
+        inbound: &Inbound,
+        sources: &[Arc<dyn PeerSource>],
+        forward: impl FnOnce(&Event, u8),
+    ) -> NappletPush {
+        if event.verify().is_err() {
+            return NappletPush::Dropped;
+        }
+        let manifest = match myco_napplet_runtime::NappletManifest::from_event(event.clone()) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!(event = %event.id, error = %e, "not a valid napplet manifest");
+                return NappletPush::Dropped;
+            }
+        };
+        let kind = event.kind.as_u16();
+        let author = event.pubkey;
+        let d_tag = manifest.d_tag.as_deref();
+
+        // The relay kept something newer for this slot and refused this one:
+        // a stale version, not worth anyone's hop.
+        if let Ok(Some(newest)) =
+            nsite_deck::seams::newest_in_slot(self.relay.as_ref(), kind, &author, d_tag).await
+        {
+            if newest.created_at > event.created_at {
+                return NappletPush::Dropped;
+            }
+        }
+
+        let budget = self.manifest_forward_budget(inbound);
+
+        // Installed means the same author and `d` tag in the Library: the
+        // signature already ties the manifest to `author`, so a napplet by
+        // anyone else under the same name is a different napplet.
+        let npub = author.to_bech32().unwrap_or_default();
+        if self.napplet_grants(&npub, d_tag).is_none() {
+            if budget > 0 {
+                forward(&event, budget - 1);
+            }
+            return NappletPush::Relayed;
+        }
+
+        if let Some(pinned) = self.pinned_manifest(kind, &author, d_tag) {
+            if pinned.created_at >= event.created_at {
+                return NappletPush::Dropped;
+            }
+        }
+
+        let mut updated = false;
+        for source in sources {
+            match crate::napplet::ingest_event_into(
+                self.relay.as_ref(),
+                self.blobs.as_ref(),
+                self,
+                event.clone(),
+                source.as_ref(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    updated = true;
+                    break;
+                }
+                Err(e) => tracing::debug!(
+                    napplet = %d_tag.unwrap_or("<root>"),
+                    error = %e,
+                    "napplet update: this source could not supply it"
+                ),
+            }
+        }
+        if updated {
+            self.refresh_napplet_status().await;
+        }
+        if budget > 0 {
+            forward(&event, budget - 1);
+        }
+        if updated {
+            NappletPush::Updated
+        } else {
+            NappletPush::NotDownloaded
+        }
+    }
+
+    /// The version pinned as served for a slot, if any — not the relay's
+    /// newest.
+    pub(crate) fn pinned_manifest(
+        &self,
+        kind: u16,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+    ) -> Option<Event> {
+        self.active_manifests
+            .lock()
+            .unwrap()
+            .get(&manifest_key(kind, author, d_tag))
+            .cloned()
+    }
+
+    /// [`Content::set_active`] that never moves a slot backwards: a version
+    /// older than the pinned one is refused; the same version, or another
+    /// with the same `created_at`, is accepted. Returns whether it pinned.
+    ///
+    /// Every napplet pin goes through here ([`crate::napplet::ManifestStore`]).
+    /// Two versions downloading at once — a push from the Circle and the
+    /// update check, say — must not leave the older one served because it
+    /// finished last, and a window opening must not re-pin what it resolved
+    /// over a newer version pinned meanwhile. Equal is allowed because the
+    /// legitimate re-pins are all of the same version: `open` re-pinning
+    /// what it just resolved, "Download again" of an installed napplet
+    /// whose bytes went missing, a seed re-fetching its default. A first
+    /// install, or anything after a wipe, has no pin to compare with. Nsite
+    /// activation calls `set_active` directly and is unaffected.
+    fn set_active_if_newer(&self, manifest: &Event) -> bool {
+        let key = manifest_key(
+            manifest.kind.as_u16(),
+            &manifest.pubkey,
+            event_d_tag(manifest).as_deref(),
+        );
+        let snapshot = {
+            let mut m = self.active_manifests.lock().unwrap();
+            if m.get(&key)
+                .is_some_and(|cur| cur.created_at > manifest.created_at)
+            {
+                return false;
+            }
+            m.insert(key, manifest.clone());
+            m.values().cloned().collect::<Vec<_>>()
+        };
+        save_active(&self.active_path, &snapshot);
+        true
     }
 
     /// Fan a manifest to connected Circle peers over the push plane (carrying a
@@ -4251,6 +4465,20 @@ fn save_circle(path: &Path, items: &[CircleContact]) {
     }
 }
 
+/// What became of a napplet manifest pushed to this device. See
+/// [`Content::handle_napplet_manifest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NappletPush {
+    /// Invalid, stale, or not newer than the installed version: stopped here.
+    Dropped,
+    /// Not installed here: passed on, nothing fetched.
+    Relayed,
+    /// Installed: the new version's bytes are here and pinned, then passed on.
+    Updated,
+    /// Installed, but no source supplied the bytes: passed on regardless.
+    NotDownloaded,
+}
+
 #[async_trait]
 impl crate::napplet::ManifestStore for Content {
     async fn current(
@@ -4264,8 +4492,11 @@ impl crate::napplet::ManifestStore for Content {
         nsite_deck::seams::newest_in_slot(&self.active_backend(), kind, author, d_tag).await
     }
 
+    /// A napplet's pin never moves back: every napplet pin — open, install,
+    /// "Download again", the update check, a push from the Circle — goes
+    /// through [`Content::set_active_if_newer`]. See there for why.
     fn pin(&self, manifest: &Event) {
-        self.set_active(manifest);
+        self.set_active_if_newer(manifest);
     }
 }
 
@@ -4672,6 +4903,70 @@ mod tests {
                 .to_ipv6(),
         );
         assert!(!content.may_forward_from(stranger_ip));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The multihop-write clamp holds for napplet manifests too: a push from a
+    /// peer we have not granted multihop writes is kept here and goes no
+    /// further; the same push from a granted peer is passed on.
+    #[tokio::test]
+    async fn a_napplet_manifest_from_a_peer_without_multihop_goes_no_further() {
+        let dir = tmp("napplet-multihop");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+
+        let peer = Keys::generate();
+        let npub = peer.public_key().to_bech32().unwrap();
+        content.add_to_circle(&npub, "Peer");
+        let ip = IpAddr::V6(
+            fips::PeerIdentity::from_npub(&npub)
+                .unwrap()
+                .address()
+                .to_ipv6(),
+        );
+        let from_peer = Inbound {
+            origin: Origin::Mesh,
+            event_ttl: Some(3),
+            sender: Some(ip),
+        };
+        let push = |at: u64| {
+            let content = content.clone();
+            let inbound = from_peer;
+            async move {
+                let napplet = myco_napplet_runtime::testing::NappletBuilder::new()
+                    .created_at(at)
+                    .build();
+                content
+                    .relay()
+                    .publish(napplet.manifest.clone())
+                    .await
+                    .unwrap();
+                let mut forwarded = Vec::new();
+                let outcome = content
+                    .handle_napplet_manifest(napplet.manifest, &inbound, &[], |_, ttl| {
+                        forwarded.push(ttl)
+                    })
+                    .await;
+                (outcome, forwarded)
+            }
+        };
+
+        let (outcome, forwarded) = push(1_000).await;
+        assert_eq!(outcome, NappletPush::Relayed);
+        assert_eq!(
+            forwarded,
+            vec![2],
+            "a granted peer's push was not passed on"
+        );
+
+        content.circle.lock().unwrap()[0].perms.relay_write_multihop = false;
+        let (outcome, forwarded) = push(2_000).await;
+        assert_eq!(outcome, NappletPush::Relayed);
+        assert!(
+            forwarded.is_empty(),
+            "a revoked peer's napplet went further"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

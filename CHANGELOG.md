@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logout at once (NAP-IDENTITY's `identity.changed`). A new guest follows three
   default accounts, so a napplet's friends feed is not empty on day one;
   existing and imported identities are left alone.
+- **Napplet updates reach your Circle.** A newer version of a napplet you
+  have installed, heard from a paired phone, is downloaded (from that phone
+  first), checked and kept, then passed on — as nsite updates already were —
+  and opens at the app's next launch. One found by "Check for updates" is
+  passed on too. Only its author's newer versions are taken, and an update
+  never gets a permission you did not review: anything new it asks for goes
+  through the review sheet when you next open it. Phones without the app just
+  pass the update along.
 - **Log in with Amber.** The Account page's "Log in with a signer" logs in
   through a NIP-55 signer app: your key stays there and never enters Myco.
   Napplets sign through it — in the background once you let the signer
@@ -51,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A manifest published through NAP-MESH keeps to the hop budget the
+  napplet chose.** An nsite or napplet manifest a napplet published over the
+  mesh went out at the default budget whatever it asked for; it now respects
+  the choice, including 0 for "this phone only", as other NAP-MESH publishes
+  do.
 - **A napplet's publish no longer times out while you approve it in your
   signer app.** Publishing (NAP-OUTBOX and NAP-MESH) gave up after 30 s, so a
   slow approval in Amber showed as "outbox.publish timed out" — and the event

@@ -242,6 +242,10 @@ long-press sheet offers "Update now" (a no-op nudge if it'll auto-apply on close
 > being local (§5). So: never withhold a version, never serve one we can't back,
 > and be a useful blob source for sites we actually run.
 
+Napplet manifests (15129/35129) follow the same policy, with the napplet's own
+checks in front — see
+[napplet-runtime.md §7.3](../napplet/napplet-runtime.md).
+
 ### 4.1 Manifests gossip like any event — with an interest check on forward
 
 The proxy treats manifest kinds like any other event: it stores the canonical
