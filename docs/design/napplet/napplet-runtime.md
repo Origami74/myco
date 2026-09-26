@@ -64,7 +64,7 @@ transport-neutral; the *web projection* binds them to iframes, `postMessage`, an
 |---|----------|--------|
 | D1 | Runtime core | Written here, in Rust. No dependency on the `nmp-native-runtime-*` crates. |
 | D2 | Rendering | One shell WebView per napplet; the napplet itself in a `sandbox="allow-scripts"` `srcdoc` iframe. |
-| D3 | Identity | A user key **separate** from the mesh device key, generated on first napplet use and seeded with a guest profile. |
+| D3 | Identity | A user key **separate** from the mesh device key, generated as a guest on first launch; the person can log in with their own `nsec`, reveal it, or log out. |
 | D4 | Relay scope | Local relay, mesh peers, and internet relays when reachable. |
 | D5 | Mesh | Standard NAPs behave exactly as specified. Mesh rides those contracts through `<npub>.fips` relay URLs (§7.4); a Myco mesh NAP covers only what has no standard equivalent. |
 | D6 | First milestone | A full verified resolve — manifest, blobs, aggregate, `srcdoc`, handshake. No shortcuts that get thrown away. |
@@ -359,9 +359,9 @@ the napplet can react to rather than a namespace it reads as permanent absence.
 
 ### S2 — Publish and subscribe
 
-The user key is generated on first napplet use and persisted beside the device key, never
-leaving Rust. The same step publishes a kind 0 for it: a guest profile named
-`Myco Guest <5 digits>`, with a link to Myco on Zapstore in the bio, so a new user is
+The user key is generated as a guest on first launch and persisted beside the device key
+(§7.1). The same step publishes a kind 0 for it: a guest profile named
+`Myco Guest <5 digits>`, with a link to Myco in the bio, so a new user is
 never a bare pubkey and every event they publish carries an invitation.
 
 `NAP-RESOURCE`, `NAP-RELAY` (`subscribe`, `publish`, `query`) and a read-only
@@ -513,20 +513,42 @@ NAP-OUTBOX's and still to come; until then the pool is the default relay set.
 
 ### 7.1 Two identities on one device
 
-Myco has exactly one keypair today, and `own_npub` is both the mesh device identity and
-the social one. D3 splits them: the device key keeps signing mesh traffic, pairing and
-gossip, and the user key signs only napplet-originated events. The Identity screen must
-not conflate them.
+D3 keeps two keys apart: the device key signs mesh traffic, pairing and gossip, and the
+user key signs only napplet-originated events. Settings keeps them apart too: the account
+header at the top is the user key, and "Device name" below it is the device.
 
-Generating the user key lazily means no migration for existing installs — but a user who
-already has a Nostr identity has no import path until one is added. Accepted for now.
+**The account** (`account.rs`, roadmap N1). A guest is generated on first launch — and on
+the next launch of an install from before this, which had one only after its first
+napplet. From the Account page the person can:
+
+- **reveal the nsec**, after a warning never to share it — the one path by which the user
+  key leaves Rust (`accountRevealNsec`, outside the reducer so the secret is in no state
+  snapshot; the dialog sets `FLAG_SECURE`, and the copy is marked sensitive);
+- **log out** — the key leaves the disk and the signer's slot, and every identity call is
+  refused until the next login. A marker file keeps the next launch from answering "no
+  key" with a new guest. The dialog offers to reveal the key first;
+- **log in** again: a new guest, a pasted `nsec` (or hex), or — roadmap N2 — Amber.
+
+The napplet signer reads the account's slot on every call, so a login or logout reaches
+an open napplet on its next call.
 
 The guest profile's number is five random digits, drawn once at key generation and
 persisted with the key rather than derived from the pubkey. Collisions across the mesh are
-expected and harmless: the pubkey is the identity, the number is a label. The kind 0
-always goes to the local relay; whether it also goes to the mesh or to internet relays is
-deferred, and it must never block a napplet launch. A user who edits their profile through
-a napplet overwrites it, bio link included — the link is a default, not a watermark.
+expected and harmless: the pubkey is the identity, the number is a label.
+
+The guest picture is the Myco logo, bundled as one JPEG and re-tinted with a two-hue
+gradient drawn from the pubkey (`guest_avatar.rs`), so guests look different at a glance.
+The output is deterministic, so its hash never needs storing. It goes to the local
+Blossom at once and to a few public Blossom servers (BUD-02) when online; `picture`
+names the first server that took it, by hash.
+
+The kind 0 and relay list go to the local relay at once — the configured custom relay, when
+there is one, where the first-use profile used to stay unpublished — then to the public
+relays. Offline,
+the account retries with backoff and the sidecar (`user-guest.json`) remembers the profile is
+pending across launches. None of it blocks anything. Guests from before this are not
+re-published. A user who edits their profile through a napplet overwrites it, bio link
+included — the link is a default, not a watermark.
 
 ### 7.2 Update semantics versus content addressing
 
@@ -569,7 +591,7 @@ The work this implied is done with NAP-OUTBOX (S3): a `.fips` URL in a relay lis
 `RelayLane::Mesh` and is reached through `PeerRelayPool` — and only ever as
 `ws://<npub>.fips:4870` rebuilt from its npub, never as the string given, so a list or a
 napplet cannot smuggle userinfo, a path or another port into the pool's dial; the user's own kind 10002 — the
-configured relays — is published beside the guest profile on first napplet use, so the
+configured relays — is published beside the guest profile on first launch, so the
 user's own outbox plan resolves as NIP-65; per-lane reachability is reported
 (`incomplete`, the per-relay map on publish — for the lanes that answered by the quorum)
 rather than failing hard. Policy lives in one

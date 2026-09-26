@@ -253,6 +253,9 @@ pub struct AppRuntime {
     content: Option<Arc<Content>>,
     /// Live napplet sessions, one per open window. Built on first use.
     napplet_host: Option<Arc<crate::napplet::NappletHost>>,
+    /// The logged-in user: the key napplets sign with, and the Settings
+    /// header. `None` only on a startup error.
+    account: Option<crate::account::Account>,
     /// The relay hub, once the content layer has stood it up. Napplet publishes
     /// go through it so they fan out to the Circle exactly as a socket-borne
     /// event does.
@@ -362,6 +365,24 @@ impl AppRuntime {
         // The bundled DingDong napplet, pinned with defaults only: what it
         // declares is reviewed the first time it opens.
         seed_default_napplets(&content, &rt, Path::new(data_dir));
+
+        // The account: a guest on first launch, so every install has an
+        // identity from the start. Its profile is stored here at once and
+        // published to the internet whenever the internet is there.
+        let account = crate::account::Account::start(
+            Path::new(data_dir).to_path_buf(),
+            crate::account::AccountContext {
+                relay: content.relay(),
+                blobs: content.blobs(),
+                offline_only: {
+                    let content = content.clone();
+                    Arc::new(move || content.is_offline_only())
+                },
+                relays: crate::ip_source::default_relays(),
+                avatar_servers: crate::account::default_avatar_servers(),
+            },
+            rt.handle().clone(),
+        );
 
         // Peer state now comes off the node's control socket, so the tick needs
         // somewhere to publish it and somewhere to record whether the feed
@@ -612,6 +633,7 @@ impl AppRuntime {
             app_version: app_version.to_string(),
             data_dir: data_dir.to_string(),
             napplet_host: None,
+            account: Some(account),
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
             napplet_mesh_limits: Arc::new(std::sync::RwLock::new(settings.napplet_mesh_limits())),
             relay_hub,
@@ -803,6 +825,7 @@ impl AppRuntime {
             app_version: app_version.to_string(),
             data_dir: String::new(),
             napplet_host: None,
+            account: None,
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
             napplet_mesh_limits: Arc::new(std::sync::RwLock::new(
                 crate::settings_store::Settings::default().napplet_mesh_limits(),
@@ -902,6 +925,38 @@ impl AppRuntime {
                 // The sheet stays up, "Adding…", until the bytes are in; the
                 // install task closes it.
                 self.install_napplet(&pointer, granted);
+                self.rev += 1;
+            }
+            NativeAppAction::AccountLogout => {
+                if let Some(account) = &self.account {
+                    if let Err(e) = account.logout() {
+                        self.error = format!("logout failed: {e}");
+                    }
+                }
+                self.announce_identity();
+                self.rev += 1;
+            }
+            NativeAppAction::AccountNewGuest => {
+                if let Some(account) = &self.account {
+                    if let Err(e) = account.new_guest() {
+                        self.error = format!("could not create an identity: {e}");
+                    }
+                }
+                self.announce_identity();
+                self.rev += 1;
+            }
+            NativeAppAction::AccountLoginNsec { nsec } => {
+                // A failure lands on the account view for the login sheet.
+                if let Some(account) = &self.account {
+                    let _ = account.login_nsec(&nsec);
+                }
+                self.announce_identity();
+                self.rev += 1;
+            }
+            NativeAppAction::AccountRefresh => {
+                if let Some(account) = &self.account {
+                    account.refresh();
+                }
                 self.rev += 1;
             }
             NativeAppAction::DismissNappletReview => {
@@ -1666,20 +1721,8 @@ impl AppRuntime {
         let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
             return;
         };
-        // The user's own profile and relay list are kept — but a wipe never
-        // *generates* a user key: only an existing one is read.
-        let data_dir = Path::new(&self.data_dir);
-        let keep_author = if crate::user_key::exists(data_dir) {
-            match crate::user_key::load_or_generate(data_dir) {
-                Ok(user) => Some(user.keys.public_key()),
-                Err(e) => {
-                    tracing::warn!(error = %e, "user key unreadable; its events are not kept");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // The user's own profile and relay list are kept.
+        let keep_author = self.account.as_ref().and_then(|a| a.public_key());
         if let Err(e) = rt.block_on(content.wipe_cache(keep_author)) {
             self.error = format!("cache wipe failed: {e}");
         }
@@ -1705,68 +1748,12 @@ impl AppRuntime {
         let handle = self.rt.as_ref()?.handle().clone();
         if self.napplet_host.is_none() {
             let content = self.content.as_ref()?;
-            // The user key is generated here, on first napplet use — not at
-            // install. A device that never opens a napplet never gets a social
-            // identity, and existing installs need no migration.
-            let data_dir = Path::new(&self.data_dir);
-            let first_use = !crate::user_key::exists(data_dir);
-            let user = match crate::user_key::load_or_generate(data_dir) {
-                Ok(user) => user,
-                Err(e) => {
-                    // Every open will say "content layer is not running";
-                    // this is the line that says why.
-                    tracing::error!(error = %e, "user key unreadable; napplets cannot open");
-                    return None;
-                }
-            };
-            let signer = Arc::new(crate::user_key::UserSigner::new(user.keys.clone()));
-
-            if first_use {
-                // A new user is never a bare pubkey. Published to the embedded
-                // store only — `relay_store()`, not `relay()`, which is the
-                // configured custom relay when there is one — and never in
-                // the way of opening a napplet: a profile that failed to
-                // publish is cosmetic, and a launch that waited on the
-                // network would not be. With a custom relay configured there
-                // is no local store to write, and nothing is sent anywhere.
-                //
-                // Beside it, a relay list (kind 10002) naming the configured
-                // relays, so the user's own outbox plan resolves as NIP-65
-                // rather than fallback (§7.4). Never this device's mesh relay:
-                // that URL is the device npub, and a user-key event carrying
-                // it would publish the link between the two for good.
-                match content.relay_store() {
-                    Some(store) => {
-                        let profile = nostr::EventBuilder::new(
-                            nostr::Kind::Metadata,
-                            crate::user_key::guest_profile_json(&user),
-                        )
-                        .sign_with_keys(&user.keys)
-                        .map_err(anyhow::Error::from);
-                        let relay_list = crate::outbox::own_relay_list(&user.keys);
-                        for (what, signed) in
-                            [("guest profile", profile), ("relay list", relay_list)]
-                        {
-                            match signed {
-                                Ok(event) => {
-                                    let store = store.clone();
-                                    handle.spawn(async move {
-                                        use nsite_deck::seams::RelayBackend;
-                                        if let Err(e) = store.publish(event).await {
-                                            tracing::warn!("could not store the {what}: {e}");
-                                        }
-                                    });
-                                }
-                                Err(e) => tracing::warn!("could not sign the {what}: {e}"),
-                            }
-                        }
-                    }
-                    None => tracing::debug!(
-                        "a custom relay is configured; the first-use profile and relay list stay unpublished"
-                    ),
-                }
-                tracing::info!("generated a user key for napplets: {}", user.guest_name());
-            }
+            // The signer reads the account's slot per call: a login or logout
+            // reaches open napplets on their next call, and while logged out
+            // every identity call is refused.
+            let signer = Arc::new(crate::user_key::UserSigner::new(
+                self.account.as_ref()?.slot(),
+            ));
 
             let mesh = Arc::new(crate::napplet::NappletMeshSink::new(
                 self.relay_hub.clone(),
@@ -1832,6 +1819,34 @@ impl AppRuntime {
             self.napplet_host = Some(host);
         }
         Some((self.napplet_host.clone()?, handle))
+    }
+
+    /// Push the current user to open napplets (`identity.changed`). Sent on
+    /// every account action, whether or not the user actually changed: a
+    /// repeat of the same pubkey is harmless, a missed change is not.
+    fn announce_identity(&self) {
+        let (Some(host), Some(rt), Some(account)) = (
+            self.napplet_host.clone(),
+            self.rt.as_ref(),
+            self.account.as_ref(),
+        ) else {
+            return;
+        };
+        let pubkey = account.view().pubkey_hex;
+        rt.spawn(async move { host.identity_changed(&pubkey).await });
+    }
+
+    /// The logged-in secret as `nsec1…`, for the Account page's reveal —
+    /// the one path by which the user key leaves Rust. `None` while logged
+    /// out.
+    pub fn reveal_nsec(&self) -> Option<String> {
+        self.account.as_ref()?.reveal_nsec()
+    }
+
+    /// The account's avatar bytes (JPEG or whatever the profile names), for
+    /// the Settings header. Empty while there is none.
+    pub fn account_avatar(&self) -> Option<Arc<Vec<u8>>> {
+        self.account.as_ref()?.avatar()
     }
 
     fn start_node(&mut self) {
@@ -2212,6 +2227,7 @@ impl AppRuntime {
                 .filter(|d| !myco_napplet_runtime::MANDATORY_DOMAINS.contains(d))
                 .map(|d| d.to_string())
                 .collect(),
+            account: self.account.as_ref().map(|a| a.view()).unwrap_or_default(),
             napplet_mesh_reach: {
                 let limits = *self.napplet_mesh_limits.read().unwrap();
                 crate::state::NappletMeshReachView {
@@ -2894,10 +2910,6 @@ mod tests {
         assert!(item.denied.is_empty());
         assert_eq!(item.granted, crate::napplet::effective_grants(&[]));
         assert!(dir.join("seeded-napplets").exists());
-        assert!(
-            !crate::user_key::exists(&dir),
-            "seeding must not generate a user key — that is for first napplet use"
-        );
 
         // A second launch does not duplicate it.
         let relaunched = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");

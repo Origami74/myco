@@ -49,6 +49,8 @@ pub struct AppState {
     pub napplet_status: Vec<crate::content::NappletStatusView>,
     /// The user's cap on how far napplets reach over the mesh (NAP-MESH).
     pub napplet_mesh_reach: NappletMeshReachView,
+    /// The logged-in user (the Settings header and the Account page).
+    pub account: AccountView,
     /// Every capability domain this build can grant a napplet, in the order
     /// the sheet lists them. The handshake is not among them: it is not a
     /// grant.
@@ -181,6 +183,34 @@ pub struct PeerDiagnosticView {
     /// Recorded connect attempts against this peer, newest first, capped at 20.
     /// Empty when nothing has been recorded.
     pub attempts: Vec<PeerAttemptView>,
+}
+
+/// The user account, as the Settings header and the Account page show it.
+///
+/// Never carries the secret: revealing the nsec is its own JNI call
+/// (`accountRevealNsec`), so the key is not in every state snapshot.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountView {
+    /// `guest`, `nsec`, or `logged_out`.
+    pub status: String,
+    pub npub: String,
+    pub pubkey_hex: String,
+    /// From the user's kind 0 when this device has it; the guest name, or
+    /// empty, until then.
+    pub name: String,
+    pub about: String,
+    pub picture: String,
+    /// Bumped whenever the avatar bytes change, so the UI knows to fetch them
+    /// again (`accountAvatar`).
+    pub avatar_rev: u64,
+    /// A guest profile that has not reached a public relay yet (offline since
+    /// it was made, or offline-only on).
+    pub publish_pending: bool,
+    /// Looking for an imported key's profile on the public relays.
+    pub profile_loading: bool,
+    /// Why the last login failed; empty otherwise.
+    pub error: String,
 }
 
 /// The NAP-MESH caps as the Settings screen shows them: the current values and

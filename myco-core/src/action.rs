@@ -96,6 +96,20 @@ pub enum NativeAppAction {
     /// Close the install-review screen without installing. The fetched bytes
     /// stay cached; no grant is written, so the napplet has nothing.
     DismissNappletReview,
+
+    // --- account ---
+    /// Log out: the user key leaves the device, and napplets have no identity
+    /// until the next login.
+    AccountLogout,
+    /// Log in as a new guest (`Myco Guest NNNNN`), published like a first
+    /// launch's.
+    AccountNewGuest,
+    /// Log in with a pasted `nsec1…` (or hex) secret. A bad one is reported
+    /// on `account.error`.
+    AccountLoginNsec { nsec: String },
+    /// Re-read the account's profile from the local store (a napplet may have
+    /// published a new one).
+    AccountRefresh,
     /// Check online relays for newer versions of installed nsites and stage/apply
     /// them (`docs/design/nsite/nsite-updates.md`). Spawn-not-block.
     CheckNsiteUpdates,

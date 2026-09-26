@@ -37,6 +37,11 @@ socket2 = { workspace = true }
 # `dns_intercept` synthesises the AAAA query it sends to the node's built-in
 # `.fips` responder for route warming. Matches fips's pin.
 simple-dns = "0.11.2"
+# The guest avatar (`guest_avatar`): the bundled logo, decoded, tinted from the
+# npub and re-encoded. Pure Rust and scalar-only (no SIMD features), so the
+# same npub always yields the same bytes — and so the same Blossom hash.
+zune-jpeg = { version = "0.4", default-features = false, features = ["std"] }
+jpeg-encoder = "0.7"
 
 [features]
 # Build against a fips checkout that carries multi-path switchover

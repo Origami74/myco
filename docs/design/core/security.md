@@ -334,7 +334,7 @@ surface is the ordinary web-content surface, scoped down:
 - The WebView never resolves `.fips`, which keeps nsite JS off the sync
   transport. What it *can* reach is `ws://localhost:4870` — the embedded relay,
   as any local web page could. Today an event published there is gossiped to
-  the Circle at the default hop budget; that is being removed (roadmap N2), so
+  the Circle at the default hop budget; that is being removed (roadmap N3), so
   that reaching the room is a *granted* capability (below) rather than a side
   effect of a loopback socket.
 - No `file://`, no Myco chrome to redirect, no shared navigation surface.
@@ -357,6 +357,11 @@ security shape is:
   key material, no socket, no file handle ever crosses into the iframe. The
   user key signs on the napplet's behalf; the napplet never sees it (§7.1 of
   the runtime design).
+- **The user key at rest.** `user.nsec` is written atomically with mode
+  0600 in the app's private data dir (`allowBackup=false`); logout deletes
+  it. It leaves Rust only through the Account page's reveal
+  (`accountRevealNsec`, outside the reducer so it is in no state snapshot),
+  behind a warning, with screenshots blocked and the copy marked sensitive.
 - **Grants are the user's, per call.** What a napplet may do is decided at
   install review — in words, on a screen the fetch cannot skip — and can be
   changed per capability on its sheet. The check is made on **every call**

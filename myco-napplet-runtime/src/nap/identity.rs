@@ -53,6 +53,12 @@ async fn get_public_key(ctx: &NapContext, message: &Envelope) -> Envelope {
     message.to_result().with_field("pubkey", pubkey)
 }
 
+/// The push NAP-IDENTITY requires when the shell-user changes: a hex pubkey
+/// on login, `""` on logout.
+pub fn changed(pubkey_hex: &str) -> Envelope {
+    Envelope::new("identity.changed").with_field("pubkey", pubkey_hex)
+}
+
 fn empty(message: &Envelope, field: &str) -> Envelope {
     message
         .to_result()
@@ -245,6 +251,8 @@ mod tests {
         let reply = call(&ctx, "getPublicKey").await;
         assert!(reply.field("pubkey").is_some());
         assert!(reply.field("publicKey").is_none());
+        assert_eq!(changed("ab").field("pubkey").unwrap().as_str(), Some("ab"));
+        assert_eq!(changed("").msg_type, "identity.changed");
     }
 
     #[tokio::test]

@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Napplets can read who you follow and mute.** NAP-IDENTITY's `getFollows`
   and `getMutes` answer from your kind 3 and kind 10000 on this phone (empty
   when there are none), where they were always empty.
+- **Account.** The top of Settings shows who you are — picture, name and
+  npub — and opens an Account page. Every install starts as a guest
+  (`Myco Guest NNNNN`) from the first launch, with a picture: the Myco logo
+  in a gradient drawn from your npub. The profile goes to the public relays
+  and Blossom when you're online. From the Account page you can show your
+  secret key (after a warning never to share it), log out, and log back in
+  as a new guest or with an `nsec`. Open napplets hear about a login or
+  logout at once (NAP-IDENTITY's `identity.changed`). A new guest follows three
+  default accounts, so a napplet's friends feed is not empty on day one;
+  existing and imported identities are left alone.
 
 ### Fixed
 
@@ -41,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   you tap "Add to my apps" (the button shows "Adding…"), verified against the
   manifest you reviewed. The review sheet opens fully and scrolls, with its
   buttons always on screen. The update check keeps its 600 ms wait.
+
+### Changed
+
+- The user key napplets publish as is created on first launch, not the
+  first time a napplet opens. Settings' "Identity" row is now "Device name",
+  to keep it apart from the account.
 
 ## [0.7.0] - 2026-09-16
 

@@ -16,7 +16,7 @@ start".
 | File | What | Owner |
 | --- | --- | --- |
 | `identity.nsec` | the **device key** — mesh identity, link auth, `<npub>.fips`; generated on first launch | `identity_store.rs` |
-| `user.nsec`, `user-guest.json` | the **user key** napplets publish as, and its guest name; generated the first time a napplet runs | `user_key.rs` |
+| `user.nsec`, `user-guest.json`, `user-logged-out` | the **user key** (the account): guest name, where the key came from, whether the guest profile is still to be published; the marker a logout leaves. A guest is generated on first launch | `user_key.rs` |
 | `settings.json` | the persisted settings below | `settings_store.rs` |
 | `library.json` | the Apps grid: every installed nsite and napplet, with `kind`, `pinned`, a napplet's `granted` capabilities and the `pointer` it was added by | `content.rs` (`LibraryItem`) |
 | `circle.json` | the Circle: paired peers (`npub`, `name`, `addedAt`, per-peer `perms`) | `content.rs` (`CircleContact`) |

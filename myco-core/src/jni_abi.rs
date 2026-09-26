@@ -191,6 +191,49 @@ pub extern "system" fn Java_app_myco_core_NativeCore_gatewayGet(
         .unwrap_or(std::ptr::null_mut())
 }
 
+// --- account ------------------------------------------------------------
+//
+// Out of the reducer on purpose: the secret must not ride in every state
+// snapshot, and the avatar is bytes, not JSON.
+
+/// The logged-in `nsec1…`, for the Account page's reveal (after its warning).
+/// Empty while logged out.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_accountRevealNsec(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jstring {
+    let nsec = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.reveal_nsec().unwrap_or_default()
+        }
+        None => String::new(),
+    };
+    jstr(&mut env, nsec)
+}
+
+/// The account's avatar bytes; empty while there is none. Re-fetch when
+/// `account.avatarRev` changes.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_accountAvatar(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jbyteArray {
+    let bytes = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.account_avatar()
+        }
+        None => None,
+    };
+    env.byte_array_from_slice(bytes.as_deref().map(|b| b.as_slice()).unwrap_or(&[]))
+        .map(|a| a.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
+
 // --- napplets ------------------------------------------------------------
 //
 // Every call mirrors `gatewayGet`'s shape: the lock is held only long enough

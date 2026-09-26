@@ -606,6 +606,30 @@ impl NappletHost {
         }
     }
 
+    /// Tell every open napplet granted `identity` that the user changed:
+    /// NAP-IDENTITY's `identity.changed`, a hex pubkey on login and `""` on
+    /// logout. A napplet re-runs its identity-dependent work on it instead of
+    /// holding the old answer until it is reopened.
+    pub async fn identity_changed(&self, pubkey_hex: &str) {
+        let live: Vec<(
+            Arc<tokio::sync::Mutex<Session>>,
+            mpsc::UnboundedSender<ToShell>,
+        )> = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions
+                .values()
+                .map(|l| (l.session.clone(), l.outbox.clone()))
+                .collect()
+        };
+        for (session, outbox) in live {
+            if session.lock().await.may_service("identity") {
+                let _ = outbox.send(ToShell::to_napplet(
+                    myco_napplet_runtime::nap::identity::changed(pubkey_hex),
+                ));
+            }
+        }
+    }
+
     /// Wait for frames this window should be sent unprompted, up to `timeout`.
     ///
     /// Blocks rather than returning immediately so the caller can long-poll

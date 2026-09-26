@@ -27,6 +27,16 @@ internal object NativeCore {
      * (empty string if none). Blocks while the in-process gateway serves direct
      * from the local relay + Blossom.
      */
+    // --- account ---------------------------------------------------------
+    // Outside the reducer: the secret must not ride in every state snapshot,
+    // and the avatar is bytes.
+
+    /** The logged-in `nsec1…`; empty while logged out. Show only after the warning. */
+    external fun accountRevealNsec(handle: Long): String
+
+    /** The account's avatar bytes; empty while there is none. */
+    external fun accountAvatar(handle: Long): ByteArray
+
     // --- napplets --------------------------------------------------------
     // The shell page and the injected object name come from Rust rather than
     // being written twice, so the page and the code that registers its channel

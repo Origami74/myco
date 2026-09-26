@@ -76,8 +76,8 @@ import app.myco.ui.SectionCard
 import app.myco.ui.radioWarnings
 
 
-/** The Settings surfaces: the root list and its three drill-in sub-pages. */
-private enum class SettingsPage { Root, Identity, Storage, Developer }
+/** The Settings surfaces: the root list and its drill-in sub-pages. */
+private enum class SettingsPage { Root, Account, Identity, Storage, Developer }
 
 /**
  * Stores the user pointed us at that cannot be reached, as (title, detail).
@@ -98,7 +98,7 @@ fun backendErrors(state: AppState): List<Pair<String, String>> = buildList {
 private const val STORAGE_CAP_BYTES = 2_000_000_000.0
 
 /**
- * **Settings** — a root list of categories (Identity, Storage, the Mesh + its
+ * **Settings** — a root list: the account header, then categories (Device name, Storage, the Mesh + its
  * transports, and Advanced) that drill into focused sub-pages. Developer-only
  * controls (mesh-only, raw identity) live behind the Advanced → Developer settings
  * page, shown only when developer mode is on.
@@ -145,10 +145,13 @@ fun SettingsScreen(
             onMeshReachChange = { publish, subscribe ->
                 client.dispatch(NativeActions.setNappletMeshReach(publish, subscribe))
             },
+            client = client,
+            onOpenAccount = { page = SettingsPage.Account },
             onOpenIdentity = { page = SettingsPage.Identity },
             onOpenStorage = { page = SettingsPage.Storage },
             onOpenDeveloper = { page = SettingsPage.Developer },
         )
+        SettingsPage.Account -> AccountSettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Identity -> IdentitySettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Storage -> StorageSettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Developer -> DeveloperSettings(
@@ -180,6 +183,8 @@ private fun RootSettings(
     onDeveloperModeToggle: (Boolean) -> Unit,
     bleExhausted: Boolean,
     onMeshReachChange: (publishTtl: Int, subscribeTtl: Int) -> Unit,
+    client: AppCoreClient,
+    onOpenAccount: () -> Unit,
     onOpenIdentity: () -> Unit,
     onOpenStorage: () -> Unit,
     onOpenDeveloper: () -> Unit,
@@ -195,11 +200,17 @@ private fun RootSettings(
         ScreenHeader("Settings", state)
         Spacer(Modifier.height(8.dp))
 
+        // Who is logged in, first — as in Android's own Settings.
+        AccountHeader(state.account, client, onClick = onOpenAccount)
+
+        Spacer(Modifier.height(8.dp))
         GroupLabel("DEVICE")
         SectionCard {
+            // The device's name on the mesh — not the account above. The two
+            // are separate keys (D3), and the labels keep them apart.
             SettingRow(
                 icon = Icons.Filled.Person,
-                title = "Identity",
+                title = "Device name",
                 subtitle = deviceName,
                 onClick = onOpenIdentity,
             )
@@ -394,7 +405,7 @@ private fun IdentitySettings(state: AppState, client: AppCoreClient, onBack: () 
     val saved = DeviceName.current(context, state.ownNpub)
 
     SettingsColumn {
-        SubHeader("Identity", onBack)
+        SubHeader("Device name", onBack)
         Spacer(Modifier.height(4.dp))
 
         GroupLabel("DEVICE NAME")
@@ -755,7 +766,7 @@ private fun DeveloperSettings(
 // ----------------------------------------------------------------------------
 
 @Composable
-private fun SettingsColumn(content: @Composable () -> Unit) {
+internal fun SettingsColumn(content: @Composable () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -764,7 +775,7 @@ private fun SettingsColumn(content: @Composable () -> Unit) {
 
 /** A sub-page header: a back arrow + the page title. */
 @Composable
-private fun SubHeader(title: String, onBack: () -> Unit) {
+internal fun SubHeader(title: String, onBack: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onBack) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -1052,7 +1063,7 @@ private fun BleExhaustedCard() {
 }
 
 @Composable
-private fun SettingRow(
+internal fun SettingRow(
     icon: ImageVector?,
     title: String,
     subtitle: String,
@@ -1152,7 +1163,7 @@ private fun HopsRow(
 
 /** A disabled row standing in for a not-yet-shipped option, tagged "SOON". */
 @Composable
-private fun SoonRow(icon: ImageVector, title: String, subtitle: String) {
+internal fun SoonRow(icon: ImageVector, title: String, subtitle: String) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1176,7 +1187,7 @@ private fun SoonRow(icon: ImageVector, title: String, subtitle: String) {
 }
 
 @Composable
-private fun LeadingIcon(icon: ImageVector, tint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface) {
+internal fun LeadingIcon(icon: ImageVector, tint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface) {
     Box(
         modifier = Modifier
             .size(38.dp)
@@ -1188,7 +1199,7 @@ private fun LeadingIcon(icon: ImageVector, tint: androidx.compose.ui.graphics.Co
 }
 
 @Composable
-private fun RowDivider() {
+internal fun RowDivider() {
     HorizontalDivider(color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(start = 16.dp))
 }
 
