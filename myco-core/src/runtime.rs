@@ -987,31 +987,12 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
-            NativeAppAction::CheckNsiteUpdates => {
-                // Poll online relays for newer manifests; stage + apply. Non-blocking.
-                // Napplets ride the same check when any are installed — the
-                // host is only stood up (and a user key only generated) when
-                // there is one to check.
-                let napplets = self.napplet_refresh_targets();
-                let host = if napplets.is_empty() {
-                    None
+            NativeAppAction::CheckNsiteUpdates { auto } => {
+                self.check_updates(if auto {
+                    crate::update_gate::CheckTrigger::Auto
                 } else {
-                    self.napplet_context().map(|(host, _)| host)
-                };
-                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    // Napplet authors publish to public relays and the sharer
-                    // is not recorded, so offline-only has nowhere to ask:
-                    // counted as checked, none updated.
-                    let offline_only = content.is_offline_only();
-                    let napplet_check = async move {
-                        let host = host?;
-                        if offline_only {
-                            return Some((0, napplets.len()));
-                        }
-                        Some(crate::napplet::refresh_all(&host, &napplets).await)
-                    };
-                    rt.spawn(content.check_updates_with(napplet_check));
-                }
+                    crate::update_gate::CheckTrigger::Manual
+                });
                 self.rev += 1;
             }
             NativeAppAction::WipeStores => {
@@ -1695,6 +1676,42 @@ impl AppRuntime {
             }
             content.refresh_napplet_status().await;
         });
+    }
+
+    /// Start an update check of installed nsites and napplets, if the throttle
+    /// lets `trigger` through (`update_gate.rs`). Non-blocking: the check is
+    /// spawned. Nothing happens without the content layer.
+    fn check_updates(&mut self, trigger: crate::update_gate::CheckTrigger) {
+        let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
+            return;
+        };
+        let rt = rt.handle().clone();
+        // Gate first: a throttled trigger must not stand up the napplet host
+        // (or generate a user key) for nothing.
+        let Some(in_flight) = content.begin_update_check(trigger) else {
+            return;
+        };
+        // Napplets ride the same check when any are installed — the host is
+        // only stood up (and a user key only generated) when there is one to
+        // check.
+        let napplets = self.napplet_refresh_targets();
+        let host = if napplets.is_empty() {
+            None
+        } else {
+            self.napplet_context().map(|(host, _)| host)
+        };
+        // Napplet authors publish to public relays and the sharer is not
+        // recorded, so offline-only has nowhere to ask: counted as checked,
+        // none updated. The nsite half asks Circle peers' mesh relays only.
+        let offline_only = content.is_offline_only();
+        let napplet_check = async move {
+            let host = host?;
+            if offline_only {
+                return Some((0, napplets.len()));
+            }
+            Some(crate::napplet::refresh_all(&host, &napplets).await)
+        };
+        rt.spawn(content.check_updates_with(in_flight, napplet_check));
     }
 
     /// The installed napplets an update check should ask about, as addresses

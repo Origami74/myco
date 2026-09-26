@@ -976,7 +976,14 @@ object NativeActions {
         JSONObject().put("type", "remove_from_library").put("link", link)
     fun forgetNsite(link: String): JSONObject =
         JSONObject().put("type", "forget_nsite").put("link", link)
-    fun checkNsiteUpdates(): JSONObject = JSONObject().put("type", "check_nsite_updates")
+    /**
+     * Check installed nsites and napplets for updates. [auto] marks an
+     * automatic trigger ([UpdateChecks]): the core throttles it and reports
+     * no result. Left false, it is the user's button — always runs, always
+     * reports.
+     */
+    fun checkNsiteUpdates(auto: Boolean = false): JSONObject =
+        JSONObject().put("type", "check_nsite_updates").put("auto", auto)
 
     /**
      * Fetch + verify a napplet without installing it. Reports what it

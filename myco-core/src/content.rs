@@ -75,6 +75,34 @@ enum NsiteCheck {
     Done(String),
 }
 
+/// A running update check's hold on the throttle, from
+/// [`Content::begin_update_check`]. [`Content::check_updates_with`] takes it,
+/// so a check cannot run without one, and it releases the gate when the check
+/// ends — or, through `Drop`, if the check never runs or ends early (its task
+/// dropped before or during a poll, or a panic inside it), so the gate can
+/// never stay shut.
+pub struct InFlightCheck {
+    content: Arc<Content>,
+    done: bool,
+}
+
+impl InFlightCheck {
+    /// Release the gate and post the result.
+    fn complete(mut self, message: &str) {
+        self.done = true;
+        self.content.release_update_check(message, false);
+    }
+}
+
+impl Drop for InFlightCheck {
+    fn drop(&mut self) {
+        if !self.done {
+            self.content
+                .release_update_check("Update check was interrupted", true);
+        }
+    }
+}
+
 /// The napplet half of an update-check toast.
 fn napplet_update_message(updated: usize, checked: usize) -> String {
     match (updated, checked) {
@@ -513,6 +541,8 @@ pub struct Content {
     pending_updates: Mutex<HashMap<String, PendingUpdate>>,
     /// Status of the latest update check, for UI feedback (checking → result).
     update_check: Mutex<UpdateCheckView>,
+    /// The throttle every update-check trigger goes through (`update_gate.rs`).
+    update_gate: Mutex<crate::update_gate::UpdateGate>,
     /// Native paired-peer file transfers. Metadata is persisted; file keys and
     /// encrypted outbox paths remain inside the app-private data directory.
     file_transfers: Mutex<Vec<FileTransferRecord>>,
@@ -730,6 +760,7 @@ impl Content {
             prev_pool_connected: Mutex::new(HashSet::new()),
             pending_updates: Mutex::new(HashMap::new()),
             update_check: Mutex::new(UpdateCheckView::default()),
+            update_gate: Mutex::new(crate::update_gate::UpdateGate::default()),
             file_transfers: Mutex::new(file_transfers),
             completed_incoming: Mutex::new(completed_incoming),
             completed_incoming_path,
@@ -3175,19 +3206,34 @@ impl Content {
 
     // --- nsite updates (docs/design/nsite/nsite-updates.md) ---
 
-    /// P-U1 manual update check (online). Polls online relays for newer manifests
-    /// of every Library site in **one combined REQ per relay** (deduplicated, read
-    /// until EOSE), and for each newer-than-active candidate stages its blobs and
-    /// activates when complete. Spawn-not-block; the UI polls `siteStatus`.
-    pub async fn check_updates(self: Arc<Self>) {
-        self.check_updates_with(async { None }).await
+    /// Ask the update-check throttle whether a check from `trigger` may start
+    /// now (`update_gate.rs`). `Some` marks one in flight; hand the token to
+    /// [`Self::check_updates_with`], or drop it to release the gate.
+    pub fn begin_update_check(
+        self: &Arc<Self>,
+        trigger: crate::update_gate::CheckTrigger,
+    ) -> Option<InFlightCheck> {
+        let decision = self.update_gate.lock().unwrap().begin(trigger, now_secs());
+        tracing::info!(?trigger, ?decision, "update check requested");
+        (decision == crate::update_gate::Decision::Run).then(|| InFlightCheck {
+            content: self.clone(),
+            done: false,
+        })
     }
 
-    /// Check nsites and, through `napplets`, napplets — one "Checking…" and
-    /// one result toast for both. `napplets` resolves to
-    /// `Some((updated, checked))`, or `None` when there are none to check;
-    /// the napplet path lives in `napplet.rs` because it needs the host.
-    pub async fn check_updates_with<F>(self: Arc<Self>, napplets: F)
+    /// P-U1 update check. Polls relays for newer manifests of every Library
+    /// site in **one combined REQ per relay** (deduplicated, read until EOSE),
+    /// and for each newer-than-active candidate stages its blobs and activates
+    /// when complete. Spawn-not-block; the UI polls `siteStatus`.
+    ///
+    /// Checks napplets too, through `napplets` — one "Checking…" and one
+    /// result for both. `napplets` resolves to `Some((updated, checked))`, or
+    /// `None` when there are none to check; the napplet path lives in
+    /// `napplet.rs` because it needs the host.
+    ///
+    /// `in_flight` is the token [`Self::begin_update_check`] handed out; it
+    /// releases the gate when this ends, also if the task is dropped part-way.
+    pub async fn check_updates_with<F>(self: Arc<Self>, in_flight: InFlightCheck, napplets: F)
     where
         F: std::future::Future<Output = Option<(usize, usize)>>,
     {
@@ -3203,7 +3249,7 @@ impl Content {
                 format!("{msg}; {}", napplet_update_message(updated, checked))
             }
         };
-        self.finish_update_check(&msg);
+        in_flight.complete(&msg);
     }
 
     /// The nsite half of an update check. Progress lands in `update_check`
@@ -3386,13 +3432,29 @@ impl Content {
         uc.message = message.to_string();
     }
 
-    /// Mark the check complete and bump `generation` so the UI fires a one-shot
-    /// result toast.
-    fn finish_update_check(&self, message: &str) {
-        let mut uc = self.update_check.lock().unwrap();
+    /// End the running check: post `message` and release the gate. The
+    /// result is written **under** the gate lock, so a check that starts the
+    /// moment the gate opens cannot have its "Checking…" overwritten by this
+    /// one's result. Lock order is gate, then `update_check`; nothing takes
+    /// them the other way round.
+    ///
+    /// The toast (`generation`) fires when the check reports — a manual one,
+    /// or one a manual press joined; an automatic check stays silent. An
+    /// `interrupted` check posts its message only if someone is waiting on it.
+    ///
+    /// Poison-tolerant: this runs from `Drop`, possibly while unwinding, where
+    /// a second panic would abort the process.
+    fn release_update_check(&self, message: &str, interrupted: bool) {
+        let mut gate = self.update_gate.lock().unwrap_or_else(|e| e.into_inner());
+        let report = gate.finish();
+        let mut uc = self.update_check.lock().unwrap_or_else(|e| e.into_inner());
         uc.checking = false;
-        uc.message = message.to_string();
-        uc.generation += 1;
+        if report || !interrupted {
+            uc.message = message.to_string();
+        }
+        if report {
+            uc.generation += 1;
+        }
     }
 
     pub fn update_check_snapshot(&self) -> UpdateCheckView {
@@ -4249,6 +4311,143 @@ mod tests {
         content.unforget_site(&addr);
         content.clone().open_site(addr.clone(), None).await;
         assert!(listed(&content), "asking again did not bring it back");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn update_test_content(tag: &str) -> (Arc<Content>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "myco-update-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        (Arc::new(Content::open(&dir).unwrap()), dir)
+    }
+
+    /// Automatic update checks share the manual one's gate: they are throttled,
+    /// they release the gate when done, and only a manual check fires the
+    /// result toast (`generation`). Hermetic — nothing installed, so nothing
+    /// is asked of any relay.
+    #[tokio::test]
+    async fn automatic_update_checks_are_throttled_and_silent() {
+        use crate::update_gate::CheckTrigger::{Auto, Manual};
+        let (content, dir) = update_test_content("gate");
+        let generation = |c: &Content| c.update_check_snapshot().generation;
+
+        let auto = content.begin_update_check(Auto).expect("first auto check");
+        content
+            .clone()
+            .check_updates_with(auto, async { None })
+            .await;
+        assert_eq!(generation(&content), 0, "an automatic check toasted");
+
+        assert!(content.begin_update_check(Auto).is_none(), "not throttled");
+        let manual = content
+            .begin_update_check(Manual)
+            .expect("manual throttled");
+        assert!(
+            content.begin_update_check(Manual).is_none(),
+            "a second check overlapped the running one"
+        );
+        content
+            .clone()
+            .check_updates_with(manual, async { None })
+            .await;
+        assert_eq!(generation(&content), 1);
+        assert!(!content.update_check_snapshot().checking);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A manual press while an automatic check runs joins it and gets its result.
+    #[tokio::test]
+    async fn a_manual_press_joins_a_running_check() {
+        use crate::update_gate::CheckTrigger::{Auto, Manual};
+        let (content, dir) = update_test_content("join");
+        let auto = content.begin_update_check(Auto).unwrap();
+        assert!(content.begin_update_check(Manual).is_none());
+        content
+            .clone()
+            .check_updates_with(auto, async { None })
+            .await;
+        let uc = content.update_check_snapshot();
+        assert_eq!(uc.generation, 1);
+        assert_eq!(uc.message, "No apps to check");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A token dropped before its check ever runs (the spawned task dropped
+    /// before its first poll) releases the gate, silently.
+    #[tokio::test]
+    async fn an_unused_update_token_releases_the_gate() {
+        use crate::update_gate::CheckTrigger::{Auto, Manual};
+        let (content, dir) = update_test_content("unused");
+        drop(content.begin_update_check(Auto).unwrap());
+        assert_eq!(content.update_check_snapshot().generation, 0);
+        let manual = content.begin_update_check(Manual);
+        assert!(manual.is_some(), "gate stayed shut");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A check dropped part-way (its task cancelled) still releases the gate,
+    /// and a user who pressed "Check for updates" still gets a result.
+    #[tokio::test]
+    async fn a_dropped_update_check_releases_the_gate_and_reports() {
+        use crate::update_gate::CheckTrigger::{Auto, Manual};
+        let (content, dir) = update_test_content("drop");
+        let never = || std::future::pending::<Option<(usize, usize)>>();
+        let ms10 = std::time::Duration::from_millis(10);
+
+        // Automatic and cancelled: silent.
+        let auto = content.begin_update_check(Auto).unwrap();
+        let check = content.clone().check_updates_with(auto, never());
+        let _ = tokio::time::timeout(ms10, check).await;
+        let uc = content.update_check_snapshot();
+        assert!(!uc.checking);
+        assert_eq!(uc.generation, 0);
+
+        // Manual and cancelled: the presser hears about it.
+        let manual = content
+            .begin_update_check(Manual)
+            .expect("gate stayed shut");
+        let check = content.clone().check_updates_with(manual, never());
+        let _ = tokio::time::timeout(ms10, check).await;
+        let uc = content.update_check_snapshot();
+        assert!(!uc.checking);
+        assert_eq!(uc.generation, 1);
+        assert_eq!(uc.message, "Update check was interrupted");
+        assert!(content.begin_update_check(Manual).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Whenever the gate reads as open, the previous check's result is already
+    /// posted, so a check that starts in that moment cannot have its
+    /// "Checking…" overwritten by the old result. Races the release on another
+    /// thread against an observer that holds the gate lock while it looks.
+    #[tokio::test]
+    async fn the_result_is_posted_before_the_gate_opens() {
+        use crate::update_gate::{CheckTrigger::Manual, Decision};
+        let (content, dir) = update_test_content("order");
+        for round in 0..200 {
+            let token = content.begin_update_check(Manual).unwrap();
+            content.set_update_check(true, "Checking for updates…");
+            let expected = format!("done {round}");
+            let msg = expected.clone();
+            let releaser = std::thread::spawn(move || token.complete(&msg));
+            loop {
+                let gate = content.update_gate.lock().unwrap();
+                if gate.decide(Manual, now_secs()) == Decision::Run {
+                    let uc = content.update_check.lock().unwrap();
+                    assert_eq!(uc.message, expected, "gate opened before the result");
+                    assert!(!uc.checking);
+                    break;
+                }
+                drop(gate);
+                std::thread::yield_now();
+            }
+            releaser.join().unwrap();
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

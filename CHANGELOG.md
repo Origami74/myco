@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Apps check for updates on their own.** Myco now checks installed nsites
+  and napplets when it comes to the foreground and every 6 hours while it
+  runs. Automatic checks are quiet and run at most once per 30 minutes;
+  "Check for updates" still runs right away and shows its result.
 - **Discover comes preinstalled.** An app store for napplets, itself a
   napplet: a feed of napplets from your relays, community recommendations
   from people you follow, and store-style app pages whose Install opens

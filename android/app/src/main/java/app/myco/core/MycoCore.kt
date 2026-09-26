@@ -25,6 +25,8 @@ object MycoCore {
                     // Carries signing requests to a signer app (Amber) for a
                     // signer login; idle otherwise.
                     ExternalSigner.start(app, it)
+                    // Foreground + periodic update checks, throttled by the core.
+                    UpdateChecks.start(it)
                 }
             }
         }
