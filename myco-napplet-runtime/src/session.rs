@@ -21,8 +21,9 @@ use nostr::{Event, Filter};
 /// this with what the user granted — a grant for a domain that does not exist
 /// yet must not be advertised, or `shell.supports()` lies and the napplet takes
 /// a branch that cannot work.
-pub const IMPLEMENTED_DOMAINS: &[&str] =
-    &["shell", "identity", "relay", "mesh", "outbox", "resource"];
+pub const IMPLEMENTED_DOMAINS: &[&str] = &[
+    "shell", "identity", "relay", "mesh", "outbox", "resource", "link", "theme",
+];
 
 /// Domains every napplet gets, grant or no grant.
 ///
@@ -44,11 +45,28 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// a grant nobody made. `resource` is here because a napplet that shows a
 /// feed shows pictures, and a content-addressed fetch is the least a napplet
 /// can be allowed while still working.
-pub const DEFAULT_GRANTS: &[&str] = &["identity", "relay", "resource"];
+///
+/// `link` and `theme` cost the user nothing to grant. `theme` is read-only
+/// and says no more than the napplet's own `prefers-color-scheme` does.
+/// `link` never acts on its own: every link ends at something the user
+/// answers — the system browser, or Myco's install review, where nothing is
+/// installed until the user says so — and the host rate-limits the asking.
+pub const DEFAULT_GRANTS: &[&str] = &["identity", "link", "relay", "resource", "theme"];
 
 /// The most live subscriptions one session may hold, across `relay`, `mesh`
 /// and `outbox`. See [`Session::subscribe_in`].
 pub const MAX_SUBSCRIPTIONS: usize = 64;
+
+/// Whether the app is drawing light or dark — which NAP-THEME theme applies.
+///
+/// Reported by the window host (it follows the phone's dark mode), never by
+/// the napplet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Appearance {
+    #[default]
+    Light,
+    Dark,
+}
 
 /// A napplet's identity: the `(dTag, aggregateHash)` tuple NIP-5D defines,
 /// computed by the runtime from verified bytes — plus the author who signed
@@ -113,6 +131,8 @@ pub struct Session {
     /// and a napplet may reuse a `subId` across the two — the spec scopes ids
     /// per domain, not per session.
     subscriptions: BTreeMap<(String, String), Vec<Filter>>,
+    /// Light or dark, as the window host last reported. See [`Appearance`].
+    appearance: Appearance,
 }
 
 impl Session {
@@ -137,7 +157,21 @@ impl Session {
             implemented: implemented.into_iter().map(Into::into).collect(),
             established: false,
             subscriptions: BTreeMap::new(),
+            appearance: Appearance::default(),
         }
+    }
+
+    /// The appearance NAP-THEME answers with.
+    pub fn appearance(&self) -> Appearance {
+        self.appearance
+    }
+
+    /// Record the app's appearance. Returns whether it changed — the host
+    /// pushes `theme.changed` only then.
+    pub fn set_appearance(&mut self, appearance: Appearance) -> bool {
+        let changed = self.appearance != appearance;
+        self.appearance = appearance;
+        changed
     }
 
     /// Whether this runtime implements `domain` at all — regardless of grants.

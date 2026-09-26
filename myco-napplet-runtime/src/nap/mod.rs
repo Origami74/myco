@@ -9,11 +9,13 @@
 //! specified in the registry's form so it can be proposed there.
 
 pub mod identity;
+pub mod link;
 pub mod mesh;
 pub mod outbox;
 pub mod relay;
 pub mod resource;
 pub mod shell;
+pub mod theme;
 
 use nostr::{Event, Filter};
 

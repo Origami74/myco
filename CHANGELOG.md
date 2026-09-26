@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Napplets can open links and match your theme.** NAP-LINK: a napplet can
+  ask to open a web link (your browser, after a one-tap confirm unless you just
+  touched the app) or point you at another napplet — Myco's install review
+  opens over the running app, and nothing installs until you tap Add. Repeated
+  asks are refused while a review is showing and rate-limited. NAP-THEME:
+  `theme.get` answers Myco Light or Myco AMOLED to match the app's dark mode,
+  and a switch while the app is open is pushed as `theme.changed` without
+  restarting it. Both are granted by default and can be switched off per app.
 - **Napplets can read who you follow and mute.** NAP-IDENTITY's `getFollows`
   and `getMutes` answer from your kind 3 and kind 10000 on this phone (empty
   when there are none), where they were always empty.

@@ -871,6 +871,14 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
         return (0 until array.length()).map { array.getJSONObject(it).toString() }
     }
 
+    /**
+     * Report the window's light/dark appearance to its session (NAP-THEME).
+     * Call after open and on every configuration change.
+     */
+    fun nappletSetAppearance(sessionId: String, dark: Boolean) {
+        NativeCore.nappletSetAppearance(requireHandle(), sessionId, dark)
+    }
+
     /** Drop a window's session. Rust ignores every later frame for it. */
     fun nappletClose(sessionId: String) {
         NativeCore.nappletClose(requireHandle(), sessionId)

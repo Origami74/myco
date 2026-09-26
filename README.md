@@ -52,7 +52,7 @@ Full design docs are in **[docs/](docs/README.md)**:
 scanning a QR, and apps flow both ways over Bluetooth, Wi-Fi Aware or the LAN
 with no internet. Two kinds of app run: **nsites** (static sites published on
 Nostr) and **napplets** (sandboxed programs with a permission model — mesh,
-relays, pictures). Every install has a Nostr identity from the first launch —
+relays, pictures, links, theme). Every install has a Nostr identity from the first launch —
 a guest you can keep, export, or swap for your own `nsec` or a signer app
 such as Amber in Settings. See the [roadmap](docs/roadmap.md) for what's next and
 [docs/](docs/README.md) for how it works.

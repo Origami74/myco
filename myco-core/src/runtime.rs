@@ -1795,7 +1795,9 @@ impl AppRuntime {
                 // Served versions come from the content layer's pins, so a
                 // newer manifest with no blob behind it cannot displace the
                 // one that opens.
-                .with_manifests(content.clone()),
+                .with_manifests(content.clone())
+                // NAP-LINK never stacks a second review on the one showing.
+                .with_review_slot(self.napplet_review.clone()),
             );
 
             // Feed every accepted event to open napplets' subscriptions — this

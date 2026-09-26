@@ -64,6 +64,6 @@ pub use seams::{
     MeshLimits, MeshReach, MeshSink, NapTransport, NoFetcher, OutboxResolver, PlanSource,
     RelayBackend, RelayLane, RelayPlan, Signer, StoreOnlySink,
 };
-pub use session::{NappletIdentity, Session, IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
+pub use session::{Appearance, NappletIdentity, Session, IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
 pub use shell_link::{ShellAction, ToRuntime, ToShell};
 pub use shell_page::{shell_page, RUNTIME_OBJECT};

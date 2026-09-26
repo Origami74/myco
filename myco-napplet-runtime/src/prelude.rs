@@ -166,6 +166,27 @@ mod tests {
         }
     }
 
+    /// NAP-LINK and NAP-THEME need nothing from the supplement: the vendored
+    /// installer carries both namespaces and routes their results, gated on
+    /// the same domain list.
+    #[test]
+    fn the_vendored_prelude_installs_link_and_theme() {
+        for domain in ["link", "theme"] {
+            assert!(
+                PRELUDE_IIFE.contains(&format!(r#"domains.has("{domain}")"#)),
+                "the vendored prelude no longer installs {domain}"
+            );
+        }
+        for wire in [
+            "link.open",
+            "link.open.result",
+            "theme.get",
+            "theme.changed",
+        ] {
+            assert!(PRELUDE_IIFE.contains(&format!(r#""{wire}""#)), "{wire}");
+        }
+    }
+
     /// Every implemented API is installed, whether or not it was granted.
     #[test]
     fn the_allowlist_is_everything_this_build_implements() {

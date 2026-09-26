@@ -711,7 +711,7 @@ internal fun NappletBadge(modifier: Modifier = Modifier) {
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NappletReviewSheet(
+internal fun NappletReviewSheet(
     review: NappletReview,
     onInstall: (List<String>) -> Unit,
     onRetry: () -> Unit,
@@ -896,7 +896,7 @@ private fun capabilityWording(domain: String): Capability = when (domain) {
     "inc" -> Capability("App to app", "Talk to your other open apps")
     "notify" -> Capability("Notifications", "Send you notifications")
     "theme" -> Capability("Theme", "Match your colours")
-    "link" -> Capability("Links", "Open links outside Myco")
+    "link" -> Capability("Links", "Ask to open web links in your browser, and suggest other apps for you to add")
     "config" -> Capability("Settings", "Have settings you can change")
     "shell" -> Capability("Start up", "Every app does this")
     else -> Capability(domain, "Something this version of Myco doesn't know about")

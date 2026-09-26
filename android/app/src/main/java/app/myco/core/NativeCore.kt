@@ -73,6 +73,13 @@ internal object NativeCore {
      */
     external fun nappletNextFrames(handle: Long, sessionId: String, timeoutMs: Long): String
 
+    /**
+     * Tell a window's session whether the app is drawing dark, so NAP-THEME
+     * answers with the matching theme and pushes `theme.changed` when it
+     * changes. Brief: takes the session lock only.
+     */
+    external fun nappletSetAppearance(handle: Long, sessionId: String, dark: Boolean)
+
     /** Drop a window's session. */
     external fun nappletClose(handle: Long, sessionId: String)
 

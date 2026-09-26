@@ -26,11 +26,12 @@ use nostr::PublicKey;
 use nsite_deck::seams::{newest_in_slot, BlobStore, PeerSource, RelayBackend};
 
 use myco_napplet_runtime::artifact::{assemble, Injection, SrcdocArtifact};
-use myco_napplet_runtime::dispatch::{dispatch, NapContext};
+use myco_napplet_runtime::dispatch::{dispatch, NapContext, Outcome};
 use myco_napplet_runtime::manifest::{KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT};
+use myco_napplet_runtime::nap::link::{LinkTarget, BLOCKED_BY_POLICY, INVALID_URL};
 use myco_napplet_runtime::prelude::render_for;
 use myco_napplet_runtime::resolve::resolve;
-use myco_napplet_runtime::session::{NappletIdentity, Session};
+use myco_napplet_runtime::session::{Appearance, NappletIdentity, Session};
 use myco_napplet_runtime::shell_link::{ShellAction, ToRuntime, ToShell};
 
 /// Where a napplet manifest lives: an author, a `d` tag for a named one, and
@@ -266,6 +267,80 @@ impl ManifestStore for NewestInSlot {
     fn pin(&self, _manifest: &nostr::Event) {}
 }
 
+/// The install-review slot the app's review sheet is drawn from — shared with
+/// `AppRuntime`, which fills it on `FetchNapplet`.
+pub type ReviewSlot = Arc<Mutex<Option<NappletReview>>>;
+
+/// How soon after one admitted napplet link another may open a review.
+///
+/// Covers the gap between answering `link.open` and the window host
+/// dispatching the fetch that fills the review slot — without it, a napplet
+/// firing a burst would have every one admitted before the first sheet
+/// showed — and stops a napplet reopening the sheet the moment the user
+/// dismisses it.
+pub const REVIEW_LINK_COOLDOWN: Duration = Duration::from_secs(5);
+
+/// How soon after one admitted web link another may open the browser.
+pub const WEB_LINK_COOLDOWN: Duration = Duration::from_secs(2);
+
+/// NAP-LINK admission — the host's half of `link.open`.
+///
+/// The runtime crate classifies a link; whether it is admitted *now* depends on
+/// what is on screen, which only the host knows. Device-wide, not per window:
+/// the review sheet is one sheet, and two napplets taking turns must not get
+/// twice the rate.
+#[derive(Default)]
+struct LinkGate {
+    /// When set, a review already in the slot refuses another link.
+    review: Option<ReviewSlot>,
+    last_review: Mutex<Option<std::time::Instant>>,
+    last_web: Mutex<Option<std::time::Instant>>,
+}
+
+impl LinkGate {
+    /// Admit `target` at `now`, returning the command for the window host, or
+    /// the `error` code to deny it with.
+    fn admit(&self, target: &LinkTarget, now: std::time::Instant) -> Result<ToShell, &'static str> {
+        let within = |last: &Mutex<Option<std::time::Instant>>, cooldown: Duration| {
+            let mut last = last.lock().unwrap();
+            if last.is_some_and(|t| now.saturating_duration_since(t) < cooldown) {
+                return true;
+            }
+            *last = Some(now);
+            false
+        };
+        match target {
+            LinkTarget::Web(url) => {
+                if within(&self.last_web, WEB_LINK_COOLDOWN) {
+                    return Err(BLOCKED_BY_POLICY);
+                }
+                Ok(ToShell::OpenExternal { url: url.clone() })
+            }
+            LinkTarget::Napplet(pointer) => {
+                // The runtime already decoded it; the host's own parser is the
+                // one `FetchNapplet` will use, so it gets the last word.
+                if NappletAddr::parse(pointer).is_err() {
+                    return Err(INVALID_URL);
+                }
+                // One question at a time: a review on screen — loading,
+                // waiting for an answer, or installing — is never replaced
+                // by a napplet's say-so.
+                if let Some(slot) = &self.review {
+                    if slot.lock().unwrap().is_some() {
+                        return Err(BLOCKED_BY_POLICY);
+                    }
+                }
+                if within(&self.last_review, REVIEW_LINK_COOLDOWN) {
+                    return Err(BLOCKED_BY_POLICY);
+                }
+                Ok(ToShell::ReviewNapplet {
+                    pointer: pointer.clone(),
+                })
+            }
+        }
+    }
+}
+
 /// The device's live napplet sessions.
 pub struct NappletHost {
     relay: Arc<dyn RelayBackend>,
@@ -277,6 +352,8 @@ pub struct NappletHost {
     ctx: NapContext,
     sessions: Mutex<HashMap<String, LiveNapplet>>,
     next_id: Mutex<u64>,
+    /// NAP-LINK admission. See [`LinkGate`].
+    links: LinkGate,
 }
 
 impl NappletHost {
@@ -290,7 +367,15 @@ impl NappletHost {
             ctx,
             sessions: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
+            links: LinkGate::default(),
         }
+    }
+
+    /// Refuse NAP-LINK reviews while `slot` holds one — the slot the app's
+    /// review sheet is drawn from.
+    pub fn with_review_slot(mut self, slot: ReviewSlot) -> Self {
+        self.links.review = Some(slot);
+        self
     }
 
     /// Serve versions through `manifests` — on the device, the content layer's
@@ -566,11 +651,55 @@ impl NappletHost {
             dispatch(&self.ctx, &mut snapshot, &message).await
         };
 
+        // NAP-LINK: the runtime classified the link, the host decides. An
+        // admitted link goes to the window host as a command *and* is
+        // answered `opened`; the command comes first so the window acts on
+        // it before the napplet hears back.
+        if let Outcome::Link(request) = &out {
+            return match self.links.admit(&request.target, std::time::Instant::now()) {
+                Ok(command) => {
+                    tracing::info!(session = session_id, ?command, "napplet link admitted");
+                    vec![command, ToShell::to_napplet(request.opened())]
+                }
+                Err(error) => {
+                    tracing::info!(
+                        session = session_id,
+                        target = ?request.target,
+                        error,
+                        "napplet link refused"
+                    );
+                    vec![ToShell::to_napplet(request.denied(error))]
+                }
+            };
+        }
+
         out.envelopes()
             .iter()
             .cloned()
             .map(ToShell::to_napplet)
             .collect()
+    }
+
+    /// Record the app's light/dark appearance for one window, and push
+    /// NAP-THEME's `theme.changed` if it changed and the napplet may hear it.
+    ///
+    /// The window host calls this right after open (before the handshake, so
+    /// the first `theme.get` is already right) and again on every
+    /// configuration change.
+    pub async fn set_appearance(&self, session_id: &str, appearance: Appearance) {
+        let (session, outbox) = {
+            let sessions = self.sessions.lock().unwrap();
+            match sessions.get(session_id) {
+                Some(live) => (live.session.clone(), live.outbox.clone()),
+                None => return,
+            }
+        };
+        let mut session = session.lock().await;
+        if session.set_appearance(appearance) {
+            if let Some(push) = myco_napplet_runtime::nap::theme::changed_frame(&session) {
+                let _ = outbox.send(ToShell::to_napplet(push));
+            }
+        }
     }
 
     /// Deliver an accepted event to whichever open napplets subscribed to it.
@@ -1323,6 +1452,258 @@ mod tests {
             )
             .await
             .is_empty());
+    }
+
+    /// A napplet naddr of the named kind, for NAP-LINK tests.
+    fn napplet_naddr() -> String {
+        use nostr::nips::nip01::Coordinate;
+        use nostr::nips::nip19::Nip19Coordinate;
+        let coordinate = Coordinate::new(
+            nostr::Kind::from(KIND_NAMED),
+            nostr::Keys::generate().public_key(),
+        )
+        .identifier("dingdong");
+        Nip19Coordinate::new(coordinate, Vec::<nostr::RelayUrl>::new())
+            .to_bech32()
+            .unwrap()
+    }
+
+    fn link_frame(url: &str) -> String {
+        serde_json::json!({
+            "channel": "napplet",
+            "message": {"type": "link.open", "id": "l1", "url": url}
+        })
+        .to_string()
+    }
+
+    /// An established session granted `granted`, on a host whose review
+    /// sheet is drawn from `slot`.
+    async fn linked_host(granted: &[&str], slot: ReviewSlot) -> (NappletHost, String) {
+        let (host, addr) = host_with_fixture().await;
+        let host = host.with_review_slot(slot);
+        let opened = host
+            .open(&addr, Some(granted.iter().map(|g| g.to_string()).collect()))
+            .await
+            .unwrap();
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        (host, opened.session_id)
+    }
+
+    fn link_result(frame: &ToShell) -> (String, Option<String>) {
+        let ToShell::Napplet { message } = frame else {
+            panic!("expected a napplet reply, got {frame:?}");
+        };
+        assert_eq!(message.msg_type, "link.open.result");
+        (
+            message
+                .field("status")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
+            message
+                .field("error")
+                .and_then(|e| e.as_str())
+                .map(str::to_string),
+        )
+    }
+
+    /// NAP-LINK to another napplet: the window is told to open the review
+    /// for it — the same `FetchNapplet` path a scanned code takes — and the
+    /// napplet hears `opened`. Nothing here, or anywhere on this path, can
+    /// install: the frame carries a pointer and nothing else.
+    #[tokio::test]
+    async fn a_napplet_link_asks_the_window_for_a_review() {
+        let slot: ReviewSlot = Arc::new(Mutex::new(None));
+        let (host, session) = linked_host(&["link"], slot.clone()).await;
+        let pointer = napplet_naddr();
+
+        let out = host
+            .frame(&session, &link_frame(&format!("nostr:{pointer}")))
+            .await;
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(
+            out[0],
+            ToShell::ReviewNapplet {
+                pointer: pointer.clone()
+            }
+        );
+        assert_eq!(link_result(&out[1]), ("opened".into(), None));
+
+        // While a review is showing, another link is refused — whoever asks.
+        *slot.lock().unwrap() = Some(NappletReview {
+            pointer: pointer.clone(),
+            loading: true,
+            title: String::new(),
+            description: String::new(),
+            requires: Vec::new(),
+            grants: Vec::new(),
+            installing: false,
+            manifest: None,
+            error: String::new(),
+            holder: None,
+        });
+        let out = host
+            .frame(&session, &link_frame(&format!("nostr:{}", napplet_naddr())))
+            .await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            link_result(&out[0]),
+            ("denied".into(), Some(BLOCKED_BY_POLICY.into()))
+        );
+    }
+
+    /// A burst of review links admits one: the rest land inside the cooldown,
+    /// before the first fetch has even filled the slot.
+    #[tokio::test]
+    async fn a_napplet_cannot_spam_review_sheets() {
+        let (host, session) = linked_host(&["link"], Arc::new(Mutex::new(None))).await;
+        let mut admitted = 0;
+        for _ in 0..5 {
+            let out = host
+                .frame(&session, &link_frame(&format!("nostr:{}", napplet_naddr())))
+                .await;
+            if out
+                .iter()
+                .any(|f| matches!(f, ToShell::ReviewNapplet { .. }))
+            {
+                admitted += 1;
+            } else {
+                assert_eq!(
+                    link_result(&out[0]),
+                    ("denied".into(), Some(BLOCKED_BY_POLICY.into()))
+                );
+            }
+        }
+        assert_eq!(admitted, 1);
+    }
+
+    #[test]
+    fn link_cooldowns_expire() {
+        let gate = LinkGate::default();
+        let t0 = std::time::Instant::now();
+        let web = LinkTarget::Web("https://example.com".into());
+        assert!(gate.admit(&web, t0).is_ok());
+        assert_eq!(gate.admit(&web, t0), Err(BLOCKED_BY_POLICY));
+        assert!(gate.admit(&web, t0 + WEB_LINK_COOLDOWN).is_ok());
+
+        let napplet = LinkTarget::Napplet(napplet_naddr());
+        assert!(gate.admit(&napplet, t0).is_ok());
+        assert_eq!(
+            gate.admit(&napplet, t0 + REVIEW_LINK_COOLDOWN / 2),
+            Err(BLOCKED_BY_POLICY)
+        );
+        assert!(gate.admit(&napplet, t0 + REVIEW_LINK_COOLDOWN).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_web_link_goes_to_the_browser_and_others_are_denied() {
+        let (host, session) = linked_host(&["link"], Arc::new(Mutex::new(None))).await;
+        let out = host
+            .frame(&session, &link_frame("https://example.com/x"))
+            .await;
+        assert_eq!(
+            out[0],
+            ToShell::OpenExternal {
+                url: "https://example.com/x".into()
+            }
+        );
+        assert_eq!(link_result(&out[1]), ("opened".into(), None));
+
+        let out = host.frame(&session, &link_frame("tel:+15550100")).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            link_result(&out[0]),
+            ("denied".into(), Some("unsupported-scheme".into()))
+        );
+        let out = host.frame(&session, &link_frame("https://")).await;
+        assert_eq!(
+            link_result(&out[0]),
+            ("denied".into(), Some("invalid-url".into()))
+        );
+    }
+
+    /// A napplet whose `link` grant was switched off gets a refusal and no
+    /// command reaches the window.
+    #[tokio::test]
+    async fn an_ungranted_link_reaches_no_window() {
+        let (host, addr) = host_with_fixture().await;
+        // Switched off on the sheet: `denied`, which a launch never widens
+        // over — `link` being a default does not bring it back.
+        let opened = host
+            .open_with(
+                &addr,
+                Some(crate::content::NappletGrants {
+                    granted: vec!["relay".into()],
+                    denied: vec!["link".into()],
+                    reviewed: Vec::new(),
+                }),
+            )
+            .await
+            .unwrap();
+        let session = opened.session_id;
+        host.frame(
+            &session,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        let out = host
+            .frame(&session, &link_frame(&format!("nostr:{}", napplet_naddr())))
+            .await;
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(&out[0], ToShell::Napplet { message } if message.field("error").is_some())
+        );
+    }
+
+    /// NAP-THEME: the window reports dark mode, `theme.get` answers AMOLED,
+    /// and a later switch is pushed to the napplet.
+    #[tokio::test]
+    async fn the_theme_follows_the_windows_appearance() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host.open(&addr, Some(vec!["theme".into()])).await.unwrap();
+        // Reported before the handshake: nothing is pushed, but the answer is
+        // already right.
+        host.set_appearance(&opened.session_id, Appearance::Dark)
+            .await;
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        let out = host
+            .frame(
+                &opened.session_id,
+                r#"{"channel":"napplet","message":{"type":"theme.get","id":"t1"}}"#,
+            )
+            .await;
+        let ToShell::Napplet { message } = &out[0] else {
+            panic!("expected a reply");
+        };
+        assert_eq!(message.field("theme").unwrap()["title"], "Myco AMOLED");
+        assert!(host
+            .next_frames(&opened.session_id, Duration::from_millis(10))
+            .await
+            .is_empty());
+
+        // Switched to light while open: pushed once, not again for the same.
+        host.set_appearance(&opened.session_id, Appearance::Light)
+            .await;
+        host.set_appearance(&opened.session_id, Appearance::Light)
+            .await;
+        let pushed = host
+            .next_frames(&opened.session_id, Duration::from_millis(50))
+            .await;
+        assert_eq!(pushed.len(), 1);
+        let ToShell::Napplet { message } = &pushed[0] else {
+            panic!("expected a push");
+        };
+        assert_eq!(message.msg_type, "theme.changed");
+        assert_eq!(message.field("theme").unwrap()["title"], "Myco Light");
     }
 
     /// Frames that overlap must queue, never be dropped.

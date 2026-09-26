@@ -72,6 +72,17 @@ pub enum ToShell {
     /// the switch would otherwise never exist. Handled by the window host,
     /// not the shell page — the shell never reloads in place.
     Relaunch,
+    /// Hand this `http(s):` URL to the system browser: a NAP-LINK
+    /// `link.open` the host admitted. Handled by the window host, which may
+    /// ask the user first; never by the shell page, which does not navigate.
+    #[serde(rename = "open-external")]
+    OpenExternal { url: String },
+    /// Put Myco's install review for this napplet pointer in front of the
+    /// user, over the running napplet: a NAP-LINK `link.open` naming another
+    /// napplet. Handled by the window host. It **fetches for review** and
+    /// nothing more — installing is the user's answer on the sheet.
+    #[serde(rename = "review-napplet")]
+    ReviewNapplet { pointer: String },
 }
 
 impl ToShell {
@@ -172,12 +183,44 @@ mod tests {
         assert_eq!(bytes, artifact.as_str());
     }
 
+    /// The window host switches on these exact channel names.
+    #[test]
+    fn host_commands_use_the_channel_names_the_window_host_reads() {
+        let v = serde_json::to_value(ToShell::OpenExternal {
+            url: "https://example.com".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"channel": "open-external", "url": "https://example.com"})
+        );
+        let v = serde_json::to_value(ToShell::ReviewNapplet {
+            pointer: "naddr1x".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"channel": "review-napplet", "pointer": "naddr1x"})
+        );
+        assert_eq!(
+            serde_json::to_value(ToShell::Relaunch).unwrap(),
+            serde_json::json!({"channel": "relaunch"})
+        );
+    }
+
     #[test]
     fn frames_round_trip_through_json() {
         let artifact = assemble("<p>hi</p>", &Injection::default());
         for frame in [
             ToShell::load(&artifact),
             ToShell::to_napplet(Envelope::new("shell.init")),
+            ToShell::Relaunch,
+            ToShell::OpenExternal {
+                url: "https://example.com".into(),
+            },
+            ToShell::ReviewNapplet {
+                pointer: "naddr1x".into(),
+            },
         ] {
             let json = serde_json::to_value(&frame).unwrap();
             assert_eq!(serde_json::from_value::<ToShell>(json).unwrap(), frame);
