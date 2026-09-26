@@ -155,6 +155,7 @@ external fun nappletOpen(handle, pointer): String              // resolve + veri
 external fun nappletFrame(handle, sessionId, frameJson): String     // one frame in, JSON array of frames out
 external fun nappletNextFrames(handle, sessionId, timeoutMs): String // long poll for pushed frames; BLOCKS
 external fun nappletSetAppearance(handle, sessionId, dark: Boolean)  // NAP-THEME light/dark; after open + on uiMode change
+external fun nappletNewerVersion(handle, sessionId): String      // served aggregate if newer than the window's, else ""
 external fun nappletClose(handle, sessionId)
 ```
 
@@ -168,6 +169,12 @@ the activity. `open-external` (`{url}`) and `review-napplet` (`{pointer}`) are
 NAP-LINK host commands for the window, never posted to the shell: the first opens
 the browser (confirming unless the user just touched the napplet), the second
 dispatches `fetch_napplet` and draws the install-review sheet over the napplet.
+
+`nappletNewerVersion` answers whether an update moved the napplet's served
+(pinned) version past the one this window's session opened: the new version's
+aggregate, or `""` while the window is current or the session is gone. It reads
+the relay, so it runs off the main thread. `NappletActivity` asks it when the
+window returns to the foreground and offers a restart — once per version.
 
 ### The BLE byte bridge
 
@@ -211,7 +218,7 @@ ways on its own threads. Design: [ports.md](./ports.md) §4.
 
 - Kotlin never waits on the mesh inside a reducer call.
 - Anything that **blocks** says so in its Kotlin doc and is called off the main
-  thread: `nappletNextFrames`, `bleChannelNextSend`, `tunNextPacket`,
+  thread: `nappletNextFrames`, `nappletNewerVersion`, `bleChannelNextSend`, `tunNextPacket`,
   `nextUdpTransportFd`, `gatewayGet`.
 - Grants cross the boundary in exactly one direction: from the user, through
   `install_napplet` / `set_napplet_grant`, into the library. Nothing Kotlin

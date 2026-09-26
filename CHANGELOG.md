@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An updated napplet offers a restart.** A napplet window keeps the version
+  it opened, so re-opening one that sat in the background used to bring back
+  the old version after an update. Now, when it comes back and a newer version
+  has been installed meanwhile, it asks once: "Restart" opens the new version,
+  "I'll restart later" keeps the window as it is and is not asked again for
+  that version.
 - **Apps check for updates on their own.** Myco now checks installed nsites
   and napplets when it comes to the foreground and every 6 hours while it
   runs. Automatic checks are quiet and run at most once per 30 minutes;
