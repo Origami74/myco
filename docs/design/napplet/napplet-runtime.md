@@ -454,8 +454,13 @@ is not yet claimed — the resolver needs the same normalization regardless.
 `reference/naps/drafts/NAP-OUTBOX.md`): `getEvent`, `query`, `subscribe`/`close`, `publish`,
 `resolveRelays`. Two seams — `OutboxResolver` (a NIP-65 plan per direction, with `source`
 and `missing_authors`) and `LaneTransport` (`query` / `publish` / `pull_into_local` over the
-three `RelayLane`s) — implemented by `OutboxService` in `myco-core/src/outbox.rs`. Reads and
-publishes wait for their lanes, bounded, and say `incomplete` when one never answered; a
+three `RelayLane`s) — implemented by `OutboxService` in `myco-core/src/outbox.rs`. Reads
+wait for their lanes, bounded, and say `incomplete` when one never answered. A publish
+answers at a quorum (`LaneTransport::publish_quorum`): once the event is stored here and two
+other lanes — or the only one — have taken it; the rest finish in the background and are
+absent from the result's `relays` map, which lists what answered in time. A publish naming
+`toInboxes` waits for every lane, since the spec makes an inbox a required target whose
+failure must be reported. A
 subscribe answers the local backlog and pulls the remote lanes *into* the local relay, which
 is what delivers them live (the spec has no `outbox.eose`, and this is why). Napplet-supplied
 relay URLs are validated: `ws`/`wss` only, never loopback or a private network. An author
@@ -563,7 +568,8 @@ The work this implied is done with NAP-OUTBOX (S3): a `.fips` URL in a relay lis
 napplet cannot smuggle userinfo, a path or another port into the pool's dial; the user's own kind 10002 — the
 configured relays — is published beside the guest profile on first napplet use, so the
 user's own outbox plan resolves as NIP-65; per-lane reachability is reported
-(`incomplete`, the per-relay map on publish) rather than failing hard. Policy lives in one
+(`incomplete`, the per-relay map on publish — for the lanes that answered by the quorum)
+rather than failing hard. Policy lives in one
 place (`outbox.rs`): a mesh relay is a lane only if its npub is a Circle member, our own is
 never one, and internet lanes go when offline-only.
 
