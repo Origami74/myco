@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A napplet's publish no longer times out while you approve it in your
+  signer app.** Publishing (NAP-OUTBOX and NAP-MESH) gave up after 30 s, so a
+  slow approval in Amber showed as "outbox.publish timed out" — and the event
+  could still go out. The napplet now waits for the answer: the signed event,
+  or a clear failure once the signer app has had its two minutes.
 - **Napplets saw nobody logged in.** `identity.getPublicKey` answered in a
   `publicKey` field where NAP-IDENTITY (and the reference shim) use `pubkey`,
   so every napplet read `undefined` — Minesweeper said "Sign in to publish".

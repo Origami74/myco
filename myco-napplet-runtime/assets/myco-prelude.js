@@ -10,6 +10,11 @@
 // - `window.napplet.mesh` — NAP-MESH (`docs/design/napplet/NAP-MESH.md`),
 //   Myco's own domain, which the vendored installer filters out because it is
 //   not in the upstream registry yet.
+// - `window.napplet.outbox.publish` — replaced, same wire and same result
+//   shape, only to wait longer. The vendored one gives up after 30 s, and a
+//   publish is signed first: with a signer app (NIP-55) that is a human
+//   reading an approval screen, which routinely takes longer. See
+//   `SIGNING_TIMEOUT_MS`.
 //
 // Same wire as everything else: flat NIP-5D envelopes posted to the parent
 // frame, results correlated by `id`, pushes routed by `subId`. Nothing here is
@@ -24,6 +29,16 @@ var MycoPrelude = (function () {
 
   var REQUEST_TIMEOUT_MS = 30000;
 
+  // How long a request that is signed before it is answered may wait: the
+  // publishes. The runtime bounds the signing itself (the signer app gets
+  // 120 s, `myco-core` `external_signer::ANSWER_TIMEOUT`) and then the relay
+  // write (seconds), and answers either way — with the event, or with
+  // `ok: false` and why. This is only the backstop for a runtime that never
+  // answers, so it sits well clear of that bound: a backstop that fires first
+  // turns an approval the user is still giving into "timed out", and the
+  // event may then be published anyway, behind the napplet's back.
+  var SIGNING_TIMEOUT_MS = 300000;
+
   function install(options) {
     var domains = new Set((options && options.domains) || []);
     var napplet = window.napplet || (window.napplet = {});
@@ -37,6 +52,7 @@ var MycoPrelude = (function () {
     });
 
     installShell(napplet, domains, routers);
+    if (domains.has("outbox") && napplet.outbox) installOutboxPublish(napplet, routers);
     if (domains.has("mesh")) installMesh(napplet, routers);
     return napplet;
   }
@@ -76,6 +92,69 @@ var MycoPrelude = (function () {
     Object.defineProperty(napplet, "shell", { value: shell, enumerable: true, configurable: false, writable: false });
   }
 
+  // --- NAP-OUTBOX: publish, with a signing-length wait ----------------------
+  //
+  // A drop-in for the vendored `outbox.publish`: the same envelope, resolved
+  // with the same object built from the same fields — `ok`, `event`,
+  // `eventId`, `relays`, `error` — so a caller cannot tell the two apart,
+  // except that this one waits `SIGNING_TIMEOUT_MS` rather than 30 s.
+  //
+  // The vendored router still sees our `outbox.publish.result`s and drops
+  // them: it resolves only ids in its own pending map, and ours never enter
+  // it. Its other `outbox.*` calls are untouched.
+  //
+  // `relay.publish` needs no such fix: the vendored one sets no timer at all
+  // and waits for its result however long signing takes.
+  // The vendored shim's send (`cloneMode: "auto"`) retries a message the
+  // structured clone refuses — a template held in a reactive Proxy, say — as a
+  // plain snapshot. Kept here so the replacement publishes whatever the
+  // original did. Event templates are JSON, so a JSON round trip is the snapshot.
+  function postCloneable(message) {
+    try {
+      window.parent.postMessage(message, "*");
+    } catch (e) {
+      if (!e || e.name !== "DataCloneError") throw e;
+      window.parent.postMessage(JSON.parse(JSON.stringify(message)), "*");
+    }
+  }
+
+  function installOutboxPublish(napplet, routers) {
+    var pending = new Map();
+
+    routers.push(function (msg) {
+      if (msg.type !== "outbox.publish.result" || typeof msg.id !== "string") return;
+      var p = pending.get(msg.id);
+      if (!p) return;
+      pending.delete(msg.id);
+      clearTimeout(p.timeout);
+      var result = { ok: msg.ok };
+      if (msg.event !== undefined) result.event = msg.event;
+      if (msg.eventId !== undefined) result.eventId = msg.eventId;
+      if (msg.relays !== undefined) result.relays = msg.relays;
+      if (msg.error !== undefined) result.error = msg.error;
+      p.resolve(result);
+    });
+
+    napplet.outbox.publish = function publish(template, options) {
+      var id = crypto.randomUUID();
+      return new Promise(function (resolve, reject) {
+        var timeout = setTimeout(function () {
+          if (pending.delete(id)) reject(new Error("outbox.publish timed out"));
+        }, SIGNING_TIMEOUT_MS);
+        pending.set(id, { resolve: resolve, timeout: timeout });
+        var message = { type: "outbox.publish", id: id, event: template };
+        if (options !== undefined) message.options = options;
+        try {
+          postCloneable(message);
+        } catch (e) {
+          clearTimeout(timeout);
+          pending.delete(id);
+          reject(e);
+        }
+      });
+    };
+  }
+
   // --- NAP-MESH --------------------------------------------------------------
   function installMesh(napplet, routers) {
     var pending = new Map();
@@ -85,13 +164,13 @@ var MycoPrelude = (function () {
       window.parent.postMessage(message, "*");
     }
 
-    function request(message, project) {
+    function request(message, project, timeoutMs) {
       var id = crypto.randomUUID();
       message.id = id;
       return new Promise(function (resolve, reject) {
         var timeout = setTimeout(function () {
           if (pending.delete(id)) reject(new Error(message.type + " timed out"));
-        }, REQUEST_TIMEOUT_MS);
+        }, timeoutMs || REQUEST_TIMEOUT_MS);
         pending.set(id, { resolve: resolve, reject: reject, timeout: timeout, project: project });
         post(message);
       });
@@ -126,7 +205,8 @@ var MycoPrelude = (function () {
     }
 
     // A publish failure is a result with `ok: false`, not a rejection — the
-    // napplet reads one field to branch on, as NAP-RELAY has it.
+    // napplet reads one field to branch on, as NAP-RELAY has it. Signed
+    // first, so it waits as long as an outbox publish does.
     function publish(template, options) {
       var message = { type: "mesh.publish", event: template };
       if (options && options.ttl !== undefined) message.ttl = options.ttl;
@@ -137,7 +217,7 @@ var MycoPrelude = (function () {
         if (msg.ttl !== undefined) out.ttl = msg.ttl;
         if (msg.error !== undefined) out.error = msg.error;
         return out;
-      });
+      }, SIGNING_TIMEOUT_MS);
     }
 
     function subscribe(filters, options) {

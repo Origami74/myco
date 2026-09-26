@@ -57,7 +57,9 @@ pub use manifest::{
     is_napplet_kind, Archetype, NappletManifest, KINDS, KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT,
 };
 pub use nap::deliveries_for;
-pub use prelude::{render_for as render_prelude, PRELUDE_GLOBAL, SUPPLEMENT_GLOBAL};
+pub use prelude::{
+    render_for as render_prelude, PRELUDE_GLOBAL, SIGNING_TIMEOUT, SUPPLEMENT_GLOBAL,
+};
 pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
     is_mesh_relay_url, BlobFetcher, BlobStore, Direction, Envelope, EventSink, LaneTransport,
