@@ -290,10 +290,11 @@ history, so this node keeps it.
 
 ### Manifests are the same plane, a different policy
 
-Manifest kinds (15128/35128) travel this same push plane, but with an
-interest-aware download-then-forward policy and an active-version gate rather
-than the plain forward rule above. See
-[nsite-updates.md §4](../nsite/nsite-updates.md).
+Manifest kinds — nsite 15128/35128 and napplet 15129/35129 — travel this same
+push plane, but with an interest-aware download-then-forward policy and an
+active-version gate rather than the plain forward rule above. See
+[nsite-updates.md §4](../nsite/nsite-updates.md) and, for napplets,
+[napplet-runtime.md §7.3](../napplet/napplet-runtime.md).
 
 ---
 
@@ -316,9 +317,10 @@ and NIP-40 GC is not something an arbitrary backend guarantees.
 ## 6. What shipped
 
 - **Circle fan-out.** Published app events are gossiped to Circle members — v1
-  default **all kinds** except the manifest kinds 15128/35128, which take the
-  interest-aware path (§4). Napplet publishes through NAP-MESH originate at
-  the budget the napplet chose, within the user's cap (§2.6); `relay.publish`
+  default **all kinds** except the manifest kinds 15128/35128 and the napplet
+  manifest kinds 15129/35129, which take the interest-aware path (§4).
+  Napplet publishes through NAP-MESH originate at the budget the napplet
+  chose, within the user's cap (§2.6) — manifests included; `relay.publish`
   from a napplet does **not** gossip (relays only); nsite publishes still do,
   until N2.
 - **Multi-hop flood.** The `MESH` envelope (§2), the §3 forward rule (seen-set +

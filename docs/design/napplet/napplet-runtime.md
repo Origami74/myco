@@ -622,21 +622,60 @@ one whose index blob is here, pinned through the content layer's active-version 
 landing in the relay with no blob behind it — pulled by a subscription, flooded by a peer
 — does not displace the one that opens. The pin moves when a fetch brings the new bytes:
 "Check for updates" refreshes every installed napplet from its pointer's relays beside
-the nsite check (`NappletHost::refresh`, bytes first, manifest, then pin), and the tile
+the nsite check (`NappletHost::refresh`, bytes first, manifest, then pin), and a version
+it brings in is passed on to the Circle, as an nsite update found by the check is (§7.3).
+A newer version pushed by a Circle peer moves the pin the same way (§7.3). The tile
 reports `ready` or `missing` from the same pin. The same check also runs on its own, on
 foreground and every 6 h, through the throttle in `nsite-updates.md` §3.1; under
-offline-only the napplet half is skipped (counted as checked, none updated). An open window keeps its session — it
+offline-only the napplet half is skipped (counted as checked, none updated). An open
+window keeps its session — it
 pinned the aggregate at open — and sees the new version at its next launch. Storage
 across versions is still open: napplets have no storage capability yet.
 
 ### 7.3 Mesh replication of the new kinds
 
-Napplets replicate for free only if the peer-sync filters and gossip paths know about
-`5129` / `15129` / `35129` and pull their blobs. Not done: the napplet kinds are
-gossip-eligible as plain events (no download-then-forward, no Discover listing), and the
-active-version pin (§7.2) is what keeps a manifest arriving that way from breaking the
-installed app. A napplet reaches another phone by the share handoff (bump, QR) and the
-public relays; automatic Circle replication and Discover are roadmap items.
+**Updates travel the Circle the way nsite updates do.** The gossiper routes the napplet
+manifest kinds `15129` / `35129` to their own handler (`Content::on_napplet_manifest_event`)
+instead of plain-flooding them. It is the nsite policy
+([nsite-updates.md §4](../nsite/nsite-updates.md)) — the same hop budget, split-horizon
+and multihop clamp — with the napplet's checks in front:
+
+- **Checked first, on every phone.** The manifest must be signed and parse as NIP-5D
+  (one `index.html`, an aggregate over its paths). One that does not, or that is older
+  than the version the relay already keeps for its slot, stops here.
+- **Not installed here** (no Library entry for that author and `d` tag): passed on at
+  once and nothing is fetched — a pure relay, as for an nsite we don't run. Holding no
+  bytes costs the next phone nothing: it asks the sender, gets a 404, and falls back to
+  the public servers (nsite-updates.md §4.2).
+- **Installed, not newer than the pinned version:** a downgrade or a replay. Not
+  fetched, not pinned, not passed on.
+- **Installed and newer:** the index blob is fetched from the sender's mesh Blossom
+  first, then the public Blossom servers unless offline-only; verified against the
+  manifest; stored; pinned — and only then passed on, so the next phone can fetch the
+  bytes from this one. A download that fails still passes the manifest on, so the wave
+  never stalls on one phone; the old version keeps serving.
+
+A napplet's pin never moves back — every pin (open, install, "Download again", the update
+check, a push) refuses a version older than the pinned one and accepts an equal one — so
+two versions downloading at once cannot leave the older one served, and a window opening
+on the old version cannot re-pin it. Equal is allowed because the real re-pins are of the
+version already served. The blob fetch is capped at NAP-RESOURCE's per-blob limit, so a
+sender cannot stream an unbounded body before the hash check. The version activates as
+§7.2 says: an open window keeps its session, the next launch opens the new one.
+
+**An update never widens grants.** Author and `d` tag are the address, and the
+signature ties a manifest to its author — a napplet by someone else under the same name
+is a different napplet, relayed like any other this phone lacks. Nothing on this path
+writes grants: a new version declaring a domain the user never reviewed opens without it,
+and the domain comes back as unreviewed for the review sheet (`open_with`).
+
+**Snapshots (`5129`) stay plain events.** A snapshot is an immutable build: nothing in the
+Library installs by it, so there is nothing to update, and the not-installed branch
+would pass it on unchanged anyway.
+
+Still not done: first delivery to a phone that has never had the napplet. It arrives by
+the share handoff (bump, QR) and the public relays; a Circle Discover listing for
+napplets is a roadmap item.
 
 ### 7.4 The outbox model over the mesh
 

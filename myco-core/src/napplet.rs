@@ -939,7 +939,8 @@ pub async fn ingest_event_into(
 impl NappletHost {
     /// Fetch whatever `source` has for `addr` and, if it is a newer version
     /// than the one served, bring it in — bytes first, so the served version
-    /// moves only when the new one can open. Returns whether it moved.
+    /// moves only when the new one can open. Returns the manifest now served
+    /// when it moved, so the caller can pass it on to the Circle.
     ///
     /// The update path for napplets: the same [`NappletHost::ingest`] the first
     /// fetch used, gated on version. A source with nothing newer, or nothing at
@@ -948,7 +949,7 @@ impl NappletHost {
         &self,
         addr: &NappletAddr,
         source: &dyn PeerSource,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Option<nostr::Event>> {
         let served = self
             .manifests
             .current(addr.kind(), &addr.author, addr.d_tag.as_deref())
@@ -962,21 +963,34 @@ impl NappletHost {
             None => true,
         };
         if !newer {
-            return Ok(false);
+            return Ok(None);
         }
-        self.ingest(addr, source).await?;
-        Ok(true)
+        // The source is untrusted and its answer is about to be passed on to
+        // the Circle: it must be this napplet, not whatever was asked for.
+        anyhow::ensure!(
+            offered.pubkey == addr.author
+                && offered.kind.as_u16() == addr.kind()
+                && offered.tags.identifier() == addr.d_tag.as_deref(),
+            "the source offered a manifest for another napplet"
+        );
+        // What was checked is what is kept: `ingest` would ask the source
+        // again, and a source answering differently the second time must not
+        // slip in a version the newer-than check never saw.
+        self.ingest_event(offered.clone(), source).await?;
+        Ok(Some(offered))
     }
 }
 
 /// Refresh every installed napplet from the public relays, in parallel.
-/// Returns `(updated, checked)` for the update-check toast.
+/// Returns the manifests that moved — for the update-check toast, and for the
+/// caller to pass on to the Circle as it does an nsite update — and how many
+/// were checked.
 ///
 /// Public relays only: a napplet's author publishes there, and the holder
 /// who shared it is not recorded. Offline-only skips the lot — `checked`
 /// still counts them, so the toast says they were not updated rather than
 /// that there were none.
-pub async fn refresh_all(host: &NappletHost, addrs: &[NappletAddr]) -> (usize, usize) {
+pub async fn refresh_all(host: &NappletHost, addrs: &[NappletAddr]) -> (Vec<nostr::Event>, usize) {
     let checks = addrs.iter().map(|addr| async move {
         match host.refresh(addr, &addr.public_source()).await {
             Ok(moved) => moved,
@@ -986,12 +1000,12 @@ pub async fn refresh_all(host: &NappletHost, addrs: &[NappletAddr]) -> (usize, u
                     error = %e,
                     "napplet update check: no newer version reachable"
                 );
-                false
+                None
             }
         }
     });
     let results = futures_util::future::join_all(checks).await;
-    (results.iter().filter(|m| **m).count(), addrs.len())
+    (results.into_iter().flatten().collect(), addrs.len())
 }
 
 /// The manifest's `["server", …]` Blossom hints.
@@ -2100,12 +2114,453 @@ mod tests {
 
         // A refresh from a source that has v2 whole moves the served version;
         // one that has nothing newer does not.
-        assert!(host.refresh(&addr, &source_for(&v2).await).await.unwrap());
+        let moved = host.refresh(&addr, &source_for(&v2).await).await.unwrap();
+        assert_eq!(moved.map(|m| m.id), Some(v2.manifest.id));
         let opened = host.open(&addr, None).await.unwrap();
         assert_eq!(opened.title.as_deref(), Some("Version two"));
-        assert!(!host.refresh(&addr, &source_for(&v2).await).await.unwrap());
+        assert!(host
+            .refresh(&addr, &source_for(&v2).await)
+            .await
+            .unwrap()
+            .is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A phone for the Circle-update tests: a real content layer (so pins,
+    /// the Library and the relay's slot rules are the device's) and a host
+    /// serving through its pins. The data dir goes when the phone does.
+    struct Phone {
+        dir: std::path::PathBuf,
+        content: Arc<crate::content::Content>,
+        host: NappletHost,
+    }
+
+    impl Drop for Phone {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn phone(tag: &str) -> Phone {
+        let dir = std::env::temp_dir().join(format!(
+            "myco-napplet-push-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(crate::content::Content::open(&dir).unwrap());
+        let host = NappletHost::new(test_ctx(content.relay(), content.blobs()))
+            .with_manifests(content.clone());
+        Phone { dir, content, host }
+    }
+
+    /// One version of the `fixture` napplet by `keys`, with bytes of its own.
+    fn version(
+        keys: &nostr::Keys,
+        at: u64,
+        title: &str,
+        requires: &[&str],
+    ) -> myco_napplet_runtime::testing::TestNapplet {
+        let html = format!("<!doctype html><title>{title}</title>");
+        NappletBuilder::new()
+            .keys(keys.clone())
+            .created_at(at)
+            .title(title)
+            .requires(requires)
+            .files(&[("/index.html", html.as_bytes())])
+            .build()
+    }
+
+    /// A peer that holds `napplet` whole.
+    async fn holder_of(
+        napplet: &myco_napplet_runtime::testing::TestNapplet,
+    ) -> Arc<dyn PeerSource> {
+        let relay = MemRelay::new();
+        let blobs = MemBlobs::new();
+        for (_, bytes) in &napplet.blobs {
+            blobs.put(bytes).await.unwrap();
+        }
+        relay.publish(napplet.manifest.clone()).await.unwrap();
+        Arc::new(FakeSource {
+            relay,
+            blobs,
+            kind: napplet.manifest.kind.as_u16(),
+        })
+    }
+
+    fn addr_of(napplet: &myco_napplet_runtime::testing::TestNapplet) -> NappletAddr {
+        NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
+        }
+    }
+
+    /// Install `napplet` the way an answered review does: bytes in and
+    /// pinned, then a Library entry recording what the sheet showed.
+    async fn install(
+        phone: &Phone,
+        napplet: &myco_napplet_runtime::testing::TestNapplet,
+        reviewed: &[&str],
+    ) {
+        let source = holder_of(napplet).await;
+        phone
+            .host
+            .ingest_event(napplet.manifest.clone(), source.as_ref())
+            .await
+            .unwrap();
+        let reviewed: Vec<String> = reviewed.iter().map(|d| d.to_string()).collect();
+        phone.content.add_napplet_to_library(
+            &napplet.author.to_bech32().unwrap(),
+            Some("fixture"),
+            Some("Fixture"),
+            "fixture.napplet.localhost",
+            effective_grants(&reviewed),
+            reviewed,
+            "",
+            0,
+        );
+    }
+
+    /// A push from a mesh peer with `ttl` hops left.
+    fn mesh(ttl: u8) -> crate::mesh_relay::Inbound {
+        crate::mesh_relay::Inbound {
+            origin: crate::mesh_relay::Origin::Mesh,
+            event_ttl: Some(ttl),
+            sender: None,
+        }
+    }
+
+    /// Push `napplet`'s manifest at `phone` as the relay hub does: stored
+    /// first, then handed to the policy. Returns the outcome and every
+    /// forward made, each with the version pinned at the moment it went out.
+    async fn push(
+        phone: &Phone,
+        napplet: &myco_napplet_runtime::testing::TestNapplet,
+        inbound: crate::mesh_relay::Inbound,
+        sources: &[Arc<dyn PeerSource>],
+    ) -> (
+        crate::content::NappletPush,
+        Vec<(u8, Option<nostr::EventId>)>,
+    ) {
+        let event = napplet.manifest.clone();
+        phone.content.relay().publish(event.clone()).await.unwrap();
+        let forwarded = Mutex::new(Vec::new());
+        let content = phone.content.clone();
+        let outcome = phone
+            .content
+            .handle_napplet_manifest(event, &inbound, sources, |m, ttl| {
+                let pinned = content
+                    .pinned_manifest(m.kind.as_u16(), &m.pubkey, Some("fixture"))
+                    .map(|e| e.id);
+                forwarded.lock().unwrap().push((ttl, pinned));
+            })
+            .await;
+        (outcome, forwarded.into_inner().unwrap())
+    }
+
+    /// An installed napplet that hears of a newer version from a Circle peer
+    /// fetches its bytes, verifies and pins them, and only then passes the
+    /// manifest on — so the next phone can fetch the bytes from this one.
+    /// The next launch opens the new version.
+    #[tokio::test]
+    async fn an_installed_napplet_downloads_a_pushed_update_before_passing_it_on() {
+        let phone = phone("update");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "Version one", &["relay"]);
+        let v2 = version(&keys, 2_000, "Version two", &["relay"]);
+        install(&phone, &v1, &["relay"]).await;
+
+        let (outcome, forwarded) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::Updated);
+        assert_eq!(
+            forwarded,
+            vec![(1, Some(v2.manifest.id))],
+            "passed on before the new version was here, or with the wrong budget"
+        );
+        assert!(phone.content.blobs().has(&v2.blobs[0].0).await);
+        let opened = phone.host.open(&addr_of(&v2), None).await.unwrap();
+        assert_eq!(opened.title.as_deref(), Some("Version two"));
+    }
+
+    /// A phone that does not have the napplet is a pure relay for it, as for
+    /// an nsite it does not run: the manifest goes on at once and nothing is
+    /// downloaded. With no hops left it goes nowhere.
+    #[tokio::test]
+    async fn a_napplet_not_installed_here_is_passed_on_and_not_fetched() {
+        let phone = phone("relay");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "Version one", &["relay"]);
+
+        let (outcome, forwarded) = push(&phone, &v1, mesh(2), &[holder_of(&v1).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::Relayed);
+        assert_eq!(forwarded, vec![(1, None)]);
+        assert!(!phone.content.blobs().has(&v1.blobs[0].0).await);
+
+        let v2 = version(&keys, 2_000, "Version two", &["relay"]);
+        let (outcome, forwarded) = push(&phone, &v2, mesh(0), &[holder_of(&v2).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::Relayed);
+        assert!(forwarded.is_empty(), "a spent budget was forwarded");
+
+        // Published here: the default budget, or the one a napplet chose
+        // through NAP-MESH — where 0 means this phone only.
+        let local = |ttl| crate::mesh_relay::Inbound {
+            origin: crate::mesh_relay::Origin::Local,
+            event_ttl: ttl,
+            sender: None,
+        };
+        let v3 = version(&keys, 3_000, "Version three", &["relay"]);
+        let (_, forwarded) = push(&phone, &v3, local(None), &[]).await;
+        assert_eq!(
+            forwarded,
+            vec![(crate::mesh_wire::EVENT_TTL - 1, None)],
+            "a local publish did not originate at the default"
+        );
+        let v4 = version(&keys, 4_000, "Version four", &["relay"]);
+        let (_, forwarded) = push(&phone, &v4, local(Some(0)), &[]).await;
+        assert!(forwarded.is_empty(), "a NAP-MESH ttl of 0 left the phone");
+    }
+
+    /// An older version is a downgrade or a replay: it is not fetched, not
+    /// pinned, and goes no further. A newer napplet by another author under
+    /// the same `d` tag is a different napplet — relayed like any other this
+    /// phone lacks, and never a way to replace the installed one.
+    #[tokio::test]
+    async fn an_older_version_or_another_authors_napplet_leaves_the_installed_one_alone() {
+        let phone = phone("stale");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "Version one", &["relay"]);
+        let v2 = version(&keys, 2_000, "Version two", &["relay"]);
+        install(&phone, &v2, &["relay"]).await;
+
+        let (outcome, forwarded) = push(&phone, &v1, mesh(2), &[holder_of(&v1).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::Dropped);
+        assert!(forwarded.is_empty(), "a downgrade was passed on");
+        assert!(!phone.content.blobs().has(&v1.blobs[0].0).await);
+
+        // The installed version itself, pushed again: nothing new to fetch
+        // and nothing to spread.
+        let (outcome, forwarded) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::Dropped);
+        assert!(forwarded.is_empty(), "a replay was passed on");
+
+        let impostor = version(&nostr::Keys::generate(), 3_000, "Impostor", &["relay"]);
+        let (outcome, _) = push(&phone, &impostor, mesh(2), &[holder_of(&impostor).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::Relayed);
+        assert!(!phone.content.blobs().has(&impostor.blobs[0].0).await);
+
+        let opened = phone.host.open(&addr_of(&v2), None).await.unwrap();
+        assert_eq!(opened.title.as_deref(), Some("Version two"));
+    }
+
+    /// A manifest that fails the napplet's own checks — a forged signature,
+    /// an aggregate that does not cover its files — is stopped here, however
+    /// new it claims to be.
+    #[tokio::test]
+    async fn an_invalid_napplet_manifest_goes_no_further() {
+        let phone = phone("invalid");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "Version one", &["relay"]);
+        install(&phone, &v1, &["relay"]).await;
+
+        let corrupt = NappletBuilder::new()
+            .keys(keys.clone())
+            .created_at(2_000)
+            .aggregate(myco_napplet_runtime::testing::FixtureAggregate::Corrupt)
+            .build();
+        let forged = NappletBuilder::new()
+            .keys(keys.clone())
+            .created_at(3_000)
+            .break_signature()
+            .build();
+        for bad in [&corrupt, &forged] {
+            let (outcome, forwarded) = push(&phone, bad, mesh(2), &[holder_of(bad).await]).await;
+            assert_eq!(outcome, crate::content::NappletPush::Dropped);
+            assert!(forwarded.is_empty(), "an invalid manifest was passed on");
+        }
+        assert_eq!(
+            phone
+                .content
+                .pinned_manifest(KIND_NAMED, &keys.public_key(), Some("fixture"))
+                .map(|e| e.id),
+            Some(v1.manifest.id)
+        );
+    }
+
+    /// No source with the bytes: the installed version keeps serving, and the
+    /// manifest still goes on so the wave does not stall on this phone.
+    #[tokio::test]
+    async fn a_failed_download_keeps_the_served_version_and_still_passes_it_on() {
+        let phone = phone("nobytes");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "Version one", &["relay"]);
+        let v2 = version(&keys, 2_000, "Version two", &["relay"]);
+        install(&phone, &v1, &["relay"]).await;
+
+        // The only source has v1's bytes, not v2's.
+        let (outcome, forwarded) = push(&phone, &v2, mesh(2), &[holder_of(&v1).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::NotDownloaded);
+        assert_eq!(forwarded, vec![(1, Some(v1.manifest.id))]);
+        let opened = phone.host.open(&addr_of(&v1), None).await.unwrap();
+        assert_eq!(opened.title.as_deref(), Some("Version one"));
+    }
+
+    /// A napplet's pin never moves back. An older version is refused; the
+    /// same version, or another signed in the same second, is accepted —
+    /// the re-pins that happen in practice (open, "Download again") are of
+    /// the version already served.
+    #[tokio::test]
+    async fn a_napplet_pin_never_moves_back() {
+        let phone = phone("monotonic");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "Version one", &["relay"]);
+        let v2 = version(&keys, 2_000, "Version two", &["relay"]);
+        let v2_twin = version(&keys, 2_000, "Version two, again", &["relay"]);
+        let pinned = || {
+            phone
+                .content
+                .pinned_manifest(KIND_NAMED, &keys.public_key(), Some("fixture"))
+                .map(|e| e.id)
+        };
+
+        ManifestStore::pin(phone.content.as_ref(), &v2.manifest);
+        ManifestStore::pin(phone.content.as_ref(), &v1.manifest);
+        assert_eq!(pinned(), Some(v2.manifest.id), "the pin moved back");
+        ManifestStore::pin(phone.content.as_ref(), &v2.manifest);
+        assert_eq!(pinned(), Some(v2.manifest.id));
+        ManifestStore::pin(phone.content.as_ref(), &v2_twin.manifest);
+        assert_eq!(
+            pinned(),
+            Some(v2_twin.manifest.id),
+            "an equal version was refused"
+        );
+    }
+
+    /// Nothing after a pushed update takes it back: not a window open on the
+    /// old version (which re-pins what it resolves), and not an older
+    /// version's download finishing late.
+    #[tokio::test]
+    async fn neither_an_open_window_nor_a_late_download_undoes_a_pushed_update() {
+        let phone = phone("nodowngrade");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "Version one", &["relay"]);
+        let v2 = version(&keys, 2_000, "Version two", &["relay"]);
+        install(&phone, &v1, &["relay"]).await;
+        let window = phone.host.open(&addr_of(&v1), None).await.unwrap();
+        assert_eq!(window.title.as_deref(), Some("Version one"));
+
+        let (outcome, _) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::Updated);
+
+        // v1's bytes arriving now — a slow install, a refresh that started
+        // earlier — are kept, but do not move the pin.
+        phone
+            .host
+            .ingest_event(v1.manifest.clone(), holder_of(&v1).await.as_ref())
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let opened = phone.host.open(&addr_of(&v2), None).await.unwrap();
+            assert_eq!(opened.title.as_deref(), Some("Version two"));
+        }
+        assert_eq!(
+            phone
+                .content
+                .pinned_manifest(KIND_NAMED, &keys.public_key(), Some("fixture"))
+                .map(|e| e.id),
+            Some(v2.manifest.id)
+        );
+    }
+
+    /// A source that answers every manifest query with the same event,
+    /// whatever was asked — what a hostile or confused relay can do.
+    struct LyingSource {
+        manifest: nostr::Event,
+        blobs: MemBlobs,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerSource for LyingSource {
+        async fn fetch_manifest(
+            &self,
+            _author: &PublicKey,
+            _d_tag: Option<&str>,
+        ) -> anyhow::Result<Option<nostr::Event>> {
+            Ok(Some(self.manifest.clone()))
+        }
+
+        async fn fetch_blob(
+            &self,
+            sha256_hex: &str,
+            _servers: &[String],
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            self.blobs.get(sha256_hex).await
+        }
+    }
+
+    /// The update check passes what it brings in on to the Circle, so it
+    /// must be the napplet asked for: a newer manifest for another author or
+    /// another `d` tag is refused, and the served version stays.
+    #[tokio::test]
+    async fn the_update_check_refuses_a_manifest_for_another_napplet() {
+        let phone = phone("refresh-foreign");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "Version one", &["relay"]);
+        install(&phone, &v1, &["relay"]).await;
+
+        let other_author = version(&nostr::Keys::generate(), 5_000, "Impostor", &["relay"]);
+        let other_d = NappletBuilder::new()
+            .keys(keys.clone())
+            .created_at(5_000)
+            .d_tag(Some("elsewhere"))
+            .build();
+        for offered in [&other_author, &other_d] {
+            let blobs = MemBlobs::new();
+            for (_, bytes) in &offered.blobs {
+                blobs.put(bytes).await.unwrap();
+            }
+            let source = LyingSource {
+                manifest: offered.manifest.clone(),
+                blobs,
+            };
+            assert!(phone.host.refresh(&addr_of(&v1), &source).await.is_err());
+            assert_eq!(
+                phone
+                    .content
+                    .pinned_manifest(KIND_NAMED, &keys.public_key(), Some("fixture"))
+                    .map(|e| e.id),
+                Some(v1.manifest.id)
+            );
+        }
+    }
+
+    /// An update from the Circle never widens what the napplet may do. The new
+    /// version declaring a domain the user never reviewed opens without it,
+    /// and hands it back as unreviewed for the review sheet.
+    #[tokio::test]
+    async fn a_pushed_update_that_declares_more_is_not_granted_until_reviewed() {
+        let phone = phone("grants");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "Version one", &["relay"]);
+        let v2 = version(&keys, 2_000, "Version two", &["relay", "mesh"]);
+        install(&phone, &v1, &["relay"]).await;
+
+        let (outcome, _) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::Updated);
+
+        let npub = keys.public_key().to_bech32().unwrap();
+        let grants = phone.content.napplet_grants(&npub, Some("fixture"));
+        let opened = phone.host.open_with(&addr_of(&v2), grants).await.unwrap();
+        assert_eq!(opened.title.as_deref(), Some("Version two"));
+        assert!(
+            !opened.granted().contains(&"mesh".to_string()),
+            "an update from the Circle granted itself a domain nobody reviewed"
+        );
+        assert_eq!(opened.unreviewed, vec!["mesh".to_string()]);
     }
 
     /// A domain the user switched off on the sheet stays off at the next

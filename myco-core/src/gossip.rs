@@ -16,9 +16,11 @@
 //! the first time this device sees an id, so a copy arriving via a second path is
 //! never re-forwarded — and unlike the store's dedup, that holds even after the
 //! event has been GC'd (`docs/design/core/event-gossip.md` §3–4). Manifest kinds
-//! (15128/35128) are excluded — they have their own path
-//! (`docs/design/nsite/nsite-layer.md` §2.1); everything else is gossip-eligible by
-//! default (`docs/design/nsite/nsite-permissions.md`).
+//! — nsite 15128/35128, napplet 15129/35129 — are excluded: they have their own
+//! interest-aware path (`docs/design/nsite/nsite-updates.md` §4,
+//! `docs/design/napplet/napplet-runtime.md` §7.3); everything else, napplet
+//! snapshots (5129) included, is gossip-eligible by default
+//! (`docs/design/nsite/nsite-permissions.md`).
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -41,10 +43,18 @@ impl MeshGossiper {
     }
 }
 
-/// v1 gossip eligibility: everything except nsite manifests (which propagate via
-/// their own path). See `docs/design/nsite/nsite-permissions.md` (`gossip-kinds`).
+/// Whether `kind` is a napplet manifest that names an updatable address — the
+/// replaceable root (`15129`) or addressable named (`35129`) kind. A snapshot
+/// (`5129`) is an immutable build nothing installs by address, so it is not.
+fn is_napplet_manifest(kind: u16) -> bool {
+    kind == myco_napplet_runtime::KIND_ROOT || kind == myco_napplet_runtime::KIND_NAMED
+}
+
+/// v1 gossip eligibility: everything except nsite and napplet manifests (which
+/// propagate via their own path). See `docs/design/nsite/nsite-permissions.md`
+/// (`gossip-kinds`).
 fn is_gossip_eligible(kind: u16) -> bool {
-    kind != nsite_deck::KIND_ROOT && kind != nsite_deck::KIND_NAMED
+    kind != nsite_deck::KIND_ROOT && kind != nsite_deck::KIND_NAMED && !is_napplet_manifest(kind)
 }
 
 #[async_trait]
@@ -60,6 +70,13 @@ impl Gossiper for MeshGossiper {
         // the active-version gate. See docs/design/nsite/nsite-updates.md §4.
         if kind == nsite_deck::KIND_ROOT || kind == nsite_deck::KIND_NAMED {
             self.content.clone().on_manifest_event(event, inbound).await;
+            return;
+        }
+        // Napplet manifests take the same policy with the napplet's checks in
+        // front: signed by the installed author, newer than the pinned version,
+        // bytes verified before the pin moves. napplet-runtime.md §7.3.
+        if is_napplet_manifest(kind) {
+            self.content.on_napplet_manifest_event(event, inbound).await;
             return;
         }
         if !is_gossip_eligible(kind) {
@@ -169,6 +186,10 @@ mod tests {
     fn manifests_are_not_gossiped_chat_is() {
         assert!(!is_gossip_eligible(nsite_deck::KIND_ROOT));
         assert!(!is_gossip_eligible(nsite_deck::KIND_NAMED));
+        assert!(!is_gossip_eligible(myco_napplet_runtime::KIND_ROOT));
+        assert!(!is_gossip_eligible(myco_napplet_runtime::KIND_NAMED));
+        // A snapshot is an immutable build: nothing to update, plain gossip.
+        assert!(is_gossip_eligible(myco_napplet_runtime::KIND_SNAPSHOT));
         assert!(is_gossip_eligible(9)); // chat
         assert!(is_gossip_eligible(1)); // notes
     }

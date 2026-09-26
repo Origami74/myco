@@ -1704,12 +1704,19 @@ impl AppRuntime {
         // recorded, so offline-only has nowhere to ask: counted as checked,
         // none updated. The nsite half asks Circle peers' mesh relays only.
         let offline_only = content.is_offline_only();
+        let forwarder = content.clone();
         let napplet_check = async move {
             let host = host?;
             if offline_only {
                 return Some((0, napplets.len()));
             }
-            Some(crate::napplet::refresh_all(&host, &napplets).await)
+            let (updated, checked) = crate::napplet::refresh_all(&host, &napplets).await;
+            // We hold the new bytes now: pass each update on to the Circle, as
+            // an nsite update found here is.
+            for manifest in &updated {
+                forwarder.forward_updated_manifest(manifest);
+            }
+            Some((updated.len(), checked))
         };
         rt.spawn(content.check_updates_with(in_flight, napplet_check));
     }
