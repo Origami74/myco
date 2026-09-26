@@ -858,6 +858,14 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
         NativeCore.nappletSetAppearance(requireHandle(), sessionId, dark)
     }
 
+    /**
+     * The version (aggregate) now served for this window's napplet when an
+     * update moved it past the one the window opened, or null while the window
+     * is current. **Blocks** on a relay read — background thread only.
+     */
+    fun nappletNewerVersion(sessionId: String): String? =
+        NativeCore.nappletNewerVersion(requireHandle(), sessionId).ifEmpty { null }
+
     /** Drop a window's session. Rust ignores every later frame for it. */
     fun nappletClose(sessionId: String) {
         NativeCore.nappletClose(requireHandle(), sessionId)

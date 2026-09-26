@@ -489,6 +489,32 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletSetAppearance(
     }
 }
 
+/// The aggregate of the version now served for a window's napplet when it is
+/// newer than the one the window opened, else `""` — also for a session that
+/// is not open. Asked when the window returns to the foreground, to offer a
+/// restart. A relay read: call it off the main thread.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletNewerVersion(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_id: JString,
+) -> jstring {
+    let session_id = get_string(&mut env, &session_id);
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.napplet_context()
+        }
+        None => None,
+    };
+    let newer = match ctx {
+        Some((host, rt_handle)) => rt_handle.block_on(host.newer_version(&session_id)),
+        None => None,
+    };
+    jstr(&mut env, newer.unwrap_or_default())
+}
+
 /// Drop a window's session. Every later frame for it is ignored.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(

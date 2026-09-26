@@ -193,6 +193,16 @@ struct LiveNapplet {
     /// The draining end. Behind a lock because one window has one drainer, and
     /// two would split its frames between them.
     drain: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ToShell>>>,
+    /// The version this window opened. See [`NappletHost::newer_version`].
+    opened: OpenedVersion,
+}
+
+/// Which version of which napplet a window's session pinned at open — kept to
+/// tell, later, whether the served version has moved on without it.
+struct OpenedVersion {
+    addr: NappletAddr,
+    created_at: nostr::Timestamp,
+    aggregate: String,
 }
 
 /// What the Activity needs to put a napplet on screen.
@@ -544,6 +554,11 @@ impl NappletHost {
                 artifact,
                 outbox,
                 drain: Arc::new(tokio::sync::Mutex::new(drain)),
+                opened: OpenedVersion {
+                    addr: addr.clone(),
+                    created_at: event.created_at,
+                    aggregate: resolved.aggregate.clone(),
+                },
             },
         );
 
@@ -784,6 +799,44 @@ impl NappletHost {
             }
         }
         out
+    }
+
+    /// The aggregate of the version now served for this window's napplet, when
+    /// it is newer than the one the window opened — or `None` while the window
+    /// is current, and for a session that is not open.
+    ///
+    /// A window keeps the version it opened for its whole life (design doc
+    /// §7.2); an update check or a Circle push moves the pin under it. The
+    /// Activity asks this when the window comes back to the foreground, to
+    /// offer a restart onto the new version. The served version is the pinned
+    /// one, and a pin moves only once its bytes are here — so a restart this
+    /// answers "yes" for opens the new version, offline or not.
+    ///
+    /// Newer means a later-or-equal `created_at` **and** a different
+    /// aggregate: a re-signed manifest over the same bytes is not an update
+    /// worth restarting for, and a pin never moves back, so an older served
+    /// version is not expected — and would not be offered if it were.
+    pub async fn newer_version(&self, session_id: &str) -> Option<String> {
+        let (addr, created_at, aggregate) = {
+            let sessions = self.sessions.lock().unwrap();
+            let opened = &sessions.get(session_id)?.opened;
+            (
+                opened.addr.clone(),
+                opened.created_at,
+                opened.aggregate.clone(),
+            )
+        };
+        let served = self
+            .manifests
+            .current(addr.kind(), &addr.author, addr.d_tag.as_deref())
+            .await
+            .ok()
+            .flatten()?;
+        if served.created_at < created_at {
+            return None;
+        }
+        let served = myco_napplet_runtime::manifest::NappletManifest::from_event(served).ok()?;
+        (served.aggregate != aggregate).then_some(served.aggregate)
     }
 
     /// Drop a window's session. Every later frame for it is ignored.
@@ -2474,6 +2527,63 @@ mod tests {
                 .map(|e| e.id),
             Some(v2.manifest.id)
         );
+    }
+
+    /// A window open on v1 is told once the served version has moved to v2 —
+    /// by a Circle push here, the update check the same way — and a window
+    /// opened after that is current. A session that is gone has nothing to say.
+    #[tokio::test]
+    async fn an_open_window_learns_the_served_version_moved_on() {
+        let phone = phone("stale");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "Version one", &["relay"]);
+        let v2 = version(&keys, 2_000, "Version two", &["relay"]);
+        install(&phone, &v1, &["relay"]).await;
+        let old = phone.host.open(&addr_of(&v1), None).await.unwrap();
+        assert_eq!(
+            phone.host.newer_version(&old.session_id).await,
+            None,
+            "a window on the served version is current"
+        );
+
+        let (outcome, _) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
+        assert_eq!(outcome, crate::content::NappletPush::Updated);
+        let v2_aggregate =
+            myco_napplet_runtime::manifest::NappletManifest::from_event(v2.manifest.clone())
+                .unwrap()
+                .aggregate;
+        assert_eq!(
+            phone.host.newer_version(&old.session_id).await,
+            Some(v2_aggregate)
+        );
+
+        let fresh = phone.host.open(&addr_of(&v2), None).await.unwrap();
+        assert_eq!(phone.host.newer_version(&fresh.session_id).await, None);
+
+        phone.host.close(&old.session_id);
+        assert_eq!(phone.host.newer_version(&old.session_id).await, None);
+        assert_eq!(phone.host.newer_version("napplet-999").await, None);
+    }
+
+    /// A newer manifest with no bytes behind it is not served, so an open
+    /// window is not asked to restart onto it — the restart would open the
+    /// same version again.
+    #[tokio::test]
+    async fn a_manifest_without_its_bytes_does_not_make_a_window_stale() {
+        let phone = phone("stale-noblob");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "Version one", &["relay"]);
+        let v2 = version(&keys, 2_000, "Version two", &["relay"]);
+        install(&phone, &v1, &["relay"]).await;
+        let window = phone.host.open(&addr_of(&v1), None).await.unwrap();
+
+        phone
+            .content
+            .relay()
+            .publish(v2.manifest.clone())
+            .await
+            .unwrap();
+        assert_eq!(phone.host.newer_version(&window.session_id).await, None);
     }
 
     /// A source that answers every manifest query with the same event,

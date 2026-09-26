@@ -80,6 +80,13 @@ internal object NativeCore {
      */
     external fun nappletSetAppearance(handle: Long, sessionId: String, dark: Boolean)
 
+    /**
+     * The aggregate of the version now served for this window's napplet when it
+     * is newer than the one the window opened, else "". Reads the relay —
+     * background thread only.
+     */
+    external fun nappletNewerVersion(handle: Long, sessionId: String): String
+
     /** Drop a window's session. */
     external fun nappletClose(handle: Long, sessionId: String)
 

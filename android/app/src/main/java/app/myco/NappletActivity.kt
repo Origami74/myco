@@ -96,6 +96,12 @@ import java.io.ByteArrayInputStream
  * Myco's install review drawn **over** this window, so the user keeps their
  * place). Nothing here installs: the review sheet's "Add" is the user's
  * answer, exactly as on the Apps screen.
+ *
+ * ## Updates while open
+ *
+ * The window runs the version it opened for as long as it lives. When it comes
+ * back to the foreground after an update moved the served version on, it
+ * offers a restart — once per version, see [RestartPrompt].
  */
 class NappletActivity : ComponentActivity() {
     private lateinit var client: AppCoreClient
@@ -181,6 +187,65 @@ class NappletActivity : ComponentActivity() {
 
     /** When the user last lifted a finger off this window. See [openLink]. */
     private var lastTouchAt = 0L
+
+    /**
+     * The newer version this window is offering to restart onto, while the
+     * offer is on screen. See [offerRestartIfUpdated].
+     */
+    private var updatedTo by mutableStateOf<String?>(null)
+
+    /** The name the restart offer calls this napplet by. */
+    private var appTitle: String = ""
+
+    /** Whether the window has left the foreground since it was last shown. */
+    private var wasStopped = false
+
+    private val restartPrompt by lazy { RestartPrompt.persisted(applicationContext) }
+
+    override fun onStop() {
+        super.onStop()
+        wasStopped = true
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (wasStopped) {
+            wasStopped = false
+            offerRestartIfUpdated()
+        }
+    }
+
+    /**
+     * Back in the foreground — re-opened from Apps, from Recents, or by a
+     * link — after an update moved this napplet past the version the window
+     * opened: offer a restart, once per version. The window kept its session
+     * on purpose (napplet-runtime.md §7.2); this is how the user reaches the
+     * new one without hunting for the task in Recents.
+     *
+     * Never on a fresh open — that one is current by construction — and never
+     * over the review sheet or a link confirmation: the next return asks
+     * again, because nothing was shown.
+     *
+     * "I'll restart later" holds only until the next configuration change the
+     * manifest does not absorb (a rotation): that already recreates the window,
+     * which opens the version now served.
+     */
+    private fun offerRestartIfUpdated() {
+        val id = synchronized(sessionLock) { sessionId }
+        val napplet = shellHost
+        // Both are set by the opener; until then (the splash) there is no
+        // session to ask about, and no key to record an answer under.
+        if (id.isEmpty() || napplet.isEmpty() || updatedTo != null) return
+        lifecycleScope.launch {
+            val newer = withContext(Dispatchers.IO) {
+                val newer = runCatching { client.nappletNewerVersion(id) }.getOrNull()
+                newer.takeIf { restartPrompt.shouldAsk(napplet, it) }
+            } ?: return@launch
+            if (review != null || pendingExternal != null || updatedTo != null) return@launch
+            restartPrompt.markAsked(napplet, newer)
+            updatedTo = newer
+        }
+    }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
         if (ev.actionMasked == MotionEvent.ACTION_UP) lastTouchAt = SystemClock.uptimeMillis()
@@ -278,6 +343,24 @@ class NappletActivity : ComponentActivity() {
                             reviewWatch?.cancel()
                             review = null
                             act(NativeActions.dismissNappletReview())
+                        },
+                    )
+                }
+                if (review == null && pendingExternal == null && updatedTo != null) {
+                    AlertDialog(
+                        onDismissRequest = { updatedTo = null },
+                        title = { Text("$appTitle was updated") },
+                        text = { Text("Restart it to use the new version.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                updatedTo = null
+                                // The grant-change relaunch: a new session,
+                                // which opens the version now served.
+                                recreate()
+                            }) { Text("Restart") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { updatedTo = null }) { Text("I'll restart later") }
                         },
                     )
                 }
@@ -382,6 +465,9 @@ class NappletActivity : ComponentActivity() {
                 return@launch
             }
             shellHost = opened.shellHost
+            appTitle = intent.getStringExtra(EXTRA_TITLE).orEmpty()
+                .ifEmpty { opened.title.orEmpty() }
+                .ifEmpty { "This app" }
             mountShell()
         }
     }
@@ -572,10 +658,11 @@ class NappletActivity : ComponentActivity() {
      */
     private fun onBack() {
         if (isFinishing) return
-        // The review sheet and the link dialog are windows of their own and
-        // take back before it reaches this callback; should one ever not, the
-        // napplet underneath must not hear an Escape meant for them.
-        if (review != null || pendingExternal != null) return
+        // The review sheet, the link dialog and the restart offer are windows
+        // of their own and take back before it reaches this callback; should
+        // one ever not, the napplet underneath must not hear an Escape meant
+        // for them.
+        if (review != null || pendingExternal != null || updatedTo != null) return
         val view = webView
         // Detached by a renderer crash: nobody is there to answer.
         if (view.parent == null) {

@@ -667,7 +667,20 @@ reports `ready` or `missing` from the same pin. The same check also runs on its 
 foreground and every 6 h, through the throttle in `nsite-updates.md` §3.1; under
 offline-only the napplet half is skipped (counted as checked, none updated). An open
 window keeps its session — it
-pinned the aggregate at open — and sees the new version at its next launch. Storage
+pinned the aggregate at open — and sees the new version at its next launch. The task
+outlives a trip to the background, so re-opening the napplet from Apps or Recents
+brings back that same window, still on the old version. So when the window returns to
+the foreground, `NappletActivity` asks the core whether the served version has moved
+past the one its session opened (`NappletHost::newer_version`: a later-or-equal
+`created_at` with a different aggregate; the pinned version, so its bytes are here).
+If it has, a dialog offers "Restart" — the same relaunch a grant change uses, a new
+session on the new version — or "I'll restart later". It is offered once per napplet
+and version: shown, the version is recorded in the app's preferences
+(`napplet_restart_prompts`, keyed by shell host) and not offered again, even after the
+process dies; a later update asks again. Never on a fresh open, and never over the
+install-review sheet or a link confirmation. "Later" lasts only until the next
+configuration change the manifest does not absorb (a rotation, but not a `uiMode`
+switch): that recreates the window, which opens the version now served. Storage
 across versions is still open: napplets have no storage capability yet.
 
 ### 7.3 Mesh replication of the new kinds
