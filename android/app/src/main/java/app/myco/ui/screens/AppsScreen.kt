@@ -10,13 +10,14 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -24,6 +25,7 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -35,6 +37,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,6 +54,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -65,23 +69,24 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import app.myco.NsiteIcons
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
-import app.myco.core.NativeActions
 import app.myco.core.LibraryItem
 import app.myco.core.LibraryKind
 import app.myco.core.NappletReview
+import app.myco.core.NativeActions
 import app.myco.core.SiteStatus
 import app.myco.nfc.NfcReader
 import app.myco.nfc.PairPresent
 import app.myco.share.NsiteShare
 import app.myco.ui.ScreenHeader
-
 import app.myco.ui.theme.tileColorFor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -134,12 +139,24 @@ fun AppsScreen(
         query.isBlank() || it.title.contains(query, true) || it.searchKey.contains(query, true)
     }.sortedBy { it.title.ifEmpty { it.searchKey }.lowercase() }
 
+    // Launcher-style: icons have a set size per screen class — stock phone
+    // size, a step up on tablets — and the column count follows the width:
+    // five across a phone, more on a tablet, instead of four tiles stretched
+    // to fill whatever screen they are on. The page spans the full width like
+    // every other tab.
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val iconSize = appIconSizeFor(maxWidth)
+    val columns = ((maxWidth - APPS_SIDE_PADDING * 2) / (iconSize + APP_CELL_GUTTER)).toInt().coerceIn(4, 8)
+    CompositionLocalProvider(LocalAppIconSize provides iconSize) {
     LazyVerticalGrid(
-        columns = GridCells.Fixed(4),
+        columns = GridCells.Fixed(columns),
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+            horizontal = APPS_SIDE_PADDING,
+            vertical = 20.dp,
+        ),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
             Column {
@@ -185,6 +202,8 @@ fun AppsScreen(
                 )
             }
         }
+    }
+    }
     }
 
     sheetFor?.let { site ->
@@ -406,75 +425,85 @@ private fun NsiteTile(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(18.dp))
-                .background(if (icon == null) tileColorFor(site.host) else MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center,
-        ) {
-            val bmp = icon
-            if (bmp != null) {
-                Image(bmp.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize().alpha(iconAlpha))
-            } else {
-                Text(
-                    initialOf(site),
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier.alpha(iconAlpha),
-                )
-            }
-            if (syncing) {
-                // Scrim for ring contrast on bright favicons, then the progress ring.
-                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.22f)))
-                if (total > 0) {
-                    CircularProgressIndicator(
-                        progress = { fraction },
-                        modifier = Modifier.fillMaxSize().padding(12.dp),
-                        strokeWidth = 4.dp,
-                        color = Color.White,
-                        trackColor = Color.White.copy(alpha = 0.30f),
+        val bmp = icon
+        LauncherIcon(
+            // A favicon sits on a white disc, as a legacy icon does in the
+            // stock launcher (not a theme surface: AMOLED's is pure black);
+            // without one, the letter on its own colour.
+            background = if (bmp == null) tileColorFor(site.host) else Color.White,
+            outlined = bmp != null,
+            content = {
+                if (bmp != null) {
+                    Image(
+                        bmp.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().padding(9.dp).alpha(iconAlpha),
                     )
                 } else {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(26.dp),
-                        strokeWidth = 3.dp,
+                    Text(
+                        initialOf(site),
                         color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 20.sp,
+                        modifier = Modifier.alpha(iconAlpha),
                     )
                 }
-            } else if (stalled) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(6.dp)
-                        .size(11.dp)
-                        .background(MaterialTheme.colorScheme.error, RoundedCornerShape(50)),
-                )
-            }
-            // An update is downloading in the background (the app keeps working
-            // on its current version meanwhile).
-            if (site.updateTotal > 0L && site.updatePulled < site.updateTotal) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(6.dp)
-                        .size(11.dp)
-                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(50)),
-                )
-            }
-        }
+                if (syncing) {
+                    // Scrim for ring contrast on bright favicons.
+                    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.22f)))
+                }
+            },
+            overlay = {
+                if (syncing) {
+                    if (total > 0) {
+                        CircularProgressIndicator(
+                            progress = { fraction },
+                            modifier = Modifier.fillMaxSize().padding(3.dp),
+                            strokeWidth = 3.dp,
+                            color = Color.White,
+                            trackColor = Color.White.copy(alpha = 0.30f),
+                        )
+                    } else {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            strokeWidth = 2.5.dp,
+                            color = Color.White,
+                        )
+                    }
+                } else if (stalled) {
+                    StatusDot(MaterialTheme.colorScheme.error, Modifier.align(Alignment.TopEnd))
+                }
+                // An update is downloading in the background (the app keeps
+                // working on its current version meanwhile).
+                if (site.updateTotal > 0L && site.updatePulled < site.updateTotal) {
+                    StatusDot(MaterialTheme.colorScheme.primary, Modifier.align(Alignment.TopStart))
+                }
+                // Napplets are the default kind of app; an nsite — a website
+                // Myco serves, not a program it hosts — carries the mark.
+                WebBadge(modifier = Modifier.align(Alignment.BottomEnd).offset(x = 2.dp, y = 2.dp))
+            },
+        )
         Spacer(Modifier.height(6.dp))
-        Text(
+        LauncherLabel(
             if (syncing && total > 0) "$pulled/$total" else site.title.ifEmpty { site.host.take(8) },
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.labelMedium,
             color = if (syncing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-            textAlign = TextAlign.Center,
         )
     }
+}
+
+/** A small status dot on an icon's rim, ringed in the page colour. */
+@Composable
+private fun StatusDot(color: Color, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(12.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(2.dp)
+            .clip(CircleShape)
+            .background(color),
+    )
 }
 
 /**
@@ -638,38 +667,22 @@ private fun NappletTile(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(18.dp))
-                // Dimmed like an nsite that is not downloaded: the app is in
-                // the Library but not on the phone — after a cache wipe, say.
-                .alpha(if (ready) 1f else 0.35f)
-                .background(tileColorFor(item.nappletPointer)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                item.title.take(1).uppercase().ifEmpty { "N" },
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                style = MaterialTheme.typography.titleLarge,
-            )
-            // The duck marks a napplet: a program Myco hosts, as against an
-            // nsite, which is a document Myco serves. On its own chip, so it
-            // reads against any tile colour rather than sinking into a green
-            // or yellow one.
-            NappletBadge(modifier = Modifier.align(Alignment.TopEnd).padding(4.dp))
-        }
-        Spacer(Modifier.height(6.dp))
-        Text(
-            item.title.ifEmpty { item.dTag ?: item.authorNpub.take(8) },
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            textAlign = TextAlign.Center,
+        LauncherIcon(
+            background = tileColorFor(item.nappletPointer),
+            // Dimmed like an nsite that is not downloaded: the app is in the
+            // Library but not on the phone — after a cache wipe, say.
+            alpha = if (ready) 1f else 0.35f,
+            content = {
+                Text(
+                    item.title.take(1).uppercase().ifEmpty { "N" },
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 20.sp,
+                )
+            },
         )
+        Spacer(Modifier.height(6.dp))
+        LauncherLabel(item.title.ifEmpty { item.dTag ?: item.authorNpub.take(8) })
         if (!ready) {
             Text(
                 status?.message.orEmpty().ifEmpty { "Not on this phone" },
@@ -683,18 +696,89 @@ private fun NappletTile(
     }
 }
 
-/** The napplet mark: a duck on a small light chip with a dark rim, legible on every tile colour. */
+/**
+ * Launcher icon diameter by screen width: the stock Pixel launcher's 52 dp on
+ * a phone, a step up on small and large tablets so icons don't look lost.
+ */
+private fun appIconSizeFor(width: androidx.compose.ui.unit.Dp): androidx.compose.ui.unit.Dp = when {
+    width >= 840.dp -> 68.dp
+    width >= 600.dp -> 60.dp
+    else -> 52.dp
+}
+
+/** A cell is the icon plus this much room — what makes a phone five columns wide. */
+private val APP_CELL_GUTTER = 12.dp
+
+private val APPS_SIDE_PADDING = 16.dp
+
+/** The icon size of the grid being drawn (set per screen width). */
+private val LocalAppIconSize = androidx.compose.runtime.staticCompositionLocalOf { 52.dp }
+
+/**
+ * A round launcher icon of the one fixed size. The content fills the circle;
+ * `overlay` draws on top of it (progress, badges).
+ */
 @Composable
-internal fun NappletBadge(modifier: Modifier = Modifier) {
+private fun LauncherIcon(
+    background: Color,
+    modifier: Modifier = Modifier,
+    alpha: Float = 1f,
+    outlined: Boolean = false,
+    content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit,
+    overlay: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit = {},
+) {
+    Box(modifier.size(LocalAppIconSize.current), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(CircleShape)
+                .alpha(alpha)
+                .background(background)
+                // A white disc on a white page needs an edge to be a disc.
+                .then(if (outlined) Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape) else Modifier),
+            contentAlignment = Alignment.Center,
+            content = content,
+        )
+        overlay()
+    }
+}
+
+/** A one-line launcher label, stock size. */
+@Composable
+private fun LauncherLabel(text: String, color: Color = MaterialTheme.colorScheme.onSurface) {
+    Text(
+        text,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+        color = color,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp),
+    )
+}
+
+/**
+ * The website mark: a small globe on a round chip at the icon's lower edge,
+ * telling an nsite (a site Myco serves) from a napplet (the default kind of
+ * app) at a glance without competing with the icon. The chip takes the page
+ * colour so it reads as a cut-out on any tile.
+ */
+@Composable
+internal fun WebBadge(modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
-            .size(22.dp)
-            .clip(RoundedCornerShape(7.dp))
-            .background(Color.White.copy(alpha = 0.92f))
-            .border(1.dp, Color.Black.copy(alpha = 0.35f), RoundedCornerShape(7.dp)),
+            .size(18.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surface),
         contentAlignment = Alignment.Center,
     ) {
-        Text("\uD83E\uDD86", style = MaterialTheme.typography.labelMedium)
+        Icon(
+            Icons.Outlined.Language,
+            contentDescription = "Website",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(12.dp),
+        )
     }
 }
 
@@ -947,18 +1031,15 @@ private fun CapabilityRow(domain: String, dimmed: Boolean = false, modifier: Mod
 @Composable
 private fun AddTile(onClick: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.combinedClickableSafe(onClick)) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(18.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(Icons.Filled.Add, contentDescription = "Add app", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
-        }
+        LauncherIcon(
+            // A faint disc from the text colour, so it shows in every theme.
+            background = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
+            content = {
+                Icon(Icons.Filled.Add, contentDescription = "Add app", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(24.dp))
+            },
+        )
         Spacer(Modifier.height(6.dp))
-        Text("Add", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+        LauncherLabel("Add", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

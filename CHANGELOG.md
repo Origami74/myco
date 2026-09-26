@@ -98,6 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Apps screen looks like a stock Android launcher.** Round icons, five
+  across on a phone and more on a tablet, a step larger on tablets, instead of
+  four tiles stretched to fit. Napplets are the default and carry no mark; an nsite — a website Myco serves — has a
+  small globe on the icon's edge.
 - **The install review knows an app is already installed.** Opening a
   napplet you already have — from a link, a scan, or another app — greys
   out Add and says "Already installed". An installed app that is not on
