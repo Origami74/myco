@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Discover comes preinstalled.** An app store for napplets, itself a
+  napplet: a feed of napplets from your relays, community recommendations
+  from people you follow, and store-style app pages whose Install opens
+  Myco's install review. Pinned like DingDong, with only the default grants.
+  Its "Around you" tab (napplets nearby devices hold) needs `mesh`, which the
+  published manifest does not declare yet, so it stays empty until it does.
+  The native Discover tab stays for now. Phones that were already set up get
+  it on upgrade too: the seed now remembers each default it pinned, so a new
+  default still arrives and one you removed stays gone.
 - **Napplets can open links and match your theme.** NAP-LINK: a napplet can
   ask to open a web link (your browser, after a one-tap confirm unless you just
   touched the app) or point you at another napplet — Myco's install review
