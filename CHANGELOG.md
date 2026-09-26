@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two relays have taken it — or the only relay, for someone with one — and
   the rest finish in the background. A publish to other people's inboxes
   still waits for every relay, so a failed delivery is always reported.
+- **A removed app came back.** Removing an app nobody could deliver (stuck on
+  loading) had no lasting effect: its open window's loading page reloads every
+  second and each reload started a new search, re-creating the tile. Remove now
+  closes that window, drops any pending deep link to it, and keeps it gone —
+  an in-flight sync can't re-list or re-pin it — until you add it again. The
+  loading page also searches at most every 15 s rather than every second.
+  Opening the app again — from Add, Discover, a link or a home-screen
+  shortcut — brings it back.
 
 ## [0.7.0] - 2026-09-16
 

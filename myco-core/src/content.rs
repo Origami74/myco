@@ -462,6 +462,10 @@ impl crate::mesh_relay::PeerGate for CircleGate {
     }
 }
 
+/// How often an open window's loading page may start a new search for a
+/// site that is not here yet. The page itself reloads every second.
+const LOADING_RETRY_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// The content layer. Cheap to `Arc`-clone; the gateway path clones one out of the
 /// `AppRuntime` mutex and serves without holding it.
 pub struct Content {
@@ -511,6 +515,15 @@ pub struct Content {
     discovered: Mutex<Vec<DiscoveredNsite>>,
     /// host_label -> current sync status (drives the FFI `siteStatus`).
     sites: Mutex<HashMap<String, SiteStatusView>>,
+    /// Sites the user removed, by host label. Nothing brings one back but
+    /// the user asking for it again ([`Content::unforget_site`]): not an
+    /// open window's loading page reloading, not a sync already in flight
+    /// when the tile was removed.
+    forgotten: Mutex<std::collections::HashSet<String>>,
+    /// When the loading page last started a sync per host, so a site nobody
+    /// has is asked about every [`LOADING_RETRY_EVERY`] rather than on every
+    /// one-second reload.
+    loading_retries: Mutex<HashMap<String, std::time::Instant>>,
     /// The device's Nostr keypair (the pairing identity), used to sign pair
     /// request/accept events. Set once at startup from the persisted nsec.
     /// The device keypair. Behind an `Arc` because a remote blob store needs it
@@ -753,6 +766,8 @@ impl Content {
             connected_peers: Mutex::new(Vec::new()),
             discovered: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
+            forgotten: Mutex::new(std::collections::HashSet::new()),
+            loading_retries: Mutex::new(HashMap::new()),
             device_keys: device_keys.clone(),
             device_name_override: Mutex::new(None),
             pending_pairs: Mutex::new(Vec::new()),
@@ -963,7 +978,22 @@ impl Content {
                 let host_label = addr.host_label();
                 let status = self.sites.lock().unwrap().get(&host_label).cloned();
                 let syncing = status.as_ref().map(|s| s.state.as_str()) == Some("syncing");
-                if !syncing {
+                // The page reloads every second; a site nobody has would
+                // otherwise be searched for every second, forever.
+                let start = !syncing && !self.is_forgotten(&addr) && {
+                    // Stamped only when a search actually starts, so a sync
+                    // that just ended is retried a full interval after it
+                    // began, not after the last reload that found it running.
+                    let mut last = self.loading_retries.lock().unwrap();
+                    let due = last
+                        .get(&host_label)
+                        .is_none_or(|t| t.elapsed() >= LOADING_RETRY_EVERY);
+                    if due {
+                        last.insert(host_label.clone(), std::time::Instant::now());
+                    }
+                    due
+                };
+                if start {
                     // A WebView load doesn't know the holder; the IP fallback (and
                     // any earlier mesh attempt's cached result) covers the retry.
                     tokio::spawn(Arc::clone(&self).open_site(addr, None));
@@ -1200,6 +1230,11 @@ impl Content {
     // --- library ---
 
     pub fn add_to_library(&self, addr: &SiteAddr, title: Option<&str>, added_at: u64) {
+        // A sync that finishes after the user removed the site does not pin
+        // it back.
+        if self.is_forgotten(addr) {
+            return;
+        }
         let mut lib = self.library.lock().unwrap();
         let npub = addr.author.to_bech32().unwrap_or_default();
         if let Some(item) = lib.iter_mut().find(|i| {
@@ -1377,8 +1412,18 @@ impl Content {
     /// next launch. Cached blobs/events are left for the global eviction pass (P5);
     /// this is the per-app "remove" the user reaches via the app's long-press sheet.
     pub fn forget_site(&self, addr: &SiteAddr) {
+        {
+            // Under the `sites` lock, so an in-flight status update either
+            // lands before this (and is removed here) or sees the removal.
+            let mut sites = self.sites.lock().unwrap();
+            self.forgotten.lock().unwrap().insert(addr.host_label());
+            sites.remove(&addr.host_label());
+        }
+        self.loading_retries
+            .lock()
+            .unwrap()
+            .remove(&addr.host_label());
         self.remove_from_library(addr);
-        self.sites.lock().unwrap().remove(&addr.host_label());
         // Drop the active-version pin too (next open re-evaluates from the relay).
         let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
         let key = manifest_key(kind, &addr.author, addr.d_tag.as_deref());
@@ -1388,6 +1433,16 @@ impl Content {
             m.values().cloned().collect::<Vec<_>>()
         };
         save_active(&self.active_path, &snapshot);
+    }
+
+    /// The user asked for a removed site again (pasted, scanned, opened from
+    /// Discover): it may come back.
+    pub fn unforget_site(&self, addr: &SiteAddr) {
+        self.forgotten.lock().unwrap().remove(&addr.host_label());
+    }
+
+    fn is_forgotten(&self, addr: &SiteAddr) -> bool {
+        self.forgotten.lock().unwrap().contains(&addr.host_label())
     }
 
     /// Rebuild the per-site `siteStatus` from the persisted Library by checking
@@ -3932,6 +3987,12 @@ impl Content {
     ) {
         let host = addr.host_label();
         let mut sites = self.sites.lock().unwrap();
+        // Removed: no tile, whatever an in-flight sync has to report. Checked
+        // under the `sites` lock, which `forget_site` also takes, so a removal
+        // cannot land between the check and the insert.
+        if self.is_forgotten(addr) {
+            return;
+        }
         let entry = sites.entry(host.clone()).or_insert_with(|| SiteStatusView {
             host: host.clone(),
             author_npub: addr.author.to_bech32().unwrap_or_default(),
@@ -4274,6 +4335,45 @@ mod tests {
     use super::*;
     use nostr::nips::nip19::ToBech32;
     use nsite_deck::testing::build_test_site;
+
+    /// Removing a site that nobody has — stuck on "can't reach anyone" —
+    /// makes its tile go away and keeps it away: a sync still in flight, or
+    /// an open window reloading its loading page, must not bring it back.
+    /// Asking for it again does.
+    #[tokio::test]
+    async fn a_removed_site_stays_removed_until_asked_for_again() {
+        let dir = std::env::temp_dir().join(format!(
+            "myco-forget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let npub = nostr::ToBech32::to_bech32(&nostr::Keys::generate().public_key()).unwrap();
+        let addr = nsite_deck::parse_link(&npub).unwrap();
+
+        content.clone().open_site(addr.clone(), None).await;
+        let listed = |c: &Content| c.sites.lock().unwrap().contains_key(&addr.host_label());
+        assert!(listed(&content), "an unreachable site has no tile");
+
+        content.forget_site(&addr);
+        assert!(!listed(&content));
+        // What an in-flight sync or a reloading window would do.
+        content.clone().open_site(addr.clone(), None).await;
+        content.add_to_library(&addr, None, now_secs());
+        assert!(!listed(&content), "the removed tile came back");
+        assert!(
+            content.library_snapshot().is_empty(),
+            "the removed site was pinned again"
+        );
+
+        content.unforget_site(&addr);
+        content.clone().open_site(addr.clone(), None).await;
+        assert!(listed(&content), "asking again did not bring it back");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A `circle.json` written before per-peer permissions existed must load with
     /// the defaults — and crucially with `blossom.write` **off**. A missing field
