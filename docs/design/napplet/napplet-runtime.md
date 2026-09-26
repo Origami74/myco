@@ -789,7 +789,8 @@ Per D7, freeze against a specific `napplet/naps` revision and record it here on 
   pinned as copies in `reference/naps/drafts/`: NAP-RELAY (#2), NAP-OUTBOX
   (#32), NAP-RESOURCE (#13). NAP-MESH is Myco's own, in this tree.
 - `@napplet/shim` — `0.29.2`, vendored verbatim (`assets/vendor/README.md`), with
-  Myco's supplement (`assets/myco-prelude.js`) for `shell` and `mesh`.
+  Myco's supplement (`assets/myco-prelude.js`) for `shell` and `mesh`, and one
+  override: `outbox.publish` (see below).
 - NIP-5D — `nostr-protocol/nips` PR #2303 (living), read 2026-08-19 at blob `2e8fcc4657`.
 - NIP-5A — `nostr-protocol/nips` master.
 - Kehto, the reference web runtime (`reference/kheto-web`), pins
@@ -800,6 +801,31 @@ One correction worth carrying upstream: the NAP registry README describes a napp
 "a NIP-5A manifest (a Nostr event, kind 35128)". That names the parent specification and
 the parent's kind; napplet manifests are `5129` / `15129` / `35129` under NIP-5D, as every
 implementation and the build tooling agree.
+
+### The publish-timeout override
+
+The vendored `outbox.publish` rejects with "outbox.publish timed out" after 30 s. A
+publish is signed before it is answered, and with a signer app (NIP-55, Amber) signing is
+a person reading an approval screen — often longer than 30 s. The napplet then saw a
+failure while the user was still approving, and the event could go out anyway.
+
+The supplement replaces `window.napplet.outbox.publish` with a copy that posts the same
+`outbox.publish` envelope and resolves the same object (`ok`, `event`, `eventId`,
+`relays`, `error`), but waits **5 minutes** (`SIGNING_TIMEOUT_MS`, mirrored as
+`myco_napplet_runtime::SIGNING_TIMEOUT`). `mesh.publish` gets the same wait. The vendored
+router ignores our results: it resolves only ids in its own pending map. `relay.publish`
+and `relay.publishEncrypted` need nothing — the vendored ones set no timer.
+
+The 5 minutes is a backstop, not the bound. The host bounds signing itself: the signer
+app gets 120 s (`external_signer::ANSWER_TIMEOUT`), then the relay write a few seconds, and
+the napplet gets an answer either way — the event, or `ok: false` and why. The backstop
+sits well clear of that so it never fires first; a test in `external_signer.rs` holds the
+order. The vendored file stays untouched, so re-vendoring keeps the override working as
+long as the wire does. The `prelude.rs` tests check the source text, not behaviour (no JS
+engine in the test tree): they fail if the vendored `outbox.publish` no longer uses the
+30 s constant, which is the cue to re-check the envelope and whether the override is
+still needed. Like the vendored send, the override retries a message the structured clone
+refuses (a template held in a reactive Proxy) as a JSON snapshot.
 
 ---
 

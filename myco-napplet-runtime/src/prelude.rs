@@ -19,6 +19,13 @@
 //! vendored installer filters out because it is not in the upstream registry.
 //! The supplement takes the same domain list, so the two cannot disagree.
 //!
+//! The supplement also replaces one vendored function, `outbox.publish`, with
+//! a copy that posts the same envelope and resolves the same result object but
+//! waits [`SIGNING_TIMEOUT`] instead of the vendored 30 s — a publish is signed
+//! first, and with a signer app that is a person approving it. `mesh.publish`
+//! gets the same wait. (`relay.publish` needs nothing: the vendored one has no
+//! timer.)
+//!
 //! ## Every API is injected, always
 //!
 //! [`render`] installs everything this build implements, regardless of what the
@@ -49,6 +56,14 @@ const SUPPLEMENT_IIFE: &str = include_str!("../assets/myco-prelude.js");
 
 /// The global the supplement defines.
 pub const SUPPLEMENT_GLOBAL: &str = "MycoPrelude";
+
+/// How long the prelude's publishes (`outbox.publish`, `mesh.publish`) wait
+/// for their result before rejecting with "timed out" — the supplement's
+/// `SIGNING_TIMEOUT_MS`, mirrored here so the host's own signing bound can be
+/// checked against it. It is a backstop for a runtime that never answers:
+/// whatever signs a napplet's events must give up (and answer `ok: false`)
+/// well before it.
+pub const SIGNING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Render the prelude for a set of domains: the vendored installer, the call
 /// that activates it, and the readiness signal.
@@ -164,6 +179,53 @@ mod tests {
                 "the supplement never routes {push}"
             );
         }
+    }
+
+    /// The supplement's timer is the constant the host checks its signing
+    /// bound against — they cannot drift apart.
+    #[test]
+    fn the_supplement_signing_timeout_matches_the_constant() {
+        let js = format!("var SIGNING_TIMEOUT_MS = {};", SIGNING_TIMEOUT.as_millis());
+        assert!(SUPPLEMENT_IIFE.contains(&js), "expected `{js}`");
+    }
+
+    /// A publish waits on signing, which with a signer app is a person
+    /// approving it: the vendored `outbox.publish` gives up after 30 s, so the
+    /// supplement replaces it, and `mesh.publish` gets the same wait.
+    #[test]
+    fn publishes_wait_the_signing_timeout() {
+        assert!(SUPPLEMENT_IIFE.contains(r#"domains.has("outbox") && napplet.outbox"#));
+        assert!(SUPPLEMENT_IIFE.contains("napplet.outbox.publish = function publish("));
+        assert!(SUPPLEMENT_IIFE.contains(r#"type: "outbox.publish""#));
+        assert!(SUPPLEMENT_IIFE.contains(r#"msg.type !== "outbox.publish.result""#));
+        // The same result fields the vendored resolver copies.
+        for field in ["ok", "event", "eventId", "relays", "error"] {
+            assert!(
+                SUPPLEMENT_IIFE.contains(&format!("result.{field} = msg.{field}"))
+                    || SUPPLEMENT_IIFE.contains(&format!("{{ {field}: msg.{field} }}")),
+                "the outbox result drops `{field}`"
+            );
+        }
+        assert!(SUPPLEMENT_IIFE.contains("}, SIGNING_TIMEOUT_MS);\n    }"));
+        // Sent like the vendored one: a message the structured clone refuses
+        // is retried as a snapshot, and a send that still fails settles the call.
+        assert!(SUPPLEMENT_IIFE.contains("postCloneable(message);"));
+        assert!(SUPPLEMENT_IIFE.contains(r#"e.name !== "DataCloneError""#));
+        // The override only matters because the vendored one is short and is
+        // installed first; if upstream changes either, revisit it.
+        assert!(PRELUDE_IIFE.contains("outbox.publish timed out"));
+        let vendored = PRELUDE_IIFE
+            .find("function publish(template, options)")
+            .unwrap();
+        let body = &PRELUDE_IIFE[vendored..vendored + 400];
+        assert!(
+            body.contains("REQUEST_TIMEOUT_MS9"),
+            "vendored outbox.publish changed"
+        );
+        assert!(
+            body.contains(r#"type: "outbox.publish""#),
+            "vendored outbox.publish envelope changed"
+        );
     }
 
     /// NAP-LINK and NAP-THEME need nothing from the supplement: the vendored

@@ -22,6 +22,13 @@ use tokio::sync::{mpsc, oneshot};
 
 /// How long a request may wait for its answer. Long: the user may be
 /// reading an approval screen in the signer app.
+///
+/// Kept well under the napplet prelude's publish wait
+/// ([`myco_napplet_runtime::SIGNING_TIMEOUT`], 5 min): this is the bound
+/// that answers the napplet — a clean `ok: false`, "the signer app did not
+/// answer" — and the prelude's timer is only the backstop behind it. The
+/// other way round, a napplet would see "timed out" while the user was
+/// still approving, and the event could then go out anyway.
 pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// One request for Kotlin to carry to the signer app.
@@ -264,6 +271,18 @@ mod tests {
         assert!(
             bridge.pending.lock().unwrap().is_empty(),
             "a timed-out request was kept"
+        );
+    }
+
+    /// The signer wait answers the napplet; the prelude's publish timer is
+    /// only a backstop behind it. With room for the relay write after
+    /// signing, the backstop must not fire first.
+    #[test]
+    fn the_signer_gives_up_before_the_napplet_prelude_does() {
+        let relay_write_budget = Duration::from_secs(60);
+        assert!(
+            ANSWER_TIMEOUT + relay_write_budget <= myco_napplet_runtime::SIGNING_TIMEOUT,
+            "a napplet would see its publish time out while the signer is still waiting"
         );
     }
 }
