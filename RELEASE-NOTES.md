@@ -1,182 +1,108 @@
-# Myco v0.7.0
+# Myco v0.8.0
 
-**Released**: 2026-09-16
+**Released**: 2026-09-26
 
-v0.7.0 is three releases in one. Myco turns from an nsite viewer into an app
-runtime: alongside nsites it runs **napplets** — single-file programs published
-on Nostr — each in its own sandbox, with the capabilities it uses granted by
-you. You can **send a file to a friend's phone** from any app, encrypted over
-the mesh, no hotspot and no internet. And **peers stay connected**: the mesh now
-holds every link it has to a phone and switches between them, which on real
-phones in a real room is the difference between a peer that flickers and one
-that stays.
+v0.8.0 is about **you** and **your apps**.
 
-**No wire-format change from v0.6.x.** A v0.7.0 phone and a v0.6.1 phone still
-exchange apps and messages and pair. The new multi-path link messages are
-ignored by an older phone, which keeps linking over a single path as before.
-Everything on the device upgrades in place; the event store is migrated on
-first open.
+- Every install now has an account from the first launch. You can log in with your own key or with a signer app like Amber.
+- Apps find their own updates and share them with your Circle.
+- The built-in Discover tab is replaced by an app store that is itself an app.
+- The Apps screen now looks like the rest of Android.
+
+**No wire-format change from v0.7.0.** A v0.8.0 phone and a v0.7.0 phone still pair and exchange apps and messages. A v0.7.0 phone passes napplet updates along as plain events. Only v0.8.0 phones download and share them. Everything upgrades in place.
 
 ## At a glance
 
-- **Peers stay connected.** A phone next to you is usually reachable more than
-  one way; Myco now keeps every path, probes the spares, and moves traffic when
-  the active one degrades instead of dropping the peer and finding it again
-  from scratch. Built on fips's multi-path branch. The status panel shows each
-  link, the active one lit.
-- **Send a file.** Share anything from another app, pick a paired phone, and it
-  arrives encrypted over the mesh — or tap a contact on the Circle tab. The
-  other phone is asked first; the file lands in Downloads/Myco. Two phones on
-  the same Wi-Fi move it in seconds rather than minutes.
-- **Napplets.** Add one by pasting an `naddr`, scanning a QR, or bumping a
-  friend's phone — the friend's phone is asked first, so it arrives with no
-  internet. Review what it asks for, and it lands on the Apps grid with a 🦆
-  badge and its own full-screen window. Discover suggests three to start with,
-  and DingDong comes preinstalled.
-- **Permissions you can see and change.** The install sheet lists everything a
-  napplet will be able to do before you agree. Hold a tile → Manage permissions
-  to switch each capability off or on; a change is live. An update that asks for
-  more than you were shown goes back through the sheet first.
-- **Same-Wi-Fi discovery has a switch,** and peers that dropped off the network
-  come back on their own.
-- **A crashed page cannot take Myco down.** A window whose renderer dies closes
-  on its own; the mesh, the relay and your other windows keep running.
+- **An account from day one.** Every install starts as a guest with a name and a picture. Log in with your `nsec`, or with a signer app so your key never enters Myco.
+- **Discover is an app.** Browse napplets, read recommendations from people you follow, curate your own stacks, and install from a store-style page. It comes preinstalled and replaces the Discover tab.
+- **Updates find you.** Myco checks for app updates when you open it and every few hours. A napplet update one phone gets is passed to the rest of your Circle, even with no internet.
+- **A launcher-style Apps screen.** Round icons, five across on a phone and sized properly on a tablet. A small globe marks the apps that are websites.
+- **Back works inside apps.** The back gesture goes back a page inside a napplet instead of closing it.
+
+## Your account
+
+Every install now has a Nostr identity from the first launch: a guest named `Myco Guest NNNNN`, with a picture made from the Myco logo in colours drawn from your key. When you're online, the profile goes out to the public relays, so other Nostr apps see you too.
+
+The top of Settings shows who you are. It opens the **Account** page, where you can:
+
+- **Show your secret key**, behind a warning never to share it.
+- **Log out.** The key is removed from the phone. Myco offers to show it first, because a guest key you never copied is gone for good.
+- **Log in** as a new guest, by pasting an `nsec`, or with a signer app.
+
+**Signer apps (NIP-55, e.g. Amber).** Your key stays in the signer and never enters Myco. Napplets sign through it, in the background once you let the signer remember them, otherwise on its approval screen. Every event it signs is checked against what was asked for before Myco uses it. A napplet that publishes now waits while you approve, instead of timing out after 30 seconds.
+
+A new guest follows three default accounts, so an app's friends feed isn't empty on day one. Open napplets hear about a login or logout straight away.
+
+## Discover, the app store
+
+The Discover tab is gone. In its place is **Discover**, an app store for napplets that is itself a napplet. It comes preinstalled, and it reaches phones that were set up before this release too.
+
+- **Feed.** Napplets published to your relays, newest first, with search. An app's page shows its description, the permissions it asks for, and its details. **Install** opens Myco's own install review, and nothing installs until you tap Add.
+- **Stacks.** Curated lists of apps (NIP-51 app sets, the same kind Zapstore uses), shown as a carousel. A person's own recommendations are their default stack. Stacks come from you and the people you follow, plus two featured ones.
+- **Recommend.** Tap Recommend on an app to add it to your default stack. Apps your community recommends are marked with who recommended them, and only people you follow count.
+- **My stacks.** Create, rename and delete your own stacks, and add any app with **Add to stack**.
+- **Profiles.** Tap anyone's name to see their stacks and the napplets they published.
+- **Around you.** Napplets the phones near you hold, over the mesh. If you switched the Mesh permission off, Discover shows how to turn it back on.
+
+An installed app's review now says **Already installed**. If it's missing from the phone, it offers **Download again**. Either way, the permissions you changed are kept.
+
+## Updates that find you
+
+- **Automatic checks.** Myco checks installed nsites and napplets about 20 seconds after it comes to the foreground, and every 6 hours while it runs. Automatic checks are quiet and run at most every 30 minutes. **Check for updates** still runs straight away and shows its result.
+- **Through your Circle.** A newer version of a napplet you have, heard from a paired phone, is fetched (from that phone first), checked and kept, then passed on. It's the same way nsite updates already travelled. Updates found by the check are shared the same way.
+- **Restart when it suits you.** If you come back to an app that was updated while it was open, it offers a restart once. **Restart** opens the new version. **I'll restart later** keeps what you have, and you aren't asked again for that version.
+- **Safe to accept.**
+  - Only the author's newer versions are taken, and a version never moves backwards.
+  - An update never gets a permission you didn't review. Anything new it asks for goes through the review sheet when you next open it.
+  - Downloads pushed by a peer are size-capped.
+
+## The Apps screen
+
+The Apps screen now looks like a stock Android launcher:
+
+- Round icons, one size per screen: phone size on a phone, a step larger on a tablet.
+- Five across on a phone, and more on a tablet.
+- A website favicon sits on a white disc, the way the launcher frames older icons.
+- Napplets are the default and carry no mark. An **nsite**, a website Myco serves, has a small globe on the edge of its icon.
 
 ## Napplets
 
-An nsite is a website Myco serves from the mesh. A napplet is a program: one
-HTML file, signed by its author, that asks the phone running it for things —
-who you are, what your relays hold, what is on the phones around you, a picture
-by its hash. NIP-5D defines the shape; Myco implements the runtime.
+- **Back goes back.** Myco delivers the back gesture to the napplet as an Escape key. An app that handles it stays open and goes back itself. One that doesn't is closed, as before. An app can't trap you: after three backs it absorbed without a touch in between, the next back closes it. For app authors: handle Escape and call `preventDefault()` when you went back.
+- **Links.** A napplet can ask to open a web link (your browser, after a one-tap confirm unless you just touched it). It can also point you at another napplet, which opens Myco's install review over the running app.
+- **Theme.** Napplets can match Myco's light or AMOLED look. A switch while the app is open reaches it without a restart.
+- **Who you follow.** Napplets can read your follows and mutes.
+- **Faster publishing.** A napplet's publish answers once the event is stored here and two relays have it. The rest finish in the background.
+- **Faster adding.** Adding a napplet fetches only its manifest for the review. The app itself downloads when you tap Add.
 
-Each napplet runs in a sandboxed frame inside a trusted page Myco ships. It has
-no network of its own: no fetch, no WebSocket, no storage. Everything it does
-goes through a message channel to Myco, which checks the request against what
-you granted and does the work on the napplet's behalf. This release implements
-five capability families, in the words the install sheet uses:
+## Fixes
 
-- **Identity** — a user key, separate from the mesh device key, created the first
-  time a napplet opens. Napplets learn who you are socially; the device is never
-  named in anything signed by that key.
-- **Relays** — read and post as you on the relay pool: this phone's relay and the
-  public relays when reachable. Posting excludes your profile, contacts, relay
-  list and deletions for now; a napplet that tries gets a refusal, not a silent
-  drop.
-- **Outbox** — an author's notes from the relays they publish to, whether that is
-  a phone across the room or a public relay, with an honest `incomplete` when a
-  relay never answered.
-- **Mesh** — Myco's own: publish to everyone nearby with a chosen hop count and
-  pull what was missed. Settings › App reach caps how far apps may send and look.
-- **Pictures and files** — by content hash: this phone first, then a friend's
-  phone over the mesh, then the public servers. What is fetched is kept for the
-  next app and the next phone in the room.
-
-Versions are pinned to bytes: the napplet you open is always the one whose file
-is on your phone, and a newer manifest with nothing behind it cannot take an
-app off the air. "Check for updates" refreshes napplets beside the nsite check.
-
-## Send a file
-
-Share a photo, a document, anything, from any app on the phone: Myco appears in
-the system Sharesheet, you pick one of your paired phones, and the file goes
-out over the mesh — encrypted to that phone's key, over whichever path reaches
-it, with no hotspot and no internet. The Circle tab has the same door: tap a
-contact and choose **Send a file**.
-
-The receiving phone is asked before anything is transferred and can say no. A
-transfer in flight shows on the Circle tab beside pairing requests, so a send
-that is still waiting is visible from anywhere in the app and can be cancelled;
-an offer nobody answers gives up after ten minutes. Received files land in
-Downloads/Myco.
-
-Two phones on the same Wi-Fi now find each other over the network rather than
-Bluetooth — Myco announces itself on the local network the way a fips node
-does — and a file that took minutes over Bluetooth takes seconds over UDP.
-Bluetooth still works when there is no shared network; it is just slower.
-
-A transfer survives a flaky link. If a control message — the offer, the accept,
-the "ready" — is lost while Bluetooth is re-dialling, each side keeps re-sending
-what it is waiting to hear until the transfer moves on, and a large file over a
-slow hop is only given up when nothing has arrived for thirty seconds, not on a
-fixed clock.
-
-## The mesh holds more than one link
-
-This is the change that matters most in a room. A phone next to you is usually
-reachable more than one way — Bluetooth and Wi-Fi Aware, or Bluetooth and the
-local network. Until now Myco used one and forgot the other, and when that one
-failed the peer was gone until it was found again from scratch: a Bluetooth
-hiccup, a Wi-Fi Aware teardown, a phone walking behind a wall, each one a
-disconnect and a re-discovery.
-
-The mesh now keeps every path to a peer, probes the standbys so they are known
-to work before they are needed, and switches when the active one degrades. Two
-connected phones stay connected through the hiccups that used to drop them,
-without re-pairing or re-discovering. In testing on real phones this is the
-largest single reliability gain Myco has had; the peers pill stops flickering.
-
-The status panel shows it directly: one icon per lane, the lit one carrying
-traffic, the standbys faded. A phone on Bluetooth and Wi-Fi at once is listed
-under both, and peers that never told us a name are shown by their shortened
-npub instead of a placeholder.
-
-This is the first release built on fips's `feat/multi-path-switchover` branch,
-which is experimental upstream. The link messages it adds are ignored by older
-nodes, so mixed rooms keep working; the multi-path link itself only forms
-between two v0.7.0 phones.
-
-## Storage
-
-The relay Myco keeps inside the app is now an LMDB database. Queries are
-indexed, writes are one small transaction per event, and the store is ready for
-the mesh sync that comes next. Chat and other expiring messages stay in memory
-and never touch disk, as before. A store from an earlier version is migrated on
-first open; if any event fails to migrate, the old file is kept and nothing is
-lost.
+- Napplets saw nobody logged in: `identity.getPublicKey` answered in the wrong field.
+- A removed app that nobody could deliver came back on its own. Remove now closes its window and keeps it gone until you add it again.
+- A manifest a napplet published over the mesh ignored the hop budget it chose. It now keeps to it.
 
 ## Known issues
 
-- **A phone in your pocket finds nobody.** Myco winds its radios down when it is
-  not on screen, so two idle phones in a room will not discover each other until
-  one is opened.
-- **Wi-Fi Aware is shut off entirely by deep Doze** on Android 13 and later after
-  a long idle period —
-  [#30](https://github.com/Origami74/myco/issues/30).
-- **A napplet's relay access is all-or-nothing.** The `relay` grant lets a napplet
-  read everything your relay holds, including what other napplets stored. A
-  finer permission model is next on the roadmap.
-- **A napplet may name its own relays.** With the outbox grant it can ask Myco to
-  talk to a relay it chooses; that is by the specification, and it is an
-  exfiltration channel. Review the install sheet.
-- **Napplets do not replicate over the mesh yet.** A friend's phone can hand you
-  one at install time; keeping them in sync afterwards is roadmap.
-- Phones still do not always connect to every peer around them.
-- The interface can lag while the mesh is syncing.
-- Exit-node mode still covers proxy-aware apps only; other apps and QUIC/UDP
-  traffic keep using the phone's normal connection.
+- **Discover's "Around you" needs the published Discover to declare `mesh`.** Until it does, the tab stays empty.
+- **Profile pictures and app sizes in Discover.** Napplets can only load files by their hash (`blossom:`). A picture on a server Myco doesn't know about, or any plain web image, shows a placeholder. An app page may show "Unknown" for size. [#67](https://github.com/Origami74/myco/issues/67) covers finding servers properly.
+- **Open nsite windows and updates.** A napplet offers a restart when it's updated while open. An nsite doesn't yet, and an update can mix old and new files in an open nsite window until it reloads: [#71](https://github.com/Origami74/myco/issues/71).
+- **No "recently updated" mark on the Apps screen yet:** [#69](https://github.com/Origami74/myco/issues/69).
+- **Nearby nsites aren't listed anymore.** The old Discover tab showed nsites your Circle held. Discover lists napplets only. An nsite still arrives by a share, a scan or a link.
+- **A phone in your pocket finds nobody.** Myco winds its radios down when it isn't on screen.
+- **Wi-Fi Aware is shut off by deep Doze** on Android 13 and later after a long idle period: [#30](https://github.com/Origami74/myco/issues/30).
+- **A napplet's relay access is all-or-nothing,** and with the outbox grant it may name its own relays. Review the install sheet.
 
 ## Getting it
 
-- **Android**: install the APK from the
-  [v0.7.0 release](https://github.com/Origami74/myco/releases/tag/v0.7.0),
-  or via [zapstore](https://zapstore.dev/apps/app.myco).
-- **From source**: `cd android && ./gradlew assembleDebug` from a checkout of
-  the v0.7.0 tag, with fips on its `feat/multi-path-switchover` branch. See
-  [CONTRIBUTING.md](https://github.com/Origami74/myco/blob/main/CONTRIBUTING.md)
-  for build prerequisites.
+- **Android:** install the APK from the [v0.8.0 release](https://github.com/Origami74/myco/releases/tag/v0.8.0), or via [Zapstore](https://zapstore.dev/apps/app.myco).
+- **From source:** run `cd android && ./gradlew assembleDebug` from a checkout of the v0.8.0 tag, with fips on its `feat/multi-path-switchover` branch. See [CONTRIBUTING.md](https://github.com/Origami74/myco/blob/main/CONTRIBUTING.md) for build prerequisites.
 
-Phones do not need updating together, but the multi-path link only forms
-between two phones on v0.7.0.
+Phones don't need updating together.
 
-The full per-release change history lives in
-[CHANGELOG.md](https://github.com/Origami74/myco/blob/main/CHANGELOG.md).
-Issues and discussion at [github.com/Origami74/myco](https://github.com/Origami74/myco).
+The full per-release change history lives in [CHANGELOG.md](https://github.com/Origami74/myco/blob/main/CHANGELOG.md). Issues and discussion are at [github.com/Origami74/myco](https://github.com/Origami74/myco).
 
 ## Contributors
 
-Thanks to the napplet authors whose apps were the test bed — Mapplets found
-two runtime gaps on the first run — and to
-[@Origami74](https://github.com/Origami74) for maintaining the project.
+Thanks to [@Origami74](https://github.com/Origami74) for maintaining the project, and to everyone who tested on real phones in real rooms.
 
 <!--
 This file is published verbatim as the GitHub Release body by
