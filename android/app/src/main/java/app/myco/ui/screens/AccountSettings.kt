@@ -6,11 +6,15 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.PersistableBundle
 import android.view.WindowManager
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -76,6 +80,7 @@ import app.myco.core.AccountState
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
+import app.myco.signer.ExternalSigner
 import app.myco.ui.GroupLabel
 import app.myco.ui.SectionCard
 import kotlinx.coroutines.Dispatchers
@@ -192,14 +197,42 @@ private fun LoggedIn(account: AccountState, client: AppCoreClient) {
         }
     }
 
-    GroupLabel("SECRET KEY")
-    SectionCard {
-        SettingRow(
-            icon = Icons.Filled.Key,
-            title = "Show my secret key",
-            subtitle = "Your nsec, to log in with this identity elsewhere",
-            onClick = { warning = true },
-        )
+    val signer = account.isSigner
+    if (signer) {
+        // The key is in the signer app; there is nothing here to reveal.
+        GroupLabel("SIGNER")
+        SectionCard {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                LeadingIcon(Icons.Filled.Security)
+                Spacer(Modifier.size(14.dp))
+                Column {
+                    Text(
+                        "Signing with ${ExternalSigner.label(context, account.signerPackage)}",
+                        fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        "Your key stays in the signer app. It asks you before Myco posts " +
+                            "as you, unless you told it to remember.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
+    } else {
+        GroupLabel("SECRET KEY")
+        SectionCard {
+            SettingRow(
+                icon = Icons.Filled.Key,
+                title = "Show my secret key",
+                subtitle = "Your nsec, to log in with this identity elsewhere",
+                onClick = { warning = true },
+            )
+        }
     }
 
     Spacer(Modifier.height(8.dp))
@@ -207,7 +240,7 @@ private fun LoggedIn(account: AccountState, client: AppCoreClient) {
         SettingRow(
             icon = Icons.AutoMirrored.Filled.Logout,
             title = "Log out",
-            subtitle = "Remove this identity from this phone",
+            subtitle = if (signer) "Stop using this identity in Myco" else "Remove this identity from this phone",
             titleColor = MaterialTheme.colorScheme.error,
             onClick = { confirmLogout = true },
         )
@@ -243,7 +276,23 @@ private fun LoggedIn(account: AccountState, client: AppCoreClient) {
 
 @Composable
 private fun LoggedOut(account: AccountState, client: AppCoreClient) {
+    val context = LocalContext.current
     var nsecOpen by remember { mutableStateOf(false) }
+    val signerInstalled = remember { ExternalSigner.isInstalled(context) }
+    // NIP-55 `get_public_key`: the signer answers with the user's pubkey and
+    // its own package, which every later request is addressed to.
+    val signerLogin = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val data = result.data
+        val pubkey = data?.getStringExtra("result").orEmpty()
+        val pkg = data?.getStringExtra("package").orEmpty()
+        when {
+            result.resultCode != Activity.RESULT_OK || data?.getBooleanExtra("rejected", false) == true ->
+                Toast.makeText(context, "The signer app didn't log you in", Toast.LENGTH_SHORT).show()
+            else -> client.dispatch(NativeActions.accountLoginSigner(pubkey, pkg))
+        }
+    }
 
     Text(
         "You're not logged in. Apps that post or sign things as you can't until you are.",
@@ -274,11 +323,33 @@ private fun LoggedOut(account: AccountState, client: AppCoreClient) {
             NsecField(account.error) { client.dispatch(NativeActions.accountLoginNsec(it)) }
         }
         RowDivider()
-        SoonRow(
-            icon = Icons.Filled.Security,
-            title = "Log in with a signer",
-            subtitle = "Amber — your key stays in the signer app",
-        )
+        if (signerInstalled) {
+            SettingRow(
+                icon = Icons.Filled.Security,
+                title = "Log in with a signer",
+                subtitle = "Amber or another signer app — your key stays there",
+                onClick = {
+                    runCatching { signerLogin.launch(ExternalSigner.loginIntent()) }
+                        .onFailure {
+                            Toast.makeText(context, "Couldn't open the signer app", Toast.LENGTH_SHORT).show()
+                        }
+                },
+            )
+        } else {
+            // Nothing to call. Say what would make it work rather than hide it.
+            SettingRow(
+                icon = Icons.Filled.Security,
+                title = "Log in with a signer",
+                subtitle = "Install a signer app such as Amber to keep your key out of Myco",
+                onClick = {
+                    runCatching {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/greenart7c3/Amber")),
+                        )
+                    }
+                },
+            )
+        }
     }
 }
 
@@ -408,6 +479,27 @@ private fun LogoutDialog(
     onLogout: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    if (account.isSigner) {
+        // Nothing to lose here: the key stays in the signer app.
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Log out of ${displayName(account)}?") },
+            text = {
+                Text(
+                    "Myco stops using this identity. Your key stays in " +
+                        "${ExternalSigner.label(LocalContext.current, account.signerPackage)}, " +
+                        "and you can log in with it again any time.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = onLogout) {
+                    Text("Log out", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        )
+        return
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Log out of ${displayName(account)}?") },

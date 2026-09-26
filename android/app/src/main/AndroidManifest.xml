@@ -47,6 +47,15 @@
     <!-- Wi-Fi Aware is the bulk lane, not the baseline: optional, degrades to BLE. -->
     <uses-feature android:name="android.hardware.wifi.aware" android:required="false" />
 
+    <!-- NIP-55: see and call a signer app (Amber) for login and signing. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="nostrsigner" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
@@ -126,6 +135,15 @@
             android:theme="@style/Theme.Myco.Splash"
             android:windowSoftInputMode="adjustResize"
             android:label="@string/app_name" />
+
+        <!-- Invisible: shows the signer app's approval screen for one signing
+             request and hands the answer back (app.myco.signer). -->
+        <activity
+            android:name=".signer.SignerActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- Portrait-locked QR scanner (the zxing default opens sideways). -->
         <activity

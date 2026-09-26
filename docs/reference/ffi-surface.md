@@ -133,7 +133,19 @@ The account's view (`account` in the state: status, npub, name, picture,
 every state snapshot and is fetched only after the Account page's warning. The
 avatar is bytes; fetch again when `avatarRev` changes. Actions:
 `account_logout`, `account_new_guest`, `account_login_nsec { nsec }`,
-`account_refresh`.
+`account_login_signer { pubkey, package }`, `account_refresh`.
+
+### The external signer (NIP-55)
+
+```kotlin
+external fun signerNextRequest(handle, timeoutMs): String   // "" on timeout; blocks
+external fun signerRespond(handle, id, result, error)
+```
+
+For a signer-app login. A request is `{id, type, payload, currentUser,
+package}` (`type` is `sign_event`, `payload` the unsigned event JSON); the
+answer is the signed event JSON or the bare signature, or an `error`. Rust
+checks the event before using it.
 
 ### The napplet channel
 

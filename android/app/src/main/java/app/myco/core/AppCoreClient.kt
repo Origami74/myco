@@ -284,10 +284,14 @@ data class AccountState(
     val publishPending: Boolean = false,
     /** Looking up an imported key's profile. */
     val profileLoading: Boolean = false,
+    /** The signer app's package, for a `signer` login. */
+    val signerPackage: String = "",
     /** Why the last login failed. */
     val error: String = "",
 ) {
     val loggedIn: Boolean get() = status != "logged_out"
+    /** Logged in with a signer app: no secret here to reveal. */
+    val isSigner: Boolean get() = status == "signer"
 }
 
 data class AppState(
@@ -701,6 +705,7 @@ data class AppState(
                         avatarRev = a.optLong("avatarRev"),
                         publishPending = a.optBoolean("publishPending"),
                         profileLoading = a.optBoolean("profileLoading"),
+                        signerPackage = a.optString("signerPackage"),
                         error = a.optString("error"),
                     )
                 } ?: AccountState(),
@@ -796,6 +801,14 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
 
     /** The logged-in nsec, for the Account page's reveal. Empty while logged out. */
     fun revealNsec(): String = NativeCore.accountRevealNsec(requireHandle())
+
+    /** The next signer-app request (JSON), or "" after [timeoutMs]. Blocks. */
+    fun signerNextRequest(timeoutMs: Long): String =
+        NativeCore.signerNextRequest(requireHandle(), timeoutMs)
+
+    /** Answer a signer-app request. */
+    fun signerRespond(id: String, result: String, error: String) =
+        NativeCore.signerRespond(requireHandle(), id, result, error)
 
     /** The account's avatar bytes, or null. */
     fun accountAvatar(): ByteArray? =
@@ -953,6 +966,8 @@ object NativeActions {
     fun accountLoginNsec(nsec: String): JSONObject =
         JSONObject().put("type", "account_login_nsec").put("nsec", nsec)
     fun accountRefresh(): JSONObject = JSONObject().put("type", "account_refresh")
+    fun accountLoginSigner(pubkey: String, pkg: String): JSONObject =
+        JSONObject().put("type", "account_login_signer").put("pubkey", pubkey).put("package", pkg)
     fun startNode(): JSONObject = JSONObject().put("type", "start_node")
     fun stopNode(): JSONObject = JSONObject().put("type", "stop_node")
     fun setBleEnabled(enabled: Boolean): JSONObject =

@@ -107,6 +107,10 @@ pub enum NativeAppAction {
     /// Log in with a pasted `nsec1…` (or hex) secret. A bad one is reported
     /// on `account.error`.
     AccountLoginNsec { nsec: String },
+    /// Log in with a signer app (NIP-55): its `get_public_key` answer (hex or
+    /// `npub`) and its package, from the intent Kotlin ran. A bad one is
+    /// reported on `account.error`.
+    AccountLoginSigner { pubkey: String, package: String },
     /// Re-read the account's profile from the local store (a napplet may have
     /// published a new one).
     AccountRefresh,

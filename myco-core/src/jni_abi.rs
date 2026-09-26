@@ -234,6 +234,77 @@ pub extern "system" fn Java_app_myco_core_NativeCore_accountAvatar(
         .unwrap_or(std::ptr::null_mut())
 }
 
+// --- external signer (NIP-55) ------------------------------------------------
+//
+// Kotlin long-polls the queue, carries each request to the signer app, and
+// answers. The lock is held only to clone the queue out.
+
+/// The next signer request as JSON (`{id, type, payload, currentUser,
+/// package}`), waiting up to `timeoutMs`; `""` when the wait expired.
+/// **Blocks** — call from a background thread.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_signerNextRequest(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    timeout_ms: jlong,
+) -> jstring {
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.signer_context()
+        }
+        None => None,
+    };
+    let timeout = std::time::Duration::from_millis(timeout_ms.max(0) as u64);
+    let json = match ctx {
+        Some((bridge, rt)) => rt
+            .block_on(bridge.next_request(timeout))
+            .and_then(|req| serde_json::to_string(&req).ok())
+            .unwrap_or_default(),
+        // No account (the core failed to start): wait out the poll anyway,
+        // or the caller's loop spins.
+        None => {
+            std::thread::sleep(timeout);
+            String::new()
+        }
+    };
+    jstr(&mut env, json)
+}
+
+/// Answer signer request `id`: `result` (the signed event JSON, or the
+/// signer's result) when `error` is empty, else the error.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_signerRespond(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    id: JString,
+    result: JString,
+    error: JString,
+) {
+    let id = get_string(&mut env, &id);
+    let result = get_string(&mut env, &result);
+    let error = get_string(&mut env, &error);
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.signer_context()
+        }
+        None => None,
+    };
+    if let Some((bridge, _)) = ctx {
+        bridge.respond(
+            &id,
+            if error.is_empty() {
+                Ok(result)
+            } else {
+                Err(error)
+            },
+        );
+    }
+}
+
 // --- napplets ------------------------------------------------------------
 //
 // Every call mirrors `gatewayGet`'s shape: the lock is held only long enough

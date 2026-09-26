@@ -953,6 +953,13 @@ impl AppRuntime {
                 self.announce_identity();
                 self.rev += 1;
             }
+            NativeAppAction::AccountLoginSigner { pubkey, package } => {
+                if let Some(account) = &self.account {
+                    let _ = account.login_signer(&pubkey, &package);
+                }
+                self.announce_identity();
+                self.rev += 1;
+            }
             NativeAppAction::AccountRefresh => {
                 if let Some(account) = &self.account {
                     account.refresh();
@@ -1751,8 +1758,10 @@ impl AppRuntime {
             // The signer reads the account's slot per call: a login or logout
             // reaches open napplets on their next call, and while logged out
             // every identity call is refused.
+            let account = self.account.as_ref()?;
             let signer = Arc::new(crate::user_key::UserSigner::new(
-                self.account.as_ref()?.slot(),
+                account.slot(),
+                account.bridge(),
             ));
 
             let mesh = Arc::new(crate::napplet::NappletMeshSink::new(
@@ -1841,6 +1850,21 @@ impl AppRuntime {
     /// out.
     pub fn reveal_nsec(&self) -> Option<String> {
         self.account.as_ref()?.reveal_nsec()
+    }
+
+    /// The signer-app request queue and a Tokio handle to wait on it with,
+    /// for the JNI pump (`signerNextRequest` / `signerRespond`). Cloned out so
+    /// the long poll never holds the runtime lock.
+    pub fn signer_context(
+        &self,
+    ) -> Option<(
+        Arc<crate::external_signer::SignerBridge>,
+        tokio::runtime::Handle,
+    )> {
+        Some((
+            self.account.as_ref()?.bridge(),
+            self.rt.as_ref()?.handle().clone(),
+        ))
     }
 
     /// The account's avatar bytes (JPEG or whatever the profile names), for

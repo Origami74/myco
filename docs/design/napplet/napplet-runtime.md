@@ -527,7 +527,19 @@ napplet. From the Account page the person can:
 - **log out** — the key leaves the disk and the signer's slot, and every identity call is
   refused until the next login. A marker file keeps the next launch from answering "no
   key" with a new guest. The dialog offers to reveal the key first;
-- **log in** again: a new guest, a pasted `nsec` (or hex), or — roadmap N2 — Amber.
+- **log in** again: a new guest, a pasted `nsec` (or hex), or a signer app (NIP-55,
+  Amber).
+
+**A signer login** (`external_signer.rs`, roadmap N2) keeps no secret: `user-signer.json`
+holds the pubkey and the signer's package. A signature is a request queued in Rust and
+carried by Kotlin, which long-polls the queue (`signerNextRequest`) like the napplet frame
+pump. Kotlin asks the signer's content resolver first — it answers in the background once
+the user chose "remember" — and otherwise shows the signer's approval screen through an
+invisible `SignerActivity`, since a request can come from any Myco window. The answer
+(`signerRespond`) is not trusted: the event must be the one asked for — same id, same
+pubkey — with a valid signature. rust-nostr's `nostr-android-signer` was considered and
+not used: it brings gRPC over a socket, a second UniFFI library and a proxy bound to one
+activity, where this is one queue on the existing JNI surface.
 
 The napplet signer reads the account's slot on every call, so a login or logout reaches
 an open napplet on its next call.
