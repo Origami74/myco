@@ -79,6 +79,12 @@ class NsiteActivity : ComponentActivity() {
             finish()
             return
         }
+        // Opening an app is asking for it — including from a home-screen
+        // shortcut to one the user removed from the grid, which would
+        // otherwise sit on its loading page for good.
+        if (savedInstanceState == null) {
+            client.dispatch(app.myco.core.NativeActions.openNsite(hostLabel))
+        }
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
         // Give the Recents card the nsite's own title + favicon, for a native feel.
         applyTaskIcon("$hostLabel.localhost", title)
@@ -223,6 +229,19 @@ class NsiteActivity : ComponentActivity() {
          * so each route would spawn its own Recents card for the same app.
          */
         fun documentUri(hostLabel: String): Uri = Uri.parse("myco://app/$hostLabel")
+
+        /**
+         * Close this nsite's window, if one is open — for Remove. An open
+         * window left behind keeps its loading page reloading, and every
+         * reload asks for the app the user just removed.
+         */
+        fun closeTask(context: android.content.Context, hostLabel: String) {
+            val am = context.getSystemService(android.app.ActivityManager::class.java) ?: return
+            val uri = documentUri(hostLabel)
+            am.appTasks
+                .filter { runCatching { it.taskInfo.baseIntent.data == uri }.getOrDefault(false) }
+                .forEach { runCatching { it.finishAndRemoveTask() } }
+        }
     }
 }
 

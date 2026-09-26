@@ -334,6 +334,11 @@ fun AppsScreen(
             onDismissRequest = { confirmRemove = null },
             confirmButton = {
                 TextButton(onClick = {
+                    // All three, or it comes back: an open window reloads its
+                    // loading page and a pending deep link is re-asked on the
+                    // next resume.
+                    app.myco.NsiteActivity.closeTask(context, site.host)
+                    app.myco.share.PendingDeepLinks.remove(context, site.host)
                     client.dispatch(NativeActions.forgetNsite(site.host))
                     confirmRemove = null
                 }) { Text("Remove", color = MaterialTheme.colorScheme.error) }

@@ -882,6 +882,7 @@ impl AppRuntime {
             NativeAppAction::AddToLibrary { link } => {
                 if let (Some(content), Some(addr)) = (&self.content, nsite_deck::parse_link(&link))
                 {
+                    content.unforget_site(&addr);
                     content.add_to_library(&addr, None, crate::content::now_secs());
                 }
                 self.rev += 1;
@@ -1267,6 +1268,8 @@ impl AppRuntime {
         let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) else {
             return;
         };
+        // Asked for by the user: a site they removed earlier may come back.
+        content.unforget_site(&addr);
         rt.spawn(content.open_site(addr, holder));
     }
 
