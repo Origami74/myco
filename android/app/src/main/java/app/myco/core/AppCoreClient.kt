@@ -64,6 +64,9 @@ data class NappletReview(
     val pointer: String,
     /** The fetch is still running; the sheet shows progress rather than a question. */
     val loading: Boolean,
+    /** The user said yes and the app is downloading; nothing is downloaded
+     *  before that. The sheet shows "Adding…" and closes when it lands. */
+    val installing: Boolean = false,
     val title: String,
     val description: String,
     /** What it declared it needs — a statement of intent, not what it gets. */
@@ -406,6 +409,7 @@ data class AppState(
             val nappletReview = if (reviewJson == null) null else NappletReview(
                 pointer = reviewJson.optString("pointer"),
                 loading = reviewJson.optBoolean("loading"),
+                installing = reviewJson.optBoolean("installing"),
                 title = reviewJson.optString("title"),
                 description = reviewJson.optString("description"),
                 requires = reviewJson.optJSONArray("requires")?.let { r ->

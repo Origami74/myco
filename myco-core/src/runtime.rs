@@ -899,9 +899,9 @@ impl AppRuntime {
                 self.rev += 1;
             }
             NativeAppAction::InstallNapplet { pointer, granted } => {
+                // The sheet stays up, "Adding…", until the bytes are in; the
+                // install task closes it.
                 self.install_napplet(&pointer, granted);
-                // The question has been answered; the screen goes away.
-                *self.napplet_review.lock().unwrap() = None;
                 self.rev += 1;
             }
             NativeAppAction::DismissNappletReview => {
@@ -1388,12 +1388,14 @@ impl AppRuntime {
             *review.lock().unwrap() = Some(crate::napplet::NappletReview {
                 pointer: pointer.to_string(),
                 loading: false,
+                installing: false,
                 grants: Vec::new(),
                 title: String::new(),
                 description: String::new(),
                 requires: Vec::new(),
                 error: message,
                 holder: holder_for_retry.clone(),
+                manifest: None,
             });
         };
 
@@ -1414,7 +1416,9 @@ impl AppRuntime {
             self.rev += 1;
             return;
         };
-        let Some((host, rt)) = self.napplet_context() else {
+        // Finding a napplet reads a manifest and nothing else, so it needs
+        // no napplet host — only somewhere to run.
+        let Some(rt) = self.rt.as_ref().map(|r| r.handle().clone()) else {
             fail(
                 &self.napplet_review,
                 pointer,
@@ -1436,94 +1440,77 @@ impl AppRuntime {
         *review.lock().unwrap() = Some(crate::napplet::NappletReview {
             pointer: pointer.clone(),
             loading: true,
+            installing: false,
             title: String::new(),
             description: String::new(),
             requires: Vec::new(),
             grants: Vec::new(),
             error: String::new(),
             holder: holder.clone(),
+            manifest: None,
         });
 
         rt.spawn(async move {
-            // Sources in the order worth trying. The peer who handed it over
-            // comes first: they demonstrably have it, they are in the room, and
-            // a napplet shared by a tap should not need the internet to
-            // arrive. The public relays follow for everything else.
-            let mut sources: Vec<crate::ip_source::IpPeerSource> = Vec::new();
-            if let Some(npub) = holder.as_deref() {
-                match crate::ip_source::mesh_source_for(peer_relays, npub) {
-                    Ok(mesh) => sources.push(mesh.with_kind(addr.kind())),
-                    Err(e) => tracing::warn!("cannot reach the sharer {npub}: {e}"),
-                }
-            }
-            // The pointer's own relay hints first, then the defaults. A napplet
-            // lives where its author published it, which is often not where the
-            // popular aggregators look — searching only the defaults reports a
-            // napplet as missing when it is simply somewhere else.
-            //
-            // Unless offline-only is on: then the sharer's phone is the only
-            // source, as it is for every other acquisition path — mesh-only
-            // mode is how the BLE path gets proven, and a napplet install
-            // that quietly went to the internet would prove nothing.
-            if offline_only {
-                tracing::info!("offline-only: napplet {pointer} is asked of the sharer only");
-            } else {
-                sources.push(addr.public_source());
-            }
-
-            let mut ingested = Err(anyhow::anyhow!(if offline_only && sources.is_empty() {
+            let sources = napplet_sources(&addr, holder.as_deref(), peer_relays, offline_only);
+            let mut found = Err(anyhow::anyhow!(if offline_only && sources.is_empty() {
                 "Offline-only is on and nobody nearby shared this app"
             } else {
                 "no source had this napplet"
             }));
+            // The manifest only: review needs nothing else, and nothing is
+            // downloaded before the user says yes.
             for source in &sources {
-                ingested = host.ingest(&addr, source).await;
-                if ingested.is_ok() {
+                found = crate::napplet::fetch_manifest(&addr, source).await;
+                if found.is_ok() {
                     break;
                 }
             }
 
-            let outcome = match ingested {
-                Ok(ingested) => {
-                    let grants = crate::napplet::effective_grants(&ingested.requires);
+            let outcome = match found {
+                Ok((event, found)) => {
+                    let grants = crate::napplet::effective_grants(&found.requires);
                     tracing::info!(
-                        "fetched napplet {pointer}: requires {:?}, would grant {:?}",
-                        ingested.requires,
+                        "found napplet {pointer}: requires {:?}, would grant {:?}",
+                        found.requires,
                         grants
                     );
                     crate::napplet::NappletReview {
                         pointer: pointer.clone(),
                         loading: false,
-                        title: ingested.title.unwrap_or_default(),
-                        description: ingested.description.unwrap_or_default(),
-                        requires: ingested.requires,
+                        installing: false,
+                        title: found.title.unwrap_or_default(),
+                        description: found.description.unwrap_or_default(),
+                        requires: found.requires,
                         grants,
                         error: String::new(),
                         holder: holder.clone(),
+                        manifest: Some(event),
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("could not fetch napplet {pointer}: {e}");
+                    tracing::warn!("could not find napplet {pointer}: {e}");
                     crate::napplet::NappletReview {
                         pointer: pointer.clone(),
                         loading: false,
+                        installing: false,
                         title: String::new(),
                         description: String::new(),
                         requires: Vec::new(),
                         grants: Vec::new(),
                         error: e.to_string(),
                         holder: holder.clone(),
+                        manifest: None,
                     }
                 }
             };
             settle_napplet_review(&review, outcome);
-            // The ingest happened whether or not the sheet still wants to
-            // hear about it: the napplet is on the phone now.
-            content.refresh_napplet_status().await;
         });
     }
 
-    /// Record what install review granted and pin the napplet to the Library.
+    /// The user said yes: download the reviewed napplet's bytes, verify them
+    /// against the manifest they reviewed, and only then record the grants and
+    /// pin it to the Library. The sheet shows "Adding…" meanwhile and closes
+    /// when the app lands; a failed download turns it into the error screen.
     fn install_napplet(&mut self, pointer: &str, granted: Vec<String>) {
         use nostr::nips::nip19::ToBech32;
         let Ok(addr) = crate::napplet::NappletAddr::parse(pointer) else {
@@ -1533,47 +1520,94 @@ impl AppRuntime {
         let Some(content) = self.content.clone() else {
             return;
         };
-        let npub = addr.author.to_bech32().unwrap_or_default();
-        let shell_host =
-            myco_napplet_runtime::host::shell_host(&addr.author.to_bytes(), addr.d_tag.as_deref());
-
-        // The title the fetch already read from the manifest, and the
-        // declared `requires` the sheet showed. Without the title the Library
-        // falls back to the `d` tag, so a napplet called "DingDong" shows up
-        // as "dingdong" — an identifier where a name should be. The requires
-        // list is what this install *reviewed*: a later version declaring
-        // more comes back through the sheet rather than being granted at open.
-        let (title, requires) = {
-            let review = self.napplet_review.lock().unwrap();
-            let review = review.as_ref().filter(|r| r.pointer == pointer);
-            (
-                review
-                    .filter(|r| !r.title.is_empty())
-                    .map(|r| r.title.clone()),
-                review.map(|r| r.requires.clone()).unwrap_or_default(),
-            )
+        let Some((host, rt)) = self.napplet_context() else {
+            return;
         };
 
-        tracing::info!(
-            napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
-            ?granted,
-            reviewed = ?requires,
-            title = %title.as_deref().unwrap_or(""),
-            "installing napplet"
-        );
-        content.add_napplet_to_library(
-            &npub,
-            addr.d_tag.as_deref(),
-            title.as_deref(),
-            &shell_host,
+        // What review showed: the manifest it ran on, the title, and the
+        // declared `requires`. Without the title the Library falls back to
+        // the `d` tag, so "DingDong" shows up as "dingdong". The requires list
+        // is what this install *reviewed*: a later version declaring more
+        // comes back through the sheet rather than being granted at open.
+        let reviewed = {
+            let slot = self.napplet_review.lock().unwrap();
+            let Some(review) = slot.as_ref().filter(|r| r.pointer == pointer) else {
+                tracing::warn!("install for {pointer} with no review open");
+                return;
+            };
+            // A second tap while the first download runs.
+            if review.installing {
+                return;
+            }
+            review.clone()
+        };
+        let record = Install {
+            npub: addr.author.to_bech32().unwrap_or_default(),
+            d_tag: addr.d_tag.clone(),
+            title: Some(reviewed.title.clone()).filter(|t| !t.is_empty()),
+            shell_host: myco_napplet_runtime::host::shell_host(
+                &addr.author.to_bytes(),
+                addr.d_tag.as_deref(),
+            ),
             granted,
-            requires,
-            pointer,
-            crate::content::now_secs(),
-        );
-        if let Some(rt) = self.rt.as_ref() {
+            requires: reviewed.requires.clone(),
+            pointer: pointer.to_string(),
+        };
+
+        // No manifest: the review was opened by a served version that
+        // declares more than was reviewed. Its bytes are already here, so
+        // the answer is recorded now.
+        let Some(manifest) = reviewed.manifest.clone() else {
+            record.apply(&content);
+            clear_napplet_review(&self.napplet_review, pointer);
             rt.spawn(async move { content.refresh_napplet_status().await });
+            return;
+        };
+
+        if let Some(review) = self
+            .napplet_review
+            .lock()
+            .unwrap()
+            .as_mut()
+            .filter(|r| r.pointer == pointer)
+        {
+            review.installing = true;
         }
+        let peer_relays = content.peer_relays();
+        let offline_only = content.is_offline_only();
+        let review = self.napplet_review.clone();
+
+        rt.spawn(async move {
+            let sources =
+                napplet_sources(&addr, reviewed.holder.as_deref(), peer_relays, offline_only);
+            let mut ingested = Err(anyhow::anyhow!("no source had this napplet"));
+            for source in &sources {
+                ingested = host.ingest_event(manifest.clone(), source).await;
+                if ingested.is_ok() {
+                    break;
+                }
+            }
+            match ingested {
+                Ok(_) => {
+                    record.apply(&content);
+                    // The question has been answered and the app is here: the
+                    // sheet goes away.
+                    clear_napplet_review(&review, &record.pointer);
+                }
+                Err(e) => {
+                    tracing::warn!("could not download napplet {}: {e}", record.pointer);
+                    settle_napplet_review(
+                        &review,
+                        crate::napplet::NappletReview {
+                            installing: false,
+                            error: e.to_string(),
+                            ..reviewed
+                        },
+                    );
+                }
+            }
+            content.refresh_napplet_status().await;
+        });
     }
 
     /// The installed napplets an update check should ask about, as addresses
@@ -2614,16 +2648,95 @@ impl NappletOpenRequest {
             *self.review.lock().unwrap() = Some(crate::napplet::NappletReview {
                 pointer: self.pointer.clone(),
                 loading: false,
+                installing: false,
                 title: opened.title.clone().unwrap_or_default(),
                 description: String::new(),
                 requires,
                 grants,
                 error: String::new(),
                 holder: None,
+                manifest: None,
             });
             changed = true;
         }
         Ok((opened, changed))
+    }
+}
+
+/// Where to look for a napplet, in the order worth trying. The peer who
+/// handed it over comes first: they demonstrably have it, they are in the
+/// room, and a napplet shared by a tap should not need the internet. Then
+/// the pointer's own relay hints and the defaults — unless offline-only is
+/// on, when the sharer's phone is the only source, as it is for every other
+/// acquisition path.
+fn napplet_sources(
+    addr: &crate::napplet::NappletAddr,
+    holder: Option<&str>,
+    peer_relays: Arc<crate::peer_relay::PeerRelayPool>,
+    offline_only: bool,
+) -> Vec<crate::ip_source::IpPeerSource> {
+    let mut sources = Vec::new();
+    if let Some(npub) = holder {
+        match crate::ip_source::mesh_source_for(peer_relays, npub) {
+            Ok(mesh) => sources.push(mesh.with_kind(addr.kind())),
+            Err(e) => tracing::warn!("cannot reach the sharer {npub}: {e}"),
+        }
+    }
+    if offline_only {
+        tracing::info!("offline-only: a napplet is asked of the sharer only");
+    } else {
+        // A short grace: the newest version usually comes from the first
+        // relay to answer, and the user is watching "Looking for this app".
+        // The update check keeps the longer default.
+        sources.push(
+            addr.public_source()
+                .with_first_answer_grace(Duration::from_millis(250)),
+        );
+    }
+    sources
+}
+
+/// What an answered install review records on the Library entry.
+struct Install {
+    npub: String,
+    d_tag: Option<String>,
+    title: Option<String>,
+    shell_host: String,
+    granted: Vec<String>,
+    requires: Vec<String>,
+    pointer: String,
+}
+
+impl Install {
+    fn apply(&self, content: &Content) {
+        tracing::info!(
+            napplet = %self.d_tag.as_deref().unwrap_or("<root>"),
+            granted = ?self.granted,
+            reviewed = ?self.requires,
+            title = %self.title.as_deref().unwrap_or(""),
+            "installing napplet"
+        );
+        content.add_napplet_to_library(
+            &self.npub,
+            self.d_tag.as_deref(),
+            self.title.as_deref(),
+            &self.shell_host,
+            self.granted.clone(),
+            self.requires.clone(),
+            &self.pointer,
+            crate::content::now_secs(),
+        );
+    }
+}
+
+/// Close the review sheet for `pointer`, if it is still the one open.
+fn clear_napplet_review(
+    slot: &std::sync::Mutex<Option<crate::napplet::NappletReview>>,
+    pointer: &str,
+) {
+    let mut slot = slot.lock().unwrap();
+    if slot.as_ref().is_some_and(|r| r.pointer == pointer) {
+        *slot = None;
     }
 }
 
@@ -3237,16 +3350,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A served version declaring more than was reviewed opens the sheet
+    /// with no manifest — its bytes are already here. Adding from it records
+    /// the wider grants and closes the sheet; it must not wait on a download
+    /// that will never start.
+    #[test]
+    fn adding_from_a_review_without_a_manifest_records_it_at_once() {
+        use crate::content::LibraryKind;
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = temp_dir("install-no-manifest");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let npub = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        let pointer = format!("{npub}:wider");
+        let mut review = review_for(&pointer, false);
+        review.requires = vec!["relay".to_string(), "mesh".to_string()];
+        *rt.napplet_review.lock().unwrap() = Some(review);
+
+        rt.dispatch(NativeAppAction::InstallNapplet {
+            pointer: pointer.clone(),
+            granted: vec!["relay".to_string(), "mesh".to_string()],
+        });
+
+        assert!(
+            rt.napplet_review.lock().unwrap().is_none(),
+            "the sheet is still open"
+        );
+        let item = rt
+            .content
+            .as_ref()
+            .unwrap()
+            .library_snapshot()
+            .into_iter()
+            .find(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("wider"))
+            .expect("the answer was not recorded");
+        assert!(item.granted.contains(&"mesh".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn review_for(pointer: &str, loading: bool) -> crate::napplet::NappletReview {
         crate::napplet::NappletReview {
             pointer: pointer.to_string(),
             loading,
+            installing: false,
             title: String::new(),
             description: String::new(),
             requires: Vec::new(),
             grants: Vec::new(),
             error: String::new(),
             holder: None,
+            manifest: None,
         }
     }
 

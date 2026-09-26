@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loading page also searches at most every 15 s rather than every second.
   Opening the app again — from Add, Discover, a link or a home-screen
   shortcut — brings it back.
+- **Adding a napplet was slow and downloaded too early.** "Looking for this
+  app" now fetches the manifest only — the review appears as soon as it is
+  found and its signature checks out, and the relay wait after the first
+  answer is 250 ms, down from 600 ms. The app itself is downloaded only once
+  you tap "Add to my apps" (the button shows "Adding…"), verified against the
+  manifest you reviewed. The review sheet opens fully and scrolls, with its
+  buttons always on screen. The update check keeps its 600 ms wait.
 
 ## [0.7.0] - 2026-09-16
 
