@@ -1451,6 +1451,9 @@ impl AppRuntime {
                 pointer: pointer.to_string(),
                 loading: false,
                 installing: false,
+                installed: false,
+                ready: false,
+                unreviewed: Vec::new(),
                 grants: Vec::new(),
                 title: String::new(),
                 description: String::new(),
@@ -1499,10 +1502,17 @@ impl AppRuntime {
         // setting, and a fetch that starts under it does not get to consult
         // the internet because the switch moved while it was in flight.
         let offline_only = content.is_offline_only();
+        // Whether it is already here is known before anything is fetched; what
+        // it would add is not, so that waits for the manifest.
+        let (installed, _) = crate::napplet::library_standing(&content, &addr, &[]);
+        let ready = installed && crate::napplet::is_ready_here(&content, &addr);
         *review.lock().unwrap() = Some(crate::napplet::NappletReview {
             pointer: pointer.clone(),
             loading: true,
             installing: false,
+            installed,
+            ready,
+            unreviewed: Vec::new(),
             title: String::new(),
             description: String::new(),
             requires: Vec::new(),
@@ -1531,6 +1541,11 @@ impl AppRuntime {
             let outcome = match found {
                 Ok((event, found)) => {
                     let grants = crate::napplet::effective_grants(&found.requires);
+                    // Read now, not before the fetch: the Library can change
+                    // while relays are tried.
+                    let (installed, unreviewed) =
+                        crate::napplet::library_standing(&content, &addr, &found.requires);
+                    let ready = installed && crate::napplet::is_ready_here(&content, &addr);
                     tracing::info!(
                         "found napplet {pointer}: requires {:?}, would grant {:?}",
                         found.requires,
@@ -1540,6 +1555,9 @@ impl AppRuntime {
                         pointer: pointer.clone(),
                         loading: false,
                         installing: false,
+                        installed,
+                        ready,
+                        unreviewed,
                         title: found.title.unwrap_or_default(),
                         description: found.description.unwrap_or_default(),
                         requires: found.requires,
@@ -1555,6 +1573,9 @@ impl AppRuntime {
                         pointer: pointer.clone(),
                         loading: false,
                         installing: false,
+                        installed,
+                        ready,
+                        unreviewed: Vec::new(),
                         title: String::new(),
                         description: String::new(),
                         requires: Vec::new(),
@@ -1603,6 +1624,12 @@ impl AppRuntime {
             }
             review.clone()
         };
+        // Already installed, and nothing new to agree to: the grants the user
+        // has switched on or off since stay exactly as they are — the sheet's
+        // defaults must not overwrite them. What is left to do is the
+        // download, which is how "Not on this phone — hold to reload" (and a
+        // newer version with the same permissions) lands.
+        let keep_grants = reviewed.installed && reviewed.unreviewed.is_empty();
         let record = Install {
             npub: addr.author.to_bech32().unwrap_or_default(),
             d_tag: addr.d_tag.clone(),
@@ -1620,7 +1647,9 @@ impl AppRuntime {
         // declares more than was reviewed. Its bytes are already here, so
         // the answer is recorded now.
         let Some(manifest) = reviewed.manifest.clone() else {
-            record.apply(&content);
+            if !keep_grants {
+                record.apply(&content);
+            }
             clear_napplet_review(&self.napplet_review, pointer);
             rt.spawn(async move { content.refresh_napplet_status().await });
             return;
@@ -1651,7 +1680,11 @@ impl AppRuntime {
             }
             match ingested {
                 Ok(_) => {
-                    record.apply(&content);
+                    if keep_grants {
+                        tracing::info!("{} downloaded again; grants kept", record.pointer);
+                    } else {
+                        record.apply(&content);
+                    }
                     // The question has been answered and the app is here: the
                     // sheet goes away.
                     clear_napplet_review(&review, &record.pointer);
@@ -2750,6 +2783,10 @@ impl NappletOpenRequest {
                 pointer: self.pointer.clone(),
                 loading: false,
                 installing: false,
+                installed: true,
+                // It opened, so its files are here.
+                ready: true,
+                unreviewed: opened.unreviewed.clone(),
                 title: opened.title.clone().unwrap_or_default(),
                 description: String::new(),
                 requires,
@@ -3561,11 +3598,186 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Review says whether the napplet is already in the Library — the same
+    /// author and `d` tag — and, when it is, what the reviewed manifest would
+    /// add that the installed copy never asked about.
+    #[test]
+    fn a_review_knows_whether_the_napplet_is_installed() {
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = temp_dir("review-installed");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let content = rt.content.as_ref().unwrap();
+        let npub = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        content.add_napplet_to_library(
+            &npub,
+            Some("chat"),
+            Some("Chat"),
+            "shell-host",
+            crate::napplet::effective_grants(&["relay".to_string()]),
+            vec!["relay".to_string()],
+            &format!("{npub}:chat"),
+            0,
+        );
+        let standing = |pointer: &str, requires: &[&str]| {
+            let addr = crate::napplet::NappletAddr::parse(pointer).unwrap();
+            let requires: Vec<String> = requires.iter().map(|r| r.to_string()).collect();
+            crate::napplet::library_standing(content, &addr, &requires)
+        };
+
+        // Installed, and the manifest asks for nothing new.
+        assert_eq!(
+            standing(&format!("{npub}:chat"), &["relay"]),
+            (true, vec![])
+        );
+        // Installed, and an update declares more: still something to review.
+        assert_eq!(
+            standing(&format!("{npub}:chat"), &["relay", "mesh"]),
+            (true, vec!["mesh".to_string()])
+        );
+        // A domain the user switched off is a decision, not something new.
+        let mut grants = content.napplet_grants(&npub, Some("chat")).unwrap();
+        grants.set("mesh", false);
+        content.set_napplet_grants(&npub, Some("chat"), grants);
+        assert_eq!(
+            standing(&format!("{npub}:chat"), &["relay", "mesh"]),
+            (true, vec![])
+        );
+        // Another `d` tag from the same author is another napplet.
+        assert_eq!(
+            standing(&format!("{npub}:other"), &["relay"]),
+            (false, vec![])
+        );
+        // And a stranger's is not installed at all.
+        let stranger = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        assert_eq!(
+            standing(&format!("{stranger}:chat"), &["relay"]),
+            (false, vec![])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Add on an installed napplet with nothing new to review, and no fresh
+    /// manifest to download, records nothing — the user's switches since
+    /// install stay as they are — and closes the sheet.
+    #[test]
+    fn adding_an_installed_napplet_again_changes_nothing() {
+        use crate::content::LibraryKind;
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = temp_dir("install-already-installed");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let npub = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        let pointer = format!("{npub}:chat");
+        let content = rt.content.clone().unwrap();
+        content.add_napplet_to_library(
+            &npub,
+            Some("chat"),
+            Some("Chat"),
+            "shell-host",
+            vec!["shell".to_string()],
+            vec!["relay".to_string()],
+            &pointer,
+            0,
+        );
+        let mut review = review_for(&pointer, false);
+        review.installed = true;
+        review.requires = vec!["relay".to_string()];
+        *rt.napplet_review.lock().unwrap() = Some(review);
+
+        rt.dispatch(NativeAppAction::InstallNapplet {
+            pointer: pointer.clone(),
+            granted: vec!["shell".to_string(), "relay".to_string()],
+        });
+
+        assert!(rt.napplet_review.lock().unwrap().is_none());
+        let item = content
+            .library_snapshot()
+            .into_iter()
+            .find(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("chat"))
+            .unwrap();
+        assert_eq!(
+            item.granted,
+            vec!["shell".to_string()],
+            "the grants were rewritten"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Not on this phone — hold to reload" goes through the review sheet:
+    /// an installed napplet with nothing new to review still downloads, and
+    /// the user's grants are left as they are.
+    #[test]
+    fn reloading_an_installed_napplet_downloads_and_keeps_grants() {
+        use crate::content::LibraryKind;
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = temp_dir("reload-installed");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let keys = nostr::Keys::generate();
+        let npub = keys.public_key().to_bech32().unwrap();
+        let pointer = format!("{npub}:chat");
+        let content = rt.content.clone().unwrap();
+        content.add_napplet_to_library(
+            &npub,
+            Some("chat"),
+            Some("Chat"),
+            "shell-host",
+            vec!["shell".to_string()],
+            vec!["relay".to_string()],
+            &pointer,
+            0,
+        );
+        let manifest = nostr::EventBuilder::new(nostr::Kind::Custom(35129), "")
+            .tag(nostr::Tag::identifier("chat"))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut review = review_for(&pointer, false);
+        review.installed = true;
+        review.requires = vec!["relay".to_string()];
+        review.manifest = Some(manifest);
+        *rt.napplet_review.lock().unwrap() = Some(review);
+
+        rt.dispatch(NativeAppAction::InstallNapplet {
+            pointer: pointer.clone(),
+            granted: vec!["shell".to_string(), "relay".to_string()],
+        });
+
+        // The download started rather than being dropped: the sheet stays up,
+        // "Adding…" (or already reporting how the download went), where a
+        // refused reload closes it on the spot.
+        let started = rt.napplet_review.lock().unwrap().clone();
+        assert!(
+            started
+                .as_ref()
+                .is_some_and(|r| r.installing || !r.error.is_empty()),
+            "an installed napplet's reload was refused: {started:?}"
+        );
+        // ...and nothing it records can touch the grants.
+        let item = content
+            .library_snapshot()
+            .into_iter()
+            .find(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("chat"))
+            .unwrap();
+        assert_eq!(item.granted, vec!["shell".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn review_for(pointer: &str, loading: bool) -> crate::napplet::NappletReview {
         crate::napplet::NappletReview {
             pointer: pointer.to_string(),
             loading,
             installing: false,
+            installed: false,
+            ready: false,
+            unreviewed: Vec::new(),
             title: String::new(),
             description: String::new(),
             requires: Vec::new(),

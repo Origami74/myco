@@ -101,7 +101,7 @@ big fields, by layer:
 | `node`, `ble`, `bleAdverts`, `blePeers`, `wifiAware`, `peers` | 4 | node status; per-lane radio status; the merged per-peer diagnostics rows (state, transport, every multi-path link, RTT, attempts) |
 | `circle`, `reachableNpubs`, `pendingPairRequests`, `outboundPairs` | 2 | the Circle; members with a live relay connection right now; incoming requests awaiting an answer; invites waiting |
 | `sites`, `library`, `discovered`, `updateCheck` | 1 | per-nsite sync state (`syncing` / `ready` / `unreachable` / `incomplete`, files pulled/total, staged update); every installed app with `kind`, `granted`, `pointer`; "around me" results |
-| `nappletReview`, `nappletDomains`, `nappletMeshReach` | 1 | a fetched napplet awaiting install review (loading / requires / grants / error / holder); every grantable NAP; the user's mesh caps |
+| `nappletReview`, `nappletDomains`, `nappletMeshReach` | 1 | a fetched napplet awaiting install review (loading / installing / requires / grants / error / holder; `installed` when it is already in the Library, `ready` when its files are on this phone too, and `unreviewed` — what an installed copy's update would add that was never reviewed; Add is offered when not installed or `unreviewed` is non-empty, "Download again" when installed but not `ready`, and neither otherwise); every grantable NAP; the user's mesh caps |
 | `cache`, `relayBackend`, `blobBackend`, `pendingRelayUrl`, `pendingBlossomUrl`, `offlineOnly` | 3 | store counts; custom backends and their health |
 | `fileTransfers`, `speedtest` | 2 / dev | native file sharing; the Dev speedtest |
 

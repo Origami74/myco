@@ -67,6 +67,14 @@ data class NappletReview(
     /** The user said yes and the app is downloading; nothing is downloaded
      *  before that. The sheet shows "Adding…" and closes when it lands. */
     val installing: Boolean = false,
+    /** Already in the Library (same author and `d` tag). */
+    val installed: Boolean = false,
+    /** Installed and its files are on this phone. An installed napplet that is
+     *  not comes through review to be downloaded again. */
+    val ready: Boolean = false,
+    /** For an installed napplet: what this version would grant that was never
+     *  reviewed — an update declaring more. Empty when not installed. */
+    val unreviewed: List<String> = emptyList(),
     val title: String,
     val description: String,
     /** What it declared it needs — a statement of intent, not what it gets. */
@@ -437,6 +445,11 @@ data class AppState(
                 pointer = reviewJson.optString("pointer"),
                 loading = reviewJson.optBoolean("loading"),
                 installing = reviewJson.optBoolean("installing"),
+                installed = reviewJson.optBoolean("installed"),
+                ready = reviewJson.optBoolean("ready"),
+                unreviewed = reviewJson.optJSONArray("unreviewed")?.let { u ->
+                    (0 until u.length()).map { u.optString(it) }
+                }.orEmpty(),
                 title = reviewJson.optString("title"),
                 description = reviewJson.optString("description"),
                 requires = reviewJson.optJSONArray("requires")?.let { r ->

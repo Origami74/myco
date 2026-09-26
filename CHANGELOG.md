@@ -81,6 +81,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The install review knows an app is already installed.** Opening a
+  napplet you already have — from a link, a scan, or another app — greys
+  out Add and says "Already installed". An installed app that is not on
+  this phone ("hold to reload") offers "Download again" instead, and an
+  installed app whose update asks for more still offers Add, to agree to the
+  new permissions. Either way the permissions you switched since stay as you
+  left them.
 - The user key napplets publish as is created on first launch, not the
   first time a napplet opens. Settings' "Identity" row is now "Device name",
   to keep it apart from the account.

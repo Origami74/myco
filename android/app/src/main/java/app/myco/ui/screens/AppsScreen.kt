@@ -848,10 +848,33 @@ internal fun NappletReviewSheet(
 
             }
 
+            // Already in the Library with nothing new to agree to: adding it
+            // again would change nothing, so say so rather than offer it. An
+            // installed app whose update declares more still gets Add — that
+            // is how the new permissions are agreed to. One that is installed
+            // but not on this phone ("hold to reload") gets its download
+            // instead; the grants it has are kept either way.
+            val alreadyInstalled = review.installed && review.unreviewed.isEmpty()
+            val reinstall = alreadyInstalled && !review.ready
+
             Spacer(Modifier.height(20.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onDismiss, enabled = !review.installing) { Text("Not now") }
+                TextButton(onClick = onDismiss, enabled = !review.installing) {
+                    Text(if (alreadyInstalled) "Close" else "Not now")
+                }
                 Spacer(Modifier.weight(1f))
+                if (alreadyInstalled && !reinstall) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Button(enabled = false, onClick = {}) { Text("Add to my apps") }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Already installed",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    return@Row
+                }
                 // Review ran on the manifest alone; the app itself is only
                 // downloaded once the user says yes, and the sheet closes when
                 // it has landed.
@@ -865,9 +888,9 @@ internal fun NappletReviewSheet(
                             strokeWidth = 2.dp,
                         )
                         Spacer(Modifier.size(8.dp))
-                        Text("Adding…")
+                        Text(if (reinstall) "Downloading…" else "Adding…")
                     } else {
-                        Text("Add to my apps")
+                        Text(if (reinstall) "Download again" else "Add to my apps")
                     }
                 }
             }
