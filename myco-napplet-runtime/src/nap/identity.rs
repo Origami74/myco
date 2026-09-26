@@ -22,15 +22,18 @@ pub async fn handle(ctx: &NapContext, message: &Envelope) -> Vec<Envelope> {
         "getPublicKey" => vec![get_public_key(ctx, message).await],
         "getProfile" => vec![get_profile(ctx, message).await],
         "getRelays" => vec![get_relays(ctx, message).await],
-        // Every other query is defined by the NAP but not answered yet. An
-        // empty answer is the truthful one for a runtime with nothing to say —
-        // and it is the shape the spec gives for "nothing found", so a napplet
-        // handles it on a path it already has.
-        "getFollows" | "getMutes" | "getBlocked" | "getBadges" | "getZaps" | "getList" => {
-            vec![message
-                .to_result()
-                .with_field("result", serde_json::Value::Array(Vec::new()))]
-        }
+        "getFollows" => vec![get_p_tags(ctx, message, Kind::ContactList).await],
+        "getMutes" => vec![get_p_tags(ctx, message, Kind::MuteList).await],
+        // Defined by the NAP but not answered yet. An empty answer, in the
+        // field the spec names for each, is the truthful one for a runtime
+        // with nothing to say — and the shape the spec gives for "nothing
+        // found", so a napplet handles it on a path it already has. A
+        // generic `result` field would resolve the napplet's promise to
+        // `undefined`, which it cannot iterate.
+        "getBlocked" => vec![empty(message, "pubkeys")],
+        "getList" => vec![empty(message, "entries")],
+        "getZaps" => vec![empty(message, "zaps")],
+        "getBadges" => vec![empty(message, "badges")],
         // Not an identity query at all: unrecognized, so silent (NIP-5D).
         _ => Vec::new(),
     }
@@ -47,7 +50,47 @@ async fn get_public_key(ctx: &NapContext, message: &Envelope) -> Envelope {
         Ok(pk) => pk.to_hex(),
         Err(_) => String::new(),
     };
-    message.to_result().with_field("publicKey", pubkey)
+    message.to_result().with_field("pubkey", pubkey)
+}
+
+fn empty(message: &Envelope, field: &str) -> Envelope {
+    message
+        .to_result()
+        .with_field(field, serde_json::Value::Array(Vec::new()))
+}
+
+/// The `p` tags of the user's newest `kind` list — follows (3) or mutes
+/// (10000) — as `pubkeys`, from the local store. Empty when logged out or
+/// when this device has no such list.
+async fn get_p_tags(ctx: &NapContext, message: &Envelope, kind: Kind) -> Envelope {
+    let Ok(pubkey) = ctx.signer.public_key().await else {
+        return empty(message, "pubkeys");
+    };
+    let filter = Filter::new().kind(kind).author(pubkey).limit(1);
+    let newest = ctx
+        .relay
+        .query(&[filter])
+        .await
+        .ok()
+        .and_then(|events| events.into_iter().max_by_key(|e| e.created_at));
+    let mut seen = std::collections::HashSet::new();
+    let pubkeys: Vec<serde_json::Value> = newest
+        .map(|event| {
+            event
+                .tags
+                .iter()
+                .filter_map(|t| match t.as_slice() {
+                    [k, v, ..] if k == "p" && v.len() == 64 => Some(v.to_ascii_lowercase()),
+                    _ => None,
+                })
+                .filter(|v| seen.insert(v.clone()))
+                .map(serde_json::Value::String)
+                .collect()
+        })
+        .unwrap_or_default();
+    message
+        .to_result()
+        .with_field("pubkeys", serde_json::Value::Array(pubkeys))
 }
 
 /// The user's kind 0, or `null` when there is none.
@@ -161,7 +204,7 @@ mod tests {
         assert_eq!(reply.msg_type, "identity.getPublicKey.result");
         assert_eq!(reply.id.as_deref(), Some("i1"));
         assert_eq!(
-            reply.field("publicKey").unwrap().as_str().unwrap(),
+            reply.field("pubkey").unwrap().as_str().unwrap(),
             signer.public_key().to_hex()
         );
     }
@@ -190,8 +233,67 @@ mod tests {
             fetcher: Arc::new(crate::seams::NoFetcher),
         };
         let reply = call(&ctx, "getPublicKey").await;
-        assert_eq!(reply.field("publicKey").unwrap().as_str().unwrap(), "");
+        assert_eq!(reply.field("pubkey").unwrap().as_str().unwrap(), "");
         assert!(reply.field("error").is_none(), "absence is not a failure");
+    }
+
+    /// The spec names the field `pubkey`; the reference shim reads exactly
+    /// that, and a napplet handed `publicKey` sees nobody logged in.
+    #[tokio::test]
+    async fn the_public_key_travels_in_the_field_the_spec_names() {
+        let (ctx, _) = test_context();
+        let reply = call(&ctx, "getPublicKey").await;
+        assert!(reply.field("pubkey").is_some());
+        assert!(reply.field("publicKey").is_none());
+    }
+
+    #[tokio::test]
+    async fn follows_come_from_the_users_newest_contact_list() {
+        let keys = Keys::generate();
+        let relay = Arc::new(MemRelay::new());
+        let friend = Keys::generate().public_key();
+        let contacts = EventBuilder::new(Kind::ContactList, "")
+            .tags([
+                nostr::Tag::public_key(friend),
+                nostr::Tag::public_key(friend),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        relay.publish(contacts).await.unwrap();
+        let (mut ctx, _) = test_context();
+        ctx.signer = Arc::new(TestSigner::with_keys(keys));
+        ctx.relay = relay;
+
+        let reply = call(&ctx, "getFollows").await;
+        assert_eq!(
+            reply.field("pubkeys").unwrap(),
+            &serde_json::json!([friend.to_hex()])
+        );
+        let mutes = call(&ctx, "getMutes").await;
+        assert_eq!(mutes.field("pubkeys").unwrap(), &serde_json::json!([]));
+    }
+
+    /// Every list query answers in the spec's field — an empty list when
+    /// there is nothing to say — never a generic `result` a napplet cannot
+    /// iterate.
+    #[tokio::test]
+    async fn identity_queries_use_the_spec_field_names() {
+        let (ctx, _) = test_context();
+        for (action, field) in [
+            ("getFollows", "pubkeys"),
+            ("getBlocked", "pubkeys"),
+            ("getList", "entries"),
+            ("getZaps", "zaps"),
+            ("getBadges", "badges"),
+        ] {
+            let reply = call(&ctx, action).await;
+            assert_eq!(
+                reply.field(field),
+                Some(&serde_json::json!([])),
+                "{action} answered {reply:?}"
+            );
+            assert!(reply.field("result").is_none());
+        }
     }
 
     #[tokio::test]
@@ -356,7 +458,7 @@ mod tests {
         assert_eq!(replies.len(), 1);
         assert!(replies[0].field("error").is_some());
         assert!(
-            replies[0].field("publicKey").is_none(),
+            replies[0].field("pubkey").is_none(),
             "a refusal leaked the key"
         );
     }
