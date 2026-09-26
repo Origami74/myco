@@ -114,9 +114,15 @@ pub enum NativeAppAction {
     /// Re-read the account's profile from the local store (a napplet may have
     /// published a new one).
     AccountRefresh,
-    /// Check online relays for newer versions of installed nsites and stage/apply
-    /// them (`docs/design/nsite/nsite-updates.md`). Spawn-not-block.
-    CheckNsiteUpdates,
+    /// Check relays for newer versions of installed nsites and napplets and
+    /// stage/apply them (`docs/design/nsite/nsite-updates.md`). Spawn-not-block.
+    /// `auto` marks a foreground/periodic trigger: throttled and silent
+    /// (`update_gate.rs`). Absent, it is the user's "Check for updates", which
+    /// always runs and reports its result.
+    CheckNsiteUpdates {
+        #[serde(default)]
+        auto: bool,
+    },
     /// Clear the local relay + Blossom + Library + site status (dev/test reset).
     /// Content only — the device identity (and the Circle) are untouched.
     WipeStores,
@@ -212,4 +218,24 @@ pub enum NativeAppAction {
     /// Forget a finished transfer after the Android side has safely published
     /// the received file (or after a terminal sender-side outcome).
     ForgetFileTransfer { transfer_id: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The existing "Check for updates" button sends no `auto`; it must stay
+    /// a manual check.
+    #[test]
+    fn check_nsite_updates_defaults_to_manual() {
+        let parse = |json: &str| serde_json::from_str::<NativeAppAction>(json).unwrap();
+        assert!(matches!(
+            parse(r#"{"type":"check_nsite_updates"}"#),
+            NativeAppAction::CheckNsiteUpdates { auto: false }
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"check_nsite_updates","auto":true}"#),
+            NativeAppAction::CheckNsiteUpdates { auto: true }
+        ));
+    }
 }

@@ -63,7 +63,7 @@ dispatch(actionJson) → stateJson
 | `set_napplet_grant` | `pointer`: String, `domain`: String, `allowed`: bool | Allow or withdraw one capability for an installed napplet, from its sheet. |
 | `set_napplet_mesh_reach` | `publishTtl`: u8, `subscribeTtl`: u8 | Cap how far a napplet may reach over the mesh (NAP-MESH): the most hops a `mesh.publish` and a `mesh.subscribe` backlog pull may ask for. |
 | `dismiss_napplet_review` | — | Close the install-review screen without installing. |
-| `check_nsite_updates` | — | Check online relays for newer versions of installed nsites and stage/apply them (`docs/design/nsite/nsite-updates.md`). |
+| `check_nsite_updates` | `auto`: bool (default `false`) | Check relays for newer versions of installed nsites and napplets and stage/apply them (`docs/design/nsite/nsite-updates.md` §3.1). `auto: true` is an automatic trigger: skipped if a check started in the last 30 min or is running, and reports no result. Absent or `false` is the user's button: always runs (joins a running check) and bumps `updateCheck.generation`. |
 | `wipe_stores` | — | Clear the local relay + Blossom + Library + site status (dev/test reset). |
 | `wipe_cache` | — | Clear cached relay events + Blossom blobs **except** those backing pinned nsites (Settings → Storage → "Delete cache"). |
 | `add_to_circle` | `npub`: String, `name`: String | Add a paired peer to the **Circle**: the contact list of devices we pull nsites from over the mesh. |

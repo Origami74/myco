@@ -623,7 +623,9 @@ landing in the relay with no blob behind it — pulled by a subscription, floode
 — does not displace the one that opens. The pin moves when a fetch brings the new bytes:
 "Check for updates" refreshes every installed napplet from its pointer's relays beside
 the nsite check (`NappletHost::refresh`, bytes first, manifest, then pin), and the tile
-reports `ready` or `missing` from the same pin. An open window keeps its session — it
+reports `ready` or `missing` from the same pin. The same check also runs on its own, on
+foreground and every 6 h, through the throttle in `nsite-updates.md` §3.1; under
+offline-only the napplet half is skipped (counted as checked, none updated). An open window keeps its session — it
 pinned the aggregate at open — and sees the new version at its next launch. Storage
 across versions is still open: napplets have no storage capability yet.
 

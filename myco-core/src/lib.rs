@@ -85,6 +85,7 @@ mod peer_relay;
 mod platform_peers;
 mod runtime;
 mod state;
+mod update_gate;
 // The bridge is pumped only by the Android VpnService (via tun_bridge_jni) and
 // installed only on Android, so its fns read as dead on the host build.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]

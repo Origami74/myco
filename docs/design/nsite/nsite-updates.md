@@ -126,10 +126,45 @@ Two triggers, both feeding the same staging pipeline:
 
 - **Manual.** A "Check for updates" affordance (app long-press sheet + a Settings
   entry) dispatches `CheckNsiteUpdates`.
-- **Background.** A throttled check when the app comes to the foreground (and on
-  a long interval while foregrounded), realising nsite-layer.md §5.4's "eager
-  refresh of pinned sites". Throttle: at most once per site per **TBD: ~1 h**;
-  never blocks the UI (spawn-not-block, like discovery).
+- **Background.** An automatic check when the app comes to the foreground and
+  every **6 h** while the process lives, realising nsite-layer.md §5.4's "eager
+  refresh of pinned sites". Both dispatch `CheckNsiteUpdates { auto: true }`
+  from `UpdateChecks.kt`. Never blocks the UI (spawn-not-block, like
+  discovery).
+
+Both triggers pass through **one gate** in the core (`update_gate.rs`), so the
+rules hold however many triggers fire:
+
+- **Never two at once.** While a check runs, another is not started.
+- **Automatic checks are throttled.** One is skipped if any check started
+  within the last **30 min**. Foregrounding happens on every app switch; the
+  throttle caps the automatic load on public relays at two checks an hour.
+- **Manual always runs.** It bypasses the throttle. If a check is already
+  running, the press joins it instead of starting a second: that check then
+  reports its result.
+- **Only manual checks report.** An automatic check applies what it finds but
+  fires no toast; the result toast is for the user who asked.
+
+Timing choices:
+
+- **Foreground: 20 s after coming to the foreground**, cancelled if the app
+  leaves first. The mesh gets to reconnect, so the check finds Circle peers to
+  ask, and a quick app switch costs nothing.
+- **Periodic: 6 h.** Updates are rare, deliberate publishes, and a nearby peer
+  often pushes one before any poll would (§4). Four checks a day keep a
+  long-lived process current without polling from a phone in a pocket.
+- **Per process.** The gate lives in memory, so a new process starts open:
+  a cold start always checks, 20 s after the app comes up.
+- **Background runs.** The BLE foreground service (`BleService`) keeps the
+  process alive while the app is in the background, so the 6 h timer keeps
+  running there too. Without it, the process dies and the next foreground
+  check is the next one.
+- **No wake-ups.** There is no alarm or WorkManager job. The timer is a
+  coroutine delay, which stops while the phone sleeps. The throttle uses wall
+  time, so a check before bed does not look recent in the morning.
+- **Offline-only** still checks: the nsite half asks Circle peers' mesh relays
+  only, and the napplet half has nowhere to ask (§7.2 of
+  [napplet-runtime.md](../napplet/napplet-runtime.md)).
 
 ### 3.2 Check = one bounded subscription per relay
 
@@ -396,7 +431,8 @@ It becomes **"App settings"** — a per-app window that hosts:
    gossiper applies the interest-aware forward policy (§4.1) — not-interested
    forwards immediately, interested downloads-then-forwards (bounded) and activates
    on completion. No relay interceptor.
-5. **P-U5 — background eager refresh.** Throttled foreground checks.
+5. **P-U5 — background eager refresh.** Throttled foreground and periodic
+   checks (§3.1). Built.
 
 ---
 
@@ -405,7 +441,9 @@ It becomes **"App settings"** — a per-app window that hosts:
 - **History bound N** (§6.1) — last 3–5 versions + pinned?
 - **Interested-forward bound** (§4.1) — how long to best-effort download blobs
   before forwarding the manifest anyway (so the wave never stalls)?
-- **Throttle/interval** for background checks (§3.1) — start ~1 h/site?
+- **Throttle/interval** for background checks (§3.1) — settled at 30 min
+  global throttle, 6 h period. Per-site throttling is not needed: one check
+  covers every site in one REQ per relay.
 - **`no-store` sufficiency** for HTML across activation (§5.3).
 - **Manifest relay hints** (§3.2) — where the author's update relays come from
   (NIP-65 list vs. tags on the manifest), and the fallback when none are listed
