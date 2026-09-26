@@ -14,6 +14,8 @@
 //   2. carry messages both ways,
 //   3. verify MessageEvent.source on every inbound message,
 //   4. hand everything else to Rust.
+// It also keeps keyboard focus in the napplet's frame, where the back
+// gesture arrives as an Escape keydown.
 //
 // It holds no key, opens no connection, and makes no policy decision. Every
 // capability is implemented on the Rust side; this page cannot grant anything
@@ -100,7 +102,13 @@
     frame.setAttribute('sandbox', command.sandbox);
     frame.setAttribute('referrerpolicy', 'no-referrer');
     frame.srcdoc = command.artifact;
+    // Keyboard focus lives in the napplet's frame, not this page: the back
+    // gesture arrives as an Escape keydown, and the napplet has to be the one
+    // that hears it (NappletActivity.onBack). Focused again on load, since
+    // the srcdoc document replaces the initial one.
+    frame.addEventListener('load', function () { frame.focus(); });
     document.body.appendChild(frame);
+    frame.focus();
   }
 
   // --- napplet -> shell -------------------------------------------------

@@ -321,6 +321,44 @@ navigate itself into a shell origin and inherit the channel.
 Sessions are keyed by `(dTag, aggregateHash, windowId)`. Composing several napplets into
 one window is deferred, but hosting the napplet inside a shell page keeps it reachable.
 
+#### The back gesture
+
+A napplet has no history for back to walk. Its frame has an opaque origin, where
+`history.pushState` throws, and the shell never navigates. No NAP defines "back"
+either. So Myco delivers the system back gesture as what it already means on the web:
+an **Escape keydown**, sent into the napplet's document.
+
+The contract for napplet authors:
+
+- **You handled it** (closed a page, a dialog, a drawer): call `preventDefault()` on the
+  `keydown`. The napplet stays open.
+- **You did not**: leave it unhandled at your top level, and Myco closes the napplet.
+
+This is plain, portable DOM behaviour (Escape = dismiss), so a napplet that already
+closes its dialogs on Escape gets back for free. It needs no new NAP.
+
+Blink's own default actions for Escape consume it too, so they count as handled: closing
+a modal `<dialog>` (its `cancel`), closing an open popover, a `CloseWatcher`, and
+clearing a non-empty `<input type=search>`. A napplet with one of those open goes back
+by closing it, without any script of its own.
+
+**Back cannot be trapped.** A napplet that consumes every Escape would otherwise keep
+the user in it. Myco offers at most three backs in a row to a napplet that consumes
+them; with no touch on the napplet since, the fourth back closes the window without
+asking. Three is enough to walk back up a few nested pages; a touch starts the count
+over.
+
+How the window tells the two apart: `NappletActivity` dispatches a real
+`KEYCODE_ESCAPE` down and up into the WebView. A key the page does not consume comes
+back through `WebViewClient.onUnhandledKeyEvent` as the same `KeyEvent` object; an
+unhandled key-down from its own back closes the window, and a consumed one is never
+reported. The shell keeps keyboard focus in the napplet's frame so the napplet is the
+one that hears it. If focus somehow sits in the shell, the shell does not consume
+Escape, so back closes the napplet as it always did. Back also closes the window
+directly while the napplet is still opening, after a renderer crash, and when the
+renderer stays unresponsive after a back. The review sheet and the link dialog take
+back before the napplet does; an open keyboard closes first.
+
 ---
 
 ## 6. Delivery

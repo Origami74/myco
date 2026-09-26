@@ -75,6 +75,13 @@ mod tests {
         }
     }
 
+    /// Back arrives as an Escape keydown, and only a focused napplet frame
+    /// hears it: with focus left in the shell, back always closes the window.
+    #[test]
+    fn the_page_focuses_the_napplet_frame() {
+        assert!(shell_page().contains("frame.focus()"));
+    }
+
     /// NAP-RESOURCE bytes cross the JSON channel as base64 and reach the
     /// napplet as a `Blob` — built here, typed by the runtime's sniffed mime.
     #[test]
