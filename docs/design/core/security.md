@@ -334,7 +334,7 @@ surface is the ordinary web-content surface, scoped down:
 - The WebView never resolves `.fips`, which keeps nsite JS off the sync
   transport. What it *can* reach is `ws://localhost:4870` — the embedded relay,
   as any local web page could. Today an event published there is gossiped to
-  the Circle at the default hop budget; that is being removed (roadmap N2), so
+  the Circle at the default hop budget; that is being removed (roadmap N3), so
   that reaching the room is a *granted* capability (below) rather than a side
   effect of a loopback socket.
 - No `file://`, no Myco chrome to redirect, no shared navigation surface.

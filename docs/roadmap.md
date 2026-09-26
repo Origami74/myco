@@ -49,27 +49,64 @@ gossip hops); Linux interop (P6) as a tested pair; external-browser access
 
 Ordered by what unblocks what. Each is its own PR or short series.
 
-### N1 — Login
+### N1 — Account and login (nsec)
 
-**Goal.** Let a person bring their own Nostr identity instead of the generated
-guest user key, so what a napplet publishes is *them*. Two ways, one seam
-behind the runtime's `Signer`:
+**Goal.** Every install has a Nostr identity from the first launch, the person
+can see it, take its key out, log out, and log in as someone else. What a
+napplet publishes is then *them*.
 
-- **Paste an `nsec`** (or scan it) into Settings › Identity. Stored like the
-  device key; replaces the guest user key; the guest profile is not re-published.
-- **Amber** (NIP-55, `nostrsigner:` intents): the key never enters Myco.
-  `Signer::sign` and `public_key` round-trip through the Amber app;
-  `publishEncrypted` becomes possible the same way. Falls back to the guest key
-  when Amber is absent or declines.
+- **First launch.** The user key is generated at startup, not on first napplet
+  use; existing installs without one get it on their next launch. It is still
+  a separate key from the device key.
+- **Guest profile.** A new identity publishes a kind 0 named
+  `Myco Guest NNNNN` (the five-digit suffix stays), about
+  "I'm a guest user of the Myco app. Join me at https://getmyco.app". Existing
+  guests are not re-published.
+- **Guest picture.** The Myco logo, bundled in the APK as one compressed base
+  image, with its gradient recoloured from the npub so guests look different
+  from each other. Generated on device, stored in the local Blossom and
+  uploaded to a few public Blossom servers (Primal and others); `picture`
+  names it by sha256.
+- **Settings header.** The top of Settings shows the logged-in user (avatar,
+  name, short npub), like the account row in Android's own Settings. Tapping
+  it opens the **Account** page.
+- **Reveal the nsec.** On the Account page, as other Nostr apps do. A warning
+  dialog comes first: never share this key with anyone; whoever has it *is*
+  you. Then show and copy.
+- **Logout is a real logout.** The key is removed from the device; napplets
+  have no identity until the person logs in again. Before logout, the app
+  offers to reveal the nsec, because a guest key that was never copied out is
+  gone for good.
+- **Login** offers three options: **generate a new identity** (a new guest),
+  **log in with nsec** (paste or scan), and **log in with a signer** (Amber, N2).
 
-**Exit criterion.** A napplet's `identity.getPublicKey()` returns the chosen
-key; `relay.publish` produces an event signed by it; switching back to guest
-works; with Amber, no key material is ever on disk or in memory in Myco.
+**Exit criterion.** A fresh install shows a guest account in the Settings
+header, and its kind 0 and picture are visible from a public Nostr client.
+The nsec can be revealed after a warning. Logout leaves no user key on disk.
+Logging in with a pasted nsec makes `identity.getPublicKey()` return that key,
+and `relay.publish` signs with it.
 
 **Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.1
 (two identities) · [identity-pairing.md](./design/core/identity-pairing.md) §2 (storage).
 
-### N2 — Drop mesh from nsites
+### N2 — Login with Amber
+
+**Goal.** The third login option from N1, straight after it. The key lives in
+Amber (NIP-55); it never enters Myco. The runtime's `Signer` gets a second
+implementation: `public_key` comes from Amber once, via a `nostrsigner:`
+intent. Signing goes through Amber's content resolver with no UI when the
+user chose "remember", and through an intent otherwise. `publishEncrypted`
+becomes possible the same way. If Amber is uninstalled or refuses, the
+account shows as logged out; Myco does not quietly switch back to a guest.
+
+**Exit criterion.** Logged in with Amber, a napplet's `relay.publish`
+produces an event signed by the Amber key. No key material is ever on disk
+or in memory in Myco. Logout forgets the Amber pubkey.
+
+**Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.1 ·
+[NIP-55](https://github.com/nostr-protocol/nips/blob/master/55.md).
+
+### N3 — Drop mesh from nsites
 
 **Goal.** An nsite talks to `ws://localhost:4870` like any relay; today an
 event it publishes there is also flooded to the Circle at the default hop
@@ -88,7 +125,7 @@ ported to a napplet or documented as local-only.
 [nsite-permissions.md](./design/nsite/nsite-permissions.md) §3 (the `Origin`
 question this closes).
 
-### N3 — Notifications
+### N4 — Notifications
 
 **Goal.** NAP-NOTIFY for napplets — `notify.show` from a napplet becomes an
 Android notification in Myco's channel, tapping it deep-links back into the
@@ -104,12 +141,6 @@ opens the napplet.
 
 **Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) S3 ·
 [NAP-NOTIFY](https://github.com/napplet/naps/pull/11) (registry draft).
-
-### N4 — Amber login
-
-Folded into N1 as its second path; listed here because it is the one that
-matters to people who already have an identity. Ships after the paste path,
-on the same `Signer` seam.
 
 ### N5 — An app store napplet in place of the Discover tab
 
@@ -193,7 +224,7 @@ Each its own milestone with its own design pass. Roughly in order of pull.
   rasterization) — [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2b–S4.
 - **Background subscriptions.** A Myco-side subscription that survives the
   napplet's window closing, so a doorbell can ring with the app closed. Needs
-  the notification path (N3) and a battery story.
+  the notification path (N4) and a battery story.
 - **Relay read-auth.** The relay is open-read to Circle members; NIP-42 `AUTH`
   and per-peer read scoping would let a member hold private apps —
   [security.md](./design/core/security.md) §3.
