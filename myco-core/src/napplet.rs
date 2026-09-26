@@ -334,9 +334,11 @@ impl LinkGate {
                 }
                 // One question at a time: a review on screen — loading,
                 // waiting for an answer, or installing — is never replaced
-                // by a napplet's say-so.
+                // by a napplet's say-so. An added one is: its question has
+                // been answered, and a confirmation the user has not closed
+                // yet must not stop every napplet link until they do.
                 if let Some(slot) = &self.review {
-                    if slot.lock().unwrap().is_some() {
+                    if slot.lock().unwrap().as_ref().is_some_and(|r| !r.added) {
                         return Err(BLOCKED_BY_POLICY);
                     }
                 }
@@ -1342,6 +1344,15 @@ pub struct NappletReview {
     /// is the wait between "Add" and the app landing on the grid.
     #[serde(default)]
     pub installing: bool,
+    /// The download landed and the answer was recorded: the sheet stays up
+    /// saying so, and offers to open the app, until the user closes it
+    /// (`DismissNappletReview`). The other fields describe the review as it
+    /// was answered — `installed` true with nothing `unreviewed` means this
+    /// was a "Download again", not a first add. Unlike a review still asking,
+    /// it does not hold the slot: a napplet's `link.open` to another napplet
+    /// is admitted and its review replaces this one.
+    #[serde(default)]
+    pub added: bool,
     /// This napplet — the same author and `d` tag — is already in the
     /// Library. With nothing in [`Self::unreviewed`], adding it again would
     /// change nothing, so the sheet says it is installed instead of offering
@@ -1671,6 +1682,7 @@ mod tests {
             requires: Vec::new(),
             grants: Vec::new(),
             installing: false,
+            added: false,
             installed: false,
             ready: false,
             unreviewed: Vec::new(),
@@ -1686,6 +1698,39 @@ mod tests {
             link_result(&out[0]),
             ("denied".into(), Some(BLOCKED_BY_POLICY.into()))
         );
+    }
+
+    /// An added review has been answered: it is a confirmation, not a
+    /// question, so a napplet link is admitted over it (and its fetch then
+    /// replaces it in the slot).
+    #[tokio::test]
+    async fn an_added_review_does_not_block_a_napplet_link() {
+        let pointer = napplet_naddr();
+        let slot: ReviewSlot = Arc::new(Mutex::new(Some(NappletReview {
+            pointer: pointer.clone(),
+            loading: false,
+            title: "Chat".into(),
+            description: String::new(),
+            requires: Vec::new(),
+            grants: Vec::new(),
+            installing: false,
+            added: true,
+            installed: false,
+            ready: false,
+            unreviewed: Vec::new(),
+            manifest: None,
+            error: String::new(),
+            holder: None,
+        })));
+        let (host, session) = linked_host(&["link"], slot.clone()).await;
+        let next = napplet_naddr();
+
+        let out = host
+            .frame(&session, &link_frame(&format!("nostr:{next}")))
+            .await;
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0], ToShell::ReviewNapplet { pointer: next });
+        assert_eq!(link_result(&out[1]), ("opened".into(), None));
     }
 
     /// A burst of review links admits one: the rest land inside the cooldown,

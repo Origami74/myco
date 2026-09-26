@@ -1,6 +1,8 @@
 package app.myco
 
 import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
 import android.net.Uri
@@ -48,6 +50,7 @@ import app.myco.core.NappletOpen
 import app.myco.core.NappletReview
 import app.myco.core.NativeActions
 import app.myco.ui.screens.NappletReviewSheet
+import app.myco.ui.screens.nappletLaunchTarget
 import app.myco.ui.theme.MycoTheme
 import java.io.ByteArrayInputStream
 
@@ -299,10 +302,27 @@ class NappletActivity : ComponentActivity() {
     }
 
     /**
-     * Mirror the review slot into [review] until it empties — installed,
-     * dismissed, or never filled (the fetch refused the pointer outright is
-     * still a review, with an error; an empty slot for this long means another
-     * surface already answered it).
+     * "Open" on a review this window added: close the review and start the
+     * new napplet in its own window, exactly as the Apps grid would — its own
+     * task, keyed on its pointer — leaving this one running behind it.
+     */
+    private fun openAdded(added: NappletReview) {
+        lifecycleScope.launch {
+            val library = withContext(Dispatchers.IO) {
+                runCatching { client.dispatch(NativeActions.dismissNappletReview()) }
+                runCatching { client.state().library }.getOrDefault(emptyList())
+            }
+            val (pointer, title) = nappletLaunchTarget(added, library)
+            startActivity(intent(this@NappletActivity, pointer, title))
+        }
+    }
+
+    /**
+     * Mirror the review slot into [review] until it empties — dismissed, or
+     * never filled (the fetch refused the pointer outright is still a review,
+     * with an error; an empty slot for this long means another surface already
+     * answered it). A landed install does not empty it: the sheet turns
+     * "added" and offers Open until the user closes it.
      */
     private fun watchReview() {
         reviewWatch?.cancel()
@@ -338,6 +358,11 @@ class NappletActivity : ComponentActivity() {
                         onRetry = {
                             act(NativeActions.fetchNapplet(r.pointer, r.holder))
                             watchReview()
+                        },
+                        onOpen = {
+                            reviewWatch?.cancel()
+                            review = null
+                            openAdded(r)
                         },
                         onDismiss = {
                             reviewWatch?.cancel()
@@ -789,6 +814,23 @@ class NappletActivity : ComponentActivity() {
          * update. The session still pins the hash — see the design doc §7.8.
          */
         fun documentUri(pointer: String): Uri = Uri.parse("myco://napplet/$pointer")
+
+        /**
+         * The intent that opens a napplet as its own fullscreen task — from the
+         * Apps grid, a home-screen shortcut, or an added review's Open — so all
+         * of them land in the same task rather than a second card for one app.
+         */
+        fun intent(context: Context, pointer: String, title: String): Intent =
+            Intent(context, NappletActivity::class.java).apply {
+                action = Intent.ACTION_VIEW
+                // Keyed on the addressable pointer, not the napplet's identity:
+                // its identity is its aggregate hash and changes every build, so
+                // keying the task on it would strand the Recents card on update.
+                data = documentUri(pointer)
+                putExtra(EXTRA_POINTER, pointer)
+                putExtra(EXTRA_TITLE, title)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
+            }
     }
 }
 

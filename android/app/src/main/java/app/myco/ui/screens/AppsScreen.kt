@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.HomeMax
 import androidx.compose.material.icons.filled.Info
@@ -80,6 +81,7 @@ import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.LibraryItem
 import app.myco.core.LibraryKind
+import app.myco.core.NappletAddress
 import app.myco.core.NappletReview
 import app.myco.core.NativeActions
 import app.myco.core.SiteStatus
@@ -256,6 +258,11 @@ fun AppsScreen(
             // internet fails when the sharer's link is still coming up, and
             // that is the case a retry is for.
             onRetry = { client.dispatch(NativeActions.fetchNapplet(review.pointer, review.holder)) },
+            onOpen = {
+                val (pointer, title) = nappletLaunchTarget(review, state.library)
+                client.dispatch(NativeActions.dismissNappletReview())
+                onLaunchNapplet(pointer, title)
+            },
             onDismiss = { client.dispatch(NativeActions.dismissNappletReview()) },
         )
     }
@@ -799,6 +806,7 @@ internal fun NappletReviewSheet(
     review: NappletReview,
     onInstall: (List<String>) -> Unit,
     onRetry: () -> Unit,
+    onOpen: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     // Fully expanded, never half: a half-open sheet cut the permission list
@@ -858,6 +866,42 @@ internal fun NappletReviewSheet(
                 return@Column
             }
 
+            // The app landed. The sheet stays up to say so and to offer the
+            // obvious next step — a sheet that just vanished read as nothing
+            // having happened.
+            if (review.added) {
+                val name = review.title.ifEmpty { "This app" }
+                val headline = when {
+                    !review.installed -> "$name was added to your apps"
+                    review.unreviewed.isEmpty() -> "$name was downloaded again"
+                    else -> "$name was updated"
+                }
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+                ) {
+                    NappletMark(review, added = true)
+                    Spacer(Modifier.height(20.dp))
+                    Text(
+                        headline,
+                        style = MaterialTheme.typography.titleMedium,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "It's on this phone and ready to use.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    Button(onClick = onOpen, modifier = Modifier.fillMaxWidth()) { Text("Open") }
+                    Spacer(Modifier.height(4.dp))
+                    TextButton(onClick = onDismiss) { Text("Done") }
+                }
+                return@Column
+            }
+
             // Everything above the buttons scrolls; the buttons stay put, so a
             // long description or permission list never pushes the answer off
             // screen.
@@ -873,20 +917,7 @@ internal fun NappletReviewSheet(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(84.dp)
-                            .clip(RoundedCornerShape(22.dp))
-                            .background(tileColorFor(review.pointer)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            review.title.take(1).uppercase().ifEmpty { "N" },
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            style = MaterialTheme.typography.headlineMedium,
-                        )
-                    }
+                    NappletMark(review, added = false)
                     Spacer(Modifier.height(16.dp))
                     Text(
                         review.title.ifEmpty { "Untitled app" },
@@ -980,6 +1011,56 @@ internal fun NappletReviewSheet(
             }
         }
     }
+}
+
+/** The app's mark on the review sheet, with a check once it has been added. */
+@Composable
+private fun NappletMark(review: NappletReview, added: Boolean) {
+    Box {
+        Box(
+            modifier = Modifier
+                .size(84.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .background(tileColorFor(review.pointer)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                review.title.take(1).uppercase().ifEmpty { "N" },
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.headlineMedium,
+            )
+        }
+        if (added) {
+            Icon(
+                Icons.Filled.CheckCircle,
+                contentDescription = "Added",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .offset(x = 8.dp, y = 8.dp)
+                    .size(32.dp)
+                    .background(MaterialTheme.colorScheme.surface, CircleShape),
+            )
+        }
+    }
+}
+
+/**
+ * Where "Open" on an added review goes: the Library entry's own pointer and
+ * title when there is one, so the window lands in the same task the Apps grid
+ * opens — its document is keyed on the pointer — and the review's otherwise.
+ * Matched on author and `d` tag, not the pointer string: a review opened by an
+ * `naddr` names the same napplet as an entry stored as `<npub>:<dtag>`.
+ */
+internal fun nappletLaunchTarget(review: NappletReview, library: List<LibraryItem>): Pair<String, String> {
+    val address = NappletAddress.parse(review.pointer)
+    val item = library.firstOrNull {
+        it.kind == LibraryKind.Napplet &&
+            (it.nappletPointer == review.pointer ||
+                (address != null && NappletAddress.of(it.authorNpub, it.dTag) == address))
+    }
+    return (item?.nappletPointer ?: review.pointer) to (item?.title ?: review.title)
 }
 
 /**

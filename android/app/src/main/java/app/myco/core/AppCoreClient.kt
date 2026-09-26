@@ -65,8 +65,12 @@ data class NappletReview(
     /** The fetch is still running; the sheet shows progress rather than a question. */
     val loading: Boolean,
     /** The user said yes and the app is downloading; nothing is downloaded
-     *  before that. The sheet shows "Adding…" and closes when it lands. */
+     *  before that. The sheet shows "Adding…" until it lands. */
     val installing: Boolean = false,
+    /** The download landed: the sheet stays up saying so and offers Open
+     *  until the user closes it. [installed] with nothing [unreviewed] means
+     *  it was a "Download again" rather than a first add. */
+    val added: Boolean = false,
     /** Already in the Library (same author and `d` tag). */
     val installed: Boolean = false,
     /** Installed and its files are on this phone. An installed napplet that is
@@ -431,6 +435,7 @@ data class AppState(
                 pointer = reviewJson.optString("pointer"),
                 loading = reviewJson.optBoolean("loading"),
                 installing = reviewJson.optBoolean("installing"),
+                added = reviewJson.optBoolean("added"),
                 installed = reviewJson.optBoolean("installed"),
                 ready = reviewJson.optBoolean("ready"),
                 unreviewed = reviewJson.optJSONArray("unreviewed")?.let { u ->
