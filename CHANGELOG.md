@@ -59,6 +59,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Back inside a napplet goes back.** The back gesture always closed the
+  whole napplet, even from a page it had opened — Discover's app page
+  included. Myco now delivers back to the napplet as an Escape keydown: a
+  napplet that handles it (`preventDefault()`) stays open and goes back
+  itself; one that leaves it unhandled is closed, as before. A napplet
+  can't trap you: after three backs it consumed without a touch in between,
+  the next back closes it. Plain DOM behaviour, no new NAP — see the
+  napplet runtime design doc.
 - **A manifest published through NAP-MESH keeps to the hop budget the
   napplet chose.** An nsite or napplet manifest a napplet published over the
   mesh went out at the default budget whatever it asked for; it now respects

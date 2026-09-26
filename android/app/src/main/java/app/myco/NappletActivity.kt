@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ViewGroup
 import android.webkit.RenderProcessGoneDetail
@@ -14,6 +15,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebViewRenderProcess
+import android.webkit.WebViewRenderProcessClient
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -411,6 +414,27 @@ class NappletActivity : ComponentActivity() {
                 shellHost = shellHost,
                 onContentVisible = { syncChrome() },
                 onRendererGone = { finish() },
+                onUnhandledEscape = ::backEscapeUnhandled,
+            )
+            // A renderer stuck in a script never answers the Escape a back
+            // sent, and would otherwise leave back doing nothing at all.
+            setWebViewRenderProcessClient(
+                object : WebViewRenderProcessClient() {
+                    override fun onRenderProcessUnresponsive(
+                        view: WebView,
+                        renderer: WebViewRenderProcess?,
+                    ) {
+                        if (backs.outstanding(SystemClock.uptimeMillis())) {
+                            Log.w(TAG, "napplet unresponsive after back; closing the window")
+                            finish()
+                        }
+                    }
+
+                    override fun onRenderProcessResponsive(
+                        view: WebView,
+                        renderer: WebViewRenderProcess?,
+                    ) = Unit
+                },
             )
         }
 
@@ -510,11 +534,86 @@ class NappletActivity : ComponentActivity() {
             null,
         )
 
-        // Back leaves the napplet. There is no history to walk: the shell never
-        // navigates, and the napplet cannot navigate the top-level document.
-        onBackPressedDispatcher.addCallback(this) { finish() }
+        // Back is offered to the napplet first, as Escape. See [onBack].
+        onBackPressedDispatcher.addCallback(this) { onBack() }
 
         webView.loadUrl("http://$shellHost/")
+    }
+
+    /** Which back Escapes are still unanswered, and how many were consumed. */
+    private val backs = BackEscapeTracker()
+
+    /**
+     * The back gesture, delivered to the napplet as an Escape key it may
+     * consume.
+     *
+     * A napplet has no history to walk: it runs in an opaque-origin `srcdoc`
+     * frame where `history.pushState` throws, and the shell never navigates.
+     * So back is sent as what it means on the web — Escape, "dismiss" — as a
+     * real key-down and key-up into the WebView. The shell keeps focus in the
+     * napplet's frame, so the napplet's document receives it.
+     *
+     * - The napplet called `preventDefault()` on the key-down: it closed a
+     *   page or dialog of its own, and the window stays.
+     * - It did not: Chromium hands the unhandled key back to the embedder,
+     *   and WebView calls [WebViewClient.onUnhandledKeyEvent] with the **same**
+     *   `KeyEvent` object dispatched here (Chromium keeps it as the event's
+     *   `os_event`, and `WebContentsDelegateAndroid::HandleKeyboardEvent`
+     *   passes it back through `AwWebContentsDelegateAdapter`). That lands in
+     *   [backEscapeUnhandled], which closes the window.
+     *
+     * A handled key-down is never reported; the key-up's report (or its
+     * absence) marks the back consumed. So that no napplet can trap the user
+     * by consuming every Escape, only [BackEscapeTracker.MAX_CONSUMED] backs in
+     * a row are offered to it without a touch in between; the next closes the
+     * window directly. Every back sends its own Escape, so a rapid second back
+     * is simply the napplet's next chance to go back, and `finish()` is
+     * idempotent.
+     */
+    private fun onBack() {
+        if (isFinishing) return
+        // The review sheet and the link dialog are windows of their own and
+        // take back before it reaches this callback; should one ever not, the
+        // napplet underneath must not hear an Escape meant for them.
+        if (review != null || pendingExternal != null) return
+        val view = webView
+        // Detached by a renderer crash: nobody is there to answer.
+        if (view.parent == null) {
+            finish()
+            return
+        }
+        if (!view.hasFocus()) view.requestFocus()
+        if (!view.hasFocus()) {
+            finish()
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        if (backs.shouldCloseDirectly(now, lastTouchAt)) {
+            Log.i(TAG, "napplet consumed ${BackEscapeTracker.MAX_CONSUMED} backs without a touch; closing")
+            finish()
+            return
+        }
+        backs.sent(now)
+        view.dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ESCAPE, 0))
+        view.dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ESCAPE, 0))
+    }
+
+    /**
+     * The page left an Escape unhandled. Returns true when it was one [onBack]
+     * sent — then it is consumed here, and an unhandled key-down closes the
+     * window. Any other Escape (a hardware keyboard) takes the default path.
+     */
+    private fun backEscapeUnhandled(event: KeyEvent): Boolean {
+        val isDown = when (event.action) {
+            KeyEvent.ACTION_DOWN -> true
+            KeyEvent.ACTION_UP -> false
+            else -> return false
+        }
+        return when (backs.unhandled(event.downTime, isDown, lastTouchAt)) {
+            BackEscapeTracker.Report.NOT_OURS -> false
+            BackEscapeTracker.Report.CLOSE -> { finish(); true }
+            BackEscapeTracker.Report.CONSUMED -> true
+        }
     }
 
     private fun syncChrome() {
@@ -622,13 +721,26 @@ class NappletActivity : ComponentActivity() {
  * the invariant is checked rather than assumed.
  *
  * @param onRendererGone the renderer process died; the window closes itself.
+ * @param onUnhandledEscape an Escape the page left unhandled; true when the
+ *   window took it (see `NappletActivity.onBack`).
  */
 private class NappletWebViewClient(
     private val client: AppCoreClient,
     private val shellHost: String,
     private val onContentVisible: () -> Unit,
     private val onRendererGone: () -> Unit,
+    private val onUnhandledEscape: (KeyEvent) -> Boolean,
 ) : WebViewClient() {
+
+    /**
+     * Only an Escape is looked at: the back gesture arrives as one, and when
+     * the page does not consume it, this is where it comes back. Everything
+     * else keeps WebView's default, which hands it to the view hierarchy.
+     */
+    override fun onUnhandledKeyEvent(view: WebView, event: KeyEvent) {
+        if (event.keyCode == KeyEvent.KEYCODE_ESCAPE && onUnhandledEscape(event)) return
+        super.onUnhandledKeyEvent(view, event)
+    }
 
     override fun onPageCommitVisible(view: WebView, url: String) = onContentVisible()
 
