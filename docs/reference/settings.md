@@ -29,6 +29,7 @@ start".
 | `ble-attempts.jsonl` | the BLE connect-attempt log the Dev tab shows | `attempt_store.rs` |
 | `fips-control.sock` | the node's control socket (runtime, not state) | `control_client.rs` |
 | `seeded-defaults`, `profileInstalled` | one-shot markers | `runtime.rs`, `user_key.rs` |
+| `seeded-napplets` | the default napplets already pinned on this install, one `<npub>:<d>` key per line, so a default added later still arrives and one the user removed stays gone. A legacy `1` means DingDong | `runtime.rs` |
 
 ### `settings.json`
 

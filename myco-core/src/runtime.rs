@@ -362,8 +362,8 @@ impl AppRuntime {
         // fresh device shows it in Apps without pasting a link. A one-shot marker
         // file makes this idempotent and lets a user who removes it stay removed.
         seed_default_sites(&content, &rt, Path::new(data_dir));
-        // The bundled DingDong napplet, pinned with defaults only: what it
-        // declares is reviewed the first time it opens.
+        // The default napplets (DingDong, Discover), pinned with defaults
+        // only: what each declares is reviewed the first time it opens.
         seed_default_napplets(&content, &rt, Path::new(data_dir));
 
         // The account: a guest on first launch, so every install has an
@@ -2491,13 +2491,55 @@ impl AppRuntime {
 const DEFAULT_SITES: &[&str] =
     &["4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivbitchat.nsite.lol"];
 
-/// Napplets installed by default on first run: (title, pointer). Pinned with
-/// only the default grants and an empty reviewed list, so what each declares
-/// is put in front of the user the first time it opens.
-const DEFAULT_NAPPLETS: &[(&str, &str)] = &[(
-    "DingDong",
-    "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9hxwer0denstp6v0k",
-)];
+/// Napplets installed by default: (title, pointer). Pinned with only the
+/// default grants and an empty reviewed list, so what each declares is put in
+/// front of the user the first time it opens. Each is seeded once per install;
+/// one added here later still reaches devices that were seeded before it.
+const DEFAULT_NAPPLETS: &[(&str, &str)] = &[
+    (
+        "DingDong",
+        "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9hxwer0denstp6v0k",
+    ),
+    (
+        "Discover",
+        "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9ekxmmkv4eqc3hahf",
+    ),
+];
+
+/// What a `seeded-napplets` marker written before per-napplet tracking means:
+/// every default that existed then (DingDong alone) was seeded.
+const LEGACY_SEEDED_NAPPLETS: &[&str] =
+    &["npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr:dingdong"];
+
+/// The defaults already seeded on this install, as `<npub>:<d>` keys, one per
+/// line of the marker. A legacy `1` marker stands for [`LEGACY_SEEDED_NAPPLETS`].
+/// `None` when the marker exists but cannot be read: seeding then waits for a
+/// launch that can read it, rather than re-seeding what the user removed.
+fn seeded_napplet_keys(marker: &Path) -> Option<std::collections::BTreeSet<String>> {
+    let text = match std::fs::read_to_string(marker) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Default::default()),
+        Err(e) => {
+            tracing::warn!(error = %e, "default-napplet-seed marker unreadable; not seeding");
+            return None;
+        }
+    };
+    if text.trim() == "1" {
+        return Some(
+            LEGACY_SEEDED_NAPPLETS
+                .iter()
+                .map(|k| k.to_string())
+                .collect(),
+        );
+    }
+    Some(
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
 
 /// Pin + start a download for the default apps, once per install. The marker
 /// file in `data_dir` keeps this idempotent and lets a user who removes a seeded
@@ -2522,21 +2564,23 @@ fn seed_default_sites(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) {
     }
 }
 
-/// Pin the default napplets and start a fetch of each, once per install.
+/// Pin the default napplets and start a fetch of each, once per napplet per
+/// install.
 ///
 /// Its own marker, not `seeded-defaults`: a device upgraded from a build
 /// without napplets already carries the nsite marker, and this is its first
-/// run *with* napplets. The semantics are the nsite seed's — once per
-/// install, never re-seeded after removal. The seed does not stand up a
+/// run *with* napplets. The marker lists each default seeded so far, so one
+/// added in a later release is seeded on upgrade while one the user removed is
+/// never re-seeded. The seed does not stand up a
 /// [`crate::napplet::NappletHost`] (that would generate the user key, which
 /// D3 reserves for first napplet use); it fetches over the bare seams.
 fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) {
     use nostr::nips::nip19::ToBech32;
 
     let marker = data_dir.join("seeded-napplets");
-    if marker.exists() {
+    let Some(mut seeded) = seeded_napplet_keys(&marker) else {
         return;
-    }
+    };
     for (title, pointer) in DEFAULT_NAPPLETS {
         let addr = match crate::napplet::NappletAddr::parse(pointer) {
             Ok(addr) => addr,
@@ -2546,6 +2590,12 @@ fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) 
             }
         };
         let npub = addr.author.to_bech32().unwrap_or_default();
+        // Recorded before the installed check below: a default the user already
+        // installed by hand counts as seeded, so removing it later is final.
+        let key = format!("{npub}:{}", addr.d_tag.as_deref().unwrap_or(""));
+        if !seeded.insert(key) {
+            continue;
+        }
         let shell_host =
             myco_napplet_runtime::host::shell_host(&addr.author.to_bytes(), addr.d_tag.as_deref());
 
@@ -2609,7 +2659,16 @@ fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) 
             content.refresh_napplet_status().await;
         });
     }
-    if let Err(e) = std::fs::write(&marker, b"1\n") {
+    // Rewritten only when it changes: a new default seeded, or a legacy `1`
+    // marker converted to the list form.
+    let text: String = seeded.iter().map(|k| format!("{k}\n")).collect();
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(text.as_str()) {
+        return;
+    }
+    // Temp file + rename: a crash mid-write must not leave a truncated
+    // marker, which would read as "nothing seeded" and bring removed apps back.
+    let tmp = marker.with_extension("tmp");
+    if let Err(e) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &marker)) {
         tracing::warn!(error = %e, "could not write default-napplet-seed marker");
     }
 }
@@ -2951,6 +3010,40 @@ mod tests {
             "a removed default was re-seeded"
         );
 
+        // Discover is seeded alongside it, unreviewed, and the marker names both.
+        let discover = |rt: &AppRuntime| {
+            rt.content
+                .as_ref()
+                .expect("host content layer")
+                .library_snapshot()
+                .into_iter()
+                .filter(|i| {
+                    i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("discover")
+                })
+                .collect::<Vec<_>>()
+        };
+        let seeded = discover(&third);
+        assert_eq!(seeded.len(), 1, "Discover seeded: {seeded:?}");
+        assert!(seeded[0].reviewed.is_empty());
+        let marker = dir.join("seeded-napplets");
+        let before = std::fs::read_to_string(&marker).unwrap();
+        assert!(
+            before.contains(":dingdong\n") && before.contains(":discover\n"),
+            "{before}"
+        );
+
+        // Removed too, it stays removed, and the marker is left as it was.
+        let mut third = third;
+        third.dispatch(NativeAppAction::ForgetNapplet {
+            pointer: DEFAULT_NAPPLETS[1].1.to_string(),
+        });
+        let fourth = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        assert!(
+            discover(&fourth).is_empty(),
+            "a removed Discover was re-seeded"
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), before);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3002,6 +3095,46 @@ mod tests {
             "the seed rewrote a review the user already gave"
         );
         assert!(marker.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A device seeded before Discover joined the defaults carries the legacy
+    /// `1` marker. On upgrade it gets Discover, while a DingDong the user
+    /// removed stays removed.
+    #[test]
+    fn a_new_default_reaches_an_install_seeded_before_it() {
+        use crate::content::LibraryKind;
+
+        let dir = temp_dir("seed-upgrade");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // An install from before: DingDong seeded, then removed by the user.
+        std::fs::write(dir.join("seeded-napplets"), b"1\n").unwrap();
+
+        let rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let napplets: Vec<_> = rt
+            .content
+            .as_ref()
+            .expect("host content layer")
+            .library_snapshot()
+            .into_iter()
+            .filter(|i| i.kind == LibraryKind::Napplet)
+            .collect();
+        let tags: Vec<_> = napplets.iter().map(|i| i.d_tag.as_deref()).collect();
+        assert_eq!(
+            tags,
+            vec![Some("discover")],
+            "only the new default is seeded"
+        );
+        assert_eq!(napplets[0].title, "Discover");
+        assert!(napplets[0].reviewed.is_empty());
+
+        let marker = std::fs::read_to_string(dir.join("seeded-napplets")).unwrap();
+        assert!(
+            marker.contains(":dingdong\n") && marker.contains(":discover\n"),
+            "{marker}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
