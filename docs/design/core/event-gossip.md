@@ -83,8 +83,9 @@ is a direct **1-hop** request between two now-adjacent relays, so it carries **n
 mesh metadata**. It is store-only: pulled events are stored for serving and
 display, and **do not** re-enter the push wave.
 
-A **multi-hop** pull also exists — a hop-bounded `REQ` flood used for *discovery*
-rather than chat backlog (§7). It is driven by the core, not by an nsite.
+A **multi-hop** pull also exists — a hop-bounded `REQ` flood used for app pulls
+and napplet mesh backlog rather than chat backlog (§7). It is driven by the core,
+not by an nsite.
 
 ### Why both
 
@@ -343,10 +344,10 @@ A `REQ` from a **loopback** client returns its stored backlog and `EOSE` at
 local-store speed and **never** fans out. That removes the multi-second hang a
 client used to see when one peer was slow.
 
-Multi-hop pull is a **core** operation instead — discovery ("nsites around me")
-and update checks call the peer pool directly and write results into polled
-state. The proxy keeps only the forwarding half, for a `REQ` that arrives from a
-mesh peer with hops left. If an nsite ever needs transitive reach, it gets an
+Multi-hop pull is a **core** operation instead — app pulls and update checks
+call the peer pool directly and write results into polled state. The proxy
+keeps only the forwarding half, for a `REQ` that arrives from a mesh peer with
+hops left. If an nsite ever needs transitive reach, it gets an
 explicit API rather than a magic filter key.
 
 `MAX_REQ_TTL` is **2**, below the push default of 3, because flooded reads cost

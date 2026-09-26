@@ -8,7 +8,7 @@ shared with people nearby over a Bluetooth LE mesh. The codebase spans
 an Android app and a Rust core, top to bottom:
 
 - **Android app** (`android/`) — the Kotlin / Jetpack Compose shell:
-  Apps, Circle, Discover, and Settings; it pairs with peers (QR, NFC
+  Apps, Circle, Settings, and Dev; it pairs with peers (QR, NFC
   tap, nearby) and renders each nsite in its own chrome-less WebView.
 - **`myco-core`** (Rust) — the brains, driven from the app over a JNI
   bridge: device identity, the pairing/Circle state machine, content

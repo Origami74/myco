@@ -68,7 +68,7 @@ enumerating the physical mesh. Design of the handshake:
 | Concern | Rule |
 | --- | --- |
 | **Admission** | The relay and Blossom servers check every mesh connection against the Circle (the *gate*). A stranger reaches one thing: the auth service, to ask to pair. |
-| **Sources** | An app is pulled from the holder who shared it, then any reachable Circle member, then the internet. Discovery ("around me") queries Circle members' relays. |
+| **Sources** | An app is pulled from the holder who shared it, then any reachable Circle member, then the internet. |
 | **Gossip** | An accepted event is fanned out to Circle members with a hop budget; backlog is pulled from them; a member who reappears gets your open subscriptions replayed. All edges are Circle edges. |
 | **Napplets** | NAP-MESH's "everyone nearby" is the Circle, `ttl` hops out. NAP-OUTBOX's mesh lane reaches a member's relay directly; a stranger's `.fips` URL in a relay list is dropped. A `blossom:` miss is asked of reachable members. |
 | **Files** | Native encrypted file sharing is offered to, and accepted from, Circle members only. |

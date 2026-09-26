@@ -674,17 +674,14 @@ reachable source.
 
 ### Discovery: "nsites around me"
 
-Beyond loading a known `<host>.localhost`, the Apps grid can surface sites that reachable
-holders have. The set of discoverable sites is **the author-signed manifests this
-device has** — those received via the flood (small, self-authenticating manifest
-events re-emitted unmodified by relays) plus those **queried from every reachable
-relay** (your own, plus each paired peer's relay at `<npub_holder>.fips:4870`,
-plus their collected peers — see [./propagation.md](./propagation.md) for
-transitive reach) for kinds **15128 / 35128**. Present them **newest-first,
-de-duplicated by `(author, dTag)`**. Selecting one runs the normal §4 sync/serve
-flow (fetching the large blobs on demand). This is exposed as a `SearchNsites`
-FFI action ([../reference/ffi-surface.md](../../reference/ffi-surface.md)); ranking
-beyond recency is **TBD / open**.
+The native Discover tab and its `SearchNsites` action are **removed**. They
+queried each reachable Circle member's relay (`<npub_holder>.fips:4870`) for
+kinds **15128 / 35128** and listed the results, one per site, newest first.
+Discovery now belongs to the preinstalled **Discover napplet** (roadmap N5),
+which reaches the room through NAP-MESH like any other app. It lists napplets
+only; listing nsites held around you is open work under N5. An nsite is still
+reached by a share, a scan, a link or a paste, and opening one runs the normal
+§4 sync/serve flow.
 
 ### Storage and eviction
 

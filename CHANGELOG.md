@@ -15,9 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Myco's install review. Pinned like DingDong, with only the default grants.
   Its "Around you" tab (napplets nearby devices hold) needs `mesh`, which the
   published manifest does not declare yet, so it stays empty until it does.
-  The native Discover tab stays for now. Phones that were already set up get
-  it on upgrade too: the seed now remembers each default it pinned, so a new
-  default still arrives and one you removed stays gone.
+  It replaces the native Discover tab (see Removed). Phones that were
+  already set up get it on upgrade too: the seed now remembers each default
+  it pinned, so a new default still arrives and one you removed stays gone.
 - **Napplets can open links and match your theme.** NAP-LINK: a napplet can
   ask to open a web link (your browser, after a one-tap confirm unless you just
   touched the app) or point you at another napplet — Myco's install review
@@ -91,6 +91,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The user key napplets publish as is created on first launch, not the
   first time a napplet opens. Settings' "Identity" row is now "Device name",
   to keep it apart from the account.
+
+### Removed
+
+- **The Discover tab.** The bottom bar is now Apps · Circle · Settings · Dev;
+  the preinstalled Discover napplet, on the Apps grid, takes its place. What
+  goes with it: the tab's "Around you" list of *nsites* your connected Circle
+  members hold, and its Suggested row (bitchat, ICS, Dumplings, Mappy,
+  Minesweeper, DingDong). The Discover napplet lists napplets only, and its
+  own "Around you" stays empty until its manifest asks for `mesh`. An nsite
+  still arrives by a share, a scan or a link. For developers: the
+  `search_nsites` action and the `discovered` state field are gone from the
+  FFI.
 
 ## [0.7.0] - 2026-09-16
 

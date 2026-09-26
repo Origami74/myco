@@ -172,7 +172,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_gatewayGet(
         None => None,
     };
 
-    // `allow_sync == 0` is a passive probe (a favicon behind a Discover tile):
+    // `allow_sync == 0` is a passive probe (a favicon behind a grid tile):
     // serve what is local, never start a sync. Otherwise a grid of tiles pulls
     // and pins every site merely rendered on screen.
     let framed = match ctx {

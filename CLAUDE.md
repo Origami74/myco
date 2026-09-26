@@ -50,7 +50,7 @@ Kotlin ↔ Rust is a **JNI + JSON-over-strings Redux-style reducer**: `dispatch(
 
 ### Android app (`android/app/src/main/java/app/myco/`)
 
-Compose bottom-nav shell (`ui/MycoApp.kt`: Apps · Circle · Discover · Settings · Dev). Each installed nsite renders in its own chrome-less WebView activity (`NsiteActivity`). Radios are their own packages: `ble/`, `nfc/`, `aware/`, `ap/`; pairing/share links in `share/`; the reducer client in `core/`.
+Compose bottom-nav shell (`ui/MycoApp.kt`: Apps · Circle · Settings · Dev). Each installed nsite renders in its own chrome-less WebView activity (`NsiteActivity`). Radios are their own packages: `ble/`, `nfc/`, `aware/`, `ap/`; pairing/share links in `share/`; the reducer client in `core/`.
 
 ## Testing philosophy
 

@@ -172,7 +172,7 @@ fun PairConnectedDialog(theirName: String, onDone: () -> Unit) {
                 }
                 Spacer(Modifier.height(14.dp))
                 Text(
-                    "You and $theirName are now in each other's circle — one tap did both. Their apps will show up in Discover.",
+                    "You and $theirName are now in each other's circle — one tap did both.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center,

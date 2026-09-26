@@ -1014,14 +1014,6 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
-            NativeAppAction::SearchNsites { .. } => {
-                // "nsites around me": query connected Circle peers' mesh relays for
-                // their manifests. Spawn-not-block; results land in `discovered`.
-                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    rt.spawn(content.discover_from_circle());
-                }
-                self.rev += 1;
-            }
             NativeAppAction::WipeStores => {
                 self.wipe_stores();
                 self.rev += 1;
@@ -2364,11 +2356,6 @@ impl AppRuntime {
             reachable_npubs,
             outbound_pairs,
             pending_pair_requests,
-            discovered: self
-                .content
-                .as_ref()
-                .map(|c| c.discovered_snapshot())
-                .unwrap_or_default(),
             offline_only: self
                 .content
                 .as_ref()
