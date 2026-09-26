@@ -51,7 +51,22 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// `link` never acts on its own: every link ends at something the user
 /// answers — the system browser, or Myco's install review, where nothing is
 /// installed until the user says so — and the host rate-limits the asking.
-pub const DEFAULT_GRANTS: &[&str] = &["identity", "link", "relay", "resource", "theme"];
+///
+/// `mesh` is a default **for now**, not by design. The upstream napplet
+/// tooling (the Vite plugin and `napplet deploy`) keeps only the upstream NAP
+/// domains in a manifest's `requires` and drops Myco-only ones, so no napplet
+/// published with it can *ask* for `mesh` — and a grant that can only come
+/// from `requires` could never be given. It is still shown on the install
+/// sheet, capped by the user's "App reach" setting, and can be switched off
+/// per app. Take it out of the defaults once the tooling keeps extension
+/// domains.
+///
+/// Taking it out will not take it back. Every napplet opened meanwhile has
+/// `mesh` persisted in its Library `granted` list (widened at open, silently —
+/// a default gets no sheet), and a stored grant is honoured as given. Removing
+/// it from here therefore needs a migration that drops `mesh` from `granted`
+/// where it was never reviewed.
+pub const DEFAULT_GRANTS: &[&str] = &["identity", "link", "mesh", "relay", "resource", "theme"];
 
 /// The most live subscriptions one session may hold, across `relay`, `mesh`
 /// and `outbox`. See [`Session::subscribe_in`].
