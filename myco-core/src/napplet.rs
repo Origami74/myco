@@ -664,6 +664,59 @@ impl NappletHost {
         )
         .await
     }
+
+    /// Bring in the napplet a manifest describes: fetch its bytes from
+    /// `source`, verify them against the manifest, and keep both. For install,
+    /// after review ran on the manifest alone ([`fetch_manifest`]).
+    pub async fn ingest_event(
+        &self,
+        event: nostr::Event,
+        source: &dyn PeerSource,
+    ) -> anyhow::Result<IngestedNapplet> {
+        ingest_event_into(
+            self.relay.as_ref(),
+            self.blobs.as_ref(),
+            self.manifests.as_ref(),
+            event,
+            source,
+        )
+        .await
+    }
+}
+
+/// Fetch a napplet's manifest only — no bytes — and check what can be
+/// checked without them: the signature, that it is the author and address
+/// asked for, and that it parses as a NIP-5D manifest. What install review
+/// needs; nothing is downloaded or kept until the user says yes.
+pub async fn fetch_manifest(
+    addr: &NappletAddr,
+    source: &dyn PeerSource,
+) -> anyhow::Result<(nostr::Event, IngestedNapplet)> {
+    let event = source
+        .fetch_manifest(&addr.author, addr.d_tag.as_deref())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no napplet manifest at that address"))?;
+    event
+        .verify()
+        .map_err(|e| anyhow::anyhow!("manifest signature: {e}"))?;
+    anyhow::ensure!(
+        event.pubkey == addr.author,
+        "the manifest is not by the napplet's author"
+    );
+    let m = myco_napplet_runtime::manifest::NappletManifest::from_event(event.clone())
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    anyhow::ensure!(
+        m.d_tag.as_deref() == addr.d_tag.as_deref(),
+        "the manifest is for a different napplet"
+    );
+    let found = IngestedNapplet {
+        requires: m.requires,
+        title: m.title,
+        description: m.description,
+        d_tag: m.d_tag.unwrap_or_default(),
+        aggregate: m.aggregate,
+    };
+    Ok((event, found))
 }
 
 /// The same untrusted-source, verify-before-keep path as
@@ -685,7 +738,21 @@ pub async fn ingest_into(
         .fetch_manifest(&addr.author, addr.d_tag.as_deref())
         .await?
         .ok_or_else(|| anyhow::anyhow!("no napplet manifest at that address"))?;
+    ingest_event_into(relay, blobs, manifests, event, source).await
+}
 
+/// The second half of [`ingest_into`]: the bytes for a manifest already in
+/// hand. `source` is not trusted; `resolve` verifies the signature and every
+/// byte before anything is kept. The manifest's author and address are the
+/// caller's to have checked — install hands in one [`fetch_manifest`]
+/// accepted.
+pub async fn ingest_event_into(
+    relay: &dyn RelayBackend,
+    blobs: &dyn BlobStore,
+    manifests: &dyn ManifestStore,
+    event: nostr::Event,
+    source: &dyn PeerSource,
+) -> anyhow::Result<IngestedNapplet> {
     // Resolving against a view onto the *source* means the bytes are
     // verified where they arrive, before anything is written here.
     let view = SourceBlobs {
@@ -1050,6 +1117,16 @@ pub struct NappletReview {
     /// the user in words, because this is what they are agreeing to. A default
     /// that was not shown would be a grant nobody made.
     pub grants: Vec<String>,
+    /// The user said yes and the app's bytes are downloading. Review runs on
+    /// the manifest alone — nothing is downloaded before the answer — so this
+    /// is the wait between "Add" and the app landing on the grid.
+    #[serde(default)]
+    pub installing: bool,
+    /// The fetched manifest, kept so install downloads exactly what was
+    /// reviewed rather than whatever the relays hold by then. Never sent to
+    /// Kotlin.
+    #[serde(skip)]
+    pub manifest: Option<nostr::Event>,
     /// Set when the fetch failed; the screen shows this instead of asking.
     pub error: String,
     /// The peer who shared it, when it arrived by a tap or a scan — kept so a
@@ -1850,6 +1927,97 @@ mod tests {
         // Now local: opens with no source in reach.
         let opened = host.open(&addr, Some(vec!["relay".into()])).await.unwrap();
         assert!(opened.shell_host.ends_with(".napplet.localhost"));
+    }
+
+    /// Review runs on the manifest alone: finding a napplet fetches no bytes
+    /// and keeps nothing. The bytes come only with install, verified against
+    /// the manifest that was reviewed.
+    #[tokio::test]
+    async fn finding_a_napplet_downloads_nothing_until_install() {
+        struct Counting(FakeSource, std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl PeerSource for Counting {
+            async fn fetch_manifest(
+                &self,
+                author: &PublicKey,
+                d_tag: Option<&str>,
+            ) -> anyhow::Result<Option<nostr::Event>> {
+                self.0.fetch_manifest(author, d_tag).await
+            }
+            async fn fetch_blob(
+                &self,
+                sha256_hex: &str,
+                servers: &[String],
+            ) -> anyhow::Result<Option<Vec<u8>>> {
+                self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.0.fetch_blob(sha256_hex, servers).await
+            }
+        }
+
+        let napplet = NappletBuilder::new().build();
+        let source = Counting(
+            FakeSource {
+                relay: MemRelay::new(),
+                blobs: MemBlobs::new(),
+                kind: KIND_NAMED,
+            },
+            std::sync::atomic::AtomicUsize::new(0),
+        );
+        for (_, bytes) in &napplet.blobs {
+            source.0.blobs.put(bytes).await.unwrap();
+        }
+        source
+            .0
+            .relay
+            .publish(napplet.manifest.clone())
+            .await
+            .unwrap();
+        let addr = NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
+        };
+
+        let (event, found) = fetch_manifest(&addr, &source).await.unwrap();
+        let declared =
+            myco_napplet_runtime::manifest::NappletManifest::from_event(napplet.manifest.clone())
+                .unwrap();
+        assert_eq!(found.requires, declared.requires);
+        assert_eq!(found.title, declared.title);
+        assert_eq!(
+            source.1.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "finding a napplet downloaded it"
+        );
+
+        let local_relay = Arc::new(MemRelay::new());
+        let host = NappletHost::new(test_ctx(local_relay.clone(), Arc::new(MemBlobs::new())));
+        assert!(local_relay.is_empty(), "finding a napplet kept something");
+        host.ingest_event(event, &source).await.unwrap();
+        assert!(source.1.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(host.open(&addr, Some(vec!["relay".into()])).await.is_ok());
+    }
+
+    /// A forged manifest never reaches the review screen.
+    #[tokio::test]
+    async fn a_manifest_with_a_bad_signature_is_not_found() {
+        let napplet = NappletBuilder::new().break_signature().build();
+        let source = FakeSource {
+            relay: MemRelay::new(),
+            blobs: MemBlobs::new(),
+            kind: KIND_NAMED,
+        };
+        source
+            .relay
+            .publish(napplet.manifest.clone())
+            .await
+            .unwrap();
+        let addr = NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
+        };
+        assert!(fetch_manifest(&addr, &source).await.is_err());
     }
 
     /// A napplet that fails verification leaves nothing behind. Storing first

@@ -23,7 +23,9 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
@@ -42,6 +44,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -54,6 +57,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -713,8 +717,19 @@ private fun NappletReviewSheet(
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
+    // Fully expanded, never half: a half-open sheet cut the permission list
+    // off with the install button below the fold.
+    // Not dismissable while "Adding…": the download is under way, and a
+    // failure has to be able to come back to this sheet to be seen.
+    val installing by rememberUpdatedState(review.installing)
+    ModalBottomSheet(
+        onDismissRequest = { if (!installing) onDismiss() },
+        sheetState = rememberModalBottomSheetState(
+            skipPartiallyExpanded = true,
+            confirmValueChange = { it != SheetValue.Hidden || !installing },
+        ),
+    ) {
+        Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
             if (review.loading) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -759,75 +774,102 @@ private fun NappletReviewSheet(
                 return@Column
             }
 
-            // The app's mark, where the spinner was — so finding it resolves
-            // into the thing itself rather than swapping one block of text for
-            // another.
+            // Everything above the buttons scrolls; the buttons stay put, so a
+            // long description or permission list never pushes the answer off
+            // screen.
             Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .verticalScroll(rememberScrollState()),
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(84.dp)
-                        .clip(RoundedCornerShape(22.dp))
-                        .background(tileColorFor(review.pointer)),
-                    contentAlignment = Alignment.Center,
+                // The app's mark, where the spinner was — so finding it resolves
+                // into the thing itself rather than swapping one block of text for
+                // another.
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
+                    Box(
+                        modifier = Modifier
+                            .size(84.dp)
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(tileColorFor(review.pointer)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            review.title.take(1).uppercase().ifEmpty { "N" },
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.headlineMedium,
+                        )
+                    }
+                    Spacer(Modifier.height(16.dp))
                     Text(
-                        review.title.take(1).uppercase().ifEmpty { "N" },
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.headlineMedium,
-                    )
-                }
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    review.title.ifEmpty { "Untitled app" },
-                    style = MaterialTheme.typography.titleMedium,
-                    textAlign = TextAlign.Center,
-                )
-                if (review.description.isNotEmpty()) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        review.description,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        review.title.ifEmpty { "Untitled app" },
+                        style = MaterialTheme.typography.titleMedium,
                         textAlign = TextAlign.Center,
                     )
+                    if (review.description.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            review.description,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
                 }
-            }
 
-            Spacer(Modifier.height(28.dp))
+                Spacer(Modifier.height(20.dp))
 
-            // What is listed is what is granted — including the defaults every
-            // app gets. A default that was not shown would be a grant nobody
-            // made, and one of them lets an app post as you.
-            if (review.grants.isEmpty()) {
-                Text(
-                    "This app runs on its own. It can't reach the internet, " +
-                        "save anything, or use your account.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            } else {
-                Text("This app will be able to:", style = MaterialTheme.typography.titleSmall)
-                Spacer(Modifier.height(10.dp))
-                review.grants.forEach { domain ->
-                    CapabilityRow(domain)
+                // What is listed is what is granted — including the defaults every
+                // app gets. A default that was not shown would be a grant nobody
+                // made, and one of them lets an app post as you.
+                if (review.grants.isEmpty()) {
+                    Text(
+                        "This app runs on its own. It can't reach the internet, " +
+                            "save anything, or use your account.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                } else {
+                    Text("This app will be able to:", style = MaterialTheme.typography.titleSmall)
                     Spacer(Modifier.height(10.dp))
+                    review.grants.forEach { domain ->
+                        CapabilityRow(domain)
+                        Spacer(Modifier.height(10.dp))
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "You can change your mind later — press and hold the app.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "You can change your mind later — press and hold the app.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+
             }
 
-            Spacer(Modifier.height(28.dp))
-            Row {
-                TextButton(onClick = onDismiss) { Text("Not now") }
+            Spacer(Modifier.height(20.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onDismiss, enabled = !review.installing) { Text("Not now") }
                 Spacer(Modifier.weight(1f))
-                Button(onClick = { onInstall(review.grants) }) { Text("Add to my apps") }
+                // Review ran on the manifest alone; the app itself is only
+                // downloaded once the user says yes, and the sheet closes when
+                // it has landed.
+                Button(
+                    enabled = !review.installing,
+                    onClick = { onInstall(review.grants) },
+                ) {
+                    if (review.installing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(Modifier.size(8.dp))
+                        Text("Adding…")
+                    } else {
+                        Text("Add to my apps")
+                    }
+                }
             }
         }
     }

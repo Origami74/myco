@@ -344,9 +344,12 @@ injection, CSP meta and the `shell.ready` / `shell.init` handshake come up.
 `NappletActivity` arrives with the shared chrome helper extracted, the per-napplet shell
 origin routed, `NapTransport` over `addWebMessageListener` with the `WebMessagePort`
 fallback, `androidx.webkit` added, and cross-origin refusal on both WebView clients.
-Adding a napplet by `naddr` fetches its manifest and blobs online once, verifies, and
-stores. The Apps panel grows a type discriminant and its 🦆 / ＠ annotations, and the
-install-time review screen shows `requires` and records grants on the library entry.
+Adding a napplet by `naddr` fetches its **manifest only** — signature, author and
+address checked — and the install-time review screen shows `requires` from it. Nothing
+is downloaded before the user says yes: "Add" fetches the blob, verifies it against the
+manifest that was reviewed (kept in memory, so a newer version published meanwhile
+cannot slip in), stores both, and only then records grants on the library entry. The
+Apps panel grows a type discriminant and its 🦆 / ＠ annotations.
 
 *Done when* a real napplet, fetched by `naddr`, renders on a phone and completes the
 handshake. Every implemented API is injected whatever was granted, and
