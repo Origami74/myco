@@ -93,8 +93,6 @@ relay and Blossom.
 - **B serves from its own store.** Kill Myco on A (or walk it out of range);
   B's app still opens and its pages still load. Settings › Storage on B shows
   the event and blob counts that grew in Step 5.
-- **Discover works.** On B, the **Discover** tab lists what A holds — the
-  "around me" query to A's relay over the mesh — as long as A is reachable.
 - **Logs.** `adb -s <B> logcat | grep myco` during Step 5 shows the pull from
   `<npubA>.fips:4870` / `:24243`, and `accepted a mesh event` lines as gossip
   arrives.

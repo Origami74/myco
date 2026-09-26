@@ -18,8 +18,9 @@ Two kinds of app run in it:
   (relays, the mesh, pictures) and gets exactly what you granted.
 
 Myco itself is the manager: **Apps** (your grid), **Circle** (the people you
-have paired with), **Discover** (what they hold), **Settings**. Every app opens
-as its own full-screen task with no Myco chrome.
+have paired with), **Settings**. New apps come from a share, a scan, or the
+preinstalled **Discover** app. Every app opens as its own full-screen task with
+no Myco chrome.
 
 The framing is nak's "Pillars of Propagation": small relays and Blossom blobs
 hopping over bad links in every direction, surviving outages by local

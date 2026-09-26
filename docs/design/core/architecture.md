@@ -12,7 +12,7 @@ The structure of **Myco** on one phone: four layers, five Rust crates in one
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Kotlin                                                               │
-│  MainActivity (Compose: Apps · Circle · Discover · Settings · Dev)   │
+│  MainActivity (Compose: Apps · Circle · Settings · Dev)              │
 │  NsiteActivity ──── one WebView per nsite, its own task              │
 │  NappletActivity ── one WebView per napplet: shell page + sandboxed  │
 │                     srcdoc iframe, capability channel to Rust        │

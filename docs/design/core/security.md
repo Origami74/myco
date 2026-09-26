@@ -93,7 +93,7 @@ What self-authentication does **not** give you:
   withheld so you keep an older signed version; the signature is still valid,
   so you cannot tell you are behind. There is no global ordering. Mitigation is
   pull-from-many: query every reachable relay and keep the newest valid
-  `created_at` (see the "nsites around me" search default). This is best-effort,
+  `created_at`. This is best-effort,
   not a guarantee.
 - **Author intent / key compromise.** A valid signature proves the key signed
   it, not that the human meant to. A stolen **external author** key (the keys

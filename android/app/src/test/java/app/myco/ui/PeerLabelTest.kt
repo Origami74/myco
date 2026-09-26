@@ -50,7 +50,6 @@ class PeerLabelTest {
         library = emptyList(),
         cache = CacheStatus(relayEvents = 0, blobCount = 0, usedBytes = 0),
         circle = circle,
-        discovered = emptyList(),
         pendingPairRequests = pending,
         outboundPairs = outbound,
         offlineOnly = true,

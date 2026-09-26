@@ -71,8 +71,6 @@ pub struct AppState {
     pub outbound_pairs: Vec<crate::content::OutboundPairView>,
     /// Incoming pair requests awaiting accept/decline (the UI shows a pop-up).
     pub pending_pair_requests: Vec<crate::content::PairRequestView>,
-    /// nsites discovered on Circle peers' relays (`SearchNsites` — "around me").
-    pub discovered: Vec<crate::content::DiscoveredNsite>,
     /// "Mesh-only": the IP online fallback is disabled (pull only over the mesh).
     pub offline_only: bool,
     /// The configured custom relay and whether it can be reached. Empty `url`

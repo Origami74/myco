@@ -117,20 +117,12 @@ pub enum NativeAppAction {
     /// Check online relays for newer versions of installed nsites and stage/apply
     /// them (`docs/design/nsite/nsite-updates.md`). Spawn-not-block.
     CheckNsiteUpdates,
-    /// Discover nsites on connected Circle peers' relays ("nsites around me"):
-    /// query each reachable member's mesh relay for kind 15128/35128 manifests.
-    /// Spawn-not-block; results land in `discovered`. `query` is an optional title
-    /// filter (unused for now).
-    SearchNsites {
-        #[serde(default)]
-        query: Option<String>,
-    },
     /// Clear the local relay + Blossom + Library + site status (dev/test reset).
     /// Content only — the device identity (and the Circle) are untouched.
     WipeStores,
     /// Clear cached relay events + Blossom blobs **except** those backing pinned
     /// nsites (Settings → Storage → "Delete cache"). Pinned apps keep working
-    /// offline; unpinned opened sites, discovered listings and staged updates go.
+    /// offline; unpinned opened sites and staged updates go.
     WipeCache,
 
     // --- circle (paired peers) ---

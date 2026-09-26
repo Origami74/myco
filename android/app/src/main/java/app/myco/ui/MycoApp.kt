@@ -31,7 +31,6 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
@@ -87,7 +86,6 @@ import app.myco.ui.screens.PeerShareSheet
 import app.myco.ui.screens.AppsScreen
 import app.myco.ui.screens.CircleScreen
 import app.myco.ui.screens.DevScreen
-import app.myco.ui.screens.DiscoverScreen
 import app.myco.ui.screens.QrScreen
 import app.myco.ui.screens.SettingsScreen
 
@@ -100,17 +98,16 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
- * The consumer shell: a bottom-nav app over five surfaces — **Apps** (the nsite
- * launcher), **Circle** (paired peers), **Discover** ("nsites around me"),
- * **Settings**, and **Dev** (diagnostics). The Rust `AppState` is polled once a
- * second here and handed down to every tab, so all screens share one read.
+ * The consumer shell: a bottom-nav app over four surfaces — **Apps** (the nsite
+ * launcher), **Circle** (paired peers), **Settings**, and **Dev** (diagnostics).
+ * The Rust `AppState` is polled once a second here and handed down to every tab,
+ * so all screens share one read.
  */
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
 
 private val TABS = listOf(
     Tab("apps", "Apps", Icons.Filled.GridView),
     Tab("circle", "Circle", Icons.Filled.People),
-    Tab("discover", "Discover", Icons.Filled.TravelExplore),
     Tab("settings", "Settings", Icons.Filled.Settings),
     Tab("dev", "Dev", Icons.Filled.Terminal),
 )
@@ -353,22 +350,6 @@ fun MycoApp(
                         onSendFile = { peer ->
                             sendFileNpub = peer.npub
                             pickFilesForPeer.launch(arrayOf("*/*"))
-                        },
-                    )
-                }
-                composable("discover") {
-                    DiscoverScreen(
-                        state,
-                        client,
-                        onLaunchNsite = onLaunchNsite,
-                        // The review sheet lives on the Apps tab and is driven by
-                        // state.nappletReview, which the fetch has already set.
-                        onShowNappletReview = {
-                            nav.navigate("apps") {
-                                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
-                                launchSingleTop = true
-                                restoreState = true
-                            }
                         },
                     )
                 }

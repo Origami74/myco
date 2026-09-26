@@ -259,50 +259,6 @@ impl Default for PeerPerms {
     }
 }
 
-/// An nsite **discovered** on a Circle peer's mesh relay ("nsites around me").
-/// `holder_*` is the paired peer whose relay we found it on — opening it pulls
-/// from them. Ephemeral (rebuilt each discovery run; not persisted).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiscoveredNsite {
-    /// The `<host>` label to open.
-    pub host: String,
-    pub author_npub: String,
-    pub d_tag: Option<String>,
-    pub title: String,
-    /// Unix seconds of the manifest version we saw (its `created_at`), so the UI can
-    /// show "latest version: <datetime>" — handy to tell apart same-named sites from
-    /// different authors/versions.
-    pub updated_at: u64,
-    /// The Circle peer who has it (the relay we found it on) — the pull holder.
-    pub holder_npub: String,
-    pub holder_name: String,
-}
-
-/// One entry per site, keeping the freshest copy seen.
-///
-/// The same nsite legitimately turns up on several Circle peers' relays — the
-/// query runs per holder — but to someone browsing "around you" that is one
-/// app, not one per person who happens to have it. Ties on `updated_at` keep
-/// the first seen, so the result is stable when nobody has a newer version.
-///
-/// Keeping the newest also picks the right holder to pull from: whoever
-/// answered with the most recent manifest has the version we would want.
-fn dedup_by_host(found: Vec<DiscoveredNsite>) -> Vec<DiscoveredNsite> {
-    let mut best: Vec<DiscoveredNsite> = Vec::new();
-    for d in found {
-        match best.iter_mut().find(|b| b.host == d.host) {
-            Some(existing) => {
-                if d.updated_at > existing.updated_at {
-                    *existing = d;
-                }
-            }
-            None => best.push(d),
-        }
-    }
-    best
-}
-
 /// Cache/store counts for the UI.
 ///
 /// These always describe the **embedded** store and blob directory, which is
@@ -510,9 +466,6 @@ pub struct Content {
     /// `open_site` pulls from connected Circle members (bounded to who's reachable,
     /// so it never blocks on an offline contact's connect timeout).
     connected_peers: Mutex<Vec<String>>,
-    /// nsites discovered on Circle peers' relays ("nsites around me"). Rebuilt by
-    /// each `SearchNsites` run; ephemeral (not persisted).
-    discovered: Mutex<Vec<DiscoveredNsite>>,
     /// host_label -> current sync status (drives the FFI `siteStatus`).
     sites: Mutex<HashMap<String, SiteStatusView>>,
     /// Sites the user removed, by host label. Nothing brings one back but
@@ -764,7 +717,6 @@ impl Content {
             circle: Mutex::new(circle),
             circle_path,
             connected_peers: Mutex::new(Vec::new()),
-            discovered: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
             forgotten: Mutex::new(std::collections::HashSet::new()),
             loading_retries: Mutex::new(HashMap::new()),
@@ -1435,8 +1387,8 @@ impl Content {
         save_active(&self.active_path, &snapshot);
     }
 
-    /// The user asked for a removed site again (pasted, scanned, opened from
-    /// Discover): it may come back.
+    /// The user asked for a removed site again (pasted, scanned, or opened
+    /// from a link or share): it may come back.
     pub fn unforget_site(&self, addr: &SiteAddr) {
         self.forgotten.lock().unwrap().remove(&addr.host_label());
     }
@@ -1685,17 +1637,6 @@ impl Content {
             .iter()
             .filter(|c| live.contains(&c.npub))
             .map(|c| c.npub.clone())
-            .collect()
-    }
-
-    /// Circle members as `(npub, name)` — discovery targets. Like
-    /// [`circle_npubs`](Self::circle_npubs), every member regardless of hop count.
-    fn circle_contacts(&self) -> Vec<(String, String)> {
-        self.circle
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|c| (c.npub.clone(), c.name.clone()))
             .collect()
     }
 
@@ -3232,68 +3173,6 @@ impl Content {
         join_all(queries).await.into_iter().flatten().collect()
     }
 
-    // --- discovery ("nsites around me") ---
-
-    /// Discover nsites on connected Circle peers' relays: query each reachable
-    /// member's mesh relay (`ws://<npub>.fips:4870`) for manifest events in
-    /// parallel, then rebuild the discovered list. Spawn-not-block; the UI polls
-    /// `discovered`. Opening a result pulls from that peer (its npub is the holder).
-    pub async fn discover_from_circle(self: Arc<Self>) {
-        let members = self.circle_contacts();
-        let pool = &self.peer_relays;
-        let queries = members.into_iter().map(move |(npub, name)| async move {
-            let Ok(_peer) = fips::PeerIdentity::from_npub(&npub) else {
-                return Vec::new();
-            };
-            let relay_url = crate::ip_source::mesh_relay_url(&npub);
-            // Manifest kinds only. One more hop reaches our peers' peers (2 hops
-            // in total), carried in the envelope so the filter stays canonical.
-            let filter = serde_json::json!({
-                "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
-                "limit": 200,
-            });
-            let events = pool
-                .request_with(
-                    &npub,
-                    &relay_url,
-                    vec![filter],
-                    Some(crate::mesh_wire::MeshMeta::pull(
-                        1,
-                        crate::mesh_wire::new_query_id(),
-                        PULL_BUDGET_MS,
-                    )),
-                    std::time::Duration::from_secs(15),
-                )
-                .await;
-            events
-                .into_iter()
-                .filter_map(|ev| nsite_deck::Manifest::from_event(ev).ok())
-                .map(|m| {
-                    let addr = SiteAddr {
-                        author: m.author,
-                        d_tag: m.d_tag.clone(),
-                    };
-                    DiscoveredNsite {
-                        host: addr.host_label(),
-                        author_npub: m.author.to_bech32().unwrap_or_default(),
-                        d_tag: m.d_tag,
-                        title: m.title.unwrap_or_default(),
-                        updated_at: m.event.created_at.as_secs(),
-                        holder_npub: npub.clone(),
-                        holder_name: name.clone(),
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
-
-        let results = join_all(queries).await;
-        *self.discovered.lock().unwrap() = dedup_by_host(results.into_iter().flatten().collect());
-    }
-
-    pub fn discovered_snapshot(&self) -> Vec<DiscoveredNsite> {
-        self.discovered.lock().unwrap().clone()
-    }
-
     // --- nsite updates (docs/design/nsite/nsite-updates.md) ---
 
     /// P-U1 manual update check (online). Polls online relays for newer manifests
@@ -3769,7 +3648,6 @@ impl Content {
         self.blobs.wipe().await?;
         self.library.lock().unwrap().clear();
         self.sites.lock().unwrap().clear();
-        self.discovered.lock().unwrap().clear();
         self.pending_updates.lock().unwrap().clear();
         self.active_manifests.lock().unwrap().clear();
         let _ = std::fs::remove_file(&self.library_path);
@@ -3799,8 +3677,8 @@ impl Content {
     /// Clear cached relay events + Blossom blobs **except** those backing pinned
     /// nsites (Settings → Storage → "Delete cache"). The served manifest version of
     /// each pinned site and every blob it references survive, so installed apps keep
-    /// working offline; everything else — unpinned opened sites, discovered
-    /// listings, staged updates — is dropped. Identity and Circle are untouched.
+    /// working offline; everything else — unpinned opened sites and staged
+    /// updates — is dropped. Identity and Circle are untouched.
     ///
     /// `keep_author` is the user key's pubkey, when there is one: its kind 0
     /// and kind 10002 survive too. They were published once, at first napplet
@@ -3897,7 +3775,6 @@ impl Content {
             .lock()
             .unwrap()
             .retain(|host, _| pinned_hosts.contains(host));
-        self.discovered.lock().unwrap().clear();
         self.pending_updates.lock().unwrap().clear();
         let active_snapshot = {
             let mut m = self.active_manifests.lock().unwrap();
@@ -5310,33 +5187,6 @@ mod tests {
             "no invite to someone already in the Circle"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn discovery_keeps_one_entry_per_site_preferring_the_newest() {
-        let mk = |host: &str, holder: &str, updated: u64| DiscoveredNsite {
-            host: host.to_string(),
-            author_npub: "npub1author".to_string(),
-            d_tag: None,
-            title: "T".to_string(),
-            updated_at: updated,
-            holder_npub: holder.to_string(),
-            holder_name: holder.to_string(),
-        };
-        // Two peers carry the same site at different versions, plus an unrelated one.
-        let out = dedup_by_host(vec![
-            mk("site-a", "npub1alice", 100),
-            mk("site-b", "npub1alice", 50),
-            mk("site-a", "npub1bob", 300),
-        ]);
-
-        assert_eq!(out.len(), 2, "one entry per site, not one per holder");
-        let a = out.iter().find(|d| d.host == "site-a").unwrap();
-        assert_eq!(a.updated_at, 300, "keeps the freshest copy");
-        assert_eq!(
-            a.holder_npub, "npub1bob",
-            "and therefore the holder worth pulling from"
-        );
     }
 
     #[test]

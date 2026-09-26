@@ -3,7 +3,7 @@
 Seven SVG mockups drawn before the consumer UI existed (the P3.5 pass). They
 are kept for the record; the shipped screens moved on:
 
-- The shell is a bottom-nav with **Apps · Circle · Discover · Settings · Dev**;
+- The shell is a bottom-nav with **Apps · Circle · Settings · Dev**;
   mockup 03 predates the Circle tab's bump-to-pair and file sharing.
 - The Apps grid holds **napplets** as well as nsites (🦆 badge), and the
   long-press sheet (mockup 02) gained **Manage permissions** and **Reload app**.

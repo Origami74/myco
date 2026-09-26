@@ -24,8 +24,8 @@ map, the [index](./README.md).
   phone; the Circle gate on the relay and Blossom; per-peer permissions stored
   (no UI yet). Native encrypted file sharing between Circle members.
 - **nsites.** Paste a link or scan a share; holder-first pull over the mesh,
-  then any Circle member, then the internet; staged updates; discovery ("around
-  me"); home-screen pins; deep links (`myco://app/<host>/<path>`); a custom relay
+  then any Circle member, then the internet; staged updates; home-screen pins;
+  deep links (`myco://app/<host>/<path>`); a custom relay
   or Blossom instead of the embedded ones.
 - **Gossip.** Hop-limited push (3) and pull (2) between Circle members, the
   `MESH` envelope, seen-set loop safety, backlog replay on reconnect.
@@ -151,6 +151,11 @@ opens the napplet.
 [NAP-NOTIFY](https://github.com/napplet/naps/pull/11) (registry draft).
 
 ### N5 — An app store napplet in place of the Discover tab
+
+**Partly built** — the Discover napplet ships preinstalled (`DEFAULT_NAPPLETS`)
+and the native Discover tab is gone. Still open: the napplet lists napplets
+only, not nsites, and its "Around you" needs `mesh` in the published
+manifest.
 
 **Goal.** Retire the built-in Discover tab and ship "around me" as a
 **napplet** — the first-party app store. It lists what your Circle holds

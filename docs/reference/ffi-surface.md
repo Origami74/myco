@@ -64,7 +64,6 @@ dispatch(actionJson) → stateJson
 | `set_napplet_mesh_reach` | `publishTtl`: u8, `subscribeTtl`: u8 | Cap how far a napplet may reach over the mesh (NAP-MESH): the most hops a `mesh.publish` and a `mesh.subscribe` backlog pull may ask for. |
 | `dismiss_napplet_review` | — | Close the install-review screen without installing. |
 | `check_nsite_updates` | — | Check online relays for newer versions of installed nsites and stage/apply them (`docs/design/nsite/nsite-updates.md`). |
-| `search_nsites` | `query`: Option<String> | Discover nsites on connected Circle peers' relays ("nsites around me"): query each reachable member's mesh relay for kind 15128/35128 manifests. |
 | `wipe_stores` | — | Clear the local relay + Blossom + Library + site status (dev/test reset). |
 | `wipe_cache` | — | Clear cached relay events + Blossom blobs **except** those backing pinned nsites (Settings → Storage → "Delete cache"). |
 | `add_to_circle` | `npub`: String, `name`: String | Add a paired peer to the **Circle**: the contact list of devices we pull nsites from over the mesh. |
@@ -100,7 +99,7 @@ big fields, by layer:
 | `identity` | 4 | `ownNpub`, `ownPubkeyHex`, `nodeAddrHex`, `fipsAddr`, the mesh ULA |
 | `node`, `ble`, `bleAdverts`, `blePeers`, `wifiAware`, `peers` | 4 | node status; per-lane radio status; the merged per-peer diagnostics rows (state, transport, every multi-path link, RTT, attempts) |
 | `circle`, `reachableNpubs`, `pendingPairRequests`, `outboundPairs` | 2 | the Circle; members with a live relay connection right now; incoming requests awaiting an answer; invites waiting |
-| `sites`, `library`, `discovered`, `updateCheck` | 1 | per-nsite sync state (`syncing` / `ready` / `unreachable` / `incomplete`, files pulled/total, staged update); every installed app with `kind`, `granted`, `pointer`; "around me" results |
+| `sites`, `library`, `updateCheck` | 1 | per-nsite sync state (`syncing` / `ready` / `unreachable` / `incomplete`, files pulled/total, staged update); every installed app with `kind`, `granted`, `pointer` |
 | `nappletReview`, `nappletDomains`, `nappletMeshReach` | 1 | a fetched napplet awaiting install review (loading / installing / requires / grants / error / holder; `installed` when it is already in the Library, `ready` when its files are on this phone too, and `unreviewed` — what an installed copy's update would add that was never reviewed; Add is offered when not installed or `unreviewed` is non-empty, "Download again" when installed but not `ready`, and neither otherwise); every grantable NAP; the user's mesh caps |
 | `cache`, `relayBackend`, `blobBackend`, `pendingRelayUrl`, `pendingBlossomUrl`, `offlineOnly` | 3 | store counts; custom backends and their health |
 | `fileTransfers`, `speedtest` | 2 / dev | native file sharing; the Dev speedtest |

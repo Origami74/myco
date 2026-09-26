@@ -142,19 +142,6 @@ data class CircleContact(
     val addedAt: Long,
 )
 
-/** An nsite discovered on a Circle peer's relay ("nsites around me"). */
-data class DiscoveredNsite(
-    val host: String,
-    val authorNpub: String,
-    val dTag: String?,
-    val title: String,
-    /** Unix seconds of the manifest version seen (its `created_at`); 0 if unknown. */
-    val updatedAt: Long,
-    /** The Circle peer who has it — the holder to pull from on open. */
-    val holderNpub: String,
-    val holderName: String,
-)
-
 /** An invite we sent that nobody has accepted yet. */
 data class OutboundPair(
     val npub: String,
@@ -364,7 +351,6 @@ data class AppState(
     /** Circle members with a live mesh relay connection right now — reachable
      *  at any hop count, not just direct neighbours. */
     val reachableNpubs: Set<String> = emptySet(),
-    val discovered: List<DiscoveredNsite>,
     val pendingPairRequests: List<PairRequest>,
     /** Invites we sent that are still waiting to be accepted. */
     val outboundPairs: List<OutboundPair> = emptyList(),
@@ -509,25 +495,6 @@ data class AppState(
                                 npub = c.optString("npub"),
                                 name = c.optString("name"),
                                 addedAt = c.optLong("addedAt"),
-                            )
-                        )
-                    }
-                }
-            }
-            val discoveredJson = o.optJSONArray("discovered")
-            val discovered = buildList {
-                if (discoveredJson != null) {
-                    for (i in 0 until discoveredJson.length()) {
-                        val d = discoveredJson.optJSONObject(i) ?: continue
-                        add(
-                            DiscoveredNsite(
-                                host = d.optString("host"),
-                                authorNpub = d.optString("authorNpub"),
-                                dTag = if (d.isNull("dTag")) null else d.optString("dTag"),
-                                title = d.optString("title"),
-                                updatedAt = d.optLong("updatedAt"),
-                                holderNpub = d.optString("holderNpub"),
-                                holderName = d.optString("holderName"),
                             )
                         )
                     }
@@ -737,7 +704,6 @@ data class AppState(
                         for (i in 0 until arr.length()) add(arr.optString(i))
                     }
                 },
-                discovered = discovered,
                 pendingPairRequests = pendingPairRequests,
                 outboundPairs = outboundPairs,
                 offlineOnly = o.optBoolean("offlineOnly"),
@@ -834,7 +800,7 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
      *
      * [allowSync] must stay `true` for WebView loads — the user asked for that
      * site, so a missing one should start pulling. Pass `false` for a **passive
-     * probe** the user did not ask for, such as a favicon behind a Discover
+     * probe** the user did not ask for, such as a favicon behind a grid
      * tile: a sync there downloads and pins every site merely rendered on
      * screen.
      */
@@ -1086,9 +1052,6 @@ object NativeActions {
     /** Withdraw an invite still waiting to be accepted. */
     fun cancelPairInvite(npub: String): JSONObject =
         JSONObject().put("type", "cancel_pair_invite").put("npub", npub)
-
-    /** Discover nsites on connected Circle peers' relays ("nsites around me"). */
-    fun searchNsites(): JSONObject = JSONObject().put("type", "search_nsites")
 
     /**
      * Point the event store at [url], or back at the built-in store with an

@@ -27,8 +27,9 @@ decision of this doc:
   napplet's permissions. Its UI is a bottom-nav shell: **Apps** (your installed
   nsites and napplets in one grid), **Circle** (pair by bump or QR, see
   [identity-pairing.md](./identity-pairing.md); your paired people; file
-  sharing), **Discover** (apps your Circle holds — "around me"), **Settings**
-  (radios, storage, identity, app reach), and a **Dev** tab.
+  sharing), **Settings** (radios, storage, identity, app reach), and a
+  **Dev** tab. Finding new apps is the job of the preinstalled **Discover**
+  napplet, which opens from the Apps grid like any other app.
 - **Each nsite as its own fullscreen app** — launched *by* Myco but running in
   its **own task/instance**, filling the screen, with **no Myco UI around it at
   all**. To an Android user it looks and behaves like a separate app, not a tab
@@ -211,9 +212,8 @@ the Circle:
   apps. It keeps every **pinned** Library entry working offline by computing a
   keep-set from the pinned sites — each one's *served* manifest event plus the
   blob hashes that manifest references — and retaining only those, then dropping
-  everything else: unpinned opened sites, discovered listings, and staged
-  updates. A pinned site whose manifest isn't local stays pinned and simply
-  re-downloads on next open.
+  everything else: unpinned opened sites and staged updates. A pinned site
+  whose manifest isn't local stays pinned and simply re-downloads on next open.
 - **Delete all data, including apps** (`wipe_stores`) — clear the local relay +
   Blossom + Library + status wholesale, pinned apps included.
 
