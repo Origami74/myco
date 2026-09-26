@@ -357,6 +357,11 @@ security shape is:
   key material, no socket, no file handle ever crosses into the iframe. The
   user key signs on the napplet's behalf; the napplet never sees it (§7.1 of
   the runtime design).
+- **The user key at rest.** `user.nsec` is written atomically with mode
+  0600 in the app's private data dir (`allowBackup=false`); logout deletes
+  it. It leaves Rust only through the Account page's reveal
+  (`accountRevealNsec`, outside the reducer so it is in no state snapshot),
+  behind a warning, with screenshots blocked and the copy marked sensitive.
 - **Grants are the user's, per call.** What a napplet may do is decided at
   install review — in words, on a screen the fetch cannot skip — and can be
   changed per capability on its sheet. The check is made on **every call**

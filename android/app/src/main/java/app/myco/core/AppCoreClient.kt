@@ -269,6 +269,27 @@ data class PeerPath(
 )
 
 /** Parsed slice of the core's state snapshot (P1 BLE surface + P2 content). */
+/** The logged-in user, as the Settings header and the Account page show it. */
+data class AccountState(
+    /** `guest`, `nsec`, or `logged_out`. */
+    val status: String = "logged_out",
+    val npub: String = "",
+    val pubkeyHex: String = "",
+    val name: String = "",
+    val about: String = "",
+    val picture: String = "",
+    /** Changes whenever the avatar bytes do; re-fetch with [AppCoreClient.accountAvatar]. */
+    val avatarRev: Long = 0,
+    /** A guest profile that has not reached the internet yet. */
+    val publishPending: Boolean = false,
+    /** Looking up an imported key's profile. */
+    val profileLoading: Boolean = false,
+    /** Why the last login failed. */
+    val error: String = "",
+) {
+    val loggedIn: Boolean get() = status != "logged_out"
+}
+
 data class AppState(
     val rev: Long,
     val error: String,
@@ -320,6 +341,8 @@ data class AppState(
      * entry's `urlHost`. Missing from the map means not yet computed.
      */
     val nappletStatus: Map<String, NappletStatus> = emptyMap(),
+    /** The logged-in user. */
+    val account: AccountState = AccountState(),
     /** How far napplets may reach over the mesh (NAP-MESH), and the most each cap may be. */
     val nappletMeshReach: NappletMeshReach = NappletMeshReach(),
     /** Every capability Myco can grant a napplet, in sheet order. */
@@ -667,6 +690,20 @@ data class AppState(
                 nappletDomains = o.optJSONArray("nappletDomains")?.let { d ->
                     (0 until d.length()).map { d.optString(it) }
                 }.orEmpty(),
+                account = o.optJSONObject("account")?.let { a ->
+                    AccountState(
+                        status = a.optString("status", "logged_out"),
+                        npub = a.optString("npub"),
+                        pubkeyHex = a.optString("pubkeyHex"),
+                        name = a.optString("name"),
+                        about = a.optString("about"),
+                        picture = a.optString("picture"),
+                        avatarRev = a.optLong("avatarRev"),
+                        publishPending = a.optBoolean("publishPending"),
+                        profileLoading = a.optBoolean("profileLoading"),
+                        error = a.optString("error"),
+                    )
+                } ?: AccountState(),
                 nappletMeshReach = o.optJSONObject("nappletMeshReach")?.let { r ->
                     NappletMeshReach(
                         publishTtl = r.optInt("publishTtl", 3),
@@ -756,6 +793,13 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
 
     fun dispatch(action: JSONObject): AppState =
         AppState.parse(NativeCore.dispatchJson(requireHandle(), action.toString()))
+
+    /** The logged-in nsec, for the Account page's reveal. Empty while logged out. */
+    fun revealNsec(): String = NativeCore.accountRevealNsec(requireHandle())
+
+    /** The account's avatar bytes, or null. */
+    fun accountAvatar(): ByteArray? =
+        NativeCore.accountAvatar(requireHandle()).takeIf { it.isNotEmpty() }
 
     /**
      * Serve one nsite request through the in-process gateway (for the WebView's
@@ -902,6 +946,13 @@ data class GatewayResult(
 /** Builders for the reducer actions (see docs/reference/ffi-surface.md). */
 object NativeActions {
     fun tick(): JSONObject = JSONObject().put("type", "tick")
+
+    // --- account ---
+    fun accountLogout(): JSONObject = JSONObject().put("type", "account_logout")
+    fun accountNewGuest(): JSONObject = JSONObject().put("type", "account_new_guest")
+    fun accountLoginNsec(nsec: String): JSONObject =
+        JSONObject().put("type", "account_login_nsec").put("nsec", nsec)
+    fun accountRefresh(): JSONObject = JSONObject().put("type", "account_refresh")
     fun startNode(): JSONObject = JSONObject().put("type", "start_node")
     fun stopNode(): JSONObject = JSONObject().put("type", "stop_node")
     fun setBleEnabled(enabled: Boolean): JSONObject =

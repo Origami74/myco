@@ -51,6 +51,9 @@ Ordered by what unblocks what. Each is its own PR or short series.
 
 ### N1 — Account and login (nsec)
 
+**Built** — `account.rs`, `user_key.rs`, `guest_avatar.rs`; the Account page in
+`AccountSettings.kt`. See [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.1.
+
 **Goal.** Every install has a Nostr identity from the first launch, the person
 can see it, take its key out, log out, and log in as someone else. What a
 napplet publishes is then *them*.
@@ -78,7 +81,7 @@ napplet publishes is then *them*.
   offers to reveal the nsec, because a guest key that was never copied out is
   gone for good.
 - **Login** offers three options: **generate a new identity** (a new guest),
-  **log in with nsec** (paste or scan), and **log in with a signer** (Amber, N2).
+  **log in with nsec** (paste), and **log in with a signer** (Amber, N2).
 
 **Exit criterion.** A fresh install shows a guest account in the Settings
 header, and its kind 0 and picture are visible from a public Nostr client.

@@ -47,6 +47,10 @@ mod napplet;
 mod outbox;
 // The user key a napplet publishes as — separate from the mesh device key (D3).
 mod user_key;
+// The account behind the Settings header: login, logout, the guest profile.
+mod account;
+// The guest profile picture: the logo, tinted from the npub.
+mod guest_avatar;
 // The `MESH` envelope that carries mesh state alongside — never inside — a
 // NIP-01 message on the peer link. See `reference/thinning-custom-relay.md`.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]

@@ -9,10 +9,9 @@ deterministically from the paired npub. What a pairing *means* — and why it is
 not the same as a FIPS peer link — is [../circle/circle.md](../circle/circle.md).
 
 > **Two keys on this phone.** Everything below is about the **device key**.
-> A napplet publishes as a separate **user key** (`user.nsec`), generated on
-> first napplet use with a guest profile; see
-> [../napplet/napplet-runtime.md §7.1](../napplet/napplet-runtime.md) and the
-> roadmap's login item for bringing your own.
+> A napplet publishes as a separate **user key** (`user.nsec`): a guest
+> generated on first launch, replaceable by logging in with an `nsec`; see
+> [../napplet/napplet-runtime.md §7.1](../napplet/napplet-runtime.md).
 
 See [diagram 09 — the two identities (device vs nsite author)](../diagrams/09-identity-model.svg)
 and [diagram 02 — Pairing & transitive peer discovery](../diagrams/02-pairing-transitive-discovery.svg).

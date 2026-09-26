@@ -121,6 +121,20 @@ header is `{status, contentType, headers}`. Blocks while the in-process
 gateway serves from the local relay and Blossom — it runs on the WebView's
 worker thread, never the UI thread.
 
+### The account
+
+```kotlin
+external fun accountRevealNsec(handle): String   // "" while logged out
+external fun accountAvatar(handle): ByteArray    // empty while there is none
+```
+
+The account's view (`account` in the state: status, npub, name, picture,
+`avatarRev`, …) rides the reducer; these two do not. The secret stays out of
+every state snapshot and is fetched only after the Account page's warning. The
+avatar is bytes; fetch again when `avatarRev` changes. Actions:
+`account_logout`, `account_new_guest`, `account_login_nsec { nsec }`,
+`account_refresh`.
+
 ### The napplet channel
 
 ```kotlin
