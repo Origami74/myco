@@ -9,50 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.0] - 2026-09-26
 
-### Changed
-
-- **Apps get the Mesh permission by default, for now.** The tools napplet
-  authors publish with drop Myco's own permissions from what an app asks
-  for, so no app could ask for Mesh — and "Around you" in Discover, and
-  every app that talks to the phones nearby, stayed silent. Mesh is now
-  granted like Relays and Identity: still listed on the install sheet,
-  capped by App reach, and switchable off per app. Apps you already have
-  get it at their next open, without asking, unless you switched it off.
-  This goes back to opt-in once the publishing tools keep Myco's permissions.
-- **Back never closes a napplet.** When a napplet doesn't go back itself,
-  back now sends it to the background — you land where you came from, and
-  the app keeps running with its state, in Recents — instead of closing it.
-  The same goes for the anti-trap rule (three consumed backs without a
-  touch) and for back while it is still opening. Only a crashed or hung
-  window is still closed.
-
 ### Added
 
-- **Open an app right after adding it.** Tapping "Add to my apps" used to show
-  "Adding…" and then the sheet just vanished, as if nothing had happened. Now
-  it stays up once the app lands — "<App> was added to your apps" (or
-  "downloaded again") with **Open** and **Done**. Open starts the app in its
-  own window, also when the sheet was opened from a link inside another
-  napplet.
+- **Your own account — the headline of this release.** The top of Settings
+  shows who you are — picture, name and npub — and opens an Account page.
+  Every install starts as a guest (`Myco Guest NNNNN`) from the first launch,
+  with a picture: the Myco logo in a gradient drawn from your npub. The
+  profile goes to the public relays and Blossom when you're online. From the
+  Account page you can show your secret key (after a warning never to share
+  it), log out, and log back in as a new guest or with an `nsec`. Open
+  napplets hear about a login or logout at once (NAP-IDENTITY's
+  `identity.changed`). A new guest follows three default accounts, so a
+  napplet's friends feed is not empty on day one; existing and imported
+  identities are left alone.
+- **Log in with Amber — your key never enters Myco.** The Account page's "Log
+  in with a signer" logs in through a NIP-55 signer app: your key stays there
+  and never enters Myco. Napplets sign through it — in the background once you
+  let the signer remember, otherwise on its approval screen — and every signed
+  event is checked against what was asked for before it is used.
+- **AppStore comes preinstalled.** An app store for napplets, itself a
+  napplet: a feed of napplets from your relays, community recommendations
+  from people you follow, and store-style app pages whose Install opens
+  Myco's install review, and an "Around you" tab of napplets the phones nearby
+  hold. Pinned like DingDong, with only the default grants.
+  It replaces the native Discover tab (see Removed). Phones that were
+  already set up get it on upgrade too: the seed now remembers each default
+  it pinned, so a new default still arrives and one you removed stays gone.
+- **Napplet updates reach your Circle.** A newer version of a napplet you
+  have installed, heard from a paired phone, is downloaded (from that phone
+  first), checked and kept, then passed on — as nsite updates already were —
+  and opens at the app's next launch. One found by "Check for updates" is
+  passed on too. Only its author's newer versions are taken, and an update
+  never gets a permission you did not review: anything new it asks for goes
+  through the review sheet when you next open it. Phones without the app just
+  pass the update along.
+- **Apps check for updates on their own.** Myco now checks installed nsites
+  and napplets when it comes to the foreground and every 6 hours while it
+  runs. Automatic checks are quiet and run at most once per 30 minutes;
+  "Check for updates" still runs right away and shows its result.
 - **An updated napplet offers a restart.** A napplet window keeps the version
   it opened, so re-opening one that sat in the background used to bring back
   the old version after an update. Now, when it comes back and a newer version
   has been installed meanwhile, it asks once: "Restart" opens the new version,
   "I'll restart later" keeps the window as it is and is not asked again for
   that version.
-- **Apps check for updates on their own.** Myco now checks installed nsites
-  and napplets when it comes to the foreground and every 6 hours while it
-  runs. Automatic checks are quiet and run at most once per 30 minutes;
-  "Check for updates" still runs right away and shows its result.
-- **AppStore comes preinstalled.** An app store for napplets, itself a
-  napplet: a feed of napplets from your relays, community recommendations
-  from people you follow, and store-style app pages whose Install opens
-  Myco's install review. Pinned like DingDong, with only the default grants.
-  Its "Around you" tab (napplets nearby devices hold) needs `mesh`, which the
-  published manifest does not declare yet, so it stays empty until it does.
-  It replaces the native Discover tab (see Removed). Phones that were
-  already set up get it on upgrade too: the seed now remembers each default
-  it pinned, so a new default still arrives and one you removed stays gone.
+- **Open an app right after adding it.** Tapping "Add to my apps" used to show
+  "Adding…" and then the sheet just vanished, as if nothing had happened. Now
+  it stays up once the app lands — "<App> was added to your apps" (or
+  "downloaded again") with **Open** and **Done**. Open starts the app in its
+  own window, also when the sheet was opened from a link inside another
+  napplet.
 - **Napplets can open links and match your theme.** NAP-LINK: a napplet can
   ask to open a web link (your browser, after a one-tap confirm unless you just
   touched the app) or point you at another napplet — Myco's install review
@@ -64,69 +70,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Napplets can read who you follow and mute.** NAP-IDENTITY's `getFollows`
   and `getMutes` answer from your kind 3 and kind 10000 on this phone (empty
   when there are none), where they were always empty.
-- **Account.** The top of Settings shows who you are — picture, name and
-  npub — and opens an Account page. Every install starts as a guest
-  (`Myco Guest NNNNN`) from the first launch, with a picture: the Myco logo
-  in a gradient drawn from your npub. The profile goes to the public relays
-  and Blossom when you're online. From the Account page you can show your
-  secret key (after a warning never to share it), log out, and log back in
-  as a new guest or with an `nsec`. Open napplets hear about a login or
-  logout at once (NAP-IDENTITY's `identity.changed`). A new guest follows three
-  default accounts, so a napplet's friends feed is not empty on day one;
-  existing and imported identities are left alone.
-- **Napplet updates reach your Circle.** A newer version of a napplet you
-  have installed, heard from a paired phone, is downloaded (from that phone
-  first), checked and kept, then passed on — as nsite updates already were —
-  and opens at the app's next launch. One found by "Check for updates" is
-  passed on too. Only its author's newer versions are taken, and an update
-  never gets a permission you did not review: anything new it asks for goes
-  through the review sheet when you next open it. Phones without the app just
-  pass the update along.
-- **Log in with Amber.** The Account page's "Log in with a signer" logs in
-  through a NIP-55 signer app: your key stays there and never enters Myco.
-  Napplets sign through it — in the background once you let the signer
-  remember, otherwise on its approval screen — and every signed event is
-  checked against what was asked for before it is used.
 
 ### Fixed
 
-- **Back inside a napplet goes back.** The back gesture always closed the
-  whole napplet, even from a page it had opened — Discover's app page
-  included. Myco now delivers back to the napplet as an Escape keydown: a
-  napplet that handles it (`preventDefault()`) stays open and goes back
-  itself; one that leaves it unhandled is closed, as before. A napplet
-  can't trap you: after three backs it consumed without a touch in between,
-  the next back closes it. Plain DOM behaviour, no new NAP — see the
+- **Back inside a napplet goes back, and never closes it.** The back gesture
+  always closed the whole napplet, even from a page it had opened —
+  AppStore's app page included. Myco now delivers back to the napplet as an
+  Escape keydown: a napplet that handles it (`preventDefault()`) stays open
+  and goes back itself. One that leaves it unhandled is sent to the
+  background — you land where you came from, and the app keeps running with
+  its state, in Recents. A napplet can't trap you: after three backs it
+  consumed without a touch in between, the next back leaves it. Only a
+  crashed or hung window is closed. Plain DOM behaviour, no new NAP — see the
   napplet runtime design doc.
-- **A manifest published through NAP-MESH keeps to the hop budget the
-  napplet chose.** An nsite or napplet manifest a napplet published over the
-  mesh went out at the default budget whatever it asked for; it now respects
-  the choice, including 0 for "this phone only", as other NAP-MESH publishes
-  do.
-- **A napplet's publish no longer times out while you approve it in your
-  signer app.** Publishing (NAP-OUTBOX and NAP-MESH) gave up after 30 s, so a
-  slow approval in Amber showed as "outbox.publish timed out" — and the event
-  could still go out. The napplet now waits for the answer: the signed event,
-  or a clear failure once the signer app has had its two minutes.
 - **Napplets saw nobody logged in.** `identity.getPublicKey` answered in a
   `publicKey` field where NAP-IDENTITY (and the reference shim) use `pubkey`,
   so every napplet read `undefined` — Minesweeper said "Sign in to publish".
   The other identity list queries replied in a generic `result` field the
   shim reads as `undefined`; they now answer in their spec fields (`pubkeys`,
   `entries`, `zaps`, `badges`).
+- **A napplet's publish no longer times out while you approve it in your
+  signer app.** Publishing (NAP-OUTBOX and NAP-MESH) gave up after 30 s, so a
+  slow approval in Amber showed as "outbox.publish timed out" — and the event
+  could still go out. The napplet now waits for the answer: the signed event,
+  or a clear failure once the signer app has had its two minutes.
 - **Slow napplet publishes.** `outbox.publish` waited for every relay (up to
   8 s) before answering. It now answers once the event is stored here and
   two relays have taken it — or the only relay, for someone with one — and
   the rest finish in the background. A publish to other people's inboxes
   still waits for every relay, so a failed delivery is always reported.
-- **A removed app came back.** Removing an app nobody could deliver (stuck on
-  loading) had no lasting effect: its open window's loading page reloads every
-  second and each reload started a new search, re-creating the tile. Remove now
-  closes that window, drops any pending deep link to it, and keeps it gone —
-  an in-flight sync can't re-list or re-pin it — until you add it again. The
-  loading page also searches at most every 15 s rather than every second.
-  Opening the app again — from Add, Discover, a link or a home-screen
-  shortcut — brings it back.
 - **Adding a napplet was slow and downloaded too early.** "Looking for this
   app" now fetches the manifest only — the review appears as soon as it is
   found and its signature checks out, and the relay wait after the first
@@ -134,9 +106,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   you tap "Add to my apps" (the button shows "Adding…"), verified against the
   manifest you reviewed. The review sheet opens fully and scrolls, with its
   buttons always on screen. The update check keeps its 600 ms wait.
+- **A removed app came back.** Removing an app nobody could deliver (stuck on
+  loading) had no lasting effect: its open window's loading page reloads every
+  second and each reload started a new search, re-creating the tile. Remove now
+  closes that window, drops any pending deep link to it, and keeps it gone —
+  an in-flight sync can't re-list or re-pin it — until you add it again. The
+  loading page also searches at most every 15 s rather than every second.
+  Opening the app again — from Add, AppStore, a link or a home-screen
+  shortcut — brings it back.
+- **A manifest published through NAP-MESH keeps to the hop budget the
+  napplet chose.** An nsite or napplet manifest a napplet published over the
+  mesh went out at the default budget whatever it asked for; it now respects
+  the choice, including 0 for "this phone only", as other NAP-MESH publishes
+  do.
 
 ### Changed
 
+- **Apps get the Mesh permission by default, for now.** The tools napplet
+  authors publish with drop Myco's own permissions from what an app asks
+  for, so no app could ask for Mesh — and "Around you" in AppStore, and
+  every app that talks to the phones nearby, stayed silent. Mesh is now
+  granted like Relays and Identity: still listed on the install sheet,
+  capped by App reach, and switchable off per app. Apps you already have
+  get it at their next open, without asking, unless you switched it off.
+  This goes back to opt-in once the publishing tools keep Myco's permissions.
 - **The Apps screen looks like a stock Android launcher.** Round icons, five
   across on a phone and more on a tablet, a step larger on tablets, instead of
   four tiles stretched to fit. Napplets are the default and carry no mark; an
@@ -158,8 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the preinstalled AppStore napplet, on the Apps grid, takes its place. What
   goes with it: the tab's "Around you" list of *nsites* your connected Circle
   members hold, and its Suggested row (bitchat, ICS, Dumplings, Mappy,
-  Minesweeper, DingDong). The AppStore napplet lists napplets only, and its
-  own "Around you" stays empty until its manifest asks for `mesh`. An nsite
+  Minesweeper, DingDong). The AppStore napplet lists napplets only. An nsite
   still arrives by a share, a scan or a link. For developers: the
   `search_nsites` action and the `discovered` state field are gone from the
   FFI.

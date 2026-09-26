@@ -13,7 +13,8 @@ v0.8.0 is about **you** and **your apps**.
 
 ## At a glance
 
-- **An account from day one.** Every install starts as a guest with a name and a picture. Log in with your `nsec`, or with a signer app so your key never enters Myco.
+- **Your own account.** Every install has a Nostr identity from the first launch: a guest with a name and a picture. Show your key, log out, or log in with your own `nsec`.
+- **Log in with Amber.** Sign in through a signer app (NIP-55). Your key never enters Myco, and every app signs through the signer.
 - **Discover is an app.** Browse napplets, read recommendations from people you follow, curate your own stacks, and install from a store-style page. It comes preinstalled and replaces the Discover tab.
 - **Updates find you.** Myco checks for app updates when you open it and every few hours. A napplet update one phone gets is passed to the rest of your Circle, even with no internet.
 - **A launcher-style Apps screen.** Round icons, five across on a phone and sized properly on a tablet. A small globe marks the apps that are websites.
