@@ -1275,6 +1275,24 @@ pub struct NappletReview {
     /// is the wait between "Add" and the app landing on the grid.
     #[serde(default)]
     pub installing: bool,
+    /// This napplet — the same author and `d` tag — is already in the
+    /// Library. With nothing in [`Self::unreviewed`], adding it again would
+    /// change nothing, so the sheet says it is installed instead of offering
+    /// Add.
+    #[serde(default)]
+    pub installed: bool,
+    /// Installed, and its files are on this phone (the tile reads "Ready").
+    /// An installed napplet that is not — seeded offline, or its blobs gone —
+    /// comes back through this sheet to be downloaded again, so the sheet
+    /// offers that instead of "Already installed".
+    #[serde(default)]
+    pub ready: bool,
+    /// For an installed napplet: what this manifest would grant that the user
+    /// never reviewed and never decided on — an update declaring more. The
+    /// sheet still asks about these; answering records the new reviewed list.
+    /// Empty when the napplet is not installed, where everything is new.
+    #[serde(default)]
+    pub unreviewed: Vec<String>,
     /// The fetched manifest, kept so install downloads exactly what was
     /// reviewed rather than whatever the relays hold by then. Never sent to
     /// Kotlin.
@@ -1287,6 +1305,49 @@ pub struct NappletReview {
     /// Without it a retry in a room with no internet would search blind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holder: Option<String>,
+}
+
+/// Where a napplet under review stands against the Library: whether it is
+/// installed, and if so what the manifest declaring `requires` would grant
+/// that the installed copy never reviewed ([`unreviewed_domains`]).
+pub fn library_standing(
+    content: &crate::content::Content,
+    addr: &NappletAddr,
+    requires: &[String],
+) -> (bool, Vec<String>) {
+    use nostr::nips::nip19::ToBech32;
+    let npub = addr.author.to_bech32().unwrap_or_default();
+    match content.napplet_grants(&npub, addr.d_tag.as_deref()) {
+        None => (false, Vec::new()),
+        Some(grants) => (true, unreviewed_domains(&grants, requires)),
+    }
+}
+
+/// Whether the installed napplet at `addr` can open: its tile status is
+/// `ready` (the served manifest and its index blob are both here).
+pub fn is_ready_here(content: &crate::content::Content, addr: &NappletAddr) -> bool {
+    let host =
+        myco_napplet_runtime::host::shell_host(&addr.author.to_bytes(), addr.d_tag.as_deref());
+    content
+        .napplet_status_snapshot()
+        .into_iter()
+        .any(|s| s.host == host && s.state == "ready")
+}
+
+/// What a manifest declaring `requires` would grant that an installed
+/// napplet's user was never asked about: not on the reviewed list, and neither
+/// granted nor switched off. The same rule [`NappletHost::open_with`] applies
+/// to the served version at open.
+pub fn unreviewed_domains(
+    grants: &crate::content::NappletGrants,
+    requires: &[String],
+) -> Vec<String> {
+    let reviewed = effective_grants(&grants.reviewed);
+    effective_grants(requires)
+        .into_iter()
+        .filter(|d| !grants.granted.contains(d) && !grants.denied.contains(d))
+        .filter(|d| !reviewed.contains(d))
+        .collect()
 }
 
 /// What a fetched, verified napplet declares — the input to install review.
@@ -1543,6 +1604,9 @@ mod tests {
             requires: Vec::new(),
             grants: Vec::new(),
             installing: false,
+            installed: false,
+            ready: false,
+            unreviewed: Vec::new(),
             manifest: None,
             error: String::new(),
             holder: None,
