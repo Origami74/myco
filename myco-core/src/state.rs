@@ -192,7 +192,7 @@ pub struct PeerDiagnosticView {
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountView {
-    /// `guest`, `nsec`, or `logged_out`.
+    /// `guest`, `nsec`, `signer`, or `logged_out`.
     pub status: String,
     pub npub: String,
     pub pubkey_hex: String,
@@ -209,6 +209,8 @@ pub struct AccountView {
     pub publish_pending: bool,
     /// Looking for an imported key's profile on the public relays.
     pub profile_loading: bool,
+    /// The signer app's package, for a `signer` login.
+    pub signer_package: String,
     /// Why the last login failed; empty otherwise.
     pub error: String,
 }

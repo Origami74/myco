@@ -51,6 +51,8 @@ mod user_key;
 mod account;
 // The guest profile picture: the logo, tinted from the npub.
 mod guest_avatar;
+// Signing with a key in a signer app (NIP-55, Amber), carried by Kotlin.
+mod external_signer;
 // The `MESH` envelope that carries mesh state alongside — never inside — a
 // NIP-01 message on the peer link. See `reference/thinning-custom-relay.md`.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]

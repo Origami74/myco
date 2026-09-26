@@ -26,7 +26,7 @@ use nsite_deck::seams::{BlobStore, RelayBackend};
 use nsite_deck::sha256_hex;
 
 use crate::state::AccountView;
-use crate::user_key::{Origin, Slot, Startup, UserKey};
+use crate::user_key::{ExternalUser, Identity, Origin, Slot, Startup, UserKey};
 
 /// Where the guest picture is uploaded, first one first. The profile names
 /// the first server that accepted it.
@@ -78,6 +78,8 @@ pub struct Account {
     generation: Arc<AtomicU64>,
     ctx: AccountContext,
     handle: tokio::runtime::Handle,
+    /// Where a signer-app login's requests wait for Kotlin.
+    bridge: Arc<crate::external_signer::SignerBridge>,
 }
 
 impl Account {
@@ -91,6 +93,7 @@ impl Account {
             generation: Arc::new(AtomicU64::new(0)),
             ctx,
             handle,
+            bridge: Arc::new(crate::external_signer::SignerBridge::default()),
         };
         match crate::user_key::startup(&account.data_dir) {
             Ok(Startup::Existing(user)) => account.activate(user, false),
@@ -98,6 +101,7 @@ impl Account {
                 tracing::info!("generated a guest account: {}", user.guest_name());
                 account.activate(user, true)
             }
+            Ok(Startup::Signer(user)) => account.activate_signer(user),
             Ok(Startup::LoggedOut) => account.set_logged_out(String::new()),
             Err(e) => {
                 // A key that cannot be read is not silently replaced: the
@@ -114,6 +118,11 @@ impl Account {
         self.slot.clone()
     }
 
+    /// The queue a signer-app login's requests wait in, for the JNI pump.
+    pub fn bridge(&self) -> Arc<crate::external_signer::SignerBridge> {
+        self.bridge.clone()
+    }
+
     pub fn view(&self) -> AccountView {
         self.lock().view.clone()
     }
@@ -123,10 +132,11 @@ impl Account {
     }
 
     pub fn public_key(&self) -> Option<PublicKey> {
-        self.keys().map(|k| k.public_key())
+        self.identity().map(|i| i.public_key())
     }
 
     /// The logged-in secret, as `nsec1…`, for the Account page's reveal.
+    /// `None` for a signer-app login: the secret is not here to reveal.
     pub fn reveal_nsec(&self) -> Option<String> {
         self.keys()?.secret_key().to_bech32().ok()
     }
@@ -163,14 +173,30 @@ impl Account {
         }
     }
 
+    /// Log in with a signer app (NIP-55): its answer to `get_public_key` and
+    /// its package, from the intent Kotlin ran. A failure is kept on the view.
+    pub fn login_signer(&self, pubkey: &str, package: &str) -> anyhow::Result<()> {
+        match crate::user_key::login_signer(&self.data_dir, pubkey, package) {
+            Ok(user) => {
+                tracing::info!(package = %user.package, "logged in with a signer app");
+                self.activate_signer(user);
+                Ok(())
+            }
+            Err(e) => {
+                self.lock().view.error = e.to_string();
+                Err(e)
+            }
+        }
+    }
+
     /// Re-read the profile from the local store — a napplet may have
     /// published a new kind 0 since.
     pub fn refresh(&self) {
-        let Some(keys) = self.keys() else { return };
+        let Some(pk) = self.public_key() else { return };
         let this = self.clone();
         let generation = self.generation.load(Ordering::SeqCst);
         self.handle.spawn(async move {
-            if let Some(profile) = this.local_profile(&keys.public_key()).await {
+            if let Some(profile) = this.local_profile(&pk).await {
                 this.apply_profile(generation, &profile);
             }
         });
@@ -178,7 +204,8 @@ impl Account {
 
     fn activate(&self, user: UserKey, new_guest: bool) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        *self.slot.write().unwrap_or_else(|p| p.into_inner()) = Some(user.keys.clone());
+        *self.slot.write().unwrap_or_else(|p| p.into_inner()) =
+            Some(Identity::Local(user.keys.clone()));
         let pk = user.keys.public_key();
         let pending = user.origin == Origin::Guest
             && (new_guest || crate::user_key::profile_pending(&self.data_dir));
@@ -199,6 +226,7 @@ impl Account {
                 avatar_rev,
                 publish_pending: pending,
                 profile_loading: user.origin == Origin::Nsec,
+                signer_package: String::new(),
                 error: String::new(),
             };
         }
@@ -215,6 +243,32 @@ impl Account {
                     .spawn(async move { this.run_imported(generation, pk).await });
             }
         }
+    }
+
+    /// A signer-app login: no key here, the profile looked up like an
+    /// imported one's.
+    fn activate_signer(&self, user: ExternalUser) {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let pk = user.pubkey;
+        *self.slot.write().unwrap_or_else(|p| p.into_inner()) =
+            Some(Identity::External(user.clone()));
+        {
+            let mut shared = self.lock();
+            let avatar_rev = shared.view.avatar_rev + 1;
+            shared.avatar = None;
+            shared.view = AccountView {
+                status: "signer".to_string(),
+                npub: pk.to_bech32().unwrap_or_default(),
+                pubkey_hex: pk.to_hex(),
+                avatar_rev,
+                profile_loading: true,
+                signer_package: user.package,
+                ..AccountView::default()
+            };
+        }
+        let this = self.clone();
+        self.handle
+            .spawn(async move { this.run_imported(generation, pk).await });
     }
 
     fn set_logged_out(&self, error: String) {
@@ -491,8 +545,17 @@ impl Account {
         found.into_iter().max_by_key(|e| e.created_at)
     }
 
-    fn keys(&self) -> Option<Keys> {
+    fn identity(&self) -> Option<Identity> {
         self.slot.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// The local key, for a guest or an imported nsec; `None` for a
+    /// signer-app login.
+    fn keys(&self) -> Option<Keys> {
+        match self.identity()? {
+            Identity::Local(keys) => Some(keys),
+            Identity::External(_) => None,
+        }
     }
 
     fn is_current(&self, generation: u64) -> bool {
@@ -874,6 +937,45 @@ mod tests {
             follows.is_empty(),
             "an imported identity got default follows"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_signer_login_has_no_secret_to_reveal_and_survives_a_relaunch() {
+        let relay = Arc::new(MemRelay::new());
+        let blobs = Arc::new(MemBlobs::new());
+        let dir = temp_dir();
+        let account = Account::start(
+            dir.clone(),
+            offline(relay.clone(), blobs.clone()),
+            tokio::runtime::Handle::current(),
+        );
+        account.logout().unwrap();
+        let theirs = Keys::generate().public_key();
+
+        assert!(account
+            .login_signer("garbage", "com.greenart7c3.nostrsigner")
+            .is_err());
+        assert!(!account.view().error.is_empty());
+
+        account
+            .login_signer(&theirs.to_bech32().unwrap(), "com.greenart7c3.nostrsigner")
+            .unwrap();
+        let view = account.view();
+        assert_eq!(view.status, "signer");
+        assert_eq!(view.signer_package, "com.greenart7c3.nostrsigner");
+        assert_eq!(account.public_key(), Some(theirs));
+        assert!(
+            account.reveal_nsec().is_none(),
+            "a signer login revealed a secret"
+        );
+
+        let relaunched = Account::start(
+            dir,
+            offline(relay, blobs),
+            tokio::runtime::Handle::current(),
+        );
+        assert_eq!(relaunched.view().status, "signer");
+        assert_eq!(relaunched.public_key(), Some(theirs));
     }
 
     #[tokio::test(flavor = "multi_thread")]

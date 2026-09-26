@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logout at once (NAP-IDENTITY's `identity.changed`). A new guest follows three
   default accounts, so a napplet's friends feed is not empty on day one;
   existing and imported identities are left alone.
+- **Log in with Amber.** The Account page's "Log in with a signer" logs in
+  through a NIP-55 signer app: your key stays there and never enters Myco.
+  Napplets sign through it — in the background once you let the signer
+  remember, otherwise on its approval screen — and every signed event is
+  checked against what was asked for before it is used.
 
 ### Fixed
 

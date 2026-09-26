@@ -13,6 +13,11 @@
 //! which there is no user key at all, and napplets have no identity, until the
 //! person logs in again or asks for a new guest.
 //!
+//! A person can also log in with a **signer app** (NIP-55, Amber): then there
+//! is no user key here at all, only the signer's pubkey and package
+//! (`user-signer.json`), and every signature is asked of the signer
+//! (`external_signer`).
+//!
 //! The secret leaves Rust by one path only: the Account page's reveal, behind
 //! a warning (`AppRuntime::reveal_nsec`). No capability exposes it: a napplet
 //! asks for a signature and gets an event back.
@@ -20,12 +25,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use nostr::Keys;
+use nostr::{Keys, PublicKey};
 
 const KEY_FILE: &str = "user.nsec";
 /// The account's sidecar: guest number, where the key came from, and whether
 /// the guest profile has reached the internet yet. Named for its first use.
 const META_FILE: &str = "user-guest.json";
+/// A signer-app login: the user's pubkey and the signer's package. No secret.
+const SIGNER_FILE: &str = "user-signer.json";
 /// Present after a logout, so the next launch does not answer "no key" with a
 /// new guest. Only read when there is no key: a key on disk always wins.
 const LOGGED_OUT_FILE: &str = "user-logged-out";
@@ -69,6 +76,32 @@ impl UserKey {
     }
 }
 
+/// A user whose key lives in a signer app (NIP-55).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalUser {
+    pub pubkey: PublicKey,
+    /// The signer app's package, which every later request is addressed to.
+    pub package: String,
+}
+
+/// Who signs for the logged-in user.
+#[derive(Clone)]
+pub enum Identity {
+    /// A key stored here: a guest, or an imported `nsec`.
+    Local(Keys),
+    /// A signer app holds the key.
+    External(ExternalUser),
+}
+
+impl Identity {
+    pub fn public_key(&self) -> PublicKey {
+        match self {
+            Identity::Local(keys) => keys.public_key(),
+            Identity::External(user) => user.pubkey,
+        }
+    }
+}
+
 /// What a launch finds.
 pub enum Startup {
     /// A key from an earlier launch.
@@ -76,6 +109,8 @@ pub enum Startup {
     /// No key and no logout: a first launch (or the first since this landed).
     /// A guest was just generated, and its profile is still to be published.
     NewGuest(UserKey),
+    /// Logged in with a signer app.
+    Signer(ExternalUser),
     /// The person logged out and has not logged back in.
     LoggedOut,
 }
@@ -84,6 +119,9 @@ pub enum Startup {
 pub fn startup(data_dir: &Path) -> anyhow::Result<Startup> {
     if let Some(user) = load(data_dir)? {
         return Ok(Startup::Existing(user));
+    }
+    if let Some(user) = load_signer(data_dir)? {
+        return Ok(Startup::Signer(user));
     }
     if data_dir.join(LOGGED_OUT_FILE).exists() {
         return Ok(Startup::LoggedOut);
@@ -123,6 +161,57 @@ pub fn load(data_dir: &Path) -> anyhow::Result<Option<UserKey>> {
     }))
 }
 
+/// The stored signer-app login, if there is one.
+pub fn load_signer(data_dir: &Path) -> anyhow::Result<Option<ExternalUser>> {
+    let Ok(raw) = std::fs::read_to_string(data_dir.join(SIGNER_FILE)) else {
+        return Ok(None);
+    };
+    let v: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("stored signer login is unreadable: {e}"))?;
+    let pubkey = v
+        .get("pubkey")
+        .and_then(|p| p.as_str())
+        .and_then(|p| PublicKey::parse(p).ok())
+        .ok_or_else(|| anyhow::anyhow!("stored signer login has no pubkey"))?;
+    let package = v
+        .get("package")
+        .and_then(|p| p.as_str())
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("stored signer login has no signer app"))?
+        .to_string();
+    Ok(Some(ExternalUser { pubkey, package }))
+}
+
+/// Log in with a signer app: its answer to `get_public_key` (hex, or an
+/// `npub`, which some signers send) and its package. Replaces any key here.
+pub fn login_signer(data_dir: &Path, pubkey: &str, package: &str) -> anyhow::Result<ExternalUser> {
+    let pubkey = PublicKey::parse(pubkey.trim())
+        .map_err(|_| anyhow::anyhow!("The signer app sent something that is not a public key."))?;
+    let package = package.trim();
+    anyhow::ensure!(!package.is_empty(), "The signer app did not say who it is.");
+    // An Android package name — it becomes `content://<package>.SIGN_EVENT`,
+    // and anything else in there (a `/`, a `@`) would point that query at
+    // some other provider.
+    anyhow::ensure!(
+        package
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_'),
+        "The signer app sent an invalid name."
+    );
+    let user = ExternalUser {
+        pubkey,
+        package: package.to_string(),
+    };
+    std::fs::write(
+        data_dir.join(SIGNER_FILE),
+        serde_json::json!({ "pubkey": pubkey.to_hex(), "package": package }).to_string(),
+    )?;
+    for stale in [KEY_FILE, META_FILE, LOGGED_OUT_FILE] {
+        let _ = std::fs::remove_file(data_dir.join(stale));
+    }
+    Ok(user)
+}
+
 /// Generate a new guest, replacing any key (the caller logs out first).
 pub fn generate_guest(data_dir: &Path) -> anyhow::Result<UserKey> {
     let keys = Keys::generate();
@@ -139,6 +228,7 @@ pub fn generate_guest(data_dir: &Path) -> anyhow::Result<UserKey> {
         }),
     );
     let _ = std::fs::remove_file(data_dir.join(LOGGED_OUT_FILE));
+    let _ = std::fs::remove_file(data_dir.join(SIGNER_FILE));
     Ok(UserKey {
         keys,
         origin: Origin::Guest,
@@ -164,6 +254,7 @@ pub fn import(data_dir: &Path, secret: &str) -> anyhow::Result<UserKey> {
         serde_json::json!({ "origin": Origin::Nsec.as_str() }),
     );
     let _ = std::fs::remove_file(data_dir.join(LOGGED_OUT_FILE));
+    let _ = std::fs::remove_file(data_dir.join(SIGNER_FILE));
     Ok(UserKey {
         keys,
         origin: Origin::Nsec,
@@ -183,6 +274,7 @@ pub fn logout(data_dir: &Path) -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     }
     let _ = std::fs::remove_file(data_dir.join(META_FILE));
+    let _ = std::fs::remove_file(data_dir.join(SIGNER_FILE));
     Ok(())
 }
 
@@ -279,27 +371,29 @@ fn write_private(path: &PathBuf, contents: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The logged-in keys, shared by the signer and the account. `None` while
+/// Who is logged in, shared by the signer and the account. `None` while
 /// logged out.
-pub type Slot = Arc<RwLock<Option<Keys>>>;
+pub type Slot = Arc<RwLock<Option<Identity>>>;
 
 /// The [`Signer`](myco_napplet_runtime::seams::Signer) a napplet's capability
 /// calls are mediated through.
 ///
 /// Reads the account's slot on every call, so a login or logout takes effect
-/// on an open napplet's next call rather than its next launch. There is no
-/// method that returns key material: a napplet describes an event and gets an
-/// event back, or an error.
+/// on an open napplet's next call rather than its next launch. A local key
+/// signs here; a signer-app login asks the signer through `bridge`. There is
+/// no method that returns key material: a napplet describes an event and gets
+/// an event back, or an error.
 pub struct UserSigner {
     slot: Slot,
+    bridge: Arc<crate::external_signer::SignerBridge>,
 }
 
 impl UserSigner {
-    pub fn new(slot: Slot) -> Self {
-        Self { slot }
+    pub fn new(slot: Slot, bridge: Arc<crate::external_signer::SignerBridge>) -> Self {
+        Self { slot, bridge }
     }
 
-    fn keys(&self) -> anyhow::Result<Keys> {
+    fn identity(&self) -> anyhow::Result<Identity> {
         self.slot
             .read()
             .unwrap_or_else(|p| p.into_inner())
@@ -311,13 +405,24 @@ impl UserSigner {
 #[async_trait::async_trait]
 impl myco_napplet_runtime::seams::Signer for UserSigner {
     async fn public_key(&self) -> anyhow::Result<nostr::PublicKey> {
-        Ok(self.keys()?.public_key())
+        Ok(self.identity()?.public_key())
     }
 
     async fn sign(&self, unsigned: nostr::UnsignedEvent) -> anyhow::Result<nostr::Event> {
-        unsigned
-            .sign_with_keys(&self.keys()?)
-            .map_err(|e| anyhow::anyhow!("signing failed: {e}"))
+        match self.identity()? {
+            Identity::Local(keys) => unsigned
+                .sign_with_keys(&keys)
+                .map_err(|e| anyhow::anyhow!("signing failed: {e}")),
+            Identity::External(user) => {
+                crate::external_signer::sign_via(
+                    &self.bridge,
+                    unsigned,
+                    &user.pubkey,
+                    &user.package,
+                )
+                .await
+            }
+        }
     }
 }
 
@@ -345,7 +450,7 @@ mod tests {
     fn startup_user(dir: &Path) -> UserKey {
         match startup(dir).unwrap() {
             Startup::Existing(user) | Startup::NewGuest(user) => user,
-            Startup::LoggedOut => panic!("logged out"),
+            Startup::LoggedOut | Startup::Signer(_) => panic!("not a local key"),
         }
     }
 
@@ -506,15 +611,42 @@ mod tests {
         assert!(err.contains("not a valid nsec"), "{err}");
     }
 
+    /// A signer login keeps no secret, survives a relaunch, and is replaced
+    /// by any other login or cleared by logout.
+    #[test]
+    fn a_signer_login_is_remembered_without_a_key() {
+        let dir = temp_dir();
+        startup_user(&dir);
+        let theirs = Keys::generate().public_key();
+        let npub = nostr::ToBech32::to_bech32(&theirs).unwrap();
+        let user = login_signer(&dir, &npub, "com.greenart7c3.nostrsigner").unwrap();
+        assert_eq!(user.pubkey, theirs);
+        assert!(!dir.join(KEY_FILE).exists(), "a guest key was left behind");
+        match startup(&dir).unwrap() {
+            Startup::Signer(found) => assert_eq!(found, user),
+            _ => panic!("the signer login was not remembered"),
+        }
+        assert!(login_signer(&dir, "not a key", "p").is_err());
+        assert!(login_signer(&dir, &theirs.to_hex(), " ").is_err());
+        assert!(login_signer(&dir, &theirs.to_hex(), "evil.app/x").is_err());
+
+        logout(&dir).unwrap();
+        assert!(matches!(startup(&dir).unwrap(), Startup::LoggedOut));
+
+        login_signer(&dir, &theirs.to_hex(), "p").unwrap();
+        generate_guest(&dir).unwrap();
+        assert!(matches!(startup(&dir).unwrap(), Startup::Existing(_)));
+    }
+
     #[tokio::test]
     async fn the_signer_follows_login_and_logout() {
         use myco_napplet_runtime::seams::Signer;
         let slot: Slot = Arc::new(RwLock::new(None));
-        let signer = UserSigner::new(slot.clone());
+        let signer = UserSigner::new(slot.clone(), Default::default());
         assert!(signer.public_key().await.is_err(), "signs while logged out");
 
         let keys = Keys::generate();
-        *slot.write().unwrap() = Some(keys.clone());
+        *slot.write().unwrap() = Some(Identity::Local(keys.clone()));
         assert_eq!(signer.public_key().await.unwrap(), keys.public_key());
         let unsigned = nostr::EventBuilder::text_note("hi").build(keys.public_key());
         assert_eq!(

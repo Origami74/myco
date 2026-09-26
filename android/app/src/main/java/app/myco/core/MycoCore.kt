@@ -2,6 +2,7 @@ package app.myco.core
 
 import android.content.Context
 import app.myco.BuildConfig
+import app.myco.signer.ExternalSigner
 
 /**
  * Process-wide holder for the single [AppCoreClient] (one fips node per process,
@@ -19,7 +20,12 @@ object MycoCore {
             client ?: run {
                 val app = context.applicationContext
                 NativeCore.initializeAndroidContext(app)
-                AppCoreClient(app.filesDir.absolutePath, appVersion(app)).also { client = it }
+                AppCoreClient(app.filesDir.absolutePath, appVersion(app)).also {
+                    client = it
+                    // Carries signing requests to a signer app (Amber) for a
+                    // signer login; idle otherwise.
+                    ExternalSigner.start(app, it)
+                }
             }
         }
     }

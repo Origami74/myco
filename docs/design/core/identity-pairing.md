@@ -10,7 +10,8 @@ not the same as a FIPS peer link — is [../circle/circle.md](../circle/circle.m
 
 > **Two keys on this phone.** Everything below is about the **device key**.
 > A napplet publishes as a separate **user key** (`user.nsec`): a guest
-> generated on first launch, replaceable by logging in with an `nsec`; see
+> generated on first launch, replaceable by logging in with an `nsec` or a
+> signer app (NIP-55, Amber — then no user key is stored here at all); see
 > [../napplet/napplet-runtime.md §7.1](../napplet/napplet-runtime.md).
 
 See [diagram 09 — the two identities (device vs nsite author)](../diagrams/09-identity-model.svg)

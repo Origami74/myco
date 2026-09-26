@@ -94,13 +94,18 @@ and `relay.publish` signs with it.
 
 ### N2 — Login with Amber
 
+**Built** — `external_signer.rs`, `app.myco.signer`; see
+[napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.1. Encryption
+(`nip44_*`) is not carried yet: nothing in Myco asks for it.
+
 **Goal.** The third login option from N1, straight after it. The key lives in
 Amber (NIP-55); it never enters Myco. The runtime's `Signer` gets a second
 implementation: `public_key` comes from Amber once, via a `nostrsigner:`
 intent. Signing goes through Amber's content resolver with no UI when the
 user chose "remember", and through an intent otherwise. `publishEncrypted`
-becomes possible the same way. If Amber is uninstalled or refuses, the
-account shows as logged out; Myco does not quietly switch back to a guest.
+becomes possible the same way. If Amber is uninstalled or refuses, that
+signature fails and the napplet is told so; the account stays logged in with
+Amber, and Myco never quietly switches back to a guest.
 
 **Exit criterion.** Logged in with Amber, a napplet's `relay.publish`
 produces an event signed by the Amber key. No key material is ever on disk

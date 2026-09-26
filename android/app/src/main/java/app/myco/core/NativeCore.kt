@@ -37,6 +37,14 @@ internal object NativeCore {
     /** The account's avatar bytes; empty while there is none. */
     external fun accountAvatar(handle: Long): ByteArray
 
+    // --- external signer (NIP-55) -----------------------------------------
+
+    /** The next signer request as JSON, or "" when [timeoutMs] passed. **Blocks.** */
+    external fun signerNextRequest(handle: Long, timeoutMs: Long): String
+
+    /** Answer a signer request: [result] when [error] is empty. */
+    external fun signerRespond(handle: Long, id: String, result: String, error: String)
+
     // --- napplets --------------------------------------------------------
     // The shell page and the injected object name come from Rust rather than
     // being written twice, so the page and the code that registers its channel
