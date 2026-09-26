@@ -261,6 +261,7 @@ impl Account {
             for signed in [
                 sign_guest_profile(&user, default_picture.as_deref()),
                 crate::outbox::own_relay_list(&user.keys),
+                sign_guest_follows(&user.keys),
             ] {
                 match signed {
                     Ok(event) => {
@@ -375,7 +376,21 @@ impl Account {
             _ => crate::outbox::own_relay_list(&user.keys)?,
         };
 
-        let sent = publish_everywhere(&self.ctx.relays, &[profile, relay_list]).await;
+        let mut events = vec![profile, relay_list];
+        // The default follows exist only for a guest made since they were
+        // added; nothing is signed here for an older one.
+        if let Ok(mut found) = self
+            .ctx
+            .relay
+            .query(&[Filter::new().author(pk).kind(Kind::ContactList).limit(1)])
+            .await
+        {
+            if !found.is_empty() {
+                events.push(found.remove(0));
+            }
+        }
+
+        let sent = publish_everywhere(&self.ctx.relays, &events).await;
         Ok(sent[0] > 0)
     }
 
@@ -487,6 +502,26 @@ impl Account {
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
         self.shared.lock().unwrap_or_else(|p| p.into_inner())
     }
+}
+
+/// Who a new guest follows, so a napplet's friends feed is not empty on day
+/// one. Only ever signed when a guest is created: an existing follow list —
+/// a guest's, after edits, or an imported identity's — is never touched.
+pub const GUEST_FOLLOWS: [&str; 3] = [
+    "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr",
+    "npub1ye5ptcxfyyxl5vjvdjar2ua3f0hynkjzpx552mu5snj3qmx5pzjscpknpr",
+    "npub1uac67zc9er54ln0kl6e4qp2y6ta3enfcg7ywnayshvlw9r5w6ehsqq99rx",
+];
+
+fn sign_guest_follows(keys: &Keys) -> anyhow::Result<Event> {
+    use nostr::FromBech32;
+    let tags = GUEST_FOLLOWS
+        .iter()
+        .map(|npub| Ok(Tag::public_key(PublicKey::from_bech32(npub)?)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(EventBuilder::new(Kind::ContactList, "")
+        .tags(tags)
+        .sign_with_keys(keys)?)
 }
 
 fn sign_guest_profile(user: &UserKey, picture: Option<&str>) -> anyhow::Result<Event> {
@@ -736,6 +771,18 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert!(stored[0].content.contains("https://getmyco.app"));
 
+        let follows = relay
+            .query(&[Filter::new().author(pk).kind(Kind::ContactList)])
+            .await
+            .unwrap();
+        assert_eq!(follows.len(), 1, "a new guest follows the defaults");
+        let followed: Vec<String> = follows[0]
+            .tags
+            .public_keys()
+            .map(|p| nostr::ToBech32::to_bech32(p).unwrap())
+            .collect();
+        assert_eq!(followed, GUEST_FOLLOWS);
+
         // Still pending on the next launch, and the same account.
         let again = Account::start(
             dir,
@@ -801,7 +848,7 @@ mod tests {
         crate::user_key::logout(&dir).unwrap();
         let account = Account::start(
             dir,
-            offline(relay, blobs),
+            offline(relay.clone(), blobs),
             tokio::runtime::Handle::current(),
         );
         assert_eq!(account.view().status, "logged_out");
@@ -817,6 +864,16 @@ mod tests {
         assert_eq!(view.about, "hi");
         assert!(!view.profile_loading);
         assert!(view.error.is_empty());
+        let follows = relay
+            .query(&[Filter::new()
+                .author(theirs.public_key())
+                .kind(Kind::ContactList)])
+            .await
+            .unwrap();
+        assert!(
+            follows.is_empty(),
+            "an imported identity got default follows"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

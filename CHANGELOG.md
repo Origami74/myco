@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Blossom when you're online. From the Account page you can show your
   secret key (after a warning never to share it), log out, and log back in
   as a new guest or with an `nsec`. Open napplets hear about a login or
-  logout at once (NAP-IDENTITY's `identity.changed`).
+  logout at once (NAP-IDENTITY's `identity.changed`). A new guest follows three
+  default accounts, so a napplet's friends feed is not empty on day one;
+  existing and imported identities are left alone.
 
 ### Fixed
 

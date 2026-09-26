@@ -286,7 +286,9 @@ Signed by the **user key**, when a guest is created (first launch, or "Create a
 new identity"): a `0` guest profile named `Myco Guest <5 digits>`, with a
 `picture` on public Blossom, and a `10002` relay list naming the configured
 public relays — never this phone's mesh relay, which would tie the user to the
-device. Both go to the local relay at once and to the public relays when online.
+device — and a `3` follow list of three default accounts (`GUEST_FOLLOWS` in
+`account.rs`). The follow list is signed only when a guest is created; an
+existing or imported identity's is never written. Both go to the local relay at once and to the public relays when online.
 The picture upload is authorised by a `24242` (BUD-02) event signed by the same
 key. Whatever a napplet publishes through `relay`,
 `outbox` or `mesh` is signed by the same key with the kind the napplet chose.
