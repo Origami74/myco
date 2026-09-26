@@ -20,10 +20,11 @@ Related docs: [./nsite-layer.md](../nsite/nsite-layer.md) (the content layer thi
 reuse), [../circle/circle.md](../circle/circle.md) (what "everyone nearby" means),
 [../reference/nostr-kinds.md](../../reference/nostr-kinds.md) (event kinds).
 
-> Status: built through S2, S3's `NAP-OUTBOX` and `NAP-RESOURCE` (`blossom:`
-> only), and S5. Each stage below says what shipped. Not built: S2b (intents,
-> `NAP-INC`), S4 (composition), the rest of S3 (`storage`, `theme`, `notify`,
-> `link`, `config`). Login with your own key is the roadmap's N1.
+> Status: built through S2, S3's `NAP-OUTBOX`, `NAP-RESOURCE` (`blossom:`
+> only), `NAP-LINK` and `NAP-THEME` (default themes, no picker), and S5. Each
+> stage below says what shipped. Not built: S2b (intents, `NAP-INC`), S4
+> (composition), the rest of S3 (`storage`, `notify`, `config`). Login with your
+> own key is the roadmap's N1.
 
 ---
 
@@ -473,6 +474,54 @@ a miss remembered for ten minutes; a list older than a day is served as `source:
 refreshed behind the answer. NIP-66 relay intelligence is not used: it is a MAY, and the
 offline case has no monitors to ask.
 
+**`NAP-LINK` shipped** (`nap/link.rs`, the standard wire): `link.open {url, options?:
+{label?}}` → `link.open.result {status: "opened" | "denied", error?}`. The runtime
+crate only *classifies*; the host decides whether to admit, because only the host can
+see what is on screen:
+
+- `https:` / `http:` (an authority is required; userinfo, whitespace and control
+  characters are `invalid-url`) → `ToShell::OpenExternal`. `NappletActivity` hands it to
+  the system browser — directly if the user touched the napplet in the last five
+  seconds, otherwise after a one-tap "Open this link?" naming the real host. A
+  `postMessage` carries no user gesture, so the recent touch stands in for one.
+- `nostr:` or `napplet:` + an `naddr` of kind 35129 / 15129 / 5129 →
+  `ToShell::ReviewNapplet`. The window dispatches the same `FetchNapplet` a scanned code
+  does and draws the existing install-review sheet (`NappletReviewSheet`, a Compose
+  overlay on the napplet's window) **over the running napplet**, so the user keeps their
+  place. Nothing on this path installs: "Add" on the sheet is the user's answer, which is
+  §7.7's rule — a napplet can never install directly. The review slot is the app-wide
+  one, so a sheet dismissed in the napplet is dismissed everywhere.
+- Any other scheme, another NIP-19 entity (`npub`, `note`…), or an `naddr` of a
+  non-napplet kind → `denied` / `unsupported-scheme`. Malformed → `invalid-url`.
+
+`opened` means "handed to a surface the user answers", not "the user accepted"; a
+napplet learns nothing about what happened next. Admission (`LinkGate` in
+`myco-core/src/napplet.rs`, device-wide) refuses with `blocked-by-policy` while a review
+is already in the slot, within 5 s of the last admitted review link, and within 2 s of
+the last admitted web link — so a napplet cannot stack or spam sheets or browser tabs.
+`options.label` is untrusted display text and is never shown or used to decide
+anything.
+
+**`NAP-THEME` shipped**, default themes only (`nap/theme.rs`): `theme.get` →
+`theme.get.result {theme: {colors: {background, text, primary}, title}}`. Two themes
+mirror the app palette (`ui/theme/Theme.kt`): *Myco Light* (`#ffffff` / `#0f172a` /
+`#059669`) and *Myco AMOLED* (`#000000` / `#ffffff` / `#34d399`). Which one is the
+app's light/dark mode, reported per window: `NappletActivity` calls
+`nappletSetAppearance` right after open (before the handshake, so the first `theme.get`
+is already right) and again from `onConfigurationChanged` — the activity handles
+`uiMode` in place rather than restarting the napplet — and a change is pushed as
+`theme.changed` to an established session granted `theme`. A session nobody told
+answers light. A theme picker is later work.
+
+**Both are default grants.** `link` is user-mediated — every outcome ends at the
+browser (behind a touch or a tap) or at the install review, and admission is
+rate-limited — so granting it costs the user nothing they do not answer themselves.
+`theme` is read-only and tells a napplet no more than its own `prefers-color-scheme`.
+Existing installs pick both up at their next open, like any default a build newly
+implements; a switch turned off on the app's sheet stays off. The vendored
+`@napplet/shim` already installs `window.napplet.link` and `window.napplet.theme`, so
+the Myco prelude supplement needed nothing for either.
+
 ### S4 — Composition
 
 **Not built.**
@@ -646,7 +695,8 @@ stay injective, or two napplets share an origin and the partitioning D12 buys is
 Any app on the phone can send Myco an Intent. An inbound intent may **open** a napplet and
 **carry a payload**; it may never grant a capability, bypass the install review screen, or
 cause a publish. An `naddr` naming a napplet manifest routes to install review, never to a
-silent install. Payloads reach the napplet as data after the handshake, through the same
+silent install. The same holds for a napplet's own `link.open` (S3's NAP-LINK): it can
+put the review in front of the user, never past them. Payloads reach the napplet as data after the handshake, through the same
 path an in-runtime convention takes — no privileged side channel.
 
 One question is unsettled: resolver results and `intent.available()` reveal which napplets

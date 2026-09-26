@@ -459,6 +459,36 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletNextFrames(
     )
 }
 
+/// Tell a window's session whether the app is drawing light or dark, so
+/// NAP-THEME answers with the matching theme — and pushes `theme.changed` to
+/// an established napplet when it changed. Called after open and on every
+/// configuration change.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletSetAppearance(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_id: JString,
+    dark: jboolean,
+) {
+    let session_id = get_string(&mut env, &session_id);
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.napplet_context()
+        }
+        None => None,
+    };
+    if let Some((host, rt_handle)) = ctx {
+        let appearance = if dark != 0 {
+            myco_napplet_runtime::Appearance::Dark
+        } else {
+            myco_napplet_runtime::Appearance::Light
+        };
+        rt_handle.block_on(host.set_appearance(&session_id, appearance));
+    }
+}
+
 /// Drop a window's session. Every later frame for it is ignored.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(

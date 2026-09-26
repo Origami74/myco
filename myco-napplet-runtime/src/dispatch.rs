@@ -63,6 +63,13 @@ pub enum Outcome {
     Reply(Vec<Envelope>),
     /// Drop it without a word.
     Ignore,
+    /// A valid NAP-LINK `link.open` the host must decide on and answer —
+    /// only the host can see whether a review is already on screen. See
+    /// [`nap::link`]. The host **must** answer it with
+    /// [`LinkRequest::opened`](nap::link::LinkRequest::opened) or
+    /// [`LinkRequest::denied`](nap::link::LinkRequest::denied); left
+    /// unanswered, the napplet's call times out.
+    Link(nap::link::LinkRequest),
 }
 
 impl Outcome {
@@ -70,7 +77,7 @@ impl Outcome {
     pub fn envelopes(&self) -> &[Envelope] {
         match self {
             Self::Reply(envelopes) => envelopes,
-            Self::Ignore => &[],
+            Self::Ignore | Self::Link(_) => &[],
         }
     }
 }
@@ -162,6 +169,8 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
         "mesh" => Outcome::Reply(nap::mesh::handle(ctx, session, message).await),
         "outbox" => Outcome::Reply(nap::outbox::handle(ctx, session, message).await),
         "resource" => Outcome::Reply(nap::resource::handle(ctx, message).await),
+        "link" => nap::link::handle(message),
+        "theme" => Outcome::Reply(nap::theme::handle(session, message)),
         // Implemented, granted, established — and still unrouted. Reaching here
         // means the implemented set grew without a handler, which is a bug in
         // this crate rather than anything the napplet did.

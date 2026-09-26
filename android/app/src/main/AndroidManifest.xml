@@ -126,6 +126,8 @@
           from the Apps panel or through Myco's own deep-link handler, never by
           another app addressing this class directly. An inbound intent may open
           a napplet and carry a payload; it may never grant a capability.
+          `uiMode` is handled in place: a dark-mode switch is pushed to the
+          napplet as NAP-THEME's `theme.changed` rather than restarting it.
         -->
         <activity
             android:name=".NappletActivity"
@@ -134,6 +136,7 @@
             android:autoRemoveFromRecents="false"
             android:theme="@style/Theme.Myco.Splash"
             android:windowSoftInputMode="adjustResize"
+            android:configChanges="uiMode"
             android:label="@string/app_name" />
 
         <!-- Invisible: shows the signer app's approval screen for one signing

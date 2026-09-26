@@ -1,10 +1,13 @@
 package app.myco
 
 import android.annotation.SuppressLint
+import android.content.res.Configuration
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
@@ -16,12 +19,20 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.addCallback
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.ComposeView
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -31,6 +42,10 @@ import org.json.JSONObject
 import app.myco.core.AppCoreClient
 import app.myco.core.MycoCore
 import app.myco.core.NappletOpen
+import app.myco.core.NappletReview
+import app.myco.core.NativeActions
+import app.myco.ui.screens.NappletReviewSheet
+import app.myco.ui.theme.MycoTheme
 import java.io.ByteArrayInputStream
 
 /**
@@ -67,6 +82,17 @@ import java.io.ByteArrayInputStream
  * bridge and make the whole capability seam decorative.
  *
  * Verification, policy and every capability live in Rust. This class is a pipe.
+ *
+ * ## Host commands (NAP-LINK)
+ *
+ * Two runtime frames are addressed to this window rather than the shell:
+ * `open-external` (a web link the napplet asked to open — handed to the
+ * browser, after a one-tap confirmation unless the user touched the napplet in
+ * the last few seconds) and `review-napplet` (a napplet the napplet pointed at
+ * — fetched for review with the same `FetchNapplet` a scanned code uses, and
+ * Myco's install review drawn **over** this window, so the user keeps their
+ * place). Nothing here installs: the review sheet's "Add" is the user's
+ * answer, exactly as on the Apps screen.
  */
 class NappletActivity : ComponentActivity() {
     private lateinit var client: AppCoreClient
@@ -125,6 +151,7 @@ class NappletActivity : ComponentActivity() {
         var init = false
         withContext(Dispatchers.Main) {
             for (reply in replies) {
+                if (hostCommand(reply)) continue
                 if (relayedType(reply) == "shell.init") init = true
                 replyChannel?.postMessage(reply)
             }
@@ -139,6 +166,159 @@ class NappletActivity : ComponentActivity() {
      * the whole IO pool and stall the rest of the app behind it.
      */
     private val inFlight = Semaphore(MAX_IN_FLIGHT)
+
+    /** The install review drawn over this window, mirrored from app state. */
+    private var review by mutableStateOf<NappletReview?>(null)
+
+    /** A web link waiting on the user's tap, when no recent touch vouched for it. */
+    private var pendingExternal by mutableStateOf<Uri?>(null)
+
+    /** Mirrors `state.nappletReview` into [review] while one is up. */
+    private var reviewWatch: kotlinx.coroutines.Job? = null
+
+    /** When the user last lifted a finger off this window. See [openLink]. */
+    private var lastTouchAt = 0L
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_UP) lastTouchAt = SystemClock.uptimeMillis()
+        return super.dispatchTouchEvent(ev)
+    }
+
+    /**
+     * A runtime frame addressed to this window rather than the shell. Returns
+     * true when [frame] was one and has been handled; main thread.
+     */
+    private fun hostCommand(frame: String): Boolean {
+        val obj = runCatching { JSONObject(frame) }.getOrNull() ?: return false
+        return when (obj.optString("channel")) {
+            "open-external" -> { openLink(obj.optString("url")); true }
+            "review-napplet" -> { reviewNapplet(obj.optString("pointer")); true }
+            else -> false
+        }
+    }
+
+    /**
+     * NAP-LINK to the web. Rust already classified it; the scheme is checked
+     * again because this is where the intent is fired. A napplet's
+     * `postMessage` carries no user gesture, so a touch on this window in the
+     * last few seconds stands in for one — otherwise the user is asked once.
+     * The napplet's `label` never reaches here: the dialog shows the real host.
+     */
+    private fun openLink(url: String) {
+        val uri = Uri.parse(url)
+        val scheme = uri.scheme?.lowercase()
+        if (scheme != "https" && scheme != "http") return
+        if (SystemClock.uptimeMillis() - lastTouchAt <= GESTURE_WINDOW_MS) {
+            ExternalNavigation.openExternally(this, uri, TAG)
+        } else {
+            pendingExternal = uri
+        }
+    }
+
+    /**
+     * NAP-LINK to another napplet: the same fetch-for-review a scanned code
+     * starts, with the sheet drawn over this window. Never an install.
+     */
+    private fun reviewNapplet(pointer: String) {
+        if (pointer.isEmpty()) return
+        act(NativeActions.fetchNapplet(pointer))
+        watchReview()
+    }
+
+    /** Dispatch off the main thread: a reducer call takes the runtime lock. */
+    private fun act(action: JSONObject) {
+        lifecycleScope.launch(Dispatchers.IO) { runCatching { client.dispatch(action) } }
+    }
+
+    /**
+     * Mirror the review slot into [review] until it empties — installed,
+     * dismissed, or never filled (the fetch refused the pointer outright is
+     * still a review, with an error; an empty slot for this long means another
+     * surface already answered it).
+     */
+    private fun watchReview() {
+        reviewWatch?.cancel()
+        reviewWatch = lifecycleScope.launch {
+            val started = SystemClock.uptimeMillis()
+            var seen = false
+            while (isActive) {
+                val current = withContext(Dispatchers.IO) {
+                    runCatching { client.state().nappletReview }.getOrNull()
+                }
+                review = current
+                if (current != null) {
+                    seen = true
+                } else if (seen || SystemClock.uptimeMillis() - started > REVIEW_APPEAR_MS) {
+                    break
+                }
+                delay(REVIEW_POLL_MS)
+            }
+        }
+    }
+
+    /** The review sheet and the link confirmation, over the WebView. */
+    private fun overlay(): ComposeView = ComposeView(this).apply {
+        setContent {
+            MycoTheme {
+                review?.let { r ->
+                    NappletReviewSheet(
+                        review = r,
+                        onInstall = { granted ->
+                            act(NativeActions.installNapplet(r.pointer, granted))
+                            watchReview()
+                        },
+                        onRetry = {
+                            act(NativeActions.fetchNapplet(r.pointer, r.holder))
+                            watchReview()
+                        },
+                        onDismiss = {
+                            reviewWatch?.cancel()
+                            review = null
+                            act(NativeActions.dismissNappletReview())
+                        },
+                    )
+                }
+                pendingExternal?.let { uri ->
+                    AlertDialog(
+                        onDismissRequest = { pendingExternal = null },
+                        title = { Text("Open this link?") },
+                        text = { Text("This app wants to open ${uri.host.orEmpty()} in your browser.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                pendingExternal = null
+                                ExternalNavigation.openExternally(this@NappletActivity, uri, TAG)
+                            }) { Text("Open") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { pendingExternal = null }) { Text("Cancel") }
+                        },
+                    )
+                }
+            }
+        }
+    }
+
+    private fun isDark(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+
+    /**
+     * Dark mode flipped while the napplet is open. The manifest keeps this
+     * window alive through a `uiMode` change, so the napplet is not restarted
+     * for it: the session hears the new appearance and pushes NAP-THEME's
+     * `theme.changed`; the sheet above re-themes on its own.
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val id = synchronized(sessionLock) { sessionId }
+        if (id.isNotEmpty()) {
+            val dark = isDark()
+            lifecycleScope.launch(Dispatchers.IO) {
+                runCatching { client.nappletSetAppearance(id, dark) }
+            }
+        }
+        if (this::webView.isInitialized) syncChrome()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
@@ -178,6 +358,10 @@ class NappletActivity : ComponentActivity() {
                     if (orphaned) {
                         Log.i(TAG, "napplet $pointer opened after its window closed; session closed")
                         client.nappletClose(opened.sessionId)
+                    } else {
+                        // Before the shell mounts, so the napplet's first
+                        // `theme.get` already answers in the app's mode.
+                        runCatching { client.nappletSetAppearance(opened.sessionId, isDark()) }
                     }
                 }
                 opened
@@ -293,6 +477,7 @@ class NappletActivity : ComponentActivity() {
                         recreate()
                         break
                     }
+                    if (hostCommand(frame)) continue
                     replyChannel?.postMessage(frame)
                 }
             }
@@ -304,6 +489,16 @@ class NappletActivity : ComponentActivity() {
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        // Sized to its content, which is nothing until a sheet or dialog is up
+        // — and those draw in windows of their own — so it never takes a
+        // touch meant for the napplet.
+        root.addView(
+            overlay(),
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
             ),
         )
         setContentView(root)
@@ -334,6 +529,7 @@ class NappletActivity : ComponentActivity() {
 
     override fun onDestroy() {
         drainJob?.cancel()
+        reviewWatch?.cancel()
         frameJob?.cancel()
         inbound.close()
         replyChannel = null
@@ -368,6 +564,15 @@ class NappletActivity : ComponentActivity() {
 
         /** See [inbound]. */
         private const val INBOUND_CAPACITY = 64
+
+        /** A touch this recent stands in for a gesture behind a web link. See [openLink]. */
+        private const val GESTURE_WINDOW_MS = 5_000L
+
+        /** How often the review slot is re-read while the sheet is up. */
+        private const val REVIEW_POLL_MS = 400L
+
+        /** How long a requested review may take to appear in state before giving up. */
+        private const val REVIEW_APPEAR_MS = 3_000L
 
         /** The top-level `channel` of a runtime frame, or null if it is not one. */
         private fun channelOf(frame: String): String? =

@@ -155,15 +155,20 @@ external fun nappletRuntimeObject(): String    // the name the shell's channel o
 external fun nappletOpen(handle, pointer): String              // resolve + verify → {ok, sessionId, shellHost, title, error}
 external fun nappletFrame(handle, sessionId, frameJson): String     // one frame in, JSON array of frames out
 external fun nappletNextFrames(handle, sessionId, timeoutMs): String // long poll for pushed frames; BLOCKS
+external fun nappletSetAppearance(handle, sessionId, dark: Boolean)  // NAP-THEME light/dark; after open + on uiMode change
 external fun nappletClose(handle, sessionId)
 ```
 
 `nappletOpen` takes no grant list: grants are read from the library on the Rust
 side, so an intent that starts `NappletActivity` cannot hand a napplet
 capabilities the user never approved. Frames are `{channel: "shell" | "napplet"
-| "relaunch", ...}`; `NappletActivity` drives them off the main thread — one at
-a time until `shell.init` has answered, concurrently after — and posts replies
-to the shell. A `relaunch` frame recreates the activity.
+| "relaunch" | "open-external" | "review-napplet", ...}`; `NappletActivity` drives
+them off the main thread — one at a time until `shell.init` has answered,
+concurrently after — and posts replies to the shell. A `relaunch` frame recreates
+the activity. `open-external` (`{url}`) and `review-napplet` (`{pointer}`) are
+NAP-LINK host commands for the window, never posted to the shell: the first opens
+the browser (confirming unless the user just touched the napplet), the second
+dispatches `fetch_napplet` and draws the install-review sheet over the napplet.
 
 ### The BLE byte bridge
 
