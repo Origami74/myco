@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Napplets can read who you follow and mute.** NAP-IDENTITY's `getFollows`
+  and `getMutes` answer from your kind 3 and kind 10000 on this phone (empty
+  when there are none), where they were always empty.
+
+### Fixed
+
+- **Napplets saw nobody logged in.** `identity.getPublicKey` answered in a
+  `publicKey` field where NAP-IDENTITY (and the reference shim) use `pubkey`,
+  so every napplet read `undefined` — Minesweeper said "Sign in to publish".
+  The other identity list queries replied in a generic `result` field the
+  shim reads as `undefined`; they now answer in their spec fields (`pubkeys`,
+  `entries`, `zaps`, `badges`).
+
 ## [0.7.0] - 2026-09-16
 
 ### Added
