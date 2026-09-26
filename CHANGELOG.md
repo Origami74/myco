@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The other identity list queries replied in a generic `result` field the
   shim reads as `undefined`; they now answer in their spec fields (`pubkeys`,
   `entries`, `zaps`, `badges`).
+- **Slow napplet publishes.** `outbox.publish` waited for every relay (up to
+  8 s) before answering. It now answers once the event is stored here and
+  two relays have taken it — or the only relay, for someone with one — and
+  the rest finish in the background. A publish to other people's inboxes
+  still waits for every relay, so a failed delivery is always reported.
 
 ## [0.7.0] - 2026-09-16
 

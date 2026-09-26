@@ -40,6 +40,17 @@ use crate::session::Session;
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a publish waits for its lanes. Not a napplet option in the spec.
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// How many relays beyond this device must take a publish before the
+/// napplet is told it succeeded. The rest keep going in the background: one
+/// slow relay out of five used to hold every "Published" for the full
+/// timeout. Two, not one, so a success means the event is findable from more
+/// than a single server — or, for a mesh lane, handed to more than one
+/// Circle member's connection.
+///
+/// Not for `toInboxes`: NAP-OUTBOX makes an inbox a required target whose
+/// failure must be reported, so a publish naming inboxes waits for every lane.
+const PUBLISH_QUORUM: usize = 2;
 /// Bounds on a napplet-supplied `timeoutMs`: below the floor a relay across
 /// the mesh cannot answer, above the ceiling the session loop is hostage.
 const MIN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -280,17 +291,13 @@ async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
         Err(e) => return failed(message, e),
     };
 
-    let outcomes = ctx.lanes.publish(&lanes, &signed, PUBLISH_TIMEOUT).await;
-    let mut relays = serde_json::Map::new();
-    let mut stored = false;
-    for (lane, ok) in outcomes {
-        match lane.url() {
-            None => stored = ok,
-            Some(url) => {
-                relays.insert(url.to_string(), serde_json::Value::Bool(ok));
-            }
-        }
-    }
+    // Required targets must be reported, so they are waited for.
+    let quorum = if inboxes.is_empty() {
+        PUBLISH_QUORUM
+    } else {
+        usize::MAX
+    };
+    let (stored, relays) = publish_to_quorum(ctx, lanes, &signed, quorum).await;
     if !stored {
         return failed(message, "could not store the event");
     }
@@ -303,6 +310,33 @@ async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
         .with_field("event", event_json(&signed))
         .with_field("eventId", id)
         .with_field("relays", serde_json::Value::Object(relays))
+}
+
+/// Publish through the lane seam's quorum: the answer comes once the event is
+/// stored here and `quorum` other relays have taken it (or all have
+/// answered). Lanes still going are absent from the returned map — a
+/// napplet reads `relays` as what is known, not as the whole plan.
+async fn publish_to_quorum(
+    ctx: &NapContext,
+    lanes: Vec<RelayLane>,
+    event: &Event,
+    quorum: usize,
+) -> (bool, serde_json::Map<String, serde_json::Value>) {
+    let outcomes = ctx
+        .lanes
+        .publish_quorum(&lanes, event, PUBLISH_TIMEOUT, quorum)
+        .await;
+    let mut relays = serde_json::Map::new();
+    let mut stored = false;
+    for (lane, ok) in outcomes {
+        match lane.url() {
+            None => stored = ok,
+            Some(url) => {
+                relays.insert(url.to_string(), serde_json::Value::Bool(ok));
+            }
+        }
+    }
+    (stored, relays)
 }
 
 /// `outbox.resolveRelays` — the plan the shell would use, for diagnostics.
@@ -846,6 +880,7 @@ mod tests {
         assert_eq!(r["type"], "outbox.publish.result");
         assert_eq!(r["ok"], true);
         assert_eq!(r["event"]["pubkey"], signer.public_key().to_hex());
+        // An inbox is a required target: its refusal is always reported.
         assert_eq!(
             r["relays"],
             json!({

@@ -592,6 +592,73 @@ impl LaneTransport for OutboxService {
         out
     }
 
+    /// Every lane starts at once on a detached task, so the lanes the answer
+    /// does not wait for still finish — and still count toward the internet
+    /// breaker — after the napplet has its answer.
+    async fn publish_quorum(
+        &self,
+        lanes: &[RelayLane],
+        event: &Event,
+        timeout: Duration,
+        quorum: usize,
+    ) -> Vec<(RelayLane, bool)> {
+        let remote_total = lanes.iter().filter(|l| l.url().is_some()).count();
+        let enough = quorum.min(remote_total);
+        let has_local = lanes.iter().any(|l| l.url().is_none());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let this = self.detached();
+        let lanes = lanes.to_vec();
+        let event = event.clone();
+        tokio::spawn(async move {
+            let tried_internet = lanes
+                .iter()
+                .any(|l| matches!(l, RelayLane::Internet { .. }) && this.allowed(l));
+            let out: Vec<(RelayLane, bool)> = join_all(lanes.iter().map(|lane| {
+                let (this, event, tx) = (&this, &event, tx.clone());
+                async move {
+                    let ok = this.publish_lane(lane, event, timeout).await;
+                    let _ = tx.send((lane.clone(), ok));
+                    (lane.clone(), ok)
+                }
+            }))
+            .await;
+            let any_ok = out
+                .iter()
+                .any(|(l, ok)| matches!(l, RelayLane::Internet { .. }) && *ok);
+            this.content.note_internet_round(any_ok, tried_internet);
+            // The whole round, stragglers included — the answer may have
+            // gone out before some of these came in.
+            tracing::debug!(
+                accepted = out.iter().filter(|(_, ok)| *ok).count(),
+                total = out.len(),
+                "publish round finished"
+            );
+        });
+
+        let mut out = Vec::new();
+        let (mut local_done, mut accepted, mut remote_done) = (!has_local, 0, 0);
+        while let Some((lane, ok)) = rx.recv().await {
+            if lane.url().is_none() {
+                local_done = true;
+                if !ok {
+                    // Not stored here: the publish has failed, whatever
+                    // the relays say.
+                    out.push((lane, ok));
+                    break;
+                }
+            } else {
+                remote_done += 1;
+                accepted += usize::from(ok);
+            }
+            out.push((lane, ok));
+            if local_done && (accepted >= enough || remote_done == remote_total) {
+                break;
+            }
+        }
+        out
+    }
+
     async fn pull_into_local(&self, lanes: &[RelayLane], filters: &[Filter]) -> anyhow::Result<()> {
         let hub = self.hub.lock().unwrap().clone();
         let Some(hub) = hub else {
@@ -900,6 +967,118 @@ mod tests {
             0,
             "a relay publish reached the gossiper"
         );
+    }
+
+    /// A relay that never answers does not hold up the answer once two
+    /// others have the event.
+    #[tokio::test]
+    async fn a_quorum_publish_answers_without_the_silent_relay() {
+        use myco_napplet_runtime::seams::LaneTransport;
+
+        let (a, url_a) = mock_relay().await;
+        let (b, url_b) = mock_relay().await;
+        // Accepts the TCP connection and says nothing, like a relay that
+        // hangs in its handshake.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_url = format!("ws://{}", silent.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = silent.accept().await {
+                held.push(sock);
+            }
+        });
+
+        let content = scratch_content("quorum");
+        let svc = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content,
+            "npub1me".to_string(),
+        )
+        .allowing_private_dials();
+        let event = EventBuilder::text_note("gg")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let lanes = vec![
+            RelayLane::Local,
+            RelayLane::Internet { url: url_a },
+            RelayLane::Internet {
+                url: silent_url.clone(),
+            },
+            RelayLane::Internet { url: url_b },
+        ];
+
+        let started = std::time::Instant::now();
+        let out = svc
+            .publish_quorum(&lanes, &event, Duration::from_secs(5), 2)
+            .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "waited for the silent relay: {:?}",
+            started.elapsed()
+        );
+        assert!(out.contains(&(RelayLane::Local, true)));
+        assert_eq!(
+            out.iter()
+                .filter(|(l, ok)| l.url().is_some() && *ok)
+                .count(),
+            2
+        );
+        assert!(!out
+            .iter()
+            .any(|(l, _)| l.url() == Some(silent_url.as_str())));
+        assert_eq!((a.count(), b.count()), (1, 1));
+    }
+
+    /// Someone with a single outbox relay: that relay is the quorum, and the
+    /// answer waits for it rather than returning on the local store alone.
+    #[tokio::test]
+    async fn a_quorum_publish_with_one_relay_waits_for_it() {
+        use myco_napplet_runtime::seams::LaneTransport;
+
+        // A relay that answers, but only after a pause.
+        let (remote, url) = mock_relay().await;
+        let slow = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let slow_url = format!("ws://{}", slow.local_addr().unwrap());
+        let target = url.trim_start_matches("ws://").to_string();
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = slow.accept().await {
+                let target = target.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    if let Ok(mut outbound) = tokio::net::TcpStream::connect(target).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    }
+                });
+            }
+        });
+
+        let content = scratch_content("quorum-one");
+        let svc = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content,
+            "npub1me".to_string(),
+        )
+        .allowing_private_dials();
+        let event = EventBuilder::text_note("gg")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let lanes = vec![
+            RelayLane::Local,
+            RelayLane::Internet {
+                url: slow_url.clone(),
+            },
+        ];
+        let out = svc
+            .publish_quorum(&lanes, &event, Duration::from_secs(5), 2)
+            .await;
+        assert!(out.contains(&(RelayLane::Local, true)));
+        assert!(
+            out.contains(&(RelayLane::Internet { url: slow_url }, true)),
+            "answered before the only relay did: {out:?}"
+        );
+        assert_eq!(remote.count(), 1);
     }
 
     /// The internet half of the pool: the event reaches a configured relay

@@ -252,6 +252,22 @@ pub trait LaneTransport: Send + Sync {
         timeout: std::time::Duration,
     ) -> Vec<(RelayLane, bool)>;
 
+    /// As [`LaneTransport::publish`], but may answer early: once the local
+    /// lane has answered and `quorum` of the other lanes (or all of them, if
+    /// there are fewer) have accepted. Lanes still going keep going and are
+    /// left out of the answer. The default waits for every lane — right for
+    /// a transport that cannot leave work running.
+    async fn publish_quorum(
+        &self,
+        lanes: &[RelayLane],
+        event: &Event,
+        timeout: std::time::Duration,
+        quorum: usize,
+    ) -> Vec<(RelayLane, bool)> {
+        let _ = quorum;
+        self.publish(lanes, event, timeout).await
+    }
+
     /// Query the lanes for `filters` and accept what comes back into the
     /// local relay — unforwarded — so it reaches live subscriptions here.
     ///
