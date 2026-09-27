@@ -278,13 +278,6 @@ impl OutboxService {
     ///
     /// [`AuthorOutbox`]: crate::ip_source::AuthorOutbox
     async fn fetch_relay_lists_now(&self, authors: &[PublicKey], hints: &[RelayLane]) {
-        {
-            let now = std::time::Instant::now();
-            let mut checked = self.lists_checked.lock().unwrap();
-            for author in authors {
-                checked.insert(*author, now);
-            }
-        }
         let public: Vec<String> =
             if self.content.is_offline_only() || self.content.internet_looks_down() {
                 Vec::new()
@@ -330,6 +323,16 @@ impl OutboxService {
                 // The local relay is the cache: a replaceable kind keeps the
                 // newest.
                 self.lists.remember(event).await;
+            }
+        }
+        // Stamped only now, after what was found is stored: stamped sooner, a
+        // plan racing the round would take the old stored list as checked
+        // and fresh.
+        {
+            let now = std::time::Instant::now();
+            let mut checked = self.lists_checked.lock().unwrap();
+            for author in authors {
+                checked.insert(*author, now);
             }
         }
         let asked_anyone = !public.is_empty() || !lanes.is_empty();
