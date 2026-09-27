@@ -25,13 +25,14 @@ use tokio_tungstenite::tungstenite::Message;
 /// author's own NIP-65 relays too (see [`AuthorOutbox`]). `relay.ditto.pub`
 /// carries most published napplets and nsites. `relay.nostr.band` is gone —
 /// it stopped accepting connections — and a dead relay here costs every
-/// lookup that waits for all relays its full timeout.
+/// lookup that waits for all relays its full timeout. Indexers such as
+/// `purplepag.es` are not here: they hold profiles and relay lists, not apps,
+/// and are asked for those alone ([`indexer_relays`]).
 pub fn default_relays() -> Vec<String> {
     [
         "wss://relay.damus.io",
         "wss://nos.lol",
         "wss://relay.primal.net",
-        "wss://purplepag.es",
         "wss://relay.ditto.pub",
     ]
     .iter()
@@ -39,14 +40,20 @@ pub fn default_relays() -> Vec<String> {
     .collect()
 }
 
-/// Relays that specialise in relay lists (kind 10002), asked for an author's
-/// list only when it is not stored here yet. `purplepag.es`, the third
-/// well-known one, is already a default relay and is asked there.
+/// Indexer relays: they specialise in profiles and relay lists (kinds 0,
+/// 3, 10002), not in apps. Asked for an author's list only when it is not
+/// stored here yet, and published to with the user's own profile and lists
+/// so other clients find them.
 pub fn indexer_relays() -> Vec<String> {
-    ["wss://user.kindpag.es", "wss://indexer.coracle.social"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        "wss://purplepag.es",
+        "wss://index.hzrd149.com",
+        "wss://indexer.coracle.social",
+        "wss://user.kindpag.es",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// At most this many of an author's NIP-65 write relays are asked, in the

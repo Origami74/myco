@@ -547,7 +547,8 @@ five, public `ws(s)://` only), then `default_relays()`, deduplicated by URL. The
 author's `10002` is read from the local relay; when it is missing, the lookup does
 not wait for it — the hints and defaults are asked for the manifest at once, with
 the `10002` as a second filter in the same `REQ`, the indexer relays
-(`user.kindpag.es`, `indexer.coracle.social`) are asked for the list alone, and the
+(`purplepag.es`, `index.hzrd149.com`, `indexer.coracle.social`,
+`user.kindpag.es`) are asked for the list alone, and the
 author's relays join the round as soon as a list arrives. The list is stored
 locally for next time (`ip_source::AuthorOutbox`). Blobs still come from the
 manifest's `server` tags, then `default_blossom_servers()`; the author's BUD-03

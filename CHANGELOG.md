@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Profiles and relay lists go to the index relays.** A new guest's profile
+  and relay lists are now also sent to four index relays (purplepag.es,
+  index.hzrd149.com, indexer.coracle.social, user.kindpag.es), where other
+  Nostr apps look people up, and those four are where Myco looks up an app
+  author's relay list. purplepag.es is no longer asked for apps, which it
+  does not carry.
 - **A new guest gets better default relays.** Its public relay list now
   names three general-purpose relays (relay.damus.io, relay.ditto.pub,
   relay.primal.net) for both posting and receiving, instead of the lookup

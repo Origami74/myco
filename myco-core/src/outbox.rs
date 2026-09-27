@@ -748,8 +748,7 @@ pub(crate) fn relay_list_urls(list: &Event, direction: Direction) -> Vec<&str> {
 
 /// Where a new guest publishes (NIP-65 `write`): its outbox. Its own list,
 /// not [`crate::ip_source::default_relays`] — those are where Myco *looks
-/// things up*, and include an indexer and a relay too unreliable to be
-/// anyone's home. `nos.lol` was the obvious third pick but did not answer
+/// things up*, and suit that rather than being anyone's home. `nos.lol` was the obvious third pick but did not answer
 /// when this list was chosen; `relay.ditto.pub` did.
 pub const USER_OUTBOX_RELAYS: [&str; 3] = [
     "wss://relay.damus.io",
