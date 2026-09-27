@@ -26,28 +26,63 @@ use nostr::{Event, Filter, Kind, PublicKey};
 use nsite_deck::seams::RelayBackend;
 
 use myco_napplet_runtime::seams::{
-    Direction, LaneTransport, OutboxResolver, PlanSource, RelayLane, RelayPlan,
+    remote_lanes, Direction, EarlyAnswer, LaneTransport, OutboxResolver, PlanSource, RelayLane,
+    RelayPlan, WorkScope,
 };
 
 use crate::content::Content;
 use crate::mesh_relay::RelayHub;
 
-/// How long a subscription's remote pull waits for its lanes.
+/// How long a one-shot pull (a lane past the stream bound, a mesh lane's
+/// re-pull) waits for its lanes.
 const PULL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a plan waits for a missing relay list before falling back. Paid
-/// once per unknown author, on the first call that names them.
-const LIST_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
+/// How long a plan waits for missing relay lists before falling back. Paid
+/// once per plan that names authors with no list here — all of them are
+/// looked up in the same round. The same bound `AuthorOutbox` uses.
+const LIST_FETCH_TIMEOUT: Duration = crate::ip_source::LIST_FETCH_TIMEOUT;
 
-/// A stored relay list older than this is used now and refreshed behind the
-/// answer. NIP-65 lists change rarely; a day keeps a phone that was offline
-/// for a week from serving a week-old plan forever.
+/// A subscription keeps at most this many relay connections open per
+/// napplet, and the whole app at most [`MAX_STREAMS`]. Lanes past either
+/// bound get a one-shot pull instead: they backfill, and live events reach
+/// the napplet through the lanes that do stream, the Circle flood, and its
+/// own next subscription.
+const MAX_STREAMS_PER_NAPPLET: usize = 16;
+const MAX_STREAMS: usize = 64;
+
+/// A stream that dropped is re-opened after this, doubling per quick
+/// failure up to [`STREAM_BACKOFF_MAX`], with jitter so a relay restart does
+/// not see every phone come back in the same second. One that stayed up for
+/// [`STREAM_HEALTHY_AFTER`] starts over at the first step.
+#[cfg(not(test))]
+const STREAM_BACKOFF_FIRST: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const STREAM_BACKOFF_FIRST: Duration = Duration::from_millis(200);
+const STREAM_BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
+const STREAM_HEALTHY_AFTER: Duration = Duration::from_secs(60);
+
+/// A mesh lane has no REQ of its own to hold open — the Circle pool keeps
+/// one connection per peer and answers requests over it — so a
+/// subscription re-asks it this often, with up to a third again as jitter.
+/// Events a Circle member publishes reach this device through the flood
+/// anyway; this catches what arrived at their relay from elsewhere.
+const MESH_REPULL_EVERY: Duration = Duration::from_secs(45);
+
+/// On reconnecting, ask only for what is newer than this far before the
+/// last connection went down — clocks disagree, and a replayed event is
+/// deduplicated by id.
+const RECONNECT_OVERLAP_SECS: u64 = 60;
+
+/// A stored relay list published less than this long ago is fresh.
 const LIST_FRESH_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// How long a miss is remembered. An author with no list anywhere is not
-/// asked about again on every call, and is asked again soon enough that a
-/// list published today is found today.
-const MISS_REMEMBERED_FOR: Duration = Duration::from_secs(10 * 60);
+/// A stored relay list older than [`LIST_FRESH_FOR`] is used now and
+/// re-checked behind the answer — unless this device asked the pool about
+/// its author less than this long ago. Staleness is "when did we last
+/// look", not "when was it published": NIP-65 lists change rarely, and most
+/// real ones were published months ago, so judging by `created_at` alone
+/// re-checked nearly every author on every plan.
+const LIST_RECHECK_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
 
 pub struct OutboxService {
     store: Arc<dyn RelayBackend>,
@@ -59,12 +94,25 @@ pub struct OutboxService {
     /// The internet relays used as fallback and searched for relay lists.
     /// The defaults, unless a test says otherwise.
     configured: Vec<String>,
-    /// Authors asked about and not found, with when. The local relay is the
-    /// positive cache; this is the negative one.
-    misses: Arc<Mutex<std::collections::HashMap<PublicKey, std::time::Instant>>>,
+    /// Stored relay lists, the process-wide memory of authors with none, and
+    /// the indexer relays — shared with the manifest lookups
+    /// (`ip_source`), so both ask the same places and remember the same
+    /// misses.
+    lists: Arc<crate::ip_source::AuthorOutbox>,
     /// Authors whose stale list is being refreshed right now, so a burst of
     /// calls spawns one fetch rather than one per call.
     refreshing: Arc<Mutex<std::collections::HashSet<PublicKey>>>,
+    /// When the pool was last asked about each author's relay list, found or
+    /// not. In memory: after a restart every stored list is checked once.
+    lists_checked: Arc<Mutex<std::collections::HashMap<PublicKey, std::time::Instant>>>,
+    /// Relay-list fetches under way, by author: a second plan naming an
+    /// author already being looked up waits for that lookup instead of
+    /// starting its own. The flag turns true when the lookup is over.
+    lists_in_flight:
+        Arc<Mutex<std::collections::HashMap<PublicKey, tokio::sync::watch::Receiver<bool>>>>,
+    /// Background work per napplet session: its bound and its tasks. See
+    /// [`SessionWork`].
+    work: Arc<Mutex<std::collections::HashMap<u64, Arc<SessionWork>>>>,
     /// Whether an Internet lane is resolved and refused when its name points
     /// at a private address (see [`dials_public`]). Always on, except in
     /// host tests that dial a mock relay on `127.0.0.1` as an Internet lane.
@@ -89,13 +137,16 @@ impl OutboxService {
         own_npub: String,
     ) -> Self {
         Self {
-            store,
+            store: store.clone(),
             hub,
             content,
             own_npub,
             configured: crate::ip_source::default_relays(),
-            misses: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            lists: Arc::new(crate::ip_source::AuthorOutbox::new(store.clone())),
             refreshing: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            lists_checked: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            lists_in_flight: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            work: Arc::new(Mutex::new(std::collections::HashMap::new())),
             guard_private_dials: true,
         }
     }
@@ -105,6 +156,19 @@ impl OutboxService {
     #[cfg(test)]
     pub fn with_configured_relays(mut self, relays: Vec<String>) -> Self {
         self.configured = relays;
+        // And no public indexers either.
+        self.with_indexers(Vec::new())
+    }
+
+    /// Look relay lists up on `indexers` instead of the public ones — for
+    /// tests.
+    #[cfg(test)]
+    pub fn with_indexers(mut self, indexers: Vec<String>) -> Self {
+        self.lists = Arc::new(
+            crate::ip_source::AuthorOutbox::new(self.store.clone())
+                .with_indexers(indexers)
+                .allowing_private_dials(),
+        );
         self
     }
 
@@ -125,8 +189,11 @@ impl OutboxService {
             content: self.content.clone(),
             own_npub: self.own_npub.clone(),
             configured: self.configured.clone(),
-            misses: self.misses.clone(),
+            lists: self.lists.clone(),
             refreshing: self.refreshing.clone(),
+            lists_checked: self.lists_checked.clone(),
+            lists_in_flight: self.lists_in_flight.clone(),
+            work: self.work.clone(),
             guard_private_dials: self.guard_private_dials,
         })
     }
@@ -147,11 +214,90 @@ impl OutboxService {
         false
     }
 
-    /// Where a relay list might be found: the configured relays unless
-    /// offline-only, and every Circle member's mesh relay — the people around
-    /// the user are exactly who would have seen a friend's list.
-    fn list_lanes(&self) -> Vec<RelayLane> {
-        let mut lanes = self.fallback_lanes();
+    /// Look up `authors`' relay lists in the pool and store what is found;
+    /// an author still without one afterwards is remembered as a miss.
+    ///
+    /// One round, one `REQ` per relay, all the authors in it (chunked, so a
+    /// huge set does not make one huge filter). An author another plan is
+    /// already looking up is not asked for twice: this call waits for that
+    /// lookup instead. Bounded by [`LIST_FETCH_TIMEOUT`] either way.
+    async fn fetch_relay_lists(&self, authors: &[PublicKey], hints: &[RelayLane]) {
+        let (tx, _) = tokio::sync::watch::channel(false);
+        let mut mine: Vec<PublicKey> = Vec::new();
+        let mut theirs: Vec<tokio::sync::watch::Receiver<bool>> = Vec::new();
+        {
+            let mut in_flight = self.lists_in_flight.lock().unwrap();
+            for author in authors {
+                match in_flight.get(author) {
+                    Some(rx) => theirs.push(rx.clone()),
+                    None if !mine.contains(author) => {
+                        in_flight.insert(*author, tx.subscribe());
+                        mine.push(*author);
+                    }
+                    None => {}
+                }
+            }
+        }
+        // Clears this call's entries and wakes the waiters however it ends —
+        // answered, timed out, or dropped with the task that ran it.
+        let _done = ListsInFlight {
+            map: self.lists_in_flight.clone(),
+            authors: mine.clone(),
+            tx,
+        };
+        let fetch = async {
+            if !mine.is_empty() {
+                self.fetch_relay_lists_now(&mine, hints).await;
+            }
+        };
+        let wait = async {
+            for mut rx in theirs {
+                let _ = rx.wait_for(|done| *done).await;
+            }
+        };
+        let _ = tokio::time::timeout(
+            LIST_FETCH_TIMEOUT + Duration::from_secs(1),
+            futures_util::future::join(fetch, wait),
+        )
+        .await;
+    }
+
+    /// The round behind [`Self::fetch_relay_lists`], for authors nobody else
+    /// is looking up. Asked, all at once:
+    ///
+    /// - the configured relays and the indexers, through [`AuthorOutbox`] —
+    ///   unless offline only or the internet looks down;
+    /// - the relays the napplet named (`hints`), through the lanes, so a
+    ///   name that resolves to a private address is refused as always;
+    /// - every Circle member's mesh relay: the people around the user are
+    ///   exactly who would have seen a friend's list.
+    ///
+    /// An author still without a list is remembered as a miss only when the
+    /// napplet named no relays (they may be the only place it is) and every
+    /// relay asked answered to the end — a timeout is not a "no".
+    ///
+    /// [`AuthorOutbox`]: crate::ip_source::AuthorOutbox
+    async fn fetch_relay_lists_now(&self, authors: &[PublicKey], hints: &[RelayLane]) {
+        {
+            let now = std::time::Instant::now();
+            let mut checked = self.lists_checked.lock().unwrap();
+            for author in authors {
+                checked.insert(*author, now);
+            }
+        }
+        let public: Vec<String> =
+            if self.content.is_offline_only() || self.content.internet_looks_down() {
+                Vec::new()
+            } else {
+                let mut out: Vec<String> = Vec::new();
+                for url in self.configured.iter().chain(self.lists.indexers()) {
+                    if !out.iter().any(|r| crate::ip_source::same_relay(r, url)) {
+                        out.push(url.clone());
+                    }
+                }
+                out
+            };
+        let mut lanes: Vec<RelayLane> = hints.to_vec();
         for npub in self.content.circle_npubs() {
             if npub != self.own_npub {
                 lanes.push(RelayLane::Mesh {
@@ -159,31 +305,64 @@ impl OutboxService {
                 });
             }
         }
-        lanes
+        let lanes = remote_lanes(lanes);
+        let filters: Vec<Filter> = authors
+            .chunks(crate::ip_source::LIST_AUTHORS_PER_FILTER)
+            .map(|chunk| {
+                Filter::new()
+                    .kind(Kind::RelayList)
+                    .authors(chunk.iter().copied())
+            })
+            .collect();
+        let lanes_round = async {
+            if lanes.is_empty() {
+                Vec::new()
+            } else {
+                self.query(&lanes, &filters, LIST_FETCH_TIMEOUT).await
+            }
+        };
+        let (public_complete, answers) =
+            futures_util::future::join(self.lists.fetch_lists_from(authors, &public), lanes_round)
+                .await;
+        let lanes_complete = answers.iter().all(|(_, events)| events.is_some());
+        for event in answers.into_iter().filter_map(|(_, e)| e).flatten() {
+            if event.kind == Kind::RelayList && authors.contains(&event.pubkey) {
+                // The local relay is the cache: a replaceable kind keeps the
+                // newest.
+                self.lists.remember(event).await;
+            }
+        }
+        let asked_anyone = !public.is_empty() || !lanes.is_empty();
+        if !asked_anyone {
+            return;
+        }
+        if hints.is_empty() && public_complete && lanes_complete {
+            self.lists.note_misses_among(authors).await;
+        } else {
+            // Not a "no" — someone did not answer, or the napplet named
+            // relays — but not worth asking again on the next call either.
+            self.lists.note_soft_misses_among(authors).await;
+        }
     }
 
-    /// Ask the pool for `author`'s newest relay list and store it. Returns
-    /// the list, or `None` when nobody had one within the bound.
-    async fn fetch_relay_list(&self, author: &PublicKey) -> Option<Event> {
-        let lanes = self.list_lanes();
-        if lanes.is_empty() {
-            return None;
+    /// The newest relay list the local store holds for each of `authors`.
+    async fn stored_lists(
+        &self,
+        authors: &[PublicKey],
+    ) -> std::collections::HashMap<PublicKey, Event> {
+        let filter = Filter::new()
+            .kind(Kind::RelayList)
+            .authors(authors.iter().copied());
+        let mut out: std::collections::HashMap<PublicKey, Event> = std::collections::HashMap::new();
+        for event in self.store.query(&[filter]).await.unwrap_or_default() {
+            let newer = out
+                .get(&event.pubkey)
+                .is_none_or(|held| event.created_at > held.created_at);
+            if newer {
+                out.insert(event.pubkey, event);
+            }
         }
-        let filter = Filter::new().kind(Kind::RelayList).author(*author).limit(1);
-        let answers = self
-            .query(&lanes, std::slice::from_ref(&filter), LIST_FETCH_TIMEOUT)
-            .await;
-        let newest = answers
-            .into_iter()
-            .filter_map(|(_, events)| events)
-            .flatten()
-            .filter(|e| e.kind == Kind::RelayList && e.pubkey == *author)
-            .max_by_key(|e| e.created_at)?;
-        // The local relay is the cache: a replaceable kind keeps the newest.
-        if let Err(e) = self.store.publish(newest.clone()).await {
-            tracing::debug!(error = %e, "outbox: could not cache a relay list");
-        }
-        Some(newest)
+        out
     }
 
     /// The configured relays as lanes, or nothing when offline only.
@@ -209,60 +388,72 @@ impl OutboxService {
         }
     }
 
-    /// The author's NIP-65 relays for `direction`: from the local store when
-    /// it has a list, from the pool when it does not — stored on the way in,
-    /// so the second call is local.
-    async fn nip65_lanes(&self, author: &PublicKey, direction: Direction) -> Listed {
-        let filter = Filter::new().kind(Kind::RelayList).author(*author).limit(1);
-        let stored = self
-            .store
-            .query(&[filter])
-            .await
-            .ok()
-            .and_then(|events| events.into_iter().max_by_key(|e| e.created_at));
-
-        if let Some(list) = stored {
-            let age = Duration::from_secs(
-                nostr::Timestamp::now()
-                    .as_secs()
-                    .saturating_sub(list.created_at.as_secs()),
-            );
-            let lanes = relay_list_lanes(&list, direction);
-            if age <= LIST_FRESH_FOR {
-                return Listed::Fresh(lanes);
-            }
-            // Old enough to check, not too old to use. The napplet gets the
-            // stored plan now; the next call gets whatever the refresh found.
-            if self.refreshing.lock().unwrap().insert(*author) {
-                let this = self.detached();
-                let author = *author;
-                tokio::spawn(async move {
-                    let _ = this.fetch_relay_list(&author).await;
-                    this.refreshing.lock().unwrap().remove(&author);
-                });
-            }
-            return Listed::Stale(lanes);
+    /// Each author's NIP-65 relays for `direction`, in the order given: from
+    /// the local store when it has a list, from the pool when it does not —
+    /// stored on the way in, so the second call is local. Every author with
+    /// no list here is looked up in the same round.
+    ///
+    /// `hints` are relays the napplet named: asked for lists too, and an
+    /// author remembered as having none is asked again when there are some.
+    async fn listed_for(
+        &self,
+        authors: &[PublicKey],
+        direction: Direction,
+        hints: &[RelayLane],
+    ) -> Vec<Listed> {
+        let mut stored = self.stored_lists(authors).await;
+        let now_secs = nostr::Timestamp::now().as_secs();
+        let unknown: Vec<PublicKey> = authors
+            .iter()
+            .filter(|a| {
+                !stored.contains_key(a) && (!hints.is_empty() || !self.lists.recently_missed(a))
+            })
+            .copied()
+            .collect();
+        if !unknown.is_empty() {
+            self.fetch_relay_lists(&unknown, hints).await;
+            stored.extend(self.stored_lists(&unknown).await);
         }
 
-        let recently_missed = self
-            .misses
-            .lock()
-            .unwrap()
-            .get(author)
-            .is_some_and(|at| at.elapsed() < MISS_REMEMBERED_FOR);
-        if recently_missed {
-            return Listed::Missing;
-        }
-        match self.fetch_relay_list(author).await {
-            Some(list) => Listed::Fresh(relay_list_lanes(&list, direction)),
-            None => {
-                self.misses
+        let mut stale: Vec<PublicKey> = Vec::new();
+        let listed = authors
+            .iter()
+            .map(|author| {
+                let Some(list) = stored.get(author) else {
+                    return Listed::Missing;
+                };
+                let lanes = relay_list_lanes(list, direction);
+                let age = Duration::from_secs(now_secs.saturating_sub(list.created_at.as_secs()));
+                let checked_lately = self
+                    .lists_checked
                     .lock()
                     .unwrap()
-                    .insert(*author, std::time::Instant::now());
-                Listed::Missing
-            }
+                    .get(author)
+                    .is_some_and(|at| at.elapsed() < LIST_RECHECK_AFTER);
+                if age <= LIST_FRESH_FOR || checked_lately || unknown.contains(author) {
+                    return Listed::Fresh(lanes);
+                }
+                // Old enough to check, not too old to use. The napplet gets
+                // the stored plan now; the next call gets whatever the
+                // refresh found.
+                if self.refreshing.lock().unwrap().insert(*author) {
+                    stale.push(*author);
+                }
+                Listed::Stale(lanes)
+            })
+            .collect();
+        if !stale.is_empty() {
+            // One round for every stale author of this plan, not one each.
+            let this = self.detached();
+            tokio::spawn(async move {
+                this.fetch_relay_lists(&stale, &[]).await;
+                let mut refreshing = this.refreshing.lock().unwrap();
+                for author in &stale {
+                    refreshing.remove(author);
+                }
+            });
         }
+        listed
     }
 
     /// Query one lane, verifying what comes back. `None` when the lane could
@@ -486,6 +677,15 @@ impl myco_napplet_runtime::seams::EventSink for OutboxService {
 #[async_trait::async_trait]
 impl OutboxResolver for OutboxService {
     async fn plan(&self, direction: Direction, authors: &[PublicKey]) -> RelayPlan {
+        self.plan_hinted(direction, authors, &[]).await
+    }
+
+    async fn plan_hinted(
+        &self,
+        direction: Direction,
+        authors: &[PublicKey],
+        hints: &[RelayLane],
+    ) -> RelayPlan {
         if authors.is_empty() {
             let mut lanes = vec![RelayLane::Local];
             lanes.extend(self.fallback_lanes());
@@ -499,8 +699,11 @@ impl OutboxResolver for OutboxService {
         let mut lanes: Vec<RelayLane> = vec![RelayLane::Local];
         let mut missing = Vec::new();
         let mut any_stale = false;
-        for author in authors {
-            match self.nip65_lanes(author, direction).await {
+        // Every author at once: the lists not stored here are looked up in
+        // one round, not one author after another.
+        let listed = self.listed_for(authors, direction, hints).await;
+        for (author, listed) in authors.iter().zip(listed) {
+            match listed {
                 Listed::Fresh(listed) => {
                     lanes.extend(listed.into_iter().filter(|l| self.allowed(l)))
                 }
@@ -515,7 +718,7 @@ impl OutboxResolver for OutboxService {
             }
         }
         let mut seen = std::collections::HashSet::new();
-        lanes.retain(|l| seen.insert(l.clone()));
+        lanes.retain(|l| seen.insert(myco_napplet_runtime::seams::lane_key(l)));
         RelayPlan {
             lanes,
             // Fallback outranks cache: a plan with one author's list missing
@@ -532,22 +735,144 @@ impl OutboxResolver for OutboxService {
     }
 }
 
-#[async_trait::async_trait]
-impl LaneTransport for OutboxService {
-    async fn query(
+/// One lane's answer, as a query round hands it on.
+type LaneAnswer = (RelayLane, Option<Vec<Event>>);
+
+/// Where a round's answers go.
+#[derive(Clone, Copy)]
+enum Deliver<'a> {
+    /// To the caller, at the end of the round: [`LaneTransport::query`].
+    Caller,
+    /// To a caller listening lane by lane, while it listens. A lane that
+    /// finishes after it stopped — the answer has gone — is kept in the
+    /// local relay instead: [`LaneTransport::query_early`].
+    Listener(&'a tokio::sync::mpsc::UnboundedSender<LaneAnswer>),
+    /// Into the local relay, as each lane finishes: a subscription's pull.
+    Store,
+}
+
+/// The lanes a query answered without keep going behind the answer, this
+/// many rounds per napplet at a time; past that they are dropped (see
+/// [`LaneTransport::query_early`] on [`OutboxService`]).
+const MAX_BACKGROUND_PER_NAPPLET: usize = 4;
+
+/// One napplet session's background work: its query leftovers (at most
+/// [`MAX_BACKGROUND_PER_NAPPLET`]), its open relay streams (at most
+/// [`MAX_STREAMS_PER_NAPPLET`]), and every task, aborted when the session
+/// closes.
+struct SessionWork {
+    permits: Arc<tokio::sync::Semaphore>,
+    streams: Arc<tokio::sync::Semaphore>,
+    tasks: Mutex<Vec<tokio::task::AbortHandle>>,
+}
+
+/// The app-wide bound on open relay streams.
+fn all_streams() -> Arc<tokio::sync::Semaphore> {
+    static STREAMS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    STREAMS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_STREAMS)))
+        .clone()
+}
+
+/// Events a relay stream may have in hand before it waits for the store.
+const STREAM_QUEUE: usize = 256;
+
+/// How often an open stream checks whether "offline only" was switched on.
+const OFFLINE_CHECK_EVERY: Duration = Duration::from_secs(3);
+
+/// Whether `event` is one `filters` asked for.
+fn matches_any(filters: &[Filter], event: &Event) -> bool {
+    filters
+        .iter()
+        .any(|f| f.match_event(event, nostr::filter::MatchEventOptions::new()))
+}
+
+/// Up to `max` of jitter, from the OS's randomness.
+fn jitter(max: Duration) -> Duration {
+    let bytes = crate::ip_source::random_bytes(4);
+    let n = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    max.mul_f64(f64::from(n) / f64::from(u32::MAX))
+}
+
+/// `filters`, each asking for nothing older than `since` (a filter's own
+/// later `since` is kept).
+fn filters_since(filters: &[Filter], since: Option<nostr::Timestamp>) -> Vec<Filter> {
+    filters
+        .iter()
+        .map(|f| {
+            let mut f = f.clone();
+            if let Some(since) = since {
+                f.since = Some(f.since.map_or(since, |own| own.max(since)));
+            }
+            f
+        })
+        .collect()
+}
+
+/// Clears a relay-list lookup's in-flight entries and wakes whoever waits on
+/// them, when the lookup is over or dropped.
+struct ListsInFlight {
+    map: Arc<Mutex<std::collections::HashMap<PublicKey, tokio::sync::watch::Receiver<bool>>>>,
+    authors: Vec<PublicKey>,
+    tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl Drop for ListsInFlight {
+    fn drop(&mut self) {
+        let mut map = self.map.lock().unwrap();
+        for author in &self.authors {
+            map.remove(author);
+        }
+        let _ = self.tx.send(true);
+    }
+}
+
+impl OutboxService {
+    /// One query round over `lanes`, every lane at once, each bounded by
+    /// `timeout`, answered as `deliver` says. The whole round is returned at
+    /// the end, after the breaker and the log have seen it.
+    ///
+    /// What another relay answered with is kept here one way or the other,
+    /// never both: a lane whose answer was **stored** (a pull, or a lane that
+    /// finished after an early answer) went into the local relay whole; a
+    /// lane whose answer the caller **took** is offered to the keep-seen tap,
+    /// which keeps profiles, relay lists and manifests only.
+    async fn run_round(
         &self,
         lanes: &[RelayLane],
         filters: &[Filter],
         timeout: Duration,
-    ) -> Vec<(RelayLane, Option<Vec<Event>>)> {
+        deliver: Deliver<'_>,
+    ) -> Vec<LaneAnswer> {
         let tried_internet = lanes
             .iter()
             .any(|l| matches!(l, RelayLane::Internet { .. }) && self.allowed(l));
+        let rounds: Vec<(LaneAnswer, bool)> = join_all(lanes.iter().map(|lane| async move {
+            // Only what the filters asked for: a relay answering with
+            // anything else is not stored, delivered, or allowed to end an
+            // early answer's round.
+            let events = self.query_lane(lane, filters, timeout).await.map(|events| {
+                events
+                    .into_iter()
+                    .filter(|e| matches_any(filters, e))
+                    .collect::<Vec<_>>()
+            });
+            let answer = (lane.clone(), events);
+            let stored = match deliver {
+                Deliver::Caller => false,
+                // Closed by the listener when it answered: this one is late.
+                Deliver::Listener(tx) => tx.send(answer.clone()).is_err(),
+                Deliver::Store => true,
+            };
+            if stored && *lane != RelayLane::Local {
+                self.keep_pulled(answer.1.as_deref().unwrap_or_default())
+                    .await;
+            }
+            (answer, stored)
+        }))
+        .await;
         let out: Vec<(RelayLane, Option<Vec<Event>>)> =
-            join_all(lanes.iter().map(|lane| async move {
-                (lane.clone(), self.query_lane(lane, filters, timeout).await)
-            }))
-            .await;
+            rounds.iter().map(|(answer, _)| answer.clone()).collect();
         let any_ok = out
             .iter()
             .any(|(l, r)| matches!(l, RelayLane::Internet { .. }) && r.is_some());
@@ -555,11 +880,12 @@ impl LaneTransport for OutboxService {
         // Profiles, relay lists and manifests another relay answered with are
         // kept here, behind the answer, so the next ask is local and works
         // offline. Already verified by the lane; the local lane's own answer
-        // is not offered back to it.
+        // is not offered back to it, nor a lane already stored whole.
         self.content.keep_seen(
-            out.iter()
-                .filter(|(lane, _)| *lane != RelayLane::Local)
-                .filter_map(|(_, events)| events.as_ref())
+            rounds
+                .iter()
+                .filter(|((lane, _), stored)| *lane != RelayLane::Local && !stored)
+                .filter_map(|((_, events), _)| events.as_ref())
                 .flatten(),
         );
         // One line per round: which lanes answered and with how much. This
@@ -580,6 +906,343 @@ impl LaneTransport for OutboxService {
             "outbox query round"
         );
         out
+    }
+
+    /// Accept events another relay returned into the local relay,
+    /// unforwarded: stored, and delivered to live subscriptions here. The hub
+    /// dedupes by id, so an event two lanes return is delivered once. With
+    /// no hub (host builds, before start) it is stored only.
+    async fn keep_pulled(&self, events: &[Event]) -> usize {
+        let hub = self.hub.lock().unwrap().clone();
+        let mut fresh = 0usize;
+        for event in events {
+            let first = match &hub {
+                Some(hub) => hub.accept_unforwarded(event.clone()).await,
+                None => self.store.publish(event.clone()).await.map(|()| true),
+            };
+            if let Ok(true) = first {
+                fresh += 1;
+            }
+        }
+        fresh
+    }
+
+    /// The session's background bookkeeping, made on first use and dropped —
+    /// its tasks aborted — when the session's scope is cancelled. `None` for
+    /// work with no napplet behind it, which is not bounded here.
+    fn session_work(&self, scope: &WorkScope) -> Option<Arc<SessionWork>> {
+        let id = scope.id()?;
+        let (work, fresh) = {
+            let mut map = self.work.lock().unwrap();
+            match map.get(&id) {
+                Some(work) => (work.clone(), false),
+                None => {
+                    let work = Arc::new(SessionWork {
+                        permits: Arc::new(tokio::sync::Semaphore::new(MAX_BACKGROUND_PER_NAPPLET)),
+                        streams: Arc::new(tokio::sync::Semaphore::new(MAX_STREAMS_PER_NAPPLET)),
+                        tasks: Mutex::new(Vec::new()),
+                    });
+                    map.insert(id, work.clone());
+                    (work, true)
+                }
+            }
+        };
+        if fresh {
+            let map = self.work.clone();
+            scope.session().on_cancel(move || {
+                if let Some(work) = map.lock().unwrap().remove(&id) {
+                    for task in work.tasks.lock().unwrap().drain(..) {
+                        task.abort();
+                    }
+                }
+            });
+        }
+        Some(work)
+    }
+
+    /// Tie a spawned task to `scope`: aborted when its subscription closes
+    /// (if it is a subscription's), or when the session does.
+    fn track(&self, scope: &WorkScope, task: tokio::task::AbortHandle) {
+        if let Some(work) = self.session_work(scope) {
+            let mut tasks = work.tasks.lock().unwrap();
+            tasks.retain(|t| !t.is_finished());
+            tasks.push(task.clone());
+        }
+        if let Some(sub) = scope.subscription() {
+            let task = task.clone();
+            sub.on_cancel(move || task.abort());
+        }
+        if scope.is_cancelled() {
+            // Closed while this was being set up: the on-cancel hooks have
+            // already run, so stop this one here.
+            task.abort();
+        }
+    }
+
+    /// Start a subscription's remote half on `lanes` (planned first, if
+    /// `plan` says so) within `scope`, for as long as the subscription
+    /// lives.
+    ///
+    /// Each lane gets a stream while the napplet and the app have one free
+    /// ([`MAX_STREAMS_PER_NAPPLET`], [`MAX_STREAMS`]): a `REQ` held open that
+    /// delivers the stored events and then every new one, re-opened with
+    /// backoff when it drops. A lane past the bound gets one pull. All of it
+    /// stops when the subscription closes or the window does — the task
+    /// holding the streams is aborted with its scope.
+    fn spawn_pull(
+        &self,
+        scope: &WorkScope,
+        plan: Option<(Arc<dyn OutboxResolver>, Vec<PublicKey>)>,
+        lanes: Vec<RelayLane>,
+        filters: Vec<Filter>,
+    ) {
+        let this = self.detached();
+        let session = self.session_work(scope);
+        let task = tokio::spawn(async move {
+            let lanes = match plan {
+                Some((resolver, authors)) => {
+                    let plan = resolver
+                        .plan_hinted(Direction::Read, &authors, &lanes)
+                        .await;
+                    remote_lanes(plan.lanes.into_iter().chain(lanes))
+                }
+                None => remote_lanes(lanes),
+            };
+            if lanes.is_empty() {
+                return;
+            }
+            let mut streams = tokio::task::JoinSet::new();
+            let mut once = Vec::new();
+            for lane in lanes {
+                let napplet = match &session {
+                    Some(work) => match work.streams.clone().try_acquire_owned() {
+                        Ok(permit) => Some(permit),
+                        Err(_) => {
+                            once.push(lane);
+                            continue;
+                        }
+                    },
+                    None => None,
+                };
+                let Ok(app) = all_streams().try_acquire_owned() else {
+                    once.push(lane);
+                    continue;
+                };
+                let (this, filters) = (this.clone(), filters.clone());
+                streams.spawn(async move {
+                    let _permits = (napplet, app);
+                    this.stream_lane(lane, filters).await;
+                });
+            }
+            if !once.is_empty() {
+                tracing::debug!(
+                    lanes = once.len(),
+                    "outbox: stream bound reached; pulling once"
+                );
+                this.run_round(&once, &filters, PULL_TIMEOUT, Deliver::Store)
+                    .await;
+            }
+            // Held until aborted: dropping the set would close the streams.
+            while streams.join_next().await.is_some() {}
+        });
+        self.track(scope, task.abort_handle());
+    }
+
+    /// Keep one lane feeding the local relay for as long as the task runs.
+    /// Never returns on its own.
+    async fn stream_lane(self: Arc<Self>, lane: RelayLane, filters: Vec<Filter>) {
+        let mut backoff = STREAM_BACKOFF_FIRST;
+        let mut since: Option<nostr::Timestamp> = None;
+        loop {
+            let opened = tokio::time::Instant::now();
+            let asked = filters_since(&filters, since);
+            // `since` moves only once everything stored up to now has been
+            // heard — EOSE on a stream, an answer from a mesh re-pull. A
+            // connection that failed, or dropped before EOSE, leaves it
+            // where it was, so nothing stored meanwhile is skipped.
+            let heard_all_from =
+                nostr::Timestamp::now() - Duration::from_secs(RECONNECT_OVERLAP_SECS);
+            match &lane {
+                RelayLane::Mesh { .. } => {
+                    let answers = self
+                        .run_round(
+                            std::slice::from_ref(&lane),
+                            &asked,
+                            PULL_TIMEOUT,
+                            Deliver::Store,
+                        )
+                        .await;
+                    if answers.first().is_some_and(|(_, events)| events.is_some()) {
+                        since = Some(heard_all_from);
+                    }
+                    tokio::time::sleep(MESH_REPULL_EVERY + jitter(MESH_REPULL_EVERY / 3)).await;
+                    continue;
+                }
+                // `since` moves only once a connection saw EOSE.
+                RelayLane::Internet { url }
+                    if self.allowed(&lane) && self.stream_internet(url, &asked).await =>
+                {
+                    since = Some(heard_all_from);
+                }
+                // Not allowed right now (offline only, internet down), or the
+                // connection ended before EOSE: wait.
+                _ => {}
+            }
+            backoff = if opened.elapsed() >= STREAM_HEALTHY_AFTER {
+                STREAM_BACKOFF_FIRST
+            } else {
+                (backoff * 2).min(STREAM_BACKOFF_MAX)
+            };
+            tokio::time::sleep(backoff + jitter(backoff / 2)).await;
+        }
+    }
+
+    /// One connection's life on an internet lane: its events go into the
+    /// local relay as they come — the ones the filters asked for; anything
+    /// else a relay sends is dropped here. Ends early when "offline only" is
+    /// switched on. Returns whether the relay got as far as EOSE.
+    async fn stream_internet(&self, url: &str, filters: &[Filter]) -> bool {
+        if !self.may_dial(url).await {
+            return false;
+        }
+        let values: Vec<serde_json::Value> = filters
+            .iter()
+            .filter_map(|f| serde_json::to_value(f).ok())
+            .collect();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(STREAM_QUEUE);
+        let saw_eose = std::sync::atomic::AtomicBool::new(false);
+        let stream = crate::ip_source::stream_relay_filters(url, values, tx, &saw_eose);
+        let deliver = async {
+            let mut fresh = 0usize;
+            while let Some(event) = rx.recv().await {
+                if matches_any(filters, &event) {
+                    fresh += self.keep_pulled(std::slice::from_ref(&event)).await;
+                }
+            }
+            fresh
+        };
+        let offline_only = async {
+            loop {
+                tokio::time::sleep(OFFLINE_CHECK_EVERY).await;
+                if self.content.is_offline_only() {
+                    return;
+                }
+            }
+        };
+        tokio::select! {
+            (ended, fresh) = futures_util::future::join(stream, deliver) => {
+                tracing::debug!(url, fresh, ended = ?ended.err(), "outbox stream closed");
+            }
+            () = offline_only => {
+                tracing::debug!(url, "outbox stream closed: offline only");
+            }
+        }
+        saw_eose.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl LaneTransport for OutboxService {
+    async fn query(
+        &self,
+        lanes: &[RelayLane],
+        filters: &[Filter],
+        timeout: Duration,
+    ) -> Vec<(RelayLane, Option<Vec<Event>>)> {
+        self.run_round(lanes, filters, timeout, Deliver::Caller)
+            .await
+    }
+
+    /// The round runs on its own task. When the answer goes out the lanes
+    /// still running keep going — if the napplet has a background slot free
+    /// — and what they find is kept in the local relay, so the next read (or
+    /// a live subscription) has it. With no slot free they are dropped: the
+    /// napplet has its answer, and a napplet firing queries faster than
+    /// relays answer must not grow a pile of sockets behind it.
+    async fn query_early(
+        &self,
+        lanes: &[RelayLane],
+        filters: &[Filter],
+        timeout: Duration,
+        early: EarlyAnswer,
+        scope: &WorkScope,
+    ) -> Vec<(RelayLane, Option<Vec<Event>>)> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LaneAnswer>();
+        let this = self.detached();
+        let (round_lanes, round_filters) = (lanes.to_vec(), filters.to_vec());
+        let round = tokio::spawn(async move {
+            this.run_round(
+                &round_lanes,
+                &round_filters,
+                timeout,
+                Deliver::Listener(&tx),
+            )
+            .await;
+        });
+
+        let started = tokio::time::Instant::now();
+        let mut deadline = started + timeout;
+        let mut heard: Vec<LaneAnswer> = Vec::with_capacity(lanes.len());
+        while heard.len() < lanes.len() {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(answer)) => {
+                    if answer.1.as_ref().is_some_and(|e| !e.is_empty()) {
+                        deadline = deadline.min(if answer.0 == RelayLane::Local {
+                            // This device's events: a floor, not the answer —
+                            // a relay may have a newer replaceable.
+                            started + early.local_cap
+                        } else {
+                            tokio::time::Instant::now() + early.grace
+                        });
+                    }
+                    heard.push(answer);
+                }
+                // Round over (every sender gone) or out of time.
+                Ok(None) | Err(_) => break,
+            }
+        }
+        // From here a lane's send fails and it keeps its answer itself; one
+        // already sent is still ours.
+        rx.close();
+        while let Ok(answer) = rx.try_recv() {
+            heard.push(answer);
+        }
+        if heard.len() < lanes.len() {
+            let slot = self
+                .session_work(scope)
+                .map(|w| w.permits.clone().try_acquire_owned());
+            match slot {
+                Some(Err(_)) => {
+                    round.abort();
+                    tracing::debug!("outbox query: no background slot; late lanes dropped");
+                }
+                slot => {
+                    let permit = slot.and_then(Result::ok);
+                    self.track(scope, round.abort_handle());
+                    tokio::spawn(async move {
+                        let _ = round.await;
+                        drop(permit);
+                    });
+                }
+            }
+            tracing::debug!(
+                heard = heard.len(),
+                lanes = lanes.len(),
+                waited_ms = started.elapsed().as_millis() as u64,
+                "outbox query answered early"
+            );
+        }
+        // In the order asked, a lane not heard from as `None`.
+        lanes
+            .iter()
+            .map(|lane| {
+                let answer = heard
+                    .iter()
+                    .position(|(l, _)| l == lane)
+                    .and_then(|i| heard.swap_remove(i).1);
+                (lane.clone(), answer)
+            })
+            .collect()
     }
 
     async fn publish(
@@ -669,27 +1332,34 @@ impl LaneTransport for OutboxService {
         out
     }
 
-    async fn pull_into_local(&self, lanes: &[RelayLane], filters: &[Filter]) -> anyhow::Result<()> {
-        let hub = self.hub.lock().unwrap().clone();
-        let Some(hub) = hub else {
+    async fn pull_into_local(
+        &self,
+        lanes: &[RelayLane],
+        filters: &[Filter],
+        scope: &WorkScope,
+    ) -> anyhow::Result<()> {
+        if self.hub.lock().unwrap().is_none() {
             // Nothing to deliver through.
             return Ok(());
-        };
-        let this = self.detached();
-        let lanes = lanes.to_vec();
-        let filters = filters.to_vec();
-        tokio::spawn(async move {
-            let answers = this.query(&lanes, &filters, PULL_TIMEOUT).await;
-            let mut fresh = 0usize;
-            for (_, events) in answers {
-                for event in events.unwrap_or_default() {
-                    if let Ok(true) = hub.accept_unforwarded(event).await {
-                        fresh += 1;
-                    }
-                }
-            }
-            tracing::debug!(fresh, "outbox pull finished");
-        });
+        }
+        self.spawn_pull(scope, None, lanes.to_vec(), filters.to_vec());
+        Ok(())
+    }
+
+    /// Planned and pulled on a detached task: the subscription's answer (the
+    /// local backlog) does not wait for a relay list to be fetched.
+    async fn pull_plan_into_local(
+        &self,
+        resolver: Arc<dyn OutboxResolver>,
+        authors: Vec<PublicKey>,
+        extra: Vec<RelayLane>,
+        filters: Vec<Filter>,
+        scope: &WorkScope,
+    ) -> anyhow::Result<()> {
+        if self.hub.lock().unwrap().is_none() {
+            return Ok(());
+        }
+        self.spawn_pull(scope, Some((resolver, authors)), extra, filters);
         Ok(())
     }
 }
@@ -827,6 +1497,7 @@ pub fn own_dm_relay_list(keys: &nostr::Keys) -> anyhow::Result<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use myco_napplet_runtime::seams::LaneTransport;
     use nostr::{EventBuilder, Keys, Tag};
 
     #[test]
@@ -1390,11 +2061,7 @@ mod tests {
         let nobody = Keys::generate();
         let plan = svc.plan(Direction::Read, &[nobody.public_key()]).await;
         assert_eq!(plan.source, PlanSource::Fallback);
-        assert!(svc
-            .misses
-            .lock()
-            .unwrap()
-            .contains_key(&nobody.public_key()));
+        assert!(svc.lists.recently_missed(&nobody.public_key()));
         drop(remote);
         let plan = svc.plan(Direction::Read, &[nobody.public_key()]).await;
         assert_eq!(plan.missing_authors, vec![nobody.public_key()]);
@@ -1569,6 +2236,738 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A service over a fresh store and hub, dialling mock relays on
+    /// loopback, with `configured` as its fallback relays.
+    fn streaming_service(
+        tag: &str,
+        configured: Vec<String>,
+    ) -> (OutboxService, Arc<dyn RelayBackend>, Arc<RelayHub>) {
+        let content = scratch_content(tag);
+        let store = content.relay();
+        let hub = RelayHub::new(store.clone(), None);
+        let svc = OutboxService::new(
+            store.clone(),
+            Arc::new(Mutex::new(Some(hub.clone()))),
+            content,
+            "npub1me".to_string(),
+        )
+        .with_configured_relays(configured)
+        .allowing_private_dials();
+        (svc, store, hub)
+    }
+
+    fn note(text: &str) -> Event {
+        EventBuilder::text_note(text)
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    }
+
+    fn early(grace_ms: u64, local_cap_ms: u64) -> EarlyAnswer {
+        EarlyAnswer {
+            grace: Duration::from_millis(grace_ms),
+            local_cap: Duration::from_millis(local_cap_ms),
+        }
+    }
+
+    /// NAP-level `QUERY_EARLY`, restated: the runtime crate keeps it private.
+    const NAP_EARLY: EarlyAnswer = EarlyAnswer {
+        grace: Duration::from_millis(400),
+        local_cap: Duration::from_millis(1500),
+    };
+
+    /// Poll the store until `id` is in it, or give up.
+    async fn lands(store: &Arc<dyn RelayBackend>, id: nostr::EventId, within: Duration) -> bool {
+        let until = std::time::Instant::now() + within;
+        while std::time::Instant::now() < until {
+            if !store
+                .query(&[Filter::new().id(id)])
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    /// The device observed: `local=6` and every internet lane slow or dead.
+    /// A one-shot read answers with what this device holds once the local
+    /// cap is up — not at the local lane's first millisecond, and not at the
+    /// slow relay's timeout — and the relay not heard from reads as `None`.
+    #[tokio::test]
+    async fn a_query_answers_from_local_at_the_cap_while_a_relay_hangs() {
+        let held = note("held here");
+        let (slow, _) = crate::ip_source::tests::mock_relay_delayed(
+            vec![note("far away")],
+            Duration::from_secs(5),
+        )
+        .await;
+        let (svc, store, _hub) = streaming_service("early-local", Vec::new());
+        store.publish(held.clone()).await.unwrap();
+
+        let started = std::time::Instant::now();
+        let answers = svc
+            .query_early(
+                &[RelayLane::Local, RelayLane::Internet { url: slow.clone() }],
+                &[Filter::new().kind(Kind::TextNote)],
+                Duration::from_secs(8),
+                early(300, 600),
+                &WorkScope::detached(),
+            )
+            .await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited >= Duration::from_millis(500),
+            "answered from local before the cap: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_millis(1500),
+            "the answer waited {waited:?} on a relay that hangs"
+        );
+        assert_eq!(answers[0].1.as_ref().map(|e| e[0].id), Some(held.id));
+        assert_eq!(answers[1].0, RelayLane::Internet { url: slow });
+        assert!(answers[1].1.is_none(), "an unheard lane must read as None");
+    }
+
+    /// The review's case: this device holds an old profile, a relay has the
+    /// new one and answers at 800 ms — a cold dial on a phone. The local
+    /// lane answering in a millisecond must not close the round on the
+    /// stale one: the relay's newer profile is in the answer.
+    #[tokio::test]
+    async fn a_relay_with_a_newer_replaceable_beats_the_stale_one_held_here() {
+        let keys = Keys::generate();
+        let old = EventBuilder::metadata(&nostr::Metadata::new().name("old"))
+            .custom_created_at(nostr::Timestamp::from(
+                nostr::Timestamp::now().as_secs() - 3600,
+            ))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let new = EventBuilder::metadata(&nostr::Metadata::new().name("new"))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let (relay, _) = crate::ip_source::tests::mock_relay_delayed(
+            vec![new.clone()],
+            Duration::from_millis(800),
+        )
+        .await;
+        let (svc, store, _hub) = streaming_service("early-stale", Vec::new());
+        store.publish(old.clone()).await.unwrap();
+
+        let answers = svc
+            .query_early(
+                &[RelayLane::Local, RelayLane::Internet { url: relay }],
+                &[Filter::new().kind(Kind::Metadata).author(keys.public_key())],
+                Duration::from_secs(5),
+                NAP_EARLY,
+                &WorkScope::detached(),
+            )
+            .await;
+        assert_eq!(answers[0].1.as_ref().map(|e| e[0].id), Some(old.id));
+        assert_eq!(
+            answers[1].1.as_ref().map(|e| e[0].id),
+            Some(new.id),
+            "the relay's newer profile missed the answer"
+        );
+    }
+
+    /// A second relay answering inside the grace that the first remote
+    /// answer started is in the answer.
+    #[tokio::test]
+    async fn a_query_takes_a_relay_that_answers_inside_the_grace() {
+        let first = note("from the quick relay");
+        let second = note("from the next relay");
+        let (quick, _) = crate::ip_source::tests::mock_relay_holding(vec![first.clone()]).await;
+        let (next, _) = crate::ip_source::tests::mock_relay_delayed(
+            vec![second.clone()],
+            Duration::from_millis(300),
+        )
+        .await;
+        let (svc, _store, _hub) = streaming_service("early-grace", Vec::new());
+
+        let answers = svc
+            .query_early(
+                &[
+                    RelayLane::Local,
+                    RelayLane::Internet { url: quick },
+                    RelayLane::Internet { url: next },
+                ],
+                &[Filter::new().kind(Kind::TextNote)],
+                Duration::from_secs(8),
+                early(2000, 1500),
+                &WorkScope::detached(),
+            )
+            .await;
+        assert_eq!(answers[1].1.as_ref().map(|e| e[0].id), Some(first.id));
+        assert_eq!(answers[2].1.as_ref().map(|e| e[0].id), Some(second.id));
+    }
+
+    /// Every lane finished and nobody had anything: the answer goes then,
+    /// not after the grace and not after the timeout.
+    #[tokio::test]
+    async fn a_query_answers_at_once_when_every_lane_has_finished() {
+        let (empty, _) = crate::ip_source::tests::mock_relay_holding(Vec::new()).await;
+        let (svc, _store, _hub) = streaming_service("early-done", Vec::new());
+
+        let started = std::time::Instant::now();
+        let answers = svc
+            .query_early(
+                &[RelayLane::Local, RelayLane::Internet { url: empty }],
+                &[Filter::new().kind(Kind::TextNote)],
+                Duration::from_secs(8),
+                early(5000, 5000),
+                &WorkScope::detached(),
+            )
+            .await;
+        assert!(started.elapsed() < Duration::from_millis(1500));
+        assert_eq!(answers[0].1.as_ref().map(Vec::len), Some(0));
+        assert_eq!(answers[1].1.as_ref().map(Vec::len), Some(0));
+    }
+
+    /// Nothing anywhere and one relay hanging: the timeout still bounds it.
+    #[tokio::test]
+    async fn a_query_with_nothing_found_still_ends_at_the_timeout() {
+        let (hung, _) =
+            crate::ip_source::tests::mock_relay_delayed(Vec::new(), Duration::from_secs(10)).await;
+        let (svc, _store, _hub) = streaming_service("early-timeout", Vec::new());
+
+        let started = std::time::Instant::now();
+        let answers = svc
+            .query_early(
+                &[RelayLane::Local, RelayLane::Internet { url: hung }],
+                &[Filter::new().kind(Kind::TextNote)],
+                Duration::from_millis(800),
+                early(300, 300),
+                &WorkScope::detached(),
+            )
+            .await;
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(700),
+            "answered before the timeout: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_millis(2000),
+            "overran the timeout: {waited:?}"
+        );
+        assert!(answers[1].1.is_none());
+    }
+
+    /// A relay that answers after the query has is not wasted: what it
+    /// found lands in the local relay — any kind, not just the kept ones —
+    /// so the next read has it.
+    #[tokio::test]
+    async fn a_lane_that_misses_the_answer_is_kept_here() {
+        let late = note("from the slow relay");
+        let (slow, _) = crate::ip_source::tests::mock_relay_delayed(
+            vec![late.clone()],
+            Duration::from_millis(700),
+        )
+        .await;
+        let (svc, store, _hub) = streaming_service("early-late", Vec::new());
+        store.publish(note("held here")).await.unwrap();
+
+        let answers = svc
+            .query_early(
+                &[RelayLane::Local, RelayLane::Internet { url: slow }],
+                &[Filter::new().kind(Kind::TextNote)],
+                Duration::from_secs(5),
+                early(100, 200),
+                &WorkScope::detached(),
+            )
+            .await;
+        assert!(answers[1].1.is_none(), "the slow relay made the answer");
+        assert!(
+            lands(&store, late.id, Duration::from_secs(3)).await,
+            "the late relay's event was dropped"
+        );
+    }
+
+    /// A subscription's pull is a stream: the quick relay's event is
+    /// delivered while the slow one is still thinking, an event two relays
+    /// both hold is delivered once, and the slow relay's event still lands
+    /// when it comes. Starting the pull returns at once, so the napplet's
+    /// EOSE (sent after the local backlog) never waits on a lane.
+    #[tokio::test]
+    async fn a_pull_delivers_each_relay_as_it_answers_and_once_per_event() {
+        let shared = note("on two relays");
+        let late = note("from the slow relay");
+        let (quick_a, _) = crate::ip_source::tests::mock_relay_holding(vec![shared.clone()]).await;
+        let (quick_b, _) = crate::ip_source::tests::mock_relay_holding(vec![shared.clone()]).await;
+        let (slow, _) =
+            crate::ip_source::tests::mock_relay_delayed(vec![late.clone()], Duration::from_secs(3))
+                .await;
+        let (svc, _store, hub) = streaming_service("pull-stream", Vec::new());
+        let mut live = hub.live_events();
+
+        let started = std::time::Instant::now();
+        svc.pull_into_local(
+            &[
+                RelayLane::Internet { url: quick_a },
+                RelayLane::Internet { url: quick_b },
+                RelayLane::Internet { url: slow },
+            ],
+            &[Filter::new().kind(Kind::TextNote)],
+            &WorkScope::detached(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "starting a pull waited on its lanes"
+        );
+
+        let first = tokio::time::timeout(Duration::from_millis(1500), live.recv())
+            .await
+            .expect("the quick relays' event waited on the slow relay")
+            .unwrap();
+        assert_eq!(first.id, shared.id);
+
+        let next = tokio::time::timeout(Duration::from_secs(6), live.recv())
+            .await
+            .expect("the slow relay's event never landed")
+            .unwrap();
+        assert_eq!(
+            next.id, late.id,
+            "an event two relays hold was delivered twice"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_secs(2),
+            "the slow relay was not slow"
+        );
+    }
+
+    /// An outbox subscription's plan is made behind its answer: an author
+    /// nobody has a relay list for costs the napplet nothing up front, and
+    /// the planned lanes are still pulled once the lookup gives up.
+    #[tokio::test]
+    async fn a_planned_pull_returns_before_the_plan_is_made() {
+        let author = Keys::generate();
+        let theirs = EventBuilder::text_note("from the fallback relay")
+            .sign_with_keys(&author)
+            .unwrap();
+        // The only configured relay: searched for the list (it has none, and
+        // takes its time saying so), then used as the fallback lane.
+        let (slow, _) = crate::ip_source::tests::mock_relay_delayed(
+            vec![theirs.clone()],
+            Duration::from_millis(1500),
+        )
+        .await;
+        let (svc, _store, hub) = streaming_service("pull-plan", vec![slow]);
+        let svc = Arc::new(svc);
+        let mut live = hub.live_events();
+
+        let started = std::time::Instant::now();
+        svc.pull_plan_into_local(
+            svc.clone(),
+            vec![author.public_key()],
+            Vec::new(),
+            vec![Filter::new()
+                .kind(Kind::TextNote)
+                .author(author.public_key())],
+            &WorkScope::detached(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "the subscription waited on its relay plan"
+        );
+
+        let got = tokio::time::timeout(Duration::from_secs(8), live.recv())
+            .await
+            .expect("the planned lane was never pulled")
+            .unwrap();
+        assert_eq!(got.id, theirs.id);
+    }
+
+    fn relay_list_of(keys: &Keys, url: &str) -> Event {
+        EventBuilder::new(Kind::RelayList, "")
+            .tags([Tag::parse(["r", url]).unwrap()])
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    /// Two authors with no list here cost one `REQ` per relay, not one per
+    /// author, and both plans come back from their lists.
+    #[tokio::test]
+    async fn unknown_authors_are_looked_up_in_one_request() {
+        let (a, b) = (Keys::generate(), Keys::generate());
+        let (index, reqs) = crate::ip_source::tests::mock_relay_holding(vec![
+            relay_list_of(&a, "wss://a.example"),
+            relay_list_of(&b, "wss://b.example"),
+        ])
+        .await;
+        let (svc, _store, _hub) = streaming_service("plan-batch", vec![index]);
+
+        let plan = svc
+            .plan(Direction::Read, &[a.public_key(), b.public_key()])
+            .await;
+        assert_eq!(reqs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(plan.missing_authors.is_empty());
+        for url in ["wss://a.example", "wss://b.example"] {
+            assert!(plan.lanes.contains(&RelayLane::Internet {
+                url: url.to_string()
+            }));
+        }
+    }
+
+    /// Two plans at once for the same unknown author share one lookup.
+    #[tokio::test]
+    async fn concurrent_plans_share_a_lookup() {
+        let a = Keys::generate();
+        let (index, reqs) = crate::ip_source::tests::mock_relay_delayed(
+            vec![relay_list_of(&a, "wss://a.example")],
+            Duration::from_millis(400),
+        )
+        .await;
+        let (svc, _store, _hub) = streaming_service("plan-share", vec![index]);
+
+        let who = [a.public_key()];
+        let (one, two) = tokio::join!(
+            svc.plan(Direction::Read, &who),
+            svc.plan(Direction::Read, &who),
+        );
+        assert_eq!(reqs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(one.missing_authors.is_empty() && two.missing_authors.is_empty());
+    }
+
+    /// Closing the window stops its pulls: the slow relay's event never
+    /// lands. Closing one subscription stops that one's.
+    #[tokio::test]
+    async fn closing_a_session_or_a_subscription_stops_its_pull() {
+        use myco_napplet_runtime::seams::ScopeOwner;
+
+        let (svc, store, _hub) = streaming_service("pull-cancel", Vec::new());
+        let lanes_for = |url: String| vec![RelayLane::Internet { url }];
+
+        // The session closes.
+        let session_note = note("for a closed window");
+        let (slow, _) = crate::ip_source::tests::mock_relay_delayed(
+            vec![session_note.clone()],
+            Duration::from_millis(500),
+        )
+        .await;
+        let session = ScopeOwner::new();
+        svc.pull_into_local(
+            &lanes_for(slow),
+            &[Filter::new().kind(Kind::TextNote)],
+            &session.scope(),
+        )
+        .await
+        .unwrap();
+        drop(session);
+
+        // A subscription closes; its session stays open.
+        let sub_note = note("for a closed subscription");
+        let (slow, _) = crate::ip_source::tests::mock_relay_delayed(
+            vec![sub_note.clone()],
+            Duration::from_millis(500),
+        )
+        .await;
+        let session = ScopeOwner::new();
+        let sub = ScopeOwner::new();
+        svc.pull_into_local(
+            &lanes_for(slow),
+            &[Filter::new().kind(Kind::TextNote)],
+            &session.scope().with(&sub),
+        )
+        .await
+        .unwrap();
+        drop(sub);
+
+        assert!(!lands(&store, session_note.id, Duration::from_millis(1500)).await);
+        assert!(!lands(&store, sub_note.id, Duration::from_millis(100)).await);
+        drop(session);
+    }
+
+    /// A napplet's background work is bounded: past four rounds left
+    /// running behind answers, the next query's leftovers are dropped
+    /// rather than piled up.
+    #[tokio::test]
+    async fn a_napplets_background_rounds_are_bounded() {
+        use myco_napplet_runtime::seams::ScopeOwner;
+
+        let (hung, _) =
+            crate::ip_source::tests::mock_relay_delayed(Vec::new(), Duration::from_secs(10)).await;
+        let (svc, store, _hub) = streaming_service("bounded", Vec::new());
+        store.publish(note("held here")).await.unwrap();
+        let session = ScopeOwner::new();
+        let scope = session.scope();
+
+        for _ in 0..MAX_BACKGROUND_PER_NAPPLET + 2 {
+            svc.query_early(
+                &[RelayLane::Local, RelayLane::Internet { url: hung.clone() }],
+                &[Filter::new().kind(Kind::TextNote)],
+                Duration::from_secs(8),
+                early(50, 50),
+                &scope,
+            )
+            .await;
+        }
+        let work = svc.session_work(&scope).unwrap();
+        assert_eq!(work.permits.available_permits(), 0);
+        let running = work
+            .tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| !t.is_finished())
+            .count();
+        assert_eq!(running, MAX_BACKGROUND_PER_NAPPLET);
+
+        // And closing the window stops them.
+        drop(session);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(svc.work.lock().unwrap().is_empty());
+    }
+
+    /// A subscription is a stream for as long as it is open: a note a
+    /// remote relay receives 15 s after the napplet subscribed still reaches
+    /// this device — no one-shot pull would have seen it — and once the
+    /// subscription closes, the next one does not.
+    #[tokio::test]
+    async fn a_subscription_hears_a_relay_for_its_whole_life_and_not_after() {
+        use myco_napplet_runtime::seams::ScopeOwner;
+
+        let (_remote, url) = mock_relay().await;
+        let (svc, store, hub) = streaming_service("stream-live", Vec::new());
+        let mut live = hub.live_events();
+        let session = ScopeOwner::new();
+        let sub = ScopeOwner::new();
+        svc.pull_into_local(
+            &[RelayLane::Internet { url: url.clone() }],
+            &[Filter::new().kind(Kind::TextNote)],
+            &session.scope().with(&sub),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        let later = note("published a while after the napplet subscribed");
+        assert!(crate::ip_source::publish_to_relay(&url, &later)
+            .await
+            .unwrap());
+        let got = tokio::time::timeout(Duration::from_secs(3), live.recv())
+            .await
+            .expect("the open subscription missed a live event")
+            .unwrap();
+        assert_eq!(got.id, later.id);
+
+        // Close: the relay's REQ goes with it.
+        drop(sub);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let after = note("published after the subscription closed");
+        assert!(crate::ip_source::publish_to_relay(&url, &after)
+            .await
+            .unwrap());
+        assert!(
+            !lands(&store, after.id, Duration::from_millis(1500)).await,
+            "a closed subscription kept its relay stream"
+        );
+        drop(session);
+    }
+
+    /// An author whose relay list is only on an indexer — not on any
+    /// configured relay, not in the Circle — is planned onto the write
+    /// relays that list names.
+    #[tokio::test]
+    async fn a_list_found_only_on_an_indexer_plans_the_authors_relays() {
+        let author = Keys::generate();
+        let list = EventBuilder::new(Kind::RelayList, "")
+            .tags([
+                Tag::parse(["r", "wss://nostr.wine"]).unwrap(),
+                Tag::parse(["r", "wss://pyramid.fiatjaf.com", "write"]).unwrap(),
+            ])
+            .sign_with_keys(&author)
+            .unwrap();
+        let (configured, _) = crate::ip_source::tests::mock_relay_holding(Vec::new()).await;
+        let (indexer, _) = crate::ip_source::tests::mock_relay_holding(vec![list]).await;
+        let (svc, _store, _hub) = streaming_service("plan-indexer", vec![configured]);
+        let svc = svc.with_indexers(vec![indexer]);
+
+        let plan = svc.plan(Direction::Read, &[author.public_key()]).await;
+        assert!(plan.missing_authors.is_empty());
+        assert_eq!(plan.source, PlanSource::Nip65);
+        for url in ["wss://nostr.wine", "wss://pyramid.fiatjaf.com"] {
+            assert!(
+                plan.lanes
+                    .contains(&RelayLane::Internet { url: url.into() }),
+                "{url} missing from {:?}",
+                plan.lanes
+            );
+        }
+    }
+
+    /// A list found only on a relay the napplet named is used; and with
+    /// relays named, an author found nowhere is not remembered as having no
+    /// list — nor when a relay asked timed out rather than answering. Those
+    /// are soft misses: not asked again for a minute, not ten.
+    #[tokio::test]
+    async fn misses_are_remembered_only_when_every_relay_said_no_and_none_were_named() {
+        let (empty, _) = crate::ip_source::tests::mock_relay_holding(Vec::new()).await;
+        let (hung, _) =
+            crate::ip_source::tests::mock_relay_delayed(Vec::new(), Duration::from_secs(10)).await;
+
+        // A napplet-named relay holds the list.
+        let named = Keys::generate();
+        let (hint, _) = crate::ip_source::tests::mock_relay_holding(vec![EventBuilder::new(
+            Kind::RelayList,
+            "",
+        )
+        .tags([Tag::parse(["r", "wss://named.example"]).unwrap()])
+        .sign_with_keys(&named)
+        .unwrap()])
+        .await;
+        let (svc, _store, _hub) = streaming_service("plan-hints", vec![empty.clone()]);
+        let hints = [RelayLane::Internet { url: hint }];
+        let plan = svc
+            .plan_hinted(Direction::Read, &[named.public_key()], &hints)
+            .await;
+        assert!(plan.lanes.contains(&RelayLane::Internet {
+            url: "wss://named.example".into()
+        }));
+
+        let soft = crate::ip_source::LIST_SOFT_MISS_FOR;
+
+        // Named relays, found nowhere: a soft miss only.
+        let nobody = Keys::generate();
+        svc.plan_hinted(Direction::Read, &[nobody.public_key()], &hints)
+            .await;
+        assert!(svc.lists.miss_left(&nobody.public_key()).unwrap() <= soft);
+
+        // A relay that timed out: a soft miss only.
+        let (svc, _store, _hub) = streaming_service("plan-timeout", vec![empty.clone(), hung]);
+        let unsure = Keys::generate();
+        svc.plan(Direction::Read, &[unsure.public_key()]).await;
+        assert!(svc.lists.miss_left(&unsure.public_key()).unwrap() <= soft);
+
+        // Every relay said no: the full ten minutes.
+        let (svc, _store, _hub) = streaming_service("plan-clean-no", vec![empty]);
+        let absent = Keys::generate();
+        svc.plan(Direction::Read, &[absent.public_key()]).await;
+        assert!(svc.lists.miss_left(&absent.public_key()).unwrap() > soft);
+    }
+
+    /// Device bug: lists published months ago were "stale" on every plan,
+    /// and each author got a lookup round of its own. Now the stale authors
+    /// of a plan share one round, and an author checked lately is fresh
+    /// whatever its list's age.
+    #[tokio::test]
+    async fn stale_lists_are_rechecked_together_and_then_left_alone() {
+        let (index, reqs) = crate::ip_source::tests::mock_relay_holding(Vec::new()).await;
+        let (svc, store, _hub) = streaming_service("stale-batch", vec![index]);
+        let old = nostr::Timestamp::from(nostr::Timestamp::now().as_secs() - 90 * 24 * 3600);
+        let authors: Vec<Keys> = (0..3).map(|_| Keys::generate()).collect();
+        for keys in &authors {
+            let list = EventBuilder::new(Kind::RelayList, "")
+                .tags([Tag::parse(["r", "wss://old.example"]).unwrap()])
+                .custom_created_at(old)
+                .sign_with_keys(keys)
+                .unwrap();
+            store.publish(list).await.unwrap();
+        }
+        let pks: Vec<PublicKey> = authors.iter().map(|k| k.public_key()).collect();
+
+        let plan = svc.plan(Direction::Read, &pks).await;
+        assert_eq!(plan.source, PlanSource::Cache);
+        for _ in 0..100 {
+            if reqs.load(std::sync::atomic::Ordering::SeqCst) > 0
+                && svc.refreshing.lock().unwrap().is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            reqs.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one round for all three"
+        );
+
+        let plan = svc.plan(Direction::Read, &pks).await;
+        assert_eq!(plan.source, PlanSource::Nip65, "checked lately is fresh");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(reqs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A relay that answers with events nobody asked for gets none of them
+    /// stored or delivered, and they do not count as an answer.
+    #[tokio::test]
+    async fn events_outside_the_filters_are_dropped() {
+        // The mock matches on kind and author only; the filter also wants a
+        // tag the note does not have.
+        let (relay, _) =
+            crate::ip_source::tests::mock_relay_holding(vec![note("no tag here")]).await;
+        let (svc, store, _hub) = streaming_service("unasked", Vec::new());
+        let filter = Filter::new().kind(Kind::TextNote).custom_tag(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::T),
+            "wanted",
+        );
+        let answers = svc
+            .query_early(
+                &[RelayLane::Internet { url: relay.clone() }],
+                std::slice::from_ref(&filter),
+                Duration::from_secs(3),
+                early(0, 0),
+                &WorkScope::detached(),
+            )
+            .await;
+        assert_eq!(answers[0].1.as_ref().map(Vec::len), Some(0));
+
+        svc.pull_into_local(
+            &[RelayLane::Internet { url: relay }],
+            &[filter],
+            &WorkScope::detached(),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(store.query(&[Filter::new()]).await.unwrap().is_empty());
+    }
+
+    /// A stream whose first connect fails must not move `since` past what
+    /// the relay holds: when the relay comes up, its stored (older) note
+    /// still lands.
+    #[tokio::test]
+    async fn a_failed_connect_does_not_skip_what_the_relay_holds() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let url = format!("ws://127.0.0.1:{port}");
+        let (svc, store, _hub) = streaming_service("since-failed", Vec::new());
+        svc.pull_into_local(
+            &[RelayLane::Internet { url }],
+            &[Filter::new().kind(Kind::TextNote)],
+            &WorkScope::detached(),
+        )
+        .await
+        .unwrap();
+        // Let a connect or two fail.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let old = EventBuilder::text_note("stored an hour ago")
+            .custom_created_at(nostr::Timestamp::from(
+                nostr::Timestamp::now().as_secs() - 3600,
+            ))
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let remote = Arc::new(myco_relay::RelayStore::in_memory());
+        remote.admit_event(old.clone()).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        tokio::spawn(crate::mesh_relay::serve_on(remote, listener));
+
+        assert!(
+            lands(&store, old.id, Duration::from_secs(5)).await,
+            "the stored note was skipped by a `since` moved on a failed connect"
+        );
     }
 
     /// An Internet lane whose name resolves to a private address is not

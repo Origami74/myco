@@ -19,10 +19,18 @@
 //!
 //! `getEvent`, `query` and `publish` wait for their lanes, bounded — a napplet
 //! asked for relay-selected results and gets them, with `incomplete` when a
-//! lane never answered. `subscribe` does not: it answers the local backlog and
-//! pulls the remote lanes *into* the local relay, which delivers whatever
-//! arrives as `outbox.event` the same way a live event is delivered. The spec
-//! has no `outbox.eose` for exactly this reason.
+//! lane never answered. The reads answer early: their wire has one result
+//! frame, so rather than wait out the slowest relay they answer a short
+//! grace after the first remote lane returns events, or at a cap when only
+//! this device has (see [`crate::nap::QUERY_EARLY`]). `getEvent` answers from
+//! the first lane with the id, this device included: an event never
+//! changes. Lanes left out keep going, and what they find is kept here.
+//!
+//! `subscribe` waits for nothing: it answers the local backlog, then plans
+//! and pulls the remote lanes *into* the local relay behind the answer. Each
+//! lane's events land as that lane answers and are delivered as
+//! `outbox.event` the same way a live event is. The spec has no
+//! `outbox.eose` for exactly this reason.
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
@@ -59,8 +67,8 @@ const MAX_TIMEOUT: Duration = Duration::from_secs(30);
 /// Handle an inbound `outbox.*` message.
 pub async fn handle(ctx: &NapContext, session: &mut Session, message: &Envelope) -> Vec<Envelope> {
     match message.action() {
-        "getEvent" => vec![get_event(ctx, message).await],
-        "query" => vec![query(ctx, message).await],
+        "getEvent" => vec![get_event(ctx, session, message).await],
+        "query" => vec![query(ctx, session, message).await],
         "subscribe" => subscribe(ctx, session, message).await,
         "close" => {
             let Some(sub_id) = message.field("subId").and_then(|v| v.as_str()) else {
@@ -81,7 +89,7 @@ pub async fn handle(ctx: &NapContext, session: &mut Session, message: &Envelope)
 
 /// `outbox.getEvent` — one event by id, from the author's relays when an
 /// author is hinted, from policy relays otherwise.
-async fn get_event(ctx: &NapContext, message: &Envelope) -> Envelope {
+async fn get_event(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelope {
     let id = match message.field("eventId").and_then(|v| v.as_str()) {
         Some(hex) => match EventId::from_hex(hex) {
             Ok(id) => id,
@@ -100,15 +108,29 @@ async fn get_event(ctx: &NapContext, message: &Envelope) -> Envelope {
     };
     let timeout = timeout_in(options, DEFAULT_READ_TIMEOUT);
 
-    let plan = ctx.outbox.plan(Direction::Read, &authors).await;
+    let plan = ctx
+        .outbox
+        .plan_hinted(Direction::Read, &authors, &hints)
+        .await;
     let lanes = dedupe(
         std::iter::once(RelayLane::Local)
             .chain(plan.lanes.iter().cloned())
             .chain(hints),
     );
+    // One id is one event, and an event never changes: the first lane to
+    // have it — this device's included — is the answer.
     let answers = ctx
         .lanes
-        .query(&lanes, &[Filter::new().id(id)], timeout)
+        .query_early(
+            &lanes,
+            &[Filter::new().id(id)],
+            timeout,
+            crate::seams::EarlyAnswer {
+                grace: Duration::ZERO,
+                local_cap: Duration::ZERO,
+            },
+            &session.work(),
+        )
         .await;
 
     let mut found: Option<Event> = None;
@@ -144,7 +166,11 @@ async fn get_event(ctx: &NapContext, message: &Envelope) -> Envelope {
 }
 
 /// `outbox.query` — a one-shot, relay-selected query, deduplicated by id.
-async fn query(ctx: &NapContext, message: &Envelope) -> Envelope {
+///
+/// Answered early (see [`crate::nap::QUERY_EARLY`]): lanes not heard from by
+/// then make the answer `incomplete`, as an unreachable one does. Only the
+/// newest of each replaceable is returned, whichever lane had it.
+async fn query(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelope {
     let filters = match filters_from(message) {
         Ok(filters) => filters,
         Err(e) => return message.to_error(e),
@@ -170,13 +196,25 @@ async fn query(ctx: &NapContext, message: &Envelope) -> Envelope {
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
 
-    let plan = ctx.outbox.plan(Direction::Read, &authors).await;
+    let plan = ctx
+        .outbox
+        .plan_hinted(Direction::Read, &authors, &hints)
+        .await;
     let lanes = dedupe(
         std::iter::once(RelayLane::Local)
             .chain(plan.lanes.iter().cloned())
             .chain(hints),
     );
-    let answers = ctx.lanes.query(&lanes, &filters, timeout).await;
+    let answers = ctx
+        .lanes
+        .query_early(
+            &lanes,
+            &filters,
+            timeout,
+            crate::nap::QUERY_EARLY,
+            &session.work(),
+        )
+        .await;
 
     let mut incomplete = !plan.missing_authors.is_empty();
     let (events, hints_by_id) = merge(answers, &mut incomplete);
@@ -198,6 +236,10 @@ async fn query(ctx: &NapContext, message: &Envelope) -> Envelope {
 
 /// `outbox.subscribe` — register the filters, answer the local backlog, and
 /// pull the planned lanes into the local relay for live delivery.
+///
+/// The plan is made behind the answer, not before it: resolving an author
+/// nobody has a relay list for waits on the network, and this call holds the
+/// napplet's session. What this device holds goes out first, always.
 async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) -> Vec<Envelope> {
     let sub_id = match message.field("subId").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
@@ -235,15 +277,18 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
         Err(reason) => return closed(reason),
     };
 
-    let plan = ctx.outbox.plan(Direction::Read, &authors).await;
-    let remote: Vec<RelayLane> = dedupe(plan.lanes.into_iter().chain(hints))
-        .into_iter()
-        .filter(|lane| *lane != RelayLane::Local)
-        .collect();
-    if !remote.is_empty() {
-        if let Err(e) = ctx.lanes.pull_into_local(&remote, &filters).await {
-            tracing::warn!(sub_id, error = %e, "outbox pull could not be started");
-        }
+    if let Err(e) = ctx
+        .lanes
+        .pull_plan_into_local(
+            ctx.outbox.clone(),
+            authors,
+            hints,
+            filters,
+            &session.sub_work("outbox", &sub_id),
+        )
+        .await
+    {
+        tracing::warn!(sub_id, error = %e, "outbox pull could not be started");
     }
     out
 }
@@ -414,7 +459,7 @@ fn dedupe(lanes: impl IntoIterator<Item = RelayLane>) -> Vec<RelayLane> {
     let mut seen = std::collections::HashSet::new();
     lanes
         .into_iter()
-        .filter(|l| seen.insert(l.clone()))
+        .filter(|l| seen.insert(crate::seams::lane_key(l)))
         .collect()
 }
 
@@ -590,9 +635,7 @@ fn merge(
             by_id.entry(event.id).or_insert(event);
         }
     }
-    let mut events: Vec<Event> = by_id.into_values().collect();
-    events.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
-    (events, hints)
+    (crate::nap::newest_per_slot(by_id.into_values()), hints)
 }
 
 /// A `RelayEventResult` with `sidecar.relayHints` when there is anything to

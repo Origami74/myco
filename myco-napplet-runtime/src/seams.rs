@@ -222,6 +222,21 @@ pub trait OutboxResolver: Send + Sync {
     /// shell-user's own plan — where they publish (`Write`) or, for a read,
     /// the shell's policy relays.
     async fn plan(&self, direction: Direction, authors: &[PublicKey]) -> RelayPlan;
+
+    /// As [`OutboxResolver::plan`], knowing the relays the napplet named
+    /// (`options.relays`): a resolver may also look for relay lists there,
+    /// and should not conclude an author has none while those are unasked.
+    /// The hints are not added to the plan — the caller adds them. The
+    /// default ignores them.
+    async fn plan_hinted(
+        &self,
+        direction: Direction,
+        authors: &[PublicKey],
+        hints: &[RelayLane],
+    ) -> RelayPlan {
+        let _ = hints;
+        self.plan(direction, authors).await
+    }
 }
 
 /// Carries NIP-01 traffic over lanes — the seam behind NAP-OUTBOX's I/O.
@@ -241,6 +256,32 @@ pub trait LaneTransport: Send + Sync {
         filters: &[nostr::Filter],
         timeout: std::time::Duration,
     ) -> Vec<(RelayLane, Option<Vec<Event>>)>;
+
+    /// As [`LaneTransport::query`], but may answer before every lane has,
+    /// per `early` (see [`EarlyAnswer`]): shortly after the first **remote**
+    /// lane returns events, at `early.local_cap` if only the local lane has
+    /// by then, at once when every lane has finished, and never later than
+    /// `timeout`.
+    ///
+    /// For one-shot reads (`relay.query`, `outbox.query`, `outbox.getEvent`),
+    /// whose wire has one result frame and no way to add to it. A lane not
+    /// heard from by the answer is `None`, as an unreachable one is, so the
+    /// caller says `incomplete`. Where the transport can leave work running
+    /// it keeps going behind the answer, within `scope`, and what it finds
+    /// is kept locally for the next read.
+    ///
+    /// The default waits for every lane — right for a transport that cannot.
+    async fn query_early(
+        &self,
+        lanes: &[RelayLane],
+        filters: &[nostr::Filter],
+        timeout: std::time::Duration,
+        early: EarlyAnswer,
+        scope: &WorkScope,
+    ) -> Vec<(RelayLane, Option<Vec<Event>>)> {
+        let _ = (early, scope);
+        self.query(lanes, filters, timeout).await
+    }
 
     /// Publish to every lane in parallel, each bounded by `timeout`, and say
     /// which accepted. The local lane is accepted *unforwarded*: stored and
@@ -274,11 +315,251 @@ pub trait LaneTransport: Send + Sync {
     /// Returns once the work is under way, not once it is done: this is the
     /// remote half of an outbox subscription, and a napplet's other calls
     /// must not queue behind a slow relay.
+    ///
+    /// Each lane's events are accepted as that lane delivers them, not once
+    /// the slowest has, and — where the transport can — for as long as
+    /// `scope` lives: a subscription is a stream, and a relay that receives
+    /// a matching event an hour from now should deliver it then.
+    ///
+    /// The work belongs to `scope`: it is bounded per napplet and stops when
+    /// the subscription or the window closes.
     async fn pull_into_local(
         &self,
         lanes: &[RelayLane],
         filters: &[nostr::Filter],
+        scope: &WorkScope,
     ) -> anyhow::Result<()>;
+
+    /// As [`LaneTransport::pull_into_local`], with the lanes still to be
+    /// planned: `resolver`'s read plan for `authors`, plus `extra`, less the
+    /// local lane.
+    ///
+    /// A plan can wait seconds on a relay list nobody has cached, and an
+    /// outbox subscription holds the napplet's session while it opens. So
+    /// the plan belongs behind the answer too — the local backlog goes out
+    /// first. The default plans before returning, for a transport that
+    /// cannot leave work running.
+    async fn pull_plan_into_local(
+        &self,
+        resolver: std::sync::Arc<dyn OutboxResolver>,
+        authors: Vec<PublicKey>,
+        extra: Vec<RelayLane>,
+        filters: Vec<nostr::Filter>,
+        scope: &WorkScope,
+    ) -> anyhow::Result<()> {
+        let plan = resolver
+            .plan_hinted(Direction::Read, &authors, &extra)
+            .await;
+        let lanes = remote_lanes(plan.lanes.into_iter().chain(extra));
+        if lanes.is_empty() {
+            return Ok(());
+        }
+        self.pull_into_local(&lanes, &filters, scope).await
+    }
+}
+
+/// When a one-shot read may answer before every lane has. See
+/// [`LaneTransport::query_early`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EarlyAnswer {
+    /// How long the other lanes get once the first **remote** lane has
+    /// returned events.
+    pub grace: std::time::Duration,
+    /// How long, from the start, a round whose only events so far are this
+    /// device's own waits for a remote lane to return some. The local lane
+    /// answers in a millisecond and may hold a stale replaceable; a cold TLS
+    /// dial on a phone does not fit in a grace counted from *that*.
+    pub local_cap: std::time::Duration,
+}
+
+/// Work a napplet started that may outlive the call that started it — a
+/// subscription's remote pull, the lanes a query answered without.
+///
+/// A handle, passed to the seams: the transport asks it for an
+/// [`WorkScope::id`] to bound work per napplet by, and registers with
+/// [`WorkScope::on_cancel`] what stops its work. It is cancelled when the
+/// [`ScopeOwner`] behind it is dropped — the session's when the window
+/// closes, a subscription's when it is closed or replaced. No runtime here:
+/// what "stop" means (aborting a task) is the transport's.
+#[derive(Clone)]
+pub struct WorkScope {
+    /// The session's scope first, then a subscription's if any. Cancelled
+    /// when any of them is.
+    scopes: Vec<std::sync::Arc<ScopeInner>>,
+}
+
+struct ScopeInner {
+    id: u64,
+    cancelled: std::sync::atomic::AtomicBool,
+    on_cancel: std::sync::Mutex<Vec<Stop>>,
+}
+
+/// What stops a scope's work.
+type Stop = Box<dyn FnOnce() + Send>;
+/// A [`Stop`] shared by every scope it was registered with, run by the first.
+type StopOnce = std::sync::Arc<std::sync::Mutex<Option<Stop>>>;
+
+impl ScopeInner {
+    fn new() -> std::sync::Arc<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        std::sync::Arc::new(Self {
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+            on_cancel: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let callbacks = std::mem::take(&mut *self.on_cancel.lock().unwrap());
+        for f in callbacks {
+            f();
+        }
+    }
+}
+
+impl WorkScope {
+    /// A scope nothing owns: never cancelled, and not bounded by
+    /// [`WorkScope::id`] (it is `None`). For work with no napplet behind it,
+    /// and for tests.
+    pub fn detached() -> Self {
+        // Id 0: not a napplet's, so a transport does not bound it per napplet.
+        Self {
+            scopes: vec![std::sync::Arc::new(ScopeInner {
+                id: 0,
+                cancelled: std::sync::atomic::AtomicBool::new(false),
+                on_cancel: std::sync::Mutex::new(Vec::new()),
+            })],
+        }
+    }
+
+    /// The napplet session this work belongs to, to bound work per napplet
+    /// by. `None` for a [`WorkScope::detached`] scope.
+    pub fn id(&self) -> Option<u64> {
+        self.scopes.first().map(|s| s.id).filter(|id| *id != 0)
+    }
+
+    /// Whether the scope — or the session it is in — was cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.scopes
+            .iter()
+            .any(|s| s.cancelled.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// Run `stop` once, when the scope is cancelled — at once if it already
+    /// is.
+    pub fn on_cancel(&self, stop: impl FnOnce() + Send + 'static) {
+        let once: StopOnce = std::sync::Arc::new(std::sync::Mutex::new(Some(Box::new(stop))));
+        let fire = |once: &StopOnce| {
+            if let Some(f) = once.lock().unwrap().take() {
+                f();
+            }
+        };
+        for scope in &self.scopes {
+            let registered = {
+                let mut callbacks = scope.on_cancel.lock().unwrap();
+                if scope.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                    false
+                } else {
+                    let once = once.clone();
+                    callbacks.push(Box::new(move || fire(&once)));
+                    true
+                }
+            };
+            if !registered {
+                fire(&once);
+                return;
+            }
+        }
+    }
+
+    /// Just the session's scope, without any subscription's — for work
+    /// bookkeeping that should last as long as the session.
+    pub fn session(&self) -> Self {
+        Self {
+            scopes: self.scopes.iter().take(1).cloned().collect(),
+        }
+    }
+
+    /// Just the subscription's scope, if this is one.
+    pub fn subscription(&self) -> Option<Self> {
+        (self.scopes.len() > 1).then(|| Self {
+            scopes: self.scopes.iter().skip(1).cloned().collect(),
+        })
+    }
+
+    /// This scope narrowed to `sub`: cancelled when either is.
+    pub fn with(&self, sub: &ScopeOwner) -> Self {
+        let mut scopes = self.scopes.clone();
+        scopes.push(sub.0.clone());
+        Self { scopes }
+    }
+}
+
+/// Owns a [`WorkScope`]: dropping it cancels the scope. Held by a
+/// [`crate::session::Session`] for itself and for each live subscription.
+pub struct ScopeOwner(std::sync::Arc<ScopeInner>);
+
+impl ScopeOwner {
+    pub fn new() -> Self {
+        Self(ScopeInner::new())
+    }
+
+    /// The scope this owns.
+    pub fn scope(&self) -> WorkScope {
+        WorkScope {
+            scopes: vec![self.0.clone()],
+        }
+    }
+}
+
+impl Default for ScopeOwner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ScopeOwner {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+impl std::fmt::Debug for ScopeOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ScopeOwner").field(&self.0.id).finish()
+    }
+}
+
+impl std::fmt::Debug for WorkScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.scopes.iter().map(|s| s.id))
+            .finish()
+    }
+}
+
+/// What two lanes must share to be the same relay: the local lane is
+/// itself; a relay is its URL but for a trailing slash, which relay lists
+/// spell both ways (the rule `ip_source::same_relay` applies in myco-core).
+pub fn lane_key(lane: &RelayLane) -> String {
+    match lane.url() {
+        Some(url) => url.trim_end_matches('/').to_string(),
+        None => String::new(),
+    }
+}
+
+/// `lanes` deduplicated in order, without the local lane — what a pull
+/// behind a local backlog should dial.
+pub fn remote_lanes(lanes: impl IntoIterator<Item = RelayLane>) -> Vec<RelayLane> {
+    // By `lane_key`: relay lists spell `wss://relay.damus.io` with and
+    // without a trailing slash, and each spelling would be a socket.
+    let mut seen = std::collections::HashSet::new();
+    lanes
+        .into_iter()
+        .filter(|l| *l != RelayLane::Local && seen.insert(lane_key(l)))
+        .collect()
 }
 
 /// Fetches a blob this device does not hold — the seam behind NAP-RESOURCE's
@@ -552,6 +833,25 @@ pub trait NapTransport: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relay spelled with and without a trailing slash is one lane — one
+    /// socket, one stream permit.
+    #[test]
+    fn a_trailing_slash_does_not_make_a_second_lane() {
+        let lanes = remote_lanes([
+            RelayLane::Local,
+            RelayLane::Internet {
+                url: "wss://relay.damus.io".into(),
+            },
+            RelayLane::Internet {
+                url: "wss://relay.damus.io/".into(),
+            },
+            RelayLane::Internet {
+                url: "wss://nos.lol".into(),
+            },
+        ]);
+        assert_eq!(lanes.len(), 2);
+    }
     use serde_json::json;
 
     /// The examples are copied from NAP-SHELL and the NIP-5D web projection. A

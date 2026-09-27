@@ -62,15 +62,25 @@ pub fn indexer_relays() -> Vec<String> {
 pub const MAX_AUTHOR_RELAYS: usize = 5;
 
 /// How long [`AuthorOutbox::fetch_lists`] waits for the relays it asks.
-const LIST_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
+pub(crate) const LIST_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// At most this many authors in one relay-list filter; more go in another
+/// filter of the same `REQ`.
+pub(crate) const LIST_AUTHORS_PER_FILTER: usize = 100;
 
 /// How long an author with no relay list anywhere is remembered as such, so
 /// the indexers are not asked about them on every lookup — and asked again
 /// soon enough that a list published today is found today.
 pub const LIST_MISS_REMEMBERED_FOR: Duration = Duration::from_secs(10 * 60);
 
-/// Authors looked for and not found, with when. Process-wide: sources are
-/// built per lookup, and the answer is about the author, not the source.
+/// How long a lookup that was not a clean "no" — a relay timed out, or the
+/// napplet named relays of its own — keeps the author from being looked up
+/// again. Not a verdict, just not every call.
+pub const LIST_SOFT_MISS_FOR: Duration = Duration::from_secs(60);
+
+/// Authors looked for and not found, with until when that holds.
+/// Process-wide: sources are built per lookup, and the answer is about the
+/// author, not the source.
 fn list_misses(
 ) -> &'static std::sync::Mutex<std::collections::HashMap<PublicKey, std::time::Instant>> {
     static MISSES: std::sync::OnceLock<
@@ -181,15 +191,36 @@ impl AuthorOutbox {
             .lock()
             .unwrap()
             .get(author)
-            .is_some_and(|at| at.elapsed() < LIST_MISS_REMEMBERED_FOR)
+            .is_some_and(|until| std::time::Instant::now() < *until)
     }
 
     /// Remember that `author` had no list on any relay asked.
     pub fn note_miss(&self, author: &PublicKey) {
+        self.miss_for(author, LIST_MISS_REMEMBERED_FOR);
+    }
+
+    /// Remember, briefly, that a lookup for `author` found nothing but was
+    /// not a clean "no" ([`LIST_SOFT_MISS_FOR`]). A longer miss already
+    /// held is kept.
+    pub fn note_soft_miss(&self, author: &PublicKey) {
+        self.miss_for(author, LIST_SOFT_MISS_FOR);
+    }
+
+    fn miss_for(&self, author: &PublicKey, how_long: Duration) {
+        let until = std::time::Instant::now() + how_long;
+        let mut misses = list_misses().lock().unwrap();
+        let held = misses.entry(*author).or_insert(until);
+        *held = (*held).max(until);
+    }
+
+    /// How much longer `author` counts as missed — for tests.
+    #[cfg(test)]
+    pub fn miss_left(&self, author: &PublicKey) -> Option<Duration> {
         list_misses()
             .lock()
             .unwrap()
-            .insert(*author, std::time::Instant::now());
+            .get(author)
+            .and_then(|until| until.checked_duration_since(std::time::Instant::now()))
     }
 
     /// The indexer relays this outbox asks for missing lists.
@@ -261,40 +292,80 @@ impl AuthorOutbox {
     /// Fetch `authors`' lists from `relays` in **one** `REQ` per relay,
     /// bounded by [`LIST_FETCH_TIMEOUT`], and store what comes back. Authors
     /// recently found to have none are skipped; one still without a list
-    /// afterwards is remembered as a miss.
+    /// afterwards is remembered as a miss — but only when every relay
+    /// answered: a relay that timed out may have had it.
     pub async fn fetch_lists(&self, authors: &[PublicKey], relays: &[String]) {
         let wanted: Vec<PublicKey> = authors
             .iter()
             .filter(|a| !self.recently_missed(a))
             .copied()
             .collect();
-        if wanted.is_empty() || relays.is_empty() {
-            return;
+        if self.fetch_lists_from(&wanted, relays).await {
+            self.note_misses_among(&wanted).await;
+        } else {
+            self.note_soft_misses_among(&wanted).await;
         }
-        let filter = serde_json::json!({
-            "kinds": [nostr::Kind::RelayList.as_u16()],
-            "authors": wanted.iter().map(|a| a.to_hex()).collect::<Vec<_>>(),
-        });
+    }
+
+    /// The round behind [`AuthorOutbox::fetch_lists`], with no miss memory
+    /// either way: `authors`' lists from `relays`, one `REQ` per relay
+    /// (chunked by [`LIST_AUTHORS_PER_FILTER`]), stored. Returns whether
+    /// every relay answered to the end — the caller's condition for calling
+    /// a list not found a miss.
+    pub async fn fetch_lists_from(&self, authors: &[PublicKey], relays: &[String]) -> bool {
+        if authors.is_empty() || relays.is_empty() {
+            return true;
+        }
+        let filters: Vec<serde_json::Value> = authors
+            .chunks(LIST_AUTHORS_PER_FILTER)
+            .map(|chunk| {
+                serde_json::json!({
+                    "kinds": [nostr::Kind::RelayList.as_u16()],
+                    "authors": chunk.iter().map(|a| a.to_hex()).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
         let answers = join_all(relays.iter().map(|url| {
-            let filter = filter.clone();
+            let filters = filters.clone();
             async move {
-                match tokio::time::timeout(LIST_FETCH_TIMEOUT, query_relay(url, filter)).await {
-                    Ok(Ok(events)) => events,
-                    _ => Vec::new(),
+                // Configured and indexer relays: not resolved first. A relay
+                // someone else named goes through the caller's private-host
+                // guard instead (see `OutboxService::fetch_relay_lists_now`).
+                match tokio::time::timeout(LIST_FETCH_TIMEOUT, query_relay_filters(url, filters))
+                    .await
+                {
+                    Ok(Ok(events)) => Some(events),
+                    _ => None,
                 }
             }
         }))
         .await;
-        for ev in answers.into_iter().flatten() {
-            if ev.kind == nostr::Kind::RelayList && wanted.contains(&ev.pubkey) {
+        let complete = answers.iter().all(Option::is_some);
+        for ev in answers.into_iter().flatten().flatten() {
+            if ev.kind == nostr::Kind::RelayList && authors.contains(&ev.pubkey) {
                 self.remember(ev).await;
             }
         }
-        for author in &wanted {
-            // Stored meanwhile by this fetch or another path (a list riding
-            // along with a manifest query) is not a miss.
+        complete
+    }
+
+    /// Remember as a miss each of `authors` with no list stored here — by
+    /// this fetch or another path (a list riding along with a manifest
+    /// query).
+    pub async fn note_misses_among(&self, authors: &[PublicKey]) {
+        for author in authors {
             if self.stored_list(author).await.is_none() {
                 self.note_miss(author);
+            }
+        }
+    }
+
+    /// As [`AuthorOutbox::note_misses_among`], for a lookup that was not a
+    /// clean "no": remembered for [`LIST_SOFT_MISS_FOR`] only.
+    pub async fn note_soft_misses_among(&self, authors: &[PublicKey]) {
+        for author in authors {
+            if self.stored_list(author).await.is_none() {
+                self.note_soft_miss(author);
             }
         }
     }
@@ -916,6 +987,105 @@ pub async fn publish_to_relay(url: &str, event: &Event) -> anyhow::Result<bool> 
     verdict
 }
 
+/// How long [`stream_relay_filters`] waits for the connection to come up.
+pub(crate) const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Keep a `REQ` open on `url` and send every event it delivers — the stored
+/// ones and then the live ones — to `out`, verified, until the relay closes
+/// the connection or the subscription, the socket fails, or `out` is gone.
+///
+/// The long-lived half of a napplet's subscription: a feed napplet reads a
+/// subscription as an endless stream, and a relay that has a note published
+/// in an hour must deliver it in an hour, not never. Reconnecting is the
+/// caller's (with its backoff); this is one connection's life. Returns `Ok`
+/// when the connection ended on its own after it was up, `Err` when it could
+/// not be set up.
+///
+/// `saw_eose` is set when the relay said its stored events were over — the
+/// caller's cue that everything up to now has been heard, so a reconnect
+/// may ask only for what is newer. A connection that never got that far
+/// leaves it unset, and the next one asks again from the start. It is a
+/// flag rather than the return value because the caller may drop this
+/// future (the user went offline only) after EOSE.
+///
+/// A silent socket is not trusted: the relay is pinged every
+/// [`STREAM_PING_EVERY`], and a connection with no frame at all for
+/// [`STREAM_SILENT_FOR`] is given up on — a phone that changed networks
+/// leaves sockets that never error, they just never speak again.
+pub(crate) async fn stream_relay_filters(
+    url: &str,
+    filters: Vec<serde_json::Value>,
+    out: tokio::sync::mpsc::Sender<Event>,
+    saw_eose: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<()> {
+    // The connection's life has no bound; its setup does.
+    let (mut ws, _) = tokio::time::timeout(
+        STREAM_CONNECT_TIMEOUT,
+        tokio_tungstenite::connect_async(url),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("relay did not connect in time"))??;
+    let mut req = vec![serde_json::json!("REQ"), serde_json::json!("myco")];
+    req.extend(filters);
+    ws.send(Message::Text(serde_json::Value::Array(req).to_string()))
+        .await?;
+    let mut ping = tokio::time::interval(STREAM_PING_EVERY);
+    ping.tick().await; // the first tick is immediate
+    let mut heard = tokio::time::Instant::now();
+    loop {
+        let msg = tokio::select! {
+            msg = ws.next() => msg,
+            _ = ping.tick() => {
+                if heard.elapsed() >= STREAM_SILENT_FOR {
+                    tracing::debug!(url, "relay stream silent too long; closing");
+                    break;
+                }
+                if ws.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
+        let Some(msg) = msg else { break };
+        heard = tokio::time::Instant::now();
+        match msg {
+            Ok(Message::Text(txt)) => {
+                let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) else {
+                    continue;
+                };
+                match val.get(0).and_then(|v| v.as_str()) {
+                    Some("EVENT") => {
+                        let Some(ev) = val.get(2) else { continue };
+                        let Ok(event) = serde_json::from_value::<Event>(ev.clone()) else {
+                            continue;
+                        };
+                        // Verified at ingress, as `query_relay_filters` does.
+                        // A bounded channel: a relay flooding faster than the
+                        // store takes it waits here, not in memory.
+                        if event.verify().is_ok() && out.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some("EOSE") => saw_eose.store(true, std::sync::atomic::Ordering::SeqCst),
+                    Some("CLOSED") => break,
+                    _ => {}
+                }
+            }
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(_) => {} // pong, ping, binary
+        }
+    }
+    let _ = ws.send(Message::Close(None)).await;
+    Ok(())
+}
+
+/// How often a relay stream pings its relay.
+pub(crate) const STREAM_PING_EVERY: Duration = Duration::from_secs(30);
+
+/// A relay stream that has heard nothing — no event, no pong — for this
+/// long is closed and left to the caller's reconnect.
+pub(crate) const STREAM_SILENT_FOR: Duration = Duration::from_secs(90);
+
 /// Query one relay for a single filter, collecting events until EOSE. The whole
 /// call (connect + REQ + read) is hard-bounded by a `timeout` at the call site,
 /// so a dead relay can't hang the sync on a slow TCP/TLS connect.
@@ -1237,7 +1407,7 @@ pub(crate) mod tests {
     }
 
     /// As [`mock_relay_holding`], answering each REQ only after `delay`.
-    async fn mock_relay_delayed(
+    pub(crate) async fn mock_relay_delayed(
         events: Vec<Event>,
         delay: Duration,
     ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
