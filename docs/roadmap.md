@@ -11,10 +11,11 @@ map, the [index](./README.md).
 
 ---
 
-## Status — 2026-09-26
+## Status — 2026-09-27
 
-**Shipped** (v0.8.0 — accounts, the Discover napplet, updates over the
-Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
+**Shipped** (v0.8.1 — local-first napplet reads, author relay lookup, relay
+skip list and selection; v0.8.0 — accounts, the Discover napplet, updates over
+the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
 
 - **The mesh.** BLE L2CAP with per-peer PSM discovery, Wi-Fi Aware (several
   phones per lane), the LAN lane (mDNS), TCP when online; multi-path per peer

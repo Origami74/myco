@@ -7,29 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **Profiles and relay lists go to the index relays.** A new guest's profile
-  and relay lists are now also sent to four index relays (purplepag.es,
-  index.hzrd149.com, indexer.coracle.social, user.kindpag.es), where other
-  Nostr apps look people up, and those four are where Myco looks up an app
-  author's relay list. purplepag.es is no longer asked for apps, which it
-  does not carry.
-- **Profiles and app listings you have seen stay on your phone.** When an
-  app looks up a profile, someone's relay list, or an app listing (the
-  AppStore, for one), Myco keeps a copy. The next look is instant and works
-  offline, and people in your Circle can get it from your phone. It installs
-  nothing and downloads no app files, and an app you have keeps running (and
-  sharing) the version you have the files for. "Delete cache" in Storage
-  clears these copies. With a custom relay set in Storage, nothing is kept.
-- **A new guest gets better default relays.** Its public relay list now
-  names three general-purpose relays (relay.damus.io, relay.ditto.pub,
-  relay.primal.net) for both posting and receiving, instead of the lookup
-  relays, which included a directory-only relay and an unreliable one. A new
-  guest also gets a direct-message relay list, so other Nostr apps know where
-  to send it private messages. A guest made before this version keeps its
-  relay list; log out and start a new guest to get the new defaults. Accounts you log in to with an `nsec` or a
-  signer app keep their own lists; Myco does not create or change them.
+## [0.8.1] - 2026-09-27
 
 ### Fixed
 
@@ -45,18 +23,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An app's Install button is no longer refused because of a question waiting
   somewhere else, and when it is refused, the app is told why (for example
   "busy: another review is open").
-- **"Delete cache" no longer breaks an installed app that has a newer version
-  waiting.** If a newer version had reached your phone but was not downloaded
-  yet, deleting the cache could leave the app with nothing to open. The version
-  you run is now kept.
-- **Apps published only on their author's own relays are found.** Adding an
-  app, and checking installed apps for updates, used to look only on a fixed
-  set of public relays, so an app its author published elsewhere came back
-  as "could not find app" (the Minesweeper napplet from the AppStore, for
-  one). Myco now also looks on the relays the author lists as theirs, and
-  remembers that list for next time. `relay.ditto.pub`, where many apps are
-  published, is now one of the default relays; `relay.nostr.band`, which no
-  longer answers, is dropped.
 - **Apps open with what your phone already has.** An app that reads Nostr
   data (the AppStore, for one) used to wait for the slowest relay before it
   showed anything, even when your phone already held the answer — so it
@@ -66,6 +32,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a half when only your phone has answered. Relays that answer later are
   not wasted: what they send is saved on your phone for next time, and
   live views get it as it arrives.
+- **Apps published only on their author's own relays are found.** Adding an
+  app, and checking installed apps for updates, used to look only on a fixed
+  set of public relays, so an app its author published elsewhere came back
+  as "could not find app" (the Minesweeper napplet from the AppStore, for
+  one). Myco now also looks on the relays the author lists as theirs, and
+  remembers that list for next time. `relay.ditto.pub`, where many apps are
+  published, is now one of the default relays; `relay.nostr.band`, which no
+  longer answers, is dropped.
+- **One broken relay no longer cuts apps off from the rest.** An app
+  asking a single relay that answered with an error could make Myco
+  believe the internet was down and stop using every public relay for half
+  a minute. Now any answer from the internet counts as the internet
+  working.
+- **Broken relays stop slowing things down.** A public relay that refuses
+  Myco, is down, has a bad certificate, or does not exist is now left alone
+  for a while (a minute at first, up to half an hour if it keeps failing)
+  instead of being tried again on every lookup. One that keeps failing to
+  connect while others answer gets a shorter break. Losing your signal,
+  switching networks, or a Wi-Fi login page does not count against any
+  relay. Relays in your Circle, and a custom relay or Blossom server you
+  set in Storage, are never skipped.
 - **Open apps keep receiving new posts.** An app watching for new events
   (a feed, a chat, someone's app list) used to ask each relay once and
   then hear only what came through your Circle. Relays now stay connected
@@ -76,24 +63,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suggests, so people who publish only on their own relays (hzrd149's
   apps on nostr.wine, for one) are found. A person is no longer marked
   as "nowhere to be found" because a relay was slow to answer.
-- **Broken relays stop slowing things down.** A public relay that refuses
-  Myco, is down, has a bad certificate, or does not exist is now left alone
-  for a while (a minute at first, up to half an hour if it keeps failing)
-  instead of being tried again on every lookup. One that keeps failing to
-  connect while others answer gets a shorter break. Losing your signal,
-  switching networks, or a Wi-Fi login page does not count against any
-  relay. Relays in your Circle, and a custom relay or Blossom server you
-  set in Storage, are never skipped.
 - **Feeds with many people use far fewer connections.** An app showing
   posts or apps from dozens of people used to connect to every relay any
   of them listed — up to forty for one view. Myco now picks a handful of
   relays that between them reach each person twice, preferring relays it
   is already connected to and avoiding ones that are failing.
-- **One broken relay no longer cuts apps off from the rest.** An app
-  asking a single relay that answered with an error could make Myco
-  believe the internet was down and stop using every public relay for half
-  a minute. Now any answer from the internet counts as the internet
-  working.
+- **"Delete cache" no longer breaks an installed app that has a newer version
+  waiting.** If a newer version had reached your phone but was not downloaded
+  yet, deleting the cache could leave the app with nothing to open. The version
+  you run is now kept.
+
+### Changed
+
+- **Profiles and app listings you have seen stay on your phone.** When an
+  app looks up a profile, someone's relay list, or an app listing (the
+  AppStore, for one), Myco keeps a copy. The next look is instant and works
+  offline, and people in your Circle can get it from your phone. It installs
+  nothing and downloads no app files, and an app you have keeps running (and
+  sharing) the version you have the files for. "Delete cache" in Storage
+  clears these copies. With a custom relay set in Storage, nothing is kept.
+- **A new guest gets better default relays.** Its public relay list now
+  names three general-purpose relays (relay.damus.io, relay.ditto.pub,
+  relay.primal.net) for both posting and receiving, instead of the lookup
+  relays, which included a directory-only relay and an unreliable one. A new
+  guest also gets a direct-message relay list, so other Nostr apps know where
+  to send it private messages. A guest made before this version keeps its
+  relay list; log out and start a new guest to get the new defaults.
+  Accounts you log in to with an `nsec` or a signer app keep their own
+  lists; Myco does not create or change them.
+- **Profiles and relay lists go to the index relays.** A new guest's profile
+  and relay lists are now also sent to four index relays (purplepag.es,
+  index.hzrd149.com, indexer.coracle.social, user.kindpag.es), where other
+  Nostr apps look people up, and those four are where Myco looks up an app
+  author's relay list. purplepag.es is no longer asked for apps, which it
+  does not carry.
 
 ## [0.8.0] - 2026-09-26
 
