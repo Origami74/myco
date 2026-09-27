@@ -350,8 +350,14 @@ impl AppRuntime {
 
         // Install the IP online-fallback pull source so a pasted nsite link can
         // be fetched over normal internet (the P2 content-entry path). Gated by
-        // `sync.offline_only` (a P3 setting); on by default in P2.
-        content.set_source(Arc::new(crate::ip_source::IpPeerSource::with_defaults()));
+        // `sync.offline_only` (a P3 setting); on by default in P2. Manifests
+        // are looked for on the author's NIP-65 relays too, not only the
+        // defaults (`IpPeerSource::with_author_outbox`).
+        content.set_source(Arc::new(
+            crate::ip_source::IpPeerSource::with_defaults().with_author_outbox(Arc::new(
+                crate::ip_source::AuthorOutbox::new(content.relay()),
+            )),
+        ));
 
         // Re-list Library ("installed") sites as ready/incomplete by checking the
         // persisted stores — the relay + Blossom survive a restart, the in-memory
@@ -1472,6 +1478,7 @@ impl AppRuntime {
         let pointer = pointer.to_string();
         let review = self.napplet_review.clone();
         let peer_relays = content.peer_relays();
+        let store = content.relay();
         // Read before the spawn, as the update check does: offline-only is a
         // setting, and a fetch that starts under it does not get to consult
         // the internet because the switch moved while it was in flight.
@@ -1498,7 +1505,8 @@ impl AppRuntime {
         });
 
         rt.spawn(async move {
-            let sources = napplet_sources(&addr, holder.as_deref(), peer_relays, offline_only);
+            let sources =
+                napplet_sources(&addr, holder.as_deref(), peer_relays, store, offline_only);
             let mut found = Err(anyhow::anyhow!(if offline_only && sources.is_empty() {
                 "Offline-only is on and nobody nearby shared this app"
             } else {
@@ -1645,12 +1653,18 @@ impl AppRuntime {
             review.installing = true;
         }
         let peer_relays = content.peer_relays();
+        let store = content.relay();
         let offline_only = content.is_offline_only();
         let review = self.napplet_review.clone();
 
         rt.spawn(async move {
-            let sources =
-                napplet_sources(&addr, reviewed.holder.as_deref(), peer_relays, offline_only);
+            let sources = napplet_sources(
+                &addr,
+                reviewed.holder.as_deref(),
+                peer_relays,
+                store,
+                offline_only,
+            );
             let mut ingested = Err(anyhow::anyhow!("no source had this napplet"));
             for source in &sources {
                 ingested = host.ingest_event(manifest.clone(), source).await;
@@ -2682,7 +2696,7 @@ fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) 
             } else {
                 let relay = content.relay();
                 let blobs = content.blobs();
-                let source = addr.public_source();
+                let source = addr.public_source(relay.clone());
                 match crate::napplet::ingest_into(
                     relay.as_ref(),
                     blobs.as_ref(),
@@ -2815,13 +2829,14 @@ impl NappletOpenRequest {
 /// Where to look for a napplet, in the order worth trying. The peer who
 /// handed it over comes first: they demonstrably have it, they are in the
 /// room, and a napplet shared by a tap should not need the internet. Then
-/// the pointer's own relay hints and the defaults — unless offline-only is
-/// on, when the sharer's phone is the only source, as it is for every other
-/// acquisition path.
+/// the pointer's own relay hints, the author's NIP-65 relays and the
+/// defaults — unless offline-only is on, when the sharer's phone is the only
+/// source, as it is for every other acquisition path.
 fn napplet_sources(
     addr: &crate::napplet::NappletAddr,
     holder: Option<&str>,
     peer_relays: Arc<crate::peer_relay::PeerRelayPool>,
+    store: Arc<dyn nsite_deck::seams::RelayBackend>,
     offline_only: bool,
 ) -> Vec<crate::ip_source::IpPeerSource> {
     let mut sources = Vec::new();
@@ -2838,7 +2853,7 @@ fn napplet_sources(
         // relay to answer, and the user is watching "Looking for this app".
         // The update check keeps the longer default.
         sources.push(
-            addr.public_source()
+            addr.public_source(store)
                 .with_first_answer_grace(Duration::from_millis(250)),
         );
     }

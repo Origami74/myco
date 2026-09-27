@@ -176,9 +176,14 @@ the union of:
 - **Relays around us** — the embedded relays of connected mesh peers
   (`ws://[fd00::peer]:4870`), always reachable offline. (Reuse the existing
   peer-relay pool's live connections where possible rather than dialing afresh.)
-- **The manifests' listed relays** — each active manifest's own relay hints, used
-  **only when online**. The author publishes updates there, so they are the
-  authoritative poll target.
+- **The authors' relays** — each Library author's NIP-65 write relays (kind
+  `10002` as stored in the local relay; at most 12 in total), then
+  `default_relays()`, used **only when online**. The author publishes updates
+  there, so they are the authoritative poll target. The check never waits on a
+  list: the authors' `10002`s ride along in the same `REQ` to the defaults, the
+  indexers are asked for missing ones alongside, and whatever arrives is stored
+  for the next check (an author with no list anywhere is not asked about again
+  for 10 minutes).
 
 **Deduplicate by URL** so overlapping relay lists across many sites collapse to a
 single connection. For each unique relay, send **one** filter union'd across all
@@ -207,9 +212,9 @@ active pointer does not move until staging completes (§5).
 > comment beside it still claims parity with discovery. Either the check should
 > carry the same envelope or the comment should go; as written the two disagree.
 
-> **TBD / open:** where a manifest's relay hints live (NIP-65 author relay list
-> vs. tags on the manifest event) and the fallback when a manifest lists none
-> (probably `default_relays()`). See §9.
+> **Settled:** an author's update relays are their NIP-65 write relays, with
+> `default_relays()` always asked too as the fallback
+> ([nsite-layer.md §5](./nsite-layer.md)).
 
 ### 3.3 Surfacing
 
@@ -449,8 +454,7 @@ It becomes **"App settings"** — a per-app window that hosts:
   global throttle, 6 h period. Per-site throttling is not needed: one check
   covers every site in one REQ per relay.
 - **`no-store` sufficiency** for HTML across activation (§5.3).
-- **Manifest relay hints** (§3.2) — where the author's update relays come from
-  (NIP-65 list vs. tags on the manifest), and the fallback when none are listed
-  (`default_relays()`?).
+- ~~**Manifest relay hints** (§3.2)~~ — settled: the author's NIP-65 list, plus
+  `default_relays()`.
 - **Per-app update policy** ([nsite-permissions.md](./nsite-permissions.md)):
   auto-apply vs. prompt; default auto (unless pinned) for v1.
