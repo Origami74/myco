@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A new guest gets better default relays.** Its public relay list now
+  names three general-purpose relays (relay.damus.io, relay.ditto.pub,
+  relay.primal.net) for both posting and receiving, instead of the lookup
+  relays, which included a directory-only relay and an unreliable one. A new
+  guest also gets a direct-message relay list, so other Nostr apps know where
+  to send it private messages. A guest made before this version keeps its
+  relay list; log out and start a new guest to get the new defaults. Accounts you log in to with an `nsec` or a
+  signer app keep their own lists; Myco does not create or change them.
+
 ## [0.8.0] - 2026-09-26
 
 ### Added

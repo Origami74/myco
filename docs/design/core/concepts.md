@@ -145,7 +145,7 @@ fips owns the protocol), Wi-Fi Aware, the LAN, and — when a phone has internet
 | Key | Layer | What it is | Where it appears |
 | --- | --- | --- | --- |
 | **device key** | 4 | this phone's Nostr keypair; generated on first launch (`identity.nsec`) | the mesh identity, link authentication, the relay/Blossom address `<npub>.fips`, pairing |
-| **user key** | 1 | the person's Nostr keypair as napplets see it — the account in Settings; a guest generated on first launch, with a guest profile (kind `0`) and relay list (kind `10002`), or their own `nsec` | what a napplet publishes *as*; `identity.getPublicKey()` |
+| **user key** | 1 | the person's Nostr keypair as napplets see it — the account in Settings; a guest generated on first launch, with a guest profile (kind `0`) and relay lists (kinds `10002` and `10050`), or their own `nsec` or a signer app | what a napplet publishes *as*; `identity.getPublicKey()` |
 | **author key** | 1 | an app author's key, held elsewhere by external tooling | the nsite URL host, the `authors` filter in a query; never its secret |
 
 The device key never authors an app. The app never holds an author's secret
