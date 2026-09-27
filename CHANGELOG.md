@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capped by App reach, and switchable off per app. Apps you already have
   get it at their next open, without asking, unless you switched it off.
   This goes back to opt-in once the publishing tools keep Myco's permissions.
+- **Back never closes a napplet.** When a napplet doesn't go back itself,
+  back now sends it to the background — you land where you came from, and
+  the app keeps running with its state, in Recents — instead of closing it.
+  The same goes for the anti-trap rule (three consumed backs without a
+  touch) and for back while it is still opening. Only a crashed or hung
+  window is still closed.
 
 ### Added
 
