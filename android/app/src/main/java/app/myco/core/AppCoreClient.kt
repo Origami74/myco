@@ -89,7 +89,32 @@ data class NappletReview(
     val error: String,
     /** The peer who shared it, if any — so a retry tries their phone first again. */
     val holder: String? = null,
-)
+) {
+    companion object {
+        /** Read one from the core's JSON: the state's `nappletReview`, or an open's `updateReview`. */
+        fun fromJson(json: JSONObject): NappletReview = NappletReview(
+            pointer = json.optString("pointer"),
+            loading = json.optBoolean("loading"),
+            installing = json.optBoolean("installing"),
+            added = json.optBoolean("added"),
+            installed = json.optBoolean("installed"),
+            ready = json.optBoolean("ready"),
+            unreviewed = json.optJSONArray("unreviewed")?.let { u ->
+                (0 until u.length()).map { u.optString(it) }
+            }.orEmpty(),
+            title = json.optString("title"),
+            description = json.optString("description"),
+            requires = json.optJSONArray("requires")?.let { r ->
+                (0 until r.length()).map { r.optString(it) }
+            }.orEmpty(),
+            grants = json.optJSONArray("grants")?.let { g ->
+                (0 until g.length()).map { g.optString(it) }
+            }.orEmpty(),
+            error = json.optString("error"),
+            holder = json.optString("holder").ifEmpty { null },
+        )
+    }
+}
 
 /** What kind of app a Library entry is. Unknown values read as [Nsite]. */
 enum class LibraryKind { Nsite, Napplet }
@@ -431,27 +456,7 @@ data class AppState(
                 }
             }
             val reviewJson = o.optJSONObject("nappletReview")
-            val nappletReview = if (reviewJson == null) null else NappletReview(
-                pointer = reviewJson.optString("pointer"),
-                loading = reviewJson.optBoolean("loading"),
-                installing = reviewJson.optBoolean("installing"),
-                added = reviewJson.optBoolean("added"),
-                installed = reviewJson.optBoolean("installed"),
-                ready = reviewJson.optBoolean("ready"),
-                unreviewed = reviewJson.optJSONArray("unreviewed")?.let { u ->
-                    (0 until u.length()).map { u.optString(it) }
-                }.orEmpty(),
-                title = reviewJson.optString("title"),
-                description = reviewJson.optString("description"),
-                requires = reviewJson.optJSONArray("requires")?.let { r ->
-                    (0 until r.length()).map { r.optString(it) }
-                }.orEmpty(),
-                grants = reviewJson.optJSONArray("grants")?.let { g ->
-                    (0 until g.length()).map { g.optString(it) }
-                }.orEmpty(),
-                error = reviewJson.optString("error"),
-                holder = reviewJson.optString("holder").ifEmpty { null },
-            )
+            val nappletReview = reviewJson?.let { NappletReview.fromJson(it) }
 
             val libraryJson = o.optJSONArray("library")
             val library = buildList {
@@ -1018,6 +1023,20 @@ object NativeActions {
             .put("granted", list)
     }
 
+    /**
+     * Allow what an update asks for beyond what was reviewed, from the sheet
+     * over the napplet's own window. Answers only the review that window's
+     * open left; the open window then relaunches with the new grants.
+     */
+    fun acceptNappletUpdate(pointer: String, granted: List<String>): JSONObject {
+        val list = JSONArray()
+        for (domain in granted) list.put(domain)
+        return JSONObject()
+            .put("type", "accept_napplet_update")
+            .put("pointer", pointer)
+            .put("granted", list)
+    }
+
     /** Unpin a napplet and drop its grants. */
     /**
      * Cap how far napplets reach over the mesh: the most hops a `mesh.publish`
@@ -1147,6 +1166,11 @@ data class NappletOpen(
     val shellHost: String,
     val title: String?,
     val error: String?,
+    /**
+     * The served version declares more than the user reviewed: the window
+     * draws this review over the napplet it just opened. Null otherwise.
+     */
+    val updateReview: NappletReview? = null,
 ) {
     companion object {
         fun parse(json: String): NappletOpen {
@@ -1158,6 +1182,7 @@ data class NappletOpen(
                 shellHost = o.optString("shellHost"),
                 title = o.optString("title").ifEmpty { null },
                 error = o.optString("error").ifEmpty { null },
+                updateReview = o.optJSONObject("updateReview")?.let { NappletReview.fromJson(it) },
             )
         }
     }

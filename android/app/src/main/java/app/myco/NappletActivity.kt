@@ -100,6 +100,15 @@ import java.io.ByteArrayInputStream
  * place). Nothing here installs: the review sheet's "Add" is the user's
  * answer, exactly as on the Apps screen.
  *
+ * ## An update that asks for more
+ *
+ * When the version this window opens declares a capability the user never
+ * reviewed, the open withholds it and hands back an update review. The sheet
+ * is drawn here, over the app it is about — not queued on the Apps screen,
+ * where nobody was looking and where it held up the app's own links. "Allow"
+ * records the answer and the window relaunches with the new grants; "Not now"
+ * leaves the app running without them, and the next open asks again.
+ *
  * ## Updates while open
  *
  * The window runs the version it opened for as long as it lives. When it comes
@@ -182,6 +191,16 @@ class NappletActivity : ComponentActivity() {
     /** The install review drawn over this window, mirrored from app state. */
     private var review by mutableStateOf<NappletReview?>(null)
 
+    /**
+     * The review of what this version asks for beyond what was reviewed, from
+     * this window's own open. Held here, not in app state: it is about this
+     * window's app and is answered over it.
+     */
+    private var updateReview by mutableStateOf<NappletReview?>(null)
+
+    /** The pointer this window opened, for answering [updateReview]. */
+    private var openedPointer: String = ""
+
     /** A web link waiting on the user's tap, when no recent touch vouched for it. */
     private var pendingExternal by mutableStateOf<Uri?>(null)
 
@@ -244,7 +263,7 @@ class NappletActivity : ComponentActivity() {
                 val newer = runCatching { client.nappletNewerVersion(id) }.getOrNull()
                 newer.takeIf { restartPrompt.shouldAsk(napplet, it) }
             } ?: return@launch
-            if (review != null || pendingExternal != null || updatedTo != null) return@launch
+            if (sheetUp()) return@launch
             restartPrompt.markAsked(napplet, newer)
             updatedTo = newer
         }
@@ -344,10 +363,31 @@ class NappletActivity : ComponentActivity() {
         }
     }
 
-    /** The review sheet and the link confirmation, over the WebView. */
+    /** Whether a sheet or dialog of this window is on screen over the napplet. */
+    private fun sheetUp(): Boolean =
+        review != null || updateReview != null || pendingExternal != null || updatedTo != null
+
+    /** The review sheets and the link confirmation, over the WebView. */
     private fun overlay(): ComposeView = ComposeView(this).apply {
         setContent {
             MycoTheme {
+                // The app's own update review first: it opened with the app,
+                // and answering it relaunches the window.
+                val update = updateReview
+                if (update != null && review == null) {
+                    NappletReviewSheet(
+                        review = update,
+                        onInstall = { granted ->
+                            updateReview = null
+                            // The core relaunches this window once the
+                            // grants are recorded (a `relaunch` frame).
+                            act(NativeActions.acceptNappletUpdate(openedPointer, granted))
+                        },
+                        onRetry = { updateReview = null },
+                        onOpen = { updateReview = null },
+                        onDismiss = { updateReview = null },
+                    )
+                }
                 review?.let { r ->
                     NappletReviewSheet(
                         review = r,
@@ -371,7 +411,7 @@ class NappletActivity : ComponentActivity() {
                         },
                     )
                 }
-                if (review == null && pendingExternal == null && updatedTo != null) {
+                if (review == null && updateReview == null && pendingExternal == null && updatedTo != null) {
                     AlertDialog(
                         onDismissRequest = { updatedTo = null },
                         title = { Text("$appTitle was updated") },
@@ -494,6 +534,8 @@ class NappletActivity : ComponentActivity() {
                 return@launch
             }
             shellHost = opened.shellHost
+            openedPointer = pointer
+            updateReview = opened.updateReview
             appTitle = intent.getStringExtra(EXTRA_TITLE).orEmpty()
                 .ifEmpty { opened.title.orEmpty() }
                 .ifEmpty { "This app" }
@@ -693,7 +735,7 @@ class NappletActivity : ComponentActivity() {
         // of their own and take back before it reaches this callback; should
         // one ever not, the napplet underneath must not hear an Escape meant
         // for them.
-        if (review != null || pendingExternal != null || updatedTo != null) return
+        if (sheetUp()) return
         val view = webView
         // Detached by a renderer crash: nobody is there to answer.
         if (view.parent == null) {

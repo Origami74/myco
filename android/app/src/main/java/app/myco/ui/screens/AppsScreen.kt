@@ -814,6 +814,7 @@ internal fun NappletReviewSheet(
     // Not dismissable while "Adding…": the download is under way, and a
     // failure has to be able to come back to this sheet to be seen.
     val installing by rememberUpdatedState(review.installing)
+    val answer = reviewAnswer(review)
     ModalBottomSheet(
         onDismissRequest = { if (!installing) onDismiss() },
         sheetState = rememberModalBottomSheetState(
@@ -947,7 +948,14 @@ internal fun NappletReviewSheet(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 } else {
-                    Text("This app will be able to:", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (answer == ReviewAnswer.Allow) {
+                            "This update asks for more. With it, this app will be able to:"
+                        } else {
+                            "This app will be able to:"
+                        },
+                        style = MaterialTheme.typography.titleSmall,
+                    )
                     Spacer(Modifier.height(10.dp))
                     review.grants.forEach { domain ->
                         CapabilityRow(domain)
@@ -963,14 +971,9 @@ internal fun NappletReviewSheet(
 
             }
 
-            // Already in the Library with nothing new to agree to: adding it
-            // again would change nothing, so say so rather than offer it. An
-            // installed app whose update declares more still gets Add — that
-            // is how the new permissions are agreed to. One that is installed
-            // but not on this phone ("hold to reload") gets its download
-            // instead; the grants it has are kept either way.
-            val alreadyInstalled = review.installed && review.unreviewed.isEmpty()
-            val reinstall = alreadyInstalled && !review.ready
+            val alreadyInstalled = answer == ReviewAnswer.AlreadyInstalled ||
+                answer == ReviewAnswer.DownloadAgain
+            val reinstall = answer == ReviewAnswer.DownloadAgain
 
             Spacer(Modifier.height(20.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1005,12 +1008,45 @@ internal fun NappletReviewSheet(
                         Spacer(Modifier.size(8.dp))
                         Text(if (reinstall) "Downloading…" else "Adding…")
                     } else {
-                        Text(if (reinstall) "Download again" else "Add to my apps")
+                        Text(
+                            when (answer) {
+                                ReviewAnswer.DownloadAgain -> "Download again"
+                                ReviewAnswer.Allow -> "Allow"
+                                else -> "Add to my apps"
+                            },
+                        )
                     }
                 }
             }
         }
     }
+}
+
+/** What a review sheet's main button does. See [reviewAnswer]. */
+internal enum class ReviewAnswer {
+    /** Not installed: add it, with what the sheet lists. */
+    Add,
+    /** Installed and here, with nothing new to agree to: nothing to do. */
+    AlreadyInstalled,
+    /** Installed, nothing new to agree to, but its files are not on this phone. */
+    DownloadAgain,
+    /** Installed, and this version asks for more than was reviewed: agree to it. */
+    Allow,
+}
+
+/**
+ * Already in the Library with nothing new to agree to: adding it again would
+ * change nothing, so the sheet says so rather than offer it — or, when it is
+ * not on this phone ("hold to reload"), offers its download; the grants it
+ * has are kept either way. An installed app whose update declares more is
+ * asked to be allowed: that is how the new permissions are agreed to, on the
+ * Apps screen and over the app's own window alike.
+ */
+internal fun reviewAnswer(review: NappletReview): ReviewAnswer = when {
+    !review.installed -> ReviewAnswer.Add
+    review.unreviewed.isNotEmpty() -> ReviewAnswer.Allow
+    review.ready -> ReviewAnswer.AlreadyInstalled
+    else -> ReviewAnswer.DownloadAgain
 }
 
 /** The app's mark on the review sheet, with a check once it has been added. */

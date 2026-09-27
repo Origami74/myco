@@ -70,7 +70,7 @@ transport-neutral; the *web projection* binds them to iframes, `postMessage`, an
 | D5 | Mesh | Standard NAPs behave exactly as specified. Mesh rides those contracts through `<npub>.fips` relay URLs (§7.4); a Myco mesh NAP covers only what has no standard equivalent. |
 | D6 | First milestone | A full verified resolve — manifest, blobs, aggregate, `srcdoc`, handshake. No shortcuts that get thrown away. |
 | D7 | Specification drift | Pin one `napplet/naps` revision and re-audit deliberately (§8). |
-| D8 | Capability policy | An install-time review screen; grants stored per library entry as two sets — `granted` and `denied` — and switchable per capability on the app's sheet afterwards (live — an open window obeys on its next call, and relaunches). A launch may grant a declared domain this build newly implements, but never one the user switched off: "never decided" and "said no" are different slots — and only if the domain was on the list the review sheet showed; a later manifest declaring more goes back through the review sheet before it gets it. A granted `relay` covers publishing with no per-event prompt, except — interim, until the permission model adds prompts — kinds 0, 3, 5 and 10000–19999, which are refused per call. |
+| D8 | Capability policy | An install-time review screen; grants stored per library entry as two sets — `granted` and `denied` — and switchable per capability on the app's sheet afterwards (live — an open window obeys on its next call, and relaunches). A launch may grant a declared domain this build newly implements, but never one the user switched off: "never decided" and "said no" are different slots — and only if the domain was on the list the review sheet showed; a later manifest declaring more goes back through the review sheet, drawn over the napplet's own window, before it gets it. Preinstalled napplets carry the permissions Myco vetted them for as their reviewed list (§7.3). A granted `relay` covers publishing with no per-event prompt, except — interim, until the permission model adds prompts — kinds 0, 3, 5 and 10000–19999, which are refused per call. |
 | D9 | Acquisition | Fetch online when added by `naddr`; local and mesh-replicable from then on. |
 | D10 | Crate | A new `myco-napplet-runtime`, over shared NIP-5A primitives in `nsite-deck`. |
 | D11 | Intents | Android Intents and NAP-INTENT resolve through one shared resolver, bridged both ways, landed early. Claiming the `nostr:` URI scheme is deferred. |
@@ -692,10 +692,25 @@ see what is on screen:
 
 `opened` means "handed to a surface the user answers", not "the user accepted"; a
 napplet learns nothing about what happened next. Admission (`LinkGate` in
-`myco-core/src/napplet.rs`, device-wide) refuses with `blocked-by-policy` while a review
-is already in the slot and still asking (an "added" sheet is a confirmation, not a question: a
-link is admitted over it and its review replaces it), within 5 s of the last admitted review link, and within 2 s of
-the last admitted web link — so a napplet cannot stack or spam sheets or browser tabs.
+`myco-core/src/napplet.rs`) blocks a napplet link only for what is actually in front of
+the user:
+
+- **The review this window opened is still up** (loading or asking) →
+  `busy: another review is open`. The gate remembers which window's link filled the slot.
+  A review queued anywhere else — on the Apps screen, or by another napplet's window — is
+  not on screen over this napplet and refuses nothing; the new review replaces it.
+- **An install is downloading**, wherever it started → `busy: another app is being added`,
+  so the download keeps the sheet that reports it.
+- **Within 5 s of the last admitted review link**, device-wide →
+  `busy: try again in a moment`.
+- **Within 2 s of the last admitted web link** → `blocked-by-policy`.
+
+An "added" sheet is a confirmation, not a question: a link is admitted over it. NAP-LINK
+lists `invalid-url`, `unsupported-scheme`, `blocked-by-policy` and `user-denied` as common
+codes and leaves the set open, so the `busy: …` codes are plain words a napplet can show
+as they are (AppStore prints an unknown code after "Could not start the install:"). An
+update's permission review never holds the slot (§7.3), so it cannot refuse the napplet's
+links either.
 `options.label` is untrusted display text and is never shown or used to decide
 anything.
 
@@ -908,7 +923,50 @@ sender cannot stream an unbounded body before the hash check. The version activa
 signature ties a manifest to its author — a napplet by someone else under the same name
 is a different napplet, relayed like any other this phone lacks. Nothing on this path
 writes grants: a new version declaring a domain the user never reviewed opens without it,
-and the domain comes back as unreviewed for the review sheet (`open_with`).
+and the domain comes back as unreviewed (`open_with`).
+
+**The update's review is asked over the napplet's window.** The open that finds the
+unreviewed domain (`NappletOpenRequest::run`) hands the review back with the session —
+`updateReview` in `nappletOpen`'s answer — and `NappletActivity` draws the review sheet
+over the app it is about, which keeps running without the domain meanwhile. It is not
+queued on the Apps screen: nobody is looking there, and a review waiting in the shared
+slot used to refuse every `link.open` the napplet made (AppStore's Install button said
+only "cannot open install"). The sheet lists the declared domains and the defaults, less
+anything the user switched off. **Allow** dispatches `AcceptNappletUpdate`, which
+answers only the review that open left (`AppRuntime::napplet_updates`, keyed by author
+and `d` tag): it records the grants the sheet showed, keeps every refusal, stores the
+declared list as the new reviewed list, and pushes the grants into the open window, which
+relaunches under them — its startup subscriptions were refused, and a refused subscribe is
+not retried. **Not now** leaves things as they are; the next open asks again. Opens only
+ever come from a window, so there is no Apps-screen fallback.
+
+**Preinstalled napplets.** The first-run seed (`seed_default_napplets`, once per default
+per install, never again once removed) pins each entry in `DEFAULT_NAPPLETS` with the
+defaults granted and the permissions Myco vetted that app for as its **reviewed** list,
+and marks the entry `preinstalled`:
+
+| Default | Address | Published `requires` | Expected set |
+|---|---|---|---|
+| DingDong | `d=dingdong` | none | `mesh` |
+| AppStore | `d=discover` | `outbox`, `theme` | `mesh`, `outbox`, `theme` |
+
+Both expected sets add `mesh`, which the napplet tooling drops from `requires` (§S3, the
+`mesh` default). So the first open, and any update from the same author that declares no
+more than the expected set, is granted what it declares with no sheet; anything beyond it
+goes through the sheet above. The expected set is also read at every open and review
+(`library_grants`), for any entry still marked preinstalled: an expected set widened in a
+later release reaches entries seeded before it, and a review answered since cannot shrink
+it. It widens only the reviewed list — nothing is granted until a served version declares
+it, and a domain in `denied` stays off.
+
+Guards: the table is keyed on the author as well as the `d` tag, so someone else's
+napplet at `d=discover` gets nothing from it. Only the seed sets the mark, so a napplet
+the user installed themselves — including a default they removed and added again — is
+reviewed like any other. Entries seeded before this existed (defaults granted, reviewed
+list empty, no mark) are adopted at startup (`adopt_legacy_seeded_napplet`); one with a
+non-empty reviewed list went through the sheet and is left alone. The one case the two
+cannot be told apart — a user who installed DingDong by hand before it was seeded — gains
+only `mesh`, which every napplet already has by default.
 
 **Snapshots (`5129`) stay plain events.** A snapshot is an immutable build: nothing in the
 Library installs by it, so there is nothing to update, and the not-installed branch
