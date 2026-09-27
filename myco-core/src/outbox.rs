@@ -379,6 +379,19 @@ impl OutboxService {
             .collect()
     }
 
+    /// Whether a round over this lane would really try the internet: an
+    /// allowed internet lane whose relay is not on the skip list. A round of
+    /// nothing but skipped relays has not tried the internet, and must not
+    /// trip the breaker that would then hold back the good ones.
+    fn tries_internet(&self, lane: &RelayLane) -> bool {
+        match lane {
+            RelayLane::Internet { url } => {
+                self.allowed(lane) && !crate::relay_health::is_skipped(url)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether a lane may be used from this device, per the policy above.
     fn allowed(&self, lane: &RelayLane) -> bool {
         match lane {
@@ -495,6 +508,11 @@ impl OutboxService {
                 Some(events.into_iter().filter(|e| e.verify().is_ok()).collect())
             }
             RelayLane::Internet { url } => {
+                // On the skip list: finished, nothing, at once — not even
+                // resolved. See `relay_health`.
+                if crate::relay_health::is_skipped(url) {
+                    return None;
+                }
                 // One connection, one REQ carrying every filter; verified at
                 // ingress by `query_relay_filters`. The resolve-and-refuse
                 // guard runs inside the same timeout, so a slow resolver
@@ -509,7 +527,7 @@ impl OutboxService {
                     }
                     Some(crate::ip_source::query_relay_filters(url, values).await)
                 };
-                match tokio::time::timeout(timeout, dial).await {
+                match crate::relay_health::timeout(url, timeout, dial).await {
                     Ok(None) => None,
                     Ok(Some(Ok(events))) => Some(events),
                     Ok(Some(Err(e))) => {
@@ -549,6 +567,9 @@ impl OutboxService {
                 true
             }
             RelayLane::Internet { url } => {
+                if crate::relay_health::is_skipped(url) {
+                    return false;
+                }
                 let dial = async {
                     if !self.may_dial(url).await {
                         return false;
@@ -558,7 +579,10 @@ impl OutboxService {
                         Ok(true)
                     )
                 };
-                matches!(tokio::time::timeout(timeout, dial).await, Ok(true))
+                matches!(
+                    crate::relay_health::timeout(url, timeout, dial).await,
+                    Ok(true)
+                )
             }
         }
     }
@@ -601,6 +625,8 @@ pub(crate) async fn dials_public(url: &str) -> bool {
     // literal.
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let Ok(addrs) = tokio::net::lookup_host((host, port)).await else {
+        // The name does not resolve: no dial would get anywhere either.
+        crate::relay_health::record_dns_failure(url);
         return false;
     };
     let mut any = false;
@@ -847,9 +873,11 @@ impl OutboxService {
         timeout: Duration,
         deliver: Deliver<'_>,
     ) -> Vec<LaneAnswer> {
-        let tried_internet = lanes
-            .iter()
-            .any(|l| matches!(l, RelayLane::Internet { .. }) && self.allowed(l));
+        let started = std::time::Instant::now();
+        // A round bounded by less than a counted timeout — a napplet's short
+        // `timeoutMs` — says nothing about the internet either way.
+        let tried_internet = timeout >= crate::relay_health::COUNTED_TIMEOUT_MIN
+            && lanes.iter().any(|l| self.tries_internet(l));
         let rounds: Vec<(LaneAnswer, bool)> = join_all(lanes.iter().map(|lane| async move {
             // Only what the filters asked for: a relay answering with
             // anything else is not stored, delivered, or allowed to end an
@@ -879,7 +907,8 @@ impl OutboxService {
         let any_ok = out
             .iter()
             .any(|(l, r)| matches!(l, RelayLane::Internet { .. }) && r.is_some());
-        self.content.note_internet_round(any_ok, tried_internet);
+        self.content
+            .note_internet_round(any_ok, tried_internet, started);
         // Profiles, relay lists and manifests another relay answered with are
         // kept here, behind the answer, so the next ask is local and works
         // offline. Already verified by the lane; the local lane's own answer
@@ -1017,6 +1046,17 @@ impl OutboxService {
             let mut streams = tokio::task::JoinSet::new();
             let mut once = Vec::new();
             for lane in lanes {
+                // A lane on the skip list, or not usable now, takes no
+                // stream slot: it would hold one to do nothing. It gets the
+                // one pull, which costs it nothing either.
+                let usable = this.allowed(&lane)
+                    && lane
+                        .url()
+                        .is_none_or(|url| !crate::relay_health::is_skipped(url));
+                if !usable {
+                    once.push(lane);
+                    continue;
+                }
                 let napplet = match &session {
                     Some(work) => match work.streams.clone().try_acquire_owned() {
                         Ok(permit) => Some(permit),
@@ -1081,15 +1121,22 @@ impl OutboxService {
                     tokio::time::sleep(MESH_REPULL_EVERY + jitter(MESH_REPULL_EVERY / 3)).await;
                     continue;
                 }
-                // `since` moves only once a connection saw EOSE.
-                RelayLane::Internet { url }
-                    if self.allowed(&lane) && self.stream_internet(url, &asked).await =>
-                {
-                    since = Some(heard_all_from);
+                RelayLane::Internet { url } if self.allowed(&lane) => {
+                    // `since` moves only once a connection saw EOSE; a
+                    // connection that ended sooner falls through to the
+                    // backoff below.
+                    let saw_eose = self.stream_internet(url, &asked).await;
+                    if saw_eose {
+                        since = Some(heard_all_from);
+                    }
                 }
-                // Not allowed right now (offline only, internet down), or the
-                // connection ended before EOSE: wait.
-                _ => {}
+                // Not allowed right now (offline only, the internet breaker):
+                // wait and look again, without counting it against the relay
+                // — the backoff stays where it was.
+                _ => {
+                    tokio::time::sleep(STREAM_BACKOFF_FIRST + jitter(STREAM_BACKOFF_FIRST)).await;
+                    continue;
+                }
             }
             backoff = if opened.elapsed() >= STREAM_HEALTHY_AFTER {
                 STREAM_BACKOFF_FIRST
@@ -1105,7 +1152,7 @@ impl OutboxService {
     /// else a relay sends is dropped here. Ends early when "offline only" is
     /// switched on. Returns whether the relay got as far as EOSE.
     async fn stream_internet(&self, url: &str, filters: &[Filter]) -> bool {
-        if !self.may_dial(url).await {
+        if crate::relay_health::is_skipped(url) || !self.may_dial(url).await {
             return false;
         }
         let values: Vec<serde_json::Value> = filters
@@ -1254,9 +1301,9 @@ impl LaneTransport for OutboxService {
         event: &Event,
         timeout: Duration,
     ) -> Vec<(RelayLane, bool)> {
-        let tried_internet = lanes
-            .iter()
-            .any(|l| matches!(l, RelayLane::Internet { .. }) && self.allowed(l));
+        let started = std::time::Instant::now();
+        let tried_internet = timeout >= crate::relay_health::COUNTED_TIMEOUT_MIN
+            && lanes.iter().any(|l| self.tries_internet(l));
         let out: Vec<(RelayLane, bool)> = join_all(lanes.iter().map(|lane| async move {
             (lane.clone(), self.publish_lane(lane, event, timeout).await)
         }))
@@ -1264,7 +1311,8 @@ impl LaneTransport for OutboxService {
         let any_ok = out
             .iter()
             .any(|(l, ok)| matches!(l, RelayLane::Internet { .. }) && *ok);
-        self.content.note_internet_round(any_ok, tried_internet);
+        self.content
+            .note_internet_round(any_ok, tried_internet, started);
         out
     }
 
@@ -1287,9 +1335,9 @@ impl LaneTransport for OutboxService {
         let lanes = lanes.to_vec();
         let event = event.clone();
         tokio::spawn(async move {
-            let tried_internet = lanes
-                .iter()
-                .any(|l| matches!(l, RelayLane::Internet { .. }) && this.allowed(l));
+            let started = std::time::Instant::now();
+            let tried_internet = timeout >= crate::relay_health::COUNTED_TIMEOUT_MIN
+                && lanes.iter().any(|l| this.tries_internet(l));
             let out: Vec<(RelayLane, bool)> = join_all(lanes.iter().map(|lane| {
                 let (this, event, tx) = (&this, &event, tx.clone());
                 async move {
@@ -1302,7 +1350,8 @@ impl LaneTransport for OutboxService {
             let any_ok = out
                 .iter()
                 .any(|(l, ok)| matches!(l, RelayLane::Internet { .. }) && *ok);
-            this.content.note_internet_round(any_ok, tried_internet);
+            this.content
+                .note_internet_round(any_ok, tried_internet, started);
             // The whole round, stragglers included — the answer may have
             // gone out before some of these came in.
             tracing::debug!(
@@ -2190,12 +2239,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// One round where every internet lane failed trips a breaker: the next
-    /// round skips the internet at once instead of paying the timeouts
-    /// again, and reports the lane as unreached so the answer says
-    /// `incomplete`.
+    /// One round where every internet lane failed — and nothing on the
+    /// internet was heard, as with no signal: names do not resolve — trips a
+    /// breaker: the next round skips the internet at once instead of paying
+    /// the timeouts again, and reports the lane as unreached so the answer
+    /// says `incomplete`. Only a round with a counted timeout (8 s or more)
+    /// is judged.
     #[tokio::test]
     async fn a_dead_internet_trips_the_breaker_for_the_next_round() {
+        crate::relay_health::reset();
         let dir = std::env::temp_dir().join(format!("myco-outbox-breaker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(Content::open(&dir).unwrap());
@@ -2207,7 +2259,7 @@ mod tests {
         )
         .allowing_private_dials();
         let dead = RelayLane::Internet {
-            url: "ws://127.0.0.1:1".to_string(),
+            url: "ws://myco-breaker-test.invalid".to_string(),
         };
         let filters = [Filter::new().kind(Kind::TextNote)];
 
@@ -2215,7 +2267,7 @@ mod tests {
             .query(
                 std::slice::from_ref(&dead),
                 &filters,
-                Duration::from_secs(2),
+                Duration::from_secs(8),
             )
             .await;
         assert!(first[0].1.is_none());
@@ -2970,6 +3022,93 @@ mod tests {
         assert!(
             lands(&store, old.id, Duration::from_secs(5)).await,
             "the stored note was skipped by a `since` moved on a failed connect"
+        );
+    }
+
+    /// A relay on the skip list costs a round nothing: it is not dialled,
+    /// reads as finished-with-nothing at once, and a round of only skipped
+    /// relays does not trip the internet breaker that would hold back the
+    /// relays that work.
+    #[tokio::test]
+    async fn a_skipped_relay_finishes_at_once_and_trips_no_breaker() {
+        use myco_napplet_runtime::seams::LaneTransport;
+
+        let (hung, served) =
+            crate::ip_source::tests::mock_relay_delayed(Vec::new(), Duration::from_secs(10)).await;
+        crate::relay_health::current()
+            .failed(&hung, crate::relay_health::Failure::Refused("HTTP 403"));
+        let content = scratch_content("skipped-lane");
+        let svc = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content.clone(),
+            "npub1me".to_string(),
+        )
+        .allowing_private_dials();
+
+        let started = std::time::Instant::now();
+        let answers = svc
+            .query(
+                &[RelayLane::Local, RelayLane::Internet { url: hung }],
+                &[Filter::new().kind(Kind::TextNote)],
+                Duration::from_secs(5),
+            )
+            .await;
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(answers[1].1.is_none());
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a skipped relay was dialled"
+        );
+        assert!(
+            !content.internet_looks_down(),
+            "a round of skipped relays tripped the breaker"
+        );
+    }
+
+    /// Device bug A: one relay answering 502 in a round of its own tripped
+    /// the internet breaker for everyone while other relays were answering.
+    /// An HTTP answer is the internet working; the breaker stays open. And a
+    /// breaker that did trip clears the moment a stream connects.
+    #[tokio::test]
+    async fn a_relays_502_does_not_trip_the_breaker_and_a_connect_clears_it() {
+        crate::relay_health::reset();
+        let (addr, _) = crate::relay_health::tests::answering(502).await;
+        let content = scratch_content("breaker-502");
+        let svc = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content.clone(),
+            "npub1me".to_string(),
+        )
+        .allowing_private_dials();
+        let answers = svc
+            .query(
+                &[RelayLane::Internet {
+                    url: format!("ws://{addr}"),
+                }],
+                &[Filter::new()],
+                Duration::from_secs(10),
+            )
+            .await;
+        assert!(answers[0].1.is_none());
+        assert!(!content.internet_looks_down(), "a 502 tripped the breaker");
+
+        // Tripped for real: nothing heard since the round began.
+        content.note_internet_round(false, true, std::time::Instant::now());
+        assert!(content.internet_looks_down());
+        let (_remote, url) = mock_relay().await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            crate::ip_source::stream_relay_filters(&url, vec![serde_json::json!({})], tx, &flag),
+        )
+        .await;
+        assert!(
+            !content.internet_looks_down(),
+            "a stream connected and the breaker stayed tripped"
         );
     }
 

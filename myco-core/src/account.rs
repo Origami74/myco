@@ -755,8 +755,12 @@ async fn publish_everywhere(relays: &[String], events: &[Event]) -> Vec<usize> {
     for event in events {
         let results = futures_util::future::join_all(relays.iter().map(|url| async move {
             matches!(
-                tokio::time::timeout(NET_TIMEOUT, crate::ip_source::publish_to_relay(url, event))
-                    .await,
+                crate::relay_health::timeout(
+                    url,
+                    NET_TIMEOUT,
+                    crate::ip_source::publish_to_relay(url, event)
+                )
+                .await,
                 Ok(Ok(true))
             )
         }))
@@ -772,11 +776,15 @@ async fn fetch_profile(relays: &[String], pk: &PublicKey) -> Option<Event> {
     let answers = futures_util::future::join_all(relays.iter().map(|url| {
         let filter = filter.clone();
         async move {
-            tokio::time::timeout(NET_TIMEOUT, crate::ip_source::query_relay(url, filter))
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or_default()
+            crate::relay_health::timeout(
+                url,
+                NET_TIMEOUT,
+                crate::ip_source::query_relay(url, filter),
+            )
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
         }
     }))
     .await;

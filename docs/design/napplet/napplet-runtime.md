@@ -514,6 +514,61 @@ What the specs allow shapes how:
 - **One relay, one lane.** Lanes are deduplicated with the trailing slash ignored, so
   `wss://relay.damus.io` and `wss://relay.damus.io/` share one socket.
 
+#### Relays that keep failing are skipped
+
+A relay that just answered 403 will answer 403 again. `myco-core/src/relay_health.rs`
+keeps one in-memory list for the whole process, and every internet dial checks it first:
+the outbox lanes and subscription streams, `relay.query`'s pool, manifest and relay-list
+lookups (`ip_source`), account publishes, and public Blossom fetches.
+
+- **The relay said no: listed at once.** A 403, 404 or 5xx (530 included) at the WebSocket
+  upgrade, or a 5xx from a Blossom server. An HTTP answer proves the phone is online, so
+  this is about the relay. 1 min, doubling per repeat, up to 30 min. A 503 is capped at
+  5 min and honours `Retry-After` (seconds); a 511 is a captive portal speaking, and is
+  ignored.
+- **The relay could not be reached: listed at once, but only while online.** A name that
+  does not resolve, a certificate that does not verify, a refused connection — the
+  transport failures caught (other TLS failures are not). With no signal every relay fails
+  like this, so it counts only while some other *internet* dial succeeded in the last two
+  minutes. Otherwise nothing is recorded, and the backoff does not climb while the phone
+  is offline. Same backoff.
+- **Several at once is the network.** Three or more relays failing to be reached within
+  10 s is a network switch or a captive portal, not three bad relays: the listings that
+  burst made are undone, "online" and "heard" (below) are cleared, and nothing is listed
+  that way until 10 s pass with no such failure.
+- **Timeouts: listed after two in a row**, under the same online gate, and only a timeout
+  that says something about the relay: the connection never came up, within a deadline of
+  at least 8 s. A napplet's short `timeoutMs` and a round's shared cutoff never count, and
+  a relay that connected and was slow to answer is slow, not gone. 30 s, doubling, up to
+  5 min.
+- **A success clears the entry.** Mesh successes (`.fips`, `fd00::/8`, a Circle member's
+  Blossom) do not count as "online". Blossom counts a 404 as an answer ("not here"), never
+  a failure.
+- **A skipped relay is finished, with nothing, at once** — not dialled, not even resolved —
+  so it never costs a round time. A round of only skipped relays does not trip the internet
+  breaker. A lane skipped (or not usable) when a subscription opens takes no stream slot;
+  it gets its one pull, which costs nothing.
+- **Never listed:** Circle members' relays and Blossom, and the custom relay and Blossom
+  set in Storage — their clients never consult the list.
+- **Bounded:** keys are normalised as `ip_source::same_relay` does, plus the default port
+  dropped; spent entries are pruned on insert and the map holds at most 512.
+- **Logged once** per skip, when the relay is put on the list.
+
+How this differs from the internet breaker (`Content::note_internet_round`): the breaker
+notices a *round* in which every internet lane failed and stops trying the internet for 30 s;
+it is what handles "no signal". The skip list is per relay, and only for failures that
+single one relay out.
+
+The breaker trips only when nothing on the internet was **heard** since the round began.
+"Heard" is wider than "online": any success, any HTTP status but 511 (a 429, a 401, a
+relay's 502), a certificate arriving (even one that fails), a host refusing a connection.
+One relay answering 502 while others complete their handshakes is that relay's problem,
+not the internet's. A burst (above) clears "heard": a captive portal's certificates are the
+case where a certificate arriving means the internet is not there. A tripped breaker
+clears as soon as anything is heard — a subscription's stream connecting, a lookup
+answered. Only rounds with a deadline of 8 s or more count as having tried the internet,
+and a stream held back by the breaker waits without growing its backoff.
+
 **Napplet-named relays are shell policy.** NAP-RELAY prescribes `options.relay` (NIP-29
 groups are its example) and says "the shell controls which relays the napplet can access";
 NAP-OUTBOX says `options.relays` "never bypasses shell ACLs" and napplets "MUST NOT be able

@@ -861,24 +861,48 @@ impl Content {
     /// napplet that fires several calls pays them several times over while
     /// its local results wait behind them. One full round of failures buys
     /// [`INTERNET_DOWN_FOR`] of skipping; the next call after that tries again.
+    ///
+    /// A tripped breaker also clears early the moment anything on the
+    /// internet is heard from (`relay_health::internet_heard_since`) — a
+    /// subscription's stream connecting, a lookup answered.
     pub fn internet_looks_down(&self) -> bool {
         if self.is_offline_only() {
             return true;
         }
-        self.internet_down_until
-            .lock()
-            .unwrap()
-            .is_some_and(|until| std::time::Instant::now() < until)
+        let mut until = self.internet_down_until.lock().unwrap();
+        let Some(at) = *until else {
+            return false;
+        };
+        if std::time::Instant::now() >= at {
+            return false;
+        }
+        let tripped = at - INTERNET_DOWN_FOR;
+        if crate::relay_health::internet_heard_since(tripped) {
+            *until = None;
+            return false;
+        }
+        true
     }
 
-    /// Record how a round of internet lanes went. All failed → trip the
-    /// breaker; any succeeded → reset it.
-    pub fn note_internet_round(&self, any_succeeded: bool, any_tried: bool) {
+    /// Record how a round of internet lanes that began at `started` went.
+    ///
+    /// Trip the breaker only if every lane failed **and** nothing on the
+    /// internet was heard from since the round began: one relay answering
+    /// 502 while twenty-five others complete their handshakes is that relay's
+    /// problem (the skip list's), not the internet's. Any success, or
+    /// anything heard, resets it.
+    pub fn note_internet_round(
+        &self,
+        any_succeeded: bool,
+        any_tried: bool,
+        started: std::time::Instant,
+    ) {
         if !any_tried {
             return;
         }
+        let heard = crate::relay_health::internet_heard_since(started);
         let mut until = self.internet_down_until.lock().unwrap();
-        *until = if any_succeeded {
+        *until = if any_succeeded || heard {
             None
         } else {
             Some(std::time::Instant::now() + INTERNET_DOWN_FOR)
@@ -3459,7 +3483,9 @@ impl Content {
                     }
                     crate::ip_source::query_relay_filters(&url, filters).await
                 };
-                match tokio::time::timeout(std::time::Duration::from_secs(15), dial).await {
+                match crate::relay_health::timeout(&url, std::time::Duration::from_secs(15), dial)
+                    .await
+                {
                     Ok(Ok(evs)) => evs,
                     _ => Vec::new(),
                 }
