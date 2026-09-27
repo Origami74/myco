@@ -799,16 +799,7 @@ class MainActivity : ComponentActivity() {
      * than a second card for the same app.
      */
     private fun nappletIntent(pointer: String, title: String): Intent =
-        Intent(this, NappletActivity::class.java).apply {
-            action = Intent.ACTION_VIEW
-            // Keyed on the addressable pointer, not the napplet's identity: its
-            // identity is its aggregate hash and changes every build, so keying
-            // the task on it would strand the Recents card on update.
-            data = NappletActivity.documentUri(pointer)
-            putExtra(NappletActivity.EXTRA_POINTER, pointer)
-            putExtra(NappletActivity.EXTRA_TITLE, title)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
-        }
+        NappletActivity.intent(this, pointer, title)
 
     /** Pin an nsite to the home screen as an app-like shortcut (favicon + title). */
     private fun pinToHomeScreen(hostLabel: String, title: String) {

@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Open an app right after adding it.** Tapping "Add to my apps" used to show
+  "Adding…" and then the sheet just vanished, as if nothing had happened. Now
+  it stays up once the app lands — "<App> was added to your apps" (or
+  "downloaded again") with **Open** and **Done**. Open starts the app in its
+  own window, also when the sheet was opened from a link inside another
+  napplet.
 - **An updated napplet offers a restart.** A napplet window keeps the version
   it opened, so re-opening one that sat in the background used to bring back
   the old version after an update. Now, when it comes back and a newer version

@@ -1424,6 +1424,7 @@ impl AppRuntime {
                 pointer: pointer.to_string(),
                 loading: false,
                 installing: false,
+                added: false,
                 installed: false,
                 ready: false,
                 unreviewed: Vec::new(),
@@ -1483,6 +1484,7 @@ impl AppRuntime {
             pointer: pointer.clone(),
             loading: true,
             installing: false,
+            added: false,
             installed,
             ready,
             unreviewed: Vec::new(),
@@ -1528,6 +1530,7 @@ impl AppRuntime {
                         pointer: pointer.clone(),
                         loading: false,
                         installing: false,
+                        added: false,
                         installed,
                         ready,
                         unreviewed,
@@ -1546,6 +1549,7 @@ impl AppRuntime {
                         pointer: pointer.clone(),
                         loading: false,
                         installing: false,
+                        added: false,
                         installed,
                         ready,
                         unreviewed: Vec::new(),
@@ -1565,8 +1569,9 @@ impl AppRuntime {
 
     /// The user said yes: download the reviewed napplet's bytes, verify them
     /// against the manifest they reviewed, and only then record the grants and
-    /// pin it to the Library. The sheet shows "Adding…" meanwhile and closes
-    /// when the app lands; a failed download turns it into the error screen.
+    /// pin it to the Library. The sheet shows "Adding…" meanwhile; when the
+    /// app lands it stays up as "added", offering to open it, until the user
+    /// closes it. A failed download turns it into the error screen.
     fn install_napplet(&mut self, pointer: &str, granted: Vec<String>) {
         use nostr::nips::nip19::ToBech32;
         let Ok(addr) = crate::napplet::NappletAddr::parse(pointer) else {
@@ -1591,8 +1596,8 @@ impl AppRuntime {
                 tracing::warn!("install for {pointer} with no review open");
                 return;
             };
-            // A second tap while the first download runs.
-            if review.installing {
+            // A second tap while the first download runs, or after it landed.
+            if review.installing || review.added {
                 return;
             }
             review.clone()
@@ -1618,7 +1623,9 @@ impl AppRuntime {
 
         // No manifest: the review was opened by a served version that
         // declares more than was reviewed. Its bytes are already here, so
-        // the answer is recorded now.
+        // the answer is recorded now. The sheet closes rather than turning
+        // "added": the app is already running beside it, so there is nothing
+        // to offer to open.
         let Some(manifest) = reviewed.manifest.clone() else {
             if !keep_grants {
                 record.apply(&content);
@@ -1651,29 +1658,21 @@ impl AppRuntime {
                     break;
                 }
             }
-            match ingested {
+            let outcome = match ingested {
                 Ok(_) => {
                     if keep_grants {
                         tracing::info!("{} downloaded again; grants kept", record.pointer);
                     } else {
                         record.apply(&content);
                     }
-                    // The question has been answered and the app is here: the
-                    // sheet goes away.
-                    clear_napplet_review(&review, &record.pointer);
+                    Ok(())
                 }
                 Err(e) => {
                     tracing::warn!("could not download napplet {}: {e}", record.pointer);
-                    settle_napplet_review(
-                        &review,
-                        crate::napplet::NappletReview {
-                            installing: false,
-                            error: e.to_string(),
-                            ..reviewed
-                        },
-                    );
+                    Err(e.to_string())
                 }
-            }
+            };
+            settle_napplet_install(&review, reviewed, outcome);
             content.refresh_napplet_status().await;
         });
     }
@@ -2794,6 +2793,7 @@ impl NappletOpenRequest {
                 pointer: self.pointer.clone(),
                 loading: false,
                 installing: false,
+                added: false,
                 installed: true,
                 // It opened, so its files are here.
                 ready: true,
@@ -2889,6 +2889,35 @@ fn clear_napplet_review(
     }
 }
 
+/// Land a finished install download in the review slot, if the sheet is still
+/// the one it was for.
+///
+/// Success keeps the sheet up in its "added" state rather than closing it: a
+/// sheet that simply vanished when the app landed read as nothing having
+/// happened, and the user's next step is usually to open what they just
+/// added. Failure turns it into the error screen. Returns whether the outcome
+/// was kept.
+fn settle_napplet_install(
+    slot: &std::sync::Mutex<Option<crate::napplet::NappletReview>>,
+    reviewed: crate::napplet::NappletReview,
+    outcome: Result<(), String>,
+) -> bool {
+    let settled = match outcome {
+        Ok(()) => crate::napplet::NappletReview {
+            installing: false,
+            added: true,
+            error: String::new(),
+            ..reviewed
+        },
+        Err(error) => crate::napplet::NappletReview {
+            installing: false,
+            error,
+            ..reviewed
+        },
+    };
+    settle_napplet_review(slot, settled)
+}
+
 /// Land a finished napplet fetch in the review slot — but only if the slot
 /// still names the pointer the fetch was for.
 ///
@@ -2909,7 +2938,7 @@ fn settle_napplet_review(
     } else {
         tracing::info!(
             pointer = %outcome.pointer,
-            "napplet fetch finished after its review was dismissed or moved on; result dropped"
+            "napplet fetch or download finished after its review was dismissed or moved on; result dropped"
         );
         false
     }
@@ -3781,11 +3810,128 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A download that lands leaves the sheet up in its "added" state — not
+    /// cleared, which read as nothing having happened — and it stays until
+    /// the user closes it. Add is not taken a second time from it.
+    #[test]
+    fn a_landed_install_keeps_the_sheet_up_until_dismissed() {
+        use crate::content::LibraryKind;
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = temp_dir("install-added");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        // A pointer that parses, so the Add below gets as far as the guard:
+        // with no manifest on the review, an Add that got past it would record
+        // the install and close the sheet on the spot.
+        let npub = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        let pointer = format!("{npub}:chat");
+        let mut reviewed = review_for(&pointer, false);
+        reviewed.title = "Chat".to_string();
+        let mut installing = reviewed.clone();
+        installing.installing = true;
+        *rt.napplet_review.lock().unwrap() = Some(installing);
+
+        assert!(settle_napplet_install(&rt.napplet_review, reviewed, Ok(())));
+        let added = rt
+            .napplet_review
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the sheet closed when the app landed");
+        assert!(added.added && !added.installing && added.error.is_empty());
+        assert_eq!(added.title, "Chat", "the sheet lost what it was about");
+
+        // A stray Add on the added sheet starts nothing.
+        rt.dispatch(NativeAppAction::InstallNapplet {
+            pointer: pointer.clone(),
+            granted: vec!["shell".to_string()],
+        });
+        let still = rt
+            .napplet_review
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a second Add on the added sheet went through");
+        assert!(still.added && !still.installing);
+        assert!(
+            !rt.content
+                .as_ref()
+                .unwrap()
+                .library_snapshot()
+                .iter()
+                .any(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("chat")),
+            "a second Add on the added sheet recorded an install"
+        );
+
+        rt.dispatch(NativeAppAction::DismissNappletReview);
+        assert!(rt.napplet_review.lock().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An added sheet is a confirmation, not a question: asking for another
+    /// napplet — a scan, or a napplet's link — replaces it at once.
+    #[test]
+    fn a_new_review_replaces_an_added_one() {
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = temp_dir("review-replaces-added");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let npub = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        *rt.napplet_review.lock().unwrap() = Some(crate::napplet::NappletReview {
+            added: true,
+            ..review_for(&format!("{npub}:chat"), false)
+        });
+
+        let next = format!("{npub}:other");
+        rt.dispatch(NativeAppAction::FetchNapplet {
+            pointer: next.clone(),
+            holder: None,
+        });
+        let current = rt.napplet_review.lock().unwrap().clone().unwrap();
+        assert_eq!(current.pointer, next);
+        assert!(
+            !current.added,
+            "the new review inherited the old one's added"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed download still turns the sheet into the error screen, never
+    /// "added"; and an outcome for a sheet the user already closed stays out.
+    #[test]
+    fn a_failed_install_shows_the_error_and_a_closed_sheet_stays_closed() {
+        let slot = std::sync::Mutex::new(Some(crate::napplet::NappletReview {
+            installing: true,
+            ..review_for("naddr1a", false)
+        }));
+        assert!(settle_napplet_install(
+            &slot,
+            review_for("naddr1a", false),
+            Err("no source had this napplet".to_string())
+        ));
+        let failed = slot.lock().unwrap().clone().unwrap();
+        assert_eq!(failed.error, "no source had this napplet");
+        assert!(!failed.added && !failed.installing);
+
+        *slot.lock().unwrap() = None;
+        assert!(!settle_napplet_install(
+            &slot,
+            review_for("naddr1a", false),
+            Ok(())
+        ));
+        assert!(slot.lock().unwrap().is_none());
+    }
+
     fn review_for(pointer: &str, loading: bool) -> crate::napplet::NappletReview {
         crate::napplet::NappletReview {
             pointer: pointer.to_string(),
             loading,
             installing: false,
+            added: false,
             installed: false,
             ready: false,
             unreviewed: Vec::new(),

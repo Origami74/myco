@@ -528,14 +528,18 @@ see what is on screen:
   overlay on the napplet's window) **over the running napplet**, so the user keeps their
   place. Nothing on this path installs: "Add" on the sheet is the user's answer, which is
   §7.7's rule — a napplet can never install directly. The review slot is the app-wide
-  one, so a sheet dismissed in the napplet is dismissed everywhere.
+  one, so a sheet dismissed in the napplet is dismissed everywhere. Once the download
+  lands the sheet stays up as "added" (`NappletReview.added`) and offers **Open**, which
+  starts the new napplet in its own task — the same intent the Apps grid uses — beside
+  the one that asked.
 - Any other scheme, another NIP-19 entity (`npub`, `note`…), or an `naddr` of a
   non-napplet kind → `denied` / `unsupported-scheme`. Malformed → `invalid-url`.
 
 `opened` means "handed to a surface the user answers", not "the user accepted"; a
 napplet learns nothing about what happened next. Admission (`LinkGate` in
 `myco-core/src/napplet.rs`, device-wide) refuses with `blocked-by-policy` while a review
-is already in the slot, within 5 s of the last admitted review link, and within 2 s of
+is already in the slot and still asking (an "added" sheet is a confirmation, not a question: a
+link is admitted over it and its review replaces it), within 5 s of the last admitted review link, and within 2 s of
 the last admitted web link — so a napplet cannot stack or spam sheets or browser tabs.
 `options.label` is untrusted display text and is never shown or used to decide
 anything.
