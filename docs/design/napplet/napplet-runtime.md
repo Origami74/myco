@@ -428,10 +428,91 @@ through it.
 Relay access sits behind one resolver with three lanes: the local relay, mesh relays
 addressed as `ws://<npub>.fips:4870`, and internet relays when reachable (§7.4).
 `relay.query` reads the whole pool — the local relay and the configured relays unless
-offline-only — bounded and deduplicated by id; `relay.subscribe` answers the local backlog,
-sends `EOSE`, and pulls the pool into the local relay behind it, so what arrives is
-delivered live. `options.relay` targets one relay instead, validated like any
-napplet-named URL. Relay selection *by author* is NAP-OUTBOX's (S3).
+offline-only — bounded and deduplicated by id, and answers early (see "Local first" below);
+`relay.subscribe` answers the local backlog, sends `EOSE`, and pulls the pool into the local
+relay behind it, so what arrives is delivered live. `options.relay` targets one relay
+instead, validated like any napplet-named URL. Relay selection *by author* is NAP-OUTBOX's
+(S3).
+
+#### Local first: reads are streams, not requests
+
+Every read starts from this device's relay, and no read waits out a slow relay's timeout
+for what is already here. A subscription shows it at once. A query's lanes answer within
+1.5 s of starting once this device has events — but an outbox query plans first, and a
+plan naming an author with no relay list here waits up to 4 s for the lookup (once: a
+lookup that found nothing is not repeated for a minute, or ten when every relay said no).
+What the specs allow shapes how:
+
+- **Subscriptions stream, for as long as they are open.** `relay.subscribe` and
+  `outbox.subscribe` answer the local backlog at once. Each remote lane — planned, or
+  named by the napplet in `options.relays` (at most 10) — then gets a `REQ` held open for
+  the subscription's life: its stored events and then every new one land in the local
+  relay as they come, and are delivered from there. The local relay dedupes by id, so an
+  event two relays hold is delivered once. A stream that drops is re-opened with backoff
+  (5 s doubling to 5 min, with jitter; back to 5 s after a minute up). A reconnect asks only
+  for what is newer than a minute before the last connection that reached `EOSE`; a
+  connection that failed or dropped before `EOSE` does not move that point. A stream pings
+  every 30 s and is given up after 90 s with nothing heard, and ends within a few seconds
+  of "offline only" being switched on. Only events the subscription's filters match are
+  kept — a relay sending anything else has it dropped — and a stream holds at most 256
+  events in hand before it waits for the store. `relay.close` / `outbox.close` and
+  closing the window tear the streams down.
+  - Bounded: 16 open streams per napplet, 64 for the app. A lane past the bound is pulled
+    once instead.
+  - A mesh lane has no `REQ` of its own to hold — the Circle pool keeps one connection per
+    peer — so it is re-asked every 45 s (plus jitter). What Circle members publish reaches
+    this device through the flood anyway.
+- **`EOSE` marks the end of this device's backlog.** NAP-RELAY sends it "when stored events
+  are exhausted"; the local relay is the shell's store, so it goes right after the backlog.
+  Pulled events arrive after it, as live events. Holding `EOSE` until the fast relays had
+  answered was considered and not done: pulled events reach a napplet through the hub's live
+  bus, which has no ordering against a frame pushed separately, so a late `EOSE` could
+  overtake the events it was meant to follow. NAP-OUTBOX has no `eose` at all.
+- **One-shot reads answer early.** `relay.query` and `outbox.query` have exactly one
+  result frame (NAP-RELAY: "collect until EOSE", NAP-OUTBOX: "one-shot"), so they cannot
+  stream. `LaneTransport::query_early` answers:
+  - 400 ms after the first **remote** lane returns events;
+  - at 1.5 s if only this device has returned events by then — and 1.5 s is a hard
+    ceiling from the moment this device has events, whatever the other lanes do. The local
+    lane answers in a millisecond and may hold a stale profile; a cold TLS dial on a phone
+    does not fit in a grace counted from that;
+  - at once when every lane has finished;
+  - never after the timeout.
+
+  A lane not heard from reads as unreached, so `outbox.query` says `incomplete`.
+  `relay.query` cannot: its result is `id`, `events` and an optional `error`, and the shim
+  hands the napplet the events alone. `outbox.getEvent` answers from the first lane that
+  has the id, this device included: an event never changes.
+- **Only the newest of a replaceable is returned.** Lanes answer from different stores, so
+  a query merges them the way one NIP-01 relay would: newest per kind and author
+  (replaceable) or per kind, author and `d` (addressable).
+- **What arrives late is kept.** The lanes an answer went without keep running. What they
+  find is accepted into the local relay, unforwarded — stored, and delivered to live
+  subscriptions — so the next read has it. What the answer did include is offered to the
+  keep-seen tap (profiles, relay lists, manifests), as before. A lane goes one way or the
+  other, never both. Late lanes still count for the internet breaker.
+- **Background work is bounded per napplet.** At most four query rounds run behind a
+  napplet's answers at once (`MAX_BACKGROUND_PER_NAPPLET`); a query's leftover lanes are
+  dropped when there is no slot, since the napplet has its answer. Streams have their own
+  bound (above). All of it is tied to a `WorkScope`: closing a subscription stops its
+  streams, and closing the window stops everything it started.
+- **An outbox plan is made behind the answer.** An outbox subscription plans
+  (`pull_plan_into_local`) after its backlog has gone out. A plan looks up every author
+  with no relay list here in one round, one `REQ` per relay (100 authors per filter), on:
+  the configured relays, the indexers (`ip_source::indexer_relays`), the relays the napplet
+  named, and every Circle member's relay. An author another plan is already looking up is
+  waited for, not asked for twice. Stored lists, the indexers and the memory of authors
+  with no list are `ip_source::AuthorOutbox`'s, shared with the manifest lookups. An
+  author is remembered as having no list for ten minutes only when the napplet named no
+  relays and every relay asked answered to the end; otherwise (a timeout, or relays
+  named) for a minute, so the next call does not repeat the lookup.
+- **A stored list is re-checked by when it was last checked, not by its age.** A list is
+  fresh if it was published in the last day or this device asked about its author in the
+  last 6 h. Otherwise the plan uses it and the plan's stale authors are re-checked
+  together, in one round behind the answer. (Judging by `created_at` alone made nearly
+  every real list stale on every plan, one lookup per author.)
+- **One relay, one lane.** Lanes are deduplicated with the trailing slash ignored, so
+  `wss://relay.damus.io` and `wss://relay.damus.io/` share one socket.
 
 **Napplet-named relays are shell policy.** NAP-RELAY prescribes `options.relay` (NIP-29
 groups are its example) and says "the shell controls which relays the napplet can access";
@@ -499,14 +580,16 @@ is not yet claimed — the resolver needs the same normalization regardless.
 `resolveRelays`. Two seams — `OutboxResolver` (a NIP-65 plan per direction, with `source`
 and `missing_authors`) and `LaneTransport` (`query` / `publish` / `pull_into_local` over the
 three `RelayLane`s) — implemented by `OutboxService` in `myco-core/src/outbox.rs`. Reads
-wait for their lanes, bounded, and say `incomplete` when one never answered. A publish
+wait for their lanes, bounded but early (see "Local first" in S2), and say `incomplete`
+when one was not heard from. A publish
 answers at a quorum (`LaneTransport::publish_quorum`): once the event is stored here and two
 other lanes — or the only one — have taken it; the rest finish in the background and are
 absent from the result's `relays` map, which lists what answered in time. A publish naming
 `toInboxes` waits for every lane, since the spec makes an inbox a required target whose
 failure must be reported. A
-subscribe answers the local backlog and pulls the remote lanes *into* the local relay, which
-is what delivers them live (the spec has no `outbox.eose`, and this is why). Napplet-supplied
+subscribe answers the local backlog and pulls the remote lanes *into* the local relay, lane
+by lane as each answers, which is what delivers them live (the spec has no `outbox.eose`,
+and this is why). Napplet-supplied
 relay URLs are validated: `ws`/`wss` only, never loopback or a private network. An author
 whose kind 10002 the local store lacks is looked up in the pool once (the configured relays
 and every Circle member's mesh relay, bounded), stored — the local relay is the cache — and

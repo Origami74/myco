@@ -668,6 +668,7 @@ impl crate::seams::LaneTransport for OutboxFixture {
         &self,
         lanes: &[crate::seams::RelayLane],
         filters: &[nostr::Filter],
+        _scope: &crate::seams::WorkScope,
     ) -> anyhow::Result<()> {
         self.pulled
             .lock()

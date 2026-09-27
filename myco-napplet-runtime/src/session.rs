@@ -12,8 +12,11 @@
 //! runtime to be tricked into trusting.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use nostr::{Event, Filter};
+
+use crate::seams::{ScopeOwner, WorkScope};
 
 /// NAP domains this build actually implements.
 ///
@@ -148,6 +151,14 @@ pub struct Session {
     subscriptions: BTreeMap<(String, String), Vec<Filter>>,
     /// Light or dark, as the window host last reported. See [`Appearance`].
     appearance: Appearance,
+    /// The work this session started that outlives a call — cancelled when
+    /// the session (every clone of it) is gone, which is the window closing.
+    /// Shared by the snapshots a read runs against, so their work is the
+    /// session's.
+    work: Arc<ScopeOwner>,
+    /// Per live subscription, the same: closing or replacing a subscription
+    /// drops its owner and stops its remote pull.
+    sub_work: BTreeMap<(String, String), Arc<ScopeOwner>>,
 }
 
 impl Session {
@@ -173,6 +184,25 @@ impl Session {
             established: false,
             subscriptions: BTreeMap::new(),
             appearance: Appearance::default(),
+            work: Arc::new(ScopeOwner::new()),
+            sub_work: BTreeMap::new(),
+        }
+    }
+
+    /// The scope for work this session starts outside any subscription —
+    /// what a query leaves running behind its answer.
+    pub fn work(&self) -> WorkScope {
+        self.work.scope()
+    }
+
+    /// The scope for a subscription's work: stopped when the subscription
+    /// closes or the session does. The session's own scope if `sub_id` is
+    /// not live.
+    pub fn sub_work(&self, domain: &str, sub_id: &str) -> WorkScope {
+        let session = self.work.scope();
+        match self.sub_work.get(&(domain.to_string(), sub_id.to_string())) {
+            Some(sub) => session.with(sub),
+            None => session,
         }
     }
 
@@ -288,6 +318,9 @@ impl Session {
                 "too many live subscriptions ({MAX_SUBSCRIPTIONS}); close one first"
             ));
         }
+        // A new owner: replacing a subscription stops the old one's pull.
+        self.sub_work
+            .insert(key.clone(), Arc::new(ScopeOwner::new()));
         self.subscriptions.insert(key, filters);
         Ok(())
     }
@@ -300,8 +333,9 @@ impl Session {
 
     /// Drop a subscription in `domain`. Unknown ids are ignored.
     pub fn unsubscribe_in(&mut self, domain: &str, sub_id: &str) {
-        self.subscriptions
-            .remove(&(domain.to_string(), sub_id.to_string()));
+        let key = (domain.to_string(), sub_id.to_string());
+        self.subscriptions.remove(&key);
+        self.sub_work.remove(&key);
     }
 
     /// How many subscriptions are live — for state reporting and tests.
@@ -462,5 +496,37 @@ mod tests {
         let before = s.identity().clone();
         s.on_ready();
         assert_eq!(s.identity(), &before);
+    }
+
+    /// Background work is tied to what started it: closing a subscription,
+    /// or replacing it, stops its work; the session's own scope lives as
+    /// long as any copy of the session and stops when the last goes.
+    #[test]
+    fn work_scopes_end_with_their_subscription_and_their_session() {
+        let mut s = Session::new(NappletIdentity::new("chat", "aggregate"), ["relay"]);
+        s.subscribe("sub-1", Vec::new()).unwrap();
+        let replaced = s.sub_work("relay", "sub-1");
+        let session = s.work();
+        assert!(replaced.id().is_some() && replaced.id() == session.id());
+
+        s.subscribe("sub-1", Vec::new()).unwrap();
+        assert!(replaced.is_cancelled(), "replacing kept the old pull");
+        let sub = s.sub_work("relay", "sub-1");
+        s.unsubscribe("sub-1");
+        assert!(sub.is_cancelled(), "closing kept the pull");
+        assert!(!session.is_cancelled());
+
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = fired.clone();
+        session.on_cancel(move || flag.store(true, std::sync::atomic::Ordering::SeqCst));
+        let snapshot = s.clone();
+        drop(s);
+        assert!(
+            !session.is_cancelled(),
+            "a snapshot still holds the session"
+        );
+        drop(snapshot);
+        assert!(session.is_cancelled());
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

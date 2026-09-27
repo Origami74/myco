@@ -23,6 +23,64 @@ use crate::dispatch::NapContext;
 use crate::seams::Envelope;
 use crate::session::Session;
 
+/// When `relay.query` and `outbox.query` answer. They have one result frame;
+/// whatever is not in it by then is not in it at all. See
+/// [`crate::seams::EarlyAnswer`].
+///
+/// - `grace` 400 ms after the first **remote** lane returns events: long
+///   enough for a relay about as fast as the first to make it in, short
+///   enough that one slow relay does not hold the answer to its timeout.
+/// - `local_cap` 1.5 s when only this device has answered with events: long
+///   enough for a cold TLS dial on a phone to bring a newer replaceable than
+///   the one held here, short enough that a napplet reopening offline, or
+///   with every relay slow, paints from what it has. Such an answer says
+///   `incomplete` where the wire can (`outbox.query`).
+///
+/// The lanes left out keep going behind the answer, and what they find is
+/// kept here for the next read (see `LaneTransport::query_early`).
+pub(crate) const QUERY_EARLY: crate::seams::EarlyAnswer = crate::seams::EarlyAnswer {
+    grace: std::time::Duration::from_millis(400),
+    local_cap: std::time::Duration::from_millis(1500),
+};
+
+/// `events` with only the newest of each replaceable (per kind and author)
+/// and addressable (per kind, author and `d`) — what one NIP-01 relay would
+/// return. Lanes answer from different stores, and this device's may hold a
+/// profile the relay has since replaced; a napplet shown both would have to
+/// know to pick. Regular events pass through, one per id. Newest first.
+pub(crate) fn newest_per_slot(events: impl IntoIterator<Item = Event>) -> Vec<Event> {
+    use std::collections::HashMap;
+    let mut slots: HashMap<(u16, nostr::PublicKey, String), Event> = HashMap::new();
+    let mut regular: HashMap<nostr::EventId, Event> = HashMap::new();
+    for event in events {
+        let d = if event.kind.is_addressable() {
+            Some(event.tags.identifier().unwrap_or_default().to_string())
+        } else if event.kind.is_replaceable() {
+            Some(String::new())
+        } else {
+            None
+        };
+        match d {
+            Some(d) => {
+                let key = (event.kind.as_u16(), event.pubkey, d);
+                let newer = slots.get(&key).is_none_or(|held| {
+                    (event.created_at, std::cmp::Reverse(event.id))
+                        > (held.created_at, std::cmp::Reverse(held.id))
+                });
+                if newer {
+                    slots.insert(key, event);
+                }
+            }
+            None => {
+                regular.entry(event.id).or_insert(event);
+            }
+        }
+    }
+    let mut out: Vec<Event> = slots.into_values().chain(regular.into_values()).collect();
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+    out
+}
+
 /// The domains that keep live subscriptions, each delivering `<domain>.event`.
 const SUBSCRIBING_DOMAINS: [&str; 3] = ["relay", "mesh", "outbox"];
 
@@ -200,5 +258,47 @@ mod tests {
             0,
             "the failed subscription stayed registered"
         );
+    }
+
+    /// Lanes answer from different stores: only the newest of each
+    /// replaceable and addressable slot reaches the napplet, and a regular
+    /// event twice is once.
+    #[test]
+    fn only_the_newest_of_a_replaceable_is_returned() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+        let keys = Keys::generate();
+        let at = |secs: u64, b: EventBuilder| {
+            b.custom_created_at(Timestamp::from(secs))
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let old_profile = at(100, EventBuilder::new(Kind::Metadata, "{}"));
+        let new_profile = at(200, EventBuilder::new(Kind::Metadata, "{}"));
+        let d = |v: &str| Tag::parse(["d", v]).unwrap();
+        let app_a_old = at(
+            100,
+            EventBuilder::new(Kind::from(35129u16), "").tags([d("a")]),
+        );
+        let app_a_new = at(
+            300,
+            EventBuilder::new(Kind::from(35129u16), "").tags([d("a")]),
+        );
+        let app_b = at(
+            150,
+            EventBuilder::new(Kind::from(35129u16), "").tags([d("b")]),
+        );
+        let note = at(50, EventBuilder::text_note("hi"));
+
+        let out = newest_per_slot([
+            old_profile,
+            new_profile.clone(),
+            app_a_new.clone(),
+            app_a_old,
+            app_b.clone(),
+            note.clone(),
+            note.clone(),
+        ]);
+        let ids: Vec<_> = out.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![app_a_new.id, new_profile.id, app_b.id, note.id]);
     }
 }

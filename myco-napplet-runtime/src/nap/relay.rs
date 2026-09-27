@@ -64,7 +64,7 @@ pub async fn handle(
     message: &Envelope,
 ) -> Vec<Envelope> {
     match message.action() {
-        "query" => vec![query(ctx, message).await],
+        "query" => vec![query(ctx, session, message).await],
         "publish" => vec![publish(ctx, message).await],
         "subscribe" => subscribe(ctx, session, message).await,
         "close" => {
@@ -89,29 +89,48 @@ pub async fn handle(
 /// configured relays when reachable — the policy plan — each bounded, merged
 /// and deduplicated by id. No relay selection by author here; that is
 /// NAP-OUTBOX's, and a napplet that wants it asks there.
-async fn query(ctx: &NapContext, message: &Envelope) -> Envelope {
+///
+/// The spec answers a query with one `relay.query.result`, so it cannot
+/// stream; it answers early instead ([`crate::nap::QUERY_EARLY`]). A relay
+/// that is down or slow costs the grace, not its timeout; what it finds
+/// later is kept here for the next read. A napplet that wants every relay's
+/// answer as it comes subscribes.
+///
+/// No `incomplete` here: NAP-RELAY's `relay.query.result` is `id`, `events`
+/// and an optional `error`, and the shim hands the napplet the events alone,
+/// so a field outside the spec would reach nobody. `outbox.query` has it.
+async fn query(
+    ctx: &NapContext,
+    session: &crate::session::Session,
+    message: &Envelope,
+) -> Envelope {
     let filters = match filters_from(message) {
         Ok(filters) => filters,
         Err(e) => return message.to_error(e),
     };
 
     let lanes = pool_lanes(ctx).await;
-    let answers = ctx.lanes.query(&lanes, &filters, POOL_QUERY_TIMEOUT).await;
-    let mut by_id: std::collections::HashMap<nostr::EventId, nostr::Event> =
-        std::collections::HashMap::new();
+    let answers = ctx
+        .lanes
+        .query_early(
+            &lanes,
+            &filters,
+            POOL_QUERY_TIMEOUT,
+            crate::nap::QUERY_EARLY,
+            &session.work(),
+        )
+        .await;
+    let mut all: Vec<nostr::Event> = Vec::new();
     let mut reached_any = false;
     for (_, events) in answers {
         let Some(events) = events else { continue };
         reached_any = true;
-        for event in events {
-            by_id.entry(event.id).or_insert(event);
-        }
+        all.extend(events);
     }
     if !reached_any {
         return message.to_error("query failed: no relay answered");
     }
-    let mut events: Vec<nostr::Event> = by_id.into_values().collect();
-    events.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+    let events = crate::nap::newest_per_slot(all);
     let results: Vec<serde_json::Value> = events.iter().map(result_of).collect();
     message
         .to_result()
@@ -238,7 +257,8 @@ async fn subscribe(
             .collect(),
     };
     if !remote.is_empty() {
-        if let Err(e) = ctx.lanes.pull_into_local(&remote, &filters).await {
+        let scope = session.sub_work("relay", &sub_id);
+        if let Err(e) = ctx.lanes.pull_into_local(&remote, &filters, &scope).await {
             tracing::warn!(sub_id, error = %e, "relay pool pull could not be started");
         }
     }

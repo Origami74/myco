@@ -45,6 +45,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remembers that list for next time. `relay.ditto.pub`, where many apps are
   published, is now one of the default relays; `relay.nostr.band`, which no
   longer answers, is dropped.
+- **Apps open with what your phone already has.** An app that reads Nostr
+  data (the AppStore, for one) used to wait for the slowest relay before it
+  showed anything, even when your phone already held the answer — so it
+  reopened slowly whenever a public relay was down or slow. A lookup now
+  waits a moment for the relays that answer quickly (so a newer profile
+  still wins over the copy on your phone) and at most about a second and
+  a half when only your phone has answered. Relays that answer later are
+  not wasted: what they send is saved on your phone for next time, and
+  live views get it as it arrives.
+- **Open apps keep receiving new posts.** An app watching for new events
+  (a feed, a chat, someone's app list) used to ask each relay once and
+  then hear only what came through your Circle. Relays now stay connected
+  for as long as the app is watching, and new events arrive as they are
+  published; closing the view or the app disconnects them.
+- **Profiles show all of a person's apps.** Looking up where someone
+  publishes now also asks the index relays and any relays the app
+  suggests, so people who publish only on their own relays (hzrd149's
+  apps on nostr.wine, for one) are found. A person is no longer marked
+  as "nowhere to be found" because a relay was slow to answer.
 
 ## [0.8.0] - 2026-09-26
 
