@@ -353,7 +353,7 @@ over.
 How the window tells the two apart: `NappletActivity` dispatches a real
 `KEYCODE_ESCAPE` down and up into the WebView. A key the page does not consume comes
 back through `WebViewClient.onUnhandledKeyEvent` as the same `KeyEvent` object; an
-unhandled key-down from its own back closes the window, and a consumed one is never
+unhandled key-down from its own back sends the window behind, and a consumed one is never
 reported. The shell keeps keyboard focus in the napplet's frame so the napplet is the
 one that hears it. If focus somehow sits in the shell, the shell does not consume
 Escape, so back sends the window behind. It does the same while the napplet is still

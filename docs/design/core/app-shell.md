@@ -246,7 +246,8 @@ until then these two explicit actions are the only reclamation path.
 
 A napplet launches exactly like an nsite — its own task, its own Recents card,
 no chrome, `myco://napplet/<naddr>` as the intent — but in `NappletActivity`,
-not `NsiteActivity`, because the content is a program. The WebView loads a
+not `NsiteActivity`, because the content is a program. Back differs too: it
+closes an nsite window but sends a napplet window to the background, running. The WebView loads a
 trusted **shell page** from the APK at `<label>.napplet.localhost`; the shell
 mounts the verified napplet in a `sandbox="allow-scripts"` `srcdoc` iframe,
 whose origin is opaque. The napplet reaches nothing but the shell, by

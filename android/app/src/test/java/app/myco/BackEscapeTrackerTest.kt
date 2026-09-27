@@ -8,7 +8,7 @@ import org.junit.Test
 /**
  * Back in a napplet is an Escape the napplet may consume. These pin how its
  * answer is read, and that a napplet consuming every Escape cannot keep the
- * user in it: after three consumed backs with no touch, back closes.
+ * user in it: after three consumed backs with no touch, back leaves.
  */
 class BackEscapeTrackerTest {
     private val noTouch = 0L
@@ -21,7 +21,7 @@ class BackEscapeTrackerTest {
     }
 
     @Test
-    fun an_unhandled_keydown_of_ours_closes() {
+    fun an_unhandled_keydown_of_ours_leaves() {
         val t = BackEscapeTracker()
         assertFalse(t.shouldLeaveDirectly(1_000, noTouch))
         t.sent(1_000)
@@ -54,7 +54,7 @@ class BackEscapeTrackerTest {
     }
 
     @Test
-    fun three_consumed_backs_then_the_fourth_closes() {
+    fun three_consumed_backs_then_the_fourth_leaves() {
         val t = BackEscapeTracker()
         t.consumedBack(1_000)
         t.consumedBack(2_000)
@@ -122,5 +122,24 @@ class BackEscapeTrackerTest {
         assertTrue(t.shouldLeaveDirectly(1_300, noTouch))
         t.reset()
         assertFalse(t.shouldLeaveDirectly(1_400, noTouch))
+    }
+
+    @Test
+    fun escapes_in_flight_at_reset_stay_outstanding_but_stop_counting() {
+        val t = BackEscapeTracker()
+        val noTouch = 0L
+        // A hung napplet: three backs unanswered, the fourth leaves.
+        for (at in listOf(1_000L, 1_100L, 1_200L)) t.sent(at)
+        assertTrue(t.shouldLeaveDirectly(1_300, noTouch))
+        t.reset()
+        // Still in flight, so an unresponsive renderer is still closed...
+        assertTrue(t.outstanding(1_400))
+        // ...but they no longer push the next back out of the window.
+        assertFalse(t.shouldLeaveDirectly(1_400, noTouch))
+        // Their late reports are swallowed, not WebView's to handle.
+        assertEquals(BackEscapeTracker.Report.CONSUMED, t.unhandled(1_000, isDown = true, noTouch))
+        assertEquals(BackEscapeTracker.Report.CONSUMED, t.unhandled(1_000, isDown = false, noTouch))
+        assertEquals(BackEscapeTracker.Report.CONSUMED, t.unhandled(1_100, isDown = false, noTouch))
+        assertFalse(t.shouldLeaveDirectly(1_500, noTouch))
     }
 }
