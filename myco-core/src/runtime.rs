@@ -384,7 +384,13 @@ impl AppRuntime {
                     let content = content.clone();
                     Arc::new(move || content.is_offline_only())
                 },
-                relays: crate::ip_source::default_relays(),
+                // The defaults, plus the indexers, which are where other
+                // clients look up a profile and its relay lists.
+                relays: {
+                    let mut relays = crate::ip_source::default_relays();
+                    relays.extend(crate::ip_source::indexer_relays());
+                    relays
+                },
                 avatar_servers: crate::account::default_avatar_servers(),
             },
             rt.handle().clone(),
