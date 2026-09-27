@@ -82,6 +82,9 @@ mod lane_observation;
 mod peer_diagnostics;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod peer_relay;
+// Internet relays and Blossom servers not worth dialling right now, for the
+// whole process: every internet dial path checks it first.
+mod relay_health;
 // Bounded queue + drainer between the Kotlin radios' callback threads and the
 // node's control socket, where pushing a platform-discovered peer now lives.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]

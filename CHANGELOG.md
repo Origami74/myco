@@ -64,6 +64,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suggests, so people who publish only on their own relays (hzrd149's
   apps on nostr.wine, for one) are found. A person is no longer marked
   as "nowhere to be found" because a relay was slow to answer.
+- **Broken relays stop slowing things down.** A public relay that refuses
+  Myco, is down, has a bad certificate, or does not exist is now left alone
+  for a while (a minute at first, up to half an hour if it keeps failing)
+  instead of being tried again on every lookup. One that keeps failing to
+  connect while others answer gets a shorter break. Losing your signal,
+  switching networks, or a Wi-Fi login page does not count against any
+  relay. Relays in your Circle, and a custom relay or Blossom server you
+  set in Storage, are never skipped.
+- **Feeds with many people use far fewer connections.** An app showing
+  posts or apps from dozens of people used to connect to every relay any
+  of them listed — up to forty for one view. Myco now picks a handful of
+  relays that between them reach each person twice, preferring relays it
+  is already connected to and avoiding ones that are failing.
+- **One broken relay no longer cuts apps off from the rest.** An app
+  asking a single relay that answered with an error could make Myco
+  believe the internet was down and stop using every public relay for half
+  a minute. Now any answer from the internet counts as the internet
+  working.
 
 ## [0.8.0] - 2026-09-26
 

@@ -113,6 +113,9 @@ pub struct OutboxService {
     /// Background work per napplet session: its bound and its tasks. See
     /// [`SessionWork`].
     work: Arc<Mutex<std::collections::HashMap<u64, Arc<SessionWork>>>>,
+    /// Internet relays with a stream open right now, app-wide, by
+    /// `lane_key`, with how many. A plan prefers a relay already connected.
+    open_streams: Arc<Mutex<std::collections::HashMap<String, usize>>>,
     /// Whether an Internet lane is resolved and refused when its name points
     /// at a private address (see [`dials_public`]). Always on, except in
     /// host tests that dial a mock relay on `127.0.0.1` as an Internet lane.
@@ -147,6 +150,7 @@ impl OutboxService {
             lists_checked: Arc::new(Mutex::new(std::collections::HashMap::new())),
             lists_in_flight: Arc::new(Mutex::new(std::collections::HashMap::new())),
             work: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            open_streams: Arc::new(Mutex::new(std::collections::HashMap::new())),
             guard_private_dials: true,
         }
     }
@@ -194,6 +198,7 @@ impl OutboxService {
             lists_checked: self.lists_checked.clone(),
             lists_in_flight: self.lists_in_flight.clone(),
             work: self.work.clone(),
+            open_streams: self.open_streams.clone(),
             guard_private_dials: self.guard_private_dials,
         })
     }
@@ -379,6 +384,19 @@ impl OutboxService {
             .collect()
     }
 
+    /// Whether a round over this lane would really try the internet: an
+    /// allowed internet lane whose relay is not on the skip list. A round of
+    /// nothing but skipped relays has not tried the internet, and must not
+    /// trip the breaker that would then hold back the good ones.
+    fn tries_internet(&self, lane: &RelayLane) -> bool {
+        match lane {
+            RelayLane::Internet { url } => {
+                self.allowed(lane) && !crate::relay_health::is_skipped(url)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether a lane may be used from this device, per the policy above.
     fn allowed(&self, lane: &RelayLane) -> bool {
         match lane {
@@ -495,6 +513,11 @@ impl OutboxService {
                 Some(events.into_iter().filter(|e| e.verify().is_ok()).collect())
             }
             RelayLane::Internet { url } => {
+                // On the skip list: finished, nothing, at once — not even
+                // resolved. See `relay_health`.
+                if crate::relay_health::is_skipped(url) {
+                    return None;
+                }
                 // One connection, one REQ carrying every filter; verified at
                 // ingress by `query_relay_filters`. The resolve-and-refuse
                 // guard runs inside the same timeout, so a slow resolver
@@ -509,7 +532,7 @@ impl OutboxService {
                     }
                     Some(crate::ip_source::query_relay_filters(url, values).await)
                 };
-                match tokio::time::timeout(timeout, dial).await {
+                match crate::relay_health::timeout(url, timeout, dial).await {
                     Ok(None) => None,
                     Ok(Some(Ok(events))) => Some(events),
                     Ok(Some(Err(e))) => {
@@ -549,6 +572,9 @@ impl OutboxService {
                 true
             }
             RelayLane::Internet { url } => {
+                if crate::relay_health::is_skipped(url) {
+                    return false;
+                }
                 let dial = async {
                     if !self.may_dial(url).await {
                         return false;
@@ -558,7 +584,10 @@ impl OutboxService {
                         Ok(true)
                     )
                 };
-                matches!(tokio::time::timeout(timeout, dial).await, Ok(true))
+                matches!(
+                    crate::relay_health::timeout(url, timeout, dial).await,
+                    Ok(true)
+                )
             }
         }
     }
@@ -601,6 +630,8 @@ pub(crate) async fn dials_public(url: &str) -> bool {
     // literal.
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let Ok(addrs) = tokio::net::lookup_host((host, port)).await else {
+        // The name does not resolve: no dial would get anywhere either.
+        crate::relay_health::record_dns_failure(url);
         return false;
     };
     let mut any = false;
@@ -702,23 +733,64 @@ impl OutboxResolver for OutboxService {
         let mut lanes: Vec<RelayLane> = vec![RelayLane::Local];
         let mut missing = Vec::new();
         let mut any_stale = false;
+        // Each listed author's usable internet relays, for selection below.
+        let mut author_relays: Vec<Vec<String>> = Vec::new();
         // Every author at once: the lists not stored here are looked up in
         // one round, not one author after another.
         let listed = self.listed_for(authors, direction, hints).await;
         for (author, listed) in authors.iter().zip(listed) {
-            match listed {
-                Listed::Fresh(listed) => {
-                    lanes.extend(listed.into_iter().filter(|l| self.allowed(l)))
-                }
+            let listed = match listed {
+                Listed::Fresh(listed) => listed,
                 Listed::Stale(listed) => {
                     any_stale = true;
-                    lanes.extend(listed.into_iter().filter(|l| self.allowed(l)))
+                    listed
                 }
                 Listed::Missing => {
                     missing.push(*author);
                     lanes.extend(self.fallback_lanes());
+                    continue;
+                }
+            };
+            let mut internet = Vec::new();
+            for lane in listed.into_iter().filter(|l| self.allowed(l)) {
+                match lane {
+                    // Mesh lanes are the Circle's, one pooled connection per
+                    // peer: always kept.
+                    RelayLane::Internet { url } if direction == Direction::Read => {
+                        internet.push(url)
+                    }
+                    other => lanes.push(other),
                 }
             }
+            author_relays.push(internet);
+        }
+        if direction == Direction::Read {
+            // Reading: enough relays to find every author twice, not every
+            // relay every author names. (Writing to inboxes is a delivery
+            // contract — every relay — so it is not narrowed.)
+            let candidates = {
+                let mut keys = std::collections::HashSet::new();
+                author_relays
+                    .iter()
+                    .flatten()
+                    .filter(|u| keys.insert(u.trim_end_matches('/').to_string()))
+                    .count()
+            };
+            let open = self.open_streams.lock().unwrap().clone();
+            let chosen = select_relays(
+                &author_relays,
+                crate::relay_health::is_skipped,
+                |url| open.contains_key(url.trim_end_matches('/')),
+                RELAYS_PER_AUTHOR,
+                MAX_SELECTED_RELAYS,
+            );
+            tracing::debug!(
+                "plan: {} authors -> {} relays (from {} candidates)",
+                author_relays.len(),
+                chosen.len(),
+                candidates
+            );
+            lanes.extend(chosen.into_iter().map(|url| RelayLane::Internet { url }));
         }
         let mut seen = std::collections::HashSet::new();
         lanes.retain(|l| seen.insert(myco_napplet_runtime::seams::lane_key(l)));
@@ -734,6 +806,133 @@ impl OutboxResolver for OutboxService {
                 PlanSource::Nip65
             },
             missing_authors: missing,
+        }
+    }
+}
+
+/// How many of an author's relays a read plan aims to include: two, so one
+/// relay down or behind does not lose the author (NDK and welshman aim for
+/// the same).
+const RELAYS_PER_AUTHOR: usize = 2;
+
+/// The most relays a read plan selects to cover its authors. Popular relays
+/// cover most authors between them, so eight covers a large follow list
+/// twice over in practice; and eight, beside the three or four fallback
+/// relays and a few napplet-named ones, stays inside one napplet's
+/// [`MAX_STREAMS_PER_NAPPLET`], where a plan that unioned every author's
+/// relays reached 20 and 39 lanes for one subscription.
+const MAX_SELECTED_RELAYS: usize = 8;
+
+/// Choose which of the authors' relays a read goes to: a greedy set cover,
+/// as NDK and welshman do.
+///
+/// `author_relays` holds each author's write relays, in list order. Picked
+/// first is the relay covering the most authors that still need one — in
+/// two passes, so every author is covered once before any is covered twice
+/// — up to `per_author` each (or all of theirs, if fewer), and at most `cap`
+/// relays in all. A relay `skipped` (the skip list) is chosen only for an
+/// author nothing else covers. Ties go to a relay with a stream `open`
+/// already, then to the relay more authors list, then to the one seen
+/// first — so the same inputs always give the same plan.
+fn select_relays(
+    author_relays: &[Vec<String>],
+    skipped: impl Fn(&str) -> bool,
+    open: impl Fn(&str) -> bool,
+    per_author: usize,
+    cap: usize,
+) -> Vec<String> {
+    // Candidates by normalised URL, first spelling and first-seen order kept.
+    let mut urls: Vec<String> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut covers: Vec<Vec<usize>> = Vec::new();
+    for (author, relays) in author_relays.iter().enumerate() {
+        for url in relays {
+            let k = url.trim_end_matches('/').to_string();
+            let i = *index.entry(k).or_insert_with(|| {
+                urls.push(url.clone());
+                covers.push(Vec::new());
+                urls.len() - 1
+            });
+            if !covers[i].contains(&author) {
+                covers[i].push(author);
+            }
+        }
+    }
+    let skip: Vec<bool> = urls.iter().map(|u| skipped(u)).collect();
+    let is_open: Vec<bool> = urls.iter().map(|u| open(u)).collect();
+    let usable_count = |author: usize| {
+        (0..urls.len())
+            .filter(|&i| !skip[i] && covers[i].contains(&author))
+            .count()
+    };
+    let wanted: Vec<usize> = (0..author_relays.len())
+        .map(|a| per_author.min(usable_count(a)))
+        .collect();
+
+    let mut chosen: Vec<usize> = Vec::new();
+    let mut have = vec![0usize; author_relays.len()];
+    // Pass 1: everyone once; pass 2: everyone `per_author` times; pass 3: an
+    // author with only skipped relays gets one of those.
+    for (target, allow_skipped) in [(1, false), (per_author, false), (1, true)] {
+        loop {
+            if chosen.len() >= cap {
+                break;
+            }
+            let need = |a: usize| {
+                let goal = if allow_skipped {
+                    usize::from(wanted[a] == 0)
+                } else {
+                    target.min(wanted[a])
+                };
+                have[a] < goal
+            };
+            let best = (0..urls.len())
+                .filter(|i| !chosen.contains(i) && skip[*i] == allow_skipped)
+                .map(|i| {
+                    let gain = covers[i].iter().filter(|&&a| need(a)).count();
+                    (i, gain)
+                })
+                .filter(|(_, gain)| *gain > 0)
+                .max_by(|(a, ga), (b, gb)| {
+                    ga.cmp(gb)
+                        .then(is_open[*a].cmp(&is_open[*b]))
+                        .then(covers[*a].len().cmp(&covers[*b].len()))
+                        // Earlier seen wins: reverse the index order.
+                        .then(b.cmp(a))
+                });
+            let Some((i, _)) = best else { break };
+            chosen.push(i);
+            for &a in &covers[i] {
+                have[a] += 1;
+            }
+        }
+    }
+    chosen.into_iter().map(|i| urls[i].clone()).collect()
+}
+
+/// Counts one open stream to a relay in [`OutboxService::open_streams`] for
+/// as long as it lives.
+struct OpenStream {
+    map: Arc<Mutex<std::collections::HashMap<String, usize>>>,
+    key: String,
+}
+
+impl OpenStream {
+    fn new(map: Arc<Mutex<std::collections::HashMap<String, usize>>>, url: &str) -> Self {
+        let key = url.trim_end_matches('/').to_string();
+        *map.lock().unwrap().entry(key.clone()).or_default() += 1;
+        Self { map, key }
+    }
+}
+
+impl Drop for OpenStream {
+    fn drop(&mut self) {
+        let mut map = self.map.lock().unwrap();
+        if let Some(n) = map.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.key);
+            }
         }
     }
 }
@@ -847,9 +1046,11 @@ impl OutboxService {
         timeout: Duration,
         deliver: Deliver<'_>,
     ) -> Vec<LaneAnswer> {
-        let tried_internet = lanes
-            .iter()
-            .any(|l| matches!(l, RelayLane::Internet { .. }) && self.allowed(l));
+        let started = std::time::Instant::now();
+        // A round bounded by less than a counted timeout — a napplet's short
+        // `timeoutMs` — says nothing about the internet either way.
+        let tried_internet = timeout >= crate::relay_health::COUNTED_TIMEOUT_MIN
+            && lanes.iter().any(|l| self.tries_internet(l));
         let rounds: Vec<(LaneAnswer, bool)> = join_all(lanes.iter().map(|lane| async move {
             // Only what the filters asked for: a relay answering with
             // anything else is not stored, delivered, or allowed to end an
@@ -879,7 +1080,8 @@ impl OutboxService {
         let any_ok = out
             .iter()
             .any(|(l, r)| matches!(l, RelayLane::Internet { .. }) && r.is_some());
-        self.content.note_internet_round(any_ok, tried_internet);
+        self.content
+            .note_internet_round(any_ok, tried_internet, started);
         // Profiles, relay lists and manifests another relay answered with are
         // kept here, behind the answer, so the next ask is local and works
         // offline. Already verified by the lane; the local lane's own answer
@@ -1017,6 +1219,17 @@ impl OutboxService {
             let mut streams = tokio::task::JoinSet::new();
             let mut once = Vec::new();
             for lane in lanes {
+                // A lane on the skip list, or not usable now, takes no
+                // stream slot: it would hold one to do nothing. It gets the
+                // one pull, which costs it nothing either.
+                let usable = this.allowed(&lane)
+                    && lane
+                        .url()
+                        .is_none_or(|url| !crate::relay_health::is_skipped(url));
+                if !usable {
+                    once.push(lane);
+                    continue;
+                }
                 let napplet = match &session {
                     Some(work) => match work.streams.clone().try_acquire_owned() {
                         Ok(permit) => Some(permit),
@@ -1081,15 +1294,22 @@ impl OutboxService {
                     tokio::time::sleep(MESH_REPULL_EVERY + jitter(MESH_REPULL_EVERY / 3)).await;
                     continue;
                 }
-                // `since` moves only once a connection saw EOSE.
-                RelayLane::Internet { url }
-                    if self.allowed(&lane) && self.stream_internet(url, &asked).await =>
-                {
-                    since = Some(heard_all_from);
+                RelayLane::Internet { url } if self.allowed(&lane) => {
+                    // `since` moves only once a connection saw EOSE; a
+                    // connection that ended sooner falls through to the
+                    // backoff below.
+                    let saw_eose = self.stream_internet(url, &asked).await;
+                    if saw_eose {
+                        since = Some(heard_all_from);
+                    }
                 }
-                // Not allowed right now (offline only, internet down), or the
-                // connection ended before EOSE: wait.
-                _ => {}
+                // Not allowed right now (offline only, the internet breaker):
+                // wait and look again, without counting it against the relay
+                // — the backoff stays where it was.
+                _ => {
+                    tokio::time::sleep(STREAM_BACKOFF_FIRST + jitter(STREAM_BACKOFF_FIRST)).await;
+                    continue;
+                }
             }
             backoff = if opened.elapsed() >= STREAM_HEALTHY_AFTER {
                 STREAM_BACKOFF_FIRST
@@ -1105,7 +1325,7 @@ impl OutboxService {
     /// else a relay sends is dropped here. Ends early when "offline only" is
     /// switched on. Returns whether the relay got as far as EOSE.
     async fn stream_internet(&self, url: &str, filters: &[Filter]) -> bool {
-        if !self.may_dial(url).await {
+        if crate::relay_health::is_skipped(url) || !self.may_dial(url).await {
             return false;
         }
         let values: Vec<serde_json::Value> = filters
@@ -1115,6 +1335,7 @@ impl OutboxService {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(STREAM_QUEUE);
         let saw_eose = std::sync::atomic::AtomicBool::new(false);
         let stream = crate::ip_source::stream_relay_filters(url, values, tx, &saw_eose);
+        let _open = OpenStream::new(self.open_streams.clone(), url);
         let deliver = async {
             let mut fresh = 0usize;
             while let Some(event) = rx.recv().await {
@@ -1254,9 +1475,9 @@ impl LaneTransport for OutboxService {
         event: &Event,
         timeout: Duration,
     ) -> Vec<(RelayLane, bool)> {
-        let tried_internet = lanes
-            .iter()
-            .any(|l| matches!(l, RelayLane::Internet { .. }) && self.allowed(l));
+        let started = std::time::Instant::now();
+        let tried_internet = timeout >= crate::relay_health::COUNTED_TIMEOUT_MIN
+            && lanes.iter().any(|l| self.tries_internet(l));
         let out: Vec<(RelayLane, bool)> = join_all(lanes.iter().map(|lane| async move {
             (lane.clone(), self.publish_lane(lane, event, timeout).await)
         }))
@@ -1264,7 +1485,8 @@ impl LaneTransport for OutboxService {
         let any_ok = out
             .iter()
             .any(|(l, ok)| matches!(l, RelayLane::Internet { .. }) && *ok);
-        self.content.note_internet_round(any_ok, tried_internet);
+        self.content
+            .note_internet_round(any_ok, tried_internet, started);
         out
     }
 
@@ -1287,9 +1509,9 @@ impl LaneTransport for OutboxService {
         let lanes = lanes.to_vec();
         let event = event.clone();
         tokio::spawn(async move {
-            let tried_internet = lanes
-                .iter()
-                .any(|l| matches!(l, RelayLane::Internet { .. }) && this.allowed(l));
+            let started = std::time::Instant::now();
+            let tried_internet = timeout >= crate::relay_health::COUNTED_TIMEOUT_MIN
+                && lanes.iter().any(|l| this.tries_internet(l));
             let out: Vec<(RelayLane, bool)> = join_all(lanes.iter().map(|lane| {
                 let (this, event, tx) = (&this, &event, tx.clone());
                 async move {
@@ -1302,7 +1524,8 @@ impl LaneTransport for OutboxService {
             let any_ok = out
                 .iter()
                 .any(|(l, ok)| matches!(l, RelayLane::Internet { .. }) && *ok);
-            this.content.note_internet_round(any_ok, tried_internet);
+            this.content
+                .note_internet_round(any_ok, tried_internet, started);
             // The whole round, stragglers included — the answer may have
             // gone out before some of these came in.
             tracing::debug!(
@@ -2190,12 +2413,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// One round where every internet lane failed trips a breaker: the next
-    /// round skips the internet at once instead of paying the timeouts
-    /// again, and reports the lane as unreached so the answer says
-    /// `incomplete`.
+    /// One round where every internet lane failed — and nothing on the
+    /// internet was heard, as with no signal: names do not resolve — trips a
+    /// breaker: the next round skips the internet at once instead of paying
+    /// the timeouts again, and reports the lane as unreached so the answer
+    /// says `incomplete`. Only a round with a counted timeout (8 s or more)
+    /// is judged.
     #[tokio::test]
     async fn a_dead_internet_trips_the_breaker_for_the_next_round() {
+        crate::relay_health::reset();
         let dir = std::env::temp_dir().join(format!("myco-outbox-breaker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(Content::open(&dir).unwrap());
@@ -2207,7 +2433,7 @@ mod tests {
         )
         .allowing_private_dials();
         let dead = RelayLane::Internet {
-            url: "ws://127.0.0.1:1".to_string(),
+            url: "ws://myco-breaker-test.invalid".to_string(),
         };
         let filters = [Filter::new().kind(Kind::TextNote)];
 
@@ -2215,7 +2441,7 @@ mod tests {
             .query(
                 std::slice::from_ref(&dead),
                 &filters,
-                Duration::from_secs(2),
+                Duration::from_secs(8),
             )
             .await;
         assert!(first[0].1.is_none());
@@ -2971,6 +3197,217 @@ mod tests {
             lands(&store, old.id, Duration::from_secs(5)).await,
             "the stored note was skipped by a `since` moved on a failed connect"
         );
+    }
+
+    /// A relay on the skip list costs a round nothing: it is not dialled,
+    /// reads as finished-with-nothing at once, and a round of only skipped
+    /// relays does not trip the internet breaker that would hold back the
+    /// relays that work.
+    #[tokio::test]
+    async fn a_skipped_relay_finishes_at_once_and_trips_no_breaker() {
+        use myco_napplet_runtime::seams::LaneTransport;
+
+        let (hung, served) =
+            crate::ip_source::tests::mock_relay_delayed(Vec::new(), Duration::from_secs(10)).await;
+        crate::relay_health::current()
+            .failed(&hung, crate::relay_health::Failure::Refused("HTTP 403"));
+        let content = scratch_content("skipped-lane");
+        let svc = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content.clone(),
+            "npub1me".to_string(),
+        )
+        .allowing_private_dials();
+
+        let started = std::time::Instant::now();
+        let answers = svc
+            .query(
+                &[RelayLane::Local, RelayLane::Internet { url: hung }],
+                &[Filter::new().kind(Kind::TextNote)],
+                Duration::from_secs(5),
+            )
+            .await;
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(answers[1].1.is_none());
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a skipped relay was dialled"
+        );
+        assert!(
+            !content.internet_looks_down(),
+            "a round of skipped relays tripped the breaker"
+        );
+    }
+
+    /// Device bug A: one relay answering 502 in a round of its own tripped
+    /// the internet breaker for everyone while other relays were answering.
+    /// An HTTP answer is the internet working; the breaker stays open. And a
+    /// breaker that did trip clears the moment a stream connects.
+    #[tokio::test]
+    async fn a_relays_502_does_not_trip_the_breaker_and_a_connect_clears_it() {
+        crate::relay_health::reset();
+        let (addr, _) = crate::relay_health::tests::answering(502).await;
+        let content = scratch_content("breaker-502");
+        let svc = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content.clone(),
+            "npub1me".to_string(),
+        )
+        .allowing_private_dials();
+        let answers = svc
+            .query(
+                &[RelayLane::Internet {
+                    url: format!("ws://{addr}"),
+                }],
+                &[Filter::new()],
+                Duration::from_secs(10),
+            )
+            .await;
+        assert!(answers[0].1.is_none());
+        assert!(!content.internet_looks_down(), "a 502 tripped the breaker");
+
+        // Tripped for real: nothing heard since the round began.
+        content.note_internet_round(false, true, std::time::Instant::now());
+        assert!(content.internet_looks_down());
+        let (_remote, url) = mock_relay().await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            crate::ip_source::stream_relay_filters(&url, vec![serde_json::json!({})], tx, &flag),
+        )
+        .await;
+        assert!(
+            !content.internet_looks_down(),
+            "a stream connected and the breaker stayed tripped"
+        );
+    }
+
+    fn relays(list: &[&str]) -> Vec<String> {
+        list.iter().map(|u| format!("wss://{u}")).collect()
+    }
+
+    fn select(author_relays: &[Vec<String>], skipped: &[&str], open: &[&str]) -> Vec<String> {
+        let skipped: Vec<String> = relays(skipped);
+        let open: Vec<String> = relays(open);
+        select_relays(
+            author_relays,
+            |u| skipped.iter().any(|s| s == u),
+            |u| open.iter().any(|o| o == u),
+            RELAYS_PER_AUTHOR,
+            MAX_SELECTED_RELAYS,
+        )
+    }
+
+    /// Every author twice where their lists allow, with the relays most
+    /// authors share, not the union of everyone's.
+    #[test]
+    fn selection_covers_each_author_twice_with_shared_relays() {
+        let lists = vec![
+            relays(&["damus", "primal", "a-own"]),
+            relays(&["damus", "primal", "b-own"]),
+            relays(&["damus", "nos", "c-own"]),
+            relays(&["primal", "nos"]),
+        ];
+        let chosen = select(&lists, &[], &[]);
+        for (i, list) in lists.iter().enumerate() {
+            let n = list.iter().filter(|u| chosen.contains(u)).count();
+            assert!(n >= 2, "author {i} covered {n} times by {chosen:?}");
+        }
+        assert!(chosen.len() <= 3, "{chosen:?}");
+        assert!(!chosen.iter().any(|u| u.ends_with("-own")));
+    }
+
+    /// Forty authors on forty relays of their own: the plan stops at the
+    /// cap, and covers as many authors once as it can before any twice.
+    #[test]
+    fn selection_respects_the_cap() {
+        let lists: Vec<Vec<String>> = (0..40)
+            .map(|i| relays(&[&format!("own{i}"), &format!("alt{i}")]))
+            .collect();
+        let chosen = select(&lists, &[], &[]);
+        assert_eq!(chosen.len(), MAX_SELECTED_RELAYS);
+        let covered = lists
+            .iter()
+            .filter(|l| l.iter().any(|u| chosen.contains(u)))
+            .count();
+        assert_eq!(covered, MAX_SELECTED_RELAYS, "once each before twice");
+    }
+
+    /// A skip-listed relay is avoided when another covers the author, and
+    /// still chosen when nothing else does; an author with one relay gets it.
+    #[test]
+    fn selection_avoids_skipped_relays_but_never_drops_an_author() {
+        let lists = vec![
+            relays(&["broken", "good"]),
+            relays(&["broken", "good2"]),
+            relays(&["only-broken"]),
+            relays(&["lonely"]),
+        ];
+        let chosen = select(&lists, &["broken", "only-broken"], &[]);
+        assert!(!chosen.contains(&"wss://broken".to_string()));
+        assert!(chosen.contains(&"wss://only-broken".to_string()));
+        assert!(chosen.contains(&"wss://lonely".to_string()));
+        assert!(chosen.contains(&"wss://good".to_string()));
+        assert!(chosen.contains(&"wss://good2".to_string()));
+    }
+
+    /// Ties go to a relay already streaming; and the same lists always give
+    /// the same plan.
+    #[test]
+    fn selection_prefers_open_streams_and_is_deterministic() {
+        let lists = vec![relays(&["x", "y", "z"])];
+        let chosen = select(&lists, &[], &["z"]);
+        assert_eq!(chosen[0], "wss://z");
+        let lists = vec![relays(&["a", "b", "c"]), relays(&["c", "b", "a"])];
+        let first = select(&lists, &[], &[]);
+        for _ in 0..10 {
+            assert_eq!(select(&lists, &[], &[]), first);
+        }
+        assert_eq!(first, relays(&["a", "b"]));
+    }
+
+    /// Through the plan: authors' relays are narrowed, while fallback lanes
+    /// for an author with no list, and mesh lanes, stay; a write plan
+    /// (inbox delivery) is not narrowed at all.
+    #[tokio::test]
+    async fn a_read_plan_narrows_author_relays_and_keeps_the_rest() {
+        let (fallback, _) = crate::ip_source::tests::mock_relay_holding(Vec::new()).await;
+        let (svc, store, _hub) = streaming_service("plan-select", vec![fallback.clone()]);
+        let mut authors = Vec::new();
+        for i in 0..12 {
+            let keys = Keys::generate();
+            let list = EventBuilder::new(Kind::RelayList, "")
+                .tags([
+                    Tag::parse(["r", "wss://shared.example"]).unwrap(),
+                    Tag::parse(["r", "wss://shared2.example"]).unwrap(),
+                    Tag::parse(["r", &format!("wss://own{i}.example")]).unwrap(),
+                ])
+                .sign_with_keys(&keys)
+                .unwrap();
+            store.publish(list).await.unwrap();
+            authors.push(keys.public_key());
+        }
+        let nobody = Keys::generate().public_key();
+        let mut all = authors.clone();
+        all.push(nobody);
+
+        let plan = svc.plan(Direction::Read, &all).await;
+        let internet: Vec<&str> = plan.lanes.iter().filter_map(|l| l.url()).collect();
+        assert!(internet.contains(&"wss://shared.example"));
+        assert!(internet.contains(&"wss://shared2.example"));
+        assert!(
+            internet.contains(&fallback.as_str()),
+            "the fallback was dropped"
+        );
+        assert_eq!(internet.len(), 3, "{internet:?}");
+        assert_eq!(plan.missing_authors, vec![nobody]);
+
+        let write = svc.plan(Direction::Write, &authors).await;
+        assert_eq!(write.lanes.len(), 1 + 2 + 12, "inbox delivery was narrowed");
     }
 
     /// An Internet lane whose name resolves to a private address is not

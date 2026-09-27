@@ -331,8 +331,12 @@ impl AuthorOutbox {
                 // Configured and indexer relays: not resolved first. A relay
                 // someone else named goes through the caller's private-host
                 // guard instead (see `OutboxService::fetch_relay_lists_now`).
-                match tokio::time::timeout(LIST_FETCH_TIMEOUT, query_relay_filters(url, filters))
-                    .await
+                match crate::relay_health::timeout(
+                    url,
+                    LIST_FETCH_TIMEOUT,
+                    query_relay_filters(url, filters),
+                )
+                .await
                 {
                     Ok(Ok(events)) => Some(events),
                     _ => None,
@@ -601,6 +605,8 @@ impl IpPeerSource {
                     }
                     query_relay_filters(&url, filters).await
                 };
+                // The round's shared cutoff, not this relay's: not counted
+                // against it (see `relay_health`).
                 match tokio::time::timeout_at(round_end, dial).await {
                     Ok(Ok(events)) => events,
                     _ => Vec::new(),
@@ -954,7 +960,12 @@ pub(crate) fn random_bytes(n: usize) -> Vec<u8> {
 /// public relay would cost more than it saves. The custom-relay backend
 /// (`remote_backend.rs`) keeps one open because the gateway hits it per page.
 pub async fn publish_to_relay(url: &str, event: &Event) -> anyhow::Result<bool> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(url).await?;
+    crate::relay_health::check(url)?;
+    let connected = tokio_tungstenite::connect_async(url)
+        .await
+        .map_err(anyhow::Error::from);
+    crate::relay_health::record_ws(url, &connected);
+    let (mut ws, _) = connected?;
     let frame = serde_json::json!(["EVENT", event]);
     ws.send(Message::Text(frame.to_string())).await?;
 
@@ -1018,13 +1029,23 @@ pub(crate) async fn stream_relay_filters(
     out: tokio::sync::mpsc::Sender<Event>,
     saw_eose: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<()> {
-    // The connection's life has no bound; its setup does.
-    let (mut ws, _) = tokio::time::timeout(
+    // Skipped relays are not re-opened until their skip is up; the caller's
+    // backoff keeps asking. See `relay_health`. The connection's life has
+    // no bound; its setup does, and a setup that times out counts against
+    // the relay like any connect-phase timeout.
+    crate::relay_health::check(url)?;
+    let connected = match crate::relay_health::timeout(
+        url,
         STREAM_CONNECT_TIMEOUT,
         tokio_tungstenite::connect_async(url),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("relay did not connect in time"))??;
+    {
+        Ok(connected) => connected.map_err(anyhow::Error::from),
+        Err(_) => Err(anyhow::anyhow!("relay did not connect in time")),
+    };
+    crate::relay_health::record_ws(url, &connected);
+    let (mut ws, _) = connected?;
     let mut req = vec![serde_json::json!("REQ"), serde_json::json!("myco")];
     req.extend(filters);
     ws.send(Message::Text(serde_json::Value::Array(req).to_string()))
@@ -1101,7 +1122,14 @@ pub async fn query_relay_filters(
     url: &str,
     filters: Vec<serde_json::Value>,
 ) -> anyhow::Result<Vec<Event>> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(url).await?;
+    // A relay on the skip list is not dialled: it answers "nothing" at once,
+    // so a round never waits on it. See `relay_health`.
+    crate::relay_health::check(url)?;
+    let connected = tokio_tungstenite::connect_async(url)
+        .await
+        .map_err(anyhow::Error::from);
+    crate::relay_health::record_ws(url, &connected);
+    let (mut ws, _) = connected?;
     let mut req = vec![serde_json::json!("REQ"), serde_json::json!("myco")];
     req.extend(filters);
     ws.send(Message::Text(serde_json::Value::Array(req).to_string()))
@@ -1170,7 +1198,13 @@ impl PeerSource for IpPeerSource {
             // rest still answer. A timeout/error yields an empty set for that relay.
             let relays = lookup_relays(&self.hints, &[], &self.relays);
             let queries = relays.iter().map(|url| async {
-                match tokio::time::timeout(self.timeout, query_relay(url, filter.clone())).await {
+                match crate::relay_health::timeout(
+                    url,
+                    self.timeout,
+                    query_relay(url, filter.clone()),
+                )
+                .await
+                {
                     Ok(Ok(events)) => events,
                     _ => Vec::new(),
                 }
@@ -1219,10 +1253,35 @@ impl PeerSource for IpPeerSource {
         }
 
         for server in candidates {
+            // A server that failed a moment ago (5xx; TLS, DNS or a refused
+            // connection while online) is not asked again until its skip is
+            // up. A 404 is an answer — "not here" — and never held against it.
+            if crate::relay_health::is_skipped(&server) {
+                continue;
+            }
             let url = format!("{}/{}", server.trim_end_matches('/'), sha256_hex_want);
             let resp = match self.http.get(&url).send().await {
-                Ok(r) if r.status().is_success() => r,
-                _ => continue,
+                Ok(r) => {
+                    let retry_after = r
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    crate::relay_health::record_http_status(
+                        &server,
+                        r.status().as_u16(),
+                        retry_after.as_deref(),
+                    );
+                    if !r.status().is_success() {
+                        // A 404 is "not here", and the server up and answering.
+                        continue;
+                    }
+                    r
+                }
+                Err(e) => {
+                    crate::relay_health::record_http_error(&server, &e);
+                    continue;
+                }
             };
             let Some(bytes) = read_body_bounded(resp, self.max_blob_bytes).await else {
                 continue;
