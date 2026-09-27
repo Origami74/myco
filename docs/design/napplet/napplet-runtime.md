@@ -666,9 +666,21 @@ The output is deterministic, so its hash never needs storing. It goes to the loc
 Blossom at once and to a few public Blossom servers (BUD-02) when online; `picture`
 names the first server that took it, by hash.
 
-The kind 0 and relay list go to the local relay at once — the configured custom relay, when
+The kind 0 and relay lists go to the local relay at once — the configured custom relay, when
 there is one, where the first-use profile used to stay unpublished — then to the public
-relays. Offline,
+relays. The relay lists are a kind 10002 (NIP-65) and a kind 10050 (NIP-17 DM inbox),
+both from their own constants in `outbox.rs` (`USER_OUTBOX_RELAYS`, `USER_INBOX_RELAYS`:
+damus, ditto, primal) rather than the lookup defaults, which include an indexer. A relay in
+both lists is one unmarked `r` tag; one in a single list is marked `read` or `write`.
+Neither names this device's mesh relay (§7.4). The events go to the configured relays
+plus every relay the lists name, so the declared outbox actually holds them, and the
+publish counts as done only once the kind 0 and each stored list have each reached a
+relay. The lists are signed once, when the guest is created; the publish sends what is
+stored, as it is, and never signs one. Guests created before this version keep their relay
+list (the lookup relays) and get no 10050; logging out and starting a new guest gets the
+new defaults. Only a guest gets them: an
+imported `nsec` or a signer-app login keeps whatever lists it has, and when it has none
+Myco signs none — the person's own client is where those are set. Offline,
 the account retries with backoff and the sidecar (`user-guest.json`) remembers the profile is
 pending across launches. None of it blocks anything. Guests from before this are not
 re-published. A user who edits their profile through a napplet overwrites it, bio link
@@ -769,7 +781,7 @@ The work this implied is done with NAP-OUTBOX (S3): a `.fips` URL in a relay lis
 `RelayLane::Mesh` and is reached through `PeerRelayPool` — and only ever as
 `ws://<npub>.fips:4870` rebuilt from its npub, never as the string given, so a list or a
 napplet cannot smuggle userinfo, a path or another port into the pool's dial; the user's own kind 10002 — the
-configured relays — is published beside the guest profile on first launch, so the
+guest relays (§7.1) — is published beside the guest profile on first launch, so the
 user's own outbox plan resolves as NIP-65; per-lane reachability is reported
 (`incomplete`, the per-relay map on publish — for the lanes that answered by the quorum)
 rather than failing hard. Policy lives in one

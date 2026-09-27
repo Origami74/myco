@@ -3956,8 +3956,8 @@ impl Content {
     /// working offline; everything else — unpinned opened sites and staged
     /// updates — is dropped. Identity and Circle are untouched.
     ///
-    /// `keep_author` is the user key's pubkey, when there is one: its kind 0
-    /// and kind 10002 survive too. They were published once, at first napplet
+    /// `keep_author` is the user key's pubkey, when there is one: its kind 0,
+    /// kind 10002 and kind 10050 survive too. They were published once, at first napplet
     /// use, and are never republished — `user.nsec` still exists after a wipe,
     /// so nothing regenerates them — and without them the user's own outbox
     /// plan falls back and every napplet sees a bare pubkey.
@@ -4015,14 +4015,16 @@ impl Content {
         }
 
         if let Some(store) = &self.relay_store {
-            // The user's own profile and relay list, by the pubkey alone: the
-            // store keeps one of each per author, so this is at most two
+            // The user's own profile and relay lists, by the pubkey alone: the
+            // store keeps one of each per author, so this is at most three
             // events. Read from the embedded store itself — it is the only
             // thing being retained.
             if let Some(pk) = keep_author {
-                let own = Filter::new()
-                    .author(pk)
-                    .kinds([Kind::Metadata, Kind::RelayList]);
+                let own = Filter::new().author(pk).kinds([
+                    Kind::Metadata,
+                    Kind::RelayList,
+                    Kind::InboxRelays,
+                ]);
                 match store.query(&[own]).await {
                     Ok(events) => keep_events.extend(events.iter().map(|e| e.id.to_bytes())),
                     Err(e) => tracing::warn!(
@@ -5503,7 +5505,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// "Delete cache" keeps the user's own profile and relay list. They are
+    /// "Delete cache" keeps the user's own profile and relay lists. They are
     /// published once, at first napplet use, and `user.nsec` outlives the
     /// wipe, so nothing would ever publish them again: without this the
     /// user's outbox plan degrades to fallback and napplets see a bare
@@ -5523,12 +5525,13 @@ mod tests {
                 .sign_with_keys(keys)
                 .unwrap();
             let relays = crate::outbox::own_relay_list(keys).unwrap();
-            for event in [profile, relays] {
+            let dm_relays = crate::outbox::own_dm_relay_list(keys).unwrap();
+            for event in [profile, relays, dm_relays] {
                 content.relay().publish(event.clone()).await.unwrap();
                 out.push(event.id);
             }
         }
-        assert_eq!(content.cache_view().relay_events, 4);
+        assert_eq!(content.cache_view().relay_events, 6);
 
         content.wipe_cache(Some(user.public_key())).await.unwrap();
 
@@ -5540,7 +5543,7 @@ mod tests {
         for id in &theirs {
             assert!(!left.contains(id), "another author's profile survived");
         }
-        assert_eq!(left.len(), 2);
+        assert_eq!(left.len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

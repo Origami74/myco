@@ -8,7 +8,7 @@
 //! Two kinds of background work:
 //!
 //! - **A new guest** is published: the tinted logo goes to the local store and
-//!   to a few public Blossom servers, then the kind 0 and relay list go to the
+//!   to a few public Blossom servers, then the kind 0 and relay lists go to the
 //!   public relays. Offline, it waits and retries, and the sidecar remembers
 //!   it is pending across launches.
 //! - **An imported key** has its kind 0 looked up: the local store first, then
@@ -312,18 +312,25 @@ impl Account {
         if new_guest {
             // Stored first, published later: a guest has a name and a face on
             // this phone from the first second, internet or not.
-            for signed in [
-                sign_guest_profile(&user, default_picture.as_deref()),
-                crate::outbox::own_relay_list(&user.keys),
-                sign_guest_follows(&user.keys),
+            for (what, signed) in [
+                (
+                    "profile",
+                    sign_guest_profile(&user, default_picture.as_deref()),
+                ),
+                ("relay list", crate::outbox::own_relay_list(&user.keys)),
+                (
+                    "DM relay list",
+                    crate::outbox::own_dm_relay_list(&user.keys),
+                ),
+                ("follow list", sign_guest_follows(&user.keys)),
             ] {
                 match signed {
                     Ok(event) => {
                         if let Err(e) = self.ctx.relay.publish(event).await {
-                            tracing::warn!("could not store the guest profile: {e}");
+                            tracing::warn!("could not store the guest {what}: {e}");
                         }
                     }
-                    Err(e) => tracing::warn!("could not sign the guest profile: {e}"),
+                    Err(e) => tracing::warn!("could not sign the guest {what}: {e}"),
                 }
             }
         }
@@ -385,7 +392,9 @@ impl Account {
     }
 
     /// One attempt: upload the picture, then publish the profile and relay
-    /// list. `Ok(true)` once a relay has taken the profile.
+    /// lists. `Ok(true)` once the profile and each stored relay list have
+    /// each reached at least one relay; anything less stays pending and is
+    /// tried again.
     async fn publish_guest_once(
         &self,
         user: &UserKey,
@@ -420,32 +429,38 @@ impl Account {
             // nothing to publish yet.
             return Ok(false);
         };
-        let relay_list = match self
-            .ctx
-            .relay
-            .query(&[Filter::new().author(pk).kind(Kind::RelayList).limit(1)])
-            .await
-        {
-            Ok(mut found) if !found.is_empty() => found.remove(0),
-            _ => crate::outbox::own_relay_list(&user.keys)?,
-        };
+        let events = self.guest_events(&pk, profile).await;
+        let relays = guest_publish_relays(&self.ctx.relays);
+        let sent = publish_everywhere(&relays, &events).await;
+        let counts: Vec<String> = events
+            .iter()
+            .zip(&sent)
+            .map(|(event, n)| format!("{}:{n}", event.kind.as_u16()))
+            .collect();
+        tracing::info!(relays = relays.len(), sent = ?counts, "guest publish attempt");
+        Ok(guest_publish_done(&events, &sent))
+    }
 
-        let mut events = vec![profile, relay_list];
-        // The default follows exist only for a guest made since they were
-        // added; nothing is signed here for an older one.
-        if let Ok(mut found) = self
-            .ctx
-            .relay
-            .query(&[Filter::new().author(pk).kind(Kind::ContactList).limit(1)])
-            .await
-        {
-            if !found.is_empty() {
-                events.push(found.remove(0));
+    /// What a guest publishes: the kind 0 first, then whichever of its relay
+    /// lists (10002, 10050) and follows are in the local store, sent as they
+    /// are — the person may have changed them. Nothing is signed here: a
+    /// guest from before a list existed keeps what it has, and gets the
+    /// current defaults only by starting a new guest.
+    async fn guest_events(&self, pk: &PublicKey, profile: Event) -> Vec<Event> {
+        let mut events = vec![profile];
+        for kind in [Kind::RelayList, Kind::InboxRelays, Kind::ContactList] {
+            if let Ok(mut found) = self
+                .ctx
+                .relay
+                .query(&[Filter::new().author(*pk).kind(kind).limit(1)])
+                .await
+            {
+                if !found.is_empty() {
+                    events.push(found.remove(0));
+                }
             }
         }
-
-        let sent = publish_everywhere(&self.ctx.relays, &events).await;
-        Ok(sent[0] > 0)
+        events
     }
 
     // --- an imported key --------------------------------------------------
@@ -702,6 +717,38 @@ fn blossom_upload_auth(keys: &Keys, sha: &str) -> anyhow::Result<String> {
     ))
 }
 
+/// Where a guest's profile and relay lists go: the configured relays, and
+/// every relay its own lists name — a list naming an outbox that never got
+/// the events would point readers at nothing. Deduplicated, first one first.
+fn guest_publish_relays(configured: &[String]) -> Vec<String> {
+    let mut relays: Vec<String> = Vec::new();
+    let named = crate::outbox::USER_OUTBOX_RELAYS
+        .iter()
+        .chain(crate::outbox::USER_INBOX_RELAYS.iter())
+        .map(|url| url.to_string());
+    for url in configured.iter().cloned().chain(named) {
+        let key = url.trim_end_matches('/');
+        if !relays.iter().any(|r| r.trim_end_matches('/') == key) {
+            relays.push(url);
+        }
+    }
+    relays
+}
+
+/// Whether a guest publish is done, from [`publish_everywhere`]'s count for
+/// each event: the profile and every relay list sent must each have reached a
+/// relay. The follows are best-effort.
+fn guest_publish_done(events: &[Event], sent: &[usize]) -> bool {
+    events.len() == sent.len()
+        && events.iter().zip(sent).all(|(event, n)| {
+            *n > 0
+                || !matches!(
+                    event.kind,
+                    Kind::Metadata | Kind::RelayList | Kind::InboxRelays
+                )
+        })
+}
+
 /// Send each event to every relay; how many relays took each one.
 async fn publish_everywhere(relays: &[String], events: &[Event]) -> Vec<usize> {
     let mut counts = Vec::with_capacity(events.len());
@@ -846,6 +893,14 @@ mod tests {
             .collect();
         assert_eq!(followed, GUEST_FOLLOWS);
 
+        for kind in [Kind::RelayList, Kind::InboxRelays] {
+            let lists = relay
+                .query(&[Filter::new().author(pk).kind(kind)])
+                .await
+                .unwrap();
+            assert_eq!(lists.len(), 1, "a new guest has a kind {kind} stored");
+        }
+
         // Still pending on the next launch, and the same account.
         let again = Account::start(
             dir,
@@ -937,6 +992,13 @@ mod tests {
             follows.is_empty(),
             "an imported identity got default follows"
         );
+        let lists = relay
+            .query(&[Filter::new()
+                .author(theirs.public_key())
+                .kinds([Kind::RelayList, Kind::InboxRelays])])
+            .await
+            .unwrap();
+        assert!(lists.is_empty(), "an imported identity got relay lists");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -976,6 +1038,159 @@ mod tests {
         );
         assert_eq!(relaunched.view().status, "signer");
         assert_eq!(relaunched.public_key(), Some(theirs));
+    }
+
+    fn tag_rows(event: &Event) -> Vec<Vec<String>> {
+        event.tags.iter().map(|t| t.as_slice().to_vec()).collect()
+    }
+
+    /// A new guest's publish sends the lists stored at creation, with the
+    /// default relays.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_new_guest_publishes_its_stored_relay_lists() {
+        let relay = Arc::new(MemRelay::new());
+        let blobs = Arc::new(MemBlobs::new());
+        let account = Account::start(
+            temp_dir(),
+            offline(relay.clone(), blobs),
+            tokio::runtime::Handle::current(),
+        );
+        let pk = account.public_key().unwrap();
+        settle(|| !account.view().picture.is_empty()).await;
+        let profile = account.local_profile(&pk).await.unwrap();
+
+        let events = account.guest_events(&pk, profile).await;
+        let kinds: Vec<Kind> = events.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                Kind::Metadata,
+                Kind::RelayList,
+                Kind::InboxRelays,
+                Kind::ContactList
+            ]
+        );
+        assert_eq!(
+            tag_rows(&events[1]),
+            [
+                ["r", "wss://relay.damus.io"],
+                ["r", "wss://relay.ditto.pub"],
+                ["r", "wss://relay.primal.net"],
+            ]
+        );
+        assert_eq!(
+            tag_rows(&events[2]),
+            [
+                ["relay", "wss://relay.damus.io"],
+                ["relay", "wss://relay.ditto.pub"],
+                ["relay", "wss://relay.primal.net"],
+            ]
+        );
+    }
+
+    /// The publish path sends the stored lists as they are — the person may
+    /// have changed them — and never signs one: a guest from before a list
+    /// existed keeps what it has.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_guest_publish_reuses_the_stored_relay_lists_and_signs_none() {
+        let relay = Arc::new(MemRelay::new());
+        let blobs = Arc::new(MemBlobs::new());
+        let dir = temp_dir();
+        crate::user_key::logout(&dir).unwrap();
+        let account = Account::start(
+            dir,
+            offline(relay.clone(), blobs),
+            tokio::runtime::Handle::current(),
+        );
+
+        // Nothing stored: only the profile goes, and nothing is signed.
+        let old = Keys::generate();
+        let profile = EventBuilder::new(Kind::Metadata, "{}")
+            .sign_with_keys(&old)
+            .unwrap();
+        let events = account.guest_events(&old.public_key(), profile).await;
+        let kinds: Vec<Kind> = events.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, [Kind::Metadata]);
+        let signed = relay
+            .query(&[Filter::new().author(old.public_key())])
+            .await
+            .unwrap();
+        assert!(signed.is_empty(), "the publish path stored a new list");
+
+        // Stored ones — edited by the person — go out unchanged.
+        let keys = Keys::generate();
+        let profile = EventBuilder::new(Kind::Metadata, "{}")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let edited_relays = EventBuilder::new(Kind::RelayList, "")
+            .tags([Tag::parse(["r", "wss://mine.example"]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let edited_dm = EventBuilder::new(Kind::InboxRelays, "")
+            .tags([Tag::parse(["relay", "wss://dm.example"]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let follows = sign_guest_follows(&keys).unwrap();
+        for event in [&edited_relays, &edited_dm, &follows] {
+            relay.publish(event.clone()).await.unwrap();
+        }
+        let events = account.guest_events(&keys.public_key(), profile).await;
+        let ids: Vec<_> = events.iter().skip(1).map(|e| e.id).collect();
+        assert_eq!(ids, [edited_relays.id, edited_dm.id, follows.id]);
+    }
+
+    /// A publish is done only when the profile and every relay list sent
+    /// each reached a relay; the follows are best-effort. The network send
+    /// itself is not host-tested — the mocks have no internet relay.
+    #[test]
+    fn a_failed_list_publish_keeps_the_guest_pending() {
+        let keys = Keys::generate();
+        let event = |kind: Kind| EventBuilder::new(kind, "").sign_with_keys(&keys).unwrap();
+        let all = [
+            event(Kind::Metadata),
+            event(Kind::RelayList),
+            event(Kind::InboxRelays),
+            event(Kind::ContactList),
+        ];
+        assert!(guest_publish_done(&all, &[1, 1, 1, 1]));
+        assert!(
+            guest_publish_done(&all, &[2, 1, 3, 0]),
+            "follows are best-effort"
+        );
+        assert!(
+            !guest_publish_done(&all, &[1, 0, 1, 1]),
+            "the relay list failed"
+        );
+        assert!(
+            !guest_publish_done(&all, &[1, 1, 0, 1]),
+            "the DM list failed"
+        );
+        assert!(
+            !guest_publish_done(&all, &[0, 1, 1, 1]),
+            "the profile failed"
+        );
+        // An older guest with no lists stored: the profile alone decides.
+        assert!(guest_publish_done(&all[..1], &[1]));
+        assert!(!guest_publish_done(&all[..1], &[0]));
+    }
+
+    /// The events go to the configured relays and to every relay the lists
+    /// name, once each.
+    #[test]
+    fn a_guest_publishes_to_the_relays_its_lists_name() {
+        let configured = vec![
+            "wss://relay.damus.io/".to_string(),
+            "wss://purplepag.es".to_string(),
+        ];
+        assert_eq!(
+            guest_publish_relays(&configured),
+            [
+                "wss://relay.damus.io/",
+                "wss://purplepag.es",
+                "wss://relay.ditto.pub",
+                "wss://relay.primal.net",
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

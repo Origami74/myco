@@ -733,8 +733,47 @@ pub(crate) fn relay_list_lanes(list: &Event, direction: Direction) -> Vec<RelayL
         .collect()
 }
 
-/// The user's own kind 10002: the configured internet relays, so the user's
-/// own outbox plan resolves as NIP-65 rather than fallback.
+/// Where a new guest publishes (NIP-65 `write`): its outbox. Its own list,
+/// not [`crate::ip_source::default_relays`] — those are where Myco *looks
+/// things up*, and include an indexer and a relay too unreliable to be
+/// anyone's home. `nos.lol` was the obvious third pick but did not answer
+/// when this list was chosen; `relay.ditto.pub` did.
+pub const USER_OUTBOX_RELAYS: [&str; 3] = [
+    "wss://relay.damus.io",
+    "wss://relay.ditto.pub",
+    "wss://relay.primal.net",
+];
+
+/// Where others write to a new guest (NIP-65 `read`), and where its NIP-17
+/// direct messages go (kind 10050).
+pub const USER_INBOX_RELAYS: [&str; 3] = [
+    "wss://relay.damus.io",
+    "wss://relay.ditto.pub",
+    "wss://relay.primal.net",
+];
+
+/// NIP-65 `r` tags for an outbox and an inbox: a relay in both is one
+/// unmarked tag, a relay in one only is marked `write` or `read`. Outbox
+/// order first, then the inbox-only relays.
+fn relay_list_tags(outbox: &[&str], inbox: &[&str]) -> anyhow::Result<Vec<nostr::Tag>> {
+    let mut tags = Vec::new();
+    for url in outbox {
+        let mut tag = vec!["r", *url];
+        if !inbox.contains(url) {
+            tag.push("write");
+        }
+        tags.push(nostr::Tag::parse(tag)?);
+    }
+    for url in inbox.iter().filter(|url| !outbox.contains(url)) {
+        tags.push(nostr::Tag::parse(["r", *url, "read"])?);
+    }
+    Ok(tags)
+}
+
+/// A new guest's kind 10002: [`USER_OUTBOX_RELAYS`] and
+/// [`USER_INBOX_RELAYS`], so the user's own outbox plan resolves as NIP-65
+/// rather than fallback. Signed once, when a guest is created; an imported or signer-app
+/// account keeps whatever list it has, and gets none from Myco.
 ///
 /// Deliberately **not** this device's mesh relay. `ws://<device-npub>.fips`
 /// names the device key, and this event is signed by the user key: putting the
@@ -744,11 +783,21 @@ pub(crate) fn relay_list_lanes(list: &Event, direction: Direction) -> Vec<RelayL
 /// already reach its relay by policy (`OutboxService::allowed`), which needs no
 /// tag to say so.
 pub fn own_relay_list(keys: &nostr::Keys) -> anyhow::Result<Event> {
-    let mut tags = Vec::new();
-    for url in crate::ip_source::default_relays() {
-        tags.push(nostr::Tag::parse(["r".to_string(), url])?);
-    }
+    let tags = relay_list_tags(&USER_OUTBOX_RELAYS, &USER_INBOX_RELAYS)?;
     Ok(nostr::EventBuilder::new(Kind::RelayList, "")
+        .tags(tags)
+        .sign_with_keys(keys)?)
+}
+
+/// A new guest's kind 10050 (NIP-17 DM inbox relays): one `["relay", url]`
+/// tag per [`USER_INBOX_RELAYS`]. No mesh relay, for the same reason as in
+/// [`own_relay_list`].
+pub fn own_dm_relay_list(keys: &nostr::Keys) -> anyhow::Result<Event> {
+    let tags = USER_INBOX_RELAYS
+        .iter()
+        .map(|url| nostr::Tag::parse(["relay", *url]))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(nostr::EventBuilder::new(Kind::InboxRelays, "")
         .tags(tags)
         .sign_with_keys(keys)?)
 }
@@ -891,6 +940,66 @@ mod tests {
             !nostr::JsonUtil::as_json(&list).contains(".fips"),
             "no .fips host anywhere in the event"
         );
+    }
+
+    fn tag_rows<'a>(tags: impl IntoIterator<Item = &'a Tag>) -> Vec<Vec<String>> {
+        tags.into_iter().map(|t| t.as_slice().to_vec()).collect()
+    }
+
+    /// A relay in both lists is one unmarked tag; one in a single list is
+    /// marked from the author's side.
+    #[test]
+    fn a_relay_in_both_lists_is_unmarked_and_the_rest_are_marked() {
+        let tags = relay_list_tags(
+            &["wss://both.example", "wss://out.example"],
+            &["wss://in.example", "wss://both.example"],
+        )
+        .unwrap();
+        assert_eq!(
+            tag_rows(&tags),
+            vec![
+                vec!["r", "wss://both.example"],
+                vec!["r", "wss://out.example", "write"],
+                vec!["r", "wss://in.example", "read"],
+            ]
+        );
+    }
+
+    /// The guest list is the user relays, not the lookup defaults: no
+    /// indexer, no nostr.band.
+    #[test]
+    fn the_own_relay_list_is_the_user_relays() {
+        let list = own_relay_list(&Keys::generate()).unwrap();
+        assert_eq!(list.kind.as_u16(), 10002);
+        // The outbox and inbox are the same three, so each is one unmarked tag.
+        assert_eq!(
+            tag_rows(list.tags.iter()),
+            [
+                ["r", "wss://relay.damus.io"],
+                ["r", "wss://relay.ditto.pub"],
+                ["r", "wss://relay.primal.net"],
+            ]
+        );
+        let json = nostr::JsonUtil::as_json(&list);
+        assert!(!json.contains("purplepag.es") && !json.contains("nostr.band"));
+    }
+
+    #[test]
+    fn the_own_dm_relay_list_is_the_inbox_relays() {
+        let keys = Keys::generate();
+        let list = own_dm_relay_list(&keys).unwrap();
+        assert_eq!(list.kind.as_u16(), 10050);
+        assert_eq!(list.pubkey, keys.public_key());
+        assert!(list.verify().is_ok());
+        assert_eq!(
+            tag_rows(list.tags.iter()),
+            [
+                ["relay", "wss://relay.damus.io"],
+                ["relay", "wss://relay.ditto.pub"],
+                ["relay", "wss://relay.primal.net"],
+            ]
+        );
+        assert!(!nostr::JsonUtil::as_json(&list).contains(".fips"));
     }
 
     /// A mock internet relay: the embedded store served over a socket.
