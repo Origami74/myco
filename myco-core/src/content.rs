@@ -172,6 +172,15 @@ pub struct LibraryItem {
     /// user never saw. Kotlin ignores the key.
     #[serde(default)]
     pub reviewed: Vec<String>,
+    /// Put here by Myco's first-run seed as one of its preinstalled napplets,
+    /// not installed by the user. Napplets only.
+    ///
+    /// Such an entry counts that default's expected permissions as reviewed
+    /// (`DEFAULT_NAPPLETS` in `runtime.rs`), so an update from the same author
+    /// that stays within them is granted without a sheet. Cleared by nothing
+    /// but removal: a napplet removed and added again is the user's own.
+    #[serde(default)]
+    pub preinstalled: bool,
 }
 
 /// A napplet's grants as the Library records them: what the user allowed, what
@@ -1325,6 +1334,7 @@ impl Content {
                 denied: Vec::new(),
                 pointer: String::new(),
                 reviewed: Vec::new(),
+                preinstalled: false,
             });
         }
         let snapshot = lib.clone();
@@ -1386,6 +1396,7 @@ impl Content {
                 denied: Vec::new(),
                 pointer: pointer.to_string(),
                 reviewed: requires,
+                preinstalled: false,
             });
         }
         let snapshot = lib.clone();
@@ -1439,6 +1450,77 @@ impl Content {
                 denied: i.denied.clone(),
                 reviewed: i.reviewed.clone(),
             })
+    }
+
+    /// Whether the napplet at `(author_npub, d_tag)` is one of Myco's
+    /// preinstalled defaults, still the entry the first-run seed put there.
+    /// See [`LibraryItem::preinstalled`].
+    pub fn napplet_is_preinstalled(&self, author_npub: &str, d_tag: Option<&str>) -> bool {
+        self.library.lock().unwrap().iter().any(|i| {
+            i.kind == LibraryKind::Napplet
+                && i.author_npub == author_npub
+                && i.d_tag.as_deref() == d_tag
+                && i.preinstalled
+        })
+    }
+
+    /// Mark an installed napplet as a preinstalled default and count
+    /// `expected` as reviewed on it — added to its reviewed list, never
+    /// replacing it. Grants are not touched: a domain is granted at open only
+    /// once a served version declares it, and one the user switched off stays
+    /// off. Does nothing for a napplet that is not installed.
+    pub fn mark_napplet_preinstalled(
+        &self,
+        author_npub: &str,
+        d_tag: Option<&str>,
+        expected: &[String],
+    ) {
+        let mut lib = self.library.lock().unwrap();
+        let Some(item) = lib.iter_mut().find(|i| {
+            i.kind == LibraryKind::Napplet
+                && i.author_npub == author_npub
+                && i.d_tag.as_deref() == d_tag
+        }) else {
+            return;
+        };
+        item.preinstalled = true;
+        for domain in expected {
+            if !item.reviewed.contains(domain) {
+                item.reviewed.push(domain.clone());
+            }
+        }
+        let snapshot = lib.clone();
+        drop(lib);
+        save_library(&self.library_path, &snapshot);
+    }
+
+    /// Record the answer to an update's permission review: the grants and
+    /// refusals as they now stand, and the declared list the sheet showed as
+    /// the new reviewed list. Unlike [`Content::add_napplet_to_library`] this
+    /// keeps `denied` as the caller passes it — the sheet asked about what the
+    /// update adds, not about what the user already switched off. Does
+    /// nothing for a napplet that is no longer installed.
+    pub fn record_napplet_update_review(
+        &self,
+        author_npub: &str,
+        d_tag: Option<&str>,
+        grants: NappletGrants,
+    ) -> bool {
+        let mut lib = self.library.lock().unwrap();
+        let Some(item) = lib.iter_mut().find(|i| {
+            i.kind == LibraryKind::Napplet
+                && i.author_npub == author_npub
+                && i.d_tag.as_deref() == d_tag
+        }) else {
+            return false;
+        };
+        item.granted = grants.granted;
+        item.denied = grants.denied;
+        item.reviewed = grants.reviewed;
+        let snapshot = lib.clone();
+        drop(lib);
+        save_library(&self.library_path, &snapshot);
+        true
     }
 
     /// Unpin a napplet and drop its grants.
@@ -5900,6 +5982,7 @@ pub(crate) mod library_kind_tests {
             denied: Vec::new(),
             pointer: String::new(),
             reviewed: Vec::new(),
+            preinstalled: false,
         }
     }
 

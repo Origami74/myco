@@ -334,8 +334,10 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletRuntimeObject(
 
 /// Resolve a napplet and open a session for one window.
 ///
-/// Returns `{"ok":true,"sessionId":…,"shellHost":…,"title":…}`, or
-/// `{"ok":false,"error":…}`. A verification failure lands in `error` and opens
+/// Returns `{"ok":true,"sessionId":…,"shellHost":…,"title":…,"updateReview":…}`
+/// (`updateReview` a `NappletReview`, or `null` unless the served version
+/// declares more than was reviewed), or `{"ok":false,"error":…}`. A
+/// verification failure lands in `error` and opens
 /// no session — there is no partial success to render.
 ///
 /// Takes no grant list. Grants are read from the Library on the Rust side,
@@ -366,18 +368,21 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletOpen(
         None => serde_json::json!({"ok": false, "error": "native core is closed"}),
         Some(Err(e)) => serde_json::json!({"ok": false, "error": e.to_string()}),
         Some(Ok(request)) => match request.run() {
-            Ok((opened, widened)) => {
+            Ok((opened, widened, update_review)) => {
                 if widened {
                     if let Some(h) = unsafe { handle_ref(handle) } {
                         let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
                         guard.note_library_changed();
                     }
                 }
+                // The served version declares more than was reviewed: the
+                // window draws this review over the napplet it just opened.
                 serde_json::json!({
                     "ok": true,
                     "sessionId": opened.session_id,
                     "shellHost": opened.shell_host,
                     "title": opened.title,
+                    "updateReview": update_review,
                 })
             }
             Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),

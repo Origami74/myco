@@ -263,6 +263,13 @@ pub struct AppRuntime {
     /// A fetched napplet awaiting the user's answer on install review. Written
     /// by the fetch task, cleared when the user installs or dismisses.
     napplet_review: Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
+    /// Update reviews waiting on the window that opened them, keyed by
+    /// `<npub>:<d>`: an open found the served version declaring more than
+    /// was reviewed. Written by [`NappletOpenRequest::run`], answered by
+    /// `AcceptNappletUpdate`. Apart from `napplet_review` on purpose — the
+    /// sheet is drawn over the napplet's window, not queued on the Apps
+    /// screen, and it must not hold the slot NAP-LINK admission reads.
+    napplet_updates: NappletUpdates,
     /// The user's NAP-MESH caps, shared with the napplet mesh sink so a change
     /// takes effect on a napplet's next call rather than its next launch.
     napplet_mesh_limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
@@ -650,6 +657,7 @@ impl AppRuntime {
             napplet_host: None,
             account: Some(account),
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
+            napplet_updates: Default::default(),
             napplet_mesh_limits: Arc::new(std::sync::RwLock::new(settings.napplet_mesh_limits())),
             relay_hub,
             pending_relay_url: settings.relay_url().unwrap_or_default(),
@@ -842,6 +850,7 @@ impl AppRuntime {
             napplet_host: None,
             account: None,
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
+            napplet_updates: Default::default(),
             napplet_mesh_limits: Arc::new(std::sync::RwLock::new(
                 crate::settings_store::Settings::default().napplet_mesh_limits(),
             )),
@@ -934,6 +943,10 @@ impl AppRuntime {
             }
             NativeAppAction::FetchNapplet { pointer, holder } => {
                 self.fetch_napplet(&pointer, holder);
+                self.rev += 1;
+            }
+            NativeAppAction::AcceptNappletUpdate { pointer, granted } => {
+                self.accept_napplet_update(&pointer, granted);
                 self.rev += 1;
             }
             NativeAppAction::InstallNapplet { pointer, granted } => {
@@ -1382,7 +1395,7 @@ impl AppRuntime {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("content layer is not running"))?;
         let npub = addr.author.to_bech32().unwrap_or_default();
-        let grants = content.napplet_grants(&npub, addr.d_tag.as_deref());
+        let grants = crate::napplet::library_grants(&content, &npub, addr.d_tag.as_deref());
         let (host, rt) = self
             .napplet_context()
             .ok_or_else(|| anyhow::anyhow!("content layer is not running"))?;
@@ -1394,7 +1407,7 @@ impl AppRuntime {
             content,
             host,
             rt,
-            review: self.napplet_review.clone(),
+            updates: self.napplet_updates.clone(),
         })
     }
 
@@ -1404,7 +1417,7 @@ impl AppRuntime {
     /// lock released.
     pub fn open_napplet(&mut self, pointer: &str) -> anyhow::Result<crate::napplet::OpenedNapplet> {
         let request = self.prepare_open_napplet(pointer)?;
-        let (opened, widened) = request.run()?;
+        let (opened, widened, _) = request.run()?;
         if widened {
             self.rev += 1;
         }
@@ -1589,6 +1602,49 @@ impl AppRuntime {
         });
     }
 
+    /// The user allowed what an update asks for, on the sheet over the
+    /// napplet's window. Records the answer against the review the open left
+    /// for this napplet — nothing else can be answered this way — and pushes
+    /// the grants into the open window, which relaunches under them: its
+    /// startup calls were refused, and a refused subscribe is not retried.
+    fn accept_napplet_update(&mut self, pointer: &str, allowed: Vec<String>) {
+        use nostr::nips::nip19::ToBech32;
+        let Ok(addr) = crate::napplet::NappletAddr::parse(pointer) else {
+            tracing::warn!("not a napplet pointer: {pointer}");
+            return;
+        };
+        let Some(content) = self.content.clone() else {
+            return;
+        };
+        let npub = addr.author.to_bech32().unwrap_or_default();
+        let key = napplet_update_key(&npub, addr.d_tag.as_deref());
+        let Some(review) = self.napplet_updates.lock().unwrap().remove(&key) else {
+            tracing::warn!("update review answered for {pointer} with none pending");
+            return;
+        };
+        // Removed meanwhile: the answer must not bring it back.
+        let Some(current) = content.napplet_grants(&npub, addr.d_tag.as_deref()) else {
+            return;
+        };
+        let answered = answered_update(&review, current, allowed);
+        tracing::info!(
+            napplet = %addr.d_tag.as_deref().unwrap_or("<root>"),
+            granted = ?answered.granted,
+            denied = ?answered.denied,
+            reviewed = ?answered.reviewed,
+            "update review answered"
+        );
+        let granted = answered.granted.clone();
+        if !content.record_napplet_update_review(&npub, addr.d_tag.as_deref(), answered) {
+            return;
+        }
+        if let (Some(host), Some(rt)) = (self.napplet_host.clone(), self.rt.as_ref()) {
+            let author = addr.author;
+            let d_tag = addr.d_tag.clone();
+            rt.spawn(async move { host.apply_grants(&author, d_tag.as_deref(), granted).await });
+        }
+    }
+
     /// The user said yes: download the reviewed napplet's bytes, verify them
     /// against the manifest they reviewed, and only then record the grants and
     /// pin it to the Library. The sheet shows "Adding…" meanwhile; when the
@@ -1643,17 +1699,16 @@ impl AppRuntime {
             pointer: pointer.to_string(),
         };
 
-        // No manifest: the review was opened by a served version that
-        // declares more than was reviewed. Its bytes are already here, so
-        // the answer is recorded now. The sheet closes rather than turning
-        // "added": the app is already running beside it, so there is nothing
-        // to offer to open.
+        // No manifest: nothing to download, and no answer to record. An
+        // update that declares more than was reviewed no longer comes through
+        // this slot — its review is drawn over the napplet's window and
+        // answered by `AcceptNappletUpdate` — so all that is left is to close
+        // the sheet, leaving the Library as it was.
         let Some(manifest) = reviewed.manifest.clone() else {
             if !keep_grants {
-                record.apply(&content);
+                tracing::warn!("install for {pointer} with no manifest reviewed; nothing recorded");
             }
             clear_napplet_review(&self.napplet_review, pointer);
-            rt.spawn(async move { content.refresh_napplet_status().await });
             return;
         };
 
@@ -2562,20 +2617,62 @@ impl AppRuntime {
 const DEFAULT_SITES: &[&str] =
     &["4ofb5evx6765n3syphyhlocydo8q7fyipswzgpkx59u7p1yiivbitchat.nsite.lol"];
 
-/// Napplets installed by default: (title, pointer). Pinned with only the
-/// default grants and an empty reviewed list, so what each declares is put in
-/// front of the user the first time it opens. Each is seeded once per install;
-/// one added here later still reaches devices that were seeded before it.
-const DEFAULT_NAPPLETS: &[(&str, &str)] = &[
-    (
-        "DingDong",
-        "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9hxwer0denstp6v0k",
-    ),
-    (
-        "AppStore",
-        "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9ekxmmkv4eqc3hahf",
-    ),
+/// A napplet Myco installs on first run.
+pub(crate) struct DefaultNapplet {
+    /// What the Library calls it until the manifest says otherwise.
+    pub title: &'static str,
+    /// Its `naddr`: the author and `d` tag it is pinned to, with relay hints.
+    pub pointer: &'static str,
+    /// The permissions Myco vetted it for. Seeding records them as reviewed,
+    /// so a served version declaring no more than these opens with what it
+    /// declares granted and no review sheet — at first open and after an
+    /// update from the same author. A version declaring anything else still
+    /// goes through the sheet, and what the user switched off stays off.
+    ///
+    /// Kept to what the app does today (its published `requires`, plus
+    /// `mesh`, which the napplet tooling drops from `requires` — see
+    /// `DEFAULT_GRANTS`). Widening one here reaches every install still on
+    /// the seeded entry at its next open, so it is a review in itself.
+    pub expected: &'static [&'static str],
+}
+
+/// Napplets installed by default. Pinned with only the default grants and
+/// their expected permissions as the reviewed list. Each is seeded once per
+/// install; one added here later still reaches devices that were seeded
+/// before it.
+pub(crate) const DEFAULT_NAPPLETS: &[DefaultNapplet] = &[
+    // Its published manifest declares no `requires`; its source asks for
+    // `mesh`, which the tooling drops.
+    DefaultNapplet {
+        title: "DingDong",
+        pointer: "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9hxwer0denstp6v0k",
+        expected: &["mesh"],
+    },
+    // d=discover. Its published manifest declares `outbox` and `theme`;
+    // "Around you" uses `mesh`.
+    DefaultNapplet {
+        title: "AppStore",
+        pointer: "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9ekxmmkv4eqc3hahf",
+        expected: &["mesh", "outbox", "theme"],
+    },
 ];
+
+/// The expected permissions of the default napplet at `(author_npub, d_tag)`,
+/// or `None` when no default lives at that address. Matched on the author as
+/// well as the `d` tag: someone else's napplet under the same name is not the
+/// one Myco vetted.
+pub(crate) fn default_napplet_expected(
+    author_npub: &str,
+    d_tag: Option<&str>,
+) -> Option<Vec<String>> {
+    use nostr::nips::nip19::ToBech32;
+    DEFAULT_NAPPLETS.iter().find_map(|default| {
+        let addr = crate::napplet::NappletAddr::parse(default.pointer).ok()?;
+        let npub = addr.author.to_bech32().ok()?;
+        (npub == author_npub && addr.d_tag.as_deref() == d_tag)
+            .then(|| default.expected.iter().map(|d| d.to_string()).collect())
+    })
+}
 
 /// What a `seeded-napplets` marker written before per-napplet tracking means:
 /// every default that existed then (DingDong alone) was seeded.
@@ -2652,7 +2749,9 @@ fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) 
     let Some(mut seeded) = seeded_napplet_keys(&marker) else {
         return;
     };
-    for (title, pointer) in DEFAULT_NAPPLETS {
+    for default in DEFAULT_NAPPLETS {
+        let (title, pointer) = (&default.title, &default.pointer);
+        let expected: Vec<String> = default.expected.iter().map(|d| d.to_string()).collect();
         let addr = match crate::napplet::NappletAddr::parse(pointer) {
             Ok(addr) => addr,
             Err(e) => {
@@ -2665,6 +2764,7 @@ fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) 
         // installed by hand counts as seeded, so removing it later is final.
         let key = format!("{npub}:{}", addr.d_tag.as_deref().unwrap_or(""));
         if !seeded.insert(key) {
+            adopt_legacy_seeded_napplet(content, &npub, addr.d_tag.as_deref(), &expected);
             continue;
         }
         let shell_host =
@@ -2680,21 +2780,22 @@ fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) 
             continue;
         }
 
-        // The defaults every napplet gets and nothing else. `reviewed` stays
-        // empty so `open_with` reports every declared, non-default domain as
-        // `unreviewed` and `NappletOpenRequest::run` puts it on the review
-        // sheet at the first tap — the same path an update that declares more
-        // takes.
+        // The defaults every napplet gets, granted; the expected permissions
+        // Myco vetted it for, reviewed. `open_with` grants what a served
+        // version declares within that list — at the first tap, and after an
+        // update — with no sheet, and reports anything beyond it as
+        // `unreviewed` for the review sheet over the app's window.
         content.add_napplet_to_library(
             &npub,
             addr.d_tag.as_deref(),
             Some(title),
             &shell_host,
             crate::napplet::effective_grants(&[]),
-            Vec::new(),
+            expected.clone(),
             pointer,
             crate::content::now_secs(),
         );
+        content.mark_napplet_preinstalled(&npub, addr.d_tag.as_deref(), &expected);
 
         let content = content.clone();
         let addr = addr.clone();
@@ -2744,6 +2845,39 @@ fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) 
     }
 }
 
+/// Bring a default napplet seeded before preinstalled entries were marked up
+/// to the current shape: flagged as preinstalled, its expected permissions
+/// counted as reviewed.
+///
+/// Those seeds wrote the defaults as granted and an empty reviewed list, so
+/// that each declared domain was asked about at first open — and an update
+/// to AppStore that declared `outbox` queued a review nobody was looking at
+/// and withheld the capability meanwhile. Only that exact shape is adopted:
+/// an entry whose reviewed list is not empty went through the review sheet
+/// and is the user's own answer, and one already flagged needs nothing. A
+/// user who installed a default by hand before it was seeded left a reviewed
+/// list behind unless it declared nothing at all — and then the expected set
+/// adds nothing its defaults did not already give (DingDong's `mesh`).
+fn adopt_legacy_seeded_napplet(
+    content: &Content,
+    npub: &str,
+    d_tag: Option<&str>,
+    expected: &[String],
+) {
+    let Some(grants) = content.napplet_grants(npub, d_tag) else {
+        return;
+    };
+    if !grants.reviewed.is_empty() || content.napplet_is_preinstalled(npub, d_tag) {
+        return;
+    }
+    tracing::info!(
+        napplet = %d_tag.unwrap_or("<root>"),
+        ?expected,
+        "a default napplet seeded before its expected permissions were recorded; adopting"
+    );
+    content.mark_napplet_preinstalled(npub, d_tag, expected);
+}
+
 /// Milliseconds since the Unix epoch, passed to `merge_peers` (reserved for
 /// future staleness-based state work; unused by today's merge logic).
 fn now_ms() -> u64 {
@@ -2761,6 +2895,16 @@ const _: fn() = || {
     assert_send::<AppRuntime>();
 };
 
+/// Update reviews waiting on the window that opened them, keyed by
+/// [`napplet_update_key`]. See `AppRuntime::napplet_updates`.
+pub(crate) type NappletUpdates =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, crate::napplet::NappletReview>>>;
+
+/// How [`NappletUpdates`] names a napplet: `<npub>:<d>`, the Library's key.
+fn napplet_update_key(npub: &str, d_tag: Option<&str>) -> String {
+    format!("{npub}:{}", d_tag.unwrap_or(""))
+}
+
 /// A napplet open, prepared under the runtime lock and run without it.
 ///
 /// The resolve reads the relay and the blob store — a configured custom relay
@@ -2777,17 +2921,25 @@ pub struct NappletOpenRequest {
     content: Arc<crate::content::Content>,
     host: Arc<crate::napplet::NappletHost>,
     rt: tokio::runtime::Handle,
-    /// The review slot, so an update that declares more than was reviewed
-    /// can be put in front of the user.
-    review: Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
+    /// Where an update that declares more than was reviewed waits for the
+    /// window's answer.
+    updates: NappletUpdates,
 }
 
 impl NappletOpenRequest {
     /// Resolve, open the session, and record any widening in the Library.
-    /// Returns the opened napplet and whether state the UI reads changed —
-    /// the Library, or the review slot. Blocks the calling thread; never call
-    /// it on a Tokio worker.
-    pub fn run(self) -> anyhow::Result<(crate::napplet::OpenedNapplet, bool)> {
+    ///
+    /// Returns the opened napplet, whether the Library changed, and — when
+    /// the served version declares something the user never reviewed — the
+    /// review for the window to draw over the napplet. Blocks the calling
+    /// thread; never call it on a Tokio worker.
+    pub fn run(
+        self,
+    ) -> anyhow::Result<(
+        crate::napplet::OpenedNapplet,
+        bool,
+        Option<crate::napplet::NappletReview>,
+    )> {
         let opened = self
             .rt
             .block_on(self.host.open_with(&self.addr, self.grants.clone()))?;
@@ -2795,8 +2947,8 @@ impl NappletOpenRequest {
         // reviewed domain this build newly implements). Record it, so the
         // sheet says what the app can do and the next open needs no widening.
         let mut changed = false;
-        if let Some(stored) = self.grants {
-            if opened.grants != stored {
+        if let Some(stored) = &self.grants {
+            if opened.grants != *stored {
                 self.content.set_napplet_grants(
                     &self.npub,
                     self.addr.d_tag.as_deref(),
@@ -2806,37 +2958,92 @@ impl NappletOpenRequest {
             }
         }
         // The served version declares something the user never saw. It was
-        // not granted; it goes back through the review sheet, which opens on
-        // the Apps screen beside the running window. Install from there
-        // records the new reviewed list and the grants the sheet showed.
-        if !opened.unreviewed.is_empty() {
-            let requires = opened.requires.clone();
-            let grants = crate::napplet::effective_grants(&requires);
+        // not granted; the window that asked draws the review over the
+        // running napplet, and the answer (`AcceptNappletUpdate`) records the
+        // new reviewed list and relaunches it with the grants. Nothing is
+        // queued on the Apps screen: nobody is looking there, and a review
+        // waiting in the shared slot used to refuse every NAP-LINK the
+        // napplet made meanwhile.
+        let key = napplet_update_key(&self.npub, self.addr.d_tag.as_deref());
+        let review = (!opened.unreviewed.is_empty()).then(|| {
             tracing::info!(
                 napplet = %self.addr.d_tag.as_deref().unwrap_or("<root>"),
                 unreviewed = ?opened.unreviewed,
-                "an update declares more than was reviewed; asking"
+                "an update declares more than was reviewed; asking over its window"
             );
-            *self.review.lock().unwrap() = Some(crate::napplet::NappletReview {
-                pointer: self.pointer.clone(),
-                loading: false,
-                installing: false,
-                added: false,
-                installed: true,
-                // It opened, so its files are here.
-                ready: true,
-                unreviewed: opened.unreviewed.clone(),
-                title: opened.title.clone().unwrap_or_default(),
-                description: String::new(),
-                requires,
-                grants,
-                error: String::new(),
-                holder: None,
-                manifest: None,
-            });
-            changed = true;
+            update_review(&self.pointer, &opened)
+        });
+        let mut updates = self.updates.lock().unwrap();
+        match &review {
+            Some(review) => {
+                updates.insert(key, review.clone());
+            }
+            // Current again (answered, or the update withdrawn): a review an
+            // earlier open left must not be answerable any more.
+            None => {
+                updates.remove(&key);
+            }
         }
-        Ok((opened, changed))
+        Ok((opened, changed, review))
+    }
+}
+
+/// The review an open puts over its window when the served version declares
+/// more than was reviewed.
+///
+/// What the sheet lists is what answering it grants: the declared domains
+/// and the defaults, narrowed to this build — less anything the user
+/// switched off, which the answer leaves off.
+fn update_review(
+    pointer: &str,
+    opened: &crate::napplet::OpenedNapplet,
+) -> crate::napplet::NappletReview {
+    let grants = crate::napplet::effective_grants(&opened.requires)
+        .into_iter()
+        .filter(|d| !opened.grants.denied.contains(d))
+        .collect();
+    crate::napplet::NappletReview {
+        pointer: pointer.to_string(),
+        loading: false,
+        installing: false,
+        added: false,
+        installed: true,
+        // It opened, so its files are here.
+        ready: true,
+        unreviewed: opened.unreviewed.clone(),
+        title: opened.title.clone().unwrap_or_default(),
+        description: String::new(),
+        requires: opened.requires.clone(),
+        grants,
+        error: String::new(),
+        holder: None,
+        manifest: None,
+    }
+}
+
+/// The grants answering an update's review records: what the sheet showed
+/// and the user allowed, with every earlier refusal kept, and the declared
+/// list it showed as the new reviewed list.
+fn answered_update(
+    review: &crate::napplet::NappletReview,
+    current: crate::content::NappletGrants,
+    allowed: Vec<String>,
+) -> crate::content::NappletGrants {
+    let mut granted: Vec<String> = Vec::new();
+    for domain in allowed {
+        // Only what the sheet showed — which never includes a refusal.
+        if review.grants.contains(&domain)
+            && !current.denied.contains(&domain)
+            && !granted.contains(&domain)
+        {
+            granted.push(domain);
+        }
+    }
+    granted.sort();
+    crate::content::NappletGrants {
+        granted,
+        denied: current.denied,
+        reviewed: review.requires.clone(),
     }
 }
 
@@ -3059,10 +3266,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The bundled DingDong napplet is pinned on first run in the shape that
-    /// makes its first open a review: the defaults granted, nothing reviewed,
-    /// nothing denied. The seed generates no user key (D3), runs once per
-    /// install, and never re-seeds a napplet the user removed.
+    /// The bundled DingDong napplet is pinned on first run with the defaults
+    /// granted, nothing denied, and the permissions Myco vetted it for as
+    /// its reviewed list, marked preinstalled. The seed generates no user key
+    /// (D3), runs once per install, and never re-seeds a napplet the user
+    /// removed.
     #[test]
     fn dingdong_is_seeded_once_on_first_run() {
         use crate::content::LibraryKind;
@@ -3089,15 +3297,17 @@ mod tests {
         let item = &seeded[0];
         assert!(item.pinned);
         assert_eq!(item.title, "DingDong");
-        assert_eq!(item.pointer, DEFAULT_NAPPLETS[0].1);
+        assert_eq!(item.pointer, DEFAULT_NAPPLETS[0].pointer);
         assert_eq!(
             item.author_npub,
             "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr"
         );
-        assert!(
-            item.reviewed.is_empty(),
-            "the seed must not pretend a review happened"
+        assert_eq!(
+            item.reviewed,
+            vec!["mesh".to_string()],
+            "the seed records the expected set, and only that"
         );
+        assert!(item.preinstalled);
         assert!(item.denied.is_empty());
         assert_eq!(item.granted, crate::napplet::effective_grants(&[]));
         assert!(dir.join("seeded-napplets").exists());
@@ -3108,7 +3318,7 @@ mod tests {
 
         // Removed by the user, it stays removed.
         rt.dispatch(NativeAppAction::ForgetNapplet {
-            pointer: DEFAULT_NAPPLETS[0].1.to_string(),
+            pointer: DEFAULT_NAPPLETS[0].pointer.to_string(),
         });
         let third = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
         assert!(
@@ -3130,7 +3340,8 @@ mod tests {
         };
         let seeded = discover(&third);
         assert_eq!(seeded.len(), 1, "Discover seeded: {seeded:?}");
-        assert!(seeded[0].reviewed.is_empty());
+        assert_eq!(seeded[0].reviewed, vec!["mesh", "outbox", "theme"]);
+        assert!(seeded[0].preinstalled);
         let marker = dir.join("seeded-napplets");
         let before = std::fs::read_to_string(&marker).unwrap();
         assert!(
@@ -3141,7 +3352,7 @@ mod tests {
         // Removed too, it stays removed, and the marker is left as it was.
         let mut third = third;
         third.dispatch(NativeAppAction::ForgetNapplet {
-            pointer: DEFAULT_NAPPLETS[1].1.to_string(),
+            pointer: DEFAULT_NAPPLETS[1].pointer.to_string(),
         });
         let fourth = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
         assert!(
@@ -3182,7 +3393,7 @@ mod tests {
             "shell-host",
             reviewed.granted.clone(),
             reviewed.reviewed.clone(),
-            DEFAULT_NAPPLETS[0].1,
+            DEFAULT_NAPPLETS[0].pointer,
             0,
         );
         content.set_napplet_grants(npub, Some("dingdong"), reviewed.clone());
@@ -3201,6 +3412,256 @@ mod tests {
             "the seed rewrote a review the user already gave"
         );
         assert!(marker.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The expected sets are keyed on the author and the `d` tag together.
+    #[test]
+    fn a_defaults_expected_set_belongs_to_its_author_only() {
+        use nostr::nips::nip19::ToBech32;
+        let appstore = crate::napplet::NappletAddr::parse(DEFAULT_NAPPLETS[1].pointer).unwrap();
+        let npub = appstore.author.to_bech32().unwrap();
+        assert_eq!(
+            default_napplet_expected(&npub, Some("discover")),
+            Some(vec!["mesh".into(), "outbox".into(), "theme".into()])
+        );
+        assert_eq!(default_napplet_expected(&npub, Some("other")), None);
+        let stranger = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        assert_eq!(default_napplet_expected(&stranger, Some("discover")), None);
+    }
+
+    /// A device seeded before this change holds its defaults with an empty
+    /// reviewed list and no preinstalled mark — the shape that made an
+    /// AppStore update withhold `outbox` and ask on a screen nobody was
+    /// looking at. The next launch adopts it; an entry the user reviewed
+    /// themselves is theirs and is left alone.
+    #[test]
+    fn a_legacy_seeded_default_is_adopted_on_startup() {
+        use crate::content::{LibraryItem, LibraryKind};
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = temp_dir("seed-legacy-adopt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let entry = |pointer: &str, reviewed: &[&str]| {
+            let addr = crate::napplet::NappletAddr::parse(pointer).unwrap();
+            LibraryItem {
+                author_npub: addr.author.to_bech32().unwrap(),
+                d_tag: addr.d_tag.clone(),
+                title: String::new(),
+                url_host: "shell-host".into(),
+                pinned: true,
+                added_at: 0,
+                kind: LibraryKind::Napplet,
+                granted: crate::napplet::effective_grants(&[]),
+                denied: vec!["link".into()],
+                pointer: pointer.to_string(),
+                reviewed: reviewed.iter().map(|d| d.to_string()).collect(),
+                preinstalled: false,
+            }
+        };
+        // AppStore as an old seed left it; DingDong reviewed by the user.
+        let library = vec![
+            entry(DEFAULT_NAPPLETS[1].pointer, &[]),
+            entry(DEFAULT_NAPPLETS[0].pointer, &["theme"]),
+        ];
+        let mut json = serde_json::to_value(&library).unwrap();
+        // Written by a build that had no `preinstalled` key at all.
+        for item in json.as_array_mut().unwrap() {
+            item.as_object_mut().unwrap().remove("preinstalled");
+        }
+        std::fs::write(dir.join("library.json"), json.to_string()).unwrap();
+        let marker: String = library
+            .iter()
+            .map(|i| format!("{}:{}\n", i.author_npub, i.d_tag.as_deref().unwrap()))
+            .collect();
+        std::fs::write(dir.join("seeded-napplets"), marker).unwrap();
+
+        let rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let napplets: Vec<_> = rt
+            .content
+            .as_ref()
+            .unwrap()
+            .library_snapshot()
+            .into_iter()
+            .filter(|i| i.kind == LibraryKind::Napplet)
+            .collect();
+        let appstore = napplets
+            .iter()
+            .find(|i| i.d_tag.as_deref() == Some("discover"))
+            .unwrap();
+        assert!(appstore.preinstalled);
+        assert_eq!(appstore.reviewed, vec!["mesh", "outbox", "theme"]);
+        assert_eq!(
+            appstore.granted,
+            crate::napplet::effective_grants(&[]),
+            "adoption grants nothing by itself"
+        );
+        assert_eq!(
+            appstore.denied,
+            vec!["link".to_string()],
+            "a refusal was undone"
+        );
+
+        let dingdong = napplets
+            .iter()
+            .find(|i| i.d_tag.as_deref() == Some("dingdong"))
+            .unwrap();
+        assert!(!dingdong.preinstalled, "a reviewed entry was adopted");
+        assert_eq!(dingdong.reviewed, vec!["theme".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An open whose served version declares more than was reviewed hands
+    /// the review to the window that opened it — never to the Apps screen's
+    /// slot, where it used to wait unseen and refuse the napplet's links.
+    /// Once the answer is recorded, the next open has nothing to ask and the
+    /// pending review is gone.
+    #[test]
+    fn an_update_review_goes_to_the_window_not_the_apps_screen() {
+        use myco_napplet_runtime::testing::NappletBuilder;
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = temp_dir("update-review-window");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let content = rt.content.clone().unwrap();
+        let napplet = NappletBuilder::new()
+            .d_tag(Some("chat"))
+            .requires(&["outbox", "theme"])
+            .build();
+        let handle = rt.rt.as_ref().unwrap().handle().clone();
+        handle.block_on(async {
+            for (_, bytes) in &napplet.blobs {
+                content.blobs().put(bytes).await.unwrap();
+            }
+            content
+                .relay()
+                .publish(napplet.manifest.clone())
+                .await
+                .unwrap();
+        });
+        let npub = napplet.author.to_bech32().unwrap();
+        let pointer = format!("{npub}:chat");
+        content.add_napplet_to_library(
+            &npub,
+            Some("chat"),
+            Some("Chat"),
+            "shell-host",
+            crate::napplet::effective_grants(&["theme".to_string()]),
+            vec!["theme".to_string()],
+            &pointer,
+            0,
+        );
+
+        let (opened, _, review) = rt.prepare_open_napplet(&pointer).unwrap().run().unwrap();
+        assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
+        let review = review.expect("no review for the window");
+        assert_eq!(review.unreviewed, vec!["outbox".to_string()]);
+        assert!(review.grants.contains(&"outbox".to_string()));
+        assert!(rt.napplet_review.lock().unwrap().is_none());
+        assert_eq!(rt.napplet_updates.lock().unwrap().len(), 1);
+
+        rt.dispatch(NativeAppAction::AcceptNappletUpdate {
+            pointer: pointer.clone(),
+            granted: review.grants.clone(),
+        });
+        let (opened, _, review) = rt.prepare_open_napplet(&pointer).unwrap().run().unwrap();
+        assert!(review.is_none());
+        assert!(opened.granted().contains(&"outbox".to_string()));
+        assert!(rt.napplet_updates.lock().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Answering an update's review over the napplet's window records the
+    /// new reviewed list and what the sheet showed, keeps every refusal, and
+    /// answers only the review an open left — once.
+    #[test]
+    fn answering_an_update_review_records_it_and_keeps_refusals() {
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = temp_dir("accept-update");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let content = rt.content.clone().unwrap();
+        let npub = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        let pointer = format!("{npub}:chat");
+        content.add_napplet_to_library(
+            &npub,
+            Some("chat"),
+            Some("Chat"),
+            "shell-host",
+            crate::napplet::effective_grants(&["theme".to_string()]),
+            vec!["theme".to_string()],
+            &pointer,
+            0,
+        );
+        let mut grants = content.napplet_grants(&npub, Some("chat")).unwrap();
+        grants.set("mesh", false);
+        content.set_napplet_grants(&npub, Some("chat"), grants);
+
+        // Nothing pending: an answer does nothing.
+        rt.dispatch(NativeAppAction::AcceptNappletUpdate {
+            pointer: pointer.clone(),
+            granted: vec!["outbox".into()],
+        });
+        assert!(!content
+            .napplet_grants(&npub, Some("chat"))
+            .unwrap()
+            .granted
+            .contains(&"outbox".to_string()));
+
+        // What an open found: v2 declares `outbox` as well.
+        let requires = vec!["outbox".to_string(), "theme".to_string()];
+        let review = crate::napplet::NappletReview {
+            pointer: pointer.clone(),
+            loading: false,
+            installing: false,
+            added: false,
+            installed: true,
+            ready: true,
+            unreviewed: vec!["outbox".into()],
+            title: "Chat".into(),
+            description: String::new(),
+            grants: crate::napplet::effective_grants(&requires)
+                .into_iter()
+                .filter(|d| d != "mesh")
+                .collect(),
+            requires: requires.clone(),
+            error: String::new(),
+            holder: None,
+            manifest: None,
+        };
+        rt.napplet_updates
+            .lock()
+            .unwrap()
+            .insert(napplet_update_key(&npub, Some("chat")), review);
+
+        rt.dispatch(NativeAppAction::AcceptNappletUpdate {
+            pointer: pointer.clone(),
+            // `mesh` was switched off and `shell` was never on the sheet.
+            granted: vec![
+                "outbox".into(),
+                "theme".into(),
+                "mesh".into(),
+                "shell".into(),
+            ],
+        });
+        let now = content.napplet_grants(&npub, Some("chat")).unwrap();
+        assert_eq!(now.granted, vec!["outbox".to_string(), "theme".to_string()]);
+        assert_eq!(now.denied, vec!["mesh".to_string()]);
+        assert_eq!(now.reviewed, requires);
+        assert!(rt.napplet_updates.lock().unwrap().is_empty());
+        assert!(
+            rt.napplet_review.lock().unwrap().is_none(),
+            "an update review reached the Apps screen's slot"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3234,7 +3695,7 @@ mod tests {
             "only the new default is seeded"
         );
         assert_eq!(napplets[0].title, "AppStore");
-        assert!(napplets[0].reviewed.is_empty());
+        assert_eq!(napplets[0].reviewed, vec!["mesh", "outbox", "theme"]);
 
         let marker = std::fs::read_to_string(dir.join("seeded-napplets")).unwrap();
         assert!(
@@ -3627,12 +4088,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A served version declaring more than was reviewed opens the sheet
-    /// with no manifest — its bytes are already here. Adding from it records
-    /// the wider grants and closes the sheet; it must not wait on a download
-    /// that will never start.
+    /// A review with no manifest behind it has nothing to download and no
+    /// answer to record — an update declaring more than was reviewed is
+    /// answered over the napplet's window now (`AcceptNappletUpdate`), not
+    /// here. Add closes the sheet and installs nothing.
     #[test]
-    fn adding_from_a_review_without_a_manifest_records_it_at_once() {
+    fn adding_from_a_review_without_a_manifest_installs_nothing() {
         use crate::content::LibraryKind;
         use nostr::nips::nip19::ToBech32;
 
@@ -3643,27 +4104,26 @@ mod tests {
         let npub = nostr::Keys::generate().public_key().to_bech32().unwrap();
         let pointer = format!("{npub}:wider");
         let mut review = review_for(&pointer, false);
-        review.requires = vec!["relay".to_string(), "mesh".to_string()];
+        review.requires = vec!["relay".to_string(), "outbox".to_string()];
         *rt.napplet_review.lock().unwrap() = Some(review);
 
         rt.dispatch(NativeAppAction::InstallNapplet {
             pointer: pointer.clone(),
-            granted: vec!["relay".to_string(), "mesh".to_string()],
+            granted: vec!["relay".to_string(), "outbox".to_string()],
         });
 
         assert!(
             rt.napplet_review.lock().unwrap().is_none(),
             "the sheet is still open"
         );
-        let item = rt
+        let installed = rt
             .content
             .as_ref()
             .unwrap()
             .library_snapshot()
             .into_iter()
-            .find(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("wider"))
-            .expect("the answer was not recorded");
-        assert!(item.granted.contains(&"mesh".to_string()));
+            .any(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("wider"));
+        assert!(!installed, "a review with no manifest installed something");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -78,11 +78,23 @@ pub enum NativeAppAction {
         #[serde(default)]
         granted: Vec<String>,
     },
+    /// The user allowed what an update asks for beyond what they reviewed,
+    /// on the sheet drawn over the napplet's own window when it opened.
+    ///
+    /// Answers the review the open recorded for this napplet and nothing
+    /// else: `granted` is narrowed to what that sheet showed, what the user
+    /// switched off stays off, and the open window is told to relaunch with
+    /// the new grants. With no such review pending it does nothing.
+    AcceptNappletUpdate {
+        pointer: String,
+        #[serde(default)]
+        granted: Vec<String>,
+    },
     /// Unpin a napplet and drop its grants.
     ForgetNapplet { pointer: String },
     /// Allow or withdraw one capability for an installed napplet, from its
-    /// sheet. Live: an open window sees it on its next call. This and install
-    /// review are the only two writers of a grant.
+    /// sheet. Live: an open window sees it on its next call. This, install
+    /// review and an update's review are the only writers of a grant.
     SetNappletGrant {
         pointer: String,
         domain: String,

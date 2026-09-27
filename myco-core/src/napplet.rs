@@ -280,24 +280,45 @@ pub const REVIEW_LINK_COOLDOWN: Duration = Duration::from_secs(5);
 /// How soon after one admitted web link another may open the browser.
 pub const WEB_LINK_COOLDOWN: Duration = Duration::from_secs(2);
 
+/// `error` for a napplet link refused because the review sheet this napplet
+/// opened is still up over its window. NAP-LINK leaves the code open; this
+/// one says what to do: answer the sheet first.
+pub const LINK_BUSY_REVIEW_OPEN: &str = "busy: another review is open";
+
+/// `error` for a napplet link refused while another app is being added: the
+/// download it started must not lose its sheet.
+pub const LINK_BUSY_ADDING: &str = "busy: another app is being added";
+
+/// `error` for a napplet link inside [`REVIEW_LINK_COOLDOWN`] of the last one.
+pub const LINK_BUSY_TRY_AGAIN: &str = "busy: try again in a moment";
+
 /// NAP-LINK admission — the host's half of `link.open`.
 ///
 /// The runtime crate classifies a link; whether it is admitted *now* depends on
-/// what is on screen, which only the host knows. Device-wide, not per window:
-/// the review sheet is one sheet, and two napplets taking turns must not get
-/// twice the rate.
+/// what is on screen, which only the host knows. The rate limits are
+/// device-wide, not per window: two napplets taking turns must not get twice
+/// the rate. What the review slot holds is judged per window: only a review
+/// this window opened is on screen over it.
 #[derive(Default)]
 struct LinkGate {
-    /// When set, a review already in the slot refuses another link.
+    /// When set, the review slot the app's sheets are drawn from.
     review: Option<ReviewSlot>,
+    /// The session and pointer of the last napplet link admitted: the review
+    /// that window's sheet shows while the slot still names that pointer.
+    review_owner: Mutex<Option<(String, String)>>,
     last_review: Mutex<Option<std::time::Instant>>,
     last_web: Mutex<Option<std::time::Instant>>,
 }
 
 impl LinkGate {
-    /// Admit `target` at `now`, returning the command for the window host, or
-    /// the `error` code to deny it with.
-    fn admit(&self, target: &LinkTarget, now: std::time::Instant) -> Result<ToShell, &'static str> {
+    /// Admit `target` for the window of `session` at `now`, returning the
+    /// command for the window host, or the `error` code to deny it with.
+    fn admit(
+        &self,
+        session: &str,
+        target: &LinkTarget,
+        now: std::time::Instant,
+    ) -> Result<ToShell, &'static str> {
         let within = |last: &Mutex<Option<std::time::Instant>>, cooldown: Duration| {
             let mut last = last.lock().unwrap();
             if last.is_some_and(|t| now.saturating_duration_since(t) < cooldown) {
@@ -319,19 +340,34 @@ impl LinkGate {
                 if NappletAddr::parse(pointer).is_err() {
                     return Err(INVALID_URL);
                 }
-                // One question at a time: a review on screen — loading,
-                // waiting for an answer, or installing — is never replaced
-                // by a napplet's say-so. An added one is: its question has
-                // been answered, and a confirmation the user has not closed
-                // yet must not stop every napplet link until they do.
+                // One question at a time, over this window: the review this
+                // window opened — loading or waiting for an answer — is on
+                // screen above the napplet, and a napplet's say-so never
+                // replaces it. One queued anywhere else (the Apps screen,
+                // another napplet's window) is not in front of the user, so
+                // it does not refuse this link; the new review replaces it.
+                // An install already downloading does, wherever it started:
+                // its sheet has to be there to say how the download went. An
+                // added review is a confirmation, not a question, and never
+                // refuses.
                 if let Some(slot) = &self.review {
-                    if slot.lock().unwrap().as_ref().is_some_and(|r| !r.added) {
-                        return Err(BLOCKED_BY_POLICY);
+                    if let Some(open) = slot.lock().unwrap().as_ref().filter(|r| !r.added) {
+                        if open.installing {
+                            return Err(LINK_BUSY_ADDING);
+                        }
+                        let owner = self.review_owner.lock().unwrap();
+                        if owner
+                            .as_ref()
+                            .is_some_and(|(s, p)| s == session && *p == open.pointer)
+                        {
+                            return Err(LINK_BUSY_REVIEW_OPEN);
+                        }
                     }
                 }
                 if within(&self.last_review, REVIEW_LINK_COOLDOWN) {
-                    return Err(BLOCKED_BY_POLICY);
+                    return Err(LINK_BUSY_TRY_AGAIN);
                 }
+                *self.review_owner.lock().unwrap() = Some((session.to_string(), pointer.clone()));
                 Ok(ToShell::ReviewNapplet {
                     pointer: pointer.clone(),
                 })
@@ -660,7 +696,10 @@ impl NappletHost {
         // answered `opened`; the command comes first so the window acts on
         // it before the napplet hears back.
         if let Outcome::Link(request) = &out {
-            return match self.links.admit(&request.target, std::time::Instant::now()) {
+            return match self
+                .links
+                .admit(session_id, &request.target, std::time::Instant::now())
+            {
                 Ok(command) => {
                     tracing::info!(session = session_id, ?command, "napplet link admitted");
                     vec![command, ToShell::to_napplet(request.opened())]
@@ -1386,10 +1425,52 @@ pub fn library_standing(
 ) -> (bool, Vec<String>) {
     use nostr::nips::nip19::ToBech32;
     let npub = addr.author.to_bech32().unwrap_or_default();
-    match content.napplet_grants(&npub, addr.d_tag.as_deref()) {
+    match library_grants(content, &npub, addr.d_tag.as_deref()) {
         None => (false, Vec::new()),
         Some(grants) => (true, unreviewed_domains(&grants, requires)),
     }
+}
+
+/// What the Library records for a napplet, as an open or a review should
+/// read it: for a preinstalled default still on its seeded entry, the
+/// permissions Myco vetted it for count as reviewed on top of whatever the
+/// entry's own list says. `None` for a napplet that is not installed.
+///
+/// Evaluated here, at every read, rather than only written at seed time: a
+/// review answered since may have recorded a shorter list, and an expected
+/// set widened by a later release reaches the entries seeded before it. It
+/// widens the *reviewed* list only — nothing is granted unless a served
+/// version declares it, and a domain in `denied` stays off (`open_with`).
+pub fn library_grants(
+    content: &crate::content::Content,
+    npub: &str,
+    d_tag: Option<&str>,
+) -> Option<crate::content::NappletGrants> {
+    library_grants_with(
+        content,
+        npub,
+        d_tag,
+        crate::runtime::default_napplet_expected,
+    )
+}
+
+/// [`library_grants`], with the table of defaults' expected permissions
+/// passed in — the real one names addresses a test cannot sign for.
+fn library_grants_with(
+    content: &crate::content::Content,
+    npub: &str,
+    d_tag: Option<&str>,
+    expected_for: impl Fn(&str, Option<&str>) -> Option<Vec<String>>,
+) -> Option<crate::content::NappletGrants> {
+    let mut grants = content.napplet_grants(npub, d_tag)?;
+    if content.napplet_is_preinstalled(npub, d_tag) {
+        for domain in expected_for(npub, d_tag).unwrap_or_default() {
+            if !grants.reviewed.contains(&domain) {
+                grants.reviewed.push(domain);
+            }
+        }
+    }
+    Some(grants)
 }
 
 /// Whether the installed napplet at `addr` can open: its tile status is
@@ -1664,7 +1745,8 @@ mod tests {
         );
         assert_eq!(link_result(&out[1]), ("opened".into(), None));
 
-        // While a review is showing, another link is refused — whoever asks.
+        // While the review it opened is showing over this window, another
+        // link from it is refused, and the napplet is told why.
         *slot.lock().unwrap() = Some(NappletReview {
             pointer: pointer.clone(),
             loading: true,
@@ -1687,7 +1769,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(
             link_result(&out[0]),
-            ("denied".into(), Some(BLOCKED_BY_POLICY.into()))
+            ("denied".into(), Some(LINK_BUSY_REVIEW_OPEN.into()))
         );
     }
 
@@ -1742,7 +1824,7 @@ mod tests {
             } else {
                 assert_eq!(
                     link_result(&out[0]),
-                    ("denied".into(), Some(BLOCKED_BY_POLICY.into()))
+                    ("denied".into(), Some(LINK_BUSY_TRY_AGAIN.into()))
                 );
             }
         }
@@ -1754,17 +1836,104 @@ mod tests {
         let gate = LinkGate::default();
         let t0 = std::time::Instant::now();
         let web = LinkTarget::Web("https://example.com".into());
-        assert!(gate.admit(&web, t0).is_ok());
-        assert_eq!(gate.admit(&web, t0), Err(BLOCKED_BY_POLICY));
-        assert!(gate.admit(&web, t0 + WEB_LINK_COOLDOWN).is_ok());
+        assert!(gate.admit("s1", &web, t0).is_ok());
+        assert_eq!(gate.admit("s1", &web, t0), Err(BLOCKED_BY_POLICY));
+        assert!(gate.admit("s1", &web, t0 + WEB_LINK_COOLDOWN).is_ok());
 
         let napplet = LinkTarget::Napplet(napplet_naddr());
-        assert!(gate.admit(&napplet, t0).is_ok());
+        assert!(gate.admit("s1", &napplet, t0).is_ok());
         assert_eq!(
-            gate.admit(&napplet, t0 + REVIEW_LINK_COOLDOWN / 2),
-            Err(BLOCKED_BY_POLICY)
+            gate.admit("s1", &napplet, t0 + REVIEW_LINK_COOLDOWN / 2),
+            Err(LINK_BUSY_TRY_AGAIN)
         );
-        assert!(gate.admit(&napplet, t0 + REVIEW_LINK_COOLDOWN).is_ok());
+        assert!(gate
+            .admit("s1", &napplet, t0 + REVIEW_LINK_COOLDOWN)
+            .is_ok());
+    }
+
+    fn review_of(pointer: &str) -> NappletReview {
+        NappletReview {
+            pointer: pointer.to_string(),
+            loading: false,
+            title: "Update".into(),
+            description: String::new(),
+            requires: vec!["outbox".into()],
+            grants: vec!["outbox".into()],
+            installing: false,
+            added: false,
+            installed: true,
+            ready: true,
+            unreviewed: vec!["outbox".into()],
+            manifest: None,
+            error: String::new(),
+            holder: None,
+        }
+    }
+
+    /// The bug seen on a first run: AppStore's update review sat in the
+    /// shared slot, on the Apps screen, while the user was in AppStore — and
+    /// every Install tap there was refused. A review this window did not open
+    /// is not on screen over it, so it refuses nothing; the new review
+    /// replaces it.
+    #[test]
+    fn a_review_queued_elsewhere_does_not_block_a_napplet_link() {
+        let slot: ReviewSlot = Arc::new(Mutex::new(Some(review_of(&napplet_naddr()))));
+        let gate = LinkGate {
+            review: Some(slot),
+            ..Default::default()
+        };
+        let target = LinkTarget::Napplet(napplet_naddr());
+        assert!(
+            gate.admit("napplet-1", &target, std::time::Instant::now())
+                .is_ok(),
+            "a queued review blocked a link from a window it is not over"
+        );
+    }
+
+    /// The review a window's link opened is on screen over that window: a
+    /// second link from it is refused, saying why. Another window's link is
+    /// not — its review replaces the one it cannot see.
+    #[test]
+    fn a_review_open_over_this_window_blocks_its_next_link() {
+        let slot: ReviewSlot = Arc::new(Mutex::new(None));
+        let gate = LinkGate {
+            review: Some(slot.clone()),
+            ..Default::default()
+        };
+        let t0 = std::time::Instant::now();
+        let first = napplet_naddr();
+        assert!(gate
+            .admit("napplet-1", &LinkTarget::Napplet(first.clone()), t0)
+            .is_ok());
+        // The window's fetch fills the slot.
+        *slot.lock().unwrap() = Some(review_of(&first));
+
+        let later = t0 + REVIEW_LINK_COOLDOWN;
+        let next = LinkTarget::Napplet(napplet_naddr());
+        assert_eq!(
+            gate.admit("napplet-1", &next, later),
+            Err(LINK_BUSY_REVIEW_OPEN)
+        );
+        assert!(gate.admit("napplet-2", &next, later).is_ok());
+    }
+
+    /// A download under way keeps its sheet, whichever window asks.
+    #[test]
+    fn an_install_under_way_blocks_every_napplet_link() {
+        let mut installing = review_of(&napplet_naddr());
+        installing.installing = true;
+        let gate = LinkGate {
+            review: Some(Arc::new(Mutex::new(Some(installing)))),
+            ..Default::default()
+        };
+        assert_eq!(
+            gate.admit(
+                "napplet-1",
+                &LinkTarget::Napplet(napplet_naddr()),
+                std::time::Instant::now()
+            ),
+            Err(LINK_BUSY_ADDING)
+        );
     }
 
     #[tokio::test]
@@ -2344,6 +2513,182 @@ mod tests {
             "",
             0,
         );
+    }
+
+    /// Put `napplet` on `phone` the way the first-run seed does: bytes in,
+    /// the defaults granted, `expected` recorded as reviewed, and the entry
+    /// marked preinstalled.
+    async fn seed(
+        phone: &Phone,
+        napplet: &myco_napplet_runtime::testing::TestNapplet,
+        expected: &[&str],
+    ) {
+        let source = holder_of(napplet).await;
+        phone
+            .host
+            .ingest_event(napplet.manifest.clone(), source.as_ref())
+            .await
+            .unwrap();
+        let npub = napplet.author.to_bech32().unwrap();
+        let expected: Vec<String> = expected.iter().map(|d| d.to_string()).collect();
+        phone.content.add_napplet_to_library(
+            &npub,
+            Some("fixture"),
+            Some("Fixture"),
+            "fixture.napplet.localhost",
+            effective_grants(&[]),
+            expected.clone(),
+            "",
+            0,
+        );
+        phone
+            .content
+            .mark_napplet_preinstalled(&npub, Some("fixture"), &expected);
+    }
+
+    /// Bring `napplet` in as the update check does: bytes first, then pinned.
+    async fn update_to(phone: &Phone, napplet: &myco_napplet_runtime::testing::TestNapplet) {
+        let source = holder_of(napplet).await;
+        phone
+            .host
+            .ingest_event(napplet.manifest.clone(), source.as_ref())
+            .await
+            .unwrap();
+    }
+
+    /// The defaults table as a test sees it: `author`'s `fixture` napplet is
+    /// a default expected to use `expected`, and nothing else is.
+    fn defaults_table(
+        author: &PublicKey,
+        expected: &'static [&'static str],
+    ) -> impl Fn(&str, Option<&str>) -> Option<Vec<String>> {
+        let npub = author.to_bech32().unwrap();
+        move |who: &str, d: Option<&str>| {
+            (who == npub && d == Some("fixture"))
+                .then(|| expected.iter().map(|d| d.to_string()).collect())
+        }
+    }
+
+    /// Open the served version of `addr` with what the Library records,
+    /// read as a device open reads it.
+    async fn open_as_device(
+        phone: &Phone,
+        addr: &NappletAddr,
+        table: impl Fn(&str, Option<&str>) -> Option<Vec<String>>,
+    ) -> OpenedNapplet {
+        let npub = addr.author.to_bech32().unwrap();
+        let grants = library_grants_with(&phone.content, &npub, addr.d_tag.as_deref(), table);
+        phone.host.open_with(addr, grants).await.unwrap()
+    }
+
+    /// The first-run bug: AppStore, preinstalled, is updated to a version
+    /// that declares `outbox`. Within what Myco vetted it for, so it opens
+    /// with `outbox` granted and nothing to review.
+    #[tokio::test]
+    async fn a_preinstalled_default_updated_within_its_expected_set_is_granted() {
+        let phone = phone("preinstalled-within");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "v1", &["theme"]);
+        let v2 = version(&keys, 2_000, "v2", &["outbox", "theme"]);
+        seed(&phone, &v1, &["mesh", "outbox", "theme"]).await;
+        update_to(&phone, &v2).await;
+
+        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let opened = open_as_device(&phone, &addr_of(&v2), table).await;
+        assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
+        assert!(opened.granted().contains(&"outbox".to_string()));
+    }
+
+    /// An entry seeded before the reviewed list recorded the expected set —
+    /// reviewed empty — still gets it: the table is read at open, for any
+    /// entry marked preinstalled.
+    #[tokio::test]
+    async fn the_expected_set_is_read_at_open_not_only_seeded() {
+        let phone = phone("preinstalled-at-open");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "v1", &["outbox", "theme"]);
+        seed(&phone, &v1, &[]).await;
+
+        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let opened = open_as_device(&phone, &addr_of(&v1), table).await;
+        assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
+        assert!(opened.granted().contains(&"outbox".to_string()));
+    }
+
+    /// An update declaring beyond the expected set still goes through the
+    /// review sheet for the extra.
+    #[tokio::test]
+    async fn a_preinstalled_default_asking_beyond_its_expected_set_is_reviewed() {
+        let phone = phone("preinstalled-beyond");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "v1", &[]);
+        let v2 = version(&keys, 2_000, "v2", &["outbox"]);
+        seed(&phone, &v1, &["mesh"]).await;
+        update_to(&phone, &v2).await;
+
+        let table = defaults_table(&keys.public_key(), &["mesh"]);
+        let opened = open_as_device(&phone, &addr_of(&v2), table).await;
+        assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
+        assert!(!opened.granted().contains(&"outbox".to_string()));
+    }
+
+    /// Someone else's napplet under the same `d` tag is not the default,
+    /// even on an entry marked preinstalled: the table is keyed on the
+    /// author too.
+    #[tokio::test]
+    async fn another_authors_napplet_at_the_same_d_tag_is_reviewed() {
+        let phone = phone("preinstalled-stranger");
+        let vetted = nostr::Keys::generate();
+        let stranger = nostr::Keys::generate();
+        let v1 = version(&stranger, 1_000, "v1", &["theme"]);
+        let v2 = version(&stranger, 2_000, "v2", &["outbox", "theme"]);
+        seed(&phone, &v1, &[]).await;
+        update_to(&phone, &v2).await;
+
+        let table = defaults_table(&vetted.public_key(), &["mesh", "outbox", "theme"]);
+        let opened = open_as_device(&phone, &addr_of(&v2), table).await;
+        assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
+        assert!(!opened.granted().contains(&"outbox".to_string()));
+    }
+
+    /// The same author's napplet installed by the user, not seeded, gets no
+    /// expected set: what the user reviewed is what it has.
+    #[tokio::test]
+    async fn a_napplet_the_user_installed_is_not_widened_by_the_defaults_table() {
+        let phone = phone("preinstalled-own");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "v1", &["theme"]);
+        let v2 = version(&keys, 2_000, "v2", &["outbox", "theme"]);
+        install(&phone, &v1, &["theme"]).await;
+        update_to(&phone, &v2).await;
+
+        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let opened = open_as_device(&phone, &addr_of(&v2), table).await;
+        assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
+    }
+
+    /// What the user switched off stays off, expected or not — and is not
+    /// asked about again either.
+    #[tokio::test]
+    async fn a_switched_off_expected_domain_stays_off() {
+        let phone = phone("preinstalled-denied");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "v1", &["outbox", "theme"]);
+        seed(&phone, &v1, &["mesh", "outbox", "theme"]).await;
+        let npub = keys.public_key().to_bech32().unwrap();
+        let mut grants = phone
+            .content
+            .napplet_grants(&npub, Some("fixture"))
+            .unwrap();
+        grants.set("outbox", false);
+        phone
+            .content
+            .set_napplet_grants(&npub, Some("fixture"), grants);
+
+        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let opened = open_as_device(&phone, &addr_of(&v1), table).await;
+        assert!(!opened.granted().contains(&"outbox".to_string()));
+        assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
     }
 
     /// A push from a mesh peer with `ttl` hops left.

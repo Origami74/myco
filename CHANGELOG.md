@@ -33,6 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The AppStore that comes with Myco keeps working after it updates.** On a
+  new phone, AppStore could update itself a few minutes after the first
+  launch and then lose access to its app listings, while its Install button
+  said only "cannot open install". The apps Myco comes with (AppStore and
+  DingDong) now start with the permissions they are known to need, so an
+  update from the same author that asks for no more just works. An app that
+  asks for something new after an update now asks you over the app itself,
+  where you are, instead of on Myco's main screen; tap Allow and it restarts
+  with the new permission. Anything you switched off for an app stays off.
+  An app's Install button is no longer refused because of a question waiting
+  somewhere else, and when it is refused, the app is told why (for example
+  "busy: another review is open").
 - **"Delete cache" no longer breaks an installed app that has a newer version
   waiting.** If a newer version had reached your phone but was not downloaded
   yet, deleting the cache could leave the app with nothing to open. The version
