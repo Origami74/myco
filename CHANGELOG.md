@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and napplets when it comes to the foreground and every 6 hours while it
   runs. Automatic checks are quiet and run at most once per 30 minutes;
   "Check for updates" still runs right away and shows its result.
-- **Discover comes preinstalled.** An app store for napplets, itself a
+- **AppStore comes preinstalled.** An app store for napplets, itself a
   napplet: a feed of napplets from your relays, community recommendations
   from people you follow, and store-style app pages whose Install opens
   Myco's install review. Pinned like DingDong, with only the default grants.
@@ -147,10 +147,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - **The Discover tab.** The bottom bar is now Apps · Circle · Settings · Dev;
-  the preinstalled Discover napplet, on the Apps grid, takes its place. What
+  the preinstalled AppStore napplet, on the Apps grid, takes its place. What
   goes with it: the tab's "Around you" list of *nsites* your connected Circle
   members hold, and its Suggested row (bitchat, ICS, Dumplings, Mappy,
-  Minesweeper, DingDong). The Discover napplet lists napplets only, and its
+  Minesweeper, DingDong). The AppStore napplet lists napplets only, and its
   own "Around you" stays empty until its manifest asks for `mesh`. An nsite
   still arrives by a share, a scan or a link. For developers: the
   `search_nsites` action and the `discovered` state field are gone from the

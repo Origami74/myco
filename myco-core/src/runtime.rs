@@ -2544,7 +2544,7 @@ const DEFAULT_NAPPLETS: &[(&str, &str)] = &[
         "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9hxwer0denstp6v0k",
     ),
     (
-        "Discover",
+        "AppStore",
         "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9ekxmmkv4eqc3hahf",
     ),
 ];
@@ -3204,7 +3204,7 @@ mod tests {
             vec![Some("discover")],
             "only the new default is seeded"
         );
-        assert_eq!(napplets[0].title, "Discover");
+        assert_eq!(napplets[0].title, "AppStore");
         assert!(napplets[0].reviewed.is_empty());
 
         let marker = std::fs::read_to_string(dir.join("seeded-napplets")).unwrap();
