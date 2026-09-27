@@ -243,6 +243,11 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Eviction.** An LRU cap on the Blossom store (default 2 GB) with pinned apps
   exempt; today the cache only shrinks when the user asks —
   [nsite-layer.md](./design/nsite/nsite-layer.md) §6.
+- **Pruning of kept events (profiles, relay lists, manifests).** The local
+  relay keeps these kinds when a lookup sees them, and only "Delete cache"
+  removes them. Bounded in practice by small, replaceable kinds, but not by a
+  limit — [nsite-layer.md](./design/nsite/nsite-layer.md) §2.1, "Events kept
+  as they pass".
 - **Set reconciliation (NIP-77 negentropy)** between Circle members, so backlog
   catch-up is a sync rather than a replay of every open subscription —
   [propagation.md](./design/nsite/propagation.md) §5.

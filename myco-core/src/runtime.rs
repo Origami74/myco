@@ -439,8 +439,11 @@ impl AppRuntime {
             // push content. Loopback (the in-app WebView) always bypasses the gate.
             let gate: Arc<dyn crate::mesh_relay::PeerGate> =
                 Arc::new(crate::content::CircleGate::new(content.clone()));
-            let hub =
-                crate::mesh_relay::RelayHub::with_gate(content.relay(), Some(gossiper), Some(gate));
+            let hub = crate::mesh_relay::RelayHub::with_gate(
+                content.pinned_relay(),
+                Some(gossiper),
+                Some(gate),
+            );
             // Kept, not only handed to the two servers: a napplet publishing
             // through a capability has no socket to arrive on, and it must
             // still reach this device's subscriptions and the mesh.
@@ -1529,6 +1532,11 @@ impl AppRuntime {
 
             let outcome = match found {
                 Ok((event, found)) => {
+                    // The manifest only, verified by `fetch_manifest`: the
+                    // next look at this napplet, and a Circle peer asking,
+                    // find it here. Its bytes still wait for the user's yes,
+                    // and keeping it installs nothing — the Library is.
+                    content.keep_seen([&event]);
                     let grants = crate::napplet::effective_grants(&found.requires);
                     // Read now, not before the fetch: the Library can change
                     // while relays are tried.
@@ -3918,6 +3926,85 @@ mod tests {
             !current.added,
             "the new review inherited the old one's added"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reviewing a napplet keeps its manifest here — the manifest only: its
+    /// bytes are not fetched and nothing is installed until the user says
+    /// yes. Driven through the real review fetch, from the sharer's relay.
+    #[test]
+    fn a_reviewed_napplet_keeps_its_manifest_and_nothing_else() {
+        use myco_napplet_runtime::testing::NappletBuilder;
+        use nostr::nips::nip19::ToBech32;
+
+        let dir = temp_dir("review-keeps-manifest");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        // Offline only: the sharer is the one source, no public relays.
+        rt.dispatch(NativeAppAction::SetOfflineOnly { enabled: true });
+        let content = rt.content.clone().unwrap();
+
+        let napplet = NappletBuilder::new().d_tag(Some("game")).build();
+        let sharer = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        let mocks = tokio::runtime::Runtime::new().unwrap();
+        let url = mocks.block_on(crate::content::library_kind_tests::mesh_peer_holding(vec![
+            napplet.manifest.clone(),
+        ]));
+        content.peer_relays().redirect(&sharer, &url);
+
+        let pointer = format!("{}:game", napplet.author.to_bech32().unwrap());
+        rt.dispatch(NativeAppAction::FetchNapplet {
+            pointer: pointer.clone(),
+            holder: Some(sharer),
+        });
+        let mut review = None;
+        for _ in 0..250 {
+            let now = rt.napplet_review.lock().unwrap().clone();
+            if now.as_ref().is_some_and(|r| !r.loading) {
+                review = now;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let review = review.expect("the review never finished");
+        assert!(review.error.is_empty(), "review failed: {}", review.error);
+
+        let kept = || {
+            mocks
+                .block_on(nsite_deck::seams::newest_in_slot(
+                    content.relay().as_ref(),
+                    myco_napplet_runtime::KIND_NAMED,
+                    &napplet.author,
+                    Some("game"),
+                ))
+                .unwrap()
+        };
+        let mut held = kept();
+        for _ in 0..100 {
+            if held.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            held = kept();
+        }
+        assert_eq!(held.map(|e| e.id), Some(napplet.manifest.id));
+        for (hash, _) in &napplet.blobs {
+            assert!(
+                !mocks.block_on(content.blobs().has(hash)),
+                "review fetched the napplet's bytes"
+            );
+        }
+        // The seeded default napplets are there; this one is not.
+        let npub = napplet.author.to_bech32().unwrap();
+        assert!(
+            !content
+                .library_snapshot()
+                .iter()
+                .any(|i| i.author_npub == npub),
+            "review installed it"
+        );
+        drop(rt);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Nostr apps look people up, and those four are where Myco looks up an app
   author's relay list. purplepag.es is no longer asked for apps, which it
   does not carry.
+- **Profiles and app listings you have seen stay on your phone.** When an
+  app looks up a profile, someone's relay list, or an app listing (the
+  AppStore, for one), Myco keeps a copy. The next look is instant and works
+  offline, and people in your Circle can get it from your phone. It installs
+  nothing and downloads no app files, and an app you have keeps running (and
+  sharing) the version you have the files for. "Delete cache" in Storage
+  clears these copies. With a custom relay set in Storage, nothing is kept.
 - **A new guest gets better default relays.** Its public relay list now
   names three general-purpose relays (relay.damus.io, relay.ditto.pub,
   relay.primal.net) for both posting and receiving, instead of the lookup
@@ -26,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **"Delete cache" no longer breaks an installed app that has a newer version
+  waiting.** If a newer version had reached your phone but was not downloaded
+  yet, deleting the cache could leave the app with nothing to open. The version
+  you run is now kept.
 - **Apps published only on their author's own relays are found.** Adding an
   app, and checking installed apps for updates, used to look only on a fixed
   set of public relays, so an app its author published elsewhere came back

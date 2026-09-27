@@ -165,6 +165,11 @@ pub struct PeerRelayPool {
     /// never pick where it goes. Off only in host tests, which dial mock
     /// relays on `127.0.0.1` under placeholder npubs.
     canonical_urls: bool,
+    /// Test-only: where a peer's canonical `.fips` URL really goes — a mock
+    /// relay on loopback — so code that addresses peers by npub, as the app
+    /// does, can be driven end to end on the host.
+    #[cfg(test)]
+    redirects: Mutex<HashMap<String, String>>,
 }
 
 impl PeerRelayPool {
@@ -177,6 +182,16 @@ impl PeerRelayPool {
 
     /// Dial the URLs as given — for host tests whose "peers" are mock relays
     /// on loopback. Never used in the app.
+    /// Send `npub`'s connection to `url` instead of its `.fips` name — for
+    /// host tests only (see `redirects`).
+    #[cfg(test)]
+    pub(crate) fn redirect(&self, npub: &str, url: &str) {
+        self.redirects
+            .lock()
+            .unwrap()
+            .insert(npub.to_string(), url.to_string());
+    }
+
     #[cfg(test)]
     fn dialing_as_given(mut self) -> Self {
         self.canonical_urls = false;
@@ -231,6 +246,10 @@ impl PeerRelayPool {
         } else {
             url
         };
+        #[cfg(test)]
+        let redirected = self.redirects.lock().unwrap().get(npub).cloned();
+        #[cfg(test)]
+        let url = redirected.as_deref().unwrap_or(url);
         if let Some(tx) = peers.get(npub) {
             if !tx.is_closed() {
                 return Some(tx.clone());

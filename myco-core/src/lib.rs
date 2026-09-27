@@ -34,6 +34,9 @@ mod control_client;
 mod gossip;
 mod identity_store;
 mod ip_source;
+// Profiles, relay lists and manifests seen from outside, kept in the local
+// relay on the way past.
+mod keep_seen;
 // The NIP-01 front door: live subscriptions, the mesh fan-out hook, and the
 // access gate. Bound to its sockets only by the Android runtime, so on the host
 // it reads as dead outside its own tests (and the tests that use it as a plain
