@@ -104,24 +104,6 @@ impl NappletAddr {
         })
     }
 
-    /// Relays to search, the pointer's own hints first.
-    ///
-    /// The author's hints lead because they are the only ones that know where
-    /// the napplet actually is; the defaults follow as a fallback for a pointer
-    /// that carried none.
-    pub fn search_relays(&self) -> Vec<String> {
-        let mut out = self.relays.clone();
-        for relay in crate::ip_source::default_relays() {
-            if !out
-                .iter()
-                .any(|r| r.trim_end_matches('/') == relay.trim_end_matches('/'))
-            {
-                out.push(relay);
-            }
-        }
-        out
-    }
-
     /// Strip a `napplet:` or `nostr:` scheme, with or without `//`, and any
     /// trailing slash the OS may have added.
     ///
@@ -146,17 +128,22 @@ impl NappletAddr {
     }
 
     /// The public source for this napplet: its pointer's relay hints, then
-    /// the defaults, asking for the napplet kind. Untrusted — every byte is
-    /// hashed and the signature checked before anything is kept.
+    /// the author's NIP-65 write relays (read from and cached in `store`),
+    /// then the defaults, asking for the napplet kind. Untrusted — every byte
+    /// is hashed and the signature checked before anything is kept.
     ///
     /// Somebody is usually watching a spinner, so one relay answering in a
     /// few hundred milliseconds is not held up by another that sits on the
-    /// connection until the timeout.
-    pub fn public_source(&self) -> crate::ip_source::IpPeerSource {
+    /// connection until the timeout — and the author's relay list is looked
+    /// up alongside the defaults, never in front of them
+    /// ([`crate::ip_source::IpPeerSource::with_author_outbox`]).
+    pub fn public_source(&self, store: Arc<dyn RelayBackend>) -> crate::ip_source::IpPeerSource {
         crate::ip_source::IpPeerSource::new(
-            self.search_relays(),
+            crate::ip_source::default_relays(),
             crate::ip_source::default_blossom_servers(),
         )
+        .with_relay_hints(self.relays.clone())
+        .with_author_outbox(Arc::new(crate::ip_source::AuthorOutbox::new(store)))
         .with_kind(self.kind())
         .with_first_answer_grace(Duration::from_millis(600))
     }
@@ -1041,13 +1028,17 @@ impl NappletHost {
 /// caller to pass on to the Circle as it does an nsite update — and how many
 /// were checked.
 ///
-/// Public relays only: a napplet's author publishes there, and the holder
-/// who shared it is not recorded. Offline-only skips the lot — `checked`
+/// Public relays only — the hints, the author's NIP-65 relays and the
+/// defaults: a napplet's author publishes there, and the holder who shared
+/// it is not recorded. Offline-only skips the lot — `checked`
 /// still counts them, so the toast says they were not updated rather than
 /// that there were none.
 pub async fn refresh_all(host: &NappletHost, addrs: &[NappletAddr]) -> (Vec<nostr::Event>, usize) {
     let checks = addrs.iter().map(|addr| async move {
-        match host.refresh(addr, &addr.public_source()).await {
+        match host
+            .refresh(addr, &addr.public_source(host.relay.clone()))
+            .await
+        {
             Ok(moved) => moved,
             Err(e) => {
                 tracing::debug!(
@@ -3332,12 +3323,7 @@ mod live_fetch {
 
         // Exactly what the app builds, so the timing here is the timing a
         // person sees.
-        let source = crate::ip_source::IpPeerSource::new(
-            addr.search_relays(),
-            crate::ip_source::default_blossom_servers(),
-        )
-        .with_kind(addr.kind())
-        .with_first_answer_grace(std::time::Duration::from_millis(600));
+        let source = addr.public_source(Arc::new(MemRelay::new()));
 
         // The manifest first, on its own, so a missing manifest is told apart
         // from a manifest whose blobs are missing.
@@ -3374,6 +3360,40 @@ mod live_fetch {
             ),
             Err(e) => println!("INGEST FAILED in {:.2?}: {e}", started.elapsed()),
         }
+    }
+
+    /// The Minesweeper napplet lives only on its author's `relay.ditto.pub`,
+    /// and the AppStore's `naddr` for it carries no hints. With a default
+    /// relay that does not have it, it is found only through the author's
+    /// kind 10002 — which is also stored for next time.
+    ///
+    /// `cargo test -p myco-core --lib live_fetch::minesweeper -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn minesweeper_is_found_through_the_authors_relay_list() {
+        let author =
+            PublicKey::from_hex("266815e0c9210dfa324c6cba3573b14bee49da4209a9456f9484e5106cd408a5")
+                .unwrap();
+        let store = Arc::new(MemRelay::new());
+        let source = crate::ip_source::IpPeerSource::new(
+            vec!["wss://relay.damus.io".to_string()],
+            Vec::new(),
+        )
+        .with_author_outbox(Arc::new(crate::ip_source::AuthorOutbox::new(store.clone())))
+        .with_kind(KIND_NAMED)
+        .with_first_answer_grace(std::time::Duration::from_millis(600));
+        let started = std::time::Instant::now();
+        let found = source
+            .fetch_manifest(&author, Some("minesweeper"))
+            .await
+            .unwrap();
+        println!("lookup took {:.2?}", started.elapsed());
+        assert!(found.is_some(), "minesweeper not found");
+        let outbox = crate::ip_source::AuthorOutbox::new(store);
+        assert!(
+            outbox.stored_list(&author).await.is_some(),
+            "list not stored"
+        );
     }
 }
 

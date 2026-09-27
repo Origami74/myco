@@ -541,6 +541,19 @@ this order, stopping at the first hit:
    [settings.md](../../reference/settings.md)) disables it entirely so Myco
    never reaches the IP internet (tiers 1–2 only).
 
+**Where tier 3 looks for a manifest** (napplets too). Relays, in order: the
+pointer's own hints (an `naddr`'s), then the author's NIP-65 write relays (at most
+five, public `ws(s)://` only), then `default_relays()`, deduplicated by URL. The
+author's `10002` is read from the local relay; when it is missing, the lookup does
+not wait for it — the hints and defaults are asked for the manifest at once, with
+the `10002` as a second filter in the same `REQ`, the indexer relays
+(`user.kindpag.es`, `indexer.coracle.social`) are asked for the list alone, and the
+author's relays join the round as soon as a list arrives. The list is stored
+locally for next time (`ip_source::AuthorOutbox`). Blobs still come from the
+manifest's `server` tags, then `default_blossom_servers()`; the author's BUD-03
+`10063` is not read yet
+([#67](https://github.com/Origami74/myco/issues/67)).
+
 ### 5.1 Reaching the holder's services over `.fips`
 
 **Two different keys.** The site you want is identified by its **author** key

@@ -381,6 +381,11 @@ const PAIR_DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_sec
 /// (`reference/thinning-custom-relay.md`, D8).
 pub(crate) const PULL_BUDGET_MS: u32 = 10_000;
 
+/// At most this many authors' NIP-65 write relays, in total, join the default
+/// relays in an nsite update check — one combined REQ each, so the bound is
+/// on sockets, however many authors the Library holds.
+const UPDATE_CHECK_AUTHOR_RELAYS: usize = 12;
+
 /// Longest a single forwarded hop will wait on a peer, used when no budget rode
 /// in (an older peer, or a pull that never carried one). A budget that did
 /// arrive only ever shortens this.
@@ -3296,11 +3301,35 @@ impl Content {
                 Some((npub, url))
             })
             .collect();
-        let online: Vec<String> = if self.is_offline_only() {
-            Vec::new()
+        // Online: the authors' NIP-65 write relays, then the defaults. Only
+        // lists stored here decide the relay set, so the check never waits on
+        // a list fetch. Every author's list rides along in the same REQ to the
+        // defaults (refreshing stored lists, finding missing ones), and the
+        // indexers are asked for the missing ones beside the queries — both
+        // stored for the next check.
+        let defaults = crate::ip_source::default_relays();
+        let outbox = crate::ip_source::AuthorOutbox::new(self.relay());
+        let mut pubkeys: Vec<PublicKey> = Vec::new();
+        for a in &addrs {
+            if !pubkeys.contains(&a.author) {
+                pubkeys.push(a.author);
+            }
+        }
+        let (online, missing_lists) = if self.is_offline_only() {
+            (Vec::new(), Vec::new())
         } else {
-            crate::ip_source::default_relays()
+            let (author_relays, missing) = outbox
+                .stored_write_relays(&pubkeys, UPDATE_CHECK_AUTHOR_RELAYS)
+                .await;
+            (
+                crate::ip_source::lookup_relays(&[], &author_relays, &defaults),
+                missing,
+            )
         };
+        let list_filter = serde_json::json!({
+            "kinds": [Kind::RelayList.as_u16()],
+            "authors": authors,
+        });
         if mesh_peers.is_empty() && online.is_empty() {
             return NsiteCheck::Done("No peers or relays to check".to_string());
         }
@@ -3335,21 +3364,41 @@ impl Content {
             }
         });
         let online_q = online.into_iter().map(|url| {
-            let f = online_filter.clone();
+            // A relay named only by a relay list is resolved and refused if
+            // it points at a private address; a default also carries the
+            // authors' lists.
+            let from_list = !defaults
+                .iter()
+                .any(|d| crate::ip_source::same_relay(d, &url));
+            let filters = if from_list {
+                vec![online_filter.clone()]
+            } else {
+                vec![online_filter.clone(), list_filter.clone()]
+            };
+            let outbox = &outbox;
             async move {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(15),
-                    crate::ip_source::query_relay(&url, f),
-                )
-                .await
-                {
+                let dial = async {
+                    if from_list && !outbox.may_dial(&url).await {
+                        return Ok(Vec::new());
+                    }
+                    crate::ip_source::query_relay_filters(&url, filters).await
+                };
+                match tokio::time::timeout(std::time::Duration::from_secs(15), dial).await {
                     Ok(Ok(evs)) => evs,
                     _ => Vec::new(),
                 }
             }
         });
-        let (mesh_res, online_res) =
-            futures_util::future::join(join_all(mesh_q), join_all(online_q)).await;
+        // Bounded well inside the queries' own timeout, so it never
+        // lengthens the check.
+        let fetch_missing = outbox.fetch_lists(&missing_lists, outbox.indexers());
+        let (mesh_res, online_res, ()) =
+            futures_util::future::join3(join_all(mesh_q), join_all(online_q), fetch_missing).await;
+        for ev in online_res.iter().flatten() {
+            if ev.kind == Kind::RelayList && pubkeys.contains(&ev.pubkey) {
+                outbox.remember(ev.clone()).await;
+            }
+        }
 
         // Newest verified manifest per slot across all relays.
         let mut newest: HashMap<String, Event> = HashMap::new();

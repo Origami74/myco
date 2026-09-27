@@ -702,6 +702,25 @@ pub(crate) fn mesh_relay_npub(url: &str) -> Option<String> {
 /// naming `ws://npub1peer.fips:4870@evil.example/` or a loopback address
 /// must mint no lane at all.
 pub(crate) fn relay_list_lanes(list: &Event, direction: Direction) -> Vec<RelayLane> {
+    relay_list_urls(list, direction)
+        .into_iter()
+        .filter_map(
+            |url| match myco_napplet_runtime::nap::outbox::validate_relay_url(url) {
+                Ok(lane) => Some(lane),
+                Err(reason) => {
+                    tracing::debug!(url, reason, "outbox: relay list names a URL we refuse");
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
+/// The raw URLs a kind 10002 names for `direction`, trimmed and without a
+/// trailing slash, in the order the list gives them. The marker rule is
+/// [`relay_list_lanes`]'s. **Not validated**: every caller gates each URL
+/// before dialling it.
+pub(crate) fn relay_list_urls(list: &Event, direction: Direction) -> Vec<&str> {
     let wanted = match direction {
         Direction::Read => "write",
         Direction::Write => "read",
@@ -722,13 +741,7 @@ pub(crate) fn relay_list_lanes(list: &Event, direction: Direction) -> Vec<RelayL
                 Some(marker) if marker == wanted => {}
                 Some(_) => return None,
             }
-            match myco_napplet_runtime::nap::outbox::validate_relay_url(url) {
-                Ok(lane) => Some(lane),
-                Err(reason) => {
-                    tracing::debug!(url, reason, "outbox: relay list names a URL we refuse");
-                    None
-                }
-            }
+            Some(url)
         })
         .collect()
 }

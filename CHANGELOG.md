@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   relay list; log out and start a new guest to get the new defaults. Accounts you log in to with an `nsec` or a
   signer app keep their own lists; Myco does not create or change them.
 
+### Fixed
+
+- **Apps published only on their author's own relays are found.** Adding an
+  app, and checking installed apps for updates, used to look only on a fixed
+  set of public relays, so an app its author published elsewhere came back
+  as "could not find app" (the Minesweeper napplet from the AppStore, for
+  one). Myco now also looks on the relays the author lists as theirs, and
+  remembers that list for next time. `relay.ditto.pub`, where many apps are
+  published, is now one of the default relays; `relay.nostr.band`, which no
+  longer answers, is dropped.
+
 ## [0.8.0] - 2026-09-26
 
 ### Added
