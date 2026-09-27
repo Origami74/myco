@@ -11,9 +11,10 @@ map, the [index](./README.md).
 
 ---
 
-## Status — 2026-09-15
+## Status — 2026-09-26
 
-**Shipped** (v0.6.0, plus the unreleased `feat/napplet-runtime` branch):
+**Shipped** (v0.8.0 — accounts, the Discover napplet, updates over the
+Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
 
 - **The mesh.** BLE L2CAP with per-peer PSM discovery, Wi-Fi Aware (several
   phones per lane), the LAN lane (mDNS), TCP when online; multi-path per peer
@@ -29,13 +30,20 @@ map, the [index](./README.md).
   or Blossom instead of the embedded ones.
 - **Gossip.** Hop-limited push (3) and pull (2) between Circle members, the
   `MESH` envelope, seen-set loop safety, backlog replay on reconnect.
-- **Napplets** (unreleased). NIP-5D manifests fetched by `naddr` or shared by
-  bump; verified resolve into a sandboxed iframe; a user key with a guest
-  profile and relay list; install review and per-app permission switches;
-  NAPs: `shell`, `identity`, `relay` (pool reads, relay-pool publish), `outbox`
-  (NIP-65 plans over local/mesh/internet lanes), `mesh` (hop-limited
+- **Napplets.** NIP-5D manifests fetched by `naddr` or shared by bump;
+  verified resolve into a sandboxed iframe; install review and per-app
+  permission switches; updates found by an automatic check and forwarded over
+  the Circle (download-then-forward, pins never move back); back delivered as
+  Escape. NAPs: `shell`, `identity`, `relay` (pool reads, relay-pool publish),
+  `outbox` (NIP-65 plans over local/mesh/internet lanes), `mesh` (hop-limited
   publish/subscribe, user-capped — Myco's own, [NAP-MESH](./design/napplet/NAP-MESH.md)),
-  `resource` (`blossom:` only, local store first, fetched blobs kept).
+  `resource` (`blossom:` only, local store first, fetched blobs kept), `link`,
+  `theme`.
+- **Accounts.** A guest identity from the first launch, `nsec` login and
+  logout, and login through a NIP-55 signer (Amber) — N1, N2.
+- **Discover.** The app store is a preinstalled napplet: feed, stacks and
+  recommendations from people you follow, profiles, "Around you" over the mesh
+  — N5.
 
 **Not built**, from the first plan: NIP-77 negentropy reconcile; LRU eviction
 with a size cap (Storage shows counts and offers "delete cache"; nothing
@@ -152,10 +160,15 @@ opens the napplet.
 
 ### N5 — An app store napplet in place of the Discover tab
 
-**Partly built** — the Discover napplet ships preinstalled (`DEFAULT_NAPPLETS`)
-and the native Discover tab is gone. Still open: the napplet lists napplets
-only, not nsites, and its "Around you" needs `mesh` in the published
-manifest.
+**Partly built** (v0.8.0) — the Discover napplet ships preinstalled
+(`DEFAULT_NAPPLETS`) and the native Discover tab is gone. It lists napplets
+from relays and from the phones around you (NAP-MESH), with stacks (NIP-51 app
+sets), recommendations from people you follow and profiles; Install hands the
+app's `naddr` to Myco over NAP-LINK, which opens the install review. Still
+open: it lists napplets only, not nsites; it can't see *which* nearby phone
+holds an app; its "Around you" needs `mesh` in the published manifest (the
+upstream napplet tooling drops Myco-only `requires`); and "Open" for an
+installed app waits on NAP-INTENT (N7).
 
 **Goal.** Retire the built-in Discover tab and ship "around me" as a
 **napplet** — the first-party app store. It lists what your Circle holds
@@ -178,6 +191,8 @@ screen.
 
 ### N6 — Release the napplet runtime
 
+**Done** — v0.7.0 (2026-09-16), followed by v0.8.0 (2026-09-26).
+
 **Goal.** Cut v0.7.0 from `feat/napplet-runtime` after the two-phone checks:
 share a napplet by bump with no internet; doorbell rings across phones; a
 picture loads by `blossom:` from the other phone's store; permissions switch
@@ -185,6 +200,39 @@ live. README and the intro diagrams updated to say "apps", not "sites".
 
 **Exit criterion.** Tagged, on GitHub Releases and Zapstore
 ([publish.md](./how-to/publish.md)); the demo runbook passes on two phones.
+
+### N7 — NAP-INTENT: open another napplet by role
+
+**Goal.** A napplet asks Myco to open "a `note` viewer" or "a `profile`" — a
+role (archetype), never a specific app — and Myco picks the handler from the
+installed napplets (the user's default, or an "Open with…" choice), opens its
+window and delivers the payload. The spec is small ([NAP-INTENT](https://github.com/napplet/naps/blob/master/naps/NAP-INTENT.md):
+`invoke`/`open`, `available`, `handlers`, `intent.changed`); the work is
+around it. Manifests already carry `archetype` tags (`manifest.rs`), and the
+design is written ([napplet-runtime.md](./design/napplet/napplet-runtime.md)
+D11, §5.4). Sized at roughly 1.5–3k lines across Rust and Kotlin, in three
+slices:
+
+1. **Open by role, no payload.** `intent.available`, `intent.handlers`,
+   `intent.invoke` for `action: "open"`; a role → installed-napplet index
+   rebuilt on install/remove/update; a per-role default only the user can set;
+   an "Open with…" chooser sheet; launch or focus the handler's window. Enough
+   for "open a note viewer", and for Discover to offer **Open** on an
+   installed app instead of a greyed-out Add.
+2. **Payloads over NAP-INC.** The spec delivers the payload over NAP-INC
+   topics (or as initial state on a cold start), so this slice brings NAP-INC
+   in with it. Payloads reach only the resolved handler; targeting a specific
+   napplet (`handler: "<dTag>"`) needs a user grant.
+3. **The Android bridge and the rest.** Android intents in and out through the
+   same resolver (§5.4), `intent.changed`, more actions and conventions.
+
+**Exit criterion.** A napplet's `intent.open("note", …)` opens the user's
+default note napplet (or asks, first time), which receives the payload; a
+napplet can't force routing to a napplet the user didn't choose; Discover's
+installed-app page offers **Open**.
+
+**Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) D11,
+§5.4, S2b · [NAP-INTENT](https://github.com/napplet/naps/blob/master/naps/NAP-INTENT.md).
 
 ---
 
@@ -204,11 +252,14 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Peer permissions UI.** The per-peer record exists (`relay_write`,
   `relay_read_multihop`, …) with defaults for everyone; a switch per Circle
   member — [nsite-permissions.md](./design/nsite/nsite-permissions.md) §2.
-- **BUD-03 blob resolution.** A `blossom:sha256:` URI names no server, and
-  Myco resolves it against a fixed list of public replicas. Read the kind
-  10063 server lists of the authors a napplet has been reading from (cached
-  in the local relay like 10002), and the napplet manifest's `server` tags,
-  before the defaults — [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
+- **Relay and Blossom server discovery (BUD-03, NIP-65, hints).** A
+  `blossom:sha256:` URI names no server, and Myco resolves it against a fixed
+  list of public replicas — and ignores the `servers` hint a napplet passes.
+  Read the kind 10063 server lists of the authors a napplet has been reading
+  from (cached in the local relay like 10002), honour NAP-RESOURCE hints and
+  the manifest's `server` tags, before the defaults —
+  [#67](https://github.com/Origami74/myco/issues/67),
+  [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
 - **Blob privacy over the mesh.** Whether a napplet's `blossom:` miss should
   ask every Circle member, or only the peer whose event referenced it —
   [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
@@ -229,14 +280,19 @@ Each its own milestone with its own design pass. Roughly in order of pull.
   peers, peers' peers — is the design pass behind it. More urgent while
   `mesh` is a default grant: every installed napplet has it unless switched
   off ([napplet-runtime.md](./design/napplet/napplet-runtime.md) S3).
-- **Napplet replication and Discover.** Napplet manifests are gossip-eligible
-  as plain events; no download-then-forward, no Discover listing. An
-  installed napplet reaches another phone by the share handoff and the public
-  relays — [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.3.
-- **More NAPs.** `storage` (per-napplet key-value), `intent` + `inc` (open
-  another napplet by role; napplet-to-napplet channels), `theme`, `link`,
-  `config`; `resource` beyond `blossom:` (`https:`, `nostr:`, SVG
-  rasterization) — [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2b–S4.
+- **Open nsite windows and updates.** A napplet window keeps the version it
+  opened and offers a restart when the served version moves on (v0.8.0); an
+  open nsite window can mix old and new files when an update is applied — the
+  §5.2 open-window gate was never built —
+  [#71](https://github.com/Origami74/myco/issues/71).
+- **"Recently updated" on the Apps screen.** Needs a local "activated at" time
+  recorded when an app's served version moves —
+  [#69](https://github.com/Origami74/myco/issues/69).
+- **More NAPs.** `storage` (per-napplet key-value), `config`; `resource`
+  beyond `blossom:` (`https:`, `nostr:`, SVG rasterization — and HTML with
+  inline SVG, which the sniffer misreads as SVG today). `intent` + `inc` are
+  N7; `link` and `theme` shipped in v0.8.0 —
+  [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2b–S4.
 - **Background subscriptions.** A Myco-side subscription that survives the
   napplet's window closing, so a doorbell can ring with the app closed. Needs
   the notification path (N4) and a battery story.
