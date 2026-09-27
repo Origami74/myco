@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Apps get the Mesh permission by default, for now.** The tools napplet
+  authors publish with drop Myco's own permissions from what an app asks
+  for, so no app could ask for Mesh — and "Around you" in Discover, and
+  every app that talks to the phones nearby, stayed silent. Mesh is now
+  granted like Relays and Identity: still listed on the install sheet,
+  capped by App reach, and switchable off per app. Apps you already have
+  get it at their next open, without asking, unless you switched it off.
+  This goes back to opt-in once the publishing tools keep Myco's permissions.
+
 ### Added
 
 - **An updated napplet offers a restart.** A napplet window keeps the version

@@ -226,7 +226,9 @@ Each its own milestone with its own design pass. Roughly in order of pull.
   the user's hop cap, and one misbehaving app saturates the BLE lane for the
   room. Nsites can already do this through the loopback relay. A per-session
   token bucket is the cheap fix; what the mesh should trust from whom — apps,
-  peers, peers' peers — is the design pass behind it.
+  peers, peers' peers — is the design pass behind it. More urgent while
+  `mesh` is a default grant: every installed napplet has it unless switched
+  off ([napplet-runtime.md](./design/napplet/napplet-runtime.md) S3).
 - **Napplet replication and Discover.** Napplet manifests are gossip-eligible
   as plain events; no download-then-forward, no Discover listing. An
   installed napplet reaches another phone by the share handoff and the public

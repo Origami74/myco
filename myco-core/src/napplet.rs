@@ -2008,7 +2008,7 @@ mod tests {
         assert_eq!(granted, expected);
         assert!(granted.contains(&"relay".to_string()));
         assert!(
-            !granted.contains(&"mesh".to_string()),
+            !granted.contains(&"outbox".to_string()),
             "undeclared, non-default: not granted"
         );
 
@@ -2023,15 +2023,46 @@ mod tests {
         );
     }
 
+    /// `mesh` became a default after napplets were already installed. One the
+    /// user never decided on picks it up at its next open, silently — there
+    /// is no sheet for a default. One where the user switched `mesh` off keeps
+    /// it off: a default does not overrule a decision.
+    #[tokio::test]
+    async fn a_new_mesh_default_does_not_overrule_a_switched_off_mesh() {
+        let (host, addr) = host_with_fixture().await; // declares shell, relay
+
+        let never_decided = crate::content::NappletGrants {
+            granted: vec!["shell".into(), "relay".into()],
+            denied: vec![],
+            reviewed: vec!["shell".into(), "relay".into()],
+        };
+        let opened = host.open_with(&addr, Some(never_decided)).await.unwrap();
+        assert!(opened.granted().contains(&"mesh".to_string()));
+        assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
+
+        let switched_off = crate::content::NappletGrants {
+            granted: vec!["shell".into(), "relay".into()],
+            denied: vec!["mesh".into()],
+            reviewed: vec!["shell".into(), "relay".into()],
+        };
+        let opened = host.open_with(&addr, Some(switched_off)).await.unwrap();
+        assert!(
+            !opened.granted().contains(&"mesh".to_string()),
+            "the new default overruled a mesh the user switched off"
+        );
+        assert!(opened.granted().contains(&"relay".to_string()));
+        assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
+    }
+
     /// A pinned update that declares more than the version the user reviewed
     /// does not get the extra at open: the update check showed no screen. The
     /// domain comes back as unreviewed for the sheet, and is granted only
     /// once a review that showed it has been recorded.
     #[tokio::test]
     async fn an_update_that_declares_more_is_not_granted_until_reviewed() {
-        let (host, addr) = host_with(NappletBuilder::new().requires(&["relay", "mesh"])).await;
+        let (host, addr) = host_with(NappletBuilder::new().requires(&["relay", "outbox"])).await;
 
-        // v1 was reviewed with `relay`; the served v2 now also declares `mesh`.
+        // v1 was reviewed with `relay`; the served v2 now also declares `outbox`.
         let stored = crate::content::NappletGrants {
             granted: vec![],
             denied: vec![],
@@ -2043,23 +2074,23 @@ mod tests {
             "a reviewed, declared domain was not granted"
         );
         assert!(
-            !opened.granted().contains(&"mesh".to_string()),
+            !opened.granted().contains(&"outbox".to_string()),
             "an update granted itself a domain nobody reviewed"
         );
-        assert_eq!(opened.unreviewed, vec!["mesh".to_string()]);
+        assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
         assert_eq!(
             opened.requires,
-            vec!["relay".to_string(), "mesh".to_string()]
+            vec!["relay".to_string(), "outbox".to_string()]
         );
 
         // Reviewed again, with the new list: now it is granted.
         let reviewed = crate::content::NappletGrants {
             granted: vec![],
             denied: vec![],
-            reviewed: vec!["relay".into(), "mesh".into()],
+            reviewed: vec!["relay".into(), "outbox".into()],
         };
         let opened = host.open_with(&addr, Some(reviewed)).await.unwrap();
-        assert!(opened.granted().contains(&"mesh".to_string()));
+        assert!(opened.granted().contains(&"outbox".to_string()));
         assert!(opened.unreviewed.is_empty());
 
         // And a decision already made is not "unreviewed", whatever the list
@@ -2067,12 +2098,12 @@ mod tests {
         // is not asked about a domain it already switched off.
         let decided = crate::content::NappletGrants {
             granted: vec!["relay".into()],
-            denied: vec!["mesh".into()],
+            denied: vec!["outbox".into()],
             reviewed: vec![],
         };
         let opened = host.open_with(&addr, Some(decided)).await.unwrap();
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
-        assert!(!opened.granted().contains(&"mesh".to_string()));
+        assert!(!opened.granted().contains(&"outbox".to_string()));
     }
 
     /// The shape the first-run seed writes — the defaults granted, nothing
@@ -2081,7 +2112,7 @@ mod tests {
     /// with the defaults and nothing more.
     #[tokio::test]
     async fn a_seeded_napplet_reviews_what_it_declares_on_first_open() {
-        let (host, addr) = host_with(NappletBuilder::new().requires(&["relay", "mesh"])).await;
+        let (host, addr) = host_with(NappletBuilder::new().requires(&["relay", "outbox"])).await;
 
         let seeded = crate::content::NappletGrants {
             granted: effective_grants(&[]),
@@ -2089,12 +2120,12 @@ mod tests {
             reviewed: vec![],
         };
         let opened = host.open_with(&addr, Some(seeded)).await.unwrap();
-        assert_eq!(opened.unreviewed, vec!["mesh".to_string()]);
+        assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
         let mut granted = opened.granted().to_vec();
         granted.sort();
         assert_eq!(granted, effective_grants(&[]));
         assert!(
-            !granted.contains(&"mesh".to_string()),
+            !granted.contains(&"outbox".to_string()),
             "a seed granted a domain nobody reviewed"
         );
     }
@@ -2656,7 +2687,7 @@ mod tests {
         let phone = phone("grants");
         let keys = nostr::Keys::generate();
         let v1 = version(&keys, 1_000, "Version one", &["relay"]);
-        let v2 = version(&keys, 2_000, "Version two", &["relay", "mesh"]);
+        let v2 = version(&keys, 2_000, "Version two", &["relay", "outbox"]);
         install(&phone, &v1, &["relay"]).await;
 
         let (outcome, _) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
@@ -2667,10 +2698,10 @@ mod tests {
         let opened = phone.host.open_with(&addr_of(&v2), grants).await.unwrap();
         assert_eq!(opened.title.as_deref(), Some("Version two"));
         assert!(
-            !opened.granted().contains(&"mesh".to_string()),
+            !opened.granted().contains(&"outbox".to_string()),
             "an update from the Circle granted itself a domain nobody reviewed"
         );
-        assert_eq!(opened.unreviewed, vec!["mesh".to_string()]);
+        assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
     }
 
     /// A domain the user switched off on the sheet stays off at the next
@@ -2733,6 +2764,9 @@ mod tests {
         .await;
         let ask = r#"{"channel":"napplet","message":{"type":"mesh.info","id":"m1"}}"#;
 
+        // `mesh` is a default grant (for now), so switch it off here first.
+        host.apply_grants(&addr.author, Some("fixture"), vec![])
+            .await;
         let other_author = nostr::Keys::generate().public_key();
         host.apply_grants(&other_author, Some("fixture"), vec!["mesh".into()])
             .await;
@@ -2759,13 +2793,17 @@ mod tests {
         .await;
         let ask = r#"{"channel":"napplet","message":{"type":"mesh.info","id":"m1"}}"#;
 
+        // `mesh` is a default grant (for now): switched off on the sheet, it
+        // is refused at once.
+        host.apply_grants(&addr.author, Some("fixture"), vec![])
+            .await;
         let out = host.frame(&opened.session_id, ask).await;
         let ToShell::Napplet { message } = &out[0] else {
             panic!("not a napplet frame")
         };
         assert!(
             message.field("error").is_some(),
-            "mesh was granted without asking"
+            "mesh was served after being switched off"
         );
 
         host.apply_grants(&addr.author, Some("fixture"), vec!["mesh".into()])

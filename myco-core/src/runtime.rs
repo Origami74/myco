@@ -3645,15 +3645,15 @@ mod tests {
         );
         // Installed, and an update declares more: still something to review.
         assert_eq!(
-            standing(&format!("{npub}:chat"), &["relay", "mesh"]),
-            (true, vec!["mesh".to_string()])
+            standing(&format!("{npub}:chat"), &["relay", "outbox"]),
+            (true, vec!["outbox".to_string()])
         );
         // A domain the user switched off is a decision, not something new.
         let mut grants = content.napplet_grants(&npub, Some("chat")).unwrap();
-        grants.set("mesh", false);
+        grants.set("outbox", false);
         content.set_napplet_grants(&npub, Some("chat"), grants);
         assert_eq!(
-            standing(&format!("{npub}:chat"), &["relay", "mesh"]),
+            standing(&format!("{npub}:chat"), &["relay", "outbox"]),
             (true, vec![])
         );
         // Another `d` tag from the same author is another napplet.

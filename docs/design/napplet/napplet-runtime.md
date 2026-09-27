@@ -560,6 +560,25 @@ implements; a switch turned off on the app's sheet stays off. The vendored
 `@napplet/shim` already installs `window.napplet.link` and `window.napplet.theme`, so
 the Myco prelude supplement needed nothing for either.
 
+**`mesh` is a default grant too — for now.** The upstream napplet tooling (the Vite
+plugin and `napplet deploy`) keeps only upstream NAP domains in a manifest's
+`requires` and drops Myco-only ones, so a napplet published with it cannot ask for
+`mesh`, and a grant that can only come from `requires` could never be given.
+Until the tooling keeps extension domains, `mesh` is in `DEFAULT_GRANTS`. It is
+still listed on the install sheet (NAP-MESH's "acting as the user" warning holds),
+capped by the user's App reach setting, and switchable off per app. Existing
+installs pick it up at their next open unless the user switched it off — silently,
+with no sheet, deliberately: a default is never reviewed, and asking about one would
+be a sheet for every installed app at once. Remove it from the defaults once the
+tooling is fixed — and note that removal alone does not revoke it: the widened grant
+is persisted in each entry's `granted`, so taking `mesh` out of the defaults needs a
+migration that drops it where it was never reviewed.
+
+With `mesh` on for every app, the roadmap's
+[mesh rate limits](../../roadmap.md#later) item (a per-session token bucket on
+`mesh.publish` / `mesh.subscribe`) is more urgent: any installed napplet can now flood
+the Circle up to the user's App reach cap.
+
 ### S4 — Composition
 
 **Not built.**
