@@ -552,6 +552,16 @@ impl LaneTransport for OutboxService {
             .iter()
             .any(|(l, r)| matches!(l, RelayLane::Internet { .. }) && r.is_some());
         self.content.note_internet_round(any_ok, tried_internet);
+        // Profiles, relay lists and manifests another relay answered with are
+        // kept here, behind the answer, so the next ask is local and works
+        // offline. Already verified by the lane; the local lane's own answer
+        // is not offered back to it.
+        self.content.keep_seen(
+            out.iter()
+                .filter(|(lane, _)| *lane != RelayLane::Local)
+                .filter_map(|(_, events)| events.as_ref())
+                .flatten(),
+        );
         // One line per round: which lanes answered and with how much. This
         // is the first thing to look at when a napplet says "not found".
         let summary: Vec<String> = out
@@ -1611,5 +1621,71 @@ mod tests {
         assert!(!dials_public("not a url").await);
         assert!(!dials_public("ws://[::ffff:127.0.0.1]:4870").await);
         assert!(!dials_public("ws://100.64.0.1").await);
+    }
+
+    /// A napplet's query through another relay keeps the profiles in the
+    /// answer here — and only those: a note is answered and not kept, and a
+    /// forged profile is dropped where it came in and never reaches the store.
+    #[tokio::test]
+    async fn a_query_keeps_verified_profiles_and_nothing_else() {
+        use myco_napplet_runtime::seams::LaneTransport;
+
+        let keys = Keys::generate();
+        let profile = EventBuilder::metadata(&nostr::Metadata::new().name("alice"))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let note = EventBuilder::text_note("not kept")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut forged = serde_json::to_value(
+            EventBuilder::metadata(&nostr::Metadata::new().name("real"))
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+        )
+        .unwrap();
+        forged["content"] = serde_json::json!(r#"{"name":"forged"}"#);
+        let forged: Event = serde_json::from_value(forged).unwrap();
+        assert!(forged.verify().is_err());
+
+        let (url, _) =
+            crate::ip_source::tests::mock_relay_holding(vec![profile.clone(), note, forged]).await;
+        let content = scratch_content("keep-seen");
+        let store = content.relay();
+        let svc = OutboxService::new(
+            store.clone(),
+            Arc::new(Mutex::new(None)),
+            content,
+            "npub1me".to_string(),
+        )
+        .allowing_private_dials();
+
+        let answers = svc
+            .query(
+                &[RelayLane::Local, RelayLane::Internet { url }],
+                &[Filter::new()],
+                Duration::from_secs(5),
+            )
+            .await;
+        let answered: usize = answers
+            .iter()
+            .filter_map(|(_, events)| events.as_ref())
+            .map(Vec::len)
+            .sum();
+        assert_eq!(answered, 2, "the profile and the note, not the forgery");
+
+        // Kept behind the answer, so wait for the write to land.
+        let mut held = Vec::new();
+        for _ in 0..100 {
+            held = store.query(&[Filter::new()]).await.unwrap();
+            if !held.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            held.iter().map(|e| e.id).collect::<Vec<_>>(),
+            [profile.id],
+            "only the verified profile is kept"
+        );
     }
 }

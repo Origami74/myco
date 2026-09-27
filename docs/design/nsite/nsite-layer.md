@@ -231,6 +231,102 @@ The store MUST keep only the newest event per slot, matching the dedup the Go
 sync does by `(kind, d-tag)`
 (`service.go `deduplicateManifests`` (nsite-deck reference)).
 
+#### Events kept as they pass
+
+Some events arrive from outside the local relay and would be asked for again:
+a profile a napplet looked up, a manifest the AppStore listed. The tap in
+[`keep_seen.rs`](../../../myco-core/src/keep_seen.rs) writes those into the
+local relay behind the lookup that found them. The next lookup answers
+locally, works offline, and a Circle peer asking this phone gets it too.
+
+**Which kinds.** Only these, all replaceable:
+
+| Kind | What | Why kept |
+| --- | --- | --- |
+| `0` | profile | napplets show names and pictures |
+| `10002` | NIP-65 relay list | where an author's notes and manifests are |
+| `10050` | NIP-17 DM relay list | where to send an author a DM |
+| `10063` | BUD-03 Blossom server list | where an author's blobs are |
+| `15128` / `35128` | nsite manifests | opening or sharing a site |
+| `15129` / `35129` | napplet manifests | review, install, the AppStore |
+
+Not kept: the legacy per-file nsite kind `34128` (nothing reads it, one event
+per file) and napplet snapshots `5129` (nothing reads them, and a regular kind
+is never replaced).
+
+**Where it taps.** Every lane of a napplet's `relay.query`, `outbox.query` and
+`outbox.getEvent` except the local one, relays the napplet named included;
+events passing through on a multi-hop pull for a peer; and the manifest an
+install review fetched. A subscription's pull already lands in the local
+relay, and the NIP-65 lookup already stores the lists it finds.
+
+**Rules.**
+
+- **Verified once, at ingress.** Every tapped path hands in events already
+  checked by `query_relay_filters` or the peer pool, so the tap does not
+  check again.
+- **Newest wins.** Writes go through `RelayBackend::publish`, so the store's
+  replaceable, addressable and NIP-09 rules apply.
+- **Manifests only, never blobs.** A napplet reviewed but not added keeps its
+  manifest, not its bytes.
+- **Off the hot path.** The tap filters, then spawns the writes. The napplet's
+  answer does not wait.
+- **The embedded store only.** With a custom relay configured there is no
+  tap: browsing is not written to someone else's relay, where "Delete cache"
+  could not clear it.
+
+**Nothing gets installed, and an installed app keeps its version.** The
+Library, the gateway's active version and a napplet's pin each have their own
+record; none of them is inferred from what the relay holds. A kept manifest
+for a site nobody added shows up nowhere.
+
+A kept newer manifest for an installed app does land in the store, replacing
+the pinned version there, as a manifest pushed by a peer always has
+([nsite-updates.md §1](./nsite-updates.md)). What is never done is pin a
+version whose files this phone does not have. Three things read through the
+pin instead of the store's newest:
+
+- the gateway, and a napplet's open (`ManifestStore::current`);
+- the Circle-facing relay (`Content::pinned_relay`, behind the mesh and
+  loopback sockets), so a peer asking for an installed app gets the version
+  this phone can hand the files over for;
+- "Delete cache", which drops kept events like any other cache and then puts
+  each pinned version back in the store.
+
+An app installed before pinning existed has no pin, and would serve the
+store's newest. The startup pass that lists the Library pins the version
+whose files are here — nsites already, napplets now too — so a newer manifest
+kept afterwards cannot take its place. Pinning at startup rather than in the
+tap keeps the rule in one place and covers peer pushes too. The one gap is a
+newer manifest landing between startup and that pass. The pass is spawned
+as the content layer starts and normally finishes before the mesh sockets
+accept, but it is not awaited: a peer push racing it is the remaining gap.
+
+Opening a site for the first time asks its sources for the manifest before
+fetching files. A copy kept from browsing may be stale, so it is only the
+fallback for a source that has the files but not the manifest. Whichever
+version's files were fetched is the one pinned.
+
+**Growth.** Every kept kind is replaceable, so the store holds one event per
+author (and `d` tag) however often it is seen. Growth follows how many
+authors and apps the user comes across, not how often; the kinds are small,
+and an event over 64 KiB is not kept. That bounds it in practice, not by a
+hard limit: a napplet that pages through a huge directory, or names a relay
+that serves endless fresh keys, can still add events. Per lookup:
+
+- at most 128 events are kept;
+- at most two write batches run at once, and a batch beyond that is dropped,
+  not queued.
+
+Nothing prunes kept events yet besides "Delete cache". Pruning them is on the
+roadmap ([roadmap.md](../../roadmap.md), Later: pruning of kept events).
+
+**Privacy.** The local relay is readable by Circle members. Kept events are
+public, signed data, and serving them helps propagation. But the set of
+profiles and apps this phone has looked up shows what the user browsed. The
+Circle is people the user paired with on purpose, and they can already read
+what a subscription pulled in, so this is accepted.
+
 **Fanout to connected peers.** The store never fans out. Fanout is the proxy's
 gossiper: when an event is accepted for the first time, it is published onward to
 every circle peer except the one it came from, as a `MESH`-wrapped `["EVENT", …]`

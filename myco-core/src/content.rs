@@ -570,12 +570,16 @@ pub struct Content {
     /// store (NIP-01-faithful, propagated to peers) while we keep serving the fully
     /// downloaded version until its replacement is staged. See
     /// `docs/design/nsite/nsite-updates.md` §1. Persisted to `active.json`.
-    active_manifests: Mutex<HashMap<String, Event>>,
+    active_manifests: Arc<Mutex<HashMap<String, Event>>>,
     active_path: PathBuf,
     /// Whether each installed napplet can open right now, keyed by shell host.
     /// Rebuilt at startup, after a cache wipe, and whenever a version is
     /// pinned — the napplet counterpart of `sites` for nsites.
     napplet_status: Mutex<HashMap<String, NappletStatusView>>,
+    /// Keeps profiles, relay lists and manifests seen from outside in the
+    /// embedded store. `None` with a custom relay: browsing is not written to
+    /// someone else's relay, where "Delete cache" could not clear it.
+    keep_seen: Option<crate::keep_seen::KeepSeen>,
 }
 
 /// A [`RelayBackend`] view the **gateway** reads: it returns the core-chosen
@@ -583,13 +587,18 @@ pub struct Content {
 /// back to the relay's newest when we haven't pinned one. Every other call passes
 /// straight through to the relay. This is what keeps a working app serving while a
 /// newer manifest is still downloading. See `docs/design/nsite/nsite-updates.md` §1.
-struct ActiveBackend<'a> {
-    relay: &'a dyn RelayBackend,
-    active: &'a Mutex<HashMap<String, Event>>,
+///
+/// The Circle-facing relay reads through the same view ([`Content::pinned_relay`]),
+/// so a peer asking for an installed app's manifest gets the version this phone
+/// has the files for, not a newer one kept in the store without them.
+#[derive(Clone)]
+struct ActiveBackend {
+    relay: Arc<dyn RelayBackend>,
+    active: Arc<Mutex<HashMap<String, Event>>>,
 }
 
 #[async_trait]
-impl RelayBackend for ActiveBackend<'_> {
+impl RelayBackend for ActiveBackend {
     async fn publish(&self, event: Event) -> anyhow::Result<()> {
         self.relay.publish(event).await
     }
@@ -599,10 +608,14 @@ impl RelayBackend for ActiveBackend<'_> {
     /// The substitution happens here, on the way out, because the seam no longer
     /// has a slot-shaped read to override — everything goes through `query` now.
     /// A pinned event shares its slot with the one it replaces (same kind,
-    /// author, and `d` tag), so anything that matched the newer one matches it.
+    /// author, and `d` tag), but not its `created_at`, id or other tags, so a
+    /// Circle peer's `since`, `ids` or tag filter can match the newer version
+    /// and not the pin. The pin is served only when it matches the request
+    /// itself; otherwise the slot answers nothing, as a relay holding only the
+    /// pin would.
     async fn query(&self, filters: &[Filter]) -> anyhow::Result<Vec<Event>> {
         let mut out = self.relay.query(filters).await?;
-        let active = self.active.lock().unwrap().clone();
+        let active = self.active.lock().unwrap();
         if active.is_empty() {
             return Ok(out);
         }
@@ -616,8 +629,54 @@ impl RelayBackend for ActiveBackend<'_> {
                 *event = pinned.clone();
             }
         }
+        drop(active);
+        out.retain(|e| {
+            filters
+                .iter()
+                .any(|f| f.match_event(e, nostr::filter::MatchEventOptions::new()))
+        });
         out.dedup_by(|a, b| a.id == b.id);
         Ok(out)
+    }
+}
+
+/// The site's manifest from `source`, verified and parsed; `None` when the
+/// source has none. The author and slot are checked here too, so a source
+/// cannot answer for a different site.
+async fn fetch_verified_manifest(
+    source: &dyn PeerSource,
+    addr: &SiteAddr,
+) -> anyhow::Result<Option<nsite_deck::Manifest>> {
+    let Some(event) = source
+        .fetch_manifest(&addr.author, addr.d_tag.as_deref())
+        .await?
+    else {
+        return Ok(None);
+    };
+    event
+        .verify()
+        .map_err(|e| anyhow::anyhow!("fetched manifest verification failed: {e}"))?;
+    anyhow::ensure!(
+        event.pubkey == addr.author
+            && event.kind.as_u16() == nsite_deck::kind_for(addr.d_tag.as_deref())
+            && event_d_tag(&event).as_deref() == addr.d_tag.as_deref(),
+        "the source answered with a different site's manifest"
+    );
+    Ok(Some(nsite_deck::Manifest::from_event(event)?))
+}
+
+/// The newer of two manifests for one slot.
+fn newer_manifest(
+    a: Option<nsite_deck::Manifest>,
+    b: Option<nsite_deck::Manifest>,
+) -> Option<nsite_deck::Manifest> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(if b.event.created_at > a.event.created_at {
+            b
+        } else {
+            a
+        }),
+        (a, b) => a.or(b),
     }
 }
 
@@ -714,6 +773,7 @@ impl Content {
         // Kept only while it is the thing serving: the usage counts and the
         // selective retain it backs describe our store, not someone else's.
         let relay_store = (!using_custom).then_some(embedded);
+        let keep_seen = relay_store.clone().map(crate::keep_seen::KeepSeen::new);
 
         let embedded_blobs = Arc::new(FsBlobStore::open(data_dir.join("blossom"))?);
         let blobs: Arc<dyn BlobStore> = match &custom_blobs {
@@ -772,9 +832,10 @@ impl Content {
             file_transfers_path,
             file_outbox_dir,
             received_dir,
-            active_manifests: Mutex::new(active_manifests),
+            active_manifests: Arc::new(Mutex::new(active_manifests)),
             active_path,
             napplet_status: Mutex::new(HashMap::new()),
+            keep_seen,
         })
     }
 
@@ -830,6 +891,25 @@ impl Content {
         self.peer_relays.clone()
     }
 
+    /// Keep the profiles, relay lists and manifests among `events` — seen
+    /// from outside and already verified — in the embedded store, behind the
+    /// caller (`keep_seen.rs`). Nothing with a custom relay configured.
+    ///
+    /// Returns the write task, for tests to wait on.
+    pub fn keep_seen<'a>(
+        &self,
+        events: impl IntoIterator<Item = &'a Event>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        self.keep_seen.as_ref()?.offer(events)
+    }
+
+    /// The store as the Circle sees it: an installed app's manifest slot reads
+    /// as its **pinned** version, the one this phone has the files for, even
+    /// when a newer one sits in the store. Everything else passes through.
+    pub fn pinned_relay(&self) -> Arc<dyn RelayBackend> {
+        Arc::new(self.active_backend())
+    }
+
     /// The event store (shared), for the mesh WS proxy in front of it.
     pub fn relay(&self) -> Arc<dyn RelayBackend> {
         self.relay.clone()
@@ -876,10 +956,10 @@ impl Content {
 
     /// The backend the gateway reads: serves the active (fully-downloaded) version,
     /// not necessarily the relay's newest.
-    fn active_backend(&self) -> ActiveBackend<'_> {
+    fn active_backend(&self) -> ActiveBackend {
         ActiveBackend {
-            relay: self.relay.as_ref(),
-            active: &self.active_manifests,
+            relay: self.relay.clone(),
+            active: self.active_manifests.clone(),
         }
     }
 
@@ -1086,68 +1166,41 @@ impl Content {
             );
         };
 
+        // An installed site's local manifest is the version it runs: fetch only
+        // its missing files. A first open asks each source for the manifest
+        // first, so a copy kept from browsing — possibly stale — is only the
+        // fallback for a source that has the files but not the manifest.
+        let installed = self.is_in_library(&addr);
+
         // Try each in order; the first that goes Ready wins. Keep the best
         // non-ready outcome (incomplete > unreachable) to report if none succeed.
         let mut best = SyncOutcome::Unreachable;
         for source in &sources {
-            // Manifest already local → fetch only its (missing) blobs, no manifest
-            // refetch. Otherwise do a full sync (manifest + blobs).
-            let outcome = match &known {
-                Some(manifest) => {
-                    sync::stage_blobs(self.blobs.as_ref(), source.as_ref(), manifest, &progress)
-                        .await
-                }
-                None => {
-                    sync::sync_site(
-                        self.relay.as_ref(),
-                        self.blobs.as_ref(),
-                        source.as_ref(),
-                        &addr,
-                        &progress,
-                    )
-                    .await
-                }
+            let target = match (&known, installed) {
+                (Some(local), true) => Some(local.clone()),
+                _ => match fetch_verified_manifest(source.as_ref(), &addr).await {
+                    Ok(fresh) => newer_manifest(fresh, known.clone()),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "sync source errored");
+                        known.clone()
+                    }
+                },
             };
+            let Some(target) = target else {
+                continue;
+            };
+            let outcome =
+                sync::stage_blobs(self.blobs.as_ref(), source.as_ref(), &target, &progress).await;
             match outcome {
                 Ok(SyncOutcome::Ready) => {
-                    match &known {
-                        // The manifest was already local — it's complete now. Ensure
-                        // it's stored (idempotent) and pin it as the active version;
-                        // title/count come straight from the manifest we held.
-                        Some(m) => {
-                            let _ = self.relay.publish(m.event.clone()).await;
-                            self.set_active(&m.event);
-                            let n = m.paths.len() as u64;
-                            self.set_status_titled(
-                                &addr,
-                                m.title.as_deref(),
-                                "ready",
-                                n,
-                                n,
-                                "Ready",
-                            );
-                            self.add_to_library(&addr, m.title.as_deref(), now_secs());
-                        }
-                        // Full sync stored the just-fetched manifest (the relay's
-                        // newest) — pull it back to make it the active version.
-                        None => {
-                            let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-                            if let Ok(Some(ev)) = nsite_deck::seams::newest_in_slot(
-                                self.relay.as_ref(),
-                                kind,
-                                &addr.author,
-                                addr.d_tag.as_deref(),
-                            )
-                            .await
-                            {
-                                self.set_active(&ev);
-                            }
-                            let title = self.lookup_title(&addr).await;
-                            let n = self.manifest_file_count(&addr).await;
-                            self.set_status_titled(&addr, title.as_deref(), "ready", n, n, "Ready");
-                            self.add_to_library(&addr, title.as_deref(), now_secs());
-                        }
-                    }
+                    // Every file is here: store the manifest (idempotent), and pin
+                    // exactly the version whose files were just fetched — not
+                    // whatever the store's newest is by now.
+                    let _ = self.relay.publish(target.event.clone()).await;
+                    self.set_active(&target.event);
+                    let n = target.paths.len() as u64;
+                    self.set_status_titled(&addr, target.title.as_deref(), "ready", n, n, "Ready");
+                    self.add_to_library(&addr, target.title.as_deref(), now_secs());
                     tracing::info!(host = %addr.host_label(), "open_site: ready");
                     return;
                 }
@@ -1492,7 +1545,25 @@ impl Content {
         let mut fresh = HashMap::new();
         for item in napplets {
             let ready = match self.napplet_keep_set(&item).await {
-                Some((_, index)) => self.blobs.has(&index).await,
+                Some((event, index)) => {
+                    let here = self.blobs.has(&index).await;
+                    // A napplet installed before pinning existed has no pin,
+                    // so it serves the store's newest — and a newer manifest
+                    // kept or pushed without its bytes would take its place.
+                    // Pin the version whose bytes are here, as the nsite pass
+                    // above does. Only when there is no pin: one that exists
+                    // is already the version to serve.
+                    let key = manifest_key(
+                        event.kind.as_u16(),
+                        &event.pubkey,
+                        event_d_tag(&event).as_deref(),
+                    );
+                    let pinned = self.active_manifests.lock().unwrap().contains_key(&key);
+                    if here && !pinned {
+                        self.set_active_if_newer(&event);
+                    }
+                    here
+                }
                 None => false,
             };
             let (state, message) = if ready {
@@ -3206,7 +3277,12 @@ impl Content {
             })
         });
 
-        join_all(queries).await.into_iter().flatten().collect()
+        let events: Vec<Event> = join_all(queries).await.into_iter().flatten().collect();
+        // Passing through on their way to the peer that asked: keep the
+        // profiles, relay lists and manifests, so the next ask stops here.
+        // Verified by the pool at ingress.
+        self.keep_seen(&events);
+        events
     }
 
     // --- nsite updates (docs/design/nsite/nsite-updates.md) ---
@@ -4083,6 +4159,25 @@ impl Content {
                 }
             }
             store.retain_events(&keep_events).await;
+            // A pinned version may no longer be in the store at all: a newer
+            // manifest for the slot — pushed by a peer, or kept when a napplet
+            // browsed it — replaced it there, and the retain just dropped that
+            // newer one as cache. The gateway substitutes a pin only for an
+            // event the slot still returns, so put each pin back; an older one
+            // than the store holds is a no-op.
+            let pins: Vec<Event> = self
+                .active_manifests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(k, _)| keep_active.contains(*k))
+                .map(|(_, e)| e.clone())
+                .collect();
+            for pin in pins {
+                if let Err(e) = store.publish(pin).await {
+                    tracing::warn!(error = %e, "wipe_cache: could not restore a pinned manifest");
+                }
+            }
         }
         if let Some(store) = &self.blobs_local {
             store.retain_blobs(&keep_blobs);
@@ -4219,36 +4314,6 @@ impl Content {
         entry.files_pulled = pulled;
         entry.files_total = total;
         entry.message = msg.to_string();
-    }
-
-    async fn lookup_title(&self, addr: &SiteAddr) -> Option<String> {
-        let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-        let event = nsite_deck::seams::newest_in_slot(
-            self.relay.as_ref(),
-            kind,
-            &addr.author,
-            addr.d_tag.as_deref(),
-        )
-        .await
-        .ok()??;
-        nsite_deck::Manifest::from_event(event).ok()?.title
-    }
-
-    async fn manifest_file_count(&self, addr: &SiteAddr) -> u64 {
-        let kind = nsite_deck::kind_for(addr.d_tag.as_deref());
-        match nsite_deck::seams::newest_in_slot(
-            self.relay.as_ref(),
-            kind,
-            &addr.author,
-            addr.d_tag.as_deref(),
-        )
-        .await
-        {
-            Ok(Some(event)) => nsite_deck::Manifest::from_event(event)
-                .map(|m| m.paths.len() as u64)
-                .unwrap_or(0),
-            _ => 0,
-        }
     }
 }
 
@@ -5454,7 +5519,7 @@ mod tests {
     }
 
     /// Write a generated site to a bundle dir (`manifest.json` + `blobs/`).
-    fn write_bundle(dir: &Path, site: &nsite_deck::testing::TestSite) {
+    pub(super) fn write_bundle(dir: &Path, site: &nsite_deck::testing::TestSite) {
         std::fs::create_dir_all(dir.join("blobs")).unwrap();
         std::fs::write(
             dir.join("manifest.json"),
@@ -5789,10 +5854,11 @@ mod tests {
 }
 
 #[cfg(test)]
-mod library_kind_tests {
-    use super::tests::tmp;
+pub(crate) mod library_kind_tests {
+    use super::tests::{tmp, write_bundle};
     use super::*;
     use nostr::nips::nip19::ToBech32;
+    use nsite_deck::testing::build_test_site;
 
     fn entry(kind: LibraryKind, d_tag: &str) -> LibraryItem {
         LibraryItem {
@@ -5946,6 +6012,400 @@ mod library_kind_tests {
         // And the nsite itself still counts once it is added.
         content.add_to_library(&addr, Some("Bitchat site"), 3);
         assert!(content.is_in_library(&addr));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A manifest kept because a lookup saw it — an nsite's or a napplet's —
+    /// installs nothing: no Library entry, no site status, no napplet
+    /// status, even after the Library is re-read.
+    #[tokio::test]
+    async fn a_kept_manifest_installs_nothing() {
+        use myco_napplet_runtime::testing::NappletBuilder;
+        let dir = tmp("keep-seen-not-installed");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let site = build_test_site(&[("/index.html", b"<h1>seen</h1>")], Some("blog"), None);
+        let napplet = NappletBuilder::new().d_tag(Some("game")).build();
+
+        content
+            .keep_seen([&site.manifest, &napplet.manifest])
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(content.cache_view().relay_events, 2, "both were kept");
+
+        Arc::clone(&content).refresh_library_status().await;
+        assert!(content.library_snapshot().is_empty());
+        assert!(content.sites_snapshot().is_empty());
+        assert!(content.napplet_status_snapshot().is_empty());
+        assert!(!content.is_in_library(&SiteAddr {
+            author: site.author,
+            d_tag: Some("blog".into()),
+        }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A newer manifest kept for an installed site does not change what the
+    /// site serves — the pinned version does — and "Delete cache" drops the
+    /// newer one and leaves the pinned version serving.
+    #[tokio::test]
+    async fn a_kept_newer_manifest_leaves_the_installed_version_serving() {
+        let dir = tmp("keep-seen-pinned");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let keys = nostr::Keys::generate();
+        let v1 = nsite_deck::testing::build_test_site_with_keys(
+            &keys,
+            &[("/index.html", b"<h1>v1</h1>")],
+            None,
+            Some("Site"),
+        );
+        let bundle = dir.join("v1");
+        write_bundle(&bundle, &v1);
+        assert_eq!(
+            content.import_dir(&bundle).await.unwrap(),
+            SyncOutcome::Ready
+        );
+        let host = format!("{}.nsite", keys.public_key().to_bech32().unwrap());
+
+        // v2 names bytes this phone does not have.
+        let v2_site = nsite_deck::testing::build_test_site_with_keys(
+            &keys,
+            &[("/index.html", b"<h1>v2</h1>")],
+            None,
+            Some("Site"),
+        );
+        let v2 = EventBuilder::new(v2_site.manifest.kind, "")
+            .tags(v2_site.manifest.tags.clone())
+            .custom_created_at(nostr::Timestamp::from(
+                v1.manifest.created_at.as_secs() + 60,
+            ))
+            .sign_with_keys(&keys)
+            .unwrap();
+        content.keep_seen([&v2]).unwrap().await.unwrap();
+        let newest = nsite_deck::seams::newest_in_slot(
+            content.relay().as_ref(),
+            nsite_deck::KIND_ROOT,
+            &keys.public_key(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(newest.map(|e| e.id), Some(v2.id), "v2 was not kept");
+
+        let served = content.gateway_get(&host, "/", None).await;
+        assert_eq!(served.status, 200);
+        assert_eq!(served.body, b"<h1>v1</h1>");
+
+        // A Circle peer asking over the wire gets v1 too — the version whose
+        // files this phone can hand over.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(crate::mesh_relay::serve_on(
+            content.pinned_relay(),
+            listener,
+        ));
+        let answered = crate::ip_source::query_relay(
+            &url,
+            serde_json::json!({
+                "kinds": [nsite_deck::KIND_ROOT],
+                "authors": [keys.public_key().to_hex()],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            answered.iter().map(|e| e.id).collect::<Vec<_>>(),
+            [v1.manifest.id],
+            "the Circle relay offered a version without its files"
+        );
+        // A filter only the newer version matches gets nothing, not a stale v1.
+        let answered = crate::ip_source::query_relay(
+            &url,
+            serde_json::json!({
+                "kinds": [nsite_deck::KIND_ROOT],
+                "authors": [keys.public_key().to_hex()],
+                "since": v2.created_at.as_secs(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            answered.is_empty(),
+            "the pin was served to a filter it does not match"
+        );
+
+        content.wipe_cache(None).await.unwrap();
+        let served = content.gateway_get(&host, "/", None).await;
+        assert_eq!(served.status, 200, "the wipe took the installed site down");
+        assert_eq!(served.body, b"<h1>v1</h1>");
+        assert_eq!(content.library_snapshot().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A napplet installed before pinning existed has no pin. The startup
+    /// pass pins the version whose bytes are here, so a newer manifest kept
+    /// afterwards — bytes not here — does not take its place: it still
+    /// opens v1.
+    #[tokio::test]
+    async fn an_unpinned_installed_napplet_still_opens_v1_after_v2_is_kept() {
+        use crate::napplet::ManifestStore;
+        use myco_napplet_runtime::testing::NappletBuilder;
+        let dir = tmp("keep-seen-legacy-napplet");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let keys = nostr::Keys::generate();
+        let v1 = NappletBuilder::new()
+            .keys(keys.clone())
+            .d_tag(Some("game"))
+            .files(&[("/index.html", b"<h1>v1</h1>")])
+            .created_at(1_000)
+            .build();
+        for (_, bytes) in &v1.blobs {
+            content.blobs().put(bytes).await.unwrap();
+        }
+        // Installed the old way: manifest and bytes, no pin.
+        content.relay().publish(v1.manifest.clone()).await.unwrap();
+        content.add_napplet_to_library(
+            &keys.public_key().to_bech32().unwrap(),
+            Some("game"),
+            Some("Game"),
+            "game.napplet.localhost",
+            vec![],
+            vec![],
+            "naddr1game",
+            1,
+        );
+        assert!(content.active_manifests.lock().unwrap().is_empty());
+
+        Arc::clone(&content).refresh_library_status().await;
+
+        let v2 = NappletBuilder::new()
+            .keys(keys.clone())
+            .d_tag(Some("game"))
+            .files(&[("/index.html", b"<h1>v2</h1>")])
+            .created_at(2_000)
+            .build();
+        content.keep_seen([&v2.manifest]).unwrap().await.unwrap();
+        let newest = nsite_deck::seams::newest_in_slot(
+            content.relay().as_ref(),
+            myco_napplet_runtime::KIND_NAMED,
+            &keys.public_key(),
+            Some("game"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(newest.map(|e| e.id), Some(v2.manifest.id));
+
+        let current = content
+            .current(
+                myco_napplet_runtime::KIND_NAMED,
+                &keys.public_key(),
+                Some("game"),
+            )
+            .await
+            .unwrap()
+            .expect("the napplet lost its manifest");
+        assert_eq!(current.id, v1.manifest.id, "v2 took v1's place");
+        let opened = myco_napplet_runtime::resolve(current, content.blobs().as_ref())
+            .await
+            .expect("v1 does not open");
+        assert!(opened.index_html.contains("v1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Profiles and manifests seen are kept only in the embedded store. With
+    /// a custom relay there is no tap: browsing is not written to someone
+    /// else's relay, where "Delete cache" could not reach it.
+    #[tokio::test]
+    async fn a_custom_relay_turns_keeping_off() {
+        let dir = tmp("keep-seen-custom-relay");
+        let _ = std::fs::remove_dir_all(&dir);
+        let backend = Arc::new(crate::remote_backend::RemoteBackend::new(
+            "ws://127.0.0.1:9".to_string(),
+        ));
+        let content = Content::open_with_relay(&dir, Some(backend)).unwrap();
+        let profile = EventBuilder::metadata(&nostr::Metadata::new().name("x"))
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        assert!(content.keep_seen([&profile]).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A mesh peer's relay on loopback: answers every `REQ` — bare or in a
+    /// `MESH` envelope, which the real proxy refuses from loopback — with
+    /// `events` and `EOSE`. Returns its URL.
+    pub(crate) async fn mesh_peer_holding(events: Vec<Event>) -> String {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let events = Arc::new(events);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(Message::Text(txt))) = ws.next().await {
+                        let Ok(mut frame) = serde_json::from_str::<serde_json::Value>(&txt) else {
+                            continue;
+                        };
+                        if frame[0] == "MESH" {
+                            frame = frame[2].clone();
+                        }
+                        if frame[0] != "REQ" {
+                            continue;
+                        }
+                        let sub = frame[1].clone();
+                        for ev in events.iter() {
+                            let out = serde_json::json!(["EVENT", sub, ev]).to_string();
+                            let _ = ws.send(Message::Text(out)).await;
+                        }
+                        let eose = serde_json::json!(["EOSE", sub]).to_string();
+                        let _ = ws.send(Message::Text(eose)).await;
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    /// Events passing through on a multi-hop pull for a peer are kept here —
+    /// the profiles, not the notes — through the real pull path over the
+    /// peer pool.
+    #[tokio::test]
+    async fn a_multi_hop_pull_keeps_what_passes_through() {
+        let dir = tmp("keep-seen-pull");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+
+        // A Circle member whose relay (a mock on loopback) holds a profile
+        // and a note.
+        let peer = nostr::Keys::generate();
+        let peer_npub = peer.public_key().to_bech32().unwrap();
+        let author = nostr::Keys::generate();
+        let profile = EventBuilder::metadata(&nostr::Metadata::new().name("far"))
+            .sign_with_keys(&author)
+            .unwrap();
+        let note = EventBuilder::text_note("passing")
+            .sign_with_keys(&author)
+            .unwrap();
+        let url = mesh_peer_holding(vec![profile.clone(), note]).await;
+        content.add_to_circle(&peer_npub, "peer");
+        content.peer_relays().redirect(&peer_npub, &url);
+
+        let pulled = content
+            .pull_from_peers(
+                vec![serde_json::json!({ "authors": [author.public_key().to_hex()] })],
+                crate::mesh_wire::MeshMeta::pull(0, crate::mesh_wire::new_query_id(), 5_000),
+                None,
+            )
+            .await;
+        assert_eq!(pulled.len(), 2, "the pull did not reach the peer");
+
+        let mut held = Vec::new();
+        for _ in 0..100 {
+            held = content.relay().query(&[Filter::new()]).await.unwrap();
+            if !held.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            held.iter().map(|e| e.id).collect::<Vec<_>>(),
+            [profile.id],
+            "only the profile is kept"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A PeerSource over fixed events and blobs.
+    struct FixedSource {
+        manifest: Option<Event>,
+        blobs: Vec<(String, Vec<u8>)>,
+    }
+
+    #[async_trait]
+    impl PeerSource for FixedSource {
+        async fn fetch_manifest(
+            &self,
+            _author: &PublicKey,
+            _d_tag: Option<&str>,
+        ) -> anyhow::Result<Option<Event>> {
+            Ok(self.manifest.clone())
+        }
+
+        async fn fetch_blob(
+            &self,
+            sha256_hex: &str,
+            _servers: &[String],
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(self
+                .blobs
+                .iter()
+                .find(|(h, _)| h == sha256_hex)
+                .map(|(_, b)| b.clone()))
+        }
+    }
+
+    /// Opening a site for the first time asks the source for its manifest,
+    /// rather than staging a stale one kept from browsing, and pins exactly
+    /// the version whose files it fetched.
+    #[tokio::test]
+    async fn a_first_open_fetches_past_a_stale_kept_manifest() {
+        let dir = tmp("keep-seen-first-open");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let keys = nostr::Keys::generate();
+        let old = nsite_deck::testing::build_test_site_with_keys(
+            &keys,
+            &[("/index.html", b"<h1>old</h1>")],
+            None,
+            Some("Site"),
+        );
+        let new_site = nsite_deck::testing::build_test_site_with_keys(
+            &keys,
+            &[("/index.html", b"<h1>new</h1>")],
+            None,
+            Some("Site"),
+        );
+        let new = EventBuilder::new(new_site.manifest.kind, "")
+            .tags(new_site.manifest.tags.clone())
+            .custom_created_at(nostr::Timestamp::from(
+                old.manifest.created_at.as_secs() + 60,
+            ))
+            .sign_with_keys(&keys)
+            .unwrap();
+        content.keep_seen([&old.manifest]).unwrap().await.unwrap();
+        // The source has the new version and both versions' files.
+        content.set_source(Arc::new(FixedSource {
+            manifest: Some(new.clone()),
+            blobs: old.blobs.iter().chain(&new_site.blobs).cloned().collect(),
+        }));
+
+        let addr = SiteAddr {
+            author: keys.public_key(),
+            d_tag: None,
+        };
+        Arc::clone(&content).open_site(addr, None).await;
+
+        let host = format!("{}.nsite", keys.public_key().to_bech32().unwrap());
+        let served = content.gateway_get(&host, "/", None).await;
+        assert_eq!(served.status, 200);
+        assert_eq!(
+            served.body, b"<h1>new</h1>",
+            "the stale kept copy was installed"
+        );
+        let pinned: Vec<_> = content
+            .active_manifests
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(pinned, [new.id]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1230,7 +1230,7 @@ pub(crate) mod tests {
     /// A mock relay holding `events`: answers every REQ, on any number of
     /// connections, with the held events any of its filters match by kind and
     /// author, then EOSE. Returns the URL and a count of REQs served.
-    async fn mock_relay_holding(
+    pub(crate) async fn mock_relay_holding(
         events: Vec<Event>,
     ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         mock_relay_delayed(events, Duration::ZERO).await
