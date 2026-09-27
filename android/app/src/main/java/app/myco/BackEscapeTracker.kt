@@ -40,19 +40,19 @@ internal class BackEscapeTracker(
         /** Not an Escape a back sent: leave it to WebView's default. */
         NOT_OURS,
 
-        /** The napplet left back to Myco: close the window. */
-        CLOSE,
+        /** The napplet left back to Myco: leave the window (to the background). */
+        LEAVE,
 
         /** One of ours, nothing to do. */
         CONSUMED,
     }
 
     /**
-     * A back arrived. True when it must close the window directly — the
+     * A back arrived. True when it must leave the window directly — the
      * napplet has already consumed [maxConsumed] backs since the last touch —
      * rather than be offered to the napplet.
      */
-    fun shouldCloseDirectly(now: Long, lastTouchAt: Long): Boolean {
+    fun shouldLeaveDirectly(now: Long, lastTouchAt: Long): Boolean {
         syncTouch(lastTouchAt)
         expire(now, lastTouchAt)
         val unanswered = pending.count { !it.downUnhandled && it.downTime >= lastTouchAt }
@@ -69,11 +69,22 @@ internal class BackEscapeTracker(
         val entry = pending.firstOrNull { it.downTime == downTime } ?: return Report.NOT_OURS
         if (isDown) {
             entry.downUnhandled = true
-            return Report.CLOSE
+            return Report.LEAVE
         }
         pending.remove(entry)
         if (!entry.downUnhandled) countConsumed(entry, lastTouchAt)
         return Report.CONSUMED
+    }
+
+    /**
+     * The window was sent to the background: forget what is in flight and
+     * start the count over, so coming back to it is a fresh start — not a
+     * back that leaves again at once.
+     */
+    fun reset() {
+        pending.clear()
+        consumed = 0
+        countedTouch = Long.MIN_VALUE
     }
 
     /** A back was sent recently and the page has not answered it yet. */

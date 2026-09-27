@@ -332,7 +332,9 @@ The contract for napplet authors:
 
 - **You handled it** (closed a page, a dialog, a drawer): call `preventDefault()` on the
   `keydown`. The napplet stays open.
-- **You did not**: leave it unhandled at your top level, and Myco closes the napplet.
+- **You did not**: leave it unhandled at your top level, and Myco sends the napplet's
+  window to the background — you land where you came from, and the napplet keeps
+  running with its state, in Recents. Back never closes a napplet.
 
 This is plain, portable DOM behaviour (Escape = dismiss), so a napplet that already
 closes its dialogs on Escape gets back for free. It needs no new NAP.
@@ -344,8 +346,8 @@ by closing it, without any script of its own.
 
 **Back cannot be trapped.** A napplet that consumes every Escape would otherwise keep
 the user in it. Myco offers at most three backs in a row to a napplet that consumes
-them; with no touch on the napplet since, the fourth back closes the window without
-asking. Three is enough to walk back up a few nested pages; a touch starts the count
+them; with no touch on the napplet since, the fourth back sends the window to the
+background without asking. Three is enough to walk back up a few nested pages; a touch starts the count
 over.
 
 How the window tells the two apart: `NappletActivity` dispatches a real
@@ -354,9 +356,9 @@ back through `WebViewClient.onUnhandledKeyEvent` as the same `KeyEvent` object; 
 unhandled key-down from its own back closes the window, and a consumed one is never
 reported. The shell keeps keyboard focus in the napplet's frame so the napplet is the
 one that hears it. If focus somehow sits in the shell, the shell does not consume
-Escape, so back closes the napplet as it always did. Back also closes the window
-directly while the napplet is still opening, after a renderer crash, and when the
-renderer stays unresponsive after a back. The review sheet and the link dialog take
+Escape, so back sends the window behind. It does the same while the napplet is still
+opening. Only a broken window is closed: after a renderer crash, and when the renderer
+stays unresponsive after a back. The review sheet and the link dialog take
 back before the napplet does; an open keyboard closes first.
 
 ---

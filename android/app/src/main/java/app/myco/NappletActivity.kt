@@ -436,6 +436,10 @@ class NappletActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         client = MycoCore.client(this)
+        // Until the shell is up there is no napplet to offer back to; it still
+        // only sends the window behind, never closes it. Replaced by [onBack]
+        // once mounted (a later callback takes precedence).
+        onBackPressedDispatcher.addCallback(this) { moveTaskToBack(true) }
 
         val pointer = intent.getStringExtra(EXTRA_POINTER).orEmpty()
         if (pointer.isEmpty()) {
@@ -645,7 +649,8 @@ class NappletActivity : ComponentActivity() {
             null,
         )
 
-        // Back is offered to the napplet first, as Escape. See [onBack].
+        // Back is offered to the napplet first, as Escape. See [onBack]. Added
+        // after the splash-time callback in onCreate, so this one wins.
         onBackPressedDispatcher.addCallback(this) { onBack() }
 
         webView.loadUrl("http://$shellHost/")
@@ -671,15 +676,16 @@ class NappletActivity : ComponentActivity() {
      *   `KeyEvent` object dispatched here (Chromium keeps it as the event's
      *   `os_event`, and `WebContentsDelegateAndroid::HandleKeyboardEvent`
      *   passes it back through `AwWebContentsDelegateAdapter`). That lands in
-     *   [backEscapeUnhandled], which closes the window.
+     *   [backEscapeUnhandled], which [leave]s: the window goes to the
+     *   background, still running, as Android does for an app at its root.
+     *   Back never closes a napplet.
      *
      * A handled key-down is never reported; the key-up's report (or its
      * absence) marks the back consumed. So that no napplet can trap the user
      * by consuming every Escape, only [BackEscapeTracker.MAX_CONSUMED] backs in
-     * a row are offered to it without a touch in between; the next closes the
+     * a row are offered to it without a touch in between; the next leaves the
      * window directly. Every back sends its own Escape, so a rapid second back
-     * is simply the napplet's next chance to go back, and `finish()` is
-     * idempotent.
+     * is simply the napplet's next chance to go back.
      */
     private fun onBack() {
         if (isFinishing) return
@@ -696,13 +702,13 @@ class NappletActivity : ComponentActivity() {
         }
         if (!view.hasFocus()) view.requestFocus()
         if (!view.hasFocus()) {
-            finish()
+            leave()
             return
         }
         val now = SystemClock.uptimeMillis()
-        if (backs.shouldCloseDirectly(now, lastTouchAt)) {
-            Log.i(TAG, "napplet consumed ${BackEscapeTracker.MAX_CONSUMED} backs without a touch; closing")
-            finish()
+        if (backs.shouldLeaveDirectly(now, lastTouchAt)) {
+            Log.i(TAG, "napplet consumed ${BackEscapeTracker.MAX_CONSUMED} backs without a touch; leaving")
+            leave()
             return
         }
         backs.sent(now)
@@ -712,7 +718,7 @@ class NappletActivity : ComponentActivity() {
 
     /**
      * The page left an Escape unhandled. Returns true when it was one [onBack]
-     * sent — then it is consumed here, and an unhandled key-down closes the
+     * sent — then it is consumed here, and an unhandled key-down [leave]s the
      * window. Any other Escape (a hardware keyboard) takes the default path.
      */
     private fun backEscapeUnhandled(event: KeyEvent): Boolean {
@@ -723,9 +729,21 @@ class NappletActivity : ComponentActivity() {
         }
         return when (backs.unhandled(event.downTime, isDown, lastTouchAt)) {
             BackEscapeTracker.Report.NOT_OURS -> false
-            BackEscapeTracker.Report.CLOSE -> { finish(); true }
+            BackEscapeTracker.Report.LEAVE -> { leave(); true }
             BackEscapeTracker.Report.CONSUMED -> true
         }
+    }
+
+    /**
+     * Where back takes you when the napplet doesn't go back itself: out of the
+     * window, not out of the napplet. The task moves behind — to Myco's Apps
+     * screen or the launcher, wherever you came from — and keeps running with
+     * its state, in Recents. Only a broken window (a dead or hung renderer) is
+     * ever closed.
+     */
+    private fun leave() {
+        backs.reset()
+        moveTaskToBack(true)
     }
 
     private fun syncChrome() {
