@@ -513,6 +513,21 @@ What the specs allow shapes how:
   every real list stale on every plan, one lookup per author.)
 - **One relay, one lane.** Lanes are deduplicated with the trailing slash ignored, so
   `wss://relay.damus.io` and `wss://relay.damus.io/` share one socket.
+- **A read plan picks relays, it does not union them.** A subscription to a feed or a
+  stack names dozens of authors, and the union of their write relays reached 20 and 39
+  lanes for one subscription. Like NDK and welshman, a read plan does a greedy set cover
+  over the authors' internet write relays (`select_relays`): it takes the relay covering
+  the most authors still short of two relays, every author once before any twice, until
+  each listed author has two (or all theirs, if fewer) or eight relays are chosen
+  (`MAX_SELECTED_RELAYS`: popular relays cover most authors between them, and eight beside
+  the fallback and a few named relays stays inside a napplet's 16 streams). Skip-listed
+  relays are chosen only for an author nothing else covers; ties go to a relay already
+  streaming, then to the one more authors list, then to the one seen first, so a plan is
+  deterministic. Unchanged: the local lane, mesh lanes, fallback relays for authors with
+  no list, and the napplet's own `options.relays`. One-shot reads and subscriptions plan
+  the same way. A write plan (`toInboxes`) is not narrowed: inbox delivery must reach
+  every relay. Each read plan logs `plan: N authors -> M relays (from K candidates)` at
+  debug level.
 
 #### Relays that keep failing are skipped
 

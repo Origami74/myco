@@ -72,6 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switching networks, or a Wi-Fi login page does not count against any
   relay. Relays in your Circle, and a custom relay or Blossom server you
   set in Storage, are never skipped.
+- **Feeds with many people use far fewer connections.** An app showing
+  posts or apps from dozens of people used to connect to every relay any
+  of them listed — up to forty for one view. Myco now picks a handful of
+  relays that between them reach each person twice, preferring relays it
+  is already connected to and avoiding ones that are failing.
 - **One broken relay no longer cuts apps off from the rest.** An app
   asking a single relay that answered with an error could make Myco
   believe the internet was down and stop using every public relay for half

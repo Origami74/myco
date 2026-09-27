@@ -113,6 +113,9 @@ pub struct OutboxService {
     /// Background work per napplet session: its bound and its tasks. See
     /// [`SessionWork`].
     work: Arc<Mutex<std::collections::HashMap<u64, Arc<SessionWork>>>>,
+    /// Internet relays with a stream open right now, app-wide, by
+    /// `lane_key`, with how many. A plan prefers a relay already connected.
+    open_streams: Arc<Mutex<std::collections::HashMap<String, usize>>>,
     /// Whether an Internet lane is resolved and refused when its name points
     /// at a private address (see [`dials_public`]). Always on, except in
     /// host tests that dial a mock relay on `127.0.0.1` as an Internet lane.
@@ -147,6 +150,7 @@ impl OutboxService {
             lists_checked: Arc::new(Mutex::new(std::collections::HashMap::new())),
             lists_in_flight: Arc::new(Mutex::new(std::collections::HashMap::new())),
             work: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            open_streams: Arc::new(Mutex::new(std::collections::HashMap::new())),
             guard_private_dials: true,
         }
     }
@@ -194,6 +198,7 @@ impl OutboxService {
             lists_checked: self.lists_checked.clone(),
             lists_in_flight: self.lists_in_flight.clone(),
             work: self.work.clone(),
+            open_streams: self.open_streams.clone(),
             guard_private_dials: self.guard_private_dials,
         })
     }
@@ -728,23 +733,64 @@ impl OutboxResolver for OutboxService {
         let mut lanes: Vec<RelayLane> = vec![RelayLane::Local];
         let mut missing = Vec::new();
         let mut any_stale = false;
+        // Each listed author's usable internet relays, for selection below.
+        let mut author_relays: Vec<Vec<String>> = Vec::new();
         // Every author at once: the lists not stored here are looked up in
         // one round, not one author after another.
         let listed = self.listed_for(authors, direction, hints).await;
         for (author, listed) in authors.iter().zip(listed) {
-            match listed {
-                Listed::Fresh(listed) => {
-                    lanes.extend(listed.into_iter().filter(|l| self.allowed(l)))
-                }
+            let listed = match listed {
+                Listed::Fresh(listed) => listed,
                 Listed::Stale(listed) => {
                     any_stale = true;
-                    lanes.extend(listed.into_iter().filter(|l| self.allowed(l)))
+                    listed
                 }
                 Listed::Missing => {
                     missing.push(*author);
                     lanes.extend(self.fallback_lanes());
+                    continue;
+                }
+            };
+            let mut internet = Vec::new();
+            for lane in listed.into_iter().filter(|l| self.allowed(l)) {
+                match lane {
+                    // Mesh lanes are the Circle's, one pooled connection per
+                    // peer: always kept.
+                    RelayLane::Internet { url } if direction == Direction::Read => {
+                        internet.push(url)
+                    }
+                    other => lanes.push(other),
                 }
             }
+            author_relays.push(internet);
+        }
+        if direction == Direction::Read {
+            // Reading: enough relays to find every author twice, not every
+            // relay every author names. (Writing to inboxes is a delivery
+            // contract — every relay — so it is not narrowed.)
+            let candidates = {
+                let mut keys = std::collections::HashSet::new();
+                author_relays
+                    .iter()
+                    .flatten()
+                    .filter(|u| keys.insert(u.trim_end_matches('/').to_string()))
+                    .count()
+            };
+            let open = self.open_streams.lock().unwrap().clone();
+            let chosen = select_relays(
+                &author_relays,
+                crate::relay_health::is_skipped,
+                |url| open.contains_key(url.trim_end_matches('/')),
+                RELAYS_PER_AUTHOR,
+                MAX_SELECTED_RELAYS,
+            );
+            tracing::debug!(
+                "plan: {} authors -> {} relays (from {} candidates)",
+                author_relays.len(),
+                chosen.len(),
+                candidates
+            );
+            lanes.extend(chosen.into_iter().map(|url| RelayLane::Internet { url }));
         }
         let mut seen = std::collections::HashSet::new();
         lanes.retain(|l| seen.insert(myco_napplet_runtime::seams::lane_key(l)));
@@ -760,6 +806,133 @@ impl OutboxResolver for OutboxService {
                 PlanSource::Nip65
             },
             missing_authors: missing,
+        }
+    }
+}
+
+/// How many of an author's relays a read plan aims to include: two, so one
+/// relay down or behind does not lose the author (NDK and welshman aim for
+/// the same).
+const RELAYS_PER_AUTHOR: usize = 2;
+
+/// The most relays a read plan selects to cover its authors. Popular relays
+/// cover most authors between them, so eight covers a large follow list
+/// twice over in practice; and eight, beside the three or four fallback
+/// relays and a few napplet-named ones, stays inside one napplet's
+/// [`MAX_STREAMS_PER_NAPPLET`], where a plan that unioned every author's
+/// relays reached 20 and 39 lanes for one subscription.
+const MAX_SELECTED_RELAYS: usize = 8;
+
+/// Choose which of the authors' relays a read goes to: a greedy set cover,
+/// as NDK and welshman do.
+///
+/// `author_relays` holds each author's write relays, in list order. Picked
+/// first is the relay covering the most authors that still need one — in
+/// two passes, so every author is covered once before any is covered twice
+/// — up to `per_author` each (or all of theirs, if fewer), and at most `cap`
+/// relays in all. A relay `skipped` (the skip list) is chosen only for an
+/// author nothing else covers. Ties go to a relay with a stream `open`
+/// already, then to the relay more authors list, then to the one seen
+/// first — so the same inputs always give the same plan.
+fn select_relays(
+    author_relays: &[Vec<String>],
+    skipped: impl Fn(&str) -> bool,
+    open: impl Fn(&str) -> bool,
+    per_author: usize,
+    cap: usize,
+) -> Vec<String> {
+    // Candidates by normalised URL, first spelling and first-seen order kept.
+    let mut urls: Vec<String> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut covers: Vec<Vec<usize>> = Vec::new();
+    for (author, relays) in author_relays.iter().enumerate() {
+        for url in relays {
+            let k = url.trim_end_matches('/').to_string();
+            let i = *index.entry(k).or_insert_with(|| {
+                urls.push(url.clone());
+                covers.push(Vec::new());
+                urls.len() - 1
+            });
+            if !covers[i].contains(&author) {
+                covers[i].push(author);
+            }
+        }
+    }
+    let skip: Vec<bool> = urls.iter().map(|u| skipped(u)).collect();
+    let is_open: Vec<bool> = urls.iter().map(|u| open(u)).collect();
+    let usable_count = |author: usize| {
+        (0..urls.len())
+            .filter(|&i| !skip[i] && covers[i].contains(&author))
+            .count()
+    };
+    let wanted: Vec<usize> = (0..author_relays.len())
+        .map(|a| per_author.min(usable_count(a)))
+        .collect();
+
+    let mut chosen: Vec<usize> = Vec::new();
+    let mut have = vec![0usize; author_relays.len()];
+    // Pass 1: everyone once; pass 2: everyone `per_author` times; pass 3: an
+    // author with only skipped relays gets one of those.
+    for (target, allow_skipped) in [(1, false), (per_author, false), (1, true)] {
+        loop {
+            if chosen.len() >= cap {
+                break;
+            }
+            let need = |a: usize| {
+                let goal = if allow_skipped {
+                    usize::from(wanted[a] == 0)
+                } else {
+                    target.min(wanted[a])
+                };
+                have[a] < goal
+            };
+            let best = (0..urls.len())
+                .filter(|i| !chosen.contains(i) && skip[*i] == allow_skipped)
+                .map(|i| {
+                    let gain = covers[i].iter().filter(|&&a| need(a)).count();
+                    (i, gain)
+                })
+                .filter(|(_, gain)| *gain > 0)
+                .max_by(|(a, ga), (b, gb)| {
+                    ga.cmp(gb)
+                        .then(is_open[*a].cmp(&is_open[*b]))
+                        .then(covers[*a].len().cmp(&covers[*b].len()))
+                        // Earlier seen wins: reverse the index order.
+                        .then(b.cmp(a))
+                });
+            let Some((i, _)) = best else { break };
+            chosen.push(i);
+            for &a in &covers[i] {
+                have[a] += 1;
+            }
+        }
+    }
+    chosen.into_iter().map(|i| urls[i].clone()).collect()
+}
+
+/// Counts one open stream to a relay in [`OutboxService::open_streams`] for
+/// as long as it lives.
+struct OpenStream {
+    map: Arc<Mutex<std::collections::HashMap<String, usize>>>,
+    key: String,
+}
+
+impl OpenStream {
+    fn new(map: Arc<Mutex<std::collections::HashMap<String, usize>>>, url: &str) -> Self {
+        let key = url.trim_end_matches('/').to_string();
+        *map.lock().unwrap().entry(key.clone()).or_default() += 1;
+        Self { map, key }
+    }
+}
+
+impl Drop for OpenStream {
+    fn drop(&mut self) {
+        let mut map = self.map.lock().unwrap();
+        if let Some(n) = map.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.key);
+            }
         }
     }
 }
@@ -1162,6 +1335,7 @@ impl OutboxService {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(STREAM_QUEUE);
         let saw_eose = std::sync::atomic::AtomicBool::new(false);
         let stream = crate::ip_source::stream_relay_filters(url, values, tx, &saw_eose);
+        let _open = OpenStream::new(self.open_streams.clone(), url);
         let deliver = async {
             let mut fresh = 0usize;
             while let Some(event) = rx.recv().await {
@@ -3110,6 +3284,130 @@ mod tests {
             !content.internet_looks_down(),
             "a stream connected and the breaker stayed tripped"
         );
+    }
+
+    fn relays(list: &[&str]) -> Vec<String> {
+        list.iter().map(|u| format!("wss://{u}")).collect()
+    }
+
+    fn select(author_relays: &[Vec<String>], skipped: &[&str], open: &[&str]) -> Vec<String> {
+        let skipped: Vec<String> = relays(skipped);
+        let open: Vec<String> = relays(open);
+        select_relays(
+            author_relays,
+            |u| skipped.iter().any(|s| s == u),
+            |u| open.iter().any(|o| o == u),
+            RELAYS_PER_AUTHOR,
+            MAX_SELECTED_RELAYS,
+        )
+    }
+
+    /// Every author twice where their lists allow, with the relays most
+    /// authors share, not the union of everyone's.
+    #[test]
+    fn selection_covers_each_author_twice_with_shared_relays() {
+        let lists = vec![
+            relays(&["damus", "primal", "a-own"]),
+            relays(&["damus", "primal", "b-own"]),
+            relays(&["damus", "nos", "c-own"]),
+            relays(&["primal", "nos"]),
+        ];
+        let chosen = select(&lists, &[], &[]);
+        for (i, list) in lists.iter().enumerate() {
+            let n = list.iter().filter(|u| chosen.contains(u)).count();
+            assert!(n >= 2, "author {i} covered {n} times by {chosen:?}");
+        }
+        assert!(chosen.len() <= 3, "{chosen:?}");
+        assert!(!chosen.iter().any(|u| u.ends_with("-own")));
+    }
+
+    /// Forty authors on forty relays of their own: the plan stops at the
+    /// cap, and covers as many authors once as it can before any twice.
+    #[test]
+    fn selection_respects_the_cap() {
+        let lists: Vec<Vec<String>> = (0..40)
+            .map(|i| relays(&[&format!("own{i}"), &format!("alt{i}")]))
+            .collect();
+        let chosen = select(&lists, &[], &[]);
+        assert_eq!(chosen.len(), MAX_SELECTED_RELAYS);
+        let covered = lists
+            .iter()
+            .filter(|l| l.iter().any(|u| chosen.contains(u)))
+            .count();
+        assert_eq!(covered, MAX_SELECTED_RELAYS, "once each before twice");
+    }
+
+    /// A skip-listed relay is avoided when another covers the author, and
+    /// still chosen when nothing else does; an author with one relay gets it.
+    #[test]
+    fn selection_avoids_skipped_relays_but_never_drops_an_author() {
+        let lists = vec![
+            relays(&["broken", "good"]),
+            relays(&["broken", "good2"]),
+            relays(&["only-broken"]),
+            relays(&["lonely"]),
+        ];
+        let chosen = select(&lists, &["broken", "only-broken"], &[]);
+        assert!(!chosen.contains(&"wss://broken".to_string()));
+        assert!(chosen.contains(&"wss://only-broken".to_string()));
+        assert!(chosen.contains(&"wss://lonely".to_string()));
+        assert!(chosen.contains(&"wss://good".to_string()));
+        assert!(chosen.contains(&"wss://good2".to_string()));
+    }
+
+    /// Ties go to a relay already streaming; and the same lists always give
+    /// the same plan.
+    #[test]
+    fn selection_prefers_open_streams_and_is_deterministic() {
+        let lists = vec![relays(&["x", "y", "z"])];
+        let chosen = select(&lists, &[], &["z"]);
+        assert_eq!(chosen[0], "wss://z");
+        let lists = vec![relays(&["a", "b", "c"]), relays(&["c", "b", "a"])];
+        let first = select(&lists, &[], &[]);
+        for _ in 0..10 {
+            assert_eq!(select(&lists, &[], &[]), first);
+        }
+        assert_eq!(first, relays(&["a", "b"]));
+    }
+
+    /// Through the plan: authors' relays are narrowed, while fallback lanes
+    /// for an author with no list, and mesh lanes, stay; a write plan
+    /// (inbox delivery) is not narrowed at all.
+    #[tokio::test]
+    async fn a_read_plan_narrows_author_relays_and_keeps_the_rest() {
+        let (fallback, _) = crate::ip_source::tests::mock_relay_holding(Vec::new()).await;
+        let (svc, store, _hub) = streaming_service("plan-select", vec![fallback.clone()]);
+        let mut authors = Vec::new();
+        for i in 0..12 {
+            let keys = Keys::generate();
+            let list = EventBuilder::new(Kind::RelayList, "")
+                .tags([
+                    Tag::parse(["r", "wss://shared.example"]).unwrap(),
+                    Tag::parse(["r", "wss://shared2.example"]).unwrap(),
+                    Tag::parse(["r", &format!("wss://own{i}.example")]).unwrap(),
+                ])
+                .sign_with_keys(&keys)
+                .unwrap();
+            store.publish(list).await.unwrap();
+            authors.push(keys.public_key());
+        }
+        let nobody = Keys::generate().public_key();
+        let mut all = authors.clone();
+        all.push(nobody);
+
+        let plan = svc.plan(Direction::Read, &all).await;
+        let internet: Vec<&str> = plan.lanes.iter().filter_map(|l| l.url()).collect();
+        assert!(internet.contains(&"wss://shared.example"));
+        assert!(internet.contains(&"wss://shared2.example"));
+        assert!(
+            internet.contains(&fallback.as_str()),
+            "the fallback was dropped"
+        );
+        assert_eq!(internet.len(), 3, "{internet:?}");
+        assert_eq!(plan.missing_authors, vec![nobody]);
+
+        let write = svc.plan(Direction::Write, &authors).await;
+        assert_eq!(write.lanes.len(), 1 + 2 + 12, "inbox delivery was narrowed");
     }
 
     /// An Internet lane whose name resolves to a private address is not
