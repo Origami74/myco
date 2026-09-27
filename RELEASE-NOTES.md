@@ -15,10 +15,10 @@ v0.8.0 is about **you** and **your apps**.
 
 - **Your own account.** Every install has a Nostr identity from the first launch: a guest with a name and a picture. Show your key, log out, or log in with your own `nsec`.
 - **Log in with Amber.** Sign in through a signer app (NIP-55). Your key never enters Myco, and every app signs through the signer.
-- **Discover is an app.** Browse napplets, read recommendations from people you follow, curate your own stacks, and install from a store-style page. It comes preinstalled and replaces the Discover tab.
+- **AppStore, an app store that is an app.** Browse napplets, read recommendations from people you follow, curate your own stacks, and install from a store-style page. It comes preinstalled and replaces the Discover tab.
 - **Updates find you.** Myco checks for app updates when you open it and every few hours. A napplet update one phone gets is passed to the rest of your Circle, even with no internet.
 - **A launcher-style Apps screen.** Round icons, five across on a phone and sized properly on a tablet. A small globe marks the apps that are websites.
-- **Back works inside apps.** The back gesture goes back a page inside a napplet instead of closing it.
+- **Back works inside apps.** The back gesture goes back a page inside a napplet, and never closes it.
 
 ## Your account
 
@@ -34,18 +34,18 @@ The top of Settings shows who you are. It opens the **Account** page, where you 
 
 A new guest follows three default accounts, so an app's friends feed isn't empty on day one. Open napplets hear about a login or logout straight away.
 
-## Discover, the app store
+## AppStore
 
-The Discover tab is gone. In its place is **Discover**, an app store for napplets that is itself a napplet. It comes preinstalled, and it reaches phones that were set up before this release too.
+The Discover tab is gone. In its place is **AppStore**, an app store for napplets that is itself a napplet. It comes preinstalled, and it reaches phones that were set up before this release too.
 
 - **Feed.** Napplets published to your relays, newest first, with search. An app's page shows its description, the permissions it asks for, and its details. **Install** opens Myco's own install review, and nothing installs until you tap Add.
 - **Stacks.** Curated lists of apps (NIP-51 app sets, the same kind Zapstore uses), shown as a carousel. A person's own recommendations are their default stack. Stacks come from you and the people you follow, plus two featured ones.
 - **Recommend.** Tap Recommend on an app to add it to your default stack. Apps your community recommends are marked with who recommended them, and only people you follow count.
 - **My stacks.** Create, rename and delete your own stacks, and add any app with **Add to stack**.
 - **Profiles.** Tap anyone's name to see their stacks and the napplets they published.
-- **Around you.** Napplets the phones near you hold, over the mesh. If you switched the Mesh permission off, Discover shows how to turn it back on.
+- **Around you.** Napplets the phones near you hold, over the mesh. If you switched the Mesh permission off, AppStore shows how to turn it back on.
 
-An installed app's review now says **Already installed**. If it's missing from the phone, it offers **Download again**. Either way, the permissions you changed are kept.
+After you tap **Add to my apps**, the review stays up with **Open** and **Done**, so you can start the app right away. An installed app's review now says **Already installed**. If it's missing from the phone, it offers **Download again**. Either way, the permissions you changed are kept.
 
 ## Updates that find you
 
@@ -68,7 +68,8 @@ The Apps screen now looks like a stock Android launcher:
 
 ## Napplets
 
-- **Back goes back.** Myco delivers the back gesture to the napplet as an Escape key. An app that handles it stays open and goes back itself. One that doesn't is closed, as before. An app can't trap you: after three backs it absorbed without a touch in between, the next back closes it. For app authors: handle Escape and call `preventDefault()` when you went back.
+- **Back goes back.** Myco delivers the back gesture to the napplet as an Escape key. An app that handles it stays open and goes back itself. One that doesn't is sent to the background: you land where you came from, and the app keeps running in Recents. An app can't trap you: after three backs it absorbed without a touch in between, the next back leaves it. Only a crashed or hung window is closed. For app authors: handle Escape and call `preventDefault()` when you went back.
+- **Mesh on by default, for now.** The tools authors publish with drop Myco's own permissions from what an app asks for, so no app could ask for Mesh. Until they keep it, every app gets Mesh like Relays and Identity. It's still on the install sheet, capped by App reach, and you can switch it off per app. Apps you already have get it at their next open, unless you switched it off.
 - **Links.** A napplet can ask to open a web link (your browser, after a one-tap confirm unless you just touched it). It can also point you at another napplet, which opens Myco's install review over the running app.
 - **Theme.** Napplets can match Myco's light or AMOLED look. A switch while the app is open reaches it without a restart.
 - **Who you follow.** Napplets can read your follows and mutes.
@@ -83,11 +84,10 @@ The Apps screen now looks like a stock Android launcher:
 
 ## Known issues
 
-- **Discover's "Around you" needs the published Discover to declare `mesh`.** Until it does, the tab stays empty.
-- **Profile pictures and app sizes in Discover.** Napplets can only load files by their hash (`blossom:`). A picture on a server Myco doesn't know about, or any plain web image, shows a placeholder. An app page may show "Unknown" for size. [#67](https://github.com/Origami74/myco/issues/67) covers finding servers properly.
+- **Profile pictures and app sizes in AppStore.** Napplets can only load files by their hash (`blossom:`). A picture on a server Myco doesn't know about, or any plain web image, shows a placeholder. An app page may show "Unknown" for size. [#67](https://github.com/Origami74/myco/issues/67) covers finding servers properly.
 - **Open nsite windows and updates.** A napplet offers a restart when it's updated while open. An nsite doesn't yet, and an update can mix old and new files in an open nsite window until it reloads: [#71](https://github.com/Origami74/myco/issues/71).
 - **No "recently updated" mark on the Apps screen yet:** [#69](https://github.com/Origami74/myco/issues/69).
-- **Nearby nsites aren't listed anymore.** The old Discover tab showed nsites your Circle held. Discover lists napplets only. An nsite still arrives by a share, a scan or a link.
+- **Nearby nsites aren't listed anymore.** The old Discover tab showed nsites your Circle held. AppStore lists napplets only. An nsite still arrives by a share, a scan or a link.
 - **A phone in your pocket finds nobody.** Myco winds its radios down when it isn't on screen.
 - **Wi-Fi Aware is shut off by deep Doze** on Android 13 and later after a long idle period: [#30](https://github.com/Origami74/myco/issues/30).
 - **A napplet's relay access is all-or-nothing,** and with the outbox grant it may name its own relays. Review the install sheet.
