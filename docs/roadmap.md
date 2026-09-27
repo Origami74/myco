@@ -234,6 +234,37 @@ installed-app page offers **Open**.
 **Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) D11,
 §5.4, S2b · [NAP-INTENT](https://github.com/napplet/naps/blob/master/naps/NAP-INTENT.md).
 
+### N8 — A shared relay pool
+
+**Goal.** One WebSocket per internet relay, shared by every napplet,
+subscription and lookup, the way other Nostr clients work. Today each one-shot
+query and each subscription lane dials its own socket: every read pays DNS, TCP,
+TLS and the WS upgrade again, and the per-napplet stream bound (16 lanes) is
+spent on lanes, not relays. On a device, a napplet that opens many
+subscriptions (the AppStore) hit that bound 41 times in one session, so most of
+its reads fell back to a one-shot pull instead of a live stream.
+
+**Shape.**
+
+- A pool keyed by normalised relay URL.
+- Each connection multiplexes many REQs by subscription id and fans events back
+  to their owners (napplet sessions, subscriptions, lookups).
+- Connections are opened lazily. They close after an idle period with no REQs,
+  and reconnect with backoff, re-sending live REQs with `since`.
+- Limits count sockets (per relay and in total), not subscriptions.
+- One-shot queries, manifest lookups, relay-list lookups and account publishes
+  go through the same pool, so a warm connection serves all of them.
+- The relay skip list and the internet breaker sit in front of the pool.
+  Circle and custom relays keep their own connections.
+
+**Exit criterion.** On a device, AppStore at steady state holds at most one
+socket per relay it reads. It never logs `stream bound reached`. A reopen
+answers from warm connections without new TLS handshakes.
+
+**Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md),
+"Local first: reads are streams, not requests" and "Relays that keep failing
+are skipped".
+
 ---
 
 ## Later
