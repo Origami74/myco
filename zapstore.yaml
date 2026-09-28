@@ -1,28 +1,30 @@
 repository: https://github.com/Origami74/myco
 release_source: https://github.com/Origami74/myco
 description: |
-    Share small apps with the people around you by tapping your phones together —
-    like handing someone a card. It works completely offline: no internet, no app
-    store, no sign-up.
+    Hand a useful app to the people around you. Pair with someone — bump phones,
+    tap them in the list of phones nearby, or scan a code — and share the app.
+    It lands on their phone, opens full-screen like any other app, and keeps
+    opening when there is no internet.
 
-    Tap to share, and the app lands on their phone, ready to open. Everything
-    travels straight from phone to phone over Bluetooth, so it keeps working with
-    no signal at all — on a plane, at a festival, off in the mountains, or when the
-    network goes down.
+    Apps travel straight from phone to phone over Bluetooth, Wi-Fi Aware or the
+    local network. Whoever has an app can hand it on to the next person, so it
+    reaches the group even after you've left.
 
-    Once you've connected with someone you're in each other's circle: pass apps
-    back and forth, chat, and see what others nearby are sharing — all without a
-    connection. Apps open instantly and live on your phone; pin your favourites to
-    the home screen like any other app.
+    Myco is built around napplets: small programs that ask for what they need — your
+    identity, Nostr relays, the phones nearby — and get only what you allow.
+    Apps built for the mesh keep working between phones in reach with no signal
+    at all. Any nsite (a static website on Nostr) works offline too, once it's
+    on your phone.
 
-    Comes with a built-in chat to get started, plus a growing set of community
-    apps — from group messaging to tools for coordinating in an emergency.
+    Comes with AppStore, for finding napplets from your relays, from people you
+    follow, and from the phones around you.
 
-    Your identity is a key that stays on your device, not an account in someone's
-    database. Nothing needs a server. Nothing phones home.
+    Every install has a Nostr identity from the first launch: a guest you can
+    keep, or replace with your own key or a signer app like Amber.
 
-    Built for anywhere the internet isn't.
-summary: Tap phones to share apps and communicate through them — all offline, no app store, no accounts.
+    Keep Myco open on screen while pairing and sharing; phones find each other
+    only while it's open.
+summary: Hand apps to the people around you, phone to phone, and keep using them offline.
 tags:
     - mesh
     - fips
