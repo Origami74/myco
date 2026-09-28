@@ -10,7 +10,7 @@ in person. They pair — a bump, a tap on someone Myco found nearby over
 Bluetooth, or a QR scan — and share the app. It lands on the other phone,
 opens full-screen like any app, and still opens with no internet. Whoever has
 it can hand it on. Apps travel over Bluetooth, Wi-Fi Aware or the local
-network, with no central app store in between.
+network, straight from one phone to the next.
 
 Two kinds of app run in it:
 

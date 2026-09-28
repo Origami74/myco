@@ -3,8 +3,8 @@
 # Myco
 ![](docs/myco-banner.png)
 
-> **Hand a useful app to the people around you.** Phone to phone, no app
-> store, and it keeps opening when the internet is gone.
+> **Hand a useful app to the people around you.** Phone to phone, and it
+> keeps opening when the internet is gone.
 
 Someone in the room has an app that helps: a schedule, a checklist, a game, a
 way to ring each other. With Myco they bump phones with you, and the app is on

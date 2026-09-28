@@ -2,8 +2,8 @@
 
 # Myco
 
-> **Hand a useful app to the people around you.** Phone to phone, no app
-> store, and it keeps opening when the internet is gone.
+> **Hand a useful app to the people around you.** Phone to phone, and it
+> keeps opening when the internet is gone.
 
 ![Your apps live on your home screen and open like any app](design/diagrams/intro-01-your-apps.svg)
 
