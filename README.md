@@ -36,7 +36,8 @@ What Myco does not do yet:
 
 - It is **Android only** (Android 10 or newer, 64-bit ARM phones).
 - **Myco itself** comes from a download, not from another phone. See
-  [Get Myco](#get-myco).
+  [Get Myco](#get-myco). Sharing Myco from inside Myco is on the
+  [roadmap](docs/roadmap.md#later).
 - Phones find each other **only while Myco is open on screen**. A phone in a
   pocket finds nobody.
 - **Rebroadcasting Nostr events on purpose.** You can't yet pick events and
@@ -201,7 +202,8 @@ Read on:
 - **Needs:** Android 10 or newer, on a 64-bit ARM phone. NFC is optional; QR
   works everywhere.
 
-Myco cannot pass itself on from phone to phone yet. Each person needs the APK
+Myco cannot pass itself on from phone to phone yet
+([on the roadmap](docs/roadmap.md#later)). Each person needs the APK
 before they can receive apps.
 
 ## Status

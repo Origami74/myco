@@ -272,6 +272,9 @@ are skipped".
 
 Each its own milestone with its own design pass. Roughly in order of pull.
 
+- **Share Myco itself.** Hand the Myco app on from inside Myco, so someone
+  without it can get it from a phone nearby instead of a download. Today every
+  newcomer needs the APK from GitHub Releases or Zapstore first.
 - **Eviction.** An LRU cap on the Blossom store (default 2 GB) with pinned apps
   exempt; today the cache only shrinks when the user asks —
   [nsite-layer.md](./design/nsite/nsite-layer.md) §6.
