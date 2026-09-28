@@ -973,8 +973,8 @@ Library installs by it, so there is nothing to update, and the not-installed bra
 would pass it on unchanged anyway.
 
 Still not done: first delivery to a phone that has never had the napplet. It arrives by
-the share handoff (bump, QR) and the public relays; a Circle Discover listing for
-napplets is a roadmap item.
+the share handoff (bump, QR) and the public relays; AppStore's "Around you" list of
+napplets nearby phones hold is the start of a Circle listing (roadmap N5).
 
 ### 7.4 The outbox model over the mesh
 

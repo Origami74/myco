@@ -14,7 +14,7 @@ map, the [index](./README.md).
 ## Status — 2026-09-27
 
 **Shipped** (v0.8.1 — local-first napplet reads, author relay lookup, relay
-skip list and selection; v0.8.0 — accounts, the Discover napplet, updates over
+skip list and selection; v0.8.0 — accounts, the AppStore napplet, updates over
 the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
 
 - **The mesh.** BLE L2CAP with per-peer PSM discovery, Wi-Fi Aware (several
@@ -42,7 +42,7 @@ the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
   `theme`.
 - **Accounts.** A guest identity from the first launch, `nsec` login and
   logout, and login through a NIP-55 signer (Amber) — N1, N2.
-- **Discover.** The app store is a preinstalled napplet: feed, stacks and
+- **AppStore.** The app store is a preinstalled napplet: feed, stacks and
   recommendations from people you follow, profiles, "Around you" over the mesh
   — N5.
 
@@ -161,7 +161,7 @@ opens the napplet.
 
 ### N5 — An app store napplet in place of the Discover tab
 
-**Partly built** (v0.8.0) — the Discover napplet ships preinstalled
+**Partly built** (v0.8.0) — the AppStore napplet ships preinstalled
 (`DEFAULT_NAPPLETS`) and the native Discover tab is gone. It lists napplets
 from relays and from the phones around you (NAP-MESH), with stacks (NIP-51 app
 sets), recommendations from people you follow and profiles; Install hands the
@@ -218,7 +218,7 @@ slices:
    `intent.invoke` for `action: "open"`; a role → installed-napplet index
    rebuilt on install/remove/update; a per-role default only the user can set;
    an "Open with…" chooser sheet; launch or focus the handler's window. Enough
-   for "open a note viewer", and for Discover to offer **Open** on an
+   for "open a note viewer", and for AppStore to offer **Open** on an
    installed app instead of a greyed-out Add.
 2. **Payloads over NAP-INC.** The spec delivers the payload over NAP-INC
    topics (or as initial state on a cold start), so this slice brings NAP-INC
@@ -229,7 +229,7 @@ slices:
 
 **Exit criterion.** A napplet's `intent.open("note", …)` opens the user's
 default note napplet (or asks, first time), which receives the payload; a
-napplet can't force routing to a napplet the user didn't choose; Discover's
+napplet can't force routing to a napplet the user didn't choose; AppStore's
 installed-app page offers **Open**.
 
 **Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) D11,
@@ -272,6 +272,9 @@ are skipped".
 
 Each its own milestone with its own design pass. Roughly in order of pull.
 
+- **Share Myco itself.** Hand the Myco app on from inside Myco, so someone
+  without it can get it from a phone nearby instead of a download. Today every
+  newcomer needs the APK from GitHub Releases or Zapstore first.
 - **Eviction.** An LRU cap on the Blossom store (default 2 GB) with pinned apps
   exempt; today the cache only shrinks when the user asks —
   [nsite-layer.md](./design/nsite/nsite-layer.md) §6.

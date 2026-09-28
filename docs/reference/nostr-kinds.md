@@ -251,7 +251,7 @@ author-signed manifests above:
 - **"Pull on demand"** = fetch the large content-addressed **blobs** (by sha256
   from Blossom) only when a site is actually opened — the manifest tells you
   *what* a site is; the blobs are deferred until needed.
-- **Discovery / "nsites around me"** (not built today; the model the Discover
+- **Discovery / "nsites around me"** (not built today; the model the AppStore
   napplet builds on, roadmap N5) = simply the set of manifests you have
   *received* (via flood) or *queried* from reachable relays. No separate "I have
   it" event exists; possession of the manifest is the advertisement.
