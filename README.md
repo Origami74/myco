@@ -24,7 +24,8 @@ with no signal. Once you have it, you can hand it on to the next person.
 With every phone in airplane mode and Bluetooth on
 ([the runbook](docs/how-to/run-two-device-demo.md)):
 
-- **Pair** by bumping phones (NFC) or scanning a QR code.
+- **Pair** by bumping phones (NFC), tapping someone Myco found nearby over
+  Bluetooth, or scanning a QR code.
 - **Hand over an app.** The other phone pulls it straight from yours.
 - **Open it with no internet**, full-screen, from the Apps grid or a
   home-screen icon.
@@ -61,7 +62,9 @@ Myco lets them hand it to you in person.**
    notifications, and a VPN prompt. The VPN stays on your phone. Myco uses it
    to talk to other phones, not to send your traffic anywhere.
 3. **Pair.** Open the **Circle** tab and hold your phone back to back with
-   theirs. No NFC? They tap **Show my code** and you tap **Scan**.
+   theirs. Or tap them under **Nearby**, where Myco lists phones it found over
+   Bluetooth, and they accept. Or they tap **Show my code** and you tap
+   **Scan**.
 4. **Receive the app.** They long-press the app and tap **Share**. You bump
    again, or scan the code from **Apps › +**.
 5. **Open it.** It lands in your **Apps** grid. Some apps first list what they
@@ -97,7 +100,8 @@ together, passed between the phones in the room.
 **On the day, no internet needed:**
 
 1. Keep Myco open on your screen.
-2. Pair with each person: a bump, or a QR scan.
+2. Pair with each person: a bump, a tap on them under **Nearby**, or a QR
+   scan.
 3. Share the app. Each person pulls it from your phone, reviews what it asks
    for, and opens it.
 4. People who arrive late can pair with anyone who already has it and get it
