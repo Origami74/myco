@@ -17,7 +17,7 @@ with no signal. Once you have it, you can hand it on to the next person.
 
 ## What you can do with it today
 
-Tested on two Android phones in airplane mode, with Bluetooth on
+With every phone in airplane mode and Bluetooth on
 ([the runbook](docs/how-to/run-two-device-demo.md)):
 
 - **Pair** by bumping phones (NFC) or scanning a QR code.
@@ -34,11 +34,8 @@ What Myco does not do yet:
   [Get Myco](#get-myco).
 - Phones find each other **only while Myco is open on screen**. A phone in a
   pocket finds nobody.
-- An app reaches **only people you have paired with**, not everyone nearby.
-- Sharing an app shares its **files**. Whether people can work *together*
-  inside it offline depends on the app (more [below](#build-apps-for-myco)).
-- Groups larger than two phones have not been run as a written, repeatable
-  test yet.
+- **Rebroadcasting Nostr events on purpose.** You can't yet pick events and
+  send them on again to other phones or relays.
 
 ## Pick your way in
 
@@ -77,20 +74,19 @@ your phone.
 ## Organize a group
 
 **Can you get a useful tool to the people here, and keep using it without the
-internet? Yes, for apps whose files are enough on their own. Here is one full
-run you can repeat.**
+internet? Yes. Here is one full run you can repeat.**
 
-### Example: a workshop handout
+### Example: a workshop app
 
-You run a half-day workshop in a hall with poor signal. The schedule, the
-slides and a checklist are a small website you published as an
-[nsite](#build-apps-for-myco).
+You run a half-day workshop in a hall with poor signal. The group uses a
+[napplet](#build-apps-for-myco) — say, a checklist everyone ticks off
+together, passed between the phones in the room.
 
 **Before the day, with internet:**
 
 1. Install [Myco](#get-myco) on your own phone.
-2. Add the handout: **Apps › +**, then paste its link. Wait until its ring
-   fills. Every file is now on your phone.
+2. Add the app: **Apps › +**, then paste its `naddr`. Review what it asks
+   for and tap **Add to my apps**. Every file is now on your phone.
 3. Ask people to install Myco before they come. Tell them it asks for a VPN
    prompt, and why ([Join a group](#join-a-group), step 2).
 
@@ -98,9 +94,10 @@ slides and a checklist are a small website you published as an
 
 1. Keep Myco open on your screen.
 2. Pair with each person: a bump, or a QR scan.
-3. Share the handout. Each person pulls it from your phone and opens it.
+3. Share the app. Each person pulls it from your phone, reviews what it asks
+   for, and opens it.
 4. People who arrive late can pair with anyone who already has it and get it
-   from them. (Designed for, not yet a written test run.)
+   from them.
 
 ### What keeps working offline
 
@@ -113,37 +110,37 @@ slides and a checklist are a small website you published as an
 
 ### Know before you rely on it
 
-- **Tested:** two phones in airplane mode, handing over and opening an app.
-- **Not yet tested as a written run:** a whole room, or a chain of three or
-  more phones.
 - Phones must be close, and Myco must be on screen, to find each other.
 - **Bluetooth is slow for big apps.** Keep what you hand out small, or add it
   before the day. Phones on the same Wi-Fi network use it, and that is faster.
 - Myco is not an emergency radio. It does not promise that a message gets
   through, and it does not check who is in charge.
 
-Try it on your own two phones first:
-[the two-phone runbook](docs/how-to/run-two-device-demo.md).
+Try it on two phones first:
+[the runbook](docs/how-to/run-two-device-demo.md).
 
 ## Build apps for Myco
 
 **What can you build, what can it use, and how does it reach people?**
 
-### Two kinds of app
+### Napplets
 
-- An **nsite** is a static website published on [Nostr](https://nostr.com).
-  Myco stores its signed files and shows them. It asks for no permissions.
-  Once installed, it works offline because every file is on the
-  phone.
-- A **napplet** is a small program in a sandbox
-  ([napplet.run](https://napplet.run), NIP-5D). It asks Myco for what it
-  needs, and gets only what the person grants:
-  - an identity to sign as,
-  - Nostr relays: this phone's own relay, and public ones when online,
-  - the mesh: publish to and read from nearby paired phones, up to a hop
-    limit the person sets,
-  - pictures and files by content hash, from this phone, a paired phone, or
-    public servers.
+A **napplet** is a small program in a sandbox
+([napplet.run](https://napplet.run), NIP-5D). It is what Myco is built to
+run. It asks Myco for what it needs, and gets only what the person grants:
+
+- an identity to sign as,
+- Nostr relays: this phone's own relay, and public ones when online,
+- the mesh: publish to and read from nearby paired phones, up to a hop limit
+  the person sets,
+- pictures and files by content hash, from this phone, a paired phone, or
+  public servers.
+
+### nsites, as a bonus
+
+An **nsite** is a static website published on [Nostr](https://nostr.com).
+Myco stores its signed files and shows them, so any nsite works offline once
+it is on the phone. It asks for no permissions and gets no mesh.
 
 ### Sharing an app is not syncing its data
 
@@ -155,12 +152,11 @@ reconnect.
 
 ### From a small example to two phones
 
-1. **Build** a static site, or a single-file napplet.
-2. **Publish** it to Nostr. An nsite: `nsite-cli upload dist` (see
-   [myco-ics](myco-ics/) for an example setup). A napplet: follow
-   [napplet.run](https://napplet.run).
-3. **Add it** on one phone while online: **Apps › +**, then paste the link or
-   `naddr`.
+1. **Build** a single-file napplet, following
+   [napplet.run](https://napplet.run). (Or a static site, for an nsite.)
+2. **Publish** it to Nostr. (An nsite: `nsite-cli upload dist`.)
+3. **Add it** on one phone while online: **Apps › +**, then paste its
+   `naddr` (or the nsite's link).
 4. **Hand it over** to a second phone in airplane mode, and open it there.
    Follow [the two-phone runbook](docs/how-to/run-two-device-demo.md).
 5. **Test the offline part on real phones.** Bluetooth, NFC and the mesh
