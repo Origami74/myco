@@ -11,6 +11,10 @@ way to ring each other. With Myco they bump phones with you, and the app is on
 your phone too. It opens full-screen like any other app, and it still opens
 with no signal. Once you have it, you can hand it on to the next person.
 
+|  |  |  |
+| :--: | :--: | :--: |
+| ![Bump phones to pair](docs/images/zapstore-02-connect-circle.png)<br>**Bump phones to pair** | ![Hand over an app by bumping again](docs/images/zapstore-03-share-app.png)<br>**Hand over an app** | ![People in a park using an app over Bluetooth](docs/images/zapstore-01-mesh.png)<br>**Use it together, offline** |
+
 |  |  |  |  |  |
 | :--: | :--: | :--: | :--: | :--: |
 | ![Tap to pair over NFC](docs/images/01-nfc-pairing.png)<br>**Bump phones to pair** | ![Your Circle of paired people](docs/images/02-circle.png)<br>**Your Circle** | ![Share an app with someone](docs/images/03-app-sharing.png)<br>**Share an app** | ![Installed apps on the home screen](docs/images/04-home.png)<br>**Your apps** | ![An installed app running full-screen](docs/images/05-bitchat.png)<br>**Apps run full-screen** |
