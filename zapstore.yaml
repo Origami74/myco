@@ -11,17 +11,23 @@ description: |
     reaches the group even after you've left. Keep Myco open on screen while
     pairing and sharing; phones find each other only while it's open.
 
-    Myco is built around napplets: small programs that ask for what they need — your
-    identity, Nostr relays, the phones nearby — and get only what you allow.
-    Apps built for the mesh keep working between phones in reach with no signal
-    at all, and a phone that joins late catches up from the phones near it. Any nsite (a static website on Nostr) works offline too, once it's
-    on your phone.
+    Myco is built around napplets: small programs that ask for what they need —
+    your identity, Nostr relays, the phones nearby — and get only what you
+    allow. Napplets built for the mesh keep working between phones in reach
+    with no signal at all, and a phone that joins late catches up from the
+    phones near it. Any nsite (a static website on Nostr) works offline too,
+    once it's on your phone.
 
     Comes with AppStore, for finding napplets from your relays, from people you
     follow, and from the phones around you.
 
     Every install has a Nostr identity from the first launch: a guest you can
     keep, or replace with your own key or a signer app like Amber.
+
+    On first launch Myco asks for Bluetooth, nearby devices and a VPN. The VPN
+    stays on your phone: Myco uses it to talk to other phones, not to route
+    your traffic anywhere. Android 12 and older also ask for location, which
+    Android requires for Bluetooth scanning. Needs Android 10 or newer.
 summary: Hand apps to the people around you, phone to phone, and keep using them offline.
 tags:
     - mesh
