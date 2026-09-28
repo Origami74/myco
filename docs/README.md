@@ -71,10 +71,11 @@ it. A Circle member can be out of range; they are still in your Circle. The
 docs use *peer* for layer 4 and *Circle member* (or *paired*) for layer 2, and
 never swap them.
 
-**Two keys, not one.** The **device key** is layer 4's identity: the mesh
-address, the link authentication, the name of this phone's relay
-(`<npub>.fips`). The **user key** is layer 1's: what a napplet publishes *as*,
-generated the first time a napplet runs. Neither is ever an app author's key —
+**Two keys, not one.** The **device key** is the FIPS mesh key, layer 4's
+identity: the mesh address, the link authentication, the name of this phone's
+relay (`<npub>.fips`). The **user key** is the Nostr key, the social one and
+layer 1's: what a napplet publishes *as*. It is a guest key from the first
+launch, or your own `nsec` or a signer app. Neither is ever an app author's key —
 apps are authored elsewhere, and Myco only ever holds and re-serves their
 signed events.
 
@@ -161,7 +162,9 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 
 ## Where to start
 
-- New here? [getting-started.md](./getting-started.md), then
+- Using the app? [Join a group](../README.md#join-a-group) or
+  [organize one](../README.md#organize-a-group).
+- New to the code? [getting-started.md](./getting-started.md), then
   [concepts.md](./design/core/concepts.md).
 - What's next? The [roadmap](./roadmap.md).
 - Building it? [how-to/build.md](./how-to/build.md) →

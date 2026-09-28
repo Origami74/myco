@@ -21,9 +21,6 @@ with no signal. Once you have it, you can hand it on to the next person.
 
 ## What you can do with it today
 
-With every phone in airplane mode and Bluetooth on
-([the runbook](docs/how-to/run-two-device-demo.md)):
-
 - **Pair** by bumping phones (NFC), tapping someone Myco found nearby over
   Bluetooth, or scanning a QR code.
 - **Hand over an app.** The other phone pulls it straight from yours.
@@ -31,6 +28,9 @@ With every phone in airplane mode and Bluetooth on
   home-screen icon.
 - **Pass it on.** The phone that received it can share it with someone else,
   even when you have left.
+
+All of this is tested with every phone in airplane mode and Bluetooth on
+([the runbook](docs/how-to/run-two-device-demo.md)).
 
 What Myco does not do yet:
 
@@ -40,8 +40,6 @@ What Myco does not do yet:
   [roadmap](docs/roadmap.md#later).
 - Phones find each other **only while Myco is open on screen**. A phone in a
   pocket finds nobody.
-- **Rebroadcasting Nostr events on purpose.** You can't yet pick events and
-  send them on again to other phones or relays.
 
 ## Pick your way in
 
@@ -59,15 +57,24 @@ What Myco does not do yet:
 Myco lets them hand it to you in person.**
 
 1. **[Get Myco](#get-myco)** on your phone. This step needs a download.
-2. **Open it and allow what it asks for:** Bluetooth, nearby devices,
-   notifications, and a VPN prompt. The VPN stays on your phone. Myco uses it
-   to talk to other phones, not to send your traffic anywhere.
-3. **Pair.** Open the **Circle** tab and hold your phone back to back with
-   theirs. Or tap them under **Nearby**, where Myco lists phones it found over
-   Bluetooth, and they accept. Or they tap **Show my code** and you tap
-   **Scan**.
+   Android asks whether your browser may install apps. Allow it for this
+   install.
+2. **Open it and allow what it asks for:**
+   - **Bluetooth and nearby devices**, to find the phones around you.
+   - **Location**, on Android 12 and older only. Android requires it to scan
+     for Bluetooth. Myco does not record where you are.
+   - **Camera**, only when you scan a code.
+   - **Notifications.**
+   - **A VPN prompt.** The VPN stays on your phone. Myco uses it to talk to
+     other phones, not to send your traffic anywhere.
+3. **Pair**, in the **Circle** tab. Any one of these:
+   - **Bump:** hold your phone back to back with theirs.
+   - **Nearby:** tap them in the list of phones Myco found over Bluetooth,
+     and they accept.
+   - **QR:** they tap **Show my code** and you tap **Scan**.
 4. **Receive the app.** They long-press the app and tap **Share**. You bump
-   again, or scan the code from **Apps › +**.
+   phones again, or scan the code on their screen from **Apps › +**. Scanning
+   that code also pairs you, so you can skip step 3.
 5. **Open it.** It lands in your **Apps** grid. Some apps first list what they
    want to use, such as nearby phones or your pictures. You choose.
 
@@ -75,9 +82,17 @@ After that the app is yours. It opens without internet, though what it can
 show offline depends on the app. You can share it with the next person the
 same way.
 
-Pairing works both ways. The person you pair with can send you apps and files,
-and you can send them yours. Only people you have paired with can pull from
-your phone.
+### What pairing lets the other person do
+
+Pairing works both ways. The person you pair with can:
+
+- get the apps on your phone,
+- read what your apps shared with nearby phones,
+- offer you files.
+
+Nothing else on your phone is open to them, and people you have not paired
+with get nothing. To undo it, tap them in **Circle** and choose **Remove from
+circle**.
 
 ## Organize a group
 
@@ -87,26 +102,31 @@ internet? Yes. Here is one full run you can repeat.**
 ### Example: a workshop app
 
 You run a half-day workshop in a hall with poor signal. The group uses a
-[napplet](#build-apps-for-myco) — say, a checklist everyone ticks off
-together, passed between the phones in the room.
+[napplet](#build-apps-for-myco) (a small app), say a checklist everyone ticks
+off together. It is passed between the phones in the room, and each phone
+picks up the latest ticks from the phones near it, even after joining late.
 
 **Before the day, with internet:**
 
 1. Install [Myco](#get-myco) on your own phone.
-2. Add the app: **Apps › +**, then paste its `naddr`. Review what it asks
-   for and tap **Add to my apps**. Every file is now on your phone.
-3. Ask people to install Myco before they come. Tell them it asks for a VPN
-   prompt, and why ([Join a group](#join-a-group), step 2).
+2. Add the app. Find it in the preinstalled **AppStore** app. Or, if its
+   maker sent you a link (it starts with `naddr`), go to **Apps › +** and
+   paste it. Review what it asks for and tap **Add to my apps**. Every file
+   is now on your phone.
+3. Ask people to install Myco before they come. Send them
+   [Join a group](#join-a-group): it explains the permission prompts,
+   including the VPN one.
 
 **On the day, no internet needed:**
 
 1. Keep Myco open on your screen.
-2. Pair with each person: a bump, a tap on them under **Nearby**, or a QR
-   scan.
-3. Share the app. Each person pulls it from your phone, reviews what it asks
-   for, and opens it.
-4. People who arrive late can pair with anyone who already has it and get it
-   from them.
+2. Share the app with the first few people. Open the app's **Share** screen
+   and let them scan the code or bump phones. That pairs you and hands it
+   over in one go.
+3. **Let it spread.** Everyone who has the app can share it the same way. You
+   don't need to reach every person yourself, and people who arrive late can
+   get it from whoever is next to them.
+4. Each person reviews what the app asks for, and opens it.
 
 ### What keeps working offline
 
@@ -123,7 +143,7 @@ together, passed between the phones in the room.
 - **Bluetooth is slow for big apps.** Keep what you hand out small, or add it
   before the day. Phones on the same Wi-Fi network use it, and that is faster.
 - Myco is not an emergency radio. It does not promise that a message gets
-  through, and it does not check who is in charge.
+  through, and it cannot confirm that a message came from an organizer.
 
 Try it on two phones first:
 [the runbook](docs/how-to/run-two-device-demo.md).
@@ -154,10 +174,19 @@ it is on the phone. It asks for no permissions and gets no mesh.
 ### Sharing an app is not syncing its data
 
 Myco copies an app's files from phone to phone. It does not make an app
-collaborative on its own. For people to work together offline, a napplet has
-to use the **mesh** capability, and the phones must be in reach of each other
-at the time. There is no sync of what was missed yet beyond a short replay on
-reconnect.
+collaborative on its own. For people to work together offline, a napplet uses
+the **mesh** capability:
+
+- **Publish** stores a note on this phone and floods it to paired phones, up
+  to the hop limit.
+- **Subscribe** returns matching notes this phone already holds, then asks
+  phones within the hop limit for theirs. So a phone that joins late catches
+  up from the phones near it.
+- **Ephemeral notes** (with a NIP-40 `expiration`, such as chat) are kept in
+  memory only, so catch-up is not guaranteed for them.
+
+Not yet: picking stored notes and rebroadcasting them on purpose, to other
+phones or to public relays.
 
 ### From a small example to two phones
 
@@ -199,6 +228,8 @@ Read on:
 - **Download:** the APK from the
   [latest release](https://github.com/Origami74/myco/releases/latest), or
   through [Zapstore](https://zapstore.dev/apps/app.myco).
+- **Installing the APK:** Android asks whether your browser (or file app) may
+  install apps. Allow it, install Myco, and you can turn it off again.
 - **Needs:** Android 10 or newer, on a 64-bit ARM phone. NFC is optional; QR
   works everywhere.
 

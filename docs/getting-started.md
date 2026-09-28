@@ -1,7 +1,11 @@
 # Getting Started
 
-Orientation for someone new to **Myco**: what it is, the four ideas to hold,
-and where to read next. Ten minutes.
+Orientation for someone new to **Myco**'s code and design: what it is, the
+four ideas to hold, and where to read next. Ten minutes.
+
+Just want to use the app? Start with
+[Join a group](../README.md#join-a-group) or
+[Organize a group](../README.md#organize-a-group) instead.
 
 ## What the app is
 
@@ -47,11 +51,12 @@ purpose, one mutual handshake at a time. Only Circle members read your relay
 and store, receive your gossip, or get your files. A peer can be a stranger; a
 member can be out of range. [circle.md](./design/circle/circle.md).
 
-**3. Three keys.** The **device key** is the phone's: mesh identity, link
-authentication, `<npub>.fips`. The **user key** is yours as napplets see it:
-what they publish as. An **author key** belongs to whoever made an app, and
-Myco never holds it — apps are authored elsewhere and Myco only re-serves their
-signed events. [concepts.md § Three keys](./design/core/concepts.md#three-keys).
+**3. Two keys.** The **device key** is the phone's FIPS mesh key: mesh
+identity, link authentication, `<npub>.fips`. The **user key** is your Nostr
+key, the social one: what napplets publish as. It is a guest key from the first
+launch, or your own `nsec` or a signer app. Myco never holds an app author's
+key — apps are authored elsewhere and Myco only re-serves their signed events.
+[concepts.md § Three keys](./design/core/concepts.md#three-keys).
 
 **4. Trust the data, and the person — never the radio.** Every artifact is
 self-authenticating (signed events, sha256 blobs), so any source is safe to

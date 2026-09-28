@@ -8,12 +8,13 @@ description: |
 
     Apps travel straight from phone to phone over Bluetooth, Wi-Fi Aware or the
     local network. Whoever has an app can hand it on to the next person, so it
-    reaches the group even after you've left.
+    reaches the group even after you've left. Keep Myco open on screen while
+    pairing and sharing; phones find each other only while it's open.
 
     Myco is built around napplets: small programs that ask for what they need — your
     identity, Nostr relays, the phones nearby — and get only what you allow.
     Apps built for the mesh keep working between phones in reach with no signal
-    at all. Any nsite (a static website on Nostr) works offline too, once it's
+    at all, and a phone that joins late catches up from the phones near it. Any nsite (a static website on Nostr) works offline too, once it's
     on your phone.
 
     Comes with AppStore, for finding napplets from your relays, from people you
@@ -21,13 +22,13 @@ description: |
 
     Every install has a Nostr identity from the first launch: a guest you can
     keep, or replace with your own key or a signer app like Amber.
-
-    Keep Myco open on screen while pairing and sharing; phones find each other
-    only while it's open.
 summary: Hand apps to the people around you, phone to phone, and keep using them offline.
 tags:
     - mesh
     - fips
+    - nostr
+    - offline
+    - napplet
 license: MIT
 images:
     - docs/images/zapstore-01-mesh.png
