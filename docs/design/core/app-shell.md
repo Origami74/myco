@@ -28,7 +28,7 @@ decision of this doc:
   nsites and napplets in one grid), **Circle** (pair by bump or QR, see
   [identity-pairing.md](./identity-pairing.md); your paired people; file
   sharing), **Settings** (radios, storage, identity, app reach), and a
-  **Dev** tab. Finding new apps is the job of the preinstalled **Discover**
+  **Dev** tab. Finding new apps is the job of the preinstalled **AppStore**
   napplet, which opens from the Apps grid like any other app.
 - **Each nsite as its own fullscreen app** — launched *by* Myco but running in
   its **own task/instance**, filling the screen, with **no Myco UI around it at

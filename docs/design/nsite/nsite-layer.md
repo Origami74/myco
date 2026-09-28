@@ -787,7 +787,7 @@ reachable source.
 The native Discover tab and its `SearchNsites` action are **removed**. They
 queried each reachable Circle member's relay (`<npub_holder>.fips:4870`) for
 kinds **15128 / 35128** and listed the results, one per site, newest first.
-Discovery now belongs to the preinstalled **Discover napplet** (roadmap N5),
+Discovery now belongs to the preinstalled **AppStore napplet** (roadmap N5),
 which reaches the room through NAP-MESH like any other app. It lists napplets
 only; listing nsites held around you is open work under N5. An nsite is still
 reached by a share, a scan, a link or a paste, and opening one runs the normal
