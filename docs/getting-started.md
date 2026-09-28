@@ -5,21 +5,25 @@ and where to read next. Ten minutes.
 
 ## What the app is
 
-Myco is a peer-to-peer **app-sharing network**: an Android app for getting apps
-from the people around you, running them, and passing them on — over Bluetooth,
-Wi-Fi Aware or the local network, with no internet and no app store. Two phones
-in a pocket exchange and run each other's apps.
+Myco lets someone who has a useful app hand it to the people they are with,
+in person. They pair — a bump, a tap on someone Myco found nearby over
+Bluetooth, or a QR scan — and share the app. It lands on the other phone,
+opens full-screen like any app, and still opens with no internet. Whoever has
+it can hand it on. Apps travel over Bluetooth, Wi-Fi Aware or the local
+network, with no central app store in between.
 
 Two kinds of app run in it:
 
-- an **nsite** — a static website published on Nostr, which Myco serves to a
-  WebView from its own store, and
 - a **napplet** — a program in a sandbox, which asks Myco for what it needs
-  (relays, the mesh, pictures) and gets exactly what you granted.
+  (an identity, relays, the mesh, pictures) and gets exactly what you granted.
+  Napplets are what Myco is built to run; and
+- an **nsite** — a static website published on Nostr, which Myco serves to a
+  WebView from its own store. A bonus: any nsite works offline once it is on
+  the phone.
 
 Myco itself is the manager: **Apps** (your grid), **Circle** (the people you
 have paired with), **Settings**. New apps come from a share, a scan, or the
-preinstalled **Discover** app. Every app opens as its own full-screen task with
+preinstalled **AppStore** app. Every app opens as its own full-screen task with
 no Myco chrome.
 
 The framing is nak's "Pillars of Propagation": small relays and Blossom blobs
@@ -56,7 +60,8 @@ to yours is whether you paired with it. [security.md](./design/core/security.md)
 
 ## The demo in three sentences
 
-Two phones, both in airplane mode with Bluetooth on, bump to pair. One
+Two phones, both in airplane mode with Bluetooth on, pair (a bump, or a tap
+on the other under Nearby). One
 long-presses an app and shares it; the other scans (or is bumped again) and
 pulls it straight from the first phone over the mesh. It opens full-screen,
 served from the second phone's own store — and that phone can now share it on.

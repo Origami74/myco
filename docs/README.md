@@ -2,10 +2,8 @@
 
 # Myco
 
-> **Install apps from the people around you** — over Bluetooth, with no internet
-> and no app store. Meet someone, bump phones, and their apps appear on your
-> phone, ready to use offline. Anything you install you can pass on — so apps
-> spread from phone to phone, on their own.
+> **Hand a useful app to the people around you.** Phone to phone, no app
+> store, and it keeps opening when the internet is gone.
 
 ![Your apps live on your home screen and open like any app](design/diagrams/intro-01-your-apps.svg)
 
@@ -15,39 +13,41 @@
 
 ## What it is
 
-Myco is a different kind of app store. Instead of downloading from a
-company's servers, you **install apps from the people around you** — over
-Bluetooth, Wi-Fi Aware or the local network, with no internet connection.
+Someone in the room has an app that helps: a checklist, a game, a way to ring
+each other. With Myco they pair with you and hand it over, and the app is on
+your phone too. It opens full-screen like any other app, and it still opens
+with no signal. Once you have it, you can hand it on to the next person.
 
-Meet someone, **pair** with a bump or a QR scan, and their apps land in your
-**Apps** grid, ready to use offline. Anything you install you can pass on to the
-next person, so apps spread from phone to phone on their own — no servers, no
-single point that has to stay online.
+Apps travel over Bluetooth, Wi-Fi Aware or the local network, with no
+internet needed. The [project README](../README.md) has the short version for
+people joining a group, organizing one, or building apps.
 
-## Two kinds of app
+## Napplets first, nsites as a bonus
 
+- A **napplet** is a program: a sandboxed page with a permission model. It
+  asks Myco for things — an identity, relays, the mesh, pictures — and gets
+  exactly what you granted. It is a program Myco *hosts*, and what Myco is
+  built to run.
 - An **nsite** is a static website published on Nostr. Myco stores its signed
-  files and serves them to a WebView. It is a document Myco *serves*.
-- A **napplet** is a program: a sandboxed page with a permission model. It asks
-  Myco for things — relays, the mesh, pictures — and Myco decides. It is a
-  program Myco *hosts*.
+  files and serves them to a WebView, so it works offline once it is on the
+  phone. It is a document Myco *serves*, and it gets no grants.
 
 Both arrive the same way (a signed manifest plus content-addressed files),
-both live in the same grid, both open as their own full-screen app. What differs
-is trust: an nsite gets nothing, a napplet gets exactly what you granted it.
+both live in the same grid, both open as their own full-screen app.
 
 ## Pairing
 
-Getting started takes one in-person hello:
+Getting started takes one in-person hello. Open **Circle**, then:
 
-1. Open **Circle**.
-2. **Bump phones** (NFC), or show your code and let a friend scan it.
-3. You're paired — both ways. They join your **Circle**, and apps can flow in
-   either direction between you.
+- **Bump phones** (NFC), or
+- **Tap them under Nearby**, where Myco lists phones it found over Bluetooth,
+  and they accept, or
+- **Show your code** and let them scan it.
 
-Your code carries a **memorable name** so the people you pair with remember
-who you are. Pairing is always mutual: a one-time secret in the code proves the
-scan happened, and the other phone confirms.
+You're paired — both ways. They join your **Circle**, and apps can flow in
+either direction between you. Your name travels with the pairing so the people
+you pair with remember who you are. Pairing is always mutual: the other phone
+confirms, and only people you paired with can pull from your phone.
 
 ---
 
