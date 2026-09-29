@@ -185,8 +185,9 @@ the **mesh** capability:
 - **Ephemeral notes** (with a NIP-40 `expiration`, such as chat) disappear
   once they expire, so catch-up is only possible until then.
 
-Not yet: picking stored notes and rebroadcasting them on purpose, to other
-phones or to public relays.
+A napplet can also **keep** a note or picture it was shown on this phone, and
+**pass on** a note it was shown to nearby phones or public relays again — only
+ever what it was shown, never signed as you.
 
 ### From a small example to two phones
 

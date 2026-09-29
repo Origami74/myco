@@ -457,6 +457,10 @@ impl crate::mesh_relay::PeerGate for CircleGate {
         self.content.perms_for_ip(ip).is_some_and(|p| p.relay_write)
     }
 
+    fn may_forward(&self, ip: IpAddr) -> bool {
+        self.content.may_forward_from(ip)
+    }
+
     fn max_req_ttl(&self, ip: IpAddr) -> u8 {
         match self.content.perms_for_ip(ip) {
             Some(p) if p.relay_read_multihop => crate::mesh_relay::MAX_REQ_TTL,

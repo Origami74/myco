@@ -1113,6 +1113,7 @@ private fun capabilityWording(domain: String): Capability = when (domain) {
     "relay" -> Capability("Relays", "Read and post as you on your relays, without asking each time")
     "outbox" -> Capability("Outbox", "Post as you to your relays and to other people's, and read from theirs")
     "mesh" -> Capability("Mesh", "Post as you to phones nearby, and read what they share, without asking each time")
+    "local" -> Capability("Keep on this phone", "Keep notes, and things it showed you, on this phone")
     "identity" -> Capability("Identity", "See your name and profile")
     "resource" -> Capability("Pictures & files", "Load pictures and files by their content hash")
     "storage" -> Capability("Storage", "Save things on this phone")

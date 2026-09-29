@@ -787,6 +787,17 @@ domains now say what they mean, and a `relay` grant is no longer a back door to 
 `RelayPoolSink` in `myco-core/src/napplet.rs`. Outbox-model relay selection (NIP-65) is
 NAP-OUTBOX's and still to come; until then the pool is the default relay set.
 
+### S6 — Keep and pass on
+
+**Shipped as NAP-LOCAL** ([`NAP-LOCAL.md`](NAP-LOCAL.md)), provisional. With the
+shell cache in place, what a napplet reads is remembered only until it is evicted.
+`local.publish` keeps an event in the local relay and sends it nowhere;
+`resource.keep` keeps a blob in the local Blossom. Every publish also accepts a
+signed event and sends it as it is — `mesh.publish` then floods it again even if
+this phone has seen it. Both are honoured only for what the napplet was
+delivered, remembered in a per-napplet scalable bloom filter shared by its
+windows (`delivered.rs`). `local` is a default grant.
+
 ---
 
 ## 7. Open questions and hazards

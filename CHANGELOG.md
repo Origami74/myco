@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   install are stored separately and never pushed out, and private messages
   are never cached. "Delete cache" clears it too.
 
+- **Apps can keep what they showed you, and pass it on.** A napplet can keep
+  a note or picture on your phone so the cache never throws it away, and can
+  send a note it showed you on to nearby phones or public relays again. It
+  only works for things the app was actually shown, and it never signs
+  someone else's note as you. New installs list it on the install screen as
+  "Keep on this phone"; apps already installed get it the next time they
+  open, like other defaults, and it can be switched off per app.
+
 ### Changed
 
 - **Chat survives a restart until it expires.** Notes with an expiry time,

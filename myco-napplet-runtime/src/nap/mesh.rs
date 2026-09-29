@@ -25,7 +25,7 @@
 //! it behind a long wait.
 
 use crate::dispatch::NapContext;
-use crate::nap::relay::{event_json, filters_from, sign_template};
+use crate::nap::relay::{event_json, filters_from, signed_or_template};
 use crate::seams::Envelope;
 use crate::session::Session;
 
@@ -33,7 +33,7 @@ use crate::session::Session;
 pub async fn handle(ctx: &NapContext, session: &mut Session, message: &Envelope) -> Vec<Envelope> {
     match message.action() {
         "info" => vec![info(ctx, message).await],
-        "publish" => vec![publish(ctx, message).await],
+        "publish" => vec![publish(ctx, session, message).await],
         "subscribe" => subscribe(ctx, session, message).await,
         "close" => {
             if let Some(sub_id) = message.field("subId").and_then(|v| v.as_str()) {
@@ -66,19 +66,25 @@ async fn info(ctx: &NapContext, message: &Envelope) -> Envelope {
 }
 
 /// `mesh.publish` — sign the template as the user, store it, and flood it
-/// `ttl` hops out.
-async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
+/// `ttl` hops out. Given an event the napplet was delivered, keep it and flood
+/// it again as it is — any time, seen before or not (NAP-LOCAL).
+async fn publish(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelope {
     let requested = match ttl_from(message) {
         Ok(ttl) => ttl,
         Err(e) => return failed(message, e),
     };
-    let signed = match sign_template(ctx, message).await {
+    let (signed, as_is) = match signed_or_template(ctx, session, message, true).await {
         Ok(event) => event,
         Err(e) => return failed(message, e),
     };
 
     let ttl = ctx.mesh.limits().await.clamp_publish(requested);
-    if let Err(e) = ctx.mesh.publish(signed.clone(), ttl).await {
+    let sent = if as_is {
+        ctx.mesh.rebroadcast(signed.clone(), ttl).await
+    } else {
+        ctx.mesh.publish(signed.clone(), ttl).await
+    };
+    if let Err(e) = sent {
         return failed(message, format!("could not publish: {e}"));
     }
 
@@ -331,6 +337,67 @@ mod tests {
         let published = mesh.published();
         assert_eq!(published[0].0.pubkey, signer.public_key());
         assert_ne!(published[0].0.created_at.as_secs(), 1);
+    }
+
+    /// An event the napplet was delivered can be flooded again as it is — any
+    /// number of times — and one it was not delivered cannot.
+    #[tokio::test]
+    async fn a_delivered_event_is_rebroadcast_as_it_is() {
+        let (ctx, mesh, _signer) = test_context_with_mesh(MeshLimits {
+            publish_ttl: 3,
+            subscribe_ttl: 2,
+        });
+        let theirs = EventBuilder::text_note("worth passing on")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let unseen = EventBuilder::text_note("never shown")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        ctx.relay.publish(theirs.clone()).await.unwrap();
+        let mut s = granted();
+        call(
+            &ctx,
+            &mut s,
+            Envelope::new("relay.query")
+                .with_id("q")
+                .with_field("filters", json!({"ids": [theirs.id.to_hex()]})),
+        )
+        .await;
+
+        for n in 0..2 {
+            let out = call(
+                &ctx,
+                &mut s,
+                Envelope::new("mesh.publish")
+                    .with_id(format!("r{n}"))
+                    .with_field("event", event_json(&theirs))
+                    .with_field("ttl", 2),
+            )
+            .await;
+            let r = serde_json::to_value(&out[0]).unwrap();
+            assert_eq!(r["ok"], true, "{r}");
+        }
+        let passed_on = mesh.rebroadcasts();
+        assert_eq!(passed_on.len(), 2);
+        assert!(passed_on
+            .iter()
+            .all(|(e, ttl)| e.id == theirs.id && *ttl == 2));
+        assert!(
+            mesh.published().is_empty(),
+            "passed on through the publish door"
+        );
+
+        let out = call(
+            &ctx,
+            &mut s,
+            Envelope::new("mesh.publish")
+                .with_id("x")
+                .with_field("event", event_json(&unseen)),
+        )
+        .await;
+        let r = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(r["ok"], false);
+        assert_eq!(mesh.rebroadcasts().len(), 2);
     }
 
     #[tokio::test]

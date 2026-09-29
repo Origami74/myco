@@ -10,6 +10,7 @@
 
 pub mod identity;
 pub mod link;
+pub mod local;
 pub mod mesh;
 pub mod outbox;
 pub mod relay;
@@ -92,10 +93,18 @@ const SUBSCRIBING_DOMAINS: [&str; 3] = ["relay", "mesh", "outbox"];
 /// side of the mesh an event came from. Empty when nothing matches, which is
 /// the common case and deliberately cheap.
 pub fn deliveries_for(session: &Session, event: &Event) -> Vec<Envelope> {
-    SUBSCRIBING_DOMAINS
+    let frames: Vec<Envelope> = SUBSCRIBING_DOMAINS
         .iter()
         .flat_map(|domain| deliveries_in(session, domain, event))
-        .collect()
+        .collect();
+    if !frames.is_empty() {
+        session
+            .ledger()
+            .lock()
+            .unwrap()
+            .record_event(&event.id.to_bytes());
+    }
+    frames
 }
 
 /// The `<domain>.event` frames a session should receive for `event` in one

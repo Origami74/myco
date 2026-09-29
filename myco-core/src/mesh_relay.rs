@@ -145,7 +145,19 @@ pub trait PeerGate: Send + Sync {
     fn max_req_ttl(&self, _ip: IpAddr) -> u8 {
         MAX_REQ_TTL
     }
+
+    /// May events pushed by `ip` travel on through us? The gossiper applies
+    /// the same grant on the push plane; the hub needs it too, so a napplet's
+    /// rebroadcast cannot carry on what the peer's grant stopped here.
+    fn may_forward(&self, _ip: IpAddr) -> bool {
+        true
+    }
 }
+
+/// How soon the same event may be passed on again through the same door (a
+/// napplet's mesh or relay rebroadcast). A rebroadcast needs no signature, so
+/// nothing else paces a napplet that loops on one.
+pub(crate) const PASS_ON_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Default clamp on the pull hop budget we'll honour, so a peer can't turn us
 /// into an unbounded query amplifier. Lower than the push plane's
@@ -187,6 +199,13 @@ struct SeenInner {
 }
 
 impl SeenSet {
+    /// Whether `id` is remembered.
+    fn contains(&self, id: &[u8; 32]) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        inner.gc(crate::content::now_secs());
+        inner.until.contains_key(id)
+    }
+
     /// Record an id, returning `true` if this is the **first** time we have seen
     /// it — the caller's signal to fan out.
     fn insert(&self, event: &Event) -> bool {
@@ -303,6 +322,11 @@ pub struct RelayHub {
     /// Query ids already served, so a pull that reaches us by several paths is
     /// answered once instead of re-fanned each time.
     seen_queries: SeenQueries,
+    /// Ids pushed to us by peers whose events travel no further through us
+    /// (no multihop write grant). A napplet cannot pass these on.
+    stops_here: SeenSet,
+    /// When each event was last passed on, per door, for [`PASS_ON_COOLDOWN`].
+    passed_on: Mutex<HashMap<([u8; 32], &'static str), std::time::Instant>>,
 }
 
 impl RelayHub {
@@ -343,6 +367,8 @@ impl RelayHub {
             gate,
             seen: SeenSet::default(),
             seen_queries: SeenQueries::default(),
+            stops_here: SeenSet::default(),
+            passed_on: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -400,6 +426,53 @@ impl RelayHub {
             tokio::spawn(async move { gossip.on_event(event, inbound).await });
         }
         Ok(true)
+    }
+
+    /// Keep an event this device already has (or may have) seen and flood it
+    /// again at `ttl` hops: a napplet passing on something it was shown
+    /// (NAP-LOCAL). Unlike [`RelayHub::accept_local_with_ttl`] the seen-set
+    /// does not stop it here — that is the point — though it is still
+    /// recorded, so the copy peers echo back is not flooded a third time.
+    /// Live subscriptions are woken only on a first sighting.
+    pub async fn rebroadcast_local(self: &Arc<Self>, event: Event, ttl: u8) -> anyhow::Result<()> {
+        self.claim_pass_on(&event, "mesh")?;
+        let first_sighting = self.seen.insert(&event);
+        self.store.publish(event.clone()).await?;
+        if first_sighting {
+            let _ = self.live.send(event.clone());
+        }
+        if let Some(gossip) = self.gossip.clone() {
+            let inbound = Inbound {
+                origin: Origin::Local,
+                event_ttl: Some(ttl),
+                sender: None,
+            };
+            tokio::spawn(async move { gossip.on_event(event, inbound).await });
+        }
+        Ok(())
+    }
+
+    /// Whether a napplet may pass `event` on through `door` now, recording it
+    /// if so. Refused when the event came from a peer whose events stop here,
+    /// or when it went out through the same door under [`PASS_ON_COOLDOWN`]
+    /// ago.
+    ///
+    /// Only pushed events are marked: backlog pulled from a peer carries no
+    /// sender here, so a pulled event from a peer without multihop can still
+    /// be passed on (see NAP-LOCAL, Security Considerations).
+    pub(crate) fn claim_pass_on(&self, event: &Event, door: &'static str) -> anyhow::Result<()> {
+        let id = event.id.to_bytes();
+        if self.stops_here.contains(&id) {
+            anyhow::bail!("it came from a paired phone whose events go no further");
+        }
+        let now = std::time::Instant::now();
+        let mut passed = self.passed_on.lock().unwrap();
+        passed.retain(|_, at| now.duration_since(*at) < PASS_ON_COOLDOWN);
+        if passed.contains_key(&(id, door)) {
+            anyhow::bail!("it was passed on moments ago; try again shortly");
+        }
+        passed.insert((id, door), now);
+        Ok(())
     }
 
     /// Accept an event without forwarding it: dedupe, store, and wake live
@@ -821,6 +894,10 @@ async fn handle_client_frame(
             // idempotent, so it happens either way; only a first sighting fans
             // out. See `reference/thinning-custom-relay.md` (D2).
             let first_sighting = hub.seen.insert(&event);
+            if origin == Origin::Mesh && hub.gate.as_ref().is_some_and(|g| !g.may_forward(peer_ip))
+            {
+                hub.stops_here.insert(&event);
+            }
             // An in-app client's publish is this device's own and is kept; what
             // a mesh peer pushes is passing through, and is cached.
             let target = match origin {
@@ -1080,6 +1157,93 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(seen.event_ttl, None);
+    }
+
+    /// A napplet's rebroadcast floods an event the hub has already seen,
+    /// where a plain local accept of it goes nowhere.
+    #[tokio::test]
+    async fn a_rebroadcast_floods_a_seen_event_again() {
+        use std::sync::Mutex;
+
+        struct Count(Mutex<Vec<Option<u8>>>);
+        #[async_trait]
+        impl Gossiper for Count {
+            async fn on_event(&self, _event: Event, inbound: Inbound) {
+                self.0.lock().unwrap().push(inbound.event_ttl);
+            }
+        }
+
+        let store = Arc::new(nsite_deck::testing::MemRelay::new());
+        let count = Arc::new(Count(Mutex::new(Vec::new())));
+        let hub = RelayHub::new(store.clone(), Some(count.clone()));
+        let keys = Keys::generate();
+        let msg = chat_event(&keys, "mesh", "worth passing on");
+        assert!(hub
+            .accept_local_with_ttl(msg.clone(), Some(1))
+            .await
+            .unwrap());
+        assert!(!hub
+            .accept_local_with_ttl(msg.clone(), Some(1))
+            .await
+            .unwrap());
+        hub.rebroadcast_local(msg.clone(), 2).await.unwrap();
+        // Again at once is the cooldown's to refuse (see the test below).
+        assert!(hub.rebroadcast_local(msg.clone(), 3).await.is_err());
+        for _ in 0..100 {
+            if count.0.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let mut seen = count.0.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(seen, vec![Some(1), Some(2)]);
+        assert_eq!(store.query(&[Filter::new()]).await.unwrap().len(), 1);
+    }
+
+    /// A napplet cannot pass on an event from a peer whose events stop here,
+    /// nor the same event through the same door twice in a row.
+    #[tokio::test]
+    async fn pass_on_respects_the_peer_grant_and_a_cooldown() {
+        struct NoMultihop;
+        impl PeerGate for NoMultihop {
+            fn may_connect(&self, _ip: IpAddr) -> bool {
+                true
+            }
+            fn may_read(&self, _ip: IpAddr) -> bool {
+                true
+            }
+            fn may_publish(&self, _ip: IpAddr, _kind: u16) -> bool {
+                true
+            }
+            fn may_forward(&self, _ip: IpAddr) -> bool {
+                false
+            }
+        }
+
+        let hub = RelayHub::with_gate(
+            Arc::new(nsite_deck::testing::MemRelay::new()),
+            None,
+            Some(Arc::new(NoMultihop)),
+        );
+        let keys = Keys::generate();
+        let theirs = chat_event(&keys, "mesh", "from a peer without multihop");
+        let frame = serde_json::json!(["EVENT", theirs]).to_string();
+        let peer: IpAddr = "fd00::7".parse().unwrap();
+        let mut subs = HashMap::new();
+        handle_client_frame(&frame, &hub, Origin::Mesh, peer, 1, &mut subs).await;
+        assert!(
+            hub.rebroadcast_local(theirs.clone(), 2).await.is_err(),
+            "a napplet carried on what the peer's grant stopped"
+        );
+
+        let local = chat_event(&keys, "mesh", "fine to pass on");
+        hub.rebroadcast_local(local.clone(), 2).await.unwrap();
+        assert!(hub.rebroadcast_local(local.clone(), 2).await.is_err());
+        assert!(
+            hub.claim_pass_on(&local, "relays").is_ok(),
+            "doors share a cooldown"
+        );
     }
 
     /// Backlog pulled from a peer wakes this device's live subscriptions —

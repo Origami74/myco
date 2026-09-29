@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use nostr::{Event, Filter};
 
+use crate::delivered::Ledger;
 use crate::seams::{ScopeOwner, WorkScope};
 
 /// NAP domains this build actually implements.
@@ -25,7 +26,7 @@ use crate::seams::{ScopeOwner, WorkScope};
 /// yet must not be advertised, or `shell.supports()` lies and the napplet takes
 /// a branch that cannot work.
 pub const IMPLEMENTED_DOMAINS: &[&str] = &[
-    "shell", "identity", "relay", "mesh", "outbox", "resource", "link", "theme",
+    "shell", "identity", "relay", "mesh", "outbox", "local", "resource", "link", "theme",
 ];
 
 /// Domains every napplet gets, grant or no grant.
@@ -55,6 +56,13 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// answers — the system browser, or Myco's install review, where nothing is
 /// installed until the user says so — and the host rate-limits the asking.
 ///
+/// `local` keeps on this device what the napplet was shown (`local.publish`
+/// of a delivered event, `resource.keep`). It signs nothing on its own — a
+/// note-to-self template also needs `relay` — and publishes nowhere; but kept
+/// is not private: the local relay and Blossom are read by paired phones and
+/// the device's own nsites, and with a custom backend they are that server.
+/// Keeps are permanent and unquota'd, which is why it can be switched off.
+///
 /// `mesh` is a default **for now**, not by design. The upstream napplet
 /// tooling (the Vite plugin and `napplet deploy`) keeps only the upstream NAP
 /// domains in a manifest's `requires` and drops Myco-only ones, so no napplet
@@ -69,7 +77,9 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// a default gets no sheet), and a stored grant is honoured as given. Removing
 /// it from here therefore needs a migration that drops `mesh` from `granted`
 /// where it was never reviewed.
-pub const DEFAULT_GRANTS: &[&str] = &["identity", "link", "mesh", "relay", "resource", "theme"];
+pub const DEFAULT_GRANTS: &[&str] = &[
+    "identity", "link", "local", "mesh", "relay", "resource", "theme",
+];
 
 /// The most live subscriptions one session may hold, across `relay`, `mesh`
 /// and `outbox`. See [`Session::subscribe_in`].
@@ -159,6 +169,11 @@ pub struct Session {
     /// Per live subscription, the same: closing or replacing a subscription
     /// drops its owner and stops its remote pull.
     sub_work: BTreeMap<(String, String), Arc<ScopeOwner>>,
+    /// What has been delivered to this napplet, so a signed publish or a
+    /// `resource.keep` is honoured only for what it was shown. Shared by every
+    /// clone — the snapshots a read runs against record into the same one —
+    /// and, through [`Session::with_ledger`], by the napplet's other windows.
+    delivered: Ledger,
 }
 
 impl Session {
@@ -186,7 +201,45 @@ impl Session {
             appearance: Appearance::default(),
             work: Arc::new(ScopeOwner::new()),
             sub_work: BTreeMap::new(),
+            delivered: Ledger::default(),
         }
+    }
+
+    /// Share `ledger` — the one the napplet's other open windows record into —
+    /// instead of this session's own.
+    pub fn with_ledger(mut self, ledger: Ledger) -> Self {
+        self.delivered = ledger;
+        self
+    }
+
+    /// The ledger of what was delivered to this napplet.
+    pub fn ledger(&self) -> &Ledger {
+        &self.delivered
+    }
+
+    /// Record every event in outgoing `envelopes` as delivered.
+    pub fn record_delivered(&self, envelopes: &[crate::seams::Envelope]) {
+        let mut ledger = self.delivered.lock().unwrap();
+        for envelope in envelopes {
+            for value in envelope.fields.values() {
+                crate::delivered::record_events_in(&mut ledger, value);
+            }
+        }
+    }
+
+    /// Whether the event `id` was delivered to this napplet.
+    pub fn was_delivered(&self, id: &nostr::EventId) -> bool {
+        self.delivered.lock().unwrap().has_event(&id.to_bytes())
+    }
+
+    /// Whether the blob `sha256` was delivered to this napplet.
+    pub fn was_delivered_blob(&self, sha256: &[u8; 32]) -> bool {
+        self.delivered.lock().unwrap().has_blob(sha256)
+    }
+
+    /// Record the blob `sha256` as delivered.
+    pub fn record_delivered_blob(&self, sha256: &[u8; 32]) {
+        self.delivered.lock().unwrap().record_blob(sha256);
     }
 
     /// The scope for work this session starts outside any subscription —

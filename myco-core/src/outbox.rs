@@ -689,9 +689,36 @@ impl myco_napplet_runtime::seams::EventSink for OutboxService {
         if !self.accept_local(event.clone()).await? {
             return Ok(());
         }
+        self.push_to_fallback_lanes(event);
+        Ok(())
+    }
+
+    /// NAP-LOCAL's `local.publish`: kept here and shown to this device's
+    /// subscriptions, sent nowhere.
+    async fn keep(&self, event: Event) -> anyhow::Result<()> {
+        self.accept_local(event).await.map(|_| ())
+    }
+
+    /// A delivered event published as it is: kept, and pushed to the
+    /// internet lanes whether or not this device has seen it — having seen it
+    /// is how the napplet came to have it.
+    async fn rebroadcast(&self, event: Event) -> anyhow::Result<()> {
+        let hub = self.hub.lock().unwrap().clone();
+        if let Some(hub) = hub {
+            hub.claim_pass_on(&event, "relays")?;
+        }
+        self.accept_local(event.clone()).await?;
+        self.push_to_fallback_lanes(event);
+        Ok(())
+    }
+}
+
+impl OutboxService {
+    /// Push `event` to the internet fallback lanes, spawned and best-effort.
+    fn push_to_fallback_lanes(&self, event: Event) {
         let lanes = self.fallback_lanes();
         if lanes.is_empty() {
-            return Ok(());
+            return;
         }
         let this = self.detached();
         tokio::spawn(async move {
@@ -704,7 +731,6 @@ impl myco_napplet_runtime::seams::EventSink for OutboxService {
                 "napplet publish reached the internet pool"
             );
         });
-        Ok(())
     }
 }
 
@@ -1998,6 +2024,76 @@ mod tests {
             *count.0.lock().unwrap(),
             0,
             "a relay publish reached the gossiper"
+        );
+    }
+
+    /// NAP-LOCAL: `keep` stores here and sends nowhere; `rebroadcast` sends
+    /// an event this phone has already seen to the relay pool anyway — once
+    /// per cooldown.
+    #[tokio::test]
+    async fn keep_sends_nowhere_and_rebroadcast_sends_a_seen_event() {
+        use myco_napplet_runtime::seams::EventSink;
+
+        let (remote, url) = mock_relay().await;
+        let content = scratch_content("keep-rebroadcast");
+        let store = content.relay();
+        let hub = RelayHub::new(store.clone(), None);
+        let svc = OutboxService::new(
+            store.clone(),
+            Arc::new(Mutex::new(Some(hub.clone()))),
+            content,
+            "npub1me".to_string(),
+        )
+        .with_configured_relays(vec![url])
+        .allowing_private_dials();
+
+        let keys = Keys::generate();
+        let kept = EventBuilder::text_note("mine alone")
+            .sign_with_keys(&keys)
+            .unwrap();
+        svc.keep(kept.clone()).await.unwrap();
+        assert_eq!(
+            store
+                .query(&[Filter::new().id(kept.id)])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let seen = EventBuilder::text_note("seen here already")
+            .sign_with_keys(&keys)
+            .unwrap();
+        hub.accept_unforwarded(seen.clone()).await.unwrap();
+        svc.rebroadcast(seen.clone()).await.unwrap();
+        let mut reached = false;
+        for _ in 0..100 {
+            if !remote
+                .query(&[Filter::new().id(seen.id)])
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                reached = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            reached,
+            "a rebroadcast of a seen event never reached the pool"
+        );
+        assert!(
+            remote
+                .query(&[Filter::new().id(kept.id)])
+                .await
+                .unwrap()
+                .is_empty(),
+            "a kept event was sent to the pool"
+        );
+        assert!(
+            svc.rebroadcast(seen).await.is_err(),
+            "passed on again inside the cooldown"
         );
     }
 

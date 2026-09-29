@@ -2004,6 +2004,8 @@ impl AppRuntime {
                     // A blob a napplet fetches from elsewhere is cached, not
                     // kept; reads still see the local Blossom.
                     blobs: content.cache_blobs(),
+                    // `resource.keep` writes here: the configured Blossom.
+                    kept_blobs: content.blobs(),
                     fetcher: Arc::new(crate::napplet::BlossomFetcher::new(content.clone())),
                 })
                 // Served versions come from the content layer's pins, so a

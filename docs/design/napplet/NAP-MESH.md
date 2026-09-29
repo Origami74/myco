@@ -159,6 +159,7 @@ A `ttl` that is not a whole number from 0 to 255 is an error, not a zero: a napp
 ## Shell Behavior
 
 - The shell MUST sign publish templates under NAP-RELAY's rules: the napplet never sets `pubkey`, `created_at`, `id` or `sig`.
+- *(Myco, NAP-LOCAL.)* A signed event in place of a template is flooded **as it is** — kept, then forwarded with the capped budget even if this device has seen it — provided it verifies and was delivered to this napplet. See [`NAP-LOCAL.md`](NAP-LOCAL.md).
 - The shell MUST store a published event locally before or regardless of forwarding it, so a `ttl` of `0` is a working local publish.
 - The shell MUST clamp a requested `ttl` to the user's cap and MUST report the effective budget in `mesh.publish.result.ttl` and `mesh.eose.ttl`.
 - The shell MUST NOT let a napplet raise the shell's own forwarding clamp for events arriving from peers, whatever budget those events carry.
