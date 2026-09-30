@@ -30,6 +30,7 @@ chacha20poly1305 = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
+rustic-applesauce = { workspace = true }
 futures-util = { workspace = true }
 # The mesh relay proxy (`mesh_relay`) is an axum WebSocket server, bound
 # IPV6_V6ONLY via socket2 so `[::]:4870` does not collide with the loopback bind.

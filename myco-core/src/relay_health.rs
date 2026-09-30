@@ -171,6 +171,10 @@ struct Bursts {
 #[derive(Default)]
 pub(crate) struct RelayHealth {
     entries: Mutex<HashMap<String, Entry>>,
+    /// Relays the pool holds a socket to right now, by key, with how many.
+    /// A pooled read rides a connection that came up before it started, so
+    /// "connected during this call" is not the only way to be up.
+    open: Mutex<HashMap<String, usize>>,
     last_success: Mutex<Option<Instant>>,
     heard: Mutex<Option<Instant>>,
     bursts: Mutex<Bursts>,
@@ -294,6 +298,9 @@ impl RelayHealth {
     /// Whether a dial to `url` connected at or after `since` — how a timeout
     /// tells "never came up" from "came up and was slow".
     fn connected_since(&self, url: &str, since: Instant) -> bool {
+        if self.open.lock().unwrap().contains_key(&key(url)) {
+            return true;
+        }
         self.entries
             .lock()
             .unwrap()
@@ -493,6 +500,27 @@ pub(crate) fn record_ws<T>(url: &str, result: &anyhow::Result<T>) {
             if let Some(failure) = classify_ws(e) {
                 current().failed(url, failure);
             }
+        }
+    }
+}
+
+/// The relay pool opened a socket to `url` (see `relay_pool`); until the
+/// matching [`socket_closed`], a timeout on it is the relay being slow, not
+/// gone.
+pub(crate) fn socket_opened(url: &str) {
+    let health = current();
+    *health.open.lock().unwrap().entry(key(url)).or_default() += 1;
+}
+
+/// The socket [`socket_opened`] counted is gone.
+pub(crate) fn socket_closed(url: &str) {
+    let health = current();
+    let mut open = health.open.lock().unwrap();
+    let k = key(url);
+    if let Some(n) = open.get_mut(&k) {
+        *n -= 1;
+        if *n == 0 {
+            open.remove(&k);
         }
     }
 }

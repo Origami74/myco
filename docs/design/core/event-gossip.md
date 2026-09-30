@@ -362,6 +362,23 @@ explicit API rather than a magic filter key.
 `MAX_REQ_TTL` is **2**, below the push default of 3, because flooded reads cost
 more. A peer's `relay_read_multihop` clamps it to 0 for that peer.
 
+### Decided — pulls stream
+
+A pull is a stream, not a batch. Each event goes on the moment it arrives:
+
+- **The peer pool** hands each event to its caller as the peer sends it
+  (`request_stream`). `EOSE`/`CLOSED` ends the stream; a caller that gives up
+  keeps what already came.
+- **Multi-peer pulls** (`pull_from_peers_stream`) merge every Circle peer's
+  stream into one. The nearest peer's answer is never held for the slowest.
+- **A forwarded mesh `REQ`** sends the stored backlog at once, then each event
+  the forwarded pull brings as it comes, then `EOSE` when that pull ends. `EOSE`
+  still means "every hop's stored events", so older peers see no change. The
+  connection loop never waits on the pull, so pings and live events keep
+  flowing.
+- **A resync** after a peer reappears runs all open subscriptions at once, and
+  hands each event to the hub, so live subscribers see what they missed.
+
 ### Decided — a query id is mandatory on a pull
 
 Split-horizon on the immediate sender is not a loop guard on a graph. A circle is

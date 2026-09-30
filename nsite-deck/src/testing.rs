@@ -195,9 +195,7 @@ impl RelayBackend for MemRelay {
             .cloned()
             .collect();
         out.sort_by_key(|e| std::cmp::Reverse(e.created_at));
-        if let Some(limit) = filters.iter().filter_map(|f| f.limit).min() {
-            out.truncate(limit);
-        }
+        crate::seams::cap_per_filter(&mut out, filters);
         Ok(out)
     }
 }

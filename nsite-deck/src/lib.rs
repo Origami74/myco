@@ -32,7 +32,8 @@ pub use gateway::{serve, GatewayResponse, Readiness};
 pub use host::{parse_link, resolve_host, SiteAddr};
 pub use model::{kind_for, site_key, Manifest, KIND_NAMED, KIND_ROOT};
 pub use seams::{
-    newest_in_slot, AdminBackend, BlobStore, FanoutSink, NoopFanout, PeerSource, RelayBackend,
+    cap_per_filter, newest_in_slot, AdminBackend, BlobStore, FanoutSink, NoopFanout, PeerSource,
+    RelayBackend,
 };
 pub use sync::{import_site, sha256_hex, sync_site, verify_and_store_event, SyncOutcome};
 

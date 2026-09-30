@@ -149,16 +149,16 @@ impl Gossiper for MeshGossiper {
         );
     }
 
-    /// Pull plane: forward the REQ's
-    /// filters to connected Circle peers carrying the decremented `req_ttl`,
-    /// aggregating their matching events. `exclude` is split-horizon.
-    async fn on_req(
+    /// Pull plane: forward the REQ's filters to connected Circle peers
+    /// carrying the decremented `req_ttl`, streaming their matching events
+    /// back as they arrive. `exclude` is split-horizon.
+    fn on_req(
         &self,
         filters: Vec<serde_json::Value>,
         meta: crate::mesh_wire::MeshMeta,
         exclude: Option<IpAddr>,
-    ) -> Vec<Event> {
-        self.content.pull_from_peers(filters, meta, exclude).await
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
+        self.content.pull_from_peers_stream(filters, meta, exclude)
     }
 
     fn on_local_subscribe(&self, key: &str, filters: Vec<serde_json::Value>) {
