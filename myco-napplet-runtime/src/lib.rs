@@ -63,9 +63,10 @@ pub use prelude::{
 };
 pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
-    is_mesh_relay_url, BlobFetcher, BlobStore, Direction, EarlyAnswer, Envelope, EventSink,
-    LaneTransport, MeshLimits, MeshReach, MeshSink, NapTransport, NoFetcher, OutboxResolver,
-    PlanSource, RelayBackend, RelayLane, RelayPlan, ScopeOwner, Signer, StoreOnlySink, WorkScope,
+    is_mesh_relay_url, BlobFetcher, BlobHints, BlobStore, Direction, EarlyAnswer, Envelope,
+    EventSink, LaneTransport, MeshLimits, MeshReach, MeshSink, NapTransport, NoFetcher,
+    OutboxResolver, PlanSource, RelayBackend, RelayLane, RelayPlan, ScopeOwner, Signer,
+    StoreOnlySink, WorkScope,
 };
 pub use session::{Appearance, NappletIdentity, Session, IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
 pub use shell_link::{ShellAction, ToRuntime, ToShell};

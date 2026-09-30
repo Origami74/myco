@@ -196,7 +196,7 @@ async fn keep(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelo
     ) {
         (Some(sha), _) => sha.to_ascii_lowercase(),
         (None, Some(url)) => match parse_blossom_url(url) {
-            Ok(sha) => sha,
+            Ok((sha, _)) => sha,
             Err(e) => return error_for(message, e.code, e.message.as_deref()),
         },
         (None, None) => {
@@ -266,7 +266,7 @@ impl Failure {
 
 /// Resolve one URL: parse, local store, fetcher, verify, store, classify.
 async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
-    let sha = parse_blossom_url(url)?;
+    let (sha, hints) = parse_blossom_url(url)?;
 
     // Size before read: the local store may hold an nsite asset far over the
     // cap (Blossom accepts uploads to 64 MiB), and a `bytesMany` naming it a
@@ -295,7 +295,7 @@ async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
         None => {
             let fetched = ctx
                 .fetcher
-                .fetch(&sha, MAX_BYTES)
+                .fetch(&sha, MAX_BYTES, &hints)
                 .await
                 .map_err(|e| Failure::new("network-error", e.to_string()))?
                 .ok_or(Failure {
@@ -346,27 +346,116 @@ async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
     })
 }
 
-/// The sha256 named by a `blossom:` URL. The canonical form is
-/// `blossom:sha256:<hex>`; the bare `blossom:<hex>` the shim's examples use
-/// is accepted too. Anything else is the spec's `unsupported-scheme`, with
-/// a malformed blossom URL as `invalid-request`.
-fn parse_blossom_url(url: &str) -> Result<String, Failure> {
+/// The sha256 named by a `blossom:` URL, and where it says to look. Accepted:
+///
+/// - `blossom:sha256:<hex>`, this runtime's canonical form;
+/// - `blossom:<hex>`, the shim's examples;
+/// - BUD-10's `blossom:<hex>.<ext>?xs=<server>&as=<pubkey>&sz=<bytes>`, as
+///   napplets rewrite `https://` media links into. The extension is ignored
+///   (the bytes are sniffed); `xs` and `as` become [`BlobHints`], and any
+///   other parameter is ignored.
+///
+/// Anything else is the spec's `unsupported-scheme`, with a malformed
+/// blossom URL as `invalid-request`.
+///
+/// [`BlobHints`]: crate::seams::BlobHints
+fn parse_blossom_url(url: &str) -> Result<(String, crate::seams::BlobHints), Failure> {
     let Some(rest) = url.strip_prefix("blossom:") else {
         return Err(Failure::new(
             "unsupported-scheme",
             format!("only blossom: is supported, not {}", scheme_of(url)),
         ));
     };
-    let hex = rest.strip_prefix("sha256:").unwrap_or(rest);
-    let hex = hex.split(['/', '?', '#']).next().unwrap_or("");
-    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        Ok(hex.to_ascii_lowercase())
-    } else {
-        Err(Failure::new(
+    let rest = rest.strip_prefix("sha256:").unwrap_or(rest);
+    let rest = rest.split('#').next().unwrap_or("");
+    let (name, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let name = name.split('/').next().unwrap_or("");
+    let hex = name.split_once('.').map_or(name, |(hex, _ext)| hex);
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Failure::new(
             "invalid-request",
             "blossom URL must name a sha256 hex",
-        ))
+        ));
     }
+    Ok((hex.to_ascii_lowercase(), blob_hints(query)))
+}
+
+/// Most hints of each kind taken from one URL: a napplet may name a handful
+/// of places, not make the fetcher walk a list it wrote.
+const MAX_HINTS: usize = 4;
+
+/// The `xs` servers and `as` authors in a BUD-10 query string. A server is a
+/// domain (`https://` is added) or an `https://` URL; an author is 64 hex.
+/// Anything malformed is dropped, never an error: hints are only hints.
+fn blob_hints(query: &str) -> crate::seams::BlobHints {
+    let mut hints = crate::seams::BlobHints::default();
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let value = percent_decode(value);
+        match key {
+            "xs" if hints.servers.len() < MAX_HINTS => {
+                if let Some(server) = hint_server(&value) {
+                    if !hints.servers.contains(&server) {
+                        hints.servers.push(server);
+                    }
+                }
+            }
+            "as" if hints.authors.len() < MAX_HINTS => {
+                let pk = value.to_ascii_lowercase();
+                if pk.len() == 64
+                    && pk.chars().all(|c| c.is_ascii_hexdigit())
+                    && !hints.authors.contains(&pk)
+                {
+                    hints.authors.push(pk);
+                }
+            }
+            _ => {}
+        }
+    }
+    hints
+}
+
+/// A server hint as a base URL, or `None` if it is not one. Only a host
+/// (and port) is kept: a path in a hint would let a napplet steer the fetch
+/// at an arbitrary URL rather than a Blossom server's `/<sha256>`.
+fn hint_server(value: &str) -> Option<String> {
+    let (scheme, host) = match value.split_once("://") {
+        Some(("https", rest)) => ("https", rest),
+        Some(_) => return None,
+        None => ("https", value),
+    };
+    let host = host.split(['/', '?', '#']).next().unwrap_or("");
+    let valid = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'));
+    valid.then(|| format!("{scheme}://{}", host.to_ascii_lowercase()))
+}
+
+/// `%XX` escapes decoded; a malformed escape is kept as written.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn scheme_of(url: &str) -> &str {
@@ -624,6 +713,59 @@ mod tests {
             1,
             "the second ask went past the store"
         );
+    }
+
+    /// A BUD-10 URL — extension, `xs`, `as` — is fetched by its hash, and
+    /// the fetcher is told where the URL said to look.
+    #[tokio::test]
+    async fn a_bud10_url_carries_its_hints_to_the_fetcher() {
+        let (ctx, fetcher) = test_context_with_fetcher();
+        let sha = fetcher.hold(PNG);
+        let author = "AB".repeat(32);
+        let r = call(
+            &ctx,
+            Envelope::new("resource.bytes").with_id("b1").with_field(
+                "url",
+                format!(
+                    "blossom:{sha}.png?xs=cdn.example.com&xs=https%3A%2F%2Fb.example%3A8443%2Fignored\
+                     &xs=ftp://nope&as={author}&as=short&sz=12"
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(r["type"], "resource.bytes.result", "{r}");
+        assert_eq!(fetcher.asked(), vec![sha]);
+        assert_eq!(
+            fetcher.hints(),
+            vec![crate::seams::BlobHints {
+                servers: vec![
+                    "https://cdn.example.com".into(),
+                    "https://b.example:8443".into()
+                ],
+                authors: vec!["ab".repeat(32)],
+            }]
+        );
+    }
+
+    #[test]
+    fn blossom_urls_parse_with_and_without_hints() {
+        let hex = "c".repeat(64);
+        for url in [
+            format!("blossom:{hex}"),
+            format!("blossom:sha256:{hex}"),
+            format!("blossom:{hex}.jpg"),
+            format!("blossom:{hex}.jpg?sz=10#frag"),
+        ] {
+            let (sha, hints) = parse_blossom_url(&url).ok().unwrap();
+            assert_eq!(sha, hex, "{url}");
+            assert_eq!(hints, crate::seams::BlobHints::default(), "{url}");
+        }
+        assert!(parse_blossom_url(&format!("blossom:{}.jpg", "c".repeat(63))).is_err());
+        let many: String = (0..10).map(|i| format!("&xs=s{i}.example")).collect();
+        let (_, hints) = parse_blossom_url(&format!("blossom:{hex}?{many}"))
+            .ok()
+            .unwrap();
+        assert_eq!(hints.servers.len(), MAX_HINTS);
     }
 
     /// Bytes that do not hash to the name are never delivered or kept.

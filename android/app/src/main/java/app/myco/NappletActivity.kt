@@ -188,6 +188,14 @@ class NappletActivity : ComponentActivity() {
      */
     private val inFlight = Semaphore(MAX_IN_FLIGHT)
 
+    /**
+     * `resource.*` calls have slots of their own. A feed asks for a picture
+     * per card, each of which may wait on a slow server; sharing [inFlight]
+     * would let a screenful of pictures hold every slot and leave the
+     * queries and publishes behind them waiting.
+     */
+    private val resourceInFlight = Semaphore(MAX_RESOURCES_IN_FLIGHT)
+
     /** The install review drawn over this window, mirrored from app state. */
     private var review by mutableStateOf<NappletReview?>(null)
 
@@ -630,7 +638,8 @@ class NappletActivity : ComponentActivity() {
             var established = false
             for (frame in inbound) {
                 if (established) {
-                    launch { inFlight.withPermit { relay(frame) } }
+                    val slots = if (isResourceCall(frame)) resourceInFlight else inFlight
+                    launch { slots.withPermit { relay(frame) } }
                 } else {
                     if (relay(frame)) established = true
                 }
@@ -833,6 +842,9 @@ class NappletActivity : ComponentActivity() {
         /** See [inFlight]. */
         private const val MAX_IN_FLIGHT = 8
 
+        /** See [resourceInFlight]. */
+        private const val MAX_RESOURCES_IN_FLIGHT = 6
+
         /** See [inbound]. */
         private const val INBOUND_CAPACITY = 64
 
@@ -860,6 +872,14 @@ class NappletActivity : ComponentActivity() {
                 if (obj.optString("channel") != "napplet") return null
                 obj.optJSONObject("message")?.optString("type")
             }.getOrNull()?.ifEmpty { null }
+
+        /** Whether an inbound frame is a napplet's `resource.*` call. */
+        private fun isResourceCall(frame: String): Boolean =
+            runCatching {
+                val obj = JSONObject(frame)
+                obj.optString("channel") == "napplet" &&
+                    obj.optJSONObject("message")?.optString("type")?.startsWith("resource.") == true
+            }.getOrDefault(false)
 
         /** `naddr1…`, or the `<npub>:<dtag>` shorthand. */
         const val EXTRA_POINTER = "app.myco.extra.NAPPLET_POINTER"

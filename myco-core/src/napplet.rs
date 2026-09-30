@@ -1169,30 +1169,174 @@ impl BlobStore for SourceBlobs<'_> {
 }
 
 /// NAP-RESOURCE's fetcher: where a blob this device does not hold is looked
-/// for, in the order Myco prefers — the Circle's Blossom stores over the mesh
-/// first, in parallel, then the public servers when the internet is allowed.
+/// for — the Circle's Blossom stores over the mesh and, when the internet is
+/// allowed, the servers the URL named, the author's servers (kind 10063, from
+/// what this device holds) and the public defaults, in that order.
 ///
 /// Only ever reached on a local miss; the handler asks the store first and
-/// keeps whatever this returns. The mesh goes first because it is what this
-/// app is for: a picture one phone in the room fetched once is a picture
-/// nobody else in the room needs the internet for.
+/// keeps whatever this returns. Mesh and internet are asked **at once** and
+/// the first to bring the bytes wins: a feed of pictures must not wait out a
+/// mesh timeout per picture before the internet is tried. A picture one
+/// phone in the room fetched is still one the others get over the mesh — it
+/// is simply no longer made to wait for it.
+///
+/// A blob nobody had is remembered as missing for [`MISS_REMEMBERED`], so a
+/// feed scrolling past a dead link does not ask the whole world again on
+/// every scroll.
 pub struct BlossomFetcher {
     content: Arc<crate::content::Content>,
     /// The public Blossom servers. The defaults, unless a test says otherwise.
     public_servers: Vec<String>,
+    /// One client for every internet fetch, so its connections are reused.
+    http: reqwest::Client,
+    /// Blobs nobody had, by sha256, with when that was found.
+    misses: Mutex<HashMap<String, std::time::Instant>>,
 }
 
-/// How long one mesh peer gets before the public servers are tried.
+/// How long one mesh peer gets.
 const MESH_BLOB_TIMEOUT: Duration = Duration::from_secs(8);
-/// How long the public servers get, all together.
+/// How long the internet servers get, all together.
 const INTERNET_BLOB_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long one internet server gets to accept the connection, so a dead
+/// hint does not eat the whole budget before the defaults are asked.
+const INTERNET_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a blob nobody had is not asked for again.
+const MISS_REMEMBERED: Duration = Duration::from_secs(10 * 60);
+/// The most misses remembered; past it the expired go, then all of them.
+const MAX_MISSES: usize = 4096;
+/// The most authors whose server lists one fetch looks up.
+const MAX_HINT_AUTHORS: usize = 4;
 
 impl BlossomFetcher {
     pub fn new(content: Arc<crate::content::Content>) -> Self {
         Self {
             content,
             public_servers: crate::ip_source::default_blossom_servers(),
+            http: reqwest::Client::builder()
+                .connect_timeout(INTERNET_CONNECT_TIMEOUT)
+                .timeout(INTERNET_BLOB_TIMEOUT)
+                .build()
+                .unwrap_or_default(),
+            misses: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn recently_missed(&self, sha256_hex: &str) -> bool {
+        let mut misses = self.misses.lock().unwrap();
+        match misses.get(sha256_hex) {
+            Some(at) if at.elapsed() < MISS_REMEMBERED => true,
+            Some(_) => {
+                misses.remove(sha256_hex);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn remember_miss(&self, sha256_hex: &str) {
+        let mut misses = self.misses.lock().unwrap();
+        if misses.len() >= MAX_MISSES {
+            misses.retain(|_, at| at.elapsed() < MISS_REMEMBERED);
+            if misses.len() >= MAX_MISSES {
+                misses.clear();
+            }
+        }
+        misses.insert(sha256_hex.to_string(), std::time::Instant::now());
+    }
+
+    /// Every reachable Circle member at once; the first to bring it wins. A
+    /// peer that does not hold it answers quickly with nothing, and a peer
+    /// that is gone hits the bound.
+    async fn ask_mesh(&self, sha256_hex: &str, max_bytes: usize) -> Option<Vec<u8>> {
+        use futures_util::StreamExt as _;
+        let pool = self.content.peer_relays();
+        let mut asks: futures_util::stream::FuturesUnordered<_> = self
+            .content
+            .reachable_npubs()
+            .into_iter()
+            .filter_map(|npub| crate::ip_source::mesh_source_for(pool.clone(), &npub).ok())
+            .map(|source| source.with_max_blob_bytes(max_bytes))
+            .map(|source| async move {
+                match tokio::time::timeout(MESH_BLOB_TIMEOUT, source.fetch_blob(sha256_hex, &[]))
+                    .await
+                {
+                    Ok(Ok(Some(bytes))) => Some(bytes),
+                    _ => None,
+                }
+            })
+            .collect();
+        while let Some(found) = asks.next().await {
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    /// The servers the authors named in their kind 10063 lists, as held
+    /// here. Nothing is fetched for this: a list not held costs no wait.
+    async fn author_servers(&self, authors: &[String]) -> Vec<String> {
+        let authors: Vec<PublicKey> = authors
+            .iter()
+            .take(MAX_HINT_AUTHORS)
+            .filter_map(|a| PublicKey::from_hex(a).ok())
+            .collect();
+        if authors.is_empty() {
+            return Vec::new();
+        }
+        let filter = nostr::Filter::new()
+            .kind(nostr::Kind::from(10_063u16))
+            .authors(authors);
+        let Ok(lists) = self.content.relay().query(&[filter]).await else {
+            return Vec::new();
+        };
+        let mut servers = Vec::new();
+        for list in &lists {
+            for tag in list.tags.iter() {
+                let tag = tag.as_slice();
+                if tag.first().map(String::as_str) == Some("server") {
+                    if let Some(url) = tag.get(1).filter(|u| u.starts_with("https://")) {
+                        let url = url.trim_end_matches('/').to_string();
+                        if !servers.contains(&url) {
+                            servers.push(url);
+                        }
+                    }
+                }
+            }
+        }
+        servers
+    }
+
+    /// The internet's answer: `None` when it was not asked (it looks down).
+    async fn ask_internet(
+        &self,
+        sha256_hex: &str,
+        max_bytes: usize,
+        hints: &myco_napplet_runtime::BlobHints,
+    ) -> Option<anyhow::Result<Option<Vec<u8>>>> {
+        if self.content.internet_looks_down() {
+            return None;
+        }
+        let mut servers = hints.servers.clone();
+        for server in self.author_servers(&hints.authors).await {
+            if !servers.contains(&server) {
+                servers.push(server);
+            }
+        }
+        let public = crate::ip_source::IpPeerSource::new(Vec::new(), self.public_servers.clone())
+            .with_http_client(self.http.clone())
+            .with_max_blob_bytes(max_bytes);
+        Some(
+            match tokio::time::timeout(
+                INTERNET_BLOB_TIMEOUT,
+                public.fetch_blob(sha256_hex, &servers),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Ok(None),
+            },
+        )
     }
 
     /// Use `servers` instead of the public defaults — for tests, which must
@@ -1206,45 +1350,47 @@ impl BlossomFetcher {
 
 #[async_trait::async_trait]
 impl myco_napplet_runtime::seams::BlobFetcher for BlossomFetcher {
-    async fn fetch(&self, sha256_hex: &str, max_bytes: usize) -> anyhow::Result<Option<Vec<u8>>> {
-        // Every reachable Circle member at once; the first to answer wins.
-        // A peer that does not hold it answers quickly with nothing, and a
-        // peer that is gone hits the bound — either way the others are not
-        // waited on serially.
-        let pool = self.content.peer_relays();
-        let asks = self
-            .content
-            .reachable_npubs()
-            .into_iter()
-            .filter_map(|npub| crate::ip_source::mesh_source_for(pool.clone(), &npub).ok())
-            .map(|source| source.with_max_blob_bytes(max_bytes))
-            .map(|source| async move {
-                match tokio::time::timeout(MESH_BLOB_TIMEOUT, source.fetch_blob(sha256_hex, &[]))
-                    .await
-                {
-                    Ok(Ok(Some(bytes))) => Some(bytes),
-                    _ => None,
-                }
-            });
-        if let Some(found) = futures_util::future::join_all(asks)
-            .await
-            .into_iter()
-            .flatten()
-            .next()
-        {
-            return Ok(Some(found));
-        }
-
-        if self.content.internet_looks_down() {
+    async fn fetch(
+        &self,
+        sha256_hex: &str,
+        max_bytes: usize,
+        hints: &myco_napplet_runtime::BlobHints,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        if self.recently_missed(sha256_hex) {
             return Ok(None);
         }
-        let public = crate::ip_source::IpPeerSource::new(Vec::new(), self.public_servers.clone())
-            .with_max_blob_bytes(max_bytes);
-        match tokio::time::timeout(INTERNET_BLOB_TIMEOUT, public.fetch_blob(sha256_hex, &[])).await
-        {
-            Ok(Ok(bytes)) => Ok(bytes),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Ok(None),
+        let mesh = self.ask_mesh(sha256_hex, max_bytes);
+        let internet = self.ask_internet(sha256_hex, max_bytes, hints);
+        tokio::pin!(mesh, internet);
+        let (mut mesh_done, mut internet_done) = (false, false);
+        let mut internet_said = None;
+        while !(mesh_done && internet_done) {
+            tokio::select! {
+                found = &mut mesh, if !mesh_done => {
+                    mesh_done = true;
+                    if found.is_some() {
+                        return Ok(found);
+                    }
+                }
+                answer = &mut internet, if !internet_done => {
+                    internet_done = true;
+                    if let Some(Ok(Some(bytes))) = answer {
+                        return Ok(Some(bytes));
+                    }
+                    internet_said = answer;
+                }
+            }
+        }
+        match internet_said {
+            // Only a miss the internet confirmed is remembered: with it
+            // down, the mesh alone saying no says little, and a peer may
+            // join in a minute.
+            Some(Ok(None)) => {
+                self.remember_miss(sha256_hex);
+                Ok(None)
+            }
+            Some(Err(e)) => Err(e),
+            _ => Ok(None),
         }
     }
 }
@@ -3398,6 +3544,7 @@ mod tests {
     #[tokio::test]
     async fn the_blossom_fetcher_uses_the_public_servers_unless_offline() {
         use myco_napplet_runtime::seams::BlobFetcher as _;
+        let none = myco_napplet_runtime::BlobHints::default();
 
         let dir = std::env::temp_dir().join(format!("myco-fetcher-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3409,25 +3556,57 @@ mod tests {
         let fetcher = BlossomFetcher::new(content.clone()).with_public_servers(vec![server]);
 
         assert_eq!(
-            fetcher.fetch(&sha, 1 << 20).await.unwrap(),
+            fetcher.fetch(&sha, 1 << 20, &none).await.unwrap(),
             Some(bytes.clone())
         );
-        assert_eq!(
-            fetcher.fetch(&"00".repeat(32), 1 << 20).await.unwrap(),
-            None
+        let missing = "00".repeat(32);
+        assert_eq!(fetcher.fetch(&missing, 1 << 20, &none).await.unwrap(), None);
+        assert!(
+            fetcher.recently_missed(&missing),
+            "a miss was not remembered"
         );
         // A cap below the blob's size is enforced by the download, not after it.
         assert_eq!(
-            fetcher.fetch(&sha, bytes.len() - 1).await.unwrap(),
+            fetcher.fetch(&sha, bytes.len() - 1, &none).await.unwrap(),
             None,
             "an oversized blob came back anyway"
         );
 
         content.set_offline_only(true);
+        let fresh = BlossomFetcher::new(content.clone());
         assert_eq!(
-            fetcher.fetch(&sha, 1 << 20).await.unwrap(),
+            fresh.fetch(&sha, 1 << 20, &none).await.unwrap(),
             None,
             "offline only reached the internet"
+        );
+        assert!(
+            !fresh.recently_missed(&sha),
+            "a miss the internet never confirmed was remembered"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server the URL named is asked, even when it is none of the defaults.
+    #[tokio::test]
+    async fn the_blossom_fetcher_asks_the_hinted_server() {
+        use myco_napplet_runtime::seams::BlobFetcher as _;
+
+        let dir = std::env::temp_dir().join(format!("myco-fetcher-hint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(crate::content::Content::open(&dir).unwrap());
+        let bytes = b"only over there".to_vec();
+        let sha = nsite_deck::sync::sha256_hex(&bytes);
+        let server =
+            crate::ip_source::tests::mock_blossom(vec![(sha.clone(), bytes.clone())]).await;
+        let fetcher = BlossomFetcher::new(content.clone()).with_public_servers(Vec::new());
+        let hints = myco_napplet_runtime::BlobHints {
+            servers: vec![server],
+            authors: Vec::new(),
+        };
+        assert_eq!(
+            fetcher.fetch(&sha, 1 << 20, &hints).await.unwrap(),
+            Some(bytes)
         );
 
         let _ = std::fs::remove_dir_all(&dir);

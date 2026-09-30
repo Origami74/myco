@@ -460,6 +460,14 @@ impl IpPeerSource {
         self
     }
 
+    /// Use `http` rather than a client of this source's own, so repeated
+    /// fetches share its connection pool — one TLS handshake per server, not
+    /// one per blob.
+    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+        self.http = http;
+        self
+    }
+
     /// Fetch blobs only from this source's own servers, never the manifest's
     /// public `server` hints (used by the mesh source — keep it on the mesh).
     pub fn ignoring_manifest_servers(mut self) -> Self {

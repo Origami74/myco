@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Pictures in apps load faster.** Myco now asks nearby phones and the
+  internet at the same time instead of one after the other, tries the server
+  a picture link names first, reuses connections, and stops asking for a
+  picture nobody has for ten minutes. Picture loads no longer hold up an
+  app's other requests.
 - **Apps show what your phone already has straight away.** When an app asks
   for something this phone holds, it gets it at once instead of waiting up
   to a second and a half for relays to maybe send a newer version; a newer

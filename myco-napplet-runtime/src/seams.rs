@@ -578,7 +578,25 @@ pub trait BlobFetcher: Send + Sync {
     /// a fetcher must enforce **while downloading**, not after: a cap checked
     /// on the finished body has already paid for the body. `Err` is for a
     /// fetch that could not even start.
-    async fn fetch(&self, sha256_hex: &str, max_bytes: usize) -> anyhow::Result<Option<Vec<u8>>>;
+    ///
+    /// `hints` are where the URL said to look (BUD-10 `xs` and `as`). They
+    /// only add places to ask; the hash still decides what is accepted.
+    async fn fetch(
+        &self,
+        sha256_hex: &str,
+        max_bytes: usize,
+        hints: &BlobHints,
+    ) -> anyhow::Result<Option<Vec<u8>>>;
+}
+
+/// Where a `blossom:` URL says its blob may be found (BUD-10): `xs` servers
+/// that hold it, and `as` authors whose server list (kind 10063) may.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlobHints {
+    /// Server base URLs, `https://` added where the URL gave a bare domain.
+    pub servers: Vec<String>,
+    /// Author pubkeys, lowercase hex.
+    pub authors: Vec<String>,
 }
 
 /// A [`BlobFetcher`] with nowhere to fetch from — the honest default for a
@@ -588,7 +606,12 @@ pub struct NoFetcher;
 
 #[async_trait]
 impl BlobFetcher for NoFetcher {
-    async fn fetch(&self, _sha256_hex: &str, _max_bytes: usize) -> anyhow::Result<Option<Vec<u8>>> {
+    async fn fetch(
+        &self,
+        _sha256_hex: &str,
+        _max_bytes: usize,
+        _hints: &BlobHints,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
     }
 }

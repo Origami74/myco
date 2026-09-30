@@ -408,8 +408,12 @@ never a bare pubkey and every event they publish carries an invitation.
 `NAP-RESOURCE`, `NAP-RELAY` (`subscribe`, `publish`, `query`) and a read-only
 `NAP-IDENTITY` come up. `NAP-RESOURCE` is `blossom:` only for now (`nap/resource.rs`):
 every ask reads this device's Blossom store first; a miss goes through the `BlobFetcher`
-seam — the Circle's stores over the mesh, then the public servers unless offline-only —
-is verified by hash, **stored**, and only then delivered, so the second ask from any
+seam — the Circle's stores over the mesh and, unless offline-only, the internet, asked
+**at once** with the first bytes winning. The internet side asks the servers a BUD-10 URL
+names (`blossom:<sha>.<ext>?xs=<domain>&as=<pubkey>`: `xs` servers, then the `as`
+author's kind 10063 servers as held here, https only, four of each at most), then the
+public defaults, over one shared HTTP client. A blob the internet confirmed nobody has is
+not asked for again for ten minutes. What comes back is verified by hash, **stored**, and only then delivered, so the second ask from any
 napplet is local and the room can serve it over the mesh. `mime` is sniffed from the
 bytes, never a header; raw SVG is refused (`blocked-by-policy`) for want of a sandboxed
 rasterizer — checked over the whole body once the first kilobyte reads as text, not the
@@ -1088,7 +1092,8 @@ nothing here should make it impossible later.
 ### 7.11 Pulling blobs over the mesh leaks what you are looking at
 
 **Open.** NAP-RESOURCE (S2) fetches a `blossom:` blob the local store lacks from every
-reachable Circle member at once, then from the public servers. That is the right order
+reachable Circle member at once, and from the internet at the same time. Asking the room
+at all is the right choice
 for availability — the room is what this app is for — and the wrong one for privacy, in
 three ways.
 
