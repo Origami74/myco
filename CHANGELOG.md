@@ -41,6 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   just those few, and the feed soon said there was nothing older. The phone
   now answers at once only when it has the whole page, and otherwise waits
   for the first relay that has more.
+- **Installing an app you already have offers to open it.** When you tap
+  install on an app that is already on your phone (from a shared link, a
+  scan, the AppStore or another app), Myco now says "<App> is already
+  installed" with an **Open** button, instead of an install screen with a
+  greyed-out button. It also works offline, when the app can't be looked up.
+  If a newer version is available, you get an **Update** button instead, and
+  your app's permissions stay as they are.
 
 - **Pictures in apps load faster.** Myco now asks nearby phones and the
   internet at the same time instead of one after the other, tries the server

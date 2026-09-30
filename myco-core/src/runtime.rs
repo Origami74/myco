@@ -1534,6 +1534,8 @@ impl AppRuntime {
                 installed: false,
                 ready: false,
                 unreviewed: Vec::new(),
+                update_available: false,
+                already_installed: false,
                 grants: Vec::new(),
                 title: String::new(),
                 description: String::new(),
@@ -1587,6 +1589,24 @@ impl AppRuntime {
         // it would add is not, so that waits for the manifest.
         let (installed, _) = crate::napplet::library_standing(&content, &addr, &[]);
         let ready = installed && crate::napplet::is_ready_here(&content, &addr);
+        // The Library's name for it, for a sheet that has no manifest to
+        // read one from: "Already installed" after a fetch that found nothing.
+        let library_title = if installed {
+            use nostr::nips::nip19::ToBech32;
+            let npub = addr.author.to_bech32().unwrap_or_default();
+            content
+                .library_snapshot()
+                .into_iter()
+                .find(|i| {
+                    i.kind == crate::content::LibraryKind::Napplet
+                        && i.author_npub == npub
+                        && i.d_tag == addr.d_tag
+                })
+                .map(|i| i.title)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         *review.lock().unwrap() = Some(crate::napplet::NappletReview {
             pointer: pointer.clone(),
             loading: true,
@@ -1595,6 +1615,8 @@ impl AppRuntime {
             installed,
             ready,
             unreviewed: Vec::new(),
+            update_available: false,
+            already_installed: false,
             title: String::new(),
             description: String::new(),
             requires: Vec::new(),
@@ -1623,17 +1645,20 @@ impl AppRuntime {
 
             let outcome = match found {
                 Ok((event, found)) => {
+                    // Read now, not before the fetch: the Library can change
+                    // while relays are tried. And before the manifest is
+                    // kept below, so "newer than what is served" compares
+                    // against what was here, not against itself.
+                    let standing =
+                        crate::napplet::review_standing(&content, &addr, &found.requires, &event)
+                            .await;
                     // The manifest only, verified by `fetch_manifest`: the
                     // next look at this napplet, and a Circle peer asking,
                     // find it here. Its bytes still wait for the user's yes,
                     // and keeping it installs nothing — the Library is.
                     content.keep_seen([&event]);
                     let grants = crate::napplet::effective_grants(&found.requires);
-                    // Read now, not before the fetch: the Library can change
-                    // while relays are tried.
-                    let (installed, unreviewed) =
-                        crate::napplet::library_standing(&content, &addr, &found.requires);
-                    let ready = installed && crate::napplet::is_ready_here(&content, &addr);
+                    let already_installed = standing.already_installed();
                     tracing::info!(
                         "found napplet {pointer}: requires {:?}, would grant {:?}",
                         found.requires,
@@ -1644,9 +1669,11 @@ impl AppRuntime {
                         loading: false,
                         installing: false,
                         added: false,
-                        installed,
-                        ready,
-                        unreviewed,
+                        installed: standing.installed,
+                        ready: standing.installed_ready,
+                        unreviewed: standing.unreviewed,
+                        update_available: standing.update_available,
+                        already_installed,
                         title: found.title.unwrap_or_default(),
                         description: found.description.unwrap_or_default(),
                         requires: found.requires,
@@ -1666,7 +1693,12 @@ impl AppRuntime {
                         installed,
                         ready,
                         unreviewed: Vec::new(),
-                        title: String::new(),
+                        update_available: false,
+                        // Nothing was found to compare, but it is installed
+                        // and here: the person asking can still open it,
+                        // which beats telling them it could not be found.
+                        already_installed: installed && ready,
+                        title: library_title,
                         description: String::new(),
                         requires: Vec::new(),
                         grants: Vec::new(),
@@ -3125,6 +3157,8 @@ fn update_review(
         // It opened, so its files are here.
         ready: true,
         unreviewed: opened.unreviewed.clone(),
+        update_available: false,
+        already_installed: false,
         title: opened.title.clone().unwrap_or_default(),
         description: String::new(),
         requires: opened.requires.clone(),
@@ -3752,6 +3786,8 @@ mod tests {
             installed: true,
             ready: true,
             unreviewed: vec!["outbox".into()],
+            update_available: false,
+            already_installed: false,
             title: "Chat".into(),
             description: String::new(),
             grants: crate::napplet::effective_grants(&requires)
@@ -4636,6 +4672,8 @@ mod tests {
             installed: false,
             ready: false,
             unreviewed: Vec::new(),
+            update_available: false,
+            already_installed: false,
             title: String::new(),
             description: String::new(),
             requires: Vec::new(),

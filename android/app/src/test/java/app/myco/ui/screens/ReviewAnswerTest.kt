@@ -10,12 +10,16 @@ class ReviewAnswerTest {
         installed: Boolean = false,
         ready: Boolean = false,
         unreviewed: List<String> = emptyList(),
+        updateAvailable: Boolean = false,
+        alreadyInstalled: Boolean = false,
     ) = NappletReview(
         pointer = "naddr1example",
         loading = false,
         installed = installed,
         ready = ready,
         unreviewed = unreviewed,
+        updateAvailable = updateAvailable,
+        alreadyInstalled = alreadyInstalled,
         title = "AppStore",
         description = "",
         requires = listOf("outbox", "theme"),
@@ -48,6 +52,35 @@ class ReviewAnswerTest {
     @Test
     fun anInstalledAppWithNothingNewIsNotAddedAgain() {
         assertEquals(ReviewAnswer.AlreadyInstalled, reviewAnswer(review(installed = true, ready = true)))
+    }
+
+    /** The core's answer wins: installed, here and current. */
+    @Test
+    fun theCoresAlreadyInstalledIsShownAsSuch() {
+        assertEquals(
+            ReviewAnswer.AlreadyInstalled,
+            reviewAnswer(review(installed = true, ready = true, alreadyInstalled = true)),
+        )
+    }
+
+    /** A newer version asking for nothing new is an update, never "Already installed". */
+    @Test
+    fun aNewerVersionIsAnUpdate() {
+        assertEquals(
+            ReviewAnswer.Update,
+            reviewAnswer(review(installed = true, ready = true, updateAvailable = true)),
+        )
+    }
+
+    /** A newer version asking for more is still asked about first. */
+    @Test
+    fun aNewerVersionAskingForMoreIsAllowed() {
+        assertEquals(
+            ReviewAnswer.Allow,
+            reviewAnswer(
+                review(installed = true, ready = true, updateAvailable = true, unreviewed = listOf("outbox")),
+            ),
+        )
     }
 
     @Test
