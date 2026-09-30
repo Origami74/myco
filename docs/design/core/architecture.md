@@ -42,8 +42,9 @@ Each layer talks only to the one below it. Layer 1 never names a radio; layer
 | `myco-core` | all | the app crate and only cdylib: wires everything, owns identity, embeds the fips node, the JNI surface | — (it *is* the wiring) |
 | `myco-napplet-runtime` | 1 | the napplet host: NIP-5D manifest, verified resolve, the `srcdoc` artifact, the session and grants, one module per NAP | `Signer`, `EventSink`, `MeshSink`, `OutboxResolver`, `LaneTransport`, `BlobFetcher`, `NapTransport` |
 | `nsite-deck` | 1 | the nsite host: gateway (manifest → path → sha256 → serve), sync/import, propagator; the NIP-5A primitives napplets reuse | `RelayBackend`, `BlobStore`, `PeerSource`, `FanoutSink` |
-| `myco-relay` | 3 | embedded NIP-01 relay store (durable events in LMDB via `nostr-lmdb`; expiring chat memory-only) | implements `RelayBackend` |
+| `myco-relay` | 3 | embedded NIP-01 relay store: what this phone **keeps**, in LMDB via `nostr-lmdb`; expired events swept | implements `RelayBackend` |
 | `myco-blossom` | 3 | embedded Blossom store: sha256-named files, hash verified on write | implements `BlobStore` |
+| `myco-cache` | 3 | the shell cache: a second LMDB and blob directory for what passed through, held to a byte budget by segmented LRU | implements `RelayBackend`, `BlobStore` |
 
 The two layer-1 crates are **Android-free and transport-agnostic**. Every
 concrete thing — the relay in use, the radio, the WebView — arrives through a
@@ -106,6 +107,51 @@ accepted event to Circle members with a decremented budget) and the pull plane
 Circle member at `ws://<npub>.fips:4870`. Blossom is served on `[::]:24243`
 behind the same gate. Design: [event-gossip.md](./event-gossip.md),
 [../nsite/nsite-layer.md](../nsite/nsite-layer.md).
+
+#### Kept and cached
+
+Two places hold events and blobs:
+
+- **Kept** — the local relay and Blossom. This phone's own publishes,
+  installed apps and the files of apps opened here, the kinds kept as they
+  pass (`keep_seen.rs`), private messages that pass through, and whatever was
+  there before the cache existed.
+- **Cached** — `myco-cache`. Everything else that passes through: query
+  answers, pulled backlog, what mesh peers push, blobs a napplet fetched.
+
+The cache has a budget (Settings › Storage; 500 MB of events and 1.5 GB of
+blobs by default). For events the budget is an estimate of database size, not
+JSON: `nostr-lmdb` indexes cost several times the event itself, most of it
+per single-letter tag (`myco-cache/src/events.rs`, `disk_cost`). It evicts by
+segmented LRU: a new entry starts on probation and goes first, while an entry
+used a second time is protected, so a one-off scroll through a long feed
+cannot flush what the user keeps opening. Serving a napplet, a Circle peer or
+the gateway counts as use; being re-seen does not.
+
+Private messages (NIP-04 DMs, NIP-17 seals, NIP-59 gift wraps) are never
+cached: passing through, they are kept, as every event was before the cache,
+so one addressed to this phone is not evicted before it is read; in a query
+answer, they are not stored at all. A deletion reaches both tiers. An installed napplet's files
+are kept, like an nsite's; only what a running napplet fetches is cached.
+"Clear cache" (Settings › Storage) empties the cache alone, without asking;
+"Clear local database" asks first, and clears the unpinned rest of what is kept
+along with the cache.
+
+Readers do not choose. `tiered.rs` reads both, merged by id and newest per
+replaceable slot, and fixes where a write goes: the **kept** view (what the
+hub, the gateway and the content layer use) drops the cache's copy of
+anything it keeps, and the **cache** view (pulls, mesh pushes, napplet blob
+fetches) sends `keep_seen`'s kinds to the relay and the rest to the cache.
+Circle peers read both through the same gate. A deletion (kind 5) passing
+through is applied to the local relay too, where the events it names may be
+kept.
+
+Upkeep is kept light for the battery. The indexes are loaded, and repaired
+against their stores after a crash or kill, once per launch in the
+background. After that, every quarter hour: expired events are swept from the
+relay and the cache, the cache is evicted to budget, and an index is
+snapshotted only if it changed. Nothing walks a whole store on the timer; a
+read sweeps expired events itself when any are due.
 
 ### 4 — FIPS
 

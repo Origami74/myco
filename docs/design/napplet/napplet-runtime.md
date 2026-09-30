@@ -436,9 +436,9 @@ instead, validated like any napplet-named URL. Relay selection *by author* is NA
 
 #### Local first: reads are streams, not requests
 
-Every read starts from this device's relay, and no read waits out a slow relay's timeout
-for what is already here. A subscription shows it at once. A query's lanes answer within
-1.5 s of starting once this device has events — but an outbox query plans first, and a
+Every read starts from this device's relay, and **no read waits on a relay for what is
+already here**. A subscription shows it at once, and so does a query: the first events
+anyone has are the answer — but an outbox query plans first, and a
 plan naming an author with no relay list here waits up to 4 s for the lookup (once: a
 lookup that found nothing is not repeated for a minute, or ten when every relay said no).
 What the specs allow shapes how:
@@ -470,14 +470,17 @@ What the specs allow shapes how:
   overtake the events it was meant to follow. NAP-OUTBOX has no `eose` at all.
 - **One-shot reads answer early.** `relay.query` and `outbox.query` have exactly one
   result frame (NAP-RELAY: "collect until EOSE", NAP-OUTBOX: "one-shot"), so they cannot
-  stream. `LaneTransport::query_early` answers:
-  - 400 ms after the first **remote** lane returns events;
-  - at 1.5 s if only this device has returned events by then — and 1.5 s is a hard
-    ceiling from the moment this device has events, whatever the other lanes do. The local
-    lane answers in a millisecond and may hold a stale profile; a cold TLS dial on a phone
-    does not fit in a grace counted from that;
+  stream. `LaneTransport::query_early` answers with **the first events any lane returns**
+  (`QUERY_EARLY`: zero grace, zero local cap):
+  - at once when this device has events — even a stale profile: a newer one a relay brings
+    later lands in the local relay behind the answer, where the next read and any live
+    subscription get it;
+  - otherwise as soon as the first remote lane returns events;
   - at once when every lane has finished;
   - never after the timeout.
+
+  A napplet that wants the newer version in the same view subscribes instead of querying:
+  a subscription's backlog is immediate and what arrives later is delivered live.
 
   A lane not heard from reads as unreached, so `outbox.query` says `incomplete`.
   `relay.query` cannot: its result is `id`, `events` and an optional `error`, and the shim
@@ -489,11 +492,13 @@ What the specs allow shapes how:
 - **What arrives late is kept.** The lanes an answer went without keep running. What they
   find is accepted into the local relay, unforwarded — stored, and delivered to live
   subscriptions — so the next read has it. What the answer did include is offered to the
-  keep-seen tap (profiles, relay lists, manifests), as before. A lane goes one way or the
+  keep-seen tap (profiles, follow lists, relay lists, manifests), as before. A lane goes one way or the
   other, never both. Late lanes still count for the internet breaker.
 - **Background work is bounded per napplet.** At most four query rounds run behind a
   napplet's answers at once (`MAX_BACKGROUND_PER_NAPPLET`); a query's leftover lanes are
-  dropped when there is no slot, since the napplet has its answer. Streams have their own
+  dropped when there is no slot, since the napplet has its answer — except a read of
+  replaceable kinds only (profiles, follow and relay lists, manifests), which always
+  finishes: its late lanes can only bring newer versions, one event per author. Streams have their own
   bound (above). All of it is tied to a `WorkScope`: closing a subscription stops its
   streams, and closing the window stops everything it started.
 - **An outbox plan is made behind the answer.** An outbox subscription plans
@@ -786,6 +791,17 @@ reachable, best-effort and off the napplet's result — and never the Circle flo
 domains now say what they mean, and a `relay` grant is no longer a back door to the mesh.
 `RelayPoolSink` in `myco-core/src/napplet.rs`. Outbox-model relay selection (NIP-65) is
 NAP-OUTBOX's and still to come; until then the pool is the default relay set.
+
+### S6 — Keep and pass on
+
+**Shipped as NAP-LOCAL** ([`NAP-LOCAL.md`](NAP-LOCAL.md)), provisional. With the
+shell cache in place, what a napplet reads is remembered only until it is evicted.
+`local.publish` keeps an event in the local relay and sends it nowhere;
+`resource.keep` keeps a blob in the local Blossom. Every publish also accepts a
+signed event and sends it as it is — `mesh.publish` then floods it again even if
+this phone has seen it. Both are honoured only for what the napplet was
+delivered, remembered in a per-napplet scalable bloom filter shared by its
+windows (`delivered.rs`). `local` is a default grant.
 
 ---
 

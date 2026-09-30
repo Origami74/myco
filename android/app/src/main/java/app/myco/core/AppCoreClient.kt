@@ -145,7 +145,21 @@ data class LibraryItem(
         }
 }
 
-/** Local relay/Blossom counts. */
+/**
+ * How full one of the shell caches is: entries, bytes held, and its budget.
+ * Bytes are the budget's own accounting (estimated database size for events,
+ * file size for blobs), not a measurement of the disk.
+ */
+data class CacheTier(
+    val count: Long = 0,
+    val bytes: Long = 0,
+    val limit: Long = 0,
+)
+
+/**
+ * Storage figures: the local relay/Blossom (what this phone keeps) and the
+ * shell cache (what only passed through).
+ */
 data class CacheStatus(
     val relayEvents: Long,
     val blobCount: Long,
@@ -154,7 +168,17 @@ data class CacheStatus(
     val externalRelay: Boolean = false,
     /** A custom Blossom is configured, so the built-in blob store is not serving. */
     val externalBlobs: Boolean = false,
-)
+    /** The shell's event cache. */
+    val eventCache: CacheTier = CacheTier(),
+    /** The shell's blob cache. */
+    val blobCache: CacheTier = CacheTier(),
+) {
+    /** Bytes held across both caches. */
+    val cacheBytes: Long get() = eventCache.bytes + blobCache.bytes
+
+    /** The two caches' budgets together. */
+    val cacheLimit: Long get() = eventCache.limit + blobCache.limit
+}
 
 /** The configured custom relay, and why it is unreachable if it is. */
 data class RelayBackendHealth(
@@ -400,6 +424,12 @@ data class AppState(
     val peers: List<PeerDiagnostic> = emptyList(),
 ) {
     companion object {
+        private fun cacheTier(o: JSONObject?): CacheTier = CacheTier(
+            count = o?.optLong("count") ?: 0,
+            bytes = o?.optLong("bytes") ?: 0,
+            limit = o?.optLong("limit") ?: 0,
+        )
+
         fun parse(json: String): AppState {
             val o = JSONObject(json)
             val id = o.optJSONObject("identity") ?: JSONObject()
@@ -494,6 +524,8 @@ data class AppState(
                 usedBytes = cacheJson.optLong("usedBytes"),
                 externalRelay = cacheJson.optBoolean("externalRelay"),
                 externalBlobs = cacheJson.optBoolean("externalBlobs"),
+                eventCache = cacheTier(cacheJson.optJSONObject("eventCache")),
+                blobCache = cacheTier(cacheJson.optJSONObject("blobCache")),
             )
             val circleJson = o.optJSONArray("circle")
             val circle = buildList {
@@ -1067,8 +1099,22 @@ object NativeActions {
     fun dismissNappletReview(): JSONObject =
         JSONObject().put("type", "dismiss_napplet_review")
     fun wipeStores(): JSONObject = JSONObject().put("type", "wipe_stores")
-    /** Clear cached relay/Blossom data but keep pinned nsites (Storage → "Delete cache"). */
+    /**
+     * Clear the local database except what keeps pinned apps working, and the
+     * shell cache with it (Storage → "Clear local database").
+     */
     fun wipeCache(): JSONObject = JSONObject().put("type", "wipe_cache")
+    /**
+     * Drop everything in the shell cache (Storage → "Clear cache"). Nothing
+     * this phone keeps — installed apps, your own posts — is touched.
+     */
+    fun clearCache(): JSONObject = JSONObject().put("type", "clear_cache")
+    /** Set the shell cache budgets, in bytes. Applied at once, and saved. */
+    fun setCacheLimits(eventBytes: Long, blobBytes: Long): JSONObject =
+        JSONObject()
+            .put("type", "set_cache_limits")
+            .put("eventBytes", eventBytes)
+            .put("blobBytes", blobBytes)
 
     // --- circle (paired peers) ---
     /** Add a paired peer (from a scanned share QR) to the Circle. */

@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import android.widget.Toast
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -44,6 +46,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -94,8 +97,18 @@ fun backendErrors(state: AppState): List<Pair<String, String>> = buildList {
     }
 }
 
-/** Cap used for the storage gauge (matches the LRU target in the core). */
-private const val STORAGE_CAP_BYTES = 2_000_000_000.0
+/** Bytes per megabyte, as the cache-size dialog counts them (MiB). */
+private const val MB = 1024L * 1024L
+
+/** The smallest cache budget the core accepts (`settings_store::CACHE_MIN_BYTES`). */
+private const val CACHE_MIN_MB = 16L
+
+/** The largest cache budget the core accepts (`settings_store::CACHE_MAX_BYTES`, 64 GiB). */
+private const val CACHE_MAX_MB = 64L * 1024L
+
+/** The core's default budgets (`myco_cache::DEFAULT_*_CACHE_BYTES`), for when none is known. */
+private const val DEFAULT_EVENT_CACHE_MB = 500L
+private const val DEFAULT_BLOB_CACHE_MB = 1536L
 
 /**
  * **Settings** — a root list: the account header, then categories (Device name, Storage, the Mesh + its
@@ -191,9 +204,6 @@ private fun RootSettings(
 ) {
     val context = LocalContext.current
     val deviceName = DeviceName.current(context, state.ownNpub)
-    val used = state.cache.usedBytes.toDouble()
-    val pct = (used / STORAGE_CAP_BYTES * 100).coerceIn(0.0, 100.0)
-    val free = (STORAGE_CAP_BYTES - used).coerceAtLeast(0.0).toLong()
     val backendErrors = backendErrors(state)
 
     SettingsColumn {
@@ -218,7 +228,8 @@ private fun RootSettings(
             SettingRow(
                 icon = Icons.Filled.Storage,
                 title = "Storage",
-                subtitle = "${"%.0f".format(pct)}% used · ${humanBytes(free)} free",
+                subtitle = "${cacheBytes(state.cache.cacheBytes)} cached · " +
+                    "${humanBytes(state.cache.usedBytes)} of files kept",
                 alert = backendErrors.isNotEmpty(),
                 onClick = onOpenStorage,
             )
@@ -446,13 +457,15 @@ private fun IdentitySettings(state: AppState, client: AppCoreClient, onBack: () 
 }
 
 // ----------------------------------------------------------------------------
-// Storage sub-page — usage + the two destructive deletes.
+// Storage sub-page — usage, the cache (size, clear), the backends, and the two
+// destructive deletes.
 // ----------------------------------------------------------------------------
 
 @Composable
 private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -> Unit) {
     var confirmCache by remember { mutableStateOf(false) }
     var confirmAll by remember { mutableStateOf(false) }
+    var editCacheSize by remember { mutableStateOf(false) }
     var editRelay by remember { mutableStateOf(false) }
     var editBlossom by remember { mutableStateOf(false) }
     // Both settings are read when the core starts, so a save only takes hold on
@@ -464,10 +477,12 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
     // lie about a destructive action, which is the one place it matters most.
     val external = state.cache.externalRelay || state.cache.externalBlobs
 
-    val used = state.cache.usedBytes
-    val fraction = (used.toDouble() / STORAGE_CAP_BYTES).coerceIn(0.0, 1.0).toFloat()
-    val free = (STORAGE_CAP_BYTES - used).coerceAtLeast(0.0).toLong()
-    val backendErrors = backendErrors(state)
+    val cache = state.cache
+    val fraction = if (cache.cacheLimit > 0) {
+        (cache.cacheBytes.toDouble() / cache.cacheLimit).coerceIn(0.0, 1.0).toFloat()
+    } else {
+        0f
+    }
 
     SettingsColumn {
         SubHeader("Storage", onBack)
@@ -476,8 +491,10 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
         GroupLabel("USAGE")
         SectionCard {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
+                // The cache: what apps looked at and nothing asked to keep. It
+                // has a budget, so it gets the gauge.
                 Text(
-                    "${"%.0f".format(fraction * 100)}% used",
+                    "Cache · ${"%.0f".format(fraction * 100)}% full",
                     fontWeight = FontWeight.SemiBold,
                     style = MaterialTheme.typography.titleMedium,
                 )
@@ -489,8 +506,23 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "${humanBytes(used)} of 2 GB · ${humanBytes(free)} free · " +
-                        "${state.cache.blobCount} blobs · ${state.cache.relayEvents} events",
+                    "${cacheBytes(cache.cacheBytes)} of ${cacheBytes(cache.cacheLimit)} · " +
+                        "${cache.eventCache.count} notes · ${cache.blobCache.count} files",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(14.dp))
+                // The local database: what this phone keeps — installed apps,
+                // your own posts, what an app asked to keep. Never evicted.
+                Text(
+                    "Local database",
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "${cache.blobCount} files (${humanBytes(cache.usedBytes)}) · " +
+                        "${cache.relayEvents} events",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -516,6 +548,32 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
                     )
                 }
             }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        GroupLabel("CACHE")
+        SectionCard {
+            SettingRow(
+                icon = null,
+                title = "Cache size",
+                subtitle = "Notes ${cacheBytes(cache.eventCache.limit)} · " +
+                    "files ${cacheBytes(cache.blobCache.limit)}",
+                onClick = { editCacheSize = true },
+            )
+            RowDivider()
+            // No confirmation: nothing kept is touched. Offline, what an app
+            // fetched may not come back until a peer or the internet has it —
+            // the subtitle says so rather than promising a refetch.
+            SettingRow(
+                icon = null,
+                title = "Clear cache",
+                subtitle = "Frees space — apps fetch it again when they can; " +
+                    "installed apps and anything kept stay",
+                onClick = {
+                    client.dispatch(NativeActions.clearCache())
+                    Toast.makeText(context, "Cache cleared", Toast.LENGTH_SHORT).show()
+                },
+            )
         }
 
         Spacer(Modifier.height(8.dp))
@@ -554,11 +612,11 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
         SectionCard {
             SettingRow(
                 icon = null,
-                title = "Delete cache",
+                title = "Clear local database",
                 subtitle = if (external) {
                     "Frees space on this device — your custom store is untouched"
                 } else {
-                    "Free up space — keeps your pinned apps, clears everything else"
+                    "Keeps your pinned apps, clears everything else — cache included"
                 },
                 titleColor = MaterialTheme.colorScheme.error,
                 onClick = { confirmCache = true },
@@ -618,18 +676,31 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
             },
         )
     }
+    if (editCacheSize) {
+        CacheSizeDialog(
+            eventBytes = cache.eventCache.limit,
+            blobBytes = cache.blobCache.limit,
+            onSave = { events, blobs ->
+                client.dispatch(NativeActions.setCacheLimits(events, blobs))
+                editCacheSize = false
+            },
+            onDismiss = { editCacheSize = false },
+        )
+    }
     if (confirmCache) {
         ConfirmDialog(
-            title = "Delete cache?",
+            title = "Clear local database?",
             body = if (external) {
-                "Clears what's stored on this device, except your pinned apps. " +
-                    "Anything on your custom relay or Blossom stays where it is — " +
-                    "it isn't ours to delete."
+                "Clears what's stored on this device, except your pinned apps, and " +
+                    "empties the cache. Anything on your custom relay or Blossom stays " +
+                    "where it is — it isn't ours to delete."
             } else {
-                "Clears all downloaded relay events and blobs except your pinned apps, " +
-                    "which keep working offline."
+                "Clears everything this phone kept — notes and posts apps saved, " +
+                    "unpinned apps — except your pinned apps, which keep working " +
+                    "offline, and your own profile. The cache is emptied too. " +
+                    "This can't be undone."
             },
-            confirmLabel = "Delete cache",
+            confirmLabel = "Clear",
             onConfirm = { client.dispatch(NativeActions.wipeCache()); confirmCache = false },
             onDismiss = { confirmCache = false },
         )
@@ -932,6 +1003,72 @@ private fun BackendUnreachableCard(title: String, detail: String) {
 }
 
 /**
+ * The two cache budgets, in MB (binary). Values outside the core's range are
+ * brought into it rather than refused, since the core would clamp them anyway.
+ */
+@Composable
+private fun CacheSizeDialog(
+    eventBytes: Long,
+    blobBytes: Long,
+    onSave: (Long, Long) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    // A zero limit means the core never reported one (its content layer did
+    // not open): start from the defaults rather than offering to save 0.
+    var events by remember {
+        mutableStateOf((if (eventBytes > 0) eventBytes / MB else DEFAULT_EVENT_CACHE_MB).toString())
+    }
+    var blobs by remember {
+        mutableStateOf((if (blobBytes > 0) blobBytes / MB else DEFAULT_BLOB_CACHE_MB).toString())
+    }
+    val eventsMb = events.trim().toLongOrNull()
+    val blobsMb = blobs.trim().toLongOrNull()
+    val valid = eventsMb != null && blobsMb != null
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(
+                enabled = valid,
+                onClick = {
+                    onSave(
+                        (eventsMb ?: 0).coerceIn(CACHE_MIN_MB, CACHE_MAX_MB) * MB,
+                        (blobsMb ?: 0).coerceIn(CACHE_MIN_MB, CACHE_MAX_MB) * MB,
+                    )
+                },
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        title = { Text("Cache size") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = events,
+                    onValueChange = { events = it.filter(Char::isDigit).take(6) },
+                    singleLine = true,
+                    label = { Text("Notes (MB)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                OutlinedTextField(
+                    value = blobs,
+                    onValueChange = { blobs = it.filter(Char::isDigit).take(6) },
+                    singleLine = true,
+                    label = { Text("Pictures and files (MB)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                Text(
+                    "When the cache is full, what was looked at once goes first; what " +
+                        "you keep coming back to stays. A smaller size takes effect at " +
+                        "once; a much larger one fully at the next start. " +
+                        "$CACHE_MIN_MB MB to 64 GB each.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+/**
  * Enter (or clear) the custom relay URL.
  *
  * Carries the trust warning at the point of the decision rather than in a help
@@ -1212,6 +1349,17 @@ private fun IdField(label: String, value: String) {
             style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
         )
     }
+}
+
+/**
+ * Cache figures, in binary units (1 MB = 1024 × 1024 bytes) — the units the
+ * cache-size dialog is edited in, so a budget reads back as it was typed.
+ */
+private fun cacheBytes(b: Long): String = when {
+    b >= MB * 1024 -> "%.1f GB".format(b / (MB * 1024.0))
+    b >= MB -> "%.0f MB".format(b / MB.toDouble())
+    b >= 1024 -> "%.0f KB".format(b / 1024.0)
+    else -> "$b B"
 }
 
 private fun humanBytes(b: Long): String = when {

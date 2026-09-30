@@ -65,7 +65,9 @@ dispatch(actionJson) → stateJson
 | `dismiss_napplet_review` | — | Close the install-review screen — unanswered, or after an install (`added`). |
 | `check_nsite_updates` | `auto`: bool (default `false`) | Check relays for newer versions of installed nsites and napplets and stage/apply them (`docs/design/nsite/nsite-updates.md` §3.1). `auto: true` is an automatic trigger: skipped if a check started in the last 30 min or is running, and reports no result. Absent or `false` is the user's button: always runs (joins a running check) and bumps `updateCheck.generation`. |
 | `wipe_stores` | — | Clear the local relay + Blossom + Library + site status (dev/test reset). |
-| `wipe_cache` | — | Clear cached relay events + Blossom blobs **except** those backing pinned nsites (Settings → Storage → "Delete cache"). |
+| `wipe_cache` | — | Clear the local relay + Blossom **except** what backs pinned nsites, and empty the shell cache (Settings → Storage → "Clear local database"). |
+| `clear_cache` | — | Empty the shell cache (events and blobs that only passed through). Nothing kept is touched (Settings → Storage → "Clear cache"). |
+| `set_cache_limits` | `eventBytes`: u64, `blobBytes`: u64 | Set the shell cache budgets, clamped to 16 MiB..=64 GiB. Applied at once and persisted. |
 | `add_to_circle` | `npub`: String, `name`: String | Add a paired peer to the **Circle**: the contact list of devices we pull nsites from over the mesh. |
 | `remove_from_circle` | `npub`: String | Forget a peer (remove from the Circle). |
 | `send_pair_request` | `npub`: String, `name`: String, `secret`: String | Scanned a peer's pairing QR: send them a signed pair request over the mesh (to their relay). |

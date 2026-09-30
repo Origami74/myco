@@ -219,7 +219,10 @@ assume.
   event, mmap reads. It replaced a JSON file that was rewritten whole on every
   event once napplets started publishing and pulling notes into the store; it
   also brings negentropy (NIP-77) items for P3. Events with a NIP-40
-  `expiration` — chat — stay in memory and never touch disk, by design.
+  `expiration` — chat — are stored like any other, never served past their
+  expiry, and swept within a quarter hour. The relay holds what this phone
+  keeps; what only passed through is in the shell cache (`myco-cache`,
+  [architecture.md](../core/architecture.md), "Kept and cached").
 - The same `nostr` crate for signature verification, NIP-19 (`npub`)
   encode/decode, and the relay-message wire format.
 - `axum` handlers for the proxy's WebSocket sockets, the Blossom HTTP routes, and
@@ -272,7 +275,7 @@ relay, and the NIP-65 lookup already stores the lists it finds.
 - **Off the hot path.** The tap filters, then spawns the writes. The napplet's
   answer does not wait.
 - **The embedded store only.** With a custom relay configured there is no
-  tap: browsing is not written to someone else's relay, where "Delete cache"
+  tap: browsing is not written to someone else's relay, where "Clear local database"
   could not clear it.
 
 **Nothing gets installed, and an installed app keeps its version.** The
@@ -290,7 +293,7 @@ pin instead of the store's newest:
 - the Circle-facing relay (`Content::pinned_relay`, behind the mesh and
   loopback sockets), so a peer asking for an installed app gets the version
   this phone can hand the files over for;
-- "Delete cache", which drops kept events like any other cache and then puts
+- "Clear local database", which drops kept events with everything else unpinned and then puts
   each pinned version back in the store.
 
 An app installed before pinning existed has no pin, and would serve the
@@ -318,7 +321,7 @@ that serves endless fresh keys, can still add events. Per lookup:
 - at most two write batches run at once, and a batch beyond that is dropped,
   not queued.
 
-Nothing prunes kept events yet besides "Delete cache". Pruning them is on the
+Nothing prunes kept events yet besides "Clear local database". Pruning them is on the
 roadmap ([roadmap.md](../../roadmap.md), Later: pruning of kept events).
 
 **Privacy.** The local relay is readable by Circle members. Kept events are

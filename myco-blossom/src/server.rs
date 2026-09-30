@@ -1,4 +1,5 @@
-//! The BUD-01 Blossom HTTP server over [`FsBlobStore`], so the node can serve its
+//! The BUD-01 Blossom HTTP server over any [`BlobStore`] (the embedded
+//! [`FsBlobStore`], or a view that also reads a cache), so the node can serve its
 //! blobs to mesh peers at `http://[fd00::self]:24243`. Blobs are
 //! self-authenticating, so there is no per-blob auth; access is decided per
 //! request by an [`AccessFn`] taking the [`BlobOp`], which is how `myco-core`
@@ -20,6 +21,7 @@ use axum::routing::{get, put};
 use axum::Router;
 use nsite_deck::seams::BlobStore;
 
+#[cfg(doc)]
 use crate::FsBlobStore;
 
 /// What a request wants to do, so a gate can allow reads while refusing writes.
@@ -43,7 +45,7 @@ pub type AccessFn = Arc<dyn Fn(IpAddr, BlobOp) -> bool + Send + Sync>;
 /// Shared handler state: the blob store plus an optional mesh access gate.
 #[derive(Clone)]
 struct BlossomState {
-    store: Arc<FsBlobStore>,
+    store: Arc<dyn BlobStore>,
     access: Option<AccessFn>,
 }
 
@@ -57,7 +59,7 @@ impl BlossomState {
 }
 
 /// Serve Blossom on `addr` until the future is dropped/aborted.
-pub async fn serve(store: Arc<FsBlobStore>, addr: SocketAddr) -> anyhow::Result<()> {
+pub async fn serve(store: Arc<dyn BlobStore>, addr: SocketAddr) -> anyhow::Result<()> {
     serve_on(store, bind(addr)?).await
 }
 
@@ -84,7 +86,7 @@ pub fn bind(addr: SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
 /// Serve on an already-bound listener with **no** access gate — every source is
 /// served (the local/test path; an ephemeral port the caller picked).
 pub async fn serve_on(
-    store: Arc<FsBlobStore>,
+    store: Arc<dyn BlobStore>,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
     serve_state(
@@ -101,7 +103,7 @@ pub async fn serve_on(
 /// pass `access` (loopback is always allowed). The runtime uses this so only
 /// paired (Circle) peers can pull/push blobs.
 pub async fn serve_on_guarded(
-    store: Arc<FsBlobStore>,
+    store: Arc<dyn BlobStore>,
     listener: tokio::net::TcpListener,
     access: AccessFn,
 ) -> anyhow::Result<()> {
@@ -202,6 +204,7 @@ async fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FsBlobStore;
 
     #[tokio::test]
     async fn http_blossom_get_head_upload() {

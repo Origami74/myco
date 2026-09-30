@@ -236,6 +236,7 @@ mod tests {
             outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
+            kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
         };
         let reply = call(&ctx, "getPublicKey").await;
@@ -327,6 +328,7 @@ mod tests {
             outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
+            kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
         };
         let reply = call(&ctx, "getProfile").await;
@@ -354,6 +356,7 @@ mod tests {
             outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             lanes: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
+            kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
         };
 
@@ -418,6 +421,7 @@ mod tests {
             outbox: Arc::new(crate::testing::OutboxFixture::new(relay.clone())),
             lanes: Arc::new(crate::testing::OutboxFixture::new(relay)),
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
+            kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
         };
         assert!(call(&ctx, "getProfile")

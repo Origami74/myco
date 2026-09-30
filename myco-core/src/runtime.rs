@@ -173,6 +173,21 @@ const PEER_FEED_FAILURES_BEFORE_ERROR: u32 = 3;
 /// last resort that keeps the toggle from wedging forever.
 const NODE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Empty the shell cache on the runtime rather than the caller's thread:
+/// deleting up to the whole blob budget must not hold the UI. Usage figures
+/// follow on the next state poll.
+fn spawn_clear_cache(rt: &tokio::runtime::Runtime, content: Arc<Content>) {
+    rt.spawn(async move {
+        if let Err(e) = content.clear_cache().await {
+            tracing::warn!(error = %e, "clearing the cache failed");
+        }
+    });
+}
+
+/// How often the shell cache is tidied: expired events swept (here and in
+/// the local relay), evicted to budget, index snapshotted if it changed.
+const CACHE_UPKEEP_EVERY: Duration = Duration::from_secs(15 * 60);
+
 /// How the control-socket peer feed is doing. Written by the 8s tick (a
 /// detached task with no `&mut self`), read synchronously by `state()`.
 #[derive(Clone, Debug, Default)]
@@ -343,11 +358,30 @@ impl AppRuntime {
                 Arc::new(std::sync::Mutex::new(None)),
             ))
         });
-        let content = Arc::new(Content::open_with_backends(
+        let content = Arc::new(Content::open_with_caches(
             Path::new(data_dir),
             custom_relay,
             custom_blobs,
+            settings.cache_limits(),
         )?);
+
+        // The shell cache: its indexes are loaded (and repaired, after a kill)
+        // once, off the startup path; after that a light upkeep every quarter
+        // hour — expiry, eviction, and a snapshot only when something changed.
+        {
+            let content = content.clone();
+            rt.spawn(async move {
+                content.start_caches().await;
+                let mut tick = tokio::time::interval(CACHE_UPKEEP_EVERY);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // The first tick fires at once; startup just did that work.
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    content.upkeep_caches().await;
+                }
+            });
+        }
 
         // The device keypair (same nsec the node uses) is the pairing identity —
         // pair request/accept events are signed with it.
@@ -432,7 +466,11 @@ impl AppRuntime {
                                      // embedded store. With a custom server configured there is nothing
                                      // local to serve — peers reach that server by its own URL, not
                                      // through us — so the listener is simply not bound.
-            let blobs = content.blobs_local();
+                                     // Read through the blob cache too, so a paired peer can pull what
+                                     // this phone fetched but did not keep.
+                                     // Written as cache too: a peer's upload is passing through, and
+                                     // is bounded by the cache budget like a peer's pushed events.
+            let blobs = content.blobs_local().map(|_| content.cache_blobs());
 
             // One shared relay hub backs both the mesh socket and a loopback socket,
             // so a chat event a peer pushes over `.fips` reaches the in-app nsite's
@@ -446,8 +484,9 @@ impl AppRuntime {
             // push content. Loopback (the in-app WebView) always bypasses the gate.
             let gate: Arc<dyn crate::mesh_relay::PeerGate> =
                 Arc::new(crate::content::CircleGate::new(content.clone()));
-            let hub = crate::mesh_relay::RelayHub::with_gate(
+            let hub = crate::mesh_relay::RelayHub::with_cache(
                 content.pinned_relay(),
+                content.cache_relay(),
                 Some(gossiper),
                 Some(gate),
             );
@@ -894,6 +933,11 @@ impl AppRuntime {
             }
             NativeAppAction::StopNode => {
                 self.stop_node();
+                // The app is going down or backgrounding the mesh: save the
+                // cache indexes now, so the next launch rarely rebuilds one.
+                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
+                    rt.spawn(async move { content.save_cache_snapshots().await });
+                }
                 self.rev += 1;
             }
             NativeAppAction::SetBleEnabled { enabled } => {
@@ -1029,6 +1073,39 @@ impl AppRuntime {
             }
             NativeAppAction::WipeCache => {
                 self.wipe_cache();
+                self.rev += 1;
+            }
+            NativeAppAction::ClearCache => {
+                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
+                    spawn_clear_cache(rt, content);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SetCacheLimits {
+                event_bytes,
+                blob_bytes,
+            } => {
+                let mut settings = crate::settings_store::load(Path::new(&self.data_dir));
+                settings.event_cache_bytes = Some(event_bytes);
+                settings.blob_cache_bytes = Some(blob_bytes);
+                let limits = settings.cache_limits();
+                match crate::settings_store::save(Path::new(&self.data_dir), &settings) {
+                    Ok(()) => {
+                        if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref())
+                        {
+                            rt.spawn(async move { content.set_cache_limits(limits).await });
+                        }
+                        tracing::info!(
+                            events = limits.event_bytes,
+                            blobs = limits.blob_bytes,
+                            "settings: cache limits saved"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "settings: could not save the cache limits");
+                        self.error = format!("Could not save the cache limits: {e}");
+                    }
+                }
                 self.rev += 1;
             }
             NativeAppAction::AddToCircle { npub, name } => {
@@ -1850,6 +1927,7 @@ impl AppRuntime {
         if let Err(e) = rt.block_on(content.wipe()) {
             self.error = format!("wipe failed: {e}");
         }
+        spawn_clear_cache(rt, content);
     }
 
     /// Clear cached content but preserve pinned nsites (the "delete cache" half of
@@ -1864,6 +1942,9 @@ impl AppRuntime {
         if let Err(e) = rt.block_on(content.wipe_cache(keep_author)) {
             self.error = format!("cache wipe failed: {e}");
         }
+        // What only passed through goes too — "Clear local database" is a privacy
+        // control — but off this thread: it can be the whole blob budget.
+        spawn_clear_cache(rt, content);
     }
 
     /// The content layer + a Tokio handle, for the out-of-band `gatewayGet` JNI
@@ -1920,13 +2001,19 @@ impl AppRuntime {
                     mesh,
                     outbox: outbox.clone(),
                     lanes: outbox,
-                    blobs: content.blobs(),
+                    // A blob a napplet fetches from elsewhere is cached, not
+                    // kept; reads still see the local Blossom.
+                    blobs: content.cache_blobs(),
+                    // `resource.keep` writes here: the configured Blossom.
+                    kept_blobs: content.blobs(),
                     fetcher: Arc::new(crate::napplet::BlossomFetcher::new(content.clone())),
                 })
                 // Served versions come from the content layer's pins, so a
                 // newer manifest with no blob behind it cannot displace the
                 // one that opens.
                 .with_manifests(content.clone())
+                // Installs and updates keep the napplet's files locally.
+                .with_kept_blobs(content.blobs())
                 // NAP-LINK never stacks a second review on the one showing.
                 .with_review_slot(self.napplet_review.clone()),
             );

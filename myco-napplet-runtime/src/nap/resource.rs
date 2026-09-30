@@ -36,6 +36,7 @@ use nsite_deck::sync::sha256_hex;
 
 use crate::dispatch::NapContext;
 use crate::seams::Envelope;
+use crate::session::Session;
 
 /// The spec's recommended response cap.
 pub const MAX_BYTES: usize = 10 * 1024 * 1024;
@@ -48,11 +49,12 @@ pub const MAX_URLS: usize = 100;
 pub const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
 /// Handle an inbound `resource.*` message.
-pub async fn handle(ctx: &NapContext, message: &Envelope) -> Vec<Envelope> {
+pub async fn handle(ctx: &NapContext, session: &Session, message: &Envelope) -> Vec<Envelope> {
     match message.action() {
         "info" => vec![info(message)],
-        "bytes" => vec![bytes(ctx, message).await],
-        "bytesMany" => vec![bytes_many(ctx, message).await],
+        "bytes" => vec![bytes(ctx, session, message).await],
+        "bytesMany" => vec![bytes_many(ctx, session, message).await],
+        "keep" => vec![keep(ctx, session, message).await],
         // A fetch here is bounded and has no partial state to abandon; the
         // shim drops a late result for a cancelled id on its own.
         "cancel" => Vec::new(),
@@ -82,15 +84,20 @@ fn info(message: &Envelope) -> Envelope {
 }
 
 /// `resource.bytes` — one resource, or one error.
-async fn bytes(ctx: &NapContext, message: &Envelope) -> Envelope {
+async fn bytes(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelope {
     let Some(url) = message.field("url").and_then(|v| v.as_str()) else {
         return error_for(message, "invalid-request", Some("bytes needs a url"));
     };
     match fetch(ctx, url).await {
-        Ok(Fetched { blob, mime, .. }) => message
-            .to_result()
-            .with_field("blob", blob)
-            .with_field("mime", mime),
+        Ok(Fetched {
+            blob, mime, sha, ..
+        }) => {
+            record(session, &sha);
+            message
+                .to_result()
+                .with_field("blob", blob)
+                .with_field("mime", mime)
+        }
         Err(e) => {
             // A napplet's own error is invisible from outside; without this a
             // "not found" on its screen cannot be told apart from a scheme it
@@ -103,7 +110,7 @@ async fn bytes(ctx: &NapContext, message: &Envelope) -> Envelope {
 
 /// `resource.bytesMany` — each URL as if it were its own `bytes`, in order;
 /// one failure never discards its siblings.
-async fn bytes_many(ctx: &NapContext, message: &Envelope) -> Envelope {
+async fn bytes_many(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelope {
     let urls: Vec<String> = match message.field("urls").and_then(|v| v.as_array()) {
         Some(items) if !items.is_empty() => {
             let mut out = Vec::with_capacity(items.len());
@@ -138,7 +145,13 @@ async fn bytes_many(ctx: &NapContext, message: &Envelope) -> Envelope {
             continue;
         }
         let item = match fetch(ctx, &url).await {
-            Ok(Fetched { blob, mime, len }) => {
+            Ok(Fetched {
+                blob,
+                mime,
+                len,
+                sha,
+            }) => {
+                record(session, &sha);
                 total += len;
                 serde_json::json!({ "url": url, "ok": true, "blob": blob, "mime": mime })
             }
@@ -156,11 +169,84 @@ async fn bytes_many(ctx: &NapContext, message: &Envelope) -> Envelope {
     message.to_result().with_field("items", items)
 }
 
-/// One delivered resource: base64 bytes, the sniffed type, and the raw size.
+/// One delivered resource: base64 bytes, the sniffed type, the raw size, and
+/// the hash it was verified against.
 struct Fetched {
     blob: String,
     mime: String,
     len: usize,
+    sha: String,
+}
+
+/// Note a delivered blob, so the napplet may `resource.keep` it.
+fn record(session: &Session, sha: &str) {
+    if let Some(key) = crate::delivered::parse_hex32(sha) {
+        session.record_delivered_blob(&key);
+    }
+}
+
+/// `resource.keep` — keep a blob this napplet was delivered in this device's
+/// own Blossom, where nothing evicts it and Circle peers can fetch it
+/// (NAP-LOCAL). Nothing is sent anywhere. Takes `url` (`blossom:sha256:…`) or
+/// a bare `sha256`.
+async fn keep(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelope {
+    let sha = match (
+        message.field("sha256").and_then(|v| v.as_str()),
+        message.field("url").and_then(|v| v.as_str()),
+    ) {
+        (Some(sha), _) => sha.to_ascii_lowercase(),
+        (None, Some(url)) => match parse_blossom_url(url) {
+            Ok(sha) => sha,
+            Err(e) => return error_for(message, e.code, e.message.as_deref()),
+        },
+        (None, None) => {
+            return error_for(
+                message,
+                "invalid-request",
+                Some("keep needs a url or sha256"),
+            )
+        }
+    };
+    // Keeping is NAP-LOCAL's power, not NAP-RESOURCE's: switching `local` off
+    // must stop it, or the toggle promises what it cannot deliver.
+    if !session.is_granted("local") {
+        return error_for(
+            message,
+            "blocked-by-policy",
+            Some("keeping needs the local capability"),
+        );
+    }
+    let Some(key) = crate::delivered::parse_hex32(&sha) else {
+        return error_for(message, "invalid-request", Some("not a sha256"));
+    };
+    if !session.was_delivered_blob(&key) {
+        return error_for(
+            message,
+            "blocked-by-policy",
+            Some("only a blob delivered to this napplet can be kept"),
+        );
+    }
+    if ctx.kept_blobs.has(&sha).await {
+        return message.to_result().with_field("ok", true);
+    }
+    let bytes = match ctx.blobs.get(&sha).await {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            return error_for(
+                message,
+                "not-found",
+                Some("no longer held here; fetch it again first"),
+            )
+        }
+        Err(e) => return error_for(message, "network-error", Some(&e.to_string())),
+    };
+    match ctx.kept_blobs.put(&bytes).await {
+        Ok(_) => {
+            tracing::info!(sha = %sha, "napplet kept a blob");
+            message.to_result().with_field("ok", true)
+        }
+        Err(e) => error_for(message, "network-error", Some(&e.to_string())),
+    }
 }
 
 /// A per-resource failure, in the spec's vocabulary.
@@ -256,6 +342,7 @@ async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
         blob: base64::engine::general_purpose::STANDARD.encode(&raw),
         mime: mime.to_string(),
         len: raw.len(),
+        sha,
     })
 }
 
@@ -452,6 +539,58 @@ mod tests {
             fetcher.asked().is_empty(),
             "the fetcher was asked for a stored blob"
         );
+    }
+
+    /// A delivered blob can be kept in this device's own Blossom; one never
+    /// delivered cannot.
+    #[tokio::test]
+    async fn keep_takes_only_a_delivered_blob() {
+        let (mut ctx, _fetcher) = test_context_with_fetcher();
+        let kept = std::sync::Arc::new(nsite_deck::testing::MemBlobs::new());
+        ctx.kept_blobs = kept.clone();
+        let shown = ctx.blobs.put(PNG).await.unwrap();
+        let hidden = ctx.blobs.put(b"not shown").await.unwrap();
+        let mut s = Session::new(
+            NappletIdentity::new("pics", "aggregate"),
+            ["resource", "local"],
+        );
+        s.on_ready();
+        let ask = |id: &str, sha: &str| {
+            Envelope::new("resource.keep")
+                .with_id(id)
+                .with_field("url", format!("blossom:sha256:{sha}"))
+        };
+
+        let r = dispatch(&ctx, &mut s, &ask("k0", &shown)).await;
+        assert_eq!(
+            r.envelopes()[0].msg_type,
+            "resource.keep.error",
+            "kept before shown"
+        );
+
+        dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("resource.bytes")
+                .with_id("b1")
+                .with_field("url", format!("blossom:sha256:{shown}")),
+        )
+        .await;
+        let r = dispatch(&ctx, &mut s, &ask("k1", &shown)).await;
+        let r = serde_json::to_value(&r.envelopes()[0]).unwrap();
+        assert_eq!(r["type"], "resource.keep.result", "{r}");
+        assert!(crate::seams::BlobStore::has(kept.as_ref(), &shown).await);
+
+        let r = dispatch(&ctx, &mut s, &ask("k2", &hidden)).await;
+        assert_eq!(r.envelopes()[0].msg_type, "resource.keep.error");
+
+        // Switching `local` off stops keeping, whatever was delivered.
+        s.set_granted(["resource"]);
+        let r = dispatch(&ctx, &mut s, &ask("k3", &shown)).await;
+        let r = serde_json::to_value(&r.envelopes()[0]).unwrap();
+        assert_eq!(r["type"], "resource.keep.error");
+        assert!(r["message"].as_str().unwrap().contains("local"));
+        assert!(!crate::seams::BlobStore::has(kept.as_ref(), &hidden).await);
     }
 
     /// A miss is fetched, verified, **stored**, and delivered; the next ask

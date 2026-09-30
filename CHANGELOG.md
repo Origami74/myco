@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A cache for everything your apps look at.** Notes, profiles and pictures
+  your apps fetch are now kept on the phone in a separate cache, so opening
+  them again is instant and works offline, and paired phones nearby can get
+  them from you. The cache has a size limit (500 MB of notes and 1.5 GB of
+  files by default). When it is full, what you looked at once goes first, and
+  what you keep coming back to stays. What you publish and the apps you
+  install are stored separately and never pushed out, and private messages
+  are never cached. Settings › Storage shows the cache and what this phone
+  keeps separately, lets you set the cache size, and has a **Clear cache**
+  button that empties it without touching anything kept.
+
+- **Apps can keep what they showed you, and pass it on.** A napplet can keep
+  a note or picture on your phone so the cache never throws it away, and can
+  send a note it showed you on to nearby phones or public relays again. It
+  only works for things the app was actually shown, and it never signs
+  someone else's note as you. New installs list it on the install screen as
+  "Keep on this phone"; apps already installed get it the next time they
+  open, like other defaults, and it can be switched off per app.
+
+### Changed
+
+- **Apps show what your phone already has straight away.** When an app asks
+  for something this phone holds, it gets it at once instead of waiting up
+  to a second and a half for relays to maybe send a newer version; a newer
+  version still arrives and is kept for next time. Follow lists are now kept
+  on the phone like profiles, so a feed opens from your follows instantly.
+- **"Delete cache" is now "Clear local database".** It clears what this
+  phone kept (except your pinned apps) and the cache, and asks first.
+- **Chat survives a restart until it expires.** Notes with an expiry time,
+  like chat, used to be kept in memory only. They are now stored like other
+  notes and deleted once they expire, so restarting Myco mid-conversation no
+  longer empties the room.
+
 ## [0.8.1] - 2026-09-27
 
 ### Fixed

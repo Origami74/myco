@@ -38,7 +38,7 @@ use std::time::Duration;
 use nostr::{Event, EventId, Filter, PublicKey};
 
 use crate::dispatch::NapContext;
-use crate::nap::relay::{event_json, filters_from, sign_template};
+use crate::nap::relay::{event_json, filters_from, signed_or_template};
 use crate::seams::{
     is_mesh_relay_url, mesh_relay_npub, mesh_relay_url, Direction, Envelope, RelayLane, RelayPlan,
 };
@@ -81,7 +81,7 @@ pub async fn handle(ctx: &NapContext, session: &mut Session, message: &Envelope)
                 .with_field("subId", sub_id)
                 .with_field("reason", "closed")]
         }
-        "publish" => vec![publish(ctx, message).await],
+        "publish" => vec![publish(ctx, session, message).await],
         "resolveRelays" => vec![resolve_relays(ctx, message).await],
         _ => Vec::new(),
     }
@@ -295,7 +295,13 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
 
 /// `outbox.publish` — sign once, fan out to the user's outbox, the named
 /// inboxes and any validated explicit relays, and say per relay how it went.
-async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
+/// An event the napplet was delivered goes out as it is (NAP-LOCAL); the
+/// local lane keeps it either way.
+async fn publish(
+    ctx: &NapContext,
+    session: &crate::session::Session,
+    message: &Envelope,
+) -> Envelope {
     let options = options_of(message);
     let explicit = match hint_lanes(options) {
         Ok(hints) => hints,
@@ -331,8 +337,8 @@ async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
     lanes.extend(explicit);
     let lanes = dedupe(lanes);
 
-    let signed = match sign_template(ctx, message).await {
-        Ok(event) => event,
+    let signed = match signed_or_template(ctx, session, message, true).await {
+        Ok((event, _)) => event,
         Err(e) => return failed(message, e),
     };
 

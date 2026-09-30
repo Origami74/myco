@@ -53,6 +53,10 @@ pub struct NapContext {
     pub blobs: Arc<dyn BlobStore>,
     /// Where a blob the store lacks is fetched from. See [`BlobFetcher`].
     pub fetcher: Arc<dyn BlobFetcher>,
+    /// Where `resource.keep` puts a blob: this device's own Blossom, which
+    /// nothing evicts. On a device `blobs` reads it too but writes fetches to
+    /// the shell cache; with no cache the two are the same store.
+    pub kept_blobs: Arc<dyn BlobStore>,
 }
 
 /// What to do with an inbound message.
@@ -162,20 +166,26 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
         }
     }
 
-    match domain {
+    let outcome = match domain {
         "shell" => Outcome::Reply(nap::shell::handle(session, message)),
         "identity" => Outcome::Reply(nap::identity::handle(ctx, message).await),
         "relay" => Outcome::Reply(nap::relay::handle(ctx, session, message).await),
         "mesh" => Outcome::Reply(nap::mesh::handle(ctx, session, message).await),
         "outbox" => Outcome::Reply(nap::outbox::handle(ctx, session, message).await),
-        "resource" => Outcome::Reply(nap::resource::handle(ctx, message).await),
+        "local" => Outcome::Reply(nap::local::handle(ctx, session, message).await),
+        "resource" => Outcome::Reply(nap::resource::handle(ctx, session, message).await),
         "link" => nap::link::handle(message),
         "theme" => Outcome::Reply(nap::theme::handle(session, message)),
         // Implemented, granted, established — and still unrouted. Reaching here
         // means the implemented set grew without a handler, which is a bug in
         // this crate rather than anything the napplet did.
         _ => Outcome::Reply(vec![message.to_error("capability is not wired up")]),
-    }
+    };
+    // Every event handed back is now the napplet's to keep or pass on
+    // (NAP-LOCAL): recorded here, the one place every answer leaves through.
+    // Live deliveries are recorded where they are made (`deliveries_for`).
+    session.record_delivered(outcome.envelopes());
+    outcome
 }
 
 #[cfg(test)]
