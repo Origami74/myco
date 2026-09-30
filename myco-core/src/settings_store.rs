@@ -58,7 +58,23 @@ pub struct Settings {
     /// than the publish default, because a flooded read costs more than a
     /// flooded write.
     pub napplet_mesh_subscribe_ttl: Option<u8>,
+
+    /// The shell event cache's budget in bytes. `None` means the default,
+    /// [`myco_cache::DEFAULT_EVENT_CACHE_BYTES`]. Persisted because the cache
+    /// is opened, and its map sized, at startup.
+    pub event_cache_bytes: Option<u64>,
+
+    /// The shell blob cache's budget in bytes. `None` means the default,
+    /// [`myco_cache::DEFAULT_BLOB_CACHE_BYTES`].
+    pub blob_cache_bytes: Option<u64>,
 }
+
+/// The least a cache budget may be set to: below this a cache holds too little
+/// to be worth its bookkeeping.
+pub const CACHE_MIN_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The most a cache budget may be set to.
+pub const CACHE_MAX_BYTES: u64 = myco_cache::events::MAX_BUDGET;
 
 /// The most a user may allow a napplet publish to travel: the same number the
 /// mesh clamps any forwarded event to, so a higher setting could never take
@@ -94,6 +110,24 @@ impl Settings {
                 .napplet_mesh_subscribe_ttl
                 .unwrap_or(NAPPLET_MESH_SUBSCRIBE_MAX)
                 .min(NAPPLET_MESH_SUBSCRIBE_MAX),
+        }
+    }
+}
+
+impl Settings {
+    /// The cache budgets: what was set, or the defaults, within
+    /// [`CACHE_MIN_BYTES`]..=[`CACHE_MAX_BYTES`].
+    pub fn cache_limits(&self) -> crate::content::CacheLimits {
+        let defaults = crate::content::CacheLimits::default();
+        crate::content::CacheLimits {
+            event_bytes: self
+                .event_cache_bytes
+                .unwrap_or(defaults.event_bytes)
+                .clamp(CACHE_MIN_BYTES, CACHE_MAX_BYTES),
+            blob_bytes: self
+                .blob_cache_bytes
+                .unwrap_or(defaults.blob_bytes)
+                .clamp(CACHE_MIN_BYTES, CACHE_MAX_BYTES),
         }
     }
 }
@@ -141,6 +175,22 @@ pub fn save(data_dir: &Path, settings: &Settings) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cache budgets read as set, the defaults when unset, and never outside
+    /// what the cache can work with — a hand-edited file included.
+    #[test]
+    fn cache_limits_are_clamped() {
+        let defaults = crate::content::CacheLimits::default();
+        assert_eq!(Settings::default().cache_limits(), defaults);
+        let tiny = Settings {
+            event_cache_bytes: Some(1),
+            blob_cache_bytes: Some(u64::MAX),
+            ..Settings::default()
+        };
+        let limits = tiny.cache_limits();
+        assert_eq!(limits.event_bytes, CACHE_MIN_BYTES);
+        assert_eq!(limits.blob_bytes, CACHE_MAX_BYTES);
+    }
 
     fn tmp_dir(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("myco-settings-{}-{}", std::process::id(), tag))

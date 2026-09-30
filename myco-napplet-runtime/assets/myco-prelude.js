@@ -10,6 +10,10 @@
 // - `window.napplet.mesh` — NAP-MESH (`docs/design/napplet/NAP-MESH.md`),
 //   Myco's own domain, which the vendored installer filters out because it is
 //   not in the upstream registry yet.
+// - `window.napplet.local` — NAP-LOCAL (`docs/design/napplet/NAP-LOCAL.md`),
+//   Myco's keep-on-this-device domain, filtered out for the same reason; and
+//   `window.napplet.resource.keep`, its blob half, added to the vendored
+//   `resource` object.
 // - `window.napplet.outbox.publish` — replaced, same wire and same result
 //   shape, only to wait longer. The vendored one gives up after 30 s, and a
 //   publish is signed first: with a signer app (NIP-55) that is a human
@@ -54,6 +58,8 @@ var MycoPrelude = (function () {
     installShell(napplet, domains, routers);
     if (domains.has("outbox") && napplet.outbox) installOutboxPublish(napplet, routers);
     if (domains.has("mesh")) installMesh(napplet, routers);
+    if (domains.has("local")) installLocal(napplet, routers);
+    if (domains.has("resource") && napplet.resource) installResourceKeep(napplet, routers);
     return napplet;
   }
 
@@ -267,6 +273,82 @@ var MycoPrelude = (function () {
       value: Object.freeze({ info: info, publish: publish, subscribe: subscribe }),
       enumerable: true, configurable: false, writable: false
     });
+  }
+
+  // --- NAP-LOCAL -------------------------------------------------------------
+  //
+  // One request/response pair per call, correlated by `id`; `routeTypes` are
+  // the result (and error) types this installer answers.
+  function requester(routers, routeTypes) {
+    var pending = new Map();
+    routers.push(function (msg) {
+      if (routeTypes.indexOf(msg.type) === -1 || typeof msg.id !== "string") return;
+      var p = pending.get(msg.id);
+      if (!p) return;
+      pending.delete(msg.id);
+      clearTimeout(p.timeout);
+      p.settle(msg);
+    });
+    return function request(message, settle, timeoutMs) {
+      var id = crypto.randomUUID();
+      message.id = id;
+      return new Promise(function (resolve, reject) {
+        var timeout = setTimeout(function () {
+          if (pending.delete(id)) reject(new Error(message.type + " timed out"));
+        }, timeoutMs || REQUEST_TIMEOUT_MS);
+        pending.set(id, {
+          timeout: timeout,
+          settle: function (msg) { settle(msg, resolve, reject); }
+        });
+        try {
+          postCloneable(message);
+        } catch (e) {
+          clearTimeout(timeout);
+          pending.delete(id);
+          reject(e);
+        }
+      });
+    };
+  }
+
+  // `local.publish(eventOrTemplate)` — keep it on this device only. A template
+  // is signed as the user; an event the napplet was shown is kept as it is.
+  // Resolves `{ ok, event, eventId, error }` like the other publishes.
+  function installLocal(napplet, routers) {
+    var request = requester(routers, ["local.publish.result"]);
+    function publish(event) {
+      return request({ type: "local.publish", event: event }, function (msg, resolve) {
+        var out = { ok: !!msg.ok };
+        if (msg.event !== undefined) out.event = msg.event;
+        if (msg.eventId !== undefined) out.eventId = msg.eventId;
+        if (msg.error !== undefined) out.error = msg.error;
+        resolve(out);
+      }, SIGNING_TIMEOUT_MS);
+    }
+    Object.defineProperty(napplet, "local", {
+      value: Object.freeze({ publish: publish }),
+      enumerable: true, configurable: false, writable: false
+    });
+  }
+
+  // `resource.keep(url)` — keep a blob the napplet was shown in this device's
+  // own Blossom. Resolves `true`; rejects with the runtime's reason.
+  function installResourceKeep(napplet, routers) {
+    if (typeof napplet.resource.keep === "function") return;
+    if (Object.isFrozen(napplet.resource)) {
+      console.warn("myco: resource is frozen; resource.keep is unavailable");
+      return;
+    }
+    var request = requester(routers, ["resource.keep.result", "resource.keep.error"]);
+    napplet.resource.keep = function keep(url) {
+      return request({ type: "resource.keep", url: url }, function (msg, resolve, reject) {
+        if (msg.type === "resource.keep.error") {
+          reject(new Error(msg.message || msg.error || "resource.keep refused"));
+        } else {
+          resolve(true);
+        }
+      });
+    };
   }
 
   return { install: install };

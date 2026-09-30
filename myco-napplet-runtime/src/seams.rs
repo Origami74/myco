@@ -610,6 +610,22 @@ impl BlobFetcher for NoFetcher {
 pub trait EventSink: Send + Sync {
     /// Take a signed event and do everything accepting it implies.
     async fn accept(&self, event: Event) -> anyhow::Result<()>;
+
+    /// Keep a signed event on this device — stored in the local relay and
+    /// shown to this device's subscriptions — and send it nowhere
+    /// (NAP-LOCAL's `local.publish`). The default accepts it, which is right
+    /// for a sink with nothing to fan out to.
+    async fn keep(&self, event: Event) -> anyhow::Result<()> {
+        self.accept(event).await
+    }
+
+    /// Accept an event the napplet was delivered and publishes **as it is** —
+    /// kept here and sent on to relays again, even though this device has
+    /// seen it before (a plain [`EventSink::accept`] of a known event goes no
+    /// further than the store). The default accepts it.
+    async fn rebroadcast(&self, event: Event) -> anyhow::Result<()> {
+        self.accept(event).await
+    }
 }
 
 /// An [`EventSink`] that only stores — the honest default for a runtime with
@@ -676,6 +692,14 @@ pub trait MeshSink: Send + Sync {
     /// `ttl` to [`MeshSink::limits`]; an implementation may clamp again but
     /// must never raise it.
     async fn publish(&self, event: Event, ttl: u8) -> anyhow::Result<()>;
+
+    /// As [`MeshSink::publish`], for an event the napplet was delivered and
+    /// publishes **as it is**: kept here and flooded again with `ttl` hops,
+    /// even though this device has seen (and may already have flooded) it.
+    /// The default publishes it.
+    async fn rebroadcast(&self, event: Event, ttl: u8) -> anyhow::Result<()> {
+        self.publish(event, ttl).await
+    }
 
     /// Ask Circle peers, `ttl` hops out, for stored events matching `filters`.
     /// `0` means ask nobody.

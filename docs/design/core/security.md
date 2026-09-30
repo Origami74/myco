@@ -388,7 +388,7 @@ security shape is:
 | ------ | ---------------------- | ---------- |
 | **Malicious / forging relay or peer** | Tries to serve forged content | **Cannot forge.** Signatures + SHA-256 verified locally (§1); bad artifacts are rejected. |
 | **Withholding / availability attack** | Refuses to serve, serves stale, hides a newer event | Pull-from-many: query all reachable relays, keep newest valid event; manifests flood widely (announce-wide) while large blobs are pulled on demand. Best-effort, no freshness guarantee (§1). |
-| **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | Only Circle members reach the content ports at all, and **blob upload is off by default per peer** (§3.3), so a peer cannot push bytes onto your disk unless you grant it. Junk that fails verification is never stored (§1). **Not built:** an LRU cap (roadmap); today the store grows until the user deletes the cache. |
+| **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | Only Circle members reach the content ports at all, and **blob upload is off by default per peer** (§3.3), so a peer cannot push bytes onto your disk unless you grant it. Junk that fails verification is never stored (§1). What a peer pushes, and what it uploads, lands in the **shell cache**, which evicts to its budget (500 MB of events, 1.5 GB of blobs by default; [architecture.md](./architecture.md), "Kept and cached"). What this phone **keeps** — its own publishes, installed and opened apps, private messages addressed through it — is still unbounded until the user clears it. |
 | **Identity / link spoofing** | Pretends to be a paired peer | Noise IK/XK over secp256k1; identity is pubkey not MAC; spoof cannot complete handshake (§2). |
 | **Replay** | Re-injects captured datagrams | 2048-entry sliding replay window at both FMP and FSP layers (§2). |
 | **Malicious / relayed QR at pairing** | Tries to bind the attacker's npub as your paired peer | Scan-and-confirm over Noise: the single-use, unguessable `pairSecret` is echoed back inside the Noise-authenticated channel to the inviter's `<npub>.fips:4873` and confirmed by the inviter's OK prompt, so a captured/relayed invite cannot bind (§4). Optional out-of-band safety-string check on top is an open proposal (§4). |
@@ -411,6 +411,12 @@ the point of the mesh, but it has a privacy cost:
 - A peer that queries your relay/Blossom can learn **which sites you hold** —
   i.e. infer what you have browsed or chosen to cache. Hosting a site is
   observable.
+- Since the shell cache, the same holds for **notes your apps read**: every
+  answer a napplet fetched from a public relay is cached and served to paired
+  peers through the same gate, so a broad `REQ` enumerates what you looked at
+  recently (within the cache budget). Private-message kinds are never taken
+  from a query answer. A setting not to serve the cache to the Circle is an
+  open follow-up.
 - Re-serving signed content does not implicate you as its author (signatures
   attribute it to the original author, not the re-server), but *possession* is
   still a signal.
@@ -423,6 +429,22 @@ only transiently fetched. v1 should at minimum make "which manifests you are
 replicating as a source" visible and controllable in the UI rather than implicit.
 **Open question:** default propagation posture — replicate manifests for
 everything cached, or only Library-pinned sites?
+
+### Expiring events are on disk
+
+Events with a NIP-40 `expiration` (chat) used to live only in memory, by design
+— "a conversation in the room is not a record on the phone". Since the shell
+cache they are stored like other events, in the local relay and the cache, and
+swept within a quarter hour of expiry; they are never served past it. That was
+a deliberate change — chat survives a restart until it expires — and it costs
+the old property:
+
+- Until the sweep, an expired message is still in the database file.
+- An LMDB delete frees pages without scrubbing them, so swept messages can be
+  recovered forensically from the file until those pages are reused.
+
+Each expiring event's id is written to `relay/expiring.log` **before** the event
+is saved, so a crash cannot leave a message the sweep never hears of.
 
 ## 7. Explicit non-goals and open questions
 

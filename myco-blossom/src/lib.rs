@@ -116,6 +116,33 @@ impl FsBlobStore {
         }
         self.invalidate_stats();
     }
+
+    /// Delete one blob. Returns whether it was there.
+    pub fn remove(&self, sha256_hex: &str) -> bool {
+        let removed =
+            std::fs::remove_file(self.blob_path(&sha256_hex.to_ascii_lowercase())).is_ok();
+        if removed {
+            self.invalidate_stats();
+        }
+        removed
+    }
+
+    /// Every stored blob as `(sha256 hex, bytes, modified)`, for a cache
+    /// rebuilding its index from the directory.
+    pub fn list(&self) -> Vec<(String, u64, std::time::SystemTime)> {
+        let Ok(rd) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        rd.filter_map(Result::ok)
+            .filter(is_blob_name)
+            .filter_map(|entry| {
+                let meta = entry.metadata().ok()?;
+                let name = entry.file_name().to_str()?.to_string();
+                let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                Some((name, meta.len(), modified))
+            })
+            .collect()
+    }
 }
 
 fn is_blob_name(entry: &std::fs::DirEntry) -> bool {

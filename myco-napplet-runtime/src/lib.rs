@@ -34,6 +34,7 @@
 //! [NIP-5A]: https://github.com/nostr-protocol/nips/blob/master/5A.md
 
 pub mod artifact;
+pub mod delivered;
 pub mod dispatch;
 pub mod error;
 pub mod host;

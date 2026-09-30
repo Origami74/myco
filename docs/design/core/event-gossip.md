@@ -302,10 +302,17 @@ active-version gate rather than the plain forward rule above. See
 
 The driving consumer, `myco-bitchat`, makes events **expire** (NIP-40
 `["expiration", <ts>]`, +10 min) and shows a new arrival only the last ~21. For
-that to hold, the store **GCs events past their `expiration` tag**, so the store
-stays small, the Plane-B backlog stays bounded, and the room is genuinely
-ephemeral. An event re-pulled after its own expiry is simply gone — there is
-nothing to re-serve, which is the intended behaviour.
+that to hold, the stores **never serve an event past its `expiration` tag and
+sweep it within a quarter hour** (the local relay and the shell cache alike;
+both keep expiring events on disk until then, so a restart mid-conversation
+keeps the room). The store stays small, the Plane-B backlog stays bounded, and
+the room is genuinely ephemeral. An event re-pulled after its own expiry is
+simply gone — there is nothing to re-serve, which is the intended behaviour.
+
+What a mesh peer pushes lands in the **shell cache**, not the local relay
+(see [architecture.md](./architecture.md), "Kept and cached"): it is served
+on to the Circle and to this phone's subscriptions like anything else, and
+ages out under the cache's budget unless something keeps it.
 
 Expiry also bounds the seen-set: an expiring event's id is remembered exactly
 until it expires (§4), so memory is naturally capped. Note that this is now a

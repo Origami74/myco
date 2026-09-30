@@ -10,6 +10,7 @@
 
 pub mod identity;
 pub mod link;
+pub mod local;
 pub mod mesh;
 pub mod outbox;
 pub mod relay;
@@ -23,24 +24,26 @@ use crate::dispatch::NapContext;
 use crate::seams::Envelope;
 use crate::session::Session;
 
-/// When `relay.query` and `outbox.query` answer. They have one result frame;
-/// whatever is not in it by then is not in it at all. See
+/// When `relay.query` and `outbox.query` answer: **with the first events
+/// anyone has**, never later. They have one result frame, so whatever is not
+/// in it is not in it — but a napplet waiting on a relay to maybe bring a
+/// newer version is a napplet showing nothing. See
 /// [`crate::seams::EarlyAnswer`].
 ///
-/// - `grace` 400 ms after the first **remote** lane returns events: long
-///   enough for a relay about as fast as the first to make it in, short
-///   enough that one slow relay does not hold the answer to its timeout.
-/// - `local_cap` 1.5 s when only this device has answered with events: long
-///   enough for a cold TLS dial on a phone to bring a newer replaceable than
-///   the one held here, short enough that a napplet reopening offline, or
-///   with every relay slow, paints from what it has. Such an answer says
-///   `incomplete` where the wire can (`outbox.query`).
+/// - `local_cap` zero: when this device holds events, they are the answer,
+///   at once. The answer says `incomplete` where the wire can
+///   (`outbox.query`).
+/// - `grace` zero: when this device has nothing, the first relay to return
+///   events answers.
 ///
-/// The lanes left out keep going behind the answer, and what they find is
-/// kept here for the next read (see `LaneTransport::query_early`).
+/// The lanes left out keep going behind the answer, and what they find —
+/// a newer profile or follow list, say — is kept here, where the store keeps
+/// the newest per slot. The next read has it, and a live subscription is
+/// shown it as it lands (see `LaneTransport::query_early`). A napplet that
+/// wants the newer version in the same view subscribes rather than queries.
 pub(crate) const QUERY_EARLY: crate::seams::EarlyAnswer = crate::seams::EarlyAnswer {
-    grace: std::time::Duration::from_millis(400),
-    local_cap: std::time::Duration::from_millis(1500),
+    grace: std::time::Duration::ZERO,
+    local_cap: std::time::Duration::ZERO,
 };
 
 /// `events` with only the newest of each replaceable (per kind and author)
@@ -92,10 +95,18 @@ const SUBSCRIBING_DOMAINS: [&str; 3] = ["relay", "mesh", "outbox"];
 /// side of the mesh an event came from. Empty when nothing matches, which is
 /// the common case and deliberately cheap.
 pub fn deliveries_for(session: &Session, event: &Event) -> Vec<Envelope> {
-    SUBSCRIBING_DOMAINS
+    let frames: Vec<Envelope> = SUBSCRIBING_DOMAINS
         .iter()
         .flat_map(|domain| deliveries_in(session, domain, event))
-        .collect()
+        .collect();
+    if !frames.is_empty() {
+        session
+            .ledger()
+            .lock()
+            .unwrap()
+            .record_event(&event.id.to_bytes());
+    }
+    frames
 }
 
 /// The `<domain>.event` frames a session should receive for `event` in one

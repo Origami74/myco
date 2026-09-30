@@ -665,6 +665,20 @@ impl OutboxService {
     }
 }
 
+/// Whether every filter asks only for replaceable or addressable kinds — a
+/// read whose late lanes can only bring newer versions of what was answered.
+fn only_replaceable(filters: &[Filter]) -> bool {
+    !filters.is_empty()
+        && filters.iter().all(|f| {
+            f.kinds.as_ref().is_some_and(|kinds| {
+                !kinds.is_empty()
+                    && kinds
+                        .iter()
+                        .all(|k| k.is_replaceable() || k.is_addressable())
+            })
+        })
+}
+
 /// How long one internet relay gets to say `OK` before a pool publish moves on.
 const POOL_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -689,9 +703,36 @@ impl myco_napplet_runtime::seams::EventSink for OutboxService {
         if !self.accept_local(event.clone()).await? {
             return Ok(());
         }
+        self.push_to_fallback_lanes(event);
+        Ok(())
+    }
+
+    /// NAP-LOCAL's `local.publish`: kept here and shown to this device's
+    /// subscriptions, sent nowhere.
+    async fn keep(&self, event: Event) -> anyhow::Result<()> {
+        self.accept_local(event).await.map(|_| ())
+    }
+
+    /// A delivered event published as it is: kept, and pushed to the
+    /// internet lanes whether or not this device has seen it — having seen it
+    /// is how the napplet came to have it.
+    async fn rebroadcast(&self, event: Event) -> anyhow::Result<()> {
+        let hub = self.hub.lock().unwrap().clone();
+        if let Some(hub) = hub {
+            hub.claim_pass_on(&event, "relays")?;
+        }
+        self.accept_local(event.clone()).await?;
+        self.push_to_fallback_lanes(event);
+        Ok(())
+    }
+}
+
+impl OutboxService {
+    /// Push `event` to the internet fallback lanes, spawned and best-effort.
+    fn push_to_fallback_lanes(&self, event: Event) {
         let lanes = self.fallback_lanes();
         if lanes.is_empty() {
-            return Ok(());
+            return;
         }
         let this = self.detached();
         tokio::spawn(async move {
@@ -704,7 +745,6 @@ impl myco_napplet_runtime::seams::EventSink for OutboxService {
                 "napplet publish reached the internet pool"
             );
         });
-        Ok(())
     }
 }
 
@@ -1036,9 +1076,10 @@ impl OutboxService {
     ///
     /// What another relay answered with is kept here one way or the other,
     /// never both: a lane whose answer was **stored** (a pull, or a lane that
-    /// finished after an early answer) went into the local relay whole; a
-    /// lane whose answer the caller **took** is offered to the keep-seen tap,
-    /// which keeps profiles, relay lists and manifests only.
+    /// finished after an early answer) went through the hub into the cache,
+    /// waking live subscriptions; a lane whose answer the caller **took** is
+    /// remembered quietly — kept kinds to the local relay, the rest to the
+    /// cache.
     async fn run_round(
         &self,
         lanes: &[RelayLane],
@@ -1083,10 +1124,11 @@ impl OutboxService {
         self.content
             .note_internet_round(any_ok, tried_internet, started);
         // Profiles, relay lists and manifests another relay answered with are
-        // kept here, behind the answer, so the next ask is local and works
-        // offline. Already verified by the lane; the local lane's own answer
-        // is not offered back to it, nor a lane already stored whole.
-        self.content.keep_seen(
+        // kept here, and the rest cached, behind the answer, so the next ask
+        // is local and works offline. Already verified by the lane; the local
+        // lane's own answer is not offered back to it, nor a lane already
+        // stored whole.
+        self.content.remember(
             rounds
                 .iter()
                 .filter(|((lane, _), stored)| *lane != RelayLane::Local && !stored)
@@ -1113,17 +1155,19 @@ impl OutboxService {
         out
     }
 
-    /// Accept events another relay returned into the local relay,
-    /// unforwarded: stored, and delivered to live subscriptions here. The hub
-    /// dedupes by id, so an event two lanes return is delivered once. With
-    /// no hub (host builds, before start) it is stored only.
+    /// Accept events another relay returned, unforwarded, into the shell
+    /// **cache** (the kinds kept as seen go to the local relay): stored, and
+    /// delivered to live subscriptions here. The hub dedupes by id, so an
+    /// event two lanes return is delivered once. With no hub (host builds,
+    /// before start) it is stored only.
     async fn keep_pulled(&self, events: &[Event]) -> usize {
         let hub = self.hub.lock().unwrap().clone();
+        let cache = self.content.cache_relay();
         let mut fresh = 0usize;
         for event in events {
             let first = match &hub {
-                Some(hub) => hub.accept_unforwarded(event.clone()).await,
-                None => self.store.publish(event.clone()).await.map(|()| true),
+                Some(hub) => hub.accept_pulled(event.clone()).await,
+                None => cache.publish(event.clone()).await.map(|()| true),
             };
             if let Ok(true) = first {
                 fresh += 1;
@@ -1436,7 +1480,11 @@ impl LaneTransport for OutboxService {
                 .session_work(scope)
                 .map(|w| w.permits.clone().try_acquire_owned());
             match slot {
-                Some(Err(_)) => {
+                // A read of replaceable things only — profiles, follow and
+                // relay lists, manifests — always finishes: a newer version
+                // is the whole point of the lanes still out, each author
+                // costs one event, and what they bring is kept.
+                Some(Err(_)) if !only_replaceable(filters) => {
                     round.abort();
                     tracing::debug!("outbox query: no background slot; late lanes dropped");
                 }
@@ -1997,6 +2045,76 @@ mod tests {
         );
     }
 
+    /// NAP-LOCAL: `keep` stores here and sends nowhere; `rebroadcast` sends
+    /// an event this phone has already seen to the relay pool anyway — once
+    /// per cooldown.
+    #[tokio::test]
+    async fn keep_sends_nowhere_and_rebroadcast_sends_a_seen_event() {
+        use myco_napplet_runtime::seams::EventSink;
+
+        let (remote, url) = mock_relay().await;
+        let content = scratch_content("keep-rebroadcast");
+        let store = content.relay();
+        let hub = RelayHub::new(store.clone(), None);
+        let svc = OutboxService::new(
+            store.clone(),
+            Arc::new(Mutex::new(Some(hub.clone()))),
+            content,
+            "npub1me".to_string(),
+        )
+        .with_configured_relays(vec![url])
+        .allowing_private_dials();
+
+        let keys = Keys::generate();
+        let kept = EventBuilder::text_note("mine alone")
+            .sign_with_keys(&keys)
+            .unwrap();
+        svc.keep(kept.clone()).await.unwrap();
+        assert_eq!(
+            store
+                .query(&[Filter::new().id(kept.id)])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let seen = EventBuilder::text_note("seen here already")
+            .sign_with_keys(&keys)
+            .unwrap();
+        hub.accept_unforwarded(seen.clone()).await.unwrap();
+        svc.rebroadcast(seen.clone()).await.unwrap();
+        let mut reached = false;
+        for _ in 0..100 {
+            if !remote
+                .query(&[Filter::new().id(seen.id)])
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                reached = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            reached,
+            "a rebroadcast of a seen event never reached the pool"
+        );
+        assert!(
+            remote
+                .query(&[Filter::new().id(kept.id)])
+                .await
+                .unwrap()
+                .is_empty(),
+            "a kept event was sent to the pool"
+        );
+        assert!(
+            svc.rebroadcast(seen).await.is_err(),
+            "passed on again inside the cooldown"
+        );
+    }
+
     /// A relay that never answers does not hold up the answer once two
     /// others have the event.
     #[tokio::test]
@@ -2502,8 +2620,8 @@ mod tests {
 
     /// NAP-level `QUERY_EARLY`, restated: the runtime crate keeps it private.
     const NAP_EARLY: EarlyAnswer = EarlyAnswer {
-        grace: Duration::from_millis(400),
-        local_cap: Duration::from_millis(1500),
+        grace: Duration::ZERO,
+        local_cap: Duration::ZERO,
     };
 
     /// Poll the store until `id` is in it, or give up.
@@ -2563,12 +2681,13 @@ mod tests {
         assert!(answers[1].1.is_none(), "an unheard lane must read as None");
     }
 
-    /// The review's case: this device holds an old profile, a relay has the
-    /// new one and answers at 800 ms — a cold dial on a phone. The local
-    /// lane answering in a millisecond must not close the round on the
-    /// stale one: the relay's newer profile is in the answer.
+    /// This device holds an old profile, a relay has the new one and answers
+    /// at 800 ms — a cold dial on a phone. The answer does not wait for it:
+    /// the profile held here goes out at once, and the relay's newer one
+    /// lands in the local store behind the answer, for the next read and any
+    /// live subscription.
     #[tokio::test]
-    async fn a_relay_with_a_newer_replaceable_beats_the_stale_one_held_here() {
+    async fn the_held_version_answers_at_once_and_a_newer_one_lands_after() {
         let keys = Keys::generate();
         let old = EventBuilder::metadata(&nostr::Metadata::new().name("old"))
             .custom_created_at(nostr::Timestamp::from(
@@ -2587,6 +2706,7 @@ mod tests {
         let (svc, store, _hub) = streaming_service("early-stale", Vec::new());
         store.publish(old.clone()).await.unwrap();
 
+        let started = std::time::Instant::now();
         let answers = svc
             .query_early(
                 &[RelayLane::Local, RelayLane::Internet { url: relay }],
@@ -2596,12 +2716,43 @@ mod tests {
                 &WorkScope::detached(),
             )
             .await;
-        assert_eq!(answers[0].1.as_ref().map(|e| e[0].id), Some(old.id));
-        assert_eq!(
-            answers[1].1.as_ref().map(|e| e[0].id),
-            Some(new.id),
-            "the relay's newer profile missed the answer"
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the answer waited on the relay: {:?}",
+            started.elapsed()
         );
+        assert_eq!(answers[0].1.as_ref().map(|e| e[0].id), Some(old.id));
+        assert!(answers[1].1.is_none(), "the slow relay was waited for");
+        assert!(
+            lands(&store, new.id, Duration::from_secs(5)).await,
+            "the relay's newer profile never reached the local store"
+        );
+        let now = store
+            .query(&[Filter::new().kind(Kind::Metadata).author(keys.public_key())])
+            .await
+            .unwrap();
+        assert_eq!(
+            now.iter().map(|e| e.id).collect::<Vec<_>>(),
+            [new.id],
+            "the store kept both"
+        );
+    }
+
+    /// Reads of replaceable kinds only are the ones whose late lanes must
+    /// always finish; anything else may be cut when the napplet is busy.
+    #[test]
+    fn only_replaceable_reads_are_marked_to_finish() {
+        assert!(only_replaceable(&[
+            Filter::new().kinds([Kind::Metadata, Kind::ContactList])
+        ]));
+        assert!(only_replaceable(&[
+            Filter::new().kind(Kind::from(30_023u16))
+        ]));
+        assert!(!only_replaceable(&[Filter::new().kind(Kind::TextNote)]));
+        assert!(!only_replaceable(&[
+            Filter::new().author(Keys::generate().public_key())
+        ]));
+        assert!(!only_replaceable(&[]));
     }
 
     /// A second relay answering inside the grace that the first remote
@@ -3463,7 +3614,7 @@ mod tests {
     }
 
     /// A napplet's query through another relay keeps the profiles in the
-    /// answer here — and only those: a note is answered and not kept, and a
+    /// answer here — and only those: a note is answered and cached, not kept, and a
     /// forged profile is dropped where it came in and never reaches the store.
     #[tokio::test]
     async fn a_query_keeps_verified_profiles_and_nothing_else() {
@@ -3473,7 +3624,7 @@ mod tests {
         let profile = EventBuilder::metadata(&nostr::Metadata::new().name("alice"))
             .sign_with_keys(&keys)
             .unwrap();
-        let note = EventBuilder::text_note("not kept")
+        let note = EventBuilder::text_note("cached, not kept")
             .sign_with_keys(&keys)
             .unwrap();
         let mut forged = serde_json::to_value(
@@ -3486,10 +3637,16 @@ mod tests {
         let forged: Event = serde_json::from_value(forged).unwrap();
         assert!(forged.verify().is_err());
 
-        let (url, _) =
-            crate::ip_source::tests::mock_relay_holding(vec![profile.clone(), note, forged]).await;
+        let (url, _) = crate::ip_source::tests::mock_relay_holding(vec![
+            profile.clone(),
+            note.clone(),
+            forged,
+        ])
+        .await;
         let content = scratch_content("keep-seen");
         let store = content.relay();
+        let relay = content.relay_store().unwrap();
+        let cache = content.event_cache();
         let svc = OutboxService::new(
             store.clone(),
             Arc::new(Mutex::new(None)),
@@ -3513,18 +3670,25 @@ mod tests {
         assert_eq!(answered, 2, "the profile and the note, not the forgery");
 
         // Kept behind the answer, so wait for the write to land.
-        let mut held = Vec::new();
         for _ in 0..100 {
-            held = store.query(&[Filter::new()]).await.unwrap();
-            if !held.is_empty() {
+            if relay.count() > 0 && cache.contains(&note.id.to_bytes()) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        let kept = relay.query(&[Filter::new()]).await.unwrap();
         assert_eq!(
-            held.iter().map(|e| e.id).collect::<Vec<_>>(),
+            kept.iter().map(|e| e.id).collect::<Vec<_>>(),
             [profile.id],
             "only the verified profile is kept"
         );
+        // The note is remembered in the cache; the forgery nowhere.
+        let seen = store.query(&[Filter::new()]).await.unwrap();
+        assert_eq!(
+            seen.len(),
+            2,
+            "the merged view is not the profile and the note"
+        );
+        assert!(cache.contains(&note.id.to_bytes()));
     }
 }

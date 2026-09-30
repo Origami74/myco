@@ -23,7 +23,10 @@ start".
 | `circle.json` | the Circle: paired peers (`npub`, `name`, `addedAt`, per-peer `perms`) | `content.rs` (`CircleContact`) |
 | `outbound_pairs.json` | invites sent and not yet accepted | `content.rs` |
 | `active.json` | which version of each nsite is active (staged updates) | `content.rs`, [nsite-updates.md](../design/nsite/nsite-updates.md) |
-| `relay/lmdb/` | the embedded relay's durable events (manifests, relay lists, profiles, notes) — an LMDB database; expiring events (chat) are memory-only. A pre-LMDB `relay/events.json` is migrated in on first open and left as `events.json.migrated` | `myco-relay` |
+| `relay/lmdb/` | the embedded relay's events — what this phone keeps (manifests, relay lists, profiles, its own notes, private messages) — an LMDB database. Expiring events (chat) are stored too and swept once expired. A pre-LMDB `relay/events.json` is migrated in on first open and left as `events.json.migrated` | `myco-relay` |
+| `relay/expiring.log` | the ids and expiries of stored expiring events, one `"<expiry> <hex id>"` per line, for the sweep | `myco-relay` |
+| `cache/events/` | the shell event cache: an LMDB database (`lmdb/`), its index snapshot (`index.bin`), and a `compact-on-open` marker after "Clear cache" | `myco-cache` |
+| `cache/blobs/` | the shell blob cache: content-addressed blobs (`blobs/`) and its index snapshot (`index.bin`) | `myco-cache` |
 | `blossom/` | content-addressed blobs, named by sha256 | `myco-blossom` |
 | `file_transfers.json`, `file-outbox/`, `received/` | native file sharing between Circle members | `file_transfer.rs` |
 | `ble-attempts.jsonl` | the BLE connect-attempt log the Dev tab shows | `attempt_store.rs` |
@@ -44,6 +47,8 @@ thing is built.
 | `awareDataPaths` | u8? | unknown | how many concurrent Wi-Fi Aware data paths the chipset reports; sizes the Aware UDP socket pool at node start | Kotlin, whenever it can read it |
 | `nappletMeshPublishTtl` | u8? | 3 | the most hops a napplet's `mesh.publish` may ask for; never above `EVENT_TTL` | `SetNappletMeshReach` (Settings › App reach) |
 | `nappletMeshSubscribeTtl` | u8? | 2 | the most hops a napplet's `mesh.subscribe` backlog pull may ask for; never above `MAX_REQ_TTL` | `SetNappletMeshReach` |
+| `eventCacheBytes` | u64? | 500 MiB | the shell event cache budget (estimated database size); 16 MiB..=64 GiB | `SetCacheLimits` (Settings › Storage › Cache size) |
+| `blobCacheBytes` | u64? | 1.5 GiB | the shell blob cache budget; 16 MiB..=64 GiB | `SetCacheLimits` |
 
 ### Held in memory only
 

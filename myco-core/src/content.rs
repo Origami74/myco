@@ -311,6 +311,9 @@ pub struct CacheView {
     pub relay_events: u64,
     pub blob_count: u64,
     pub used_bytes: u64,
+    /// The shell cache (`myco-cache`): what passed through and was not kept.
+    pub event_cache: myco_cache::CacheStats,
+    pub blob_cache: myco_cache::CacheStats,
     /// A custom relay is configured, so the embedded event store is not serving.
     pub external_relay: bool,
     /// A custom Blossom is configured, so the embedded blob store is not
@@ -326,6 +329,8 @@ impl CacheView {
             relay_events: 0,
             blob_count: 0,
             used_bytes: 0,
+            event_cache: myco_cache::CacheStats::default(),
+            blob_cache: myco_cache::CacheStats::default(),
             external_relay: false,
             external_blobs: false,
         }
@@ -452,6 +457,10 @@ impl crate::mesh_relay::PeerGate for CircleGate {
         self.content.perms_for_ip(ip).is_some_and(|p| p.relay_write)
     }
 
+    fn may_forward(&self, ip: IpAddr) -> bool {
+        self.content.may_forward_from(ip)
+    }
+
     fn max_req_ttl(&self, ip: IpAddr) -> u8 {
         match self.content.perms_for_ip(ip) {
             Some(p) if p.relay_read_multihop => crate::mesh_relay::MAX_REQ_TTL,
@@ -459,6 +468,50 @@ impl crate::mesh_relay::PeerGate for CircleGate {
         }
     }
 }
+
+/// The shell cache's budgets, in bytes (Settings → Storage).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheLimits {
+    pub event_bytes: u64,
+    pub blob_bytes: u64,
+}
+
+impl Default for CacheLimits {
+    fn default() -> Self {
+        Self {
+            event_bytes: myco_cache::DEFAULT_EVENT_CACHE_BYTES,
+            blob_bytes: myco_cache::DEFAULT_BLOB_CACHE_BYTES,
+        }
+    }
+}
+
+/// Open a cache, and try hard not to let it be the reason the content layer
+/// does not open: a cache that will not open is deleted and reopened once at
+/// the default budget. It only ever holds what can be fetched again, so any
+/// open error — a stale map size, a corrupt file — is worth starting afresh
+/// for. A second failure is returned.
+fn open_cache<T>(
+    dir: &Path,
+    limit: u64,
+    default_limit: u64,
+    open: impl Fn(&Path, u64) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    match open(dir, limit) {
+        Ok(cache) => Ok(cache),
+        Err(e) => {
+            tracing::warn!(error = %e, dir = %dir.display(), "cache would not open; starting it afresh");
+            let _ = std::fs::remove_dir_all(dir);
+            open(dir, default_limit)
+        }
+    }
+}
+
+/// At most this many events are cached from one [`Content::remember`] call.
+const REMEMBER_PER_BATCH: usize = 256;
+
+/// At most this many [`Content::remember`] writes run at once; further calls
+/// are dropped.
+const REMEMBER_IN_FLIGHT: usize = 2;
 
 /// How often an open window's loading page may start a new search for a
 /// site that is not here yet. The page itself reloads every second.
@@ -468,8 +521,15 @@ const LOADING_RETRY_EVERY: std::time::Duration = std::time::Duration::from_secs(
 /// `AppRuntime` mutex and serves without holding it.
 pub struct Content {
     /// The event store, through the seam — so it can be the embedded relay or
-    /// any other NIP-01 relay (`reference/thinning-custom-relay.md`, D3).
+    /// any other NIP-01 relay (`reference/thinning-custom-relay.md`, D3) —
+    /// read together with the event cache, and written as **kept**
+    /// (`tiered.rs`).
     relay: Arc<dyn RelayBackend>,
+    /// The same two stores, written as **cache**: pulled backlog, mesh
+    /// pass-through, query answers nobody asked to keep.
+    cache_relay: Arc<dyn RelayBackend>,
+    /// The shell's event cache, apart from the relay (`myco-cache`).
+    event_cache: Arc<myco_cache::EventCache>,
     /// The custom relay, when one is configured — kept so its reachability can
     /// be reported. A backend that has gone away otherwise looks like an app
     /// with no content, every site missing and no explanation.
@@ -481,8 +541,13 @@ pub struct Content {
     /// shows, and the selective retain the cache wipe needs. `None` once a
     /// custom relay is configured, which is exactly what the screen reports.
     relay_store: Option<Arc<RelayStore>>,
-    /// The blob store, through the seam — embedded or someone else's Blossom.
+    /// The blob store, through the seam — embedded or someone else's Blossom —
+    /// read together with the blob cache, written as kept.
     blobs: Arc<dyn BlobStore>,
+    /// The same, written as cache: blobs a napplet fetched from elsewhere.
+    cache_blobs: Arc<dyn BlobStore>,
+    /// The shell's blob cache, apart from the local Blossom.
+    blob_cache: Arc<myco_cache::BlobCache>,
     /// The custom Blossom, when one is configured, so its reachability can be
     /// reported the same way the relay's is.
     blobs_remote: Option<Arc<crate::remote_blobs::RemoteBlobStore>>,
@@ -587,8 +652,10 @@ pub struct Content {
     napplet_status: Mutex<HashMap<String, NappletStatusView>>,
     /// Keeps profiles, relay lists and manifests seen from outside in the
     /// embedded store. `None` with a custom relay: browsing is not written to
-    /// someone else's relay, where "Delete cache" could not clear it.
+    /// someone else's relay, where "Clear local database" could not clear it.
     keep_seen: Option<crate::keep_seen::KeepSeen>,
+    /// Bounds [`Content::remember`]'s writes in flight.
+    remembering: Arc<tokio::sync::Semaphore>,
 }
 
 /// A [`RelayBackend`] view the **gateway** reads: it returns the core-chosen
@@ -766,6 +833,19 @@ impl Content {
         custom: Option<Arc<crate::remote_backend::RemoteBackend>>,
         custom_blobs: Option<Arc<crate::remote_blobs::RemoteBlobStore>>,
     ) -> anyhow::Result<Self> {
+        Self::open_with_caches(data_dir, custom, custom_blobs, CacheLimits::default())
+    }
+
+    /// [`Content::open_with_backends`] with the cache budgets from settings.
+    ///
+    /// The caches live on this device whatever the backends are: under
+    /// `<data_dir>/cache/events` and `<data_dir>/cache/blobs`.
+    pub fn open_with_caches(
+        data_dir: &Path,
+        custom: Option<Arc<crate::remote_backend::RemoteBackend>>,
+        custom_blobs: Option<Arc<crate::remote_blobs::RemoteBlobStore>>,
+        limits: CacheLimits,
+    ) -> anyhow::Result<Self> {
         // A remote blob store signs its uploads with the device key, and the key
         // is loaded after construction — so share one holder rather than keeping
         // two copies that could fall out of step.
@@ -775,20 +855,59 @@ impl Content {
             .unwrap_or_else(|| Arc::new(Mutex::new(None)));
         let embedded = Arc::new(RelayStore::open(data_dir.join("relay"))?);
         let using_custom = custom.is_some();
-        let relay: Arc<dyn RelayBackend> = match &custom {
+        let kept_relay: Arc<dyn RelayBackend> = match &custom {
             Some(remote) => remote.clone(),
             None => embedded.clone(),
         };
+        let event_cache = Arc::new(open_cache(
+            &data_dir.join("cache").join("events"),
+            limits.event_bytes,
+            myco_cache::DEFAULT_EVENT_CACHE_BYTES,
+            |dir, limit| myco_cache::EventCache::open(dir, limit),
+        )?);
+        let relay: Arc<dyn RelayBackend> = Arc::new(crate::tiered::TieredRelay::new(
+            kept_relay.clone(),
+            event_cache.clone(),
+            crate::tiered::Tier::Kept,
+        ));
+        let cache_relay: Arc<dyn RelayBackend> = Arc::new(crate::tiered::TieredRelay::new(
+            kept_relay,
+            event_cache.clone(),
+            crate::tiered::Tier::Cache {
+                keep_kinds: !using_custom,
+            },
+        ));
         // Kept only while it is the thing serving: the usage counts and the
         // selective retain it backs describe our store, not someone else's.
         let relay_store = (!using_custom).then_some(embedded);
-        let keep_seen = relay_store.clone().map(crate::keep_seen::KeepSeen::new);
+        // Through the kept view, so a kept event leaves the cache.
+        let keep_seen = relay_store
+            .is_some()
+            .then(|| crate::keep_seen::KeepSeen::new(relay.clone()));
 
         let embedded_blobs = Arc::new(FsBlobStore::open(data_dir.join("blossom"))?);
-        let blobs: Arc<dyn BlobStore> = match &custom_blobs {
+        let kept_blobs: Arc<dyn BlobStore> = match &custom_blobs {
             Some(remote) => remote.clone(),
             None => embedded_blobs.clone(),
         };
+        let blob_cache = Arc::new(open_cache(
+            &data_dir.join("cache").join("blobs"),
+            limits.blob_bytes,
+            myco_cache::DEFAULT_BLOB_CACHE_BYTES,
+            |dir, limit| myco_cache::BlobCache::open(dir, limit),
+        )?);
+        let blobs: Arc<dyn BlobStore> = Arc::new(crate::tiered::TieredBlobs::new(
+            kept_blobs.clone(),
+            blob_cache.clone(),
+            crate::tiered::Tier::Kept,
+        ));
+        let cache_blobs: Arc<dyn BlobStore> = Arc::new(crate::tiered::TieredBlobs::new(
+            kept_blobs,
+            blob_cache.clone(),
+            crate::tiered::Tier::Cache {
+                keep_kinds: !using_custom,
+            },
+        ));
         let blobs_local = custom_blobs.is_none().then_some(embedded_blobs);
         let library_path = data_dir.join("library.json");
         let library = load_library(&library_path);
@@ -808,11 +927,15 @@ impl Content {
         let _ = std::fs::create_dir_all(&received_dir);
         Ok(Self {
             relay,
+            cache_relay,
+            event_cache,
             relay_remote: custom,
             relay_store,
             blobs_remote: custom_blobs,
             blobs_local,
             blobs,
+            cache_blobs,
+            blob_cache,
             source: Mutex::new(None),
             offline_only: AtomicBool::new(false),
             internet_down_until: Mutex::new(None),
@@ -845,6 +968,7 @@ impl Content {
             active_path,
             napplet_status: Mutex::new(HashMap::new()),
             keep_seen,
+            remembering: Arc::new(tokio::sync::Semaphore::new(REMEMBER_IN_FLIGHT)),
         })
     }
 
@@ -934,6 +1058,111 @@ impl Content {
         events: impl IntoIterator<Item = &'a Event>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         self.keep_seen.as_ref()?.offer(events)
+    }
+
+    /// Remember `events` — seen from outside and already verified — in the
+    /// shell cache: the kinds `keep_seen` keeps go to the local store (see
+    /// [`Content::keep_seen`]), everything else to the cache. For answers a
+    /// caller took rather than stored (a one-shot query, a pass-through pull).
+    ///
+    /// Spawned; the caller answers without waiting. Bounded like the
+    /// keep-seen tap beside it: at most [`REMEMBER_PER_BATCH`] events per call
+    /// and [`REMEMBER_IN_FLIGHT`] writes at once — a call beyond that is
+    /// dropped, not queued, since a cache that misses an answer only costs a
+    /// refetch. Returns the write task, for tests to wait on.
+    pub fn remember<'a>(
+        &self,
+        events: impl IntoIterator<Item = &'a Event>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let events: Vec<&Event> = events.into_iter().collect();
+        self.keep_seen(events.iter().copied());
+        let keeps_kinds = self.keep_seen.is_some();
+        let passing: Vec<Event> = events
+            .into_iter()
+            .filter(|e| !(keeps_kinds && crate::keep_seen::is_kept(e)))
+            .filter(|e| !crate::tiered::is_private(e))
+            .take(REMEMBER_PER_BATCH)
+            .cloned()
+            .collect();
+        if passing.is_empty() {
+            return None;
+        }
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        let Ok(permit) = self.remembering.clone().try_acquire_owned() else {
+            tracing::debug!(
+                dropped = passing.len(),
+                "event cache: busy; not caching this answer"
+            );
+            return None;
+        };
+        let cache = self.event_cache.clone();
+        Some(runtime.spawn(async move {
+            let _permit = permit;
+            cache.insert(&passing).await;
+        }))
+    }
+
+    /// Save both caches' indexes now, if they changed — on the way down, so
+    /// the next launch rarely has to rebuild one from the store.
+    pub async fn save_cache_snapshots(&self) {
+        self.event_cache.save_snapshot().await;
+        self.blob_cache.save_snapshot().await;
+    }
+
+    /// The event stores written as **cache** (see `tiered.rs`): what a pull
+    /// brought in lands here unless it is one of the kinds kept as they pass.
+    pub fn cache_relay(&self) -> Arc<dyn RelayBackend> {
+        self.cache_relay.clone()
+    }
+
+    /// The blob stores written as cache: blobs a napplet fetched.
+    pub fn cache_blobs(&self) -> Arc<dyn BlobStore> {
+        self.cache_blobs.clone()
+    }
+
+    pub fn event_cache(&self) -> Arc<myco_cache::EventCache> {
+        self.event_cache.clone()
+    }
+
+    pub fn blob_cache(&self) -> Arc<myco_cache::BlobCache> {
+        self.blob_cache.clone()
+    }
+
+    /// Apply new cache budgets, evicting down to them now.
+    pub async fn set_cache_limits(&self, limits: CacheLimits) {
+        self.event_cache.set_limit(limits.event_bytes).await;
+        self.blob_cache.set_limit(limits.blob_bytes);
+    }
+
+    /// Drop everything in both caches ("Clear cache"). The local relay and
+    /// Blossom — what is kept — are untouched.
+    pub async fn clear_cache(&self) -> anyhow::Result<()> {
+        self.event_cache.clear().await?;
+        self.blob_cache.clear().await
+    }
+
+    /// Once per launch, in the background: load each cache's index snapshot
+    /// and repair it against its store (after a crash or an Android kill
+    /// between snapshots).
+    pub async fn start_caches(&self) {
+        self.event_cache.startup().await;
+        self.blob_cache.startup().await;
+    }
+
+    /// The caches' periodic upkeep, kept cheap for the battery: delete what
+    /// expired — in the local relay too — evict to budget, and snapshot the
+    /// indexes only if they changed. No store is walked: every kept write
+    /// goes through the kept view, which drops the cached copy as it lands,
+    /// and reads merge by id anyway.
+    pub async fn upkeep_caches(&self) {
+        if let Some(store) = &self.relay_store {
+            store.sweep_expired().await;
+        }
+        self.event_cache.sweep_expired().await;
+        self.event_cache.evict().await;
+        self.blob_cache.evict();
+        self.event_cache.save_snapshot().await;
+        self.blob_cache.save_snapshot().await;
     }
 
     /// The store as the Circle sees it: an installed app's manifest slot reads
@@ -2198,7 +2427,8 @@ impl Content {
             for ev in events {
                 // Signatures were checked by the pool at ingress. Storing is
                 // idempotent, so this counts events pulled, not new arrivals.
-                if self.relay.publish(ev).await.is_ok() {
+                // Backlog, not a keep: the cache, bar the kinds kept as seen.
+                if self.cache_relay.publish(ev).await.is_ok() {
                     stored += 1;
                 }
             }
@@ -3385,9 +3615,9 @@ impl Content {
 
         let events: Vec<Event> = join_all(queries).await.into_iter().flatten().collect();
         // Passing through on their way to the peer that asked: keep the
-        // profiles, relay lists and manifests, so the next ask stops here.
-        // Verified by the pool at ingress.
-        self.keep_seen(&events);
+        // profiles, relay lists and manifests, and cache the rest, so the next
+        // ask stops here. Verified by the pool at ingress.
+        self.remember(&events);
         events
     }
 
@@ -4183,8 +4413,12 @@ impl Content {
         }
     }
 
+    /// The shell cache is not cleared here: it can hold the whole blob
+    /// budget, and deleting that must not hold the caller. The runtime spawns
+    /// [`Content::clear_cache`] beside this (and beside [`Content::wipe`]).
+    ///
     /// Clear cached relay events + Blossom blobs **except** those backing pinned
-    /// nsites (Settings → Storage → "Delete cache"). The served manifest version of
+    /// nsites (Settings → Storage → "Clear local database"). The served manifest version of
     /// each pinned site and every blob it references survive, so installed apps keep
     /// working offline; everything else — unpinned opened sites and staged
     /// updates — is dropped. Identity and Circle are untouched.
@@ -4214,7 +4448,7 @@ impl Content {
         for item in &pinned {
             // A napplet is one manifest and one blob. Both stay, or the tile
             // stays and the app behind it is gone — which is what happened the
-            // first time "Delete cache" met an installed napplet.
+            // first time "Clear local database" met an installed napplet.
             if item.kind == LibraryKind::Napplet {
                 if let Some((event, index_hash)) = self.napplet_keep_set(item).await {
                     keep_events.insert(event.id.to_bytes());
@@ -4372,6 +4606,8 @@ impl Content {
             relay_events: self.relay_store.as_ref().map_or(0, |s| s.count() as u64),
             blob_count: self.blobs_local.as_ref().map_or(0, |b| b.count() as u64),
             used_bytes: self.blobs_local.as_ref().map_or(0, |b| b.total_bytes()),
+            event_cache: self.event_cache.stats(),
+            blob_cache: self.blob_cache.stats(),
             external_relay: self.relay_store.is_none(),
             external_blobs: self.blobs_local.is_none(),
         }
@@ -5727,7 +5963,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// "Delete cache" keeps the user's own profile and relay lists. They are
+    /// "Clear local database" keeps the user's own profile and relay lists. They are
     /// published once, at first napplet use, and `user.nsec` outlives the
     /// wipe, so nothing would ever publish them again: without this the
     /// user's outbox plan degrades to fallback and napplets see a bare
@@ -6155,7 +6391,7 @@ pub(crate) mod library_kind_tests {
     }
 
     /// A newer manifest kept for an installed site does not change what the
-    /// site serves — the pinned version does — and "Delete cache" drops the
+    /// site serves — the pinned version does — and "Clear local database" drops the
     /// newer one and leaves the pinned version serving.
     #[tokio::test]
     async fn a_kept_newer_manifest_leaves_the_installed_version_serving() {
@@ -6325,7 +6561,7 @@ pub(crate) mod library_kind_tests {
 
     /// Profiles and manifests seen are kept only in the embedded store. With
     /// a custom relay there is no tap: browsing is not written to someone
-    /// else's relay, where "Delete cache" could not reach it.
+    /// else's relay, where "Clear local database" could not reach it.
     #[tokio::test]
     async fn a_custom_relay_turns_keeping_off() {
         let dir = tmp("keep-seen-custom-relay");
@@ -6381,9 +6617,9 @@ pub(crate) mod library_kind_tests {
         url
     }
 
-    /// Events passing through on a multi-hop pull for a peer are kept here —
-    /// the profiles, not the notes — through the real pull path over the
-    /// peer pool.
+    /// Events passing through on a multi-hop pull for a peer are remembered
+    /// here — the profiles kept in the relay, the notes in the cache — through
+    /// the real pull path over the peer pool.
     #[tokio::test]
     async fn a_multi_hop_pull_keeps_what_passes_through() {
         let dir = tmp("keep-seen-pull");
@@ -6401,7 +6637,7 @@ pub(crate) mod library_kind_tests {
         let note = EventBuilder::text_note("passing")
             .sign_with_keys(&author)
             .unwrap();
-        let url = mesh_peer_holding(vec![profile.clone(), note]).await;
+        let url = mesh_peer_holding(vec![profile.clone(), note.clone()]).await;
         content.add_to_circle(&peer_npub, "peer");
         content.peer_relays().redirect(&peer_npub, &url);
 
@@ -6414,20 +6650,115 @@ pub(crate) mod library_kind_tests {
             .await;
         assert_eq!(pulled.len(), 2, "the pull did not reach the peer");
 
-        let mut held = Vec::new();
+        let relay = content.relay_store().unwrap();
+        let cache = content.event_cache();
         for _ in 0..100 {
-            held = content.relay().query(&[Filter::new()]).await.unwrap();
-            if !held.is_empty() {
+            if relay.count() > 0 && cache.contains(&note.id.to_bytes()) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        let kept = relay.query(&[Filter::new()]).await.unwrap();
         assert_eq!(
-            held.iter().map(|e| e.id).collect::<Vec<_>>(),
+            kept.iter().map(|e| e.id).collect::<Vec<_>>(),
             [profile.id],
             "only the profile is kept"
         );
+        assert!(
+            cache.contains(&note.id.to_bytes()),
+            "the note was not cached"
+        );
+        assert!(
+            !cache.contains(&profile.id.to_bytes()),
+            "the profile is held twice"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Keeping an event moves it out of the cache; "Clear cache" leaves what
+    /// is kept alone; "Clear local database"'s retain leaves the cache to the clear
+    /// the runtime spawns beside it.
+    #[tokio::test]
+    async fn keeping_dedups_and_both_clears_behave() {
+        let dir = tmp("cache-clears");
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Content::open(&dir).unwrap();
+        let keys = nostr::Keys::generate();
+        let both = EventBuilder::text_note("both")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let passing = EventBuilder::text_note("passing")
+            .sign_with_keys(&keys)
+            .unwrap();
+        content.cache_relay().publish(both.clone()).await.unwrap();
+        content
+            .cache_relay()
+            .publish(passing.clone())
+            .await
+            .unwrap();
+        content.relay().publish(both.clone()).await.unwrap();
+        assert!(!content.event_cache().contains(&both.id.to_bytes()));
+        assert!(content.event_cache().contains(&passing.id.to_bytes()));
+        content.upkeep_caches().await;
+        assert_eq!(
+            content.relay().query(&[Filter::new()]).await.unwrap().len(),
+            2
+        );
+
+        content.clear_cache().await.unwrap();
+        let left = content.relay().query(&[Filter::new()]).await.unwrap();
+        assert_eq!(left.iter().map(|e| e.id).collect::<Vec<_>>(), [both.id]);
+        let blob = content.cache_blobs().put(b"fetched").await.unwrap();
+        assert!(
+            content.blobs().has(&blob).await,
+            "reads miss the blob cache"
+        );
+        assert!(
+            !content.blobs_local().unwrap().has(&blob).await,
+            "a fetch was kept"
+        );
+
+        content
+            .cache_relay()
+            .publish(passing.clone())
+            .await
+            .unwrap();
+        // "Clear local database" is the retain plus a cache clear the runtime spawns
+        // beside it; the retain alone leaves the cache for that.
+        content.wipe_cache(None).await.unwrap();
+        assert!(content.event_cache().contains(&passing.id.to_bytes()));
+        content.clear_cache().await.unwrap();
+        assert_eq!(content.event_cache().stats().count, 0);
+        assert_eq!(content.blob_cache().stats().count, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Storage screen reads these keys (`AppCoreClient.kt`, `cacheTier`)
+    /// and treats a missing one as 0 — so a rename here would compile, pass,
+    /// and show an empty cache. Pin them.
+    #[test]
+    fn the_cache_view_keeps_the_keys_the_app_reads() {
+        let mut view = CacheView::empty();
+        view.event_cache = myco_cache::CacheStats {
+            count: 1,
+            bytes: 2,
+            limit: 3,
+        };
+        view.blob_cache.limit = 4;
+        let v = serde_json::to_value(&view).unwrap();
+        assert_eq!(v["eventCache"]["count"], 1);
+        assert_eq!(v["eventCache"]["bytes"], 2);
+        assert_eq!(v["eventCache"]["limit"], 3);
+        assert_eq!(v["blobCache"]["limit"], 4);
+        for key in [
+            "relayEvents",
+            "blobCount",
+            "usedBytes",
+            "externalRelay",
+            "externalBlobs",
+        ] {
+            assert!(v.get(key).is_some(), "{key} is gone");
+        }
     }
 
     /// A PeerSource over fixed events and blobs.
@@ -6518,7 +6849,7 @@ pub(crate) mod library_kind_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// "Delete cache" keeps installed apps working. A napplet is one manifest
+    /// "Clear local database" keeps installed apps working. A napplet is one manifest
     /// and one blob; both survive, or the tile survives and the app does not.
     #[tokio::test]
     async fn wipe_cache_keeps_an_installed_napplet() {

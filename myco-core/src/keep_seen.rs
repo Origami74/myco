@@ -6,7 +6,10 @@
 //! Only kinds another lookup will want again, and only replaceable ones, so
 //! each author (and `d` tag) costs one event however often it is seen:
 //!
-//! - **Profiles** (kind 0) and the author's relay lists: **10002** (NIP-65,
+//! - **Profiles** (kind 0) and **follow lists** (kind 3, NIP-02): a feed
+//!   napplet reads the user's on every open, and should never wait on a relay
+//!   for it.
+//! - The author's relay lists: **10002** (NIP-65,
 //!   where to find their notes and manifests), **10050** (NIP-17, where to
 //!   send them a DM) and **10063** (BUD-03, their Blossom servers).
 //! - **nsite manifests**, 15128 / 35128. Legacy 34128 is not kept: nothing
@@ -33,11 +36,10 @@
 //!
 //! **Growth** is bounded in practice by the kinds: small, replaceable, one per
 //! author and app the user actually came across. Nothing prunes them yet
-//! besides "Delete cache" (`docs/roadmap.md`, pruning of kept events).
+//! besides "Clear local database" (`docs/roadmap.md`, pruning of kept events).
 
 use std::sync::Arc;
 
-use myco_relay::RelayStore;
 use nostr::Event;
 use nsite_deck::seams::RelayBackend;
 use tokio::sync::Semaphore;
@@ -45,6 +47,7 @@ use tokio::sync::Semaphore;
 /// The kinds kept when seen. See the module docs for why each is here.
 pub(crate) const KEPT_KINDS: &[u16] = &[
     0,
+    3,
     10_002,
     10_050,
     10_063,
@@ -59,6 +62,10 @@ pub(crate) const KEPT_KINDS: &[u16] = &[
 /// the lookup that found it still has it.
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 
+/// A follow list is bigger by nature: a `p` tag per person, at about 70 bytes
+/// each. This fits about 7,000 follows.
+const MAX_FOLLOW_LIST_BYTES: usize = 512 * 1024;
+
 /// At most this many events are kept from one offer. A napplet paging through
 /// a directory asks for a page at a time; a page larger than this is a flood.
 pub(crate) const MAX_PER_BATCH: usize = 128;
@@ -68,7 +75,13 @@ pub(crate) const MAX_BATCHES_IN_FLIGHT: usize = 2;
 
 /// Whether `event` is of a kind, and a size, this device keeps.
 pub(crate) fn is_kept(event: &Event) -> bool {
-    KEPT_KINDS.contains(&event.kind.as_u16()) && approx_size(event) <= MAX_EVENT_BYTES
+    let kind = event.kind.as_u16();
+    let cap = if kind == 3 {
+        MAX_FOLLOW_LIST_BYTES
+    } else {
+        MAX_EVENT_BYTES
+    };
+    KEPT_KINDS.contains(&kind) && approx_size(event) <= cap
 }
 
 /// The event's size, near enough: its content and every tag value. Counting
@@ -83,17 +96,18 @@ fn approx_size(event: &Event) -> usize {
 }
 
 /// The tap: one per content layer, so every path shares one bound. Always
-/// over the **embedded** store: with a custom relay configured there is no
-/// tap at all (see `Content::keep_seen`), so browsing is never written to
-/// someone else's relay.
+/// over the **embedded** store (read through the cache, so a kept event
+/// leaves it): with a custom relay configured there is no tap at all (see
+/// `Content::keep_seen`), so browsing is never written to someone else's
+/// relay.
 #[derive(Clone)]
 pub struct KeepSeen {
-    store: Arc<RelayStore>,
+    store: Arc<dyn RelayBackend>,
     permits: Arc<Semaphore>,
 }
 
 impl KeepSeen {
-    pub fn new(store: Arc<RelayStore>) -> Self {
+    pub fn new(store: Arc<dyn RelayBackend>) -> Self {
         Self {
             store,
             permits: Arc::new(Semaphore::new(MAX_BATCHES_IN_FLIGHT)),
@@ -144,6 +158,7 @@ impl KeepSeen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use myco_relay::RelayStore;
     use nostr::{EventBuilder, Filter, Keys, Kind, Tag, Timestamp};
 
     fn event(keys: &Keys, kind: u16, content: &str, at: u64, d: Option<&str>) -> Event {
@@ -173,6 +188,7 @@ mod tests {
         let keys = Keys::generate();
         let kept: Vec<Event> = [
             (0, None),
+            (3, None),
             (10_002, None),
             (10_050, None),
             (10_063, None),
@@ -184,7 +200,7 @@ mod tests {
         .into_iter()
         .map(|(kind, d)| event(&keys, kind, "", 1_000, d))
         .collect();
-        let others: Vec<Event> = [1u16, 3, 7, 1059, 5_129, 30_023, 34_128]
+        let others: Vec<Event> = [1u16, 7, 1059, 5_129, 30_023, 34_128]
             .into_iter()
             .map(|kind| event(&keys, kind, "", 1_000, Some("x")))
             .collect();
@@ -235,6 +251,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(held.iter().map(|e| e.id).collect::<Vec<_>>(), [newest.id]);
+    }
+
+    #[tokio::test]
+    async fn a_long_follow_list_is_kept() {
+        let store = scratch();
+        let keep = KeepSeen::new(store.clone());
+        let keys = Keys::generate();
+        // 3,000 follows: far over the general cap, well under the follow-list one.
+        let tags: Vec<Tag> = (0..3_000)
+            .map(|_| Tag::public_key(Keys::generate().public_key()))
+            .collect();
+        let list = EventBuilder::new(Kind::ContactList, "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+        keep.offer([&list]).unwrap().await.unwrap();
+        assert_eq!(all(&store).await.len(), 1);
     }
 
     #[tokio::test]

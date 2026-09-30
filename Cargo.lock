@@ -2179,6 +2179,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "myco-cache"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures-util",
+ "hex",
+ "myco-blossom",
+ "nostr",
+ "nostr-database",
+ "nostr-lmdb",
+ "nsite-deck",
+ "serde",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "myco-core"
 version = "0.0.1"
 dependencies = [
@@ -2193,6 +2212,7 @@ dependencies = [
  "jni",
  "jpeg-encoder",
  "myco-blossom",
+ "myco-cache",
  "myco-napplet-runtime",
  "myco-relay",
  "nostr",

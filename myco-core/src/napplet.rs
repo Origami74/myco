@@ -16,7 +16,7 @@
 //! with two handshakes, and neither can see the other's.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -26,6 +26,7 @@ use nostr::PublicKey;
 use nsite_deck::seams::{newest_in_slot, BlobStore, PeerSource, RelayBackend};
 
 use myco_napplet_runtime::artifact::{assemble, Injection, SrcdocArtifact};
+use myco_napplet_runtime::delivered::{Delivered, Ledger};
 use myco_napplet_runtime::dispatch::{dispatch, NapContext, Outcome};
 use myco_napplet_runtime::manifest::{KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT};
 use myco_napplet_runtime::nap::link::{LinkTarget, BLOCKED_BY_POLICY, INVALID_URL};
@@ -376,6 +377,9 @@ impl LinkGate {
     }
 }
 
+/// A napplet's ledger key: its author and `d` tag.
+type LedgerKey = (nostr::PublicKey, Option<String>);
+
 /// The device's live napplet sessions.
 pub struct NappletHost {
     relay: Arc<dyn RelayBackend>,
@@ -389,6 +393,10 @@ pub struct NappletHost {
     next_id: Mutex<u64>,
     /// NAP-LINK admission. See [`LinkGate`].
     links: LinkGate,
+    /// What each napplet has been delivered (NAP-LOCAL), shared by its open
+    /// windows. Held weakly: the sessions own it, so it goes when the
+    /// napplet's last window closes.
+    ledgers: Mutex<HashMap<LedgerKey, Weak<std::sync::Mutex<Delivered>>>>,
 }
 
 impl NappletHost {
@@ -403,13 +411,38 @@ impl NappletHost {
             sessions: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             links: LinkGate::default(),
+            ledgers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The delivered-ids ledger for `addr`: the one its open windows share,
+    /// or a fresh one when none is open.
+    fn ledger_for(&self, addr: &NappletAddr) -> Ledger {
+        let mut ledgers = self.ledgers.lock().unwrap();
+        ledgers.retain(|_, weak| weak.strong_count() > 0);
+        let key = (addr.author, addr.d_tag.clone());
+        if let Some(live) = ledgers.get(&key).and_then(Weak::upgrade) {
+            return live;
+        }
+        let fresh = Ledger::default();
+        ledgers.insert(key, Arc::downgrade(&fresh));
+        fresh
     }
 
     /// Refuse NAP-LINK reviews while `slot` holds one — the slot the app's
     /// review sheet is drawn from.
     pub fn with_review_slot(mut self, slot: ReviewSlot) -> Self {
         self.links.review = Some(slot);
+        self
+    }
+
+    /// Resolve and install napplets from `blobs` rather than the capabilities'
+    /// store. On the device the capabilities write what a napplet fetches to
+    /// the shell cache, while an installed napplet's own files must be
+    /// **kept**, as an nsite's are — never evicted, never cleared with the
+    /// cache.
+    pub fn with_kept_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+        self.blobs = blobs;
         self
     }
 
@@ -551,7 +584,8 @@ impl NappletHost {
         let session = Session::new(
             NappletIdentity::from(&resolved),
             grants.granted.iter().cloned(),
-        );
+        )
+        .with_ledger(self.ledger_for(addr));
         let prelude = render_for(&session);
         let artifact = assemble(
             &resolved.index_html,
@@ -1275,6 +1309,24 @@ impl myco_napplet_runtime::seams::MeshSink for NappletMeshSink {
         }
     }
 
+    /// Kept and flooded again even when already seen — the hub's seen-set
+    /// would otherwise stop a rebroadcast at this phone. Peers' own seen-sets
+    /// still end the flood.
+    async fn rebroadcast(&self, event: nostr::Event, ttl: u8) -> anyhow::Result<()> {
+        // Only what the push plane floods at all: not manifests (their own
+        // interest-aware path) and not gift wraps (addressed to one phone).
+        let kind = event.kind.as_u16();
+        if !crate::gossip::is_gossip_eligible(kind) || kind == 1059 {
+            anyhow::bail!("kind {kind} is not passed on over the mesh");
+        }
+        let ttl = ttl.min(self.limits.read().unwrap().publish_ttl);
+        let hub = self.hub.lock().unwrap().clone();
+        match hub {
+            Some(hub) => hub.rebroadcast_local(event, ttl).await,
+            None => self.content.relay().publish(event).await,
+        }
+    }
+
     async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<()> {
         let ttl = ttl.min(self.limits.read().unwrap().subscribe_ttl);
         if ttl == 0 {
@@ -1303,7 +1355,7 @@ impl myco_napplet_runtime::seams::MeshSink for NappletMeshSink {
             let events = content.pull_from_peers(filters, meta, None).await;
             let mut fresh = 0usize;
             for event in events {
-                match hub.accept_unforwarded(event).await {
+                match hub.accept_pulled(event).await {
                     Ok(true) => fresh += 1,
                     Ok(false) => {}
                     Err(e) => tracing::debug!(error = %e, "napplet mesh pull: could not store"),
@@ -1548,6 +1600,39 @@ mod tests {
         }
     }
 
+    /// A napplet's windows share one ledger of what it was delivered, and it
+    /// goes with the last of them.
+    #[test]
+    fn the_ledger_is_shared_by_windows_and_dropped_with_the_last() {
+        let host = NappletHost::new(test_ctx(
+            Arc::new(MemRelay::new()),
+            Arc::new(nsite_deck::testing::MemBlobs::new()),
+        ));
+        let keys = nostr::Keys::generate();
+        let addr = NappletAddr {
+            author: keys.public_key(),
+            d_tag: Some("chat".to_string()),
+            relays: Vec::new(),
+        };
+        let other = NappletAddr {
+            d_tag: Some("other".to_string()),
+            ..addr.clone()
+        };
+        let first = host.ledger_for(&addr);
+        let second = host.ledger_for(&addr);
+        assert!(Arc::ptr_eq(&first, &second), "two windows, two ledgers");
+        assert!(!Arc::ptr_eq(&first, &host.ledger_for(&other)));
+        first.lock().unwrap().record_event(&[7u8; 32]);
+        drop(first);
+        assert!(second.lock().unwrap().has_event(&[7u8; 32]));
+        drop(second);
+        let reopened = host.ledger_for(&addr);
+        assert!(
+            !reopened.lock().unwrap().has_event(&[7u8; 32]),
+            "the ledger outlived the napplet's windows"
+        );
+    }
+
     /// A context over in-memory seams for `relay` and `blobs`, with nothing
     /// behind the mesh, the outbox or the fetcher.
     pub(super) fn test_ctx(relay: Arc<dyn RelayBackend>, blobs: Arc<dyn BlobStore>) -> NapContext {
@@ -1560,8 +1645,9 @@ mod tests {
             mesh: test_mesh(),
             outbox: test_outbox(),
             lanes: test_outbox(),
-            blobs,
+            blobs: blobs.clone(),
             fetcher: Arc::new(myco_napplet_runtime::seams::NoFetcher),
+            kept_blobs: blobs,
         }
     }
 
@@ -1604,6 +1690,64 @@ mod tests {
             relays: Vec::new(),
         };
         (NappletHost::new(test_ctx(relay, blobs)), addr)
+    }
+
+    /// What one window of a napplet was shown, another window of the same
+    /// napplet may keep — through the host's snapshot path, not the ledger
+    /// alone.
+    #[tokio::test]
+    async fn a_second_window_keeps_what_the_first_was_shown() {
+        let (host, addr) = host_with_fixture().await;
+        let granted = Some(vec!["relay".to_string(), "local".to_string()]);
+        let mut windows = Vec::new();
+        for _ in 0..2 {
+            let opened = host.open(&addr, granted.clone()).await.unwrap();
+            host.frame(
+                &opened.session_id,
+                r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+            )
+            .await;
+            windows.push(opened.session_id);
+        }
+        let note = nostr::EventBuilder::text_note("shown in one window")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        host.ctx.relay.publish(note.clone()).await.unwrap();
+        let keep = serde_json::json!({
+            "channel": "napplet",
+            "message": {"type": "local.publish", "id": "k", "event": note},
+        })
+        .to_string();
+        let kept = |replies: Vec<ToShell>| {
+            replies.into_iter().find_map(|r| match r {
+                ToShell::Napplet { message } if message.msg_type == "local.publish.result" => {
+                    message.field("ok").cloned()
+                }
+                _ => None,
+            })
+        };
+
+        assert_eq!(
+            kept(host.frame(&windows[1], &keep).await),
+            Some(serde_json::json!(false)),
+            "kept before either window was shown it"
+        );
+        // Shown through a subscription's backlog, which reads this relay.
+        let subscribe = serde_json::json!({
+            "channel": "napplet",
+            "message": {"type": "relay.subscribe", "id": "s", "subId": "s",
+                        "filters": [{"ids": [note.id.to_hex()]}]},
+        })
+        .to_string();
+        let shown = host.frame(&windows[0], &subscribe).await;
+        assert!(
+            format!("{shown:?}").contains(&note.id.to_hex()),
+            "the backlog did not carry the note"
+        );
+        assert_eq!(
+            kept(host.frame(&windows[1], &keep).await),
+            Some(serde_json::json!(true))
+        );
     }
 
     #[tokio::test]
@@ -2352,8 +2496,11 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(crate::content::Content::open(&dir).unwrap());
-        let host = NappletHost::new(test_ctx(content.relay(), content.blobs()))
-            .with_manifests(content.clone());
+        // Wired as on the device: capabilities fetch into the cache, the host
+        // installs into the kept store.
+        let host = NappletHost::new(test_ctx(content.relay(), content.cache_blobs()))
+            .with_manifests(content.clone())
+            .with_kept_blobs(content.blobs());
 
         let keys = nostr::Keys::generate();
         let v1 = NappletBuilder::new()
@@ -2391,6 +2538,11 @@ mod tests {
         host.ingest(&addr, &source_for(&v1).await).await.unwrap();
         let opened = host.open(&addr, None).await.unwrap();
         assert_eq!(opened.title.as_deref(), Some("Version one"));
+        assert!(
+            content.blobs_local().unwrap().has(&v1.blobs[0].0).await,
+            "an installed napplet's file was not kept"
+        );
+        assert!(!content.blob_cache().contains(&v1.blobs[0].0));
 
         // v2's manifest lands in the relay by some other route — no blob.
         content.relay().publish(v2.manifest.clone()).await.unwrap();

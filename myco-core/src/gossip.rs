@@ -53,7 +53,7 @@ fn is_napplet_manifest(kind: u16) -> bool {
 /// v1 gossip eligibility: everything except nsite and napplet manifests (which
 /// propagate via their own path). See `docs/design/nsite/nsite-permissions.md`
 /// (`gossip-kinds`).
-fn is_gossip_eligible(kind: u16) -> bool {
+pub(crate) fn is_gossip_eligible(kind: u16) -> bool {
     kind != nsite_deck::KIND_ROOT && kind != nsite_deck::KIND_NAMED && !is_napplet_manifest(kind)
 }
 

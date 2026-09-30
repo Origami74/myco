@@ -65,7 +65,7 @@ pub async fn handle(
 ) -> Vec<Envelope> {
     match message.action() {
         "query" => vec![query(ctx, session, message).await],
-        "publish" => vec![publish(ctx, message).await],
+        "publish" => vec![publish(ctx, session, message).await],
         "subscribe" => subscribe(ctx, session, message).await,
         "close" => {
             if let Some(sub_id) = message.field("subId").and_then(|v| v.as_str()) {
@@ -267,9 +267,14 @@ async fn subscribe(
     out
 }
 
-/// `relay.publish` — sign the napplet's template as the user, and store it.
-async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
-    let signed = match sign_template(ctx, message).await {
+/// `relay.publish` — sign the napplet's template as the user, and store it;
+/// or, given an event it was delivered, keep it and send it on as it is.
+async fn publish(
+    ctx: &NapContext,
+    session: &crate::session::Session,
+    message: &Envelope,
+) -> Envelope {
+    let (signed, as_is) = match signed_or_template(ctx, session, message, true).await {
         Ok(event) => event,
         Err(e) => return failed(message, e),
     };
@@ -277,7 +282,12 @@ async fn publish(ctx: &NapContext, message: &Envelope) -> Envelope {
     // Accepted, not merely stored: this is what wakes local subscriptions and
     // hands the event to the relay pool. The pool, not the mesh — flooding the
     // Circle is NAP-MESH's, behind its own grant and the user's hop cap.
-    if let Err(e) = ctx.sink.accept(signed.clone()).await {
+    let sent = if as_is {
+        ctx.sink.rebroadcast(signed.clone()).await
+    } else {
+        ctx.sink.accept(signed.clone()).await
+    };
+    if let Err(e) = sent {
         return failed(message, format!("could not publish: {e}"));
     }
 
@@ -355,6 +365,69 @@ pub(crate) async fn sign_template(
         .sign(unsigned)
         .await
         .map_err(|e| format!("could not sign: {e}"))
+}
+
+/// Whether a publish's `event` is an already-signed event rather than a
+/// template. Signed means a real signature: a draft some libraries emit with
+/// `"sig": ""` or `null` is still a template.
+pub(crate) fn carries_signed_event(message: &Envelope) -> bool {
+    message
+        .field("event")
+        .and_then(|v| v.get("sig"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+}
+
+/// The event a publish carries: the napplet's template signed as the user,
+/// or — when the `event` field is already a signed event (it has a `sig`) —
+/// that event **as it is** (NAP-LOCAL, `docs/design/napplet/NAP-LOCAL.md`).
+///
+/// An event published as it is must verify, and must have been delivered to
+/// this napplet: a napplet passes on what it was shown, never an event it got
+/// from nowhere. That holds for the user's own events too. A signed event is
+/// never re-signed as a template — that would put the user's name on someone
+/// else's words. The kinds refused under the grant stay refused either way.
+///
+/// A NIP-70 protected event (`["-"]`) is only ever **kept** as it is, never
+/// sent on: its author asked that no one but they publish it to a relay, and
+/// the Circle's relays are relays. `outward` says whether this publish sends.
+///
+/// Returns the event and whether it arrived signed.
+pub(crate) async fn signed_or_template(
+    ctx: &NapContext,
+    session: &crate::session::Session,
+    message: &Envelope,
+    outward: bool,
+) -> Result<(nostr::Event, bool), String> {
+    let Some(raw) = message.field("event").and_then(|v| v.as_object()) else {
+        return Err("publish needs an event template".to_string());
+    };
+    if !carries_signed_event(message) {
+        return sign_template(ctx, message).await.map(|e| (e, false));
+    }
+    let event: nostr::Event = serde_json::from_value(serde_json::Value::Object(raw.clone()))
+        .map_err(|e| format!("not a signed event: {e}"))?;
+    if event.verify().is_err() {
+        return Err("the event's signature does not verify".to_string());
+    }
+    if kind_needs_a_prompt(event.kind.as_u16()) {
+        return Err(format!(
+            "kind {} is not allowed under the relay grant until per-event prompts exist",
+            event.kind.as_u16()
+        ));
+    }
+    if !session.was_delivered(&event.id) {
+        return Err(
+            "only an event delivered to this napplet can be published as it is".to_string(),
+        );
+    }
+    if outward && event.tags.iter().any(|t| t.as_slice() == ["-"]) {
+        return Err(
+            "a protected event (NIP-70) can be kept here but not sent on by anyone but its author"
+                .to_string(),
+        );
+    }
+    Ok((event, true))
 }
 
 /// An event as the JSON a napplet reads.
@@ -437,6 +510,88 @@ mod tests {
             .to_vec()
     }
 
+    /// Deliver `event` to `session` the way a napplet comes by one: through
+    /// a query answer.
+    async fn deliver(ctx: &NapContext, session: &mut Session, event: &nostr::Event) {
+        ctx.relay.publish(event.clone()).await.unwrap();
+        let q = Envelope::new("relay.query")
+            .with_id("q")
+            .with_field("filters", json!({"ids": [event.id.to_hex()]}));
+        dispatch(ctx, session, &q).await;
+    }
+
+    /// A delivered event goes out through the rebroadcast door as it is; an
+    /// undelivered or protected one is refused, and a `sig` that is empty
+    /// leaves a template a template.
+    #[tokio::test]
+    async fn a_delivered_event_is_published_as_it_is() {
+        let (mut ctx, _signer) = test_context();
+        let sink = std::sync::Arc::new(crate::testing::RecordingSink::new());
+        ctx.sink = sink.clone();
+        let mut s = granted();
+        let theirs = EventBuilder::text_note("pass me on")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        deliver(&ctx, &mut s, &theirs).await;
+        let publish = |event: serde_json::Value| {
+            Envelope::new("relay.publish")
+                .with_id("p")
+                .with_field("event", event)
+        };
+
+        let out = dispatch(&ctx, &mut s, &publish(event_json(&theirs))).await;
+        let r = serde_json::to_value(&out.envelopes()[0]).unwrap();
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(sink.calls(), vec![("rebroadcast", theirs.id)]);
+
+        let unseen = EventBuilder::text_note("never shown")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let out = dispatch(&ctx, &mut s, &publish(event_json(&unseen))).await;
+        assert_eq!(out.envelopes()[0].field("ok"), Some(&json!(false)));
+
+        let protected = EventBuilder::text_note("only I may publish this")
+            .tags([nostr::Tag::protected()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        deliver(&ctx, &mut s, &protected).await;
+        let out = dispatch(&ctx, &mut s, &publish(event_json(&protected))).await;
+        let r = serde_json::to_value(&out.envelopes()[0]).unwrap();
+        assert_eq!(r["ok"], false);
+        assert!(r["error"].as_str().unwrap().contains("protected"));
+
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &publish(json!({"kind": 1, "content": "draft", "sig": ""})),
+        )
+        .await;
+        assert_eq!(out.envelopes()[0].field("ok"), Some(&json!(true)));
+        assert_eq!(
+            sink.calls().last().unwrap().0,
+            "accept",
+            "a draft was not signed"
+        );
+    }
+
+    /// What a live subscription delivers counts too.
+    #[tokio::test]
+    async fn a_live_delivery_counts_as_delivered() {
+        let (ctx, _signer) = test_context();
+        let mut s = granted();
+        let sub = Envelope::new("relay.subscribe")
+            .with_id("s")
+            .with_field("subId", "live")
+            .with_field("filters", json!([{"kinds": [1]}]));
+        dispatch(&ctx, &mut s, &sub).await;
+        let arriving = EventBuilder::text_note("arrived later")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(!s.was_delivered(&arriving.id));
+        assert!(!crate::nap::deliveries_for(&s, &arriving).is_empty());
+        assert!(s.was_delivered(&arriving.id));
+    }
+
     #[tokio::test]
     async fn publishes_as_the_user_and_stores_the_event() {
         let (ctx, signer) = test_context();
@@ -500,15 +655,32 @@ mod tests {
         )
         .await;
 
+        // A `sig` makes it a signed event, published as it is or not at all
+        // (NAP-LOCAL) — and this one does not verify. Never re-signed as the
+        // user, which would put their name on the napplet's forgery.
+        assert_eq!(out[0].field("ok"), Some(&json!(false)));
+        assert!(ctx.relay.query(&[Filter::new()]).await.unwrap().is_empty());
+
+        // Without the `sig`, the runtime still writes who and when.
+        let out = call(
+            &ctx,
+            Envelope::new("relay.publish").with_id("b3").with_field(
+                "event",
+                json!({
+                    "kind": 1,
+                    "content": "not mine",
+                    "pubkey": impostor.public_key().to_hex(),
+                    "created_at": long_ago,
+                }),
+            ),
+        )
+        .await;
         let event = out[0].field("event").unwrap();
         assert_eq!(event["pubkey"], json!(signer.public_key().to_hex()));
-        assert_ne!(event["pubkey"], json!(impostor.public_key().to_hex()));
         assert!(
             event["created_at"].as_u64().unwrap() > long_ago,
             "the napplet backdated its event"
         );
-        assert_ne!(event["id"], json!("0".repeat(64)));
-        assert_ne!(event["sig"], json!("0".repeat(128)));
     }
 
     #[tokio::test]
@@ -890,6 +1062,7 @@ mod tests {
             outbox: base.outbox.clone(),
             lanes: base.lanes.clone(),
             blobs: base.blobs.clone(),
+            kept_blobs: base.kept_blobs.clone(),
             fetcher: base.fetcher.clone(),
         };
 
@@ -924,6 +1097,7 @@ mod tests {
             outbox: base.outbox.clone(),
             lanes: base.lanes.clone(),
             blobs: base.blobs.clone(),
+            kept_blobs: base.kept_blobs.clone(),
             fetcher: base.fetcher.clone(),
         };
 
@@ -993,6 +1167,7 @@ mod tests {
             outbox: base.outbox.clone(),
             lanes: base.lanes.clone(),
             blobs: base.blobs.clone(),
+            kept_blobs: base.kept_blobs.clone(),
             fetcher: base.fetcher.clone(),
         };
 

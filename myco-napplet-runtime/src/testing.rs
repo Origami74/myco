@@ -356,6 +356,8 @@ pub fn test_context_with_mesh(
         std::sync::Arc::new(nsite_deck::testing::MemRelay::new());
     let mesh = std::sync::Arc::new(MemMesh::new(relay.clone(), limits));
     let outbox = std::sync::Arc::new(OutboxFixture::new(relay.clone()));
+    let blobs: std::sync::Arc<dyn crate::seams::BlobStore> =
+        std::sync::Arc::new(nsite_deck::testing::MemBlobs::new());
     let ctx = crate::dispatch::NapContext {
         signer: signer.clone(),
         relay: relay.clone(),
@@ -363,7 +365,8 @@ pub fn test_context_with_mesh(
         mesh: mesh.clone(),
         outbox: outbox.clone(),
         lanes: outbox,
-        blobs: std::sync::Arc::new(nsite_deck::testing::MemBlobs::new()),
+        blobs: blobs.clone(),
+        kept_blobs: blobs,
         fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
     };
     (ctx, mesh, signer)
@@ -387,6 +390,8 @@ pub fn test_context_with_outbox() -> (
         },
     ));
     let outbox = std::sync::Arc::new(OutboxFixture::new(relay.clone()));
+    let blobs: std::sync::Arc<dyn crate::seams::BlobStore> =
+        std::sync::Arc::new(nsite_deck::testing::MemBlobs::new());
     let ctx = crate::dispatch::NapContext {
         signer: signer.clone(),
         relay: relay.clone(),
@@ -394,7 +399,8 @@ pub fn test_context_with_outbox() -> (
         mesh,
         outbox: outbox.clone(),
         lanes: outbox.clone(),
-        blobs: std::sync::Arc::new(nsite_deck::testing::MemBlobs::new()),
+        blobs: blobs.clone(),
+        kept_blobs: blobs,
         fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
     };
     (ctx, outbox, signer)
@@ -686,6 +692,7 @@ pub struct MemMesh {
     limits: std::sync::Mutex<crate::seams::MeshLimits>,
     reach: std::sync::Mutex<crate::seams::MeshReach>,
     published: std::sync::Mutex<Vec<(Event, u8)>>,
+    rebroadcast: std::sync::Mutex<Vec<(Event, u8)>>,
     pulled: std::sync::Mutex<Vec<(Vec<serde_json::Value>, u8)>>,
 }
 
@@ -699,8 +706,18 @@ impl MemMesh {
             limits: std::sync::Mutex::new(limits),
             reach: std::sync::Mutex::new(crate::seams::MeshReach::default()),
             published: std::sync::Mutex::new(Vec::new()),
+            rebroadcast: std::sync::Mutex::new(Vec::new()),
             pulled: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every event passed on as it is ([`MeshSink::rebroadcast`]), with its
+    /// hop budget. Kept apart from [`MemMesh::published`] so a test can tell
+    /// the two doors apart.
+    ///
+    /// [`MeshSink::rebroadcast`]: crate::seams::MeshSink::rebroadcast
+    pub fn rebroadcasts(&self) -> Vec<(Event, u8)> {
+        self.rebroadcast.lock().unwrap().clone()
     }
 
     /// Every event published, with the hop budget it was given.
@@ -739,6 +756,12 @@ impl crate::seams::MeshSink for MemMesh {
         Ok(())
     }
 
+    async fn rebroadcast(&self, event: Event, ttl: u8) -> anyhow::Result<()> {
+        self.store.publish(event.clone()).await?;
+        self.rebroadcast.lock().unwrap().push((event, ttl));
+        Ok(())
+    }
+
     async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<()> {
         self.pulled.lock().unwrap().push((filters, ttl));
         Ok(())
@@ -746,10 +769,12 @@ impl crate::seams::MeshSink for MemMesh {
 }
 
 /// An [`EventSink`](crate::seams::EventSink) that records what it accepted, so
-/// a test can assert an event was handed on rather than only written.
+/// a test can assert an event was handed on rather than only written — and
+/// which door each event came through (`accept`, `keep`, `rebroadcast`).
 #[derive(Default)]
 pub struct RecordingSink {
     accepted: std::sync::Mutex<Vec<Event>>,
+    calls: std::sync::Mutex<Vec<(&'static str, nostr::EventId)>>,
 }
 
 impl RecordingSink {
@@ -760,12 +785,32 @@ impl RecordingSink {
     pub fn accepted(&self) -> Vec<Event> {
         self.accepted.lock().unwrap().clone()
     }
+
+    /// Every call so far, in order: which door, which event.
+    pub fn calls(&self) -> Vec<(&'static str, nostr::EventId)> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn record(&self, door: &'static str, event: Event) {
+        self.calls.lock().unwrap().push((door, event.id));
+        self.accepted.lock().unwrap().push(event);
+    }
 }
 
 #[async_trait::async_trait]
 impl crate::seams::EventSink for RecordingSink {
     async fn accept(&self, event: Event) -> anyhow::Result<()> {
-        self.accepted.lock().unwrap().push(event);
+        self.record("accept", event);
+        Ok(())
+    }
+
+    async fn keep(&self, event: Event) -> anyhow::Result<()> {
+        self.record("keep", event);
+        Ok(())
+    }
+
+    async fn rebroadcast(&self, event: Event) -> anyhow::Result<()> {
+        self.record("rebroadcast", event);
         Ok(())
     }
 }
