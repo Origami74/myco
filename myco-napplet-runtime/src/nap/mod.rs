@@ -9,6 +9,8 @@
 //! specified in the registry's form so it can be proposed there.
 
 pub mod identity;
+pub mod inc;
+pub mod intent;
 pub mod link;
 pub mod local;
 pub mod mesh;

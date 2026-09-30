@@ -1064,6 +1064,7 @@ mod tests {
             blobs: base.blobs.clone(),
             kept_blobs: base.kept_blobs.clone(),
             fetcher: base.fetcher.clone(),
+            intents: base.intents.clone(),
         };
 
         call(
@@ -1099,6 +1100,7 @@ mod tests {
             blobs: base.blobs.clone(),
             kept_blobs: base.kept_blobs.clone(),
             fetcher: base.fetcher.clone(),
+            intents: base.intents.clone(),
         };
 
         let mut ungranted = Session::new(
@@ -1169,6 +1171,7 @@ mod tests {
             blobs: base.blobs.clone(),
             kept_blobs: base.kept_blobs.clone(),
             fetcher: base.fetcher.clone(),
+            intents: base.intents.clone(),
         };
 
         for kind in [0u16, 3, 5, 10002, 10050, 19999] {

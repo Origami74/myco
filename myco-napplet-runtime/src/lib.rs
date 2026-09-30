@@ -58,6 +58,7 @@ pub use manifest::{
     is_napplet_kind, Archetype, NappletManifest, KINDS, KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT,
 };
 pub use nap::deliveries_for;
+pub use nap::intent::{IntentCatalog, IntentCatalogSnapshot, IntentHandler, NoIntents};
 pub use prelude::{
     render_for as render_prelude, PRELUDE_GLOBAL, SIGNING_TIMEOUT, SUPPLEMENT_GLOBAL,
 };
@@ -69,5 +70,5 @@ pub use seams::{
     StoreOnlySink, WorkScope,
 };
 pub use session::{Appearance, NappletIdentity, Session, IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
-pub use shell_link::{ShellAction, ToRuntime, ToShell};
+pub use shell_link::{ChooserCandidate, ShellAction, ToRuntime, ToShell};
 pub use shell_page::{shell_page, RUNTIME_OBJECT};

@@ -57,6 +57,9 @@ pub struct NapContext {
     /// nothing evicts. On a device `blobs` reads it too but writes fetches to
     /// the shell cache; with no cache the two are the same store.
     pub kept_blobs: Arc<dyn BlobStore>,
+    /// The installed-napplet catalog behind NAP-INTENT's `available` and
+    /// `handlers`. See [`nap::intent::IntentCatalog`].
+    pub intents: Arc<dyn nap::intent::IntentCatalog>,
 }
 
 /// What to do with an inbound message.
@@ -74,6 +77,12 @@ pub enum Outcome {
     /// [`LinkRequest::denied`](nap::link::LinkRequest::denied); left
     /// unanswered, the napplet's call times out.
     Link(nap::link::LinkRequest),
+    /// A valid NAP-INTENT `intent.invoke` for the host to resolve, open and
+    /// answer — only the host holds the catalog's windows and can ask the
+    /// user. See [`nap::intent`]. Answered with
+    /// [`IntentRequest::handled`](nap::intent::IntentRequest::handled) or
+    /// [`IntentRequest::failed`](nap::intent::IntentRequest::failed).
+    Intent(nap::intent::IntentRequest),
 }
 
 impl Outcome {
@@ -81,7 +90,7 @@ impl Outcome {
     pub fn envelopes(&self) -> &[Envelope] {
         match self {
             Self::Reply(envelopes) => envelopes,
-            Self::Ignore | Self::Link(_) => &[],
+            Self::Ignore | Self::Link(_) | Self::Intent(_) => &[],
         }
     }
 }
@@ -99,7 +108,9 @@ impl Outcome {
 pub fn needs_session(message: &Envelope) -> bool {
     matches!(
         (message.domain(), message.action()),
-        ("shell", _) | ("relay" | "mesh" | "outbox", "subscribe" | "close")
+        ("shell", _)
+            | ("relay" | "mesh" | "outbox", "subscribe" | "close")
+            | ("inc", "subscribe" | "unsubscribe")
     )
 }
 
@@ -176,6 +187,8 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
         "resource" => Outcome::Reply(nap::resource::handle(ctx, session, message).await),
         "link" => nap::link::handle(message),
         "theme" => Outcome::Reply(nap::theme::handle(session, message)),
+        "inc" => Outcome::Reply(nap::inc::handle(session, message)),
+        "intent" => nap::intent::handle(ctx, message).await,
         // Implemented, granted, established — and still unrouted. Reaching here
         // means the implemented set grew without a handler, which is a bug in
         // this crate rather than anything the napplet did.
