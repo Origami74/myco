@@ -2905,6 +2905,14 @@ pub(crate) const DEFAULT_NAPPLETS: &[DefaultNapplet] = &[
         expected: &["identity", "outbox", "relay", "resource", "theme"],
         new_installs_only: true,
     },
+    // d=simpleprofile: the `profile` role (NAP-INTENT), so tapping a person
+    // in Chronofeed opens it. Its published manifest declares these.
+    DefaultNapplet {
+        title: "Simple Profile",
+        pointer: "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqrtnd9khqmr9wpex7enfd3jsgxyu7t",
+        expected: &["identity", "inc", "outbox", "relay", "resource", "theme"],
+        new_installs_only: true,
+    },
 ];
 
 /// The expected permissions of the default napplet at `(author_npub, d_tag)`,

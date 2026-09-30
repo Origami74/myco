@@ -7,14 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **Wi-Fi Aware is on from the first launch where the phone supports it.** On
-  a fresh install the Bluetooth and Wi-Fi Aware permission requests were
-  launched back to back, and Android drops a second request while one is on
-  screen, so Aware's was never asked and the lane stayed off. Startup now asks
-  for both in one request, and any request made while a dialog is up is queued
-  and asked for when it closes.
+## [0.9.0] - 2026-09-30
 
 ### Added
 
@@ -28,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmation before another app opens. New installs list this as "Other
   apps" and "App to app"; apps already installed get it the next time they
   open, and it can be switched off per app.
-
 - **A cache for everything your apps look at.** Notes, profiles and pictures
   your apps fetch are now kept on the phone in a separate cache, so opening
   them again is instant and works offline, and paired phones nearby can get
@@ -39,7 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are never cached. Settings › Storage shows the cache and what this phone
   keeps separately, lets you set the cache size, and has a **Clear cache**
   button that empties it without touching anything kept.
-
 - **Apps can keep what they showed you, and pass it on.** A napplet can keep
   a note or picture on your phone so the cache never throws it away, and can
   send a note it showed you on to nearby phones or public relays again. It
@@ -47,28 +38,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   someone else's note as you. New installs list it on the install screen as
   "Keep on this phone"; apps already installed get it the next time they
   open, like other defaults, and it can be switched off per app.
+- **Chronofeed and Simple Profile come with Myco.** A chronological feed of
+  the people you follow, and a profile app that opens when you tap someone,
+  are installed with new installs of the app, next to DingDong and the
+  AppStore. Existing installs are left as they are.
 
 ### Changed
 
-- **Paired phones stay connected after a network change.** Since the fix for
-  the busy mesh reader, a phone whose tunnel restarted could keep the mesh
-  link up while no connection over it went through, so its Circle showed
-  nobody reachable. The reader now waits for packets without blocking the
-  restart.
-
+- **Names show up for everyone you follow.** When an app asked for notes and
+  profiles together, the phone's store handed back only as many events as the
+  notes were limited to, and the profiles were cut off. Each part of such a
+  request now gets its own limit.
+- **More names and pictures show up in apps.** Profiles are now also looked
+  for on the relays that collect them for everyone, so a person whose own
+  relays are unknown or down still shows with their name.
 - **Scrolling back in a feed keeps finding older notes.** When an app asked
   for a page of older notes and the phone held only a few of them, it got
   just those few, and the feed soon said there was nothing older. The phone
   now answers at once only when it has the whole page, and otherwise waits
   for the first relay that has more.
-- **Installing an app you already have offers to open it.** When you tap
-  install on an app that is already on your phone (from a shared link, a
-  scan, the AppStore or another app), Myco now says "<App> is already
-  installed" with an **Open** button, instead of an install screen with a
-  greyed-out button. It also works offline, when the app can't be looked up.
-  If a newer version is available, you get an **Update** button instead, and
-  your app's permissions stay as they are.
-
 - **Pictures in apps load faster.** Myco now asks nearby phones and the
   internet at the same time instead of one after the other, tries the server
   a picture link names first, reuses connections, and stops asking for a
@@ -76,6 +64,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   app's other requests, and pictures reach apps as raw bytes instead of
   being packed into text on the way, which kept feeds from scrolling
   smoothly.
+- **Apps can load files up to 64 MB.** Short videos and big pictures used to
+  be refused above 10 MB; the limit is now 64 MB, and slow downloads get
+  enough time to finish.
+- **Fewer relays turn Myco away.** Myco now keeps one connection to each
+  relay and sends everything over it, instead of opening a new one for every
+  request. Busy relays that limit connections no longer refuse it when an app
+  loads a feed.
+- **Apps show what your phone already has straight away.** When an app asks
+  for something this phone holds, it gets it at once instead of waiting up
+  to a second and a half for relays to maybe send a newer version; a newer
+  version still arrives and is kept for next time. Follow lists are now kept
+  on the phone like profiles, so a feed opens from your follows instantly.
 - **Apps and nearby phones get what Myco finds as it finds it.** Reads no
   longer wait for the slowest relay or the farthest phone: what this phone
   holds goes out at once, and each relay's and each nearby phone's answer is
@@ -83,33 +83,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   look up where people publish before it sees anything, a slow phone in the
   room no longer holds up the others, and a relay that answers slowly still
   counts for what it sent.
+- **Installing an app you already have offers to open it.** When you tap
+  install on an app that is already on your phone (from a shared link, a
+  scan, the AppStore or another app), Myco now says "<App> is already
+  installed" with an **Open** button, instead of an install screen with a
+  greyed-out button. It also works offline, when the app can't be looked up.
+  If a newer version is available, you get an **Update** button instead, and
+  your app's permissions stay as they are.
 - **Apps built with WebAssembly run.** Myco blocked apps from running the
   WebAssembly they ship with, so some showed "this host blocks WebAssembly".
   They run now, and still cannot reach the network on their own.
-- **Chronofeed comes with Myco.** A chronological feed of the people you
-  follow is installed with new installs of the app, next to DingDong and
-  the AppStore. Existing installs are left as they are.
-- **Apps can load files up to 64 MB.** Short videos and big pictures used to
-  be refused above 10 MB; the limit is now 64 MB, and slow downloads get
-  enough time to finish.
-- **Names show up for everyone you follow.** When an app asked for notes and
-  profiles together, the phone's store handed back only as many events as the
-  notes were limited to, and the profiles were cut off. Each part of such a
-  request now gets its own limit.
-- **Fewer relays turn Myco away.** Myco now keeps one connection to each
-  relay and sends everything over it, instead of opening a new one for every
-  request. Busy relays that limit connections no longer refuse it when an app
-  loads a feed.
-- **More names and pictures show up in apps.** Profiles are now also looked
-  for on the relays that collect them for everyone, so a person whose own
-  relays are unknown or down still shows with their name.
 - **Myco no longer keeps a processor core busy while the mesh is on.** The
-  mesh adapter's reader spun at full speed whenever the tunnel was up.
-- **Apps show what your phone already has straight away.** When an app asks
-  for something this phone holds, it gets it at once instead of waiting up
-  to a second and a half for relays to maybe send a newer version; a newer
-  version still arrives and is kept for next time. Follow lists are now kept
-  on the phone like profiles, so a feed opens from your follows instantly.
+  mesh adapter's reader spun at full speed whenever the tunnel was up; it now
+  sleeps until a packet arrives, and a tunnel restart after a network change
+  no longer leaves paired phones unable to reach each other.
 - **"Delete cache" is now "Clear local database".** It clears what this
   phone kept (except your pinned apps) and the cache, and asks first.
 - **Chat survives a restart until it expires.** Notes with an expiry time,

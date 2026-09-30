@@ -1,66 +1,94 @@
-# Myco v0.8.1
+# Myco v0.9.0
 
-**Released**: 2026-09-27
+**Released**: 2026-09-30
 
-v0.8.1 makes apps **fast** and **complete** when the public relays aren't cooperating.
+v0.9.0 turns Myco's apps into something you can live in: a **feed** that
+loads instantly and keeps scrolling, **apps that open each other**, and a
+**cache** that makes everything you've looked at fast and available offline.
 
-- Apps show what your phone already has straight away, instead of waiting for the slowest relay.
-- Apps published on their author's own relays are found.
-- Broken relays are left alone for a while instead of slowing every lookup.
-- Open apps keep receiving new posts while you look at them.
+- Chronofeed, a chronological feed of the people you follow, and Simple Profile come with new installs.
+- Apps can open each other by role: tap a person and your profile app opens.
+- Everything your apps look at is cached, instantly available and shared with your Circle.
+- Pictures load fast and feeds scroll smoothly.
 
-**No wire-format change from v0.8.0.** v0.8.1 and v0.8.0 phones pair and exchange apps and messages as before. Everything upgrades in place.
+**No wire-format change from v0.8.1.** v0.9.0 and v0.8.1 phones pair and
+exchange apps and messages as before. Everything upgrades in place.
 
 ## At a glance
 
-- **A smooth first run.** The AppStore that comes with Myco keeps working after it updates itself: preinstalled apps start with the permissions they're known to need, so a same-author update that asks for no more doesn't stop to ask. When an app does ask for something new, it asks over the app itself, not on Myco's main screen, and its Install button is no longer refused because of a question waiting elsewhere.
-- **Instant reopen.** An app that reads Nostr data (the AppStore, for one) shows what your phone already holds at once, and waits only a moment for relays that answer quickly, so a newer profile still wins. Relays that answer later aren't wasted: what they send is saved for next time.
-- **Apps are found where their author publishes.** Myco now looks on the relays an app's author lists as theirs, and on the index relays where people's relay lists live. "Could not find app" for napplets like Minesweeper is fixed.
-- **Broken relays don't slow you down.** A relay that refuses Myco, is down, or has a bad certificate is skipped for a minute at first, up to half an hour if it keeps failing. Losing signal, switching networks or a Wi-Fi login page never counts against a relay.
-- **One bad relay can't cut you off.** A single relay answering with an error used to make Myco believe the internet was down and stop using every public relay for half a minute. Now any answer from the internet counts as the internet working.
-- **Live views stay live.** Relays stay connected while an app is watching (a feed, a chat, someone's app list), so new events arrive as they're published.
-- **Fewer connections.** A view with dozens of people now connects to a handful of relays that reach each person twice, instead of every relay any of them listed (up to forty).
+- **Apps open each other by role.** An app can ask Myco to open "a profile",
+  "a note" or "a site" (NAP-INTENT). Myco opens the app you have for that
+  role and hands it what to show. With several candidates it asks ("Open
+  with…", with "Always use this"). **Settings › Default apps** lists your
+  choices. Only you can set them. An app that asks without a recent tap gets a
+  confirmation first. Myco itself opens sites, so "Open nsite → Myco" works.
+- **A cache for everything your apps look at.** Notes, profiles and pictures
+  your apps fetch are kept in a cache apart from what the phone keeps on
+  purpose: 500 MB of notes and 1.5 GB of files by default, with what you come
+  back to kept longest. Opening them again is instant and works offline, and
+  paired phones nearby can get them from you. **Settings › Storage** shows the
+  cache, sets its size and clears it.
+- **Apps can keep what they showed you.** A napplet can keep a note or
+  picture it showed you on your phone, or pass a note on to nearby phones or
+  relays. It only works for things the app was actually shown, and it never
+  signs someone else's note as you.
+- **Chronofeed and Simple Profile come with Myco** on new installs, next to
+  DingDong and the AppStore. Tapping a person in Chronofeed opens Simple
+  Profile. Existing installs are left as they are; both can be installed from
+  the AppStore.
 
-## On your phone
+## Faster and more complete
 
-- **Profiles and app listings you've seen are kept.** The next look is instant and works offline, and people in your Circle can get them from your phone. Nothing is installed and no app files are downloaded. "Delete cache" in Storage clears these copies. With a custom relay set, nothing is kept.
-- **Installed apps keep the version you have files for.** A newer listing that reaches your phone doesn't replace the version an installed app runs, or the one it shares with your Circle, until its files are here. "Delete cache" no longer breaks an app that has a newer version waiting.
+- **Names show up for everyone you follow.** A feed that asked for notes and
+  profiles together got the profiles cut off; each part of a request now gets
+  its own limit. Profiles are also looked for on the relays that collect them
+  for everyone, so people whose own relays are unknown or down still show
+  with their name.
+- **Feeds keep scrolling back.** A page of older notes waits for a relay when
+  the phone holds only part of it, instead of ending the feed about a week
+  back.
+- **Pictures load fast.** Nearby phones and the internet are asked at the
+  same time, the server a link names is tried first, connections are reused,
+  missing pictures aren't asked for again for ten minutes, and pictures reach
+  apps as raw bytes. Apps can load files up to 64 MB (was 10 MB), so short
+  videos play.
+- **One connection per relay.** Myco keeps a single connection to each relay
+  and sends every request over it, so relays that limit connections no longer
+  turn it away while a feed loads.
+- **Answers as they come.** What the phone holds goes out at once; each
+  relay's and each nearby phone's answer is passed on the moment it arrives.
+  No more waiting on the slowest relay, the farthest phone, or a lookup of
+  where someone publishes.
+- **Less battery.** The mesh adapter no longer keeps a processor core busy
+  while the mesh is on.
 
-## Accounts
+## Also
 
-- **A new guest gets better default relays**: relay.damus.io, relay.ditto.pub and relay.primal.net for posting and receiving, plus a direct-message relay list so other Nostr apps know where to send it private messages. Its profile and lists also go to four index relays, where other apps look people up.
-- **Guests made before this version keep their relay list.** Log out and start a new guest to get the new defaults. Accounts you log in to with an `nsec` or a signer app keep their own lists; Myco never creates or changes them.
+- **Installing an app you already have offers to open it**, or to update it
+  when a newer version is available, instead of a greyed-out install button.
+- **Apps built with WebAssembly run.** They still can't reach the network on
+  their own.
+- **Chat survives a restart** until it expires.
+- **"Delete cache" is now "Clear local database"**, and asks first.
 
 ## Known issues
 
-- **Profile pictures and app sizes in AppStore.** Napplets can only load files by their hash (`blossom:`); plain web images, including anything on nostr.build, show a placeholder, and an app page may show "Unknown" for size. `https:` image support is next. [#67](https://github.com/Origami74/myco/issues/67) covers finding Blossom servers properly.
-- **Busy apps still read some relays once instead of live.** An app with many open views can reach Myco's limit on live relay connections; past it, relays are read once rather than kept open. A shared connection per relay (roadmap N8) removes the limit.
-- **Paid relays.** Relays that require a paid account (nostr.wine, for one) refuse Myco's reads, so apps published only there can't be found.
-- **Open nsite windows and updates.** A napplet offers a restart when it's updated while open. An nsite doesn't yet, and an update can mix old and new files in an open nsite window until it reloads: [#71](https://github.com/Origami74/myco/issues/71).
-- **No "recently updated" mark on the Apps screen yet:** [#69](https://github.com/Origami74/myco/issues/69).
-- **A phone in your pocket finds nobody.** Myco winds its radios down when it isn't on screen.
-- **Wi-Fi Aware is shut off by deep Doze** on Android 13 and later after a long idle period: [#30](https://github.com/Origami74/myco/issues/30).
-- **A napplet's relay access is all-or-nothing,** and with the outbox grant it may name its own relays. Review the install sheet.
-
-## Getting it
-
-- **Android:** install the APK from the [v0.8.1 release](https://github.com/Origami74/myco/releases/tag/v0.8.1), or via [Zapstore](https://zapstore.dev/apps/app.myco).
-- **From source:** run `cd android && ./gradlew assembleDebug` from a checkout of the v0.8.1 tag, with fips on its `feat/multi-path-switchover` branch. See [CONTRIBUTING.md](https://github.com/Origami74/myco/blob/main/CONTRIBUTING.md) for build prerequisites.
-
-Phones don't need updating together.
-
-The full per-release change history lives in [CHANGELOG.md](https://github.com/Origami74/myco/blob/main/CHANGELOG.md). Issues and discussion are at [github.com/Origami74/myco](https://github.com/Origami74/myco).
-
-## Contributors
-
-Thanks to [@Origami74](https://github.com/Origami74) for maintaining the project, and to everyone who tested on real phones in real rooms.
-
-<!--
-This file is published verbatim as the GitHub Release body by
-.github/workflows/release.yml — the leading `# Myco vX.Y.Z` heading and
-`**Released**:` line are stripped, and the auto-generated "What's Changed"
-section is appended below. Two consequences when writing the next one:
-  1. Keep the version in the H1 matching the tag, or the workflow falls back
-     to generated notes rather than publishing stale text.
-  2. Use absolute links — relative paths 404 on a release page.
--->
+- **Web pictures in apps.** Napplets load files by their hash (`blossom:`).
+  Plain web images, including many profile pictures, show a placeholder (🥀 in
+  Chronofeed). `https:` image support is still to come;
+  [#67](https://github.com/Origami74/myco/issues/67) covers Blossom server
+  discovery.
+- **Few apps declare a role yet.** Opening "a profile" needs a profile app
+  whose manifest declares the `profile` archetype (`napplet:profile/open`),
+  such as Simple Profile; other profile napplets don't yet. Messages between
+  apps other than opening by role (`inc.emit`) aren't routed yet.
+- **A custom relay is read, not streamed.** With a custom relay set, reads wait
+  for it rather than streaming as they arrive.
+- **Big files are held in memory** while they load (up to 64 MB each).
+- **Paid relays.** Relays that require a paid account (nostr.wine, for one)
+  refuse Myco's reads, so apps published only there can't be found.
+- **Open nsite windows and updates.** An update can mix old and new files in
+  an open nsite window until it reloads:
+  [#71](https://github.com/Origami74/myco/issues/71).
+- **No "recently updated" mark on the Apps screen yet:**
+  [#69](https://github.com/Origami74/myco/issues/69).
