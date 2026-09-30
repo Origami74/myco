@@ -523,8 +523,8 @@ impl OutboxService {
                         timeout,
                     )
                     .await;
-                // The pool returns events as received; the caller verifies.
-                Some(events.into_iter().filter(|e| e.verify().is_ok()).collect())
+                // Verified by the pool at ingress.
+                Some(events)
             }
             RelayLane::Internet { url } => {
                 // On the skip list: finished, nothing, at once — not even
@@ -540,22 +540,32 @@ impl OutboxService {
                     .iter()
                     .filter_map(|f| serde_json::to_value(f).ok())
                     .collect();
+                // Collected as the relay sends them, so a relay that times
+                // out before `EOSE` still answers with what it sent.
+                let got = Mutex::new(Vec::new());
                 let dial = async {
                     if !self.may_dial(url).await {
                         return None;
                     }
-                    Some(crate::ip_source::query_relay_filters(url, values).await)
+                    Some(
+                        crate::ip_source::query_relay_each(url, values, |ev| {
+                            got.lock().unwrap().push(ev)
+                        })
+                        .await,
+                    )
                 };
-                match crate::relay_health::timeout(url, timeout, dial).await {
+                let outcome = crate::relay_health::timeout(url, timeout, dial).await;
+                let got = got.into_inner().unwrap();
+                match outcome {
                     Ok(None) => None,
-                    Ok(Some(Ok(events))) => Some(events),
+                    Ok(Some(Ok(()))) => Some(got),
                     Ok(Some(Err(e))) => {
                         tracing::debug!(url, error = %e, "outbox: relay query failed");
-                        None
+                        (!got.is_empty()).then_some(got)
                     }
                     Err(_) => {
-                        tracing::debug!(url, "outbox: relay query timed out");
-                        None
+                        tracing::debug!(url, kept = got.len(), "outbox: relay query timed out");
+                        (!got.is_empty()).then_some(got)
                     }
                 }
             }
@@ -1417,17 +1427,37 @@ impl OutboxService {
             let heard_all_from =
                 nostr::Timestamp::now() - Duration::from_secs(RECONNECT_OVERLAP_SECS);
             match &lane {
-                RelayLane::Mesh { .. } => {
-                    let answers = self
-                        .run_round(
-                            std::slice::from_ref(&lane),
-                            &asked,
-                            PULL_TIMEOUT,
-                            Deliver::Store,
-                        )
-                        .await;
-                    if answers.first().is_some_and(|(_, events)| events.is_some()) {
-                        since = Some(heard_all_from);
+                RelayLane::Mesh { url } => {
+                    // Each event lands as the peer sends it; a pull that ends
+                    // before its deadline heard the peer out.
+                    if self.allowed(&lane) {
+                        if let Some(npub) = mesh_relay_npub(url) {
+                            let raw: Vec<serde_json::Value> = asked
+                                .iter()
+                                .filter_map(|f| serde_json::to_value(f).ok())
+                                .collect();
+                            let mut events = self.content.peer_relays().request_stream(
+                                &npub,
+                                &crate::ip_source::mesh_relay_url(&npub),
+                                raw,
+                                None,
+                            );
+                            let deadline = tokio::time::Instant::now() + PULL_TIMEOUT;
+                            let heard_out = loop {
+                                match tokio::time::timeout_at(deadline, events.recv()).await {
+                                    Ok(Some(event)) => {
+                                        if matches_any(&asked, &event) {
+                                            self.keep_pulled(std::slice::from_ref(&event)).await;
+                                        }
+                                    }
+                                    Ok(None) => break true,
+                                    Err(_) => break false,
+                                }
+                            };
+                            if heard_out {
+                                since = Some(heard_all_from);
+                            }
+                        }
                     }
                     tokio::time::sleep(MESH_REPULL_EVERY + jitter(MESH_REPULL_EVERY / 3)).await;
                     continue;

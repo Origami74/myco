@@ -325,32 +325,39 @@ impl AuthorOutbox {
                 })
             })
             .collect();
-        let answers = join_all(relays.iter().map(|url| {
-            let filters = filters.clone();
+        // Each list is remembered the moment any relay sends it, so a plan
+        // waiting on it goes ahead on the first relay to have it, not the
+        // slowest to finish.
+        let (found, mut arriving) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let asked = join_all(relays.iter().map(|url| {
+            let (filters, found) = (filters.clone(), found.clone());
             async move {
                 // Configured and indexer relays: not resolved first. A relay
                 // someone else named goes through the caller's private-host
                 // guard instead (see `OutboxService::fetch_relay_lists_now`).
-                match crate::relay_health::timeout(
-                    url,
-                    LIST_FETCH_TIMEOUT,
-                    query_relay_filters(url, filters),
+                matches!(
+                    crate::relay_health::timeout(
+                        url,
+                        LIST_FETCH_TIMEOUT,
+                        query_relay_each(url, filters, |ev| {
+                            let _ = found.send(ev);
+                        }),
+                    )
+                    .await,
+                    Ok(Ok(()))
                 )
-                .await
-                {
-                    Ok(Ok(events)) => Some(events),
-                    _ => None,
+            }
+        }));
+        drop(found);
+        let remember = async {
+            while let Some(ev) = arriving.recv().await {
+                if ev.kind == nostr::Kind::RelayList && authors.contains(&ev.pubkey) {
+                    self.remember(ev).await;
                 }
             }
-        }))
-        .await;
-        let complete = answers.iter().all(Option::is_some);
-        for ev in answers.into_iter().flatten().flatten() {
-            if ev.kind == nostr::Kind::RelayList && authors.contains(&ev.pubkey) {
-                self.remember(ev).await;
-            }
-        }
-        complete
+        };
+        let (answered, ()) = futures_util::future::join(asked, remember).await;
+        answered.into_iter().all(|ok| ok)
     }
 
     /// Remember as a miss each of `authors` with no list stored here — by
@@ -1130,6 +1137,20 @@ pub async fn query_relay_filters(
     url: &str,
     filters: Vec<serde_json::Value>,
 ) -> anyhow::Result<Vec<Event>> {
+    let mut events = Vec::new();
+    query_relay_each(url, filters, |event| events.push(event)).await?;
+    Ok(events)
+}
+
+/// As [`query_relay_filters`], handing each verified event to `each` as the
+/// relay sends it rather than once at `EOSE`. A caller that bounds this with
+/// a timeout keeps what `each` was given before it — a relay that sent two
+/// hundred events and never reached `EOSE` still sent two hundred events.
+pub async fn query_relay_each(
+    url: &str,
+    filters: Vec<serde_json::Value>,
+    mut each: impl FnMut(Event),
+) -> anyhow::Result<()> {
     // A relay on the skip list is not dialled: it answers "nothing" at once,
     // so a round never waits on it. See `relay_health`.
     crate::relay_health::check(url)?;
@@ -1143,7 +1164,6 @@ pub async fn query_relay_filters(
     ws.send(Message::Text(serde_json::Value::Array(req).to_string()))
         .await?;
 
-    let mut events = Vec::new();
     while let Some(msg) = ws.next().await {
         match msg {
             Ok(Message::Text(txt)) => {
@@ -1159,7 +1179,7 @@ pub async fn query_relay_filters(
                                 // do not each have to remember to check. See
                                 // `reference/thinning-custom-relay.md` (D7).
                                 if event.verify().is_ok() {
-                                    events.push(event);
+                                    each(event);
                                 }
                             }
                         }
@@ -1173,7 +1193,7 @@ pub async fn query_relay_filters(
         }
     }
     let _ = ws.send(Message::Close(None)).await;
-    Ok(events)
+    Ok(())
 }
 
 #[async_trait]

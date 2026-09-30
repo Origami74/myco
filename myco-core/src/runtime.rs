@@ -494,6 +494,7 @@ impl AppRuntime {
             // through a capability has no socket to arrive on, and it must
             // still reach this device's subscriptions and the mesh.
             *relay_hub.lock().unwrap() = Some(hub.clone());
+            content.set_hub(&hub);
 
             // Mesh socket: IPV6_V6ONLY `[::]:4870` so it doesn't collide with the
             // loopback bind and is reachable by peers at `ws://<npub>.fips:4870`.

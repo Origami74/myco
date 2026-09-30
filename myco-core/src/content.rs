@@ -405,6 +405,9 @@ const UPDATE_CHECK_AUTHOR_RELAYS: usize = 12;
 /// arrive only ever shortens this.
 const PULL_HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// How many events passing through a pull are stored together.
+const PULL_REMEMBER_BATCH: usize = 32;
+
 /// How long napplet-driven internet lanes are skipped after every public relay
 /// failed in one round. Short: a phone walking back into Wi-Fi should not wait
 /// long to notice.
@@ -530,6 +533,10 @@ pub struct Content {
     cache_relay: Arc<dyn RelayBackend>,
     /// The shell's event cache, apart from the relay (`myco-cache`).
     event_cache: Arc<myco_cache::EventCache>,
+    /// The relay hub, once the runtime has built it: what a pull hands its
+    /// events to so live subscriptions see them as they land. Weak — the hub
+    /// holds this `Content` through its gossiper and gate.
+    hub: Mutex<Option<std::sync::Weak<crate::mesh_relay::RelayHub>>>,
     /// The custom relay, when one is configured — kept so its reachability can
     /// be reported. A backend that has gone away otherwise looks like an app
     /// with no content, every site missing and no explanation.
@@ -953,6 +960,7 @@ impl Content {
             outbound_pairs: Mutex::new(outbound_pairs),
             outbound_pairs_path,
             peer_relays: Arc::new(crate::peer_relay::PeerRelayPool::new()),
+            hub: Mutex::new(None),
             active_local_subs: Mutex::new(HashMap::new()),
             prev_pool_connected: Mutex::new(HashSet::new()),
             pending_updates: Mutex::new(HashMap::new()),
@@ -2418,24 +2426,49 @@ impl Content {
             return;
         };
         let url = crate::ip_source::mesh_relay_url(npub);
-        let mut stored = 0u32;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        let hub = self.hub();
+        // Every open subscription at once, each event taken as the peer sends
+        // it — through the hub, so the client whose subscription this is sees
+        // what it missed without asking again.
+        let (tx, mut merged) = tokio::sync::mpsc::unbounded_channel();
         for filters in subs {
-            let events = self
-                .peer_relays
-                .request(npub, &url, filters, std::time::Duration::from_secs(15))
-                .await;
-            for ev in events {
-                // Signatures were checked by the pool at ingress. Storing is
-                // idempotent, so this counts events pulled, not new arrivals.
-                // Backlog, not a keep: the cache, bar the kinds kept as seen.
-                if self.cache_relay.publish(ev).await.is_ok() {
-                    stored += 1;
+            let mut events = self.peer_relays.request_stream(npub, &url, filters, None);
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some(ev) = events.recv().await {
+                    if tx.send(ev).is_err() {
+                        return;
+                    }
                 }
+            });
+        }
+        drop(tx);
+        let mut stored = 0u32;
+        while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, merged.recv()).await {
+            // Signatures were checked by the pool at ingress. Backlog, not a
+            // keep: the cache, bar the kinds kept as seen.
+            let accepted = match &hub {
+                Some(hub) => hub.accept_pulled(ev).await.is_ok(),
+                None => self.cache_relay.publish(ev).await.is_ok(),
+            };
+            if accepted {
+                stored += 1;
             }
         }
         if stored > 0 {
             tracing::debug!(npub, stored, "resynced backlog from reappeared peer");
         }
+    }
+
+    /// Hand pulls the relay hub, so what they bring reaches live
+    /// subscriptions. Called once, when the runtime builds the hub.
+    pub fn set_hub(&self, hub: &Arc<crate::mesh_relay::RelayHub>) {
+        *self.hub.lock().unwrap() = Some(Arc::downgrade(hub));
+    }
+
+    fn hub(&self) -> Option<Arc<crate::mesh_relay::RelayHub>> {
+        self.hub.lock().unwrap().as_ref().and_then(|h| h.upgrade())
     }
 
     /// One keepwarm pass (driven by a runtime tick): ensure a live pooled connection
@@ -3573,18 +3606,40 @@ impl Content {
         self.peer_relays.send(npub, &url, frame);
     }
 
-    /// Pull plane: forward a REQ's filters to connected Circle peers and
-    /// aggregate their matching events. `meta` is the incoming envelope, already
-    /// decremented, so the hop budget and query id carry onward while the filters
-    /// stay canonical NIP-01. `exclude` is the requester's mesh address
-    /// (split-horizon). Per-peer queries run in parallel, each bounded by the
-    /// budget that arrived so a dead relay can't stall discovery.
+    /// Pull plane, collected: every event [`Self::pull_from_peers_stream`]
+    /// brings, once every peer has finished or run out of budget. For a
+    /// caller that needs the whole answer; one that can use events as they
+    /// come takes the stream.
     pub async fn pull_from_peers(
-        &self,
+        self: &Arc<Self>,
         filters: Vec<serde_json::Value>,
         meta: crate::mesh_wire::MeshMeta,
         exclude: Option<std::net::IpAddr>,
     ) -> Vec<Event> {
+        let mut events = self.pull_from_peers_stream(filters, meta, exclude);
+        let mut out = Vec::new();
+        while let Some(event) = events.recv().await {
+            out.push(event);
+        }
+        out
+    }
+
+    /// Pull plane: forward a REQ's filters to connected Circle peers and
+    /// hand on each matching event the moment a peer sends it — every peer's
+    /// answer merged into one stream, which ends when the last peer is done.
+    /// `meta` is the incoming envelope, already decremented, so the hop
+    /// budget and query id carry onward while the filters stay canonical
+    /// NIP-01. `exclude` is the requester's mesh address (split-horizon).
+    /// Each peer is bounded by the budget that arrived, so a dead relay can't
+    /// stall discovery — and the nearest peer's answer is never held for the
+    /// slowest's.
+    pub fn pull_from_peers_stream(
+        self: &Arc<Self>,
+        filters: Vec<serde_json::Value>,
+        meta: crate::mesh_wire::MeshMeta,
+        exclude: Option<std::net::IpAddr>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         // The filters go out untouched — hops, query id, and budget ride the
         // envelope. `meta` is the *incoming* one, already decremented, so the
         // query id survives the hop and every node downstream serves it once.
@@ -3592,33 +3647,44 @@ impl Content {
         // All filters ride in one REQ per peer over the shared connection (the relay
         // any-matches across them), so a pull is a single round-trip, not one socket
         // per filter.
-        let pool = &self.peer_relays;
-        let queries = self.circle_npubs().into_iter().filter_map(|npub| {
-            let peer = fips::PeerIdentity::from_npub(&npub).ok()?;
+        for npub in self.circle_npubs() {
+            let Ok(peer) = fips::PeerIdentity::from_npub(&npub) else {
+                continue;
+            };
             let ip = std::net::IpAddr::V6(peer.address().to_ipv6());
             if exclude == Some(ip) {
-                return None;
+                continue;
             }
             let url = crate::ip_source::mesh_relay_url(&npub);
-            let filters = filters.clone();
-            let meta = meta.clone();
             // Wait only as long as the budget that arrived allows, not a fresh
             // full-length timer. Otherwise this hop's window sits *inside* the
             // one above it, and a peer further out returns after the requester
             // has already given up (D8).
-            let timeout = meta.hop_timeout(PULL_HOP_TIMEOUT);
-            Some(async move {
-                pool.request_with(&npub, &url, filters, Some(meta), timeout)
-                    .await
-            })
-        });
-
-        let events: Vec<Event> = join_all(queries).await.into_iter().flatten().collect();
-        // Passing through on their way to the peer that asked: keep the
-        // profiles, relay lists and manifests, and cache the rest, so the next
-        // ask stops here. Verified by the pool at ingress.
-        self.remember(&events);
-        events
+            let deadline = tokio::time::Instant::now() + meta.hop_timeout(PULL_HOP_TIMEOUT);
+            let mut events =
+                self.peer_relays
+                    .request_stream(&npub, &url, filters.clone(), Some(meta.clone()));
+            let (this, tx) = (self.clone(), tx.clone());
+            tokio::spawn(async move {
+                // Passing through on their way to whoever asked: keep the
+                // profiles, relay lists and manifests, and cache the rest, so
+                // the next ask stops here — in small batches, not an LMDB
+                // write per event. Verified by the pool at ingress.
+                let mut passing = Vec::new();
+                while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
+                    passing.push(event.clone());
+                    if passing.len() >= PULL_REMEMBER_BATCH {
+                        this.remember(&passing);
+                        passing.clear();
+                    }
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                this.remember(&passing);
+            });
+        }
+        rx
     }
 
     // --- nsite updates (docs/design/nsite/nsite-updates.md) ---

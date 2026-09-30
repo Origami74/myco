@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   app's other requests, and pictures reach apps as raw bytes instead of
   being packed into text on the way, which kept feeds from scrolling
   smoothly.
+- **Apps and nearby phones get what Myco finds as it finds it.** Reads no
+  longer wait for the slowest relay or the farthest phone: what this phone
+  holds goes out at once, and each relay's and each nearby phone's answer is
+  passed on the moment it arrives. An app no longer waits seconds for Myco to
+  look up where people publish before it sees anything, a slow phone in the
+  room no longer holds up the others, and a relay that answers slowly still
+  counts for what it sent.
 - **Myco no longer keeps a processor core busy while the mesh is on.** The
   mesh adapter's reader spun at full speed whenever the tunnel was up.
 - **Apps show what your phone already has straight away.** When an app asks

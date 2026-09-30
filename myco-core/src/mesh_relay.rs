@@ -71,22 +71,23 @@ pub trait Gossiper: Send + Sync {
 
     /// The **pull plane**, forwarding half: a mesh peer asked us with hops left,
     /// so pass its filters to our own circle peers carrying a decremented
-    /// hop budget and return their matching events to fold into the backlog before
-    /// `EOSE`. `exclude` is the requester's mesh address (split-horizon — never
-    /// forward straight back to it).
+    /// hop budget, and stream back their matching events as they arrive — each
+    /// is sent on to the asking peer at once, and its `EOSE` follows when the
+    /// stream ends. `exclude` is the requester's mesh address (split-horizon —
+    /// never forward straight back to it).
     ///
     /// Only ever called for a **mesh-origin** `REQ`. A loopback client cannot
     /// reach this, so its `EOSE` never waits on a peer; the core drives multi-hop
     /// pull itself, through the peer pool. The default does nothing, so a relay
     /// with no gossiper stays single-hop. See `docs/design/core/event-gossip.md`
     /// and `reference/thinning-custom-relay.md` (D8).
-    async fn on_req(
+    fn on_req(
         &self,
         _filters: Vec<serde_json::Value>,
         _meta: crate::mesh_wire::MeshMeta,
         _exclude: Option<IpAddr>,
-    ) -> Vec<Event> {
-        Vec::new()
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
+        tokio::sync::mpsc::unbounded_channel().1
     }
 
     /// A **local** (loopback / in-app) client opened a `REQ`. The implementor
@@ -641,13 +642,22 @@ async fn handle_ws(socket: WebSocket, hub: Arc<RelayHub>, peer_ip: IpAddr) {
     let mut live = hub.live.subscribe();
     // Active subscriptions on this connection: sub_id -> its filters.
     let mut subs: HashMap<String, Vec<Filter>> = HashMap::new();
+    // Frames produced off this loop — a forwarded pull's events as peers send
+    // them — so the loop never waits on a peer and keeps answering pings and
+    // feeding live subscriptions meanwhile.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     'conn: loop {
         tokio::select! {
+            Some(frame) = out_rx.recv() => {
+                if ws_tx.send(Message::text(frame)).await.is_err() {
+                    break 'conn;
+                }
+            }
             incoming = ws_rx.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                        for reply in handle_client_frame(text.as_str(), &hub, origin, peer_ip, conn_id, &mut subs).await {
+                        for reply in handle_client_frame(text.as_str(), &hub, origin, peer_ip, conn_id, &mut subs, &out_tx).await {
                             if ws_tx.send(Message::text(reply)).await.is_err() {
                                 break 'conn;
                             }
@@ -735,6 +745,7 @@ async fn handle_client_frame(
     peer_ip: IpAddr,
     conn_id: u64,
     subs: &mut HashMap<String, Vec<Filter>>,
+    out: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Vec<String> {
     let Ok(frame) = serde_json::from_str::<serde_json::Value>(text) else {
         return Vec::new();
@@ -812,28 +823,23 @@ async fn handle_client_frame(
 
             // Stored backlog: any-match across the REQ's filters, newest first.
             let mut events: Vec<Event> = hub.store.query(&filters).await.unwrap_or_default();
-
-            // Forwarding half of the pull plane: a peer asked with hops left, so
-            // fold in our own peers' matching events before answering. Only a mesh
-            // REQ reaches here, so a local client's `EOSE` is never held up by a
-            // slow or unreachable peer — it arrives at local-store speed, and
-            // anything a peer delivers later reaches the client through the live
-            // subscription instead.
-            if !repeat {
-                if let Some(next) = hop.next_hop() {
-                    if let Some(gossip) = hub.gossip.clone() {
-                        // `next` carries the incoming query id onward, so every
-                        // node downstream serves this query once.
-                        let remote = gossip
-                            .on_req(raw_filters.clone(), next, Some(peer_ip))
-                            .await;
-                        events.extend(remote);
-                    }
-                }
-            }
-
             events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
             events.dedup_by(|a, b| a.id == b.id);
+
+            // Forwarding half of the pull plane: a peer asked with hops left, so
+            // our own peers are asked too, and each event they send goes on to
+            // the asker the moment it arrives — the stored backlog is not held
+            // for them, and neither is this connection. The `EOSE` follows the
+            // last of them. Only a mesh REQ reaches here, so a local client's
+            // `EOSE` always arrives at local-store speed, and anything a peer
+            // delivers later reaches it through the live subscription instead.
+            let remote = (!repeat)
+                .then(|| hop.next_hop())
+                .flatten()
+                .zip(hub.gossip.clone())
+                // `next` carries the incoming query id onward, so every node
+                // downstream serves this query once.
+                .map(|(next, gossip)| gossip.on_req(raw_filters.clone(), next, Some(peer_ip)));
 
             // Keep the subscription open so matching new events stream live.
             subs.insert(sub_id.clone(), filters);
@@ -849,12 +855,32 @@ async fn handle_client_frame(
                 }
             }
 
-            let mut out: Vec<String> = events
+            let mut replies: Vec<String> = events
                 .iter()
                 .map(|e| serde_json::json!(["EVENT", sub_id, e]).to_string())
                 .collect();
-            out.push(serde_json::json!(["EOSE", sub_id]).to_string());
-            out
+            match remote {
+                Some(mut remote) => {
+                    let sent: std::collections::HashSet<nostr::EventId> =
+                        events.iter().map(|e| e.id).collect();
+                    let (out, sub_id) = (out.clone(), sub_id.clone());
+                    tokio::spawn(async move {
+                        let mut sent = sent;
+                        while let Some(event) = remote.recv().await {
+                            if !sent.insert(event.id) {
+                                continue;
+                            }
+                            let frame = serde_json::json!(["EVENT", sub_id, event]).to_string();
+                            if out.send(frame).is_err() {
+                                return;
+                            }
+                        }
+                        let _ = out.send(serde_json::json!(["EOSE", sub_id]).to_string());
+                    });
+                }
+                None => replies.push(serde_json::json!(["EOSE", sub_id]).to_string()),
+            }
+            replies
         }
         Some("EVENT") => {
             let Some(event_value) = array.get(1) else {
@@ -1231,7 +1257,8 @@ mod tests {
         let frame = serde_json::json!(["EVENT", theirs]).to_string();
         let peer: IpAddr = "fd00::7".parse().unwrap();
         let mut subs = HashMap::new();
-        handle_client_frame(&frame, &hub, Origin::Mesh, peer, 1, &mut subs).await;
+        let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_client_frame(&frame, &hub, Origin::Mesh, peer, 1, &mut subs, &out).await;
         assert!(
             hub.rebroadcast_local(theirs.clone(), 2).await.is_err(),
             "a napplet carried on what the peer's grant stopped"
@@ -1441,7 +1468,8 @@ mod tests {
             let hub = RelayHub::new(Arc::new(RelayStore::in_memory()), Some(cap.clone()));
             let mut subs = HashMap::new();
             let peer: IpAddr = "fd00::9".parse().unwrap();
-            handle_client_frame(frame, &hub, Origin::Mesh, peer, 0, &mut subs).await;
+            let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+            handle_client_frame(frame, &hub, Origin::Mesh, peer, 0, &mut subs, &out).await;
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             let seen = cap.0.lock().unwrap().clone();
             assert_eq!(seen.len(), 1, "the event was accepted exactly once");
@@ -1494,14 +1522,14 @@ mod tests {
         #[async_trait]
         impl Gossiper for CountReq {
             async fn on_event(&self, _event: Event, _inbound: Inbound) {}
-            async fn on_req(
+            fn on_req(
                 &self,
                 _filters: Vec<serde_json::Value>,
                 _meta: crate::mesh_wire::MeshMeta,
                 _exclude: Option<IpAddr>,
-            ) -> Vec<Event> {
+            ) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
                 *self.0.lock().unwrap() += 1;
-                Vec::new()
+                tokio::sync::mpsc::unbounded_channel().1
             }
         }
 
@@ -1516,15 +1544,23 @@ mod tests {
         // circle wired A–B, B–C, C–A.
         for (i, peer) in ["fd00::1", "fd00::2", "fd00::3"].iter().enumerate() {
             let mut subs = HashMap::new();
-            let out = handle_client_frame(
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut out = handle_client_frame(
                 &query,
                 &hub,
                 Origin::Mesh,
                 peer.parse().unwrap(),
                 i as u64,
                 &mut subs,
+                &tx,
             )
             .await;
+            drop(tx);
+            while let Ok(Some(frame)) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await
+            {
+                out.push(frame);
+            }
             assert!(
                 out.iter().any(|f| f.contains("EOSE")),
                 "every arrival is still answered from our own store"
@@ -1536,6 +1572,78 @@ mod tests {
             1,
             "the query is fanned out once, not once per path"
         );
+    }
+
+    /// A mesh REQ with hops left answers from the store at once, hands on a
+    /// peer's event the moment it arrives, and sends `EOSE` only after the
+    /// forwarded pull ends — the handler never waits on the peer.
+    #[tokio::test]
+    async fn a_forwarded_pull_streams_behind_the_stored_backlog() {
+        use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+        struct Slow(std::sync::Mutex<Option<UnboundedReceiver<Event>>>);
+        #[async_trait]
+        impl Gossiper for Slow {
+            async fn on_event(&self, _event: Event, _inbound: Inbound) {}
+            fn on_req(
+                &self,
+                _filters: Vec<serde_json::Value>,
+                _meta: crate::mesh_wire::MeshMeta,
+                _exclude: Option<IpAddr>,
+            ) -> UnboundedReceiver<Event> {
+                self.0.lock().unwrap().take().unwrap()
+            }
+        }
+
+        let keys = Keys::generate();
+        let held = chat_event(&keys, "mesh", "held here");
+        let far = chat_event(&keys, "mesh", "from two hops out");
+        let (peer_tx, peer_rx): (UnboundedSender<Event>, _) = unbounded_channel();
+        let store = Arc::new(RelayStore::in_memory());
+        store.publish(held.clone()).await.unwrap();
+        let hub = RelayHub::new(
+            store,
+            Some(Arc::new(Slow(std::sync::Mutex::new(Some(peer_rx))))),
+        );
+
+        let query = crate::mesh_wire::wrap(
+            &crate::mesh_wire::MeshMeta::pull(2, "q-stream", 10_000),
+            serde_json::json!(["REQ", "s1", { "kinds": [held.kind.as_u16()] }]),
+        );
+        let (out, mut rx) = unbounded_channel();
+        let mut subs = HashMap::new();
+        let started = std::time::Instant::now();
+        let inline = handle_client_frame(
+            &query,
+            &hub,
+            Origin::Mesh,
+            "fd00::5".parse().unwrap(),
+            0,
+            &mut subs,
+            &out,
+        )
+        .await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert_eq!(
+            inline.len(),
+            1,
+            "the stored event, and no EOSE yet: {inline:?}"
+        );
+        assert!(inline[0].contains(&held.id.to_hex()));
+
+        peer_tx.send(held.clone()).unwrap(); // already sent: not repeated
+        peer_tx.send(far.clone()).unwrap();
+        let next = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(next.contains(&far.id.to_hex()), "{next}");
+        drop(peer_tx);
+        let last = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(last.contains("EOSE"), "{last}");
     }
 
     /// The two boundaries, asserted rather than left as a convention.
@@ -1728,15 +1836,19 @@ mod tests {
         #[async_trait]
         impl Gossiper for Hang {
             async fn on_event(&self, _event: Event, _inbound: Inbound) {}
-            async fn on_req(
+            fn on_req(
                 &self,
                 _filters: Vec<serde_json::Value>,
                 _meta: crate::mesh_wire::MeshMeta,
                 _exclude: Option<IpAddr>,
-            ) -> Vec<Event> {
+            ) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
                 *self.0.lock().unwrap() += 1;
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                Vec::new()
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    drop(tx);
+                });
+                rx
             }
         }
 
