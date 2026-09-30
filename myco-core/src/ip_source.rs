@@ -13,11 +13,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use nostr::{Event, PublicKey};
 use nsite_deck::seams::PeerSource;
 use nsite_deck::{kind_for, sha256_hex};
-use tokio_tungstenite::tungstenite::Message;
 
 /// A small, sensible default set of public relays that carry nsite manifests.
 ///
@@ -964,57 +963,16 @@ pub(crate) fn random_bytes(n: usize) -> Vec<u8> {
     out
 }
 
-/// Publish one signed event to one relay: connect, send `EVENT`, wait for the
-/// relay's `OK`, close. `Ok(true)` means accepted, `Ok(false)` means the relay
-/// said no (the message is logged), `Err` means it never answered. Bound the
-/// whole call with a timeout at the call site — a dead relay must not hold a
-/// fan-out task open.
+/// Publish one signed event to one relay and wait for its `OK`. `Ok(true)`
+/// means accepted, `Ok(false)` means the relay said no (the message is
+/// logged), `Err` means it never answered. Bound the whole call with a
+/// timeout at the call site — a dead relay must not hold a fan-out task open.
 ///
-/// One-shot on purpose: the internet pool is written to rarely (a napplet's
-/// publish) and read from through [`query_relay`], so a held-open socket per
-/// public relay would cost more than it saves. The custom-relay backend
-/// (`remote_backend.rs`) keeps one open because the gateway hits it per page.
+/// Over the shared relay pool (`relay_pool`): the relay's one connection,
+/// opened if nothing holds it yet.
 pub async fn publish_to_relay(url: &str, event: &Event) -> anyhow::Result<bool> {
-    crate::relay_health::check(url)?;
-    let connected = tokio_tungstenite::connect_async(url)
-        .await
-        .map_err(anyhow::Error::from);
-    crate::relay_health::record_ws(url, &connected);
-    let (mut ws, _) = connected?;
-    let frame = serde_json::json!(["EVENT", event]);
-    ws.send(Message::Text(frame.to_string())).await?;
-
-    let wanted = event.id.to_hex();
-    let mut verdict: anyhow::Result<bool> = Err(anyhow::anyhow!("relay closed without an OK"));
-    while let Some(msg) = ws.next().await {
-        match msg {
-            Ok(Message::Text(txt)) => {
-                let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) else {
-                    continue;
-                };
-                if val.get(0).and_then(|v| v.as_str()) != Some("OK")
-                    || val.get(1).and_then(|v| v.as_str()) != Some(wanted.as_str())
-                {
-                    continue; // NOTICE, AUTH, an OK for something else
-                }
-                let accepted = val.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
-                if !accepted {
-                    let why = val.get(3).and_then(|v| v.as_str()).unwrap_or("");
-                    tracing::debug!(url, event = %wanted, why, "relay refused the event");
-                }
-                verdict = Ok(accepted);
-                break;
-            }
-            Ok(Message::Close(_)) | Err(_) => break,
-            Ok(_) => {} // ping/pong/binary
-        }
-    }
-    let _ = ws.send(Message::Close(None)).await;
-    verdict
+    crate::relay_pool::publish(url, event).await
 }
-
-/// How long [`stream_relay_filters`] waits for the connection to come up.
-pub(crate) const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Keep a `REQ` open on `url` and send every event it delivers — the stored
 /// ones and then the live ones — to `out`, verified, until the relay closes
@@ -1023,9 +981,9 @@ pub(crate) const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// The long-lived half of a napplet's subscription: a feed napplet reads a
 /// subscription as an endless stream, and a relay that has a note published
 /// in an hour must deliver it in an hour, not never. Reconnecting is the
-/// caller's (with its backoff); this is one connection's life. Returns `Ok`
-/// when the connection ended on its own after it was up, `Err` when it could
-/// not be set up.
+/// caller's (with its backoff); this is one subscription's life. Returns `Ok`
+/// when the relay or the reader ended it, `Err` when it could not be set up
+/// or the connection failed.
 ///
 /// `saw_eose` is set when the relay said its stored events were over — the
 /// caller's cue that everything up to now has been heard, so a reconnect
@@ -1034,10 +992,9 @@ pub(crate) const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// flag rather than the return value because the caller may drop this
 /// future (the user went offline only) after EOSE.
 ///
-/// A silent socket is not trusted: the relay is pinged every
-/// [`STREAM_PING_EVERY`], and a connection with no frame at all for
-/// [`STREAM_SILENT_FOR`] is given up on — a phone that changed networks
-/// leaves sockets that never error, they just never speak again.
+/// A silent socket is not trusted: the pool pings it and gives up on it after
+/// [`crate::relay_pool::SILENT_FOR`] without a frame — a phone that changed
+/// networks leaves sockets that never error, they just never speak again.
 pub(crate) async fn stream_relay_filters(
     url: &str,
     filters: Vec<serde_json::Value>,
@@ -1045,82 +1002,11 @@ pub(crate) async fn stream_relay_filters(
     saw_eose: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<()> {
     // Skipped relays are not re-opened until their skip is up; the caller's
-    // backoff keeps asking. See `relay_health`. The connection's life has
-    // no bound; its setup does, and a setup that times out counts against
-    // the relay like any connect-phase timeout.
-    crate::relay_health::check(url)?;
-    let connected = match crate::relay_health::timeout(
-        url,
-        STREAM_CONNECT_TIMEOUT,
-        tokio_tungstenite::connect_async(url),
-    )
-    .await
-    {
-        Ok(connected) => connected.map_err(anyhow::Error::from),
-        Err(_) => Err(anyhow::anyhow!("relay did not connect in time")),
-    };
-    crate::relay_health::record_ws(url, &connected);
-    let (mut ws, _) = connected?;
-    let mut req = vec![serde_json::json!("REQ"), serde_json::json!("myco")];
-    req.extend(filters);
-    ws.send(Message::Text(serde_json::Value::Array(req).to_string()))
-        .await?;
-    let mut ping = tokio::time::interval(STREAM_PING_EVERY);
-    ping.tick().await; // the first tick is immediate
-    let mut heard = tokio::time::Instant::now();
-    loop {
-        let msg = tokio::select! {
-            msg = ws.next() => msg,
-            _ = ping.tick() => {
-                if heard.elapsed() >= STREAM_SILENT_FOR {
-                    tracing::debug!(url, "relay stream silent too long; closing");
-                    break;
-                }
-                if ws.send(Message::Ping(Vec::new())).await.is_err() {
-                    break;
-                }
-                continue;
-            }
-        };
-        let Some(msg) = msg else { break };
-        heard = tokio::time::Instant::now();
-        match msg {
-            Ok(Message::Text(txt)) => {
-                let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) else {
-                    continue;
-                };
-                match val.get(0).and_then(|v| v.as_str()) {
-                    Some("EVENT") => {
-                        let Some(ev) = val.get(2) else { continue };
-                        let Ok(event) = serde_json::from_value::<Event>(ev.clone()) else {
-                            continue;
-                        };
-                        // Verified at ingress, as `query_relay_filters` does.
-                        // A bounded channel: a relay flooding faster than the
-                        // store takes it waits here, not in memory.
-                        if event.verify().is_ok() && out.send(event).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some("EOSE") => saw_eose.store(true, std::sync::atomic::Ordering::SeqCst),
-                    Some("CLOSED") => break,
-                    _ => {}
-                }
-            }
-            Ok(Message::Close(_)) | Err(_) => break,
-            Ok(_) => {} // pong, ping, binary
-        }
-    }
-    let _ = ws.send(Message::Close(None)).await;
-    Ok(())
+    // backoff keeps asking. See `relay_health`. The relay's one pooled
+    // connection carries this beside every other read (`relay_pool`), and
+    // watches its own liveness.
+    crate::relay_pool::subscribe(url, filters, out, saw_eose).await
 }
-
-/// How often a relay stream pings its relay.
-pub(crate) const STREAM_PING_EVERY: Duration = Duration::from_secs(30);
-
-/// A relay stream that has heard nothing — no event, no pong — for this
-/// long is closed and left to the caller's reconnect.
-pub(crate) const STREAM_SILENT_FOR: Duration = Duration::from_secs(90);
 
 /// Query one relay for a single filter, collecting events until EOSE. The whole
 /// call (connect + REQ + read) is hard-bounded by a `timeout` at the call site,
@@ -1149,51 +1035,12 @@ pub async fn query_relay_filters(
 pub async fn query_relay_each(
     url: &str,
     filters: Vec<serde_json::Value>,
-    mut each: impl FnMut(Event),
+    each: impl FnMut(Event),
 ) -> anyhow::Result<()> {
     // A relay on the skip list is not dialled: it answers "nothing" at once,
-    // so a round never waits on it. See `relay_health`.
-    crate::relay_health::check(url)?;
-    let connected = tokio_tungstenite::connect_async(url)
-        .await
-        .map_err(anyhow::Error::from);
-    crate::relay_health::record_ws(url, &connected);
-    let (mut ws, _) = connected?;
-    let mut req = vec![serde_json::json!("REQ"), serde_json::json!("myco")];
-    req.extend(filters);
-    ws.send(Message::Text(serde_json::Value::Array(req).to_string()))
-        .await?;
-
-    while let Some(msg) = ws.next().await {
-        match msg {
-            Ok(Message::Text(txt)) => {
-                let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) else {
-                    continue;
-                };
-                match val.get(0).and_then(|v| v.as_str()) {
-                    Some("EVENT") => {
-                        if let Some(ev) = val.get(2) {
-                            if let Ok(event) = serde_json::from_value::<Event>(ev.clone()) {
-                                // Verified here, at the point a public relay's
-                                // events enter the process, so callers downstream
-                                // do not each have to remember to check. See
-                                // `reference/thinning-custom-relay.md` (D7).
-                                if event.verify().is_ok() {
-                                    each(event);
-                                }
-                            }
-                        }
-                    }
-                    Some("EOSE") | Some("CLOSED") => break,
-                    _ => {}
-                }
-            }
-            Ok(Message::Close(_)) | Err(_) => break,
-            Ok(_) => {} // ping/pong/binary
-        }
-    }
-    let _ = ws.send(Message::Close(None)).await;
-    Ok(())
+    // so a round never waits on it. See `relay_health`. The read rides the
+    // relay's one pooled connection (`relay_pool`).
+    crate::relay_pool::request(url, filters, each).await
 }
 
 #[async_trait]
@@ -1356,10 +1203,12 @@ fn event_d_tag(event: &Event) -> Option<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use futures_util::SinkExt;
     use nsite_deck::seams::RelayBackend;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
 
     #[tokio::test]
     async fn speedtest_round_trips_through_blossom() {
@@ -1383,25 +1232,37 @@ pub(crate) mod tests {
 
     /// A mock relay: accept one WS connection, read the REQ, reply with the given
     /// event then EOSE. Returns the `ws://` URL.
+    /// The sub id of a `REQ` frame, `None` for anything else (`CLOSE`, pings).
+    pub(crate) fn req_sub_id(msg: &Message) -> Option<String> {
+        let Message::Text(text) = msg else {
+            return None;
+        };
+        let v: serde_json::Value = serde_json::from_str(text).ok()?;
+        (v.get(0)?.as_str()? == "REQ").then(|| v.get(1)?.as_str().map(str::to_string))?
+    }
+
     async fn mock_relay(event_json: String) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             if let Ok((stream, _)) = listener.accept().await {
                 let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-                // Read the REQ (ignore contents; the test filter always matches).
-                if let Some(Ok(Message::Text(_req))) = ws.next().await {
+                // Every REQ on the connection, answered under its own sub id,
+                // and the socket held open — as a relay does. The test filter
+                // always matches.
+                while let Some(Ok(msg)) = ws.next().await {
+                    let Some(sub) = req_sub_id(&msg) else {
+                        continue;
+                    };
                     let event = serde_json::json!([
                         "EVENT",
-                        "myco",
+                        sub,
                         serde_json::from_str::<serde_json::Value>(&event_json).unwrap()
                     ]);
-                    ws.send(Message::Text(event.to_string())).await.unwrap();
-                    ws.send(Message::Text(
-                        serde_json::json!(["EOSE", "myco"]).to_string(),
-                    ))
-                    .await
-                    .unwrap();
+                    let _ = ws.send(Message::Text(event.to_string())).await;
+                    let _ = ws
+                        .send(Message::Text(serde_json::json!(["EOSE", sub]).to_string()))
+                        .await;
                 }
             }
         });
@@ -1511,33 +1372,36 @@ pub(crate) mod tests {
                     let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
                         return;
                     };
-                    let Some(Ok(Message::Text(req))) = ws.next().await else {
-                        return;
-                    };
-                    served.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(delay).await;
-                    let req: serde_json::Value = serde_json::from_str(&req).unwrap();
-                    let filters = &req.as_array().unwrap()[2..];
-                    for ev in events.iter() {
-                        let wanted = filters.iter().any(|f| {
-                            let kind_ok = f["kinds"]
-                                .as_array()
-                                .is_none_or(|k| k.iter().any(|k| k == ev.kind.as_u16()));
-                            let author_ok = f["authors"]
-                                .as_array()
-                                .is_none_or(|a| a.iter().any(|a| a == &ev.pubkey.to_hex()));
-                            kind_ok && author_ok
-                        });
-                        if wanted {
-                            let frame = serde_json::json!(["EVENT", "myco", ev]);
-                            let _ = ws.send(Message::Text(frame.to_string())).await;
+                    // Every REQ on the connection, each under its own sub id,
+                    // with the socket held open between them — as a relay does.
+                    while let Some(Ok(msg)) = ws.next().await {
+                        let Some(sub) = req_sub_id(&msg) else {
+                            continue;
+                        };
+                        let Message::Text(req) = msg else { continue };
+                        served.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(delay).await;
+                        let req: serde_json::Value = serde_json::from_str(&req).unwrap();
+                        let filters = &req.as_array().unwrap()[2..];
+                        for ev in events.iter() {
+                            let wanted = filters.iter().any(|f| {
+                                let kind_ok = f["kinds"]
+                                    .as_array()
+                                    .is_none_or(|k| k.iter().any(|k| k == ev.kind.as_u16()));
+                                let author_ok = f["authors"]
+                                    .as_array()
+                                    .is_none_or(|a| a.iter().any(|a| a == &ev.pubkey.to_hex()));
+                                kind_ok && author_ok
+                            });
+                            if wanted {
+                                let frame = serde_json::json!(["EVENT", sub, ev]);
+                                let _ = ws.send(Message::Text(frame.to_string())).await;
+                            }
                         }
+                        let _ = ws
+                            .send(Message::Text(serde_json::json!(["EOSE", sub]).to_string()))
+                            .await;
                     }
-                    let _ = ws
-                        .send(Message::Text(
-                            serde_json::json!(["EOSE", "myco"]).to_string(),
-                        ))
-                        .await;
                 });
             }
         });

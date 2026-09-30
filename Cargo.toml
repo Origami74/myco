@@ -63,6 +63,9 @@ thiserror = "2"
 # rustls (not native-tls) so it cross-compiles cleanly for Android.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+# The internet relay pool: one shared, multiplexed connection per relay.
+# Not on crates.io; pinned to a reviewed commit.
+rustic-applesauce = { git = "https://github.com/hzrd149/rustic-applesauce", rev = "f026dca246b8f3b8cba4ba7c9bcf0fafdc877af9" }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # The embedded relay (WS, NIP-01) + Blossom (HTTP) servers that serve the node's
 # manifest events + blobs to mesh peers over `.fips` (P3).
