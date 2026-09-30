@@ -46,9 +46,10 @@ the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
   recommendations from people you follow, profiles, "Around you" over the mesh
   — N5.
 
-**Not built**, from the first plan: NIP-77 negentropy reconcile; LRU eviction
-with a size cap (Storage shows counts and offers "delete cache"; nothing
-evicts on its own); transitive peer-list polling (reach is the Circle, plus
+**Not built**, from the first plan: NIP-77 negentropy reconcile; eviction of
+what the phone keeps (the shell cache evicts to its budget, but the local
+relay and Blossom only shrink when the user clears them); transitive
+peer-list polling (reach is the Circle, plus
 gossip hops); Linux interop (P6) as a tested pair; external-browser access
 (NAT46). All still on the list below.
 
@@ -275,9 +276,12 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Share Myco itself.** Hand the Myco app on from inside Myco, so someone
   without it can get it from a phone nearby instead of a download. Today every
   newcomer needs the APK from GitHub Releases or Zapstore first.
-- **Eviction.** An LRU cap on the Blossom store (default 2 GB) with pinned apps
-  exempt; today the cache only shrinks when the user asks —
-  [nsite-layer.md](./design/nsite/nsite-layer.md) §6.
+- **Reclaiming event-cache disk sooner.** The shell cache evicts to its
+  budget, but LMDB never shrinks its file in place: space freed by eviction
+  is reused, and after "Clear cache" the file shrinks only at the next start.
+- **Not serving the cache to the Circle.** A per-device setting, for someone
+  who does not want paired phones to enumerate what their apps read
+  ([security.md](./design/core/security.md) §6).
 - **Pruning of kept events (profiles, relay lists, manifests).** The local
   relay keeps these kinds when a lookup sees them, and only "Delete cache"
   removes them. Bounded in practice by small, replaceable kinds, but not by a

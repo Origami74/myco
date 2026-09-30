@@ -1036,9 +1036,10 @@ impl OutboxService {
     ///
     /// What another relay answered with is kept here one way or the other,
     /// never both: a lane whose answer was **stored** (a pull, or a lane that
-    /// finished after an early answer) went into the local relay whole; a
-    /// lane whose answer the caller **took** is offered to the keep-seen tap,
-    /// which keeps profiles, relay lists and manifests only.
+    /// finished after an early answer) went through the hub into the cache,
+    /// waking live subscriptions; a lane whose answer the caller **took** is
+    /// remembered quietly — kept kinds to the local relay, the rest to the
+    /// cache.
     async fn run_round(
         &self,
         lanes: &[RelayLane],
@@ -1083,10 +1084,11 @@ impl OutboxService {
         self.content
             .note_internet_round(any_ok, tried_internet, started);
         // Profiles, relay lists and manifests another relay answered with are
-        // kept here, behind the answer, so the next ask is local and works
-        // offline. Already verified by the lane; the local lane's own answer
-        // is not offered back to it, nor a lane already stored whole.
-        self.content.keep_seen(
+        // kept here, and the rest cached, behind the answer, so the next ask
+        // is local and works offline. Already verified by the lane; the local
+        // lane's own answer is not offered back to it, nor a lane already
+        // stored whole.
+        self.content.remember(
             rounds
                 .iter()
                 .filter(|((lane, _), stored)| *lane != RelayLane::Local && !stored)
@@ -1113,17 +1115,19 @@ impl OutboxService {
         out
     }
 
-    /// Accept events another relay returned into the local relay,
-    /// unforwarded: stored, and delivered to live subscriptions here. The hub
-    /// dedupes by id, so an event two lanes return is delivered once. With
-    /// no hub (host builds, before start) it is stored only.
+    /// Accept events another relay returned, unforwarded, into the shell
+    /// **cache** (the kinds kept as seen go to the local relay): stored, and
+    /// delivered to live subscriptions here. The hub dedupes by id, so an
+    /// event two lanes return is delivered once. With no hub (host builds,
+    /// before start) it is stored only.
     async fn keep_pulled(&self, events: &[Event]) -> usize {
         let hub = self.hub.lock().unwrap().clone();
+        let cache = self.content.cache_relay();
         let mut fresh = 0usize;
         for event in events {
             let first = match &hub {
-                Some(hub) => hub.accept_unforwarded(event.clone()).await,
-                None => self.store.publish(event.clone()).await.map(|()| true),
+                Some(hub) => hub.accept_pulled(event.clone()).await,
+                None => cache.publish(event.clone()).await.map(|()| true),
             };
             if let Ok(true) = first {
                 fresh += 1;
@@ -3463,7 +3467,7 @@ mod tests {
     }
 
     /// A napplet's query through another relay keeps the profiles in the
-    /// answer here — and only those: a note is answered and not kept, and a
+    /// answer here — and only those: a note is answered and cached, not kept, and a
     /// forged profile is dropped where it came in and never reaches the store.
     #[tokio::test]
     async fn a_query_keeps_verified_profiles_and_nothing_else() {
@@ -3473,7 +3477,7 @@ mod tests {
         let profile = EventBuilder::metadata(&nostr::Metadata::new().name("alice"))
             .sign_with_keys(&keys)
             .unwrap();
-        let note = EventBuilder::text_note("not kept")
+        let note = EventBuilder::text_note("cached, not kept")
             .sign_with_keys(&keys)
             .unwrap();
         let mut forged = serde_json::to_value(
@@ -3486,10 +3490,16 @@ mod tests {
         let forged: Event = serde_json::from_value(forged).unwrap();
         assert!(forged.verify().is_err());
 
-        let (url, _) =
-            crate::ip_source::tests::mock_relay_holding(vec![profile.clone(), note, forged]).await;
+        let (url, _) = crate::ip_source::tests::mock_relay_holding(vec![
+            profile.clone(),
+            note.clone(),
+            forged,
+        ])
+        .await;
         let content = scratch_content("keep-seen");
         let store = content.relay();
+        let relay = content.relay_store().unwrap();
+        let cache = content.event_cache();
         let svc = OutboxService::new(
             store.clone(),
             Arc::new(Mutex::new(None)),
@@ -3513,18 +3523,25 @@ mod tests {
         assert_eq!(answered, 2, "the profile and the note, not the forgery");
 
         // Kept behind the answer, so wait for the write to land.
-        let mut held = Vec::new();
         for _ in 0..100 {
-            held = store.query(&[Filter::new()]).await.unwrap();
-            if !held.is_empty() {
+            if relay.count() > 0 && cache.contains(&note.id.to_bytes()) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        let kept = relay.query(&[Filter::new()]).await.unwrap();
         assert_eq!(
-            held.iter().map(|e| e.id).collect::<Vec<_>>(),
+            kept.iter().map(|e| e.id).collect::<Vec<_>>(),
             [profile.id],
             "only the verified profile is kept"
         );
+        // The note is remembered in the cache; the forgery nowhere.
+        let seen = store.query(&[Filter::new()]).await.unwrap();
+        assert_eq!(
+            seen.len(),
+            2,
+            "the merged view is not the profile and the note"
+        );
+        assert!(cache.contains(&note.id.to_bytes()));
     }
 }

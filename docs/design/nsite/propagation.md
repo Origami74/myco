@@ -287,6 +287,12 @@ signature and defeat §4.
 
 ## 6. Cache retention and LRU eviction
 
+> **Built differently.** What passes through now goes to a separate, bounded
+> shell cache (segmented LRU, 500 MB of events and 1.5 GB of blobs by default);
+> installed and opened apps stay in the local stores and are never evicted.
+> See [architecture.md](../core/architecture.md), "Kept and cached". The
+> proposal below is kept for its reasoning.
+
 Caching is what turns a node into a new source, so retention policy *is*
 propagation policy. Proposed defaults (vetoable):
 

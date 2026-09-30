@@ -71,6 +71,8 @@ mod remote_blobs;
 // layer is constructed rather than how it behaves.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod settings_store;
+// Reading the local stores and the shell cache as one; which a write lands in.
+mod tiered;
 // npub -> observed lane record (Wi-Fi Aware vs. LAN/AP), pushed by the
 // Android Aware JNI bridge and consumed by `AppRuntime::state()`'s
 // lane_by_npub override. Plain, non-JNI logic so it is unit-testable on the

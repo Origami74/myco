@@ -7,10 +7,10 @@
 //! keeps this store swappable for any other NIP-01 relay
 //! (`reference/thinning-custom-relay.md`).
 //!
-//! Two kinds of event live here, in two places:
+//! Every stored event lives in one place:
 //!
-//! - **Durable** events — manifests, a user's replaceable kinds, notes a
-//!   napplet published or pulled — live in an **LMDB** database
+//! - Manifests, a user's replaceable kinds, notes a napplet published or
+//!   kept, chat — live in an **LMDB** database
 //!   ([`nostr_lmdb`], rust-nostr's store). It indexes by id, kind, author,
 //!   `d` tag, tags and time, so a query is an index walk rather than a scan
 //!   of everything held; it applies NIP-01 replaceable / addressable
@@ -19,16 +19,19 @@
 //!   ACID transaction — never a rewrite of the whole set, which is what the
 //!   JSON file this replaced did on every event.
 //! - **Expiring** events (a NIP-40 `expiration` tag — chat, pair traffic;
-//!   `docs/design/core/event-gossip.md` §5) stay **in memory**, GC'd on
-//!   expiry and never written to disk. That is a design property, not a
-//!   shortcut: a conversation in the room is not a record on the phone.
+//!   `docs/design/core/event-gossip.md` §5) are stored like any other and
+//!   deleted by [`RelayStore::sweep_expired`] once their time is up; they are
+//!   never served past it. Their ids and expiries are tracked in a small
+//!   append-only log beside the database (`expiring.log`), because LMDB does
+//!   not index a multi-letter tag.
 //!
 //! Ephemeral kinds (20000–29999) are stored by neither, as NIP-01 says; the
 //! front door still delivers them live.
 //!
 //! [`RelayBackend`]: nsite_deck::seams::RelayBackend
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -51,8 +54,11 @@ const MAP_SIZE: usize = 1024 * 1024 * 1024;
 /// aside on the first open that finds it; never written again.
 const LEGACY_FILE: &str = "events.json";
 
-/// An embedded NIP-01 event store: durable events in LMDB, expiring events in
-/// memory. See the crate docs for why the two are apart.
+/// Ids of stored events that carry a NIP-40 expiry, one `"<expiry> <hex id>"`
+/// line each: appended on admit, rewritten by the sweep.
+const EXPIRING_LOG: &str = "expiring.log";
+
+/// An embedded NIP-01 event store over LMDB. See the crate docs.
 pub struct RelayStore {
     /// Durable events. `None` only for a store that failed to open, which
     /// `open` refuses to construct — so always present in practice; the
@@ -60,8 +66,9 @@ pub struct RelayStore {
     db: NostrLMDB,
     /// Where the LMDB lives, for `wipe` and diagnostics.
     dir: PathBuf,
-    /// Expiring events, by id. Memory-only by design.
-    expiring: Mutex<HashMap<[u8; 32], Event>>,
+    /// Stored events that expire, as `(expiry, id)`, for the sweep.
+    /// Mirrored to [`EXPIRING_LOG`].
+    expiring: Mutex<BTreeSet<(u64, [u8; 32])>>,
     /// Events read from a pre-LMDB `events.json`, waiting to be saved on the
     /// first async call. `open` is synchronous and the LMDB save is not, so
     /// the file is read there and drained here; it is moved aside once
@@ -112,10 +119,11 @@ impl RelayStore {
             .build()
             .map_err(|e| anyhow::anyhow!("open relay store at {}: {e}", lmdb_dir.display()))?;
         let pending_legacy = read_legacy_file(&dir.join(LEGACY_FILE));
+        let expiring = read_expiring_log(&dir.join(EXPIRING_LOG));
         Ok(Self {
             db,
             dir,
-            expiring: Mutex::new(HashMap::new()),
+            expiring: Mutex::new(expiring),
             pending_legacy: Mutex::new(pending_legacy),
             legacy_flushed: tokio::sync::OnceCell::new(),
             scratch: false,
@@ -174,9 +182,9 @@ impl RelayStore {
             .await;
     }
 
-    /// Number of stored (non-expired) events (for diagnostics).
+    /// Number of stored events (for diagnostics). Expired events count until
+    /// the next sweep deletes them.
     pub fn count(&self) -> usize {
-        let now = now_secs();
         let pending = self.pending_legacy.lock().unwrap().len();
         let durable = self
             .db
@@ -187,14 +195,90 @@ impl RelayStore {
             .now_or_never()
             .and_then(|r| r.ok())
             .unwrap_or(0);
-        let live = self
+        durable + pending
+    }
+
+    /// Delete every event past its NIP-40 expiry and rewrite the log with what
+    /// is left. Returns how many were deleted. Ids whose delete failed stay
+    /// in the log for the next sweep.
+    pub async fn sweep_expired(&self) -> usize {
+        self.flush_legacy().await;
+        let now = now_secs();
+        let due: Vec<(u64, [u8; 32])> = self
             .expiring
             .lock()
             .unwrap()
-            .values()
-            .filter(|e| !is_expired(e, now))
-            .count();
-        durable + live + pending
+            .range(..(now + 1, [0u8; 32]))
+            .copied()
+            .collect();
+        if due.is_empty() {
+            return 0;
+        }
+        let mut swept = 0usize;
+        for chunk in due.chunks(256) {
+            let ids = chunk
+                .iter()
+                .map(|(_, id)| nostr::EventId::from_byte_array(*id));
+            match self.db.delete(Filter::new().ids(ids)).await {
+                Ok(()) => {
+                    let mut expiring = self.expiring.lock().unwrap();
+                    for entry in chunk {
+                        expiring.remove(entry);
+                    }
+                    swept += chunk.len();
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "relay store: expiry sweep could not delete");
+                }
+            }
+        }
+        if swept > 0 {
+            self.rewrite_expiring_log();
+        }
+        swept
+    }
+
+    /// How many logged events are past their expiry and not yet swept.
+    fn due(&self, now: u64) -> usize {
+        self.expiring
+            .lock()
+            .unwrap()
+            .range(..(now + 1, [0u8; 32]))
+            .count()
+    }
+
+    /// Rewrite the log from the set. The file is written **under the lock**,
+    /// so an append racing the rewrite cannot land in the file being replaced
+    /// and be lost with it. It is a few lines per live chat message.
+    fn rewrite_expiring_log(&self) {
+        let path = self.dir.join(EXPIRING_LOG);
+        let tmp = path.with_extension("log.tmp");
+        let expiring = self.expiring.lock().unwrap();
+        let body: String = expiring
+            .iter()
+            .map(|(exp, id)| format!("{exp} {}\n", hex::encode(id)))
+            .collect();
+        if let Err(e) = std::fs::write(&tmp, body).and_then(|()| std::fs::rename(&tmp, &path)) {
+            tracing::warn!(error = %e, "relay store: could not rewrite the expiry log");
+        }
+    }
+
+    /// Record an expiring event in the set and append it to the log, under
+    /// one lock (see [`RelayStore::rewrite_expiring_log`]).
+    fn note_expiring(&self, exp: u64, id: [u8; 32]) {
+        let mut expiring = self.expiring.lock().unwrap();
+        if !expiring.insert((exp, id)) {
+            return;
+        }
+        let line = format!("{exp} {}\n", hex::encode(id));
+        let appended = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join(EXPIRING_LOG))
+            .and_then(|mut f| f.write_all(line.as_bytes()));
+        if let Err(e) = appended {
+            tracing::warn!(error = %e, "relay store: could not log an expiring event");
+        }
     }
 
     /// Drop every stored event whose id is **not** in `keep`. Used by the
@@ -205,7 +289,8 @@ impl RelayStore {
         self.expiring
             .lock()
             .unwrap()
-            .retain(|id, _| keep.contains(id));
+            .retain(|(_, id)| keep.contains(id));
+        self.rewrite_expiring_log();
         let all = match self.db.query(Filter::new()).await {
             Ok(events) => events,
             Err(e) => {
@@ -250,11 +335,12 @@ impl RelayStore {
         if is_expired(&event, now) || event.kind.is_ephemeral() {
             return Ok(false);
         }
-        if expiration(&event).is_some() {
-            let mut map = self.expiring.lock().unwrap();
-            // Opportunistic GC: drop anything that has expired since last touch.
-            map.retain(|_, e| !is_expired(e, now));
-            return Ok(admit_expiring(&mut map, event));
+        // Logged **before** the save: a kill between the two then leaves an
+        // id in the log for an event that never landed — harmless, the sweep's
+        // delete finds nothing — rather than an event on disk the sweep never
+        // hears of.
+        if let Some(exp) = expiration(&event) {
+            self.note_expiring(exp, event.id.to_bytes());
         }
         match self
             .db
@@ -308,64 +394,20 @@ fn write_legacy_file(path: &Path, events: &[Event]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Admit an expiring event into the in-memory map, applying replaceable /
-/// addressable dedup (newest wins) and skipping a stale duplicate. Returns
-/// `true` if the event is now stored as new.
-fn admit_expiring(map: &mut HashMap<[u8; 32], Event>, event: Event) -> bool {
-    let kind = event.kind.as_u16();
-    if is_replaceable(kind) || is_addressable(kind) {
-        let slot = slot_of(&event);
-        let existing = map
-            .iter()
-            .find(|(_, e)| slot_of(e) == slot)
-            .map(|(id, e)| (*id, e.created_at));
-        match existing {
-            Some((_, ts)) if ts >= event.created_at => return false,
-            Some((old_id, _)) => {
-                map.remove(&old_id);
-            }
-            None => {}
-        }
-        map.insert(event.id.to_bytes(), event);
-        true
-    } else {
-        if map.contains_key(&event.id.to_bytes()) {
-            return false;
-        }
-        map.insert(event.id.to_bytes(), event);
-        true
-    }
-}
-
-/// Replaceable kinds: 0, 3, and `10000..20000` (kind 15128 manifests live here).
-fn is_replaceable(kind: u16) -> bool {
-    kind == 0 || kind == 3 || (10_000..20_000).contains(&kind)
-}
-
-/// Addressable / parameterized-replaceable kinds: `30000..40000` (kind 35128).
-fn is_addressable(kind: u16) -> bool {
-    (30_000..40_000).contains(&kind)
-}
-
-fn event_d_tag(event: &Event) -> Option<String> {
-    event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        (s.first().map(String::as_str) == Some("d"))
-            .then(|| s.get(1).cloned())
-            .flatten()
-    })
-}
-
-/// The replaceable/addressable slot an event collapses into: `(kind, author, d)`,
-/// with `d` only for addressable kinds.
-fn slot_of(event: &Event) -> (u16, [u8; 32], Option<String>) {
-    let kind = event.kind.as_u16();
-    let d = if is_addressable(kind) {
-        event_d_tag(event)
-    } else {
-        None
+/// The `(expiry, id)` pairs a previous run logged. Duplicates and ids since
+/// deleted are harmless: the sweep's delete of a missing id is a no-op.
+fn read_expiring_log(path: &Path) -> BTreeSet<(u64, [u8; 32])> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return BTreeSet::new();
     };
-    (kind, event.pubkey.to_bytes(), d)
+    raw.lines()
+        .filter_map(|line| {
+            let (exp, id) = line.split_once(' ')?;
+            let mut key = [0u8; 32];
+            hex::decode_to_slice(id.trim(), &mut key).ok()?;
+            Some((exp.parse().ok()?, key))
+        })
+        .collect()
 }
 
 /// The NIP-40 `expiration` tag value (a unix timestamp), if present. Public so
@@ -386,8 +428,8 @@ pub fn is_expired(event: &Event, now: u64) -> bool {
     expiration(event).is_some_and(|exp| exp <= now)
 }
 
-/// Does an event satisfy a NIP-01 filter? Used by the in-memory half of the
-/// store and by the WebSocket front door for live-subscription matching.
+/// Does an event satisfy a NIP-01 filter? Used by the WebSocket front door
+/// for live-subscription matching.
 pub fn matches_filter(event: &Event, filter: &Filter) -> bool {
     filter.match_event(event, MatchEventOptions::new())
 }
@@ -401,32 +443,32 @@ impl RelayBackend for RelayStore {
     async fn query(&self, filters: &[Filter]) -> anyhow::Result<Vec<Event>> {
         self.flush_legacy().await;
         let now = now_secs();
+        // Expired but not yet swept events are skipped below; ask for that
+        // many more, so they cannot take a live event's place under a `limit`.
+        // Reads stay reads — deleting is the sweep's job, on its timer.
+        let due = self.due(now);
         let mut out: Vec<Event> = Vec::new();
         let mut seen: HashSet<[u8; 32]> = HashSet::new();
         // Several filters are an any-match, as a multi-filter REQ is: each is
         // run against the index on its own (with its own limit), and the
         // results are merged by id.
         for filter in filters {
+            let mut filter = filter.clone();
+            if let (Some(limit), true) = (filter.limit, due > 0) {
+                filter.limit = Some(limit + due);
+            }
             let durable = self
                 .db
-                .query(filter.clone())
+                .query(filter)
                 .await
                 .map_err(|e| anyhow::anyhow!("relay store: query failed: {e}"))?;
             for event in durable {
-                if seen.insert(event.id.to_bytes()) {
-                    out.push(event);
-                }
-            }
-        }
-        {
-            let map = self.expiring.lock().unwrap();
-            for event in map.values() {
-                if is_expired(event, now) || seen.contains(&event.id.to_bytes()) {
+                // Past its expiry but not yet swept: stored, never served.
+                if is_expired(&event, now) {
                     continue;
                 }
-                if filters.iter().any(|f| matches_filter(event, f)) {
-                    seen.insert(event.id.to_bytes());
-                    out.push(event.clone());
+                if seen.insert(event.id.to_bytes()) {
+                    out.push(event);
                 }
             }
         }
@@ -446,6 +488,7 @@ impl AdminBackend for RelayStore {
         self.pending_legacy.lock().unwrap().clear();
         let _ = std::fs::remove_file(self.dir.join(LEGACY_FILE));
         self.expiring.lock().unwrap().clear();
+        let _ = std::fs::remove_file(self.dir.join(EXPIRING_LOG));
         self.db
             .wipe()
             .await
@@ -605,9 +648,11 @@ mod tests {
         assert_eq!(got[0].id, live.id);
     }
 
+    /// Expiring events are stored like any other, survive a reopen, and the
+    /// sweep deletes them once due — the log carries the expiry across.
     #[tokio::test]
-    async fn chat_events_are_not_persisted_manifests_are() {
-        let dir = tmp("persist-split");
+    async fn expiring_events_persist_until_swept() {
+        let dir = tmp("persist-expiring");
         let _ = std::fs::remove_dir_all(&dir);
         let keys = Keys::generate();
         let site = build_test_site_with_keys(&keys, &[("/index.html", b"x")], None, None);
@@ -617,19 +662,36 @@ mod tests {
             let store = RelayStore::open(&dir).unwrap();
             store.admit_event(site.manifest.clone()).await.unwrap();
             store
-                .admit_event(chat_event(&keys, "mesh", "ephemeral", Some(now + 600)))
+                .admit_event(chat_event(&keys, "mesh", "soon", Some(now + 1)))
                 .await
                 .unwrap();
-            assert_eq!(store.count(), 2, "both live in memory");
+            store
+                .admit_event(chat_event(&keys, "mesh", "later", Some(now + 600)))
+                .await
+                .unwrap();
+            assert_eq!(store.count(), 3);
         }
-        // Reopen: only the manifest survives; the expiring chat event was never
-        // written to disk.
         let store = RelayStore::open(&dir).unwrap();
-        assert_eq!(store.count(), 1, "only the manifest persists");
-        let got = nsite_deck::seams::newest_in_slot(&store, KIND_ROOT, &keys.public_key(), None)
-            .await
-            .unwrap();
-        assert_eq!(got.map(|e| e.id), Some(site.manifest.id));
+        assert_eq!(store.count(), 3, "expiring events did not survive reopen");
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        let chat = Filter::new().kind(Kind::from(9u16));
+        assert_eq!(
+            store
+                .query(std::slice::from_ref(&chat))
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "an expired event was served"
+        );
+        // Reads do not delete; the sweep does, on its timer.
+        assert_eq!(store.count(), 3);
+        assert_eq!(store.sweep_expired().await, 1);
+        assert_eq!(store.count(), 2);
+        drop(store);
+        let store = RelayStore::open(&dir).unwrap();
+        assert_eq!(store.sweep_expired().await, 0, "the log kept a swept id");
+        assert_eq!(store.count(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

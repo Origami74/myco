@@ -219,7 +219,10 @@ assume.
   event, mmap reads. It replaced a JSON file that was rewritten whole on every
   event once napplets started publishing and pulling notes into the store; it
   also brings negentropy (NIP-77) items for P3. Events with a NIP-40
-  `expiration` — chat — stay in memory and never touch disk, by design.
+  `expiration` — chat — are stored like any other, never served past their
+  expiry, and swept within a quarter hour. The relay holds what this phone
+  keeps; what only passed through is in the shell cache (`myco-cache`,
+  [architecture.md](../core/architecture.md), "Kept and cached").
 - The same `nostr` crate for signature verification, NIP-19 (`npub`)
   encode/decode, and the relay-message wire format.
 - `axum` handlers for the proxy's WebSocket sockets, the Blossom HTTP routes, and

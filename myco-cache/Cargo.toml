@@ -1,0 +1,24 @@
+[package]
+name = "myco-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nsite-deck = { path = "../nsite-deck" }
+myco-blossom = { path = "../myco-blossom" }
+nostr = { workspace = true }
+nostr-lmdb = { workspace = true }
+nostr-database = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }

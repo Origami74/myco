@@ -35,11 +35,13 @@ The workspace depends on `fips` as a **path dependency at `reference/fips`** —
 
 ## Architecture
 
-Four Rust crates build into the one `cdylib`, `libmyco_core.so`:
+Six Rust crates build into the one `cdylib`, `libmyco_core.so`:
 
+- **`myco-napplet-runtime`** — the napplet host: NIP-5D manifest, verified resolve, sessions and grants, one module per NAP.
 - **`myco-core`** — the app crate and only cdylib. Owns device identity (one Nostr keypair, persisted on first launch), embeds the FIPS mesh node, and wires everything together: Tokio multi-thread runtime (`runtime.rs`), TUN packet bridge, `.fips` DNS interception, BLE/Wi-Fi Aware/AP lane bridges, peer diagnostics, and mesh gossip.
 - **`nsite-deck`** — reusable, transport-agnostic nsite host: gateway (manifest → path → sha256 → serve), sync/import engine, propagator. Reaches the outside world only through four trait seams in `seams.rs`: `RelayBackend`, `BlobStore`, `PeerSource`, `FanoutSink`. It names no concrete relay, store, or radio — keep it that way.
-- **`myco-relay`** — embedded NIP-01 relay implementing `RelayBackend` (ws on :4870). Durable events (manifests, replaceable kinds, notes) live in rust-nostr's LMDB store (`nostr-lmdb`, indexed NIP-01 queries, replaceable/addressable and NIP-09 semantics applied by the database); events with a NIP-40 `expiration` (chat) are memory-only by design; deliberately no relay framework in front of it.
+- **`myco-relay`** — embedded NIP-01 relay implementing `RelayBackend` (ws on :4870). Durable events (manifests, replaceable kinds, notes) live in rust-nostr's LMDB store (`nostr-lmdb`, indexed NIP-01 queries, replaceable/addressable and NIP-09 semantics applied by the database); events with a NIP-40 `expiration` (chat) are stored too and swept once expired; deliberately no relay framework in front of it. Holds only what the device **keeps**.
+- **`myco-cache`** — the shell cache: a second `nostr-lmdb` + blob directory for everything that only passed through (query answers, pulls, mesh pushes, napplet blob fetches), held to a byte budget by segmented LRU. `myco-core/src/tiered.rs` reads relay+cache / Blossom+cache as one and decides which a write lands in.
 - **`myco-blossom`** — embedded Blossom blob store implementing `BlobStore` (http on :24243). Content-addressed files named by sha256; verifies hash on write (atomic temp+rename), trusts the name on read.
 
 ### The FFI boundary

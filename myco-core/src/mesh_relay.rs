@@ -288,6 +288,10 @@ pub struct RelayHub {
     /// Whatever is answering NIP-01 behind us: the embedded store by default,
     /// or a relay the user pointed us at. The proxy never needs to know which.
     store: Arc<dyn RelayBackend>,
+    /// Where events that are only passing through are written: pulled
+    /// backlog and what mesh peers push. The shell cache in production
+    /// (`Content::cache_relay`); `store` itself unless one is given.
+    transient: Arc<dyn RelayBackend>,
     live: broadcast::Sender<Event>,
     gossip: Option<Arc<dyn Gossiper>>,
     /// Mesh access policy. `None` = open (local/test default); `Some` restricts
@@ -315,11 +319,25 @@ impl RelayHub {
         gossip: Option<Arc<dyn Gossiper>>,
         gate: Option<Arc<dyn PeerGate>>,
     ) -> Arc<Self> {
+        let transient = store.clone();
+        Self::with_cache(store, transient, gossip, gate)
+    }
+
+    /// As [`RelayHub::with_gate`], writing passing events to `transient`
+    /// rather than `store`: what this device publishes is kept, what it pulls
+    /// or a peer pushes is cached.
+    pub fn with_cache(
+        store: Arc<dyn RelayBackend>,
+        transient: Arc<dyn RelayBackend>,
+        gossip: Option<Arc<dyn Gossiper>>,
+        gate: Option<Arc<dyn PeerGate>>,
+    ) -> Arc<Self> {
         // Buffer enough that a brief subscriber stall doesn't drop chat; an
         // over-capacity lag is surfaced as `Lagged` and skipped, not blocked.
         let (live, _) = broadcast::channel(512);
         Arc::new(Self {
             store,
+            transient,
             live,
             gossip,
             gate,
@@ -387,16 +405,32 @@ impl RelayHub {
     /// Accept an event without forwarding it: dedupe, store, and wake live
     /// subscriptions — nothing to the gossiper.
     ///
-    /// Two callers, one rule. Backlog *pulled* from a peer is not a push frame
-    /// (`event-gossip.md` §3) and carries no budget; the peer that holds it
-    /// floods it on its own terms. A napplet's `relay.publish` is bound for
-    /// relays, not the Circle (NAP-RELAY; the mesh is NAP-MESH's), and still
-    /// has to reach this phone's own subscriptions.
+    /// A napplet's `relay.publish` is bound for relays, not the Circle
+    /// (NAP-RELAY; the mesh is NAP-MESH's), and still has to reach this
+    /// phone's own subscriptions. It is this device's own event, so it is
+    /// kept; backlog pulled from elsewhere goes through
+    /// [`RelayHub::accept_pulled`] instead.
     ///
     /// Returns whether this was the first sighting.
     pub async fn accept_unforwarded(&self, event: Event) -> anyhow::Result<bool> {
+        self.accept_into(&self.store, event).await
+    }
+
+    /// As [`RelayHub::accept_unforwarded`], for backlog *pulled* from a peer
+    /// or another relay: written to the cache, not kept. A pull is not a push
+    /// frame (`event-gossip.md` §3) and carries no budget; the peer that holds
+    /// it floods it on its own terms.
+    pub async fn accept_pulled(&self, event: Event) -> anyhow::Result<bool> {
+        self.accept_into(&self.transient, event).await
+    }
+
+    async fn accept_into(
+        &self,
+        store: &Arc<dyn RelayBackend>,
+        event: Event,
+    ) -> anyhow::Result<bool> {
         let first_sighting = self.seen.insert(&event);
-        self.store.publish(event.clone()).await?;
+        store.publish(event.clone()).await?;
         if first_sighting {
             let _ = self.live.send(event);
         }
@@ -787,7 +821,13 @@ async fn handle_client_frame(
             // idempotent, so it happens either way; only a first sighting fans
             // out. See `reference/thinning-custom-relay.md` (D2).
             let first_sighting = hub.seen.insert(&event);
-            if let Err(e) = hub.store.publish(event.clone()).await {
+            // An in-app client's publish is this device's own and is kept; what
+            // a mesh peer pushes is passing through, and is cached.
+            let target = match origin {
+                Origin::Mesh => &hub.transient,
+                _ => &hub.store,
+            };
+            if let Err(e) = target.publish(event.clone()).await {
                 return vec![
                     serde_json::json!(["OK", id, false, format!("error: {e}")]).to_string()
                 ];
@@ -1082,6 +1122,31 @@ mod tests {
             *count.0.lock().unwrap(),
             0,
             "a pulled event reached the gossiper"
+        );
+    }
+
+    /// With a cache behind the hub, what is pulled lands in the cache and what
+    /// this device publishes is kept; both wake live subscriptions.
+    #[tokio::test]
+    async fn pulls_are_cached_and_own_events_kept() {
+        let kept = Arc::new(RelayStore::in_memory());
+        let cache = Arc::new(RelayStore::in_memory());
+        let hub = RelayHub::with_cache(kept.clone(), cache.clone(), None, None);
+        let mut live = hub.live_events();
+
+        let keys = Keys::generate();
+        let pulled = chat_event(&keys, "mesh", "from a peer's backlog");
+        let own = chat_event(&keys, "mesh", "mine");
+        assert!(hub.accept_pulled(pulled.clone()).await.unwrap());
+        assert_eq!(live.recv().await.unwrap().id, pulled.id);
+        assert!(hub.accept_unforwarded(own.clone()).await.unwrap());
+        assert_eq!(live.recv().await.unwrap().id, own.id);
+
+        let ids = |events: Vec<Event>| events.into_iter().map(|e| e.id).collect::<Vec<_>>();
+        assert_eq!(ids(kept.query(&[Filter::new()]).await.unwrap()), [own.id]);
+        assert_eq!(
+            ids(cache.query(&[Filter::new()]).await.unwrap()),
+            [pulled.id]
         );
     }
 

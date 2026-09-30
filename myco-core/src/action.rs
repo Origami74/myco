@@ -142,6 +142,16 @@ pub enum NativeAppAction {
     /// nsites (Settings → Storage → "Delete cache"). Pinned apps keep working
     /// offline; unpinned opened sites and staged updates go.
     WipeCache,
+    /// Drop everything in the shell cache (Settings → Storage → "Clear
+    /// cache"): events and blobs that passed through and were not kept. The
+    /// local relay and Blossom are untouched, so nothing installed or kept is
+    /// lost.
+    ClearCache,
+    /// Set the shell cache budgets, in bytes (clamped to 16 MiB..=64 GiB).
+    /// Applied at once — evicting down to a lower budget — and persisted; a
+    /// budget raised far past the one the cache opened with fully takes effect
+    /// at the next launch.
+    SetCacheLimits { event_bytes: u64, blob_bytes: u64 },
 
     // --- circle (paired peers) ---
     /// Add a paired peer to the **Circle**: the contact list of devices we pull

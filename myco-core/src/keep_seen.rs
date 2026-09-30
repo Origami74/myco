@@ -37,7 +37,6 @@
 
 use std::sync::Arc;
 
-use myco_relay::RelayStore;
 use nostr::Event;
 use nsite_deck::seams::RelayBackend;
 use tokio::sync::Semaphore;
@@ -83,17 +82,18 @@ fn approx_size(event: &Event) -> usize {
 }
 
 /// The tap: one per content layer, so every path shares one bound. Always
-/// over the **embedded** store: with a custom relay configured there is no
-/// tap at all (see `Content::keep_seen`), so browsing is never written to
-/// someone else's relay.
+/// over the **embedded** store (read through the cache, so a kept event
+/// leaves it): with a custom relay configured there is no tap at all (see
+/// `Content::keep_seen`), so browsing is never written to someone else's
+/// relay.
 #[derive(Clone)]
 pub struct KeepSeen {
-    store: Arc<RelayStore>,
+    store: Arc<dyn RelayBackend>,
     permits: Arc<Semaphore>,
 }
 
 impl KeepSeen {
-    pub fn new(store: Arc<RelayStore>) -> Self {
+    pub fn new(store: Arc<dyn RelayBackend>) -> Self {
         Self {
             store,
             permits: Arc::new(Semaphore::new(MAX_BATCHES_IN_FLIGHT)),
@@ -144,6 +144,7 @@ impl KeepSeen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use myco_relay::RelayStore;
     use nostr::{EventBuilder, Filter, Keys, Kind, Tag, Timestamp};
 
     fn event(keys: &Keys, kind: u16, content: &str, at: u64, d: Option<&str>) -> Event {

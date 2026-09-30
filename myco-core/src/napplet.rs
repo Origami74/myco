@@ -413,6 +413,16 @@ impl NappletHost {
         self
     }
 
+    /// Resolve and install napplets from `blobs` rather than the capabilities'
+    /// store. On the device the capabilities write what a napplet fetches to
+    /// the shell cache, while an installed napplet's own files must be
+    /// **kept**, as an nsite's are — never evicted, never cleared with the
+    /// cache.
+    pub fn with_kept_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+        self.blobs = blobs;
+        self
+    }
+
     /// Serve versions through `manifests` — on the device, the content layer's
     /// active-version pins — instead of the relay's newest.
     pub fn with_manifests(mut self, manifests: Arc<dyn ManifestStore>) -> Self {
@@ -1303,7 +1313,7 @@ impl myco_napplet_runtime::seams::MeshSink for NappletMeshSink {
             let events = content.pull_from_peers(filters, meta, None).await;
             let mut fresh = 0usize;
             for event in events {
-                match hub.accept_unforwarded(event).await {
+                match hub.accept_pulled(event).await {
                     Ok(true) => fresh += 1,
                     Ok(false) => {}
                     Err(e) => tracing::debug!(error = %e, "napplet mesh pull: could not store"),
@@ -2352,8 +2362,11 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(crate::content::Content::open(&dir).unwrap());
-        let host = NappletHost::new(test_ctx(content.relay(), content.blobs()))
-            .with_manifests(content.clone());
+        // Wired as on the device: capabilities fetch into the cache, the host
+        // installs into the kept store.
+        let host = NappletHost::new(test_ctx(content.relay(), content.cache_blobs()))
+            .with_manifests(content.clone())
+            .with_kept_blobs(content.blobs());
 
         let keys = nostr::Keys::generate();
         let v1 = NappletBuilder::new()
@@ -2391,6 +2404,11 @@ mod tests {
         host.ingest(&addr, &source_for(&v1).await).await.unwrap();
         let opened = host.open(&addr, None).await.unwrap();
         assert_eq!(opened.title.as_deref(), Some("Version one"));
+        assert!(
+            content.blobs_local().unwrap().has(&v1.blobs[0].0).await,
+            "an installed napplet's file was not kept"
+        );
+        assert!(!content.blob_cache().contains(&v1.blobs[0].0));
 
         // v2's manifest lands in the relay by some other route — no blob.
         content.relay().publish(v2.manifest.clone()).await.unwrap();
