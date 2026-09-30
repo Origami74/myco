@@ -67,6 +67,13 @@ pub struct Settings {
     /// The shell blob cache's budget in bytes. `None` means the default,
     /// [`myco_cache::DEFAULT_BLOB_CACHE_BYTES`].
     pub blob_cache_bytes: Option<u64>,
+
+    /// NAP-INTENT default handlers: archetype slug to the handler's key
+    /// (`<npub>:<d>`, `<npub>` for a root napplet, or `myco` for Myco's own
+    /// nsite opener). The user's "open with" answers, like an OS's default
+    /// apps. Written only by the user — the chooser's "Always use this" and
+    /// Settings › Default apps — never by a napplet.
+    pub intent_defaults: std::collections::BTreeMap<String, String>,
 }
 
 /// The least a cache budget may be set to: below this a cache holds too little
@@ -279,6 +286,34 @@ mod tests {
         .napplet_mesh_limits();
         assert_eq!(wild.publish_ttl, NAPPLET_MESH_PUBLISH_MAX);
         assert_eq!(wild.subscribe_ttl, NAPPLET_MESH_SUBSCRIBE_MAX);
+    }
+
+    /// Intent defaults survive a restart, and a file from before they existed
+    /// reads as none.
+    #[test]
+    fn intent_defaults_round_trip() {
+        let dir = tmp_dir("intent-defaults");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(path_in(&dir), br#"{"customRelayUrl":"ws://x"}"#).unwrap();
+        assert!(load(&dir).intent_defaults.is_empty());
+
+        let mut settings = load(&dir);
+        settings
+            .intent_defaults
+            .insert("profile".into(), "npub1x:profiles".into());
+        save(&dir, &settings).unwrap();
+        let raw = std::fs::read_to_string(path_in(&dir)).unwrap();
+        assert!(raw.contains("\"intentDefaults\""), "{raw}");
+        assert_eq!(
+            load(&dir)
+                .intent_defaults
+                .get("profile")
+                .map(String::as_str),
+            Some("npub1x:profiles")
+        );
+        assert_eq!(load(&dir).relay_url().as_deref(), Some("ws://x"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

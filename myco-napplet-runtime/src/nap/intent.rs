@@ -373,9 +373,7 @@ pub fn resolve(catalog: &IntentCatalogSnapshot, request: &IntentRequest) -> Reso
         }
     };
     if able.is_empty() {
-        let any_action = all
-            .iter()
-            .any(|c| c.actions.contains(&request.action));
+        let any_action = all.iter().any(|c| c.actions.contains(&request.action));
         return Resolution::Refused(if any_action {
             UNSUPPORTED_CONVENTION
         } else {

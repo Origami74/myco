@@ -181,6 +181,38 @@ pub struct LibraryItem {
     /// but removal: a napplet removed and added again is the user's own.
     #[serde(default)]
     pub preinstalled: bool,
+    /// The roles the served version declared with `archetype` tags — the
+    /// installed-napplet catalog NAP-INTENT resolves against. Napplets only.
+    ///
+    /// `None` means never recorded: an entry written before NAP-INTENT, or one
+    /// whose manifest was not here yet. The catalog fills it lazily from the
+    /// pinned manifest (`intent::backfill_archetypes`); `Some(empty)` is a
+    /// napplet that declares no role. Rewritten whenever the served version
+    /// moves, from the verified manifest. Kotlin ignores the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archetypes: Option<Vec<LibraryArchetype>>,
+}
+
+/// One `["archetype", <slug>, <convention>]` a napplet declared, as the
+/// Library keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryArchetype {
+    pub slug: String,
+    pub convention: String,
+}
+
+impl LibraryArchetype {
+    /// The archetypes a verified manifest declares.
+    pub fn of_manifest(manifest: &myco_napplet_runtime::NappletManifest) -> Vec<Self> {
+        manifest
+            .archetypes
+            .iter()
+            .map(|a| Self {
+                slug: a.slug.clone(),
+                convention: a.convention.clone(),
+            })
+            .collect()
+    }
 }
 
 /// A napplet's grants as the Library records them: what the user allowed, what
@@ -573,6 +605,10 @@ pub struct Content {
     internet_down_until: Mutex<Option<std::time::Instant>>,
     library: Mutex<Vec<LibraryItem>>,
     library_path: PathBuf,
+    /// Woken on every Library write, for NAP-INTENT's `intent.changed`: the
+    /// catalog is the Library, so a write may change what an archetype
+    /// resolves to. One waiter; a write while nobody waits leaves a permit.
+    library_changed: Arc<tokio::sync::Notify>,
     /// The Circle: paired peers we pull from over the mesh. Persisted.
     circle: Mutex<Vec<CircleContact>>,
     circle_path: PathBuf,
@@ -948,6 +984,7 @@ impl Content {
             internet_down_until: Mutex::new(None),
             library: Mutex::new(library),
             library_path,
+            library_changed: Arc::new(tokio::sync::Notify::new()),
             circle: Mutex::new(circle),
             circle_path,
             connected_peers: Mutex::new(Vec::new()),
@@ -1572,11 +1609,51 @@ impl Content {
                 pointer: String::new(),
                 reviewed: Vec::new(),
                 preinstalled: false,
+                archetypes: None,
             });
         }
         let snapshot = lib.clone();
         drop(lib);
-        save_library(&self.library_path, &snapshot);
+        self.persist_library(&snapshot);
+    }
+
+    /// Write the Library to disk and wake whoever watches it.
+    fn persist_library(&self, snapshot: &[LibraryItem]) {
+        save_library(&self.library_path, snapshot);
+        self.library_changed.notify_one();
+    }
+
+    /// What is woken on every Library write. See [`Content::library_changed`]'s
+    /// field.
+    pub fn library_changed(&self) -> Arc<tokio::sync::Notify> {
+        self.library_changed.clone()
+    }
+
+    /// Record the archetypes an installed napplet's served version declares.
+    /// Returns whether anything changed; a napplet that is not installed is
+    /// left alone.
+    pub fn record_napplet_archetypes(
+        &self,
+        author_npub: &str,
+        d_tag: Option<&str>,
+        archetypes: Vec<LibraryArchetype>,
+    ) -> bool {
+        let mut lib = self.library.lock().unwrap();
+        let Some(item) = lib.iter_mut().find(|i| {
+            i.kind == LibraryKind::Napplet
+                && i.author_npub == author_npub
+                && i.d_tag.as_deref() == d_tag
+        }) else {
+            return false;
+        };
+        if item.archetypes.as_ref() == Some(&archetypes) {
+            return false;
+        }
+        item.archetypes = Some(archetypes);
+        let snapshot = lib.clone();
+        drop(lib);
+        self.persist_library(&snapshot);
+        true
     }
 
     /// Add or update a napplet's Library entry, recording what install review
@@ -1634,11 +1711,12 @@ impl Content {
                 pointer: pointer.to_string(),
                 reviewed: requires,
                 preinstalled: false,
+                archetypes: None,
             });
         }
         let snapshot = lib.clone();
         drop(lib);
-        save_library(&self.library_path, &snapshot);
+        self.persist_library(&snapshot);
     }
 
     /// Replace a napplet's recorded grants — both decision sets. Used when an
@@ -1663,7 +1741,7 @@ impl Content {
         item.denied = grants.denied;
         let snapshot = lib.clone();
         drop(lib);
-        save_library(&self.library_path, &snapshot);
+        self.persist_library(&snapshot);
     }
 
     /// What a napplet was granted and what it was refused, or `None` for one
@@ -1728,7 +1806,7 @@ impl Content {
         }
         let snapshot = lib.clone();
         drop(lib);
-        save_library(&self.library_path, &snapshot);
+        self.persist_library(&snapshot);
     }
 
     /// Record the answer to an update's permission review: the grants and
@@ -1756,7 +1834,7 @@ impl Content {
         item.reviewed = grants.reviewed;
         let snapshot = lib.clone();
         drop(lib);
-        save_library(&self.library_path, &snapshot);
+        self.persist_library(&snapshot);
         true
     }
 
@@ -1773,7 +1851,7 @@ impl Content {
         });
         let snapshot = lib.clone();
         drop(lib);
-        save_library(&self.library_path, &snapshot);
+        self.persist_library(&snapshot);
     }
 
     /// Drop an **nsite** from the Library. Kind-aware: an author may publish
@@ -1788,7 +1866,7 @@ impl Content {
         });
         let snapshot = lib.clone();
         drop(lib);
-        save_library(&self.library_path, &snapshot);
+        self.persist_library(&snapshot);
     }
 
     /// Forget a single nsite: drop it from the Library *and* its live status entry
@@ -4599,7 +4677,7 @@ impl Content {
             lib.retain(|i| i.pinned);
             let snapshot = lib.clone();
             drop(lib);
-            save_library(&self.library_path, &snapshot);
+            self.persist_library(&snapshot);
         }
         self.sites
             .lock()
@@ -5021,8 +5099,25 @@ impl crate::napplet::ManifestStore for Content {
     /// A napplet's pin never moves back: every napplet pin — open, install,
     /// "Download again", the update check, a push from the Circle — goes
     /// through [`Content::set_active_if_newer`]. See there for why.
+    ///
+    /// A napplet pin that moved also rewrites the installed entry's
+    /// archetypes from the verified manifest: the catalog NAP-INTENT resolves
+    /// against follows the version that opens.
     fn pin(&self, manifest: &Event) {
-        self.set_active_if_newer(manifest);
+        if !self.set_active_if_newer(manifest) {
+            return;
+        }
+        if !myco_napplet_runtime::is_napplet_kind(manifest.kind.as_u16()) {
+            return;
+        }
+        if let Ok(parsed) = myco_napplet_runtime::NappletManifest::from_event(manifest.clone()) {
+            let npub = parsed.author.to_bech32().unwrap_or_default();
+            self.record_napplet_archetypes(
+                &npub,
+                parsed.d_tag.as_deref(),
+                LibraryArchetype::of_manifest(&parsed),
+            );
+        }
     }
 }
 
@@ -6285,6 +6380,7 @@ pub(crate) mod library_kind_tests {
             pointer: String::new(),
             reviewed: Vec::new(),
             preinstalled: false,
+            archetypes: None,
         }
     }
 
