@@ -122,7 +122,10 @@ not a gateway, not a host, and least of all the napplet.
    the `path` tags, and every blob is hash-checked against them.
 4. Assemble the verified `/index.html` and inject it as `iframe.srcdoc`, carrying the
    `connect-src` policy as a `<meta http-equiv="Content-Security-Policy">` so it survives
-   into the iframe's opaque origin.
+   into the iframe's opaque origin. The policy is Myco's, not protocol — NIP-5D sets
+   none. It keeps the napplet off the network (`connect-src data: blob:`: only bytes
+   already in the page) and lets it run what it bundles: inline script, a `blob:`
+   worker, and WebAssembly (`'wasm-unsafe-eval'`, never JS `eval`).
 
 The napplet's identity is the `(dTag, aggregateHash)` tuple **computed** from those
 verified bytes. The runtime assigns it; the napplet never asserts it. Any verification
