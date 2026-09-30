@@ -2743,6 +2743,13 @@ pub(crate) const DEFAULT_NAPPLETS: &[DefaultNapplet] = &[
         pointer: "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9ekxmmkv4eqc3hahf",
         expected: &["mesh", "outbox", "theme"],
     },
+    // d=chronofeed: follows' notes and reposts, newest first. Its published
+    // manifest declares these; `local` and `link` are default grants.
+    DefaultNapplet {
+        title: "Chronofeed",
+        pointer: "naddr1qq9xx6rjdahx7en9v4jqz9nhwden5te0wfjkccte9ec8y6tdv9kzumn9wsqs6amnwvaz7tmwdaejumr0dsq32amnwvaz7tmjv4kxz7fwv35hgar09ec82cszyzamthdqu92k09ulq4p5q77uyqeadu9mkv8hy5f2nqw0mvhsncn5wqcyqqqgjwghpt0eg",
+        expected: &["identity", "outbox", "relay", "resource", "theme"],
+    },
 ];
 
 /// The expected permissions of the default napplet at `(author_npub, d_tag)`,
@@ -3776,18 +3783,25 @@ mod tests {
             .into_iter()
             .filter(|i| i.kind == LibraryKind::Napplet)
             .collect();
-        let tags: Vec<_> = napplets.iter().map(|i| i.d_tag.as_deref()).collect();
+        let mut tags: Vec<_> = napplets.iter().map(|i| i.d_tag.as_deref()).collect();
+        tags.sort();
         assert_eq!(
             tags,
-            vec![Some("discover")],
-            "only the new default is seeded"
+            vec![Some("chronofeed"), Some("discover")],
+            "only the new defaults are seeded; the removed one stays removed"
         );
-        assert_eq!(napplets[0].title, "AppStore");
-        assert_eq!(napplets[0].reviewed, vec!["mesh", "outbox", "theme"]);
+        let appstore = napplets
+            .iter()
+            .find(|i| i.d_tag.as_deref() == Some("discover"))
+            .unwrap();
+        assert_eq!(appstore.title, "AppStore");
+        assert_eq!(appstore.reviewed, vec!["mesh", "outbox", "theme"]);
 
         let marker = std::fs::read_to_string(dir.join("seeded-napplets")).unwrap();
         assert!(
-            marker.contains(":dingdong\n") && marker.contains(":discover\n"),
+            marker.contains(":dingdong\n")
+                && marker.contains(":discover\n")
+                && marker.contains(":chronofeed\n"),
             "{marker}"
         );
 
