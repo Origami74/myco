@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   look up where people publish before it sees anything, a slow phone in the
   room no longer holds up the others, and a relay that answers slowly still
   counts for what it sent.
+- **Apps built with WebAssembly run.** Myco blocked apps from running the
+  WebAssembly they ship with, so some showed "this host blocks WebAssembly".
+  They run now, and still cannot reach the network on their own.
 - **Chronofeed comes with Myco.** A chronological feed of the people you
   follow is installed with new installs of the app, next to DingDong and
   the AppStore. Existing installs are left as they are.
