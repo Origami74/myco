@@ -3,8 +3,10 @@
 //!
 //! - **push** ([`PeerRelayPool::send`]): fan an `["EVENT", …]` frame to a peer
 //!   (fire-and-forget) — the multi-hop flood of `docs/design/core/event-gossip.md`.
-//! - **pull** ([`PeerRelayPool::request`]): open a `REQ`, collect the peer's
-//!   matching events until `EOSE`/`CLOSED`, then close the subscription.
+//! - **pull** ([`PeerRelayPool::request_stream`]): open a `REQ` and hand on
+//!   each matching event the moment it arrives, until `EOSE`/`CLOSED`, then
+//!   close the subscription. [`PeerRelayPool::request`] collects that stream
+//!   for a caller that wants a batch.
 //!
 //! A Nostr relay connection is two-way, so there is no reason to hold more than one
 //! socket per destination: event fan-out, every REQ + its event replies, and the
@@ -31,7 +33,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use nostr::Event;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 /// Keepalive cadence: send a WS ping this often on an otherwise-idle connection.
@@ -41,16 +43,6 @@ use tokio_tungstenite::tungstenite::Message;
 /// route with no RST), not the TCP retransmit horizon; long enough not to chatter
 /// over BLE. The runtime's keepwarm loop respawns the dropped task promptly.
 const PING_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Drop any event whose signature does not check out.
-///
-/// One place, at the point remote events enter the process, rather than a check
-/// each call site has to remember — a missed one is a silent forgery hole. A
-/// forged manifest is the sharp case: the gateway would stage and serve it as
-/// the named publisher's site. See `reference/thinning-custom-relay.md` (D7).
-pub(crate) fn verified(events: Vec<Event>) -> Vec<Event> {
-    events.into_iter().filter(|e| e.verify().is_ok()).collect()
-}
 
 /// Cap on the WS connect itself. Without this, a TCP connect into a wedged FSP
 /// session hangs on SYN retransmits for the OS horizon (~2min) — and every
@@ -123,23 +115,22 @@ fn record_dial_failure(map: &BackoffMap, npub: &str) {
 enum Command {
     /// Fire-and-forget: write a pre-built `["EVENT", …]` frame (the push plane).
     Publish(String),
-    /// Open a `REQ` for `filters`, accumulate matching events until `EOSE`/`CLOSED`,
-    /// then reply once with the batch and close the subscription (the pull plane).
+    /// Open a `REQ` for `filters` and send each matching event down `events`
+    /// as it arrives; `EOSE`/`CLOSED` drops the sender, which ends the stream,
+    /// and closes the subscription (the pull plane).
     Request {
         filters: Vec<serde_json::Value>,
         /// Mesh state for this pull, carried in the envelope around the `REQ`.
         /// `None` sends a plain NIP-01 `REQ`: single hop, no query id.
         meta: Option<crate::mesh_wire::MeshMeta>,
-        reply: oneshot::Sender<Vec<Event>>,
+        events: mpsc::UnboundedSender<Event>,
     },
 }
 
-/// An in-flight `REQ` on a connection: events seen so far, and where to deliver them
-/// on `EOSE`. The events are returned unverified — callers verify (matching the old
-/// `query_relay` contract).
+/// An in-flight `REQ` on a connection: where its events go. Only events that
+/// verify are sent — this is where a peer's events cross into the process.
 struct Pending {
-    events: Vec<Event>,
-    reply: oneshot::Sender<Vec<Event>>,
+    events: mpsc::UnboundedSender<Event>,
 }
 
 #[derive(Default)]
@@ -309,6 +300,10 @@ impl PeerRelayPool {
     /// As [`request`](Self::request), but carrying mesh state — a hop budget,
     /// query id, and time budget — in the envelope around the `REQ`. Used by the
     /// core-driven multi-hop pulls (discovery, update checks).
+    ///
+    /// Collected from [`request_stream`](Self::request_stream): what arrived
+    /// by the deadline is returned even when `EOSE` did not come — a slow
+    /// peer's first two hundred events are still two hundred events.
     pub async fn request_with(
         &self,
         npub: &str,
@@ -317,36 +312,50 @@ impl PeerRelayPool {
         meta: Option<crate::mesh_wire::MeshMeta>,
         timeout: Duration,
     ) -> Vec<Event> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        {
-            let mut peers = self.peers.lock().unwrap();
-            // In dial backoff → empty batch, same contract as a dead peer.
-            let Some(tx) = self.spawn_or_get(&mut peers, npub, url) else {
-                return Vec::new();
-            };
-            if tx
-                .send(Command::Request {
-                    filters,
-                    meta,
-                    reply: reply_tx,
-                })
-                .is_err()
-            {
-                peers.remove(npub);
-                return Vec::new();
-            }
-        } // release the lock before awaiting the reply
-        match tokio::time::timeout(timeout, reply_rx).await {
-            // Signature check at the boundary: this is where a peer's events cross
-            // into the process, so callers downstream can treat what they get as
-            // authentic. Transport authenticity is not authorship — a peer relays
-            // events signed by third parties it has never met, so an honest peer
-            // still cannot vouch for them. See `reference/thinning-custom-relay.md`
-            // (D7).
-            Ok(Ok(events)) => verified(events),
-            // Timed out, or the actor died before EOSE (connection dropped).
-            _ => Vec::new(),
+        let mut events = self.request_stream(npub, url, filters, meta);
+        let mut out = Vec::new();
+        let deadline = tokio::time::Instant::now() + timeout;
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
+            out.push(event);
         }
+        out
+    }
+
+    /// Open a `REQ` on the peer's connection and receive each matching event
+    /// as the peer sends it. The stream ends at `EOSE`/`CLOSED`, or when the
+    /// connection drops; a peer in dial backoff gives an empty one. Dropping
+    /// the receiver closes the subscription on the peer.
+    ///
+    /// Every event is signature-checked before it is sent: this is where a
+    /// peer's events cross into the process, so what comes out is authentic.
+    /// Transport authenticity is not authorship — a peer relays events signed
+    /// by third parties it has never met, so an honest peer still cannot vouch
+    /// for them. See `reference/thinning-custom-relay.md` (D7).
+    pub fn request_stream(
+        &self,
+        npub: &str,
+        url: &str,
+        filters: Vec<serde_json::Value>,
+        meta: Option<crate::mesh_wire::MeshMeta>,
+    ) -> mpsc::UnboundedReceiver<Event> {
+        let (events, rx) = mpsc::unbounded_channel();
+        let mut peers = self.peers.lock().unwrap();
+        // In dial backoff → the sender drops here: an empty stream, the same
+        // contract as a dead peer.
+        let Some(tx) = self.spawn_or_get(&mut peers, npub, url) else {
+            return rx;
+        };
+        if tx
+            .send(Command::Request {
+                filters,
+                meta,
+                events,
+            })
+            .is_err()
+        {
+            peers.remove(npub);
+        }
+        rx
     }
 }
 
@@ -441,7 +450,7 @@ async fn run(
                         break;
                     }
                 }
-                Some(Command::Request { filters, meta, reply }) => {
+                Some(Command::Request { filters, meta, events }) => {
                     let sub_id = format!("r{next_sub}");
                     next_sub += 1;
                     let mut req: Vec<serde_json::Value> = Vec::with_capacity(filters.len() + 2);
@@ -456,11 +465,10 @@ async fn run(
                         None => req.to_string(),
                     };
                     if sink.send(Message::Text(frame)).await.is_err() {
-                        let _ = reply.send(Vec::new());
                         reason = "write failed (request)";
                         break;
                     }
-                    pending.insert(sub_id, Pending { events: Vec::new(), reply });
+                    pending.insert(sub_id, Pending { events });
                 }
             },
             msg = stream.next() => match msg {
@@ -499,7 +507,7 @@ async fn run(
                 // so they don't linger until the connection closes.
                 let dead: Vec<String> = pending
                     .iter()
-                    .filter(|(_, p)| p.reply.is_closed())
+                    .filter(|(_, p)| p.events.is_closed())
                     .map(|(id, _)| id.clone())
                     .collect();
                 for id in dead {
@@ -514,12 +522,13 @@ async fn run(
     // sees a fresh (re)connect edge when the peer comes back.
     tracing::info!(npub, reason, "peer relay disconnected");
     connected.lock().unwrap().remove(&npub);
-    // Pending replies drop here → their `request` callers get an empty batch.
+    // Pending senders drop here → their streams end with what they carried.
     let _ = sink.send(Message::Close(None)).await;
 }
 
-/// Route one inbound relay frame to its pending `REQ`. Returns the sub id that just
-/// completed (on `EOSE`/`CLOSED`) so the caller can `CLOSE` it, else `None`.
+/// Route one inbound relay frame to its pending `REQ`. Returns the sub id that is
+/// done — `EOSE`/`CLOSED`, or its receiver gone — so the caller can `CLOSE` it,
+/// else `None`.
 fn handle_inbound(txt: &str, pending: &mut HashMap<String, Pending>) -> Option<String> {
     let val: serde_json::Value = serde_json::from_str(txt).ok()?;
     let arr = val.as_array()?;
@@ -529,13 +538,24 @@ fn handle_inbound(txt: &str, pending: &mut HashMap<String, Pending>) -> Option<S
             let sub_id = arr.get(1)?.as_str()?;
             let p = pending.get_mut(sub_id)?;
             let event = serde_json::from_value::<Event>(arr.get(2)?.clone()).ok()?;
-            p.events.push(event);
+            // The one signature check on the pull path, where a peer's events
+            // enter the process — a check each caller had to remember would
+            // be a silent forgery hole, and a forged manifest would be served
+            // as the named publisher's site. See
+            // `reference/thinning-custom-relay.md` (D7).
+            if event.verify().is_err() {
+                return None;
+            }
+            if p.events.send(event).is_err() {
+                // Nobody is listening any more: stop the peer sending.
+                pending.remove(sub_id);
+                return Some(sub_id.to_string());
+            }
             None
         }
         "EOSE" | "CLOSED" => {
             let sub_id = arr.get(1)?.as_str()?.to_string();
-            let p = pending.remove(&sub_id)?;
-            let _ = p.reply.send(p.events);
+            pending.remove(&sub_id)?;
             Some(sub_id)
         }
         _ => None, // OK (for our EVENT publishes), NOTICE, … — nothing to route
@@ -560,13 +580,43 @@ mod tests {
         // Tamper with the content after signing: id and sig no longer match, but
         // it still deserializes as an Event, which is exactly what a hostile peer
         // would send.
-        let mut raw = serde_json::to_value(&good).unwrap();
-        raw["content"] = serde_json::json!("forged");
-        let forged: Event = serde_json::from_value(raw).unwrap();
+        let mut forged = serde_json::to_value(&good).unwrap();
+        forged["content"] = serde_json::json!("forged");
 
-        let out = verified(vec![good.clone(), forged]);
-        assert_eq!(out.len(), 1, "only the untampered event survives");
-        assert_eq!(out[0].id, good.id);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut pending = HashMap::from([("r1".to_string(), Pending { events: tx })]);
+        for event in [serde_json::to_value(&good).unwrap(), forged] {
+            let frame = serde_json::json!(["EVENT", "r1", event]).to_string();
+            assert_eq!(handle_inbound(&frame, &mut pending), None);
+        }
+        assert_eq!(rx.try_recv().unwrap().id, good.id);
+        assert!(rx.try_recv().is_err(), "only the untampered event survives");
+    }
+
+    /// Events go on as they arrive, not at `EOSE`; `EOSE` ends the stream
+    /// and asks for a `CLOSE`, and so does a receiver that went away.
+    #[test]
+    fn events_stream_until_eose() {
+        let note = |t: &str| {
+            nostr::EventBuilder::text_note(t)
+                .sign_with_keys(&nostr::Keys::generate())
+                .unwrap()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut pending = HashMap::from([("r1".to_string(), Pending { events: tx })]);
+        let first = note("first");
+        let frame = serde_json::json!(["EVENT", "r1", first]).to_string();
+        assert_eq!(handle_inbound(&frame, &mut pending), None);
+        assert_eq!(rx.try_recv().unwrap().id, first.id, "held back until EOSE");
+        let eose = serde_json::json!(["EOSE", "r1"]).to_string();
+        assert_eq!(handle_inbound(&eose, &mut pending), Some("r1".into()));
+        assert!(pending.is_empty());
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut pending = HashMap::from([("r2".to_string(), Pending { events: tx })]);
+        drop(rx);
+        let frame = serde_json::json!(["EVENT", "r2", note("late")]).to_string();
+        assert_eq!(handle_inbound(&frame, &mut pending), Some("r2".into()));
     }
 
     /// The classifier reads OS error text, so pin the three cases: mistaking a

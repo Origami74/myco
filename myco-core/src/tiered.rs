@@ -131,7 +131,7 @@ impl RelayBackend for TieredRelay {
     }
 
     /// Both stores at once, merged: one copy per id, the newest per
-    /// replaceable slot, newest first, capped at the smallest `limit`. Only
+    /// replaceable slot, newest first, each filter capped at its own `limit`. Only
     /// the cached events that survive the merge count as accessed.
     ///
     /// A cache that fails only costs its hits. A local store that fails is an
@@ -185,9 +185,7 @@ pub(crate) fn merge(kept: Vec<Event>, cached: Vec<Event>, filters: &[Filter]) ->
         out.push(event);
     }
     out.sort_by_key(|e| std::cmp::Reverse(e.created_at));
-    if let Some(limit) = filters.iter().filter_map(|f| f.limit).min() {
-        out.truncate(limit);
-    }
+    nsite_deck::cap_per_filter(&mut out, filters);
     out
 }
 
@@ -370,6 +368,39 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// A feed's `REQ` — notes with a limit, profiles without — gets every
+    /// profile: each filter's limit is its own, not the smallest one's.
+    #[tokio::test]
+    async fn a_limit_on_one_filter_does_not_cap_another() {
+        let (relay, _cache, kept, _cached) = views();
+        let people: Vec<Keys> = (0..5).map(|_| Keys::generate()).collect();
+        for (i, k) in people.iter().enumerate() {
+            relay
+                .publish(at(k, Kind::Metadata, "{}", 10))
+                .await
+                .unwrap();
+            for n in 0..4 {
+                relay
+                    .publish(at(k, Kind::TextNote, &format!("{i}-{n}"), 100 + n))
+                    .await
+                    .unwrap();
+            }
+        }
+        let authors: Vec<_> = people.iter().map(|k| k.public_key()).collect();
+        let got = kept
+            .query(&[
+                Filter::new()
+                    .authors(authors.clone())
+                    .kind(Kind::TextNote)
+                    .limit(3),
+                Filter::new().authors(authors).kind(Kind::Metadata),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(got.iter().filter(|e| e.kind == Kind::TextNote).count(), 3);
+        assert_eq!(got.iter().filter(|e| e.kind == Kind::Metadata).count(), 5);
     }
 
     #[tokio::test]

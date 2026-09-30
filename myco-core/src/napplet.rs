@@ -1565,9 +1565,11 @@ impl myco_napplet_runtime::seams::MeshSink for NappletMeshSink {
                 crate::mesh_wire::new_query_id(),
                 crate::content::PULL_BUDGET_MS,
             );
-            let events = content.pull_from_peers(filters, meta, None).await;
+            // Each event is accepted as a peer sends it, so the napplet sees
+            // the nearest peer's answer without waiting for the farthest.
+            let mut events = content.pull_from_peers_stream(filters, meta, None);
             let mut fresh = 0usize;
-            for event in events {
+            while let Some(event) = events.recv().await {
                 match hub.accept_pulled(event).await {
                     Ok(true) => fresh += 1,
                     Ok(false) => {}

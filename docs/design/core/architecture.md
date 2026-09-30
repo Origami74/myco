@@ -153,6 +153,31 @@ relay and the cache, the cache is evicted to budget, and an index is
 snapshotted only if it changed. Nothing walks a whole store on the timer; a
 read sweeps expired events itself when any are due.
 
+#### Internet relays: one connection each
+
+Every read and write Myco makes to a public or configured relay goes through
+one shared pool (`relay_pool.rs`, built on
+[rustic-applesauce](https://github.com/hzrd149/rustic-applesauce), pinned to
+a commit):
+
+- **One socket per relay.** Queries, subscription streams, relay-list
+  lookups and publishes all ride it. It opens when something asks and closes
+  a minute after the last one is done. Before this, each of those dialled its
+  own socket, and relays that count connections answered a feed opening with
+  503s and refused handshakes.
+- **Myco's connector.** The pool dials through it:
+  - the skip list is checked first;
+  - every dial's outcome is recorded in `relay_health`;
+  - a socket is pinged every 30 s and dropped after 90 s without a frame;
+  - an operation still waiting on a dial fails when that dial fails, instead
+    of waiting out its deadline.
+- **Types.** The library has its own `Event` and `Filter`, which are plain
+  NIP-01 JSON. They are converted in that one module; every event is parsed
+  into a `nostr::Event` and signature-checked there.
+
+The mesh peer pool (`peer_relay.rs`) is separate: it speaks Myco's `MESH`
+envelope over `.fips` addresses.
+
 ### 4 — FIPS
 
 `myco-core` embeds a fips `Node` on a Tokio multi-thread runtime

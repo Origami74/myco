@@ -49,6 +49,42 @@ pub trait AdminBackend: Send + Sync {
     async fn wipe(&self) -> anyhow::Result<()>;
 }
 
+/// Cap a multi-filter answer the way NIP-01 does: each filter's `limit` is
+/// its own. `events` must be newest first; an event stays if it is among the
+/// newest `limit` of some filter that matches it, or matches a filter with no
+/// limit. One that matches none of `filters` by [`Filter::match_event`] is
+/// kept — the store that returned it matched it, and a matcher gap must not
+/// lose it.
+///
+/// Truncating to the smallest limit, as this used to be done, let a feed's
+/// `{kinds: [1], limit: 50}` cut away every profile its `{kinds: [0]}` asked
+/// for in the same `REQ`.
+pub fn cap_per_filter(events: &mut Vec<Event>, filters: &[Filter]) {
+    if filters.iter().all(|f| f.limit.is_none()) {
+        return;
+    }
+    let mut taken = vec![0usize; filters.len()];
+    events.retain(|event| {
+        let mut matched = false;
+        let mut keep = false;
+        for (i, filter) in filters.iter().enumerate() {
+            if !filter.match_event(event, nostr::filter::MatchEventOptions::new()) {
+                continue;
+            }
+            matched = true;
+            match filter.limit {
+                None => keep = true,
+                Some(limit) if taken[i] < limit => {
+                    taken[i] += 1;
+                    keep = true;
+                }
+                Some(_) => {}
+            }
+        }
+        keep || !matched
+    });
+}
+
 /// The newest event in a replaceable slot: `kind` + `author`, plus the `d-tag`
 /// for parameterized-replaceable (35128). `d_tag = None` selects the root (15128)
 /// slot.

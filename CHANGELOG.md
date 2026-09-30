@@ -37,9 +37,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   app's other requests, and pictures reach apps as raw bytes instead of
   being packed into text on the way, which kept feeds from scrolling
   smoothly.
+- **Apps and nearby phones get what Myco finds as it finds it.** Reads no
+  longer wait for the slowest relay or the farthest phone: what this phone
+  holds goes out at once, and each relay's and each nearby phone's answer is
+  passed on the moment it arrives. An app no longer waits seconds for Myco to
+  look up where people publish before it sees anything, a slow phone in the
+  room no longer holds up the others, and a relay that answers slowly still
+  counts for what it sent.
 - **Apps can load files up to 64 MB.** Short videos and big pictures used to
   be refused above 10 MB; the limit is now 64 MB, and slow downloads get
   enough time to finish.
+- **Names show up for everyone you follow.** When an app asked for notes and
+  profiles together, the phone's store handed back only as many events as the
+  notes were limited to, and the profiles were cut off. Each part of such a
+  request now gets its own limit.
+- **Fewer relays turn Myco away.** Myco now keeps one connection to each
+  relay and sends everything over it, instead of opening a new one for every
+  request. Busy relays that limit connections no longer refuse it when an app
+  loads a feed.
+- **More names and pictures show up in apps.** Profiles are now also looked
+  for on the relays that collect them for everyone, so a person whose own
+  relays are unknown or down still shows with their name.
 - **Myco no longer keeps a processor core busy while the mesh is on.** The
   mesh adapter's reader spun at full speed whenever the tunnel was up.
 - **Apps show what your phone already has straight away.** When an app asks

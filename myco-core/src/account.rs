@@ -466,19 +466,39 @@ impl Account {
     // --- an imported key --------------------------------------------------
 
     async fn run_imported(&self, generation: u64, pk: PublicKey) {
-        let mut profile = self.local_profile(&pk).await;
-        if profile.is_none() && !(self.ctx.offline_only)() {
-            profile = fetch_profile(&self.ctx.relays, &pk).await;
-            if let Some(event) = &profile {
-                let _ = self.ctx.relay.publish(event.clone()).await;
-            }
-        }
+        use futures_util::StreamExt as _;
+        // What this device holds, shown at once; then every relay asked
+        // together, and each newer version shown and kept as it arrives —
+        // not held for the slowest relay, and asked even when one is held,
+        // since the held one may be old.
+        let held = self.local_profile(&pk).await;
         if !self.is_current(generation) {
             return;
         }
-        self.lock().view.profile_loading = false;
-        if let Some(profile) = profile {
-            self.apply_profile(generation, &profile);
+        let mut newest = held.as_ref().map(|e| e.created_at);
+        if let Some(profile) = &held {
+            self.lock().view.profile_loading = false;
+            self.apply_profile(generation, profile);
+        }
+        if !(self.ctx.offline_only)() {
+            let mut answers = profile_answers(&self.ctx.relays, &pk);
+            while let Some(found) = answers.next().await {
+                if !self.is_current(generation) {
+                    return;
+                }
+                for event in found {
+                    if newest.is_some_and(|t| event.created_at <= t) {
+                        continue;
+                    }
+                    newest = Some(event.created_at);
+                    let _ = self.ctx.relay.publish(event.clone()).await;
+                    self.lock().view.profile_loading = false;
+                    self.apply_profile(generation, &event);
+                }
+            }
+        }
+        if self.is_current(generation) {
+            self.lock().view.profile_loading = false;
         }
     }
 
@@ -770,29 +790,32 @@ async fn publish_everywhere(relays: &[String], events: &[Event]) -> Vec<usize> {
     counts
 }
 
-/// The newest kind 0 for `pk` any relay has.
-async fn fetch_profile(relays: &[String], pk: &PublicKey) -> Option<Event> {
+/// Each relay's kind 0 for `pk`, in the order the relays answer.
+fn profile_answers<'a>(
+    relays: &'a [String],
+    pk: &'a PublicKey,
+) -> futures_util::stream::FuturesUnordered<impl std::future::Future<Output = Vec<Event>> + 'a> {
     let filter = serde_json::json!({ "kinds": [0], "authors": [pk.to_hex()], "limit": 1 });
-    let answers = futures_util::future::join_all(relays.iter().map(|url| {
-        let filter = filter.clone();
-        async move {
-            crate::relay_health::timeout(
-                url,
-                NET_TIMEOUT,
-                crate::ip_source::query_relay(url, filter),
-            )
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or_default()
-        }
-    }))
-    .await;
-    answers
-        .into_iter()
-        .flatten()
-        .filter(|e| e.pubkey == *pk && e.kind == Kind::Metadata && e.verify().is_ok())
-        .max_by_key(|e| e.created_at)
+    relays
+        .iter()
+        .map(|url| {
+            let filter = filter.clone();
+            async move {
+                crate::relay_health::timeout(
+                    url,
+                    NET_TIMEOUT,
+                    crate::ip_source::query_relay(url, filter),
+                )
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.pubkey == *pk && e.kind == Kind::Metadata && e.verify().is_ok())
+                .collect()
+            }
+        })
+        .collect()
 }
 
 async fn download(url: &str) -> Option<Vec<u8>> {

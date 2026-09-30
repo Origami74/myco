@@ -110,7 +110,7 @@ async fn get_event(ctx: &NapContext, session: &Session, message: &Envelope) -> E
 
     let plan = ctx
         .outbox
-        .plan_hinted(Direction::Read, &authors, &hints)
+        .plan_stored(Direction::Read, &authors, &hints)
         .await;
     let lanes = dedupe(
         std::iter::once(RelayLane::Local)
@@ -198,7 +198,7 @@ async fn query(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
 
     let plan = ctx
         .outbox
-        .plan_hinted(Direction::Read, &authors, &hints)
+        .plan_stored(Direction::Read, &authors, &hints)
         .await;
     let lanes = dedupe(
         std::iter::once(RelayLane::Local)

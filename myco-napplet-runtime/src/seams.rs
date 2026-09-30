@@ -237,6 +237,23 @@ pub trait OutboxResolver: Send + Sync {
         let _ = hints;
         self.plan(direction, authors).await
     }
+
+    /// As [`OutboxResolver::plan_hinted`], from what the resolver holds
+    /// **now**: it never waits on the network. An author whose relay list
+    /// is not held gets the fallback relays and is named in
+    /// `missing_authors`; a resolver may look the list up behind the answer,
+    /// so a later `plan_hinted` has it. What a read uses to open its lanes
+    /// at once — a stream forwards what it can reach now and widens when
+    /// more is known, rather than waiting to know everything. The default
+    /// is `plan_hinted`, for a resolver with nothing to wait on.
+    async fn plan_stored(
+        &self,
+        direction: Direction,
+        authors: &[PublicKey],
+        hints: &[RelayLane],
+    ) -> RelayPlan {
+        self.plan_hinted(direction, authors, hints).await
+    }
 }
 
 /// Carries NIP-01 traffic over lanes — the seam behind NAP-OUTBOX's I/O.
