@@ -45,9 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   room no longer holds up the others, and a relay that answers slowly still
   counts for what it sent.
 - **Chronofeed comes with Myco.** A chronological feed of the people you
-  follow is installed with the app, next to DingDong and the AppStore.
-  Existing installs get it once, at their next start; removing it keeps it
-  removed.
+  follow is installed with new installs of the app, next to DingDong and
+  the AppStore. Existing installs are left as they are.
 - **Apps can load files up to 64 MB.** Short videos and big pictures used to
   be refused above 10 MB; the limit is now 64 MB, and slow downloads get
   enough time to finish.

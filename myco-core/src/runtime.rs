@@ -2722,12 +2722,17 @@ pub(crate) struct DefaultNapplet {
     /// `DEFAULT_GRANTS`). Widening one here reaches every install still on
     /// the seeded entry at its next open, so it is a review in itself.
     pub expected: &'static [&'static str],
+    /// Only a fresh install gets it. An install that has seeded before (its
+    /// marker exists) records it as seeded without installing it, so it never
+    /// appears there unasked. `false` reaches existing installs once, at their
+    /// next launch.
+    pub new_installs_only: bool,
 }
 
 /// Napplets installed by default. Pinned with only the default grants and
 /// their expected permissions as the reviewed list. Each is seeded once per
 /// install; one added here later still reaches devices that were seeded
-/// before it.
+/// before it, unless it is [`DefaultNapplet::new_installs_only`].
 pub(crate) const DEFAULT_NAPPLETS: &[DefaultNapplet] = &[
     // Its published manifest declares no `requires`; its source asks for
     // `mesh`, which the tooling drops.
@@ -2735,6 +2740,7 @@ pub(crate) const DEFAULT_NAPPLETS: &[DefaultNapplet] = &[
         title: "DingDong",
         pointer: "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9hxwer0denstp6v0k",
         expected: &["mesh"],
+        new_installs_only: false,
     },
     // d=discover. Its published manifest declares `outbox` and `theme`;
     // "Around you" uses `mesh`.
@@ -2742,6 +2748,7 @@ pub(crate) const DEFAULT_NAPPLETS: &[DefaultNapplet] = &[
         title: "AppStore",
         pointer: "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9ekxmmkv4eqc3hahf",
         expected: &["mesh", "outbox", "theme"],
+        new_installs_only: false,
     },
     // d=chronofeed: follows' notes and reposts, newest first. Its published
     // manifest declares these; `local` and `link` are default grants.
@@ -2749,6 +2756,7 @@ pub(crate) const DEFAULT_NAPPLETS: &[DefaultNapplet] = &[
         title: "Chronofeed",
         pointer: "naddr1qq9xx6rjdahx7en9v4jqz9nhwden5te0wfjkccte9ec8y6tdv9kzumn9wsqs6amnwvaz7tmwdaejumr0dsq32amnwvaz7tmjv4kxz7fwv35hgar09ec82cszyzamthdqu92k09ulq4p5q77uyqeadu9mkv8hy5f2nqw0mvhsncn5wqcyqqqgjwghpt0eg",
         expected: &["identity", "outbox", "relay", "resource", "theme"],
+        new_installs_only: true,
     },
 ];
 
@@ -2841,6 +2849,9 @@ fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) 
     use nostr::nips::nip19::ToBech32;
 
     let marker = data_dir.join("seeded-napplets");
+    // No marker yet: nothing has ever been seeded here, so this is a fresh
+    // install and gets every default.
+    let fresh = !marker.exists();
     let Some(mut seeded) = seeded_napplet_keys(&marker) else {
         return;
     };
@@ -2860,6 +2871,14 @@ fn seed_default_napplets(content: &Arc<Content>, rt: &Runtime, data_dir: &Path) 
         let key = format!("{npub}:{}", addr.d_tag.as_deref().unwrap_or(""));
         if !seeded.insert(key) {
             adopt_legacy_seeded_napplet(content, &npub, addr.d_tag.as_deref(), &expected);
+            continue;
+        }
+        if default.new_installs_only && !fresh {
+            // Recorded above, so it is never installed here later either.
+            tracing::info!(
+                title,
+                "default napplet is for new installs only; not seeded"
+            );
             continue;
         }
         let shell_host =
@@ -3407,6 +3426,17 @@ mod tests {
         assert_eq!(item.granted, crate::napplet::effective_grants(&[]));
         assert!(dir.join("seeded-napplets").exists());
 
+        // A fresh install also gets the defaults for new installs only.
+        let chronofeed = rt
+            .content
+            .as_ref()
+            .unwrap()
+            .library_snapshot()
+            .into_iter()
+            .filter(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("chronofeed"))
+            .count();
+        assert_eq!(chronofeed, 1, "a fresh install did not get Chronofeed");
+
         // A second launch does not duplicate it.
         let relaunched = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
         assert_eq!(dingdongs(&relaunched).len(), 1);
@@ -3787,8 +3817,9 @@ mod tests {
         tags.sort();
         assert_eq!(
             tags,
-            vec![Some("chronofeed"), Some("discover")],
-            "only the new defaults are seeded; the removed one stays removed"
+            vec![Some("discover")],
+            "only the new default is seeded; the removed one stays removed, \
+             and one for new installs only is not seeded here"
         );
         let appstore = napplets
             .iter()
