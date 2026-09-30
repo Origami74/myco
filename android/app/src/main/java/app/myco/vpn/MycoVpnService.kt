@@ -129,6 +129,11 @@ class MycoVpnService : VpnService() {
         }
 
         val builder = Builder()
+            // establish() hands back a non-blocking fd by default. readLoop
+            // reads it with a plain blocking read, which on a non-blocking fd
+            // returns 0 at once (EAGAIN) and spun a core for as long as the
+            // tunnel was up.
+            .setBlocking(true)
             .setSession("Myco mesh")
             .setMtu(mtu)
             .addAddress(ula, 128) // this node's IPv6 ULA
