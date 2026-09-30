@@ -40,14 +40,20 @@ use crate::dispatch::NapContext;
 use crate::seams::Envelope;
 use crate::session::Session;
 
-/// The spec's recommended response cap.
-pub const MAX_BYTES: usize = 10 * 1024 * 1024;
+/// The most one resource may be: 64 MiB, the largest body this device's own
+/// Blossom accepts. Above the spec's recommended 10 MiB because a short video
+/// is routinely larger, and bytes no longer cross the JSON channel (the shell
+/// fetches them as bytes; see the module docs). Held in memory whole while it
+/// is fetched, checked and handed over, so not higher without a path that
+/// streams from disk.
+pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 /// The spec's recommended bulk cap.
 pub const MAX_URLS: usize = 100;
-/// The most one `bytesMany` may return in total. A hundred blobs at the
-/// per-blob cap would be a gigabyte handed to one napplet at once; past this
-/// the remaining URLs are answered `too-large` without being fetched.
-pub const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+/// The most one `bytesMany` may return in total — one resource's worth. A
+/// hundred blobs at the per-blob cap would be gigabytes handed to one
+/// napplet at once; past this the remaining URLs are answered `too-large`
+/// without being fetched.
+pub const MAX_TOTAL_BYTES: usize = MAX_BYTES;
 
 /// Handle an inbound `resource.*` message.
 pub async fn handle(ctx: &NapContext, session: &Session, message: &Envelope) -> Vec<Envelope> {
@@ -973,7 +979,8 @@ mod tests {
     #[tokio::test]
     async fn bytes_many_stops_at_the_total_cap() {
         let (ctx, fetcher) = crate::testing::test_context_with_fetcher();
-        let chunk = vec![1u8; MAX_BYTES];
+        // Five eighths of the total each: the first fits, the second crosses.
+        let chunk = vec![1u8; MAX_TOTAL_BYTES / 8 * 5];
         let held: Vec<String> = (0..3)
             .map(|i| {
                 let mut b = chunk.clone();
@@ -991,8 +998,8 @@ mod tests {
         .await;
         let items = r["items"].as_array().unwrap();
         let ok: Vec<bool> = items.iter().map(|i| i["ok"].as_bool().unwrap()).collect();
-        // 16 MiB total, 10 MiB blobs: the first fits, the second crosses the
-        // line and is delivered, the third is refused unfetched.
+        // The first fits, the second crosses the line and is delivered, the
+        // third is refused unfetched.
         assert_eq!(ok, vec![true, true, false], "{items:?}");
         assert_eq!(items[2]["error"], "too-large");
         assert_eq!(

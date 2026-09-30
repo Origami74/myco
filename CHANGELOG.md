@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   look up where people publish before it sees anything, a slow phone in the
   room no longer holds up the others, and a relay that answers slowly still
   counts for what it sent.
+- **Apps can load files up to 64 MB.** Short videos and big pictures used to
+  be refused above 10 MB; the limit is now 64 MB, and slow downloads get
+  enough time to finish.
 - **Names show up for everyone you follow.** When an app asked for notes and
   profiles together, the phone's store handed back only as many events as the
   notes were limited to, and the profiles were cut off. Each part of such a

@@ -1257,7 +1257,12 @@ pub struct BlossomFetcher {
 /// How long one mesh peer gets.
 const MESH_BLOB_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long the internet servers get, all together.
-const INTERNET_BLOB_TIMEOUT: Duration = Duration::from_secs(20);
+/// Long enough for a resource at the cap (64 MiB) on a slow mobile link; a
+/// dead or silent server is cut off far sooner by the connect timeout and
+/// [`INTERNET_READ_TIMEOUT`].
+const INTERNET_BLOB_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a download may go without a byte before it is given up on.
+const INTERNET_READ_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long one internet server gets to accept the connection, so a dead
 /// hint does not eat the whole budget before the defaults are asked.
 const INTERNET_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1276,6 +1281,7 @@ impl BlossomFetcher {
             http: reqwest::Client::builder()
                 .connect_timeout(INTERNET_CONNECT_TIMEOUT)
                 .timeout(INTERNET_BLOB_TIMEOUT)
+                .read_timeout(INTERNET_READ_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
             misses: Mutex::new(HashMap::new()),
