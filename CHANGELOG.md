@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   look up where people publish before it sees anything, a slow phone in the
   room no longer holds up the others, and a relay that answers slowly still
   counts for what it sent.
+- **More names and pictures show up in apps.** Profiles are now also looked
+  for on the relays that collect them for everyone, so a person whose own
+  relays are unknown or down still shows with their name.
 - **Myco no longer keeps a processor core busy while the mesh is on.** The
   mesh adapter's reader spun at full speed whenever the tunnel was up.
 - **Apps show what your phone already has straight away.** When an app asks

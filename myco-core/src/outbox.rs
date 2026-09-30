@@ -374,6 +374,21 @@ impl OutboxService {
     }
 
     /// The configured relays as lanes, or nothing when offline only.
+    /// The indexer relays, as lanes, for reads of what they specialise in —
+    /// profiles, follow lists and relay lists. They are where every client
+    /// publishes those, so an author with no relay list, or one whose relays
+    /// are down, is still found there. None while offline or cut off.
+    fn indexer_lanes(&self) -> Vec<RelayLane> {
+        if self.content.is_offline_only() || self.content.internet_looks_down() {
+            return Vec::new();
+        }
+        self.lists
+            .indexers()
+            .iter()
+            .map(|url| RelayLane::Internet { url: url.clone() })
+            .collect()
+    }
+
     fn fallback_lanes(&self) -> Vec<RelayLane> {
         if self.content.is_offline_only() {
             return Vec::new();
@@ -1079,6 +1094,20 @@ const STREAM_QUEUE: usize = 256;
 /// How often an open stream checks whether "offline only" was switched on.
 const OFFLINE_CHECK_EVERY: Duration = Duration::from_secs(3);
 
+/// The filters that ask only for kinds the indexer relays hold: profiles
+/// (0), follow lists (3) and relay lists (10002).
+fn indexed_filters(filters: &[Filter]) -> Vec<Filter> {
+    filters
+        .iter()
+        .filter(|f| {
+            f.kinds.as_ref().is_some_and(|kinds| {
+                !kinds.is_empty() && kinds.iter().all(|k| matches!(k.as_u16(), 0 | 3 | 10_002))
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 /// Whether `event` is one `filters` asked for.
 fn matches_any(filters: &[Filter], event: &Event) -> bool {
     filters
@@ -1322,6 +1351,19 @@ impl OutboxService {
                         &mut started,
                         &mut streams,
                     );
+                    // Profiles and lists are asked of the indexers too, with
+                    // only those filters: the author's own relays may be
+                    // unknown or down, and the indexers hold them either way.
+                    let indexed = indexed_filters(&filters);
+                    if !indexed.is_empty() {
+                        this.start_lanes(
+                            this.indexer_lanes(),
+                            &indexed,
+                            &session,
+                            &mut started,
+                            &mut streams,
+                        );
+                    }
                     if lacking {
                         // The lists that plan lacked, looked up behind the
                         // streams already running; a relay they name joins
@@ -1559,6 +1601,16 @@ impl LaneTransport for OutboxService {
         early: EarlyAnswer,
         scope: &WorkScope,
     ) -> Vec<(RelayLane, Option<Vec<Event>>)> {
+        // A read of profiles and lists only goes to the indexers as well.
+        let mut lanes = lanes.to_vec();
+        if !filters.is_empty() && indexed_filters(filters).len() == filters.len() {
+            for lane in self.indexer_lanes() {
+                if !lanes.contains(&lane) {
+                    lanes.push(lane);
+                }
+            }
+        }
+        let lanes = &lanes[..];
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LaneAnswer>();
         let this = self.detached();
         let (round_lanes, round_filters) = (lanes.to_vec(), filters.to_vec());
@@ -2763,6 +2815,52 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         false
+    }
+
+    /// A read of profiles goes to the indexers too — an author whose own
+    /// relays are unknown or down is still found there — and a read of
+    /// anything else does not.
+    #[tokio::test]
+    async fn profile_reads_reach_the_indexers() {
+        let author = Keys::generate();
+        let profile = EventBuilder::metadata(&nostr::Metadata::new().name("found"))
+            .sign_with_keys(&author)
+            .unwrap();
+        let (indexer_store, indexer) = mock_relay().await;
+        indexer_store.publish(profile.clone()).await.unwrap();
+        let (svc, _store, _hub) = streaming_service("indexed", Vec::new());
+        let svc = svc.with_indexers(vec![indexer.clone()]);
+
+        let answers = svc
+            .query_early(
+                &[RelayLane::Local],
+                &[Filter::new()
+                    .author(author.public_key())
+                    .kind(Kind::Metadata)],
+                Duration::from_secs(3),
+                early(0, 0),
+                &WorkScope::detached(),
+            )
+            .await;
+        assert!(
+            answers.iter().any(|(_, e)| e
+                .as_ref()
+                .is_some_and(|e| e.iter().any(|e| e.id == profile.id))),
+            "the indexer was not asked: {answers:?}"
+        );
+
+        let answers = svc
+            .query_early(
+                &[RelayLane::Local],
+                &[Filter::new()
+                    .author(author.public_key())
+                    .kind(Kind::TextNote)],
+                Duration::from_secs(3),
+                early(0, 0),
+                &WorkScope::detached(),
+            )
+            .await;
+        assert_eq!(answers.len(), 1, "a note read went to the indexers");
     }
 
     /// A stored plan never waits on a relay-list lookup: an author without a
