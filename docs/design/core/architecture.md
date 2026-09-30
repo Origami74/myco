@@ -133,7 +133,9 @@ cached: passing through, they are kept, as every event was before the cache,
 so one addressed to this phone is not evicted before it is read; in a query
 answer, they are not stored at all. A deletion reaches both tiers. An installed napplet's files
 are kept, like an nsite's; only what a running napplet fetches is cached.
-"Delete cache" clears the shell cache along with the unpinned rest.
+"Clear cache" (Settings › Storage) empties the cache alone, without asking;
+"Clear local database" asks first, and clears the unpinned rest of what is kept
+along with the cache.
 
 Readers do not choose. `tiered.rs` reads both, merged by id and newest per
 replaceable slot, and fixes where a write goes: the **kept** view (what the

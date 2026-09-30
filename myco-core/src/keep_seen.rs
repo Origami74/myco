@@ -33,7 +33,7 @@
 //!
 //! **Growth** is bounded in practice by the kinds: small, replaceable, one per
 //! author and app the user actually came across. Nothing prunes them yet
-//! besides "Delete cache" (`docs/roadmap.md`, pruning of kept events).
+//! besides "Clear local database" (`docs/roadmap.md`, pruning of kept events).
 
 use std::sync::Arc;
 

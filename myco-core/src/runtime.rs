@@ -1942,7 +1942,7 @@ impl AppRuntime {
         if let Err(e) = rt.block_on(content.wipe_cache(keep_author)) {
             self.error = format!("cache wipe failed: {e}");
         }
-        // What only passed through goes too — "Delete cache" is a privacy
+        // What only passed through goes too — "Clear local database" is a privacy
         // control — but off this thread: it can be the whole blob budget.
         spawn_clear_cache(rt, content);
     }

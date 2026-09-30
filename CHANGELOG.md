@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files by default). When it is full, what you looked at once goes first, and
   what you keep coming back to stays. What you publish and the apps you
   install are stored separately and never pushed out, and private messages
-  are never cached. "Delete cache" clears it too.
+  are never cached. Settings › Storage shows the cache and what this phone
+  keeps separately, lets you set the cache size, and has a **Clear cache**
+  button that empties it without touching anything kept.
 
 - **Apps can keep what they showed you, and pass it on.** A napplet can keep
   a note or picture on your phone so the cache never throws it away, and can
@@ -28,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **"Delete cache" is now "Clear local database".** It clears what this
+  phone kept (except your pinned apps) and the cache, and asks first.
 - **Chat survives a restart until it expires.** Notes with an expiry time,
   like chat, used to be kept in memory only. They are now stored like other
   notes and deleted once they expire, so restarting Myco mid-conversation no

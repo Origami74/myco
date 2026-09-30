@@ -202,26 +202,36 @@ serves.** Neither owns the other's concern.
 
 ---
 
-## 8. Storage: clearing the cache vs. wiping everything
+## 8. Storage: the cache, and clearing the local database
 
-**Settings → Storage** shows local usage (against the ~2 GB cache target) and
-offers two destructive actions, neither of which touches the device identity or
-the Circle:
+**Settings → Storage** shows two figures: the **cache** (what only passed
+through, against its budget — see [architecture.md](architecture.md), "Kept and
+cached") and the **local database** (what this phone keeps). Under **Cache**:
 
-- **Delete cache** (`wipe_cache`) — reclaim space *without* breaking installed
-  apps. It keeps every **pinned** Library entry working offline by computing a
-  keep-set from the pinned sites — each one's *served* manifest event plus the
-  blob hashes that manifest references — and retaining only those, then dropping
-  everything else: unpinned opened sites and staged updates. A pinned site
-  whose manifest isn't local stays pinned and simply re-downloads on next open.
+- **Cache size** (`set_cache_limits`) — the event and blob budgets, in MB.
+- **Clear cache** (`clear_cache`) — empties the cache, with no confirmation:
+  nothing kept is touched, and an app fetches again what it needs when a peer
+  or the internet has it. Blob space comes back at once; the event cache's
+  database file shrinks at the next start.
+
+Two destructive actions follow, neither of which touches the device identity or
+the Circle, and both of which ask first:
+
+- **Clear local database** (`wipe_cache`) — reclaim space *without* breaking
+  installed apps. It keeps every **pinned** Library entry working offline by
+  computing a keep-set from the pinned sites — each one's *served* manifest
+  event plus the blob hashes that manifest references — and retaining only
+  those, then dropping everything else: unpinned opened sites, staged updates,
+  what apps kept, and the cache. A pinned site whose manifest isn't local stays
+  pinned and simply re-downloads on next open.
 - **Delete all data, including apps** (`wipe_stores`) — clear the local relay +
   Blossom + Library + status wholesale, pinned apps included.
 
 The keep-set is derived through the same **active-manifest** pointer the gateway
 serves from (see [nsite-updates.md §1](../nsite/nsite-updates.md)), so a cache wipe
 preserves exactly the version currently served, not whatever newest manifest the
-relay happens to hold. A general size-based eviction pass (P5) is still open;
-until then these two explicit actions are the only reclamation path.
+relay happens to hold. Size-based eviction applies to the cache only; what is
+kept goes only when the user clears it.
 
 ---
 

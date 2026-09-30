@@ -47,7 +47,7 @@ thing is built.
 | `awareDataPaths` | u8? | unknown | how many concurrent Wi-Fi Aware data paths the chipset reports; sizes the Aware UDP socket pool at node start | Kotlin, whenever it can read it |
 | `nappletMeshPublishTtl` | u8? | 3 | the most hops a napplet's `mesh.publish` may ask for; never above `EVENT_TTL` | `SetNappletMeshReach` (Settings › App reach) |
 | `nappletMeshSubscribeTtl` | u8? | 2 | the most hops a napplet's `mesh.subscribe` backlog pull may ask for; never above `MAX_REQ_TTL` | `SetNappletMeshReach` |
-| `eventCacheBytes` | u64? | 500 MiB | the shell event cache budget (estimated database size); 16 MiB..=64 GiB | `SetCacheLimits` |
+| `eventCacheBytes` | u64? | 500 MiB | the shell event cache budget (estimated database size); 16 MiB..=64 GiB | `SetCacheLimits` (Settings › Storage › Cache size) |
 | `blobCacheBytes` | u64? | 1.5 GiB | the shell blob cache budget; 16 MiB..=64 GiB | `SetCacheLimits` |
 
 ### Held in memory only

@@ -138,8 +138,9 @@ pub enum NativeAppAction {
     /// Clear the local relay + Blossom + Library + site status (dev/test reset).
     /// Content only — the device identity (and the Circle) are untouched.
     WipeStores,
-    /// Clear cached relay events + Blossom blobs **except** those backing pinned
-    /// nsites (Settings → Storage → "Delete cache"). Pinned apps keep working
+    /// Clear the local relay + Blossom **except** what backs pinned nsites, and
+    /// the shell cache with it (Settings → Storage → "Clear local database",
+    /// formerly "Delete cache"). Pinned apps keep working
     /// offline; unpinned opened sites and staged updates go.
     WipeCache,
     /// Drop everything in the shell cache (Settings → Storage → "Clear
@@ -258,6 +259,23 @@ mod tests {
         assert!(matches!(
             parse(r#"{"type":"check_nsite_updates","auto":true}"#),
             NativeAppAction::CheckNsiteUpdates { auto: true }
+        ));
+    }
+
+    /// The Storage screen's cache actions, in the shape `NativeActions` sends.
+    #[test]
+    fn cache_actions_parse_as_the_app_sends_them() {
+        let parse = |json: &str| serde_json::from_str::<NativeAppAction>(json).unwrap();
+        assert!(matches!(
+            parse(r#"{"type":"clear_cache"}"#),
+            NativeAppAction::ClearCache
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"set_cache_limits","eventBytes":16777216,"blobBytes":33554432}"#),
+            NativeAppAction::SetCacheLimits {
+                event_bytes: 16_777_216,
+                blob_bytes: 33_554_432
+            }
         ));
     }
 }

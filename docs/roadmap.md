@@ -283,7 +283,7 @@ Each its own milestone with its own design pass. Roughly in order of pull.
   who does not want paired phones to enumerate what their apps read
   ([security.md](./design/core/security.md) §6).
 - **Pruning of kept events (profiles, relay lists, manifests).** The local
-  relay keeps these kinds when a lookup sees them, and only "Delete cache"
+  relay keeps these kinds when a lookup sees them, and only "Clear local database"
   removes them. Bounded in practice by small, replaceable kinds, but not by a
   limit — [nsite-layer.md](./design/nsite/nsite-layer.md) §2.1, "Events kept
   as they pass".

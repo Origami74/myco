@@ -652,7 +652,7 @@ pub struct Content {
     napplet_status: Mutex<HashMap<String, NappletStatusView>>,
     /// Keeps profiles, relay lists and manifests seen from outside in the
     /// embedded store. `None` with a custom relay: browsing is not written to
-    /// someone else's relay, where "Delete cache" could not clear it.
+    /// someone else's relay, where "Clear local database" could not clear it.
     keep_seen: Option<crate::keep_seen::KeepSeen>,
     /// Bounds [`Content::remember`]'s writes in flight.
     remembering: Arc<tokio::sync::Semaphore>,
@@ -4418,7 +4418,7 @@ impl Content {
     /// [`Content::clear_cache`] beside this (and beside [`Content::wipe`]).
     ///
     /// Clear cached relay events + Blossom blobs **except** those backing pinned
-    /// nsites (Settings → Storage → "Delete cache"). The served manifest version of
+    /// nsites (Settings → Storage → "Clear local database"). The served manifest version of
     /// each pinned site and every blob it references survive, so installed apps keep
     /// working offline; everything else — unpinned opened sites and staged
     /// updates — is dropped. Identity and Circle are untouched.
@@ -4448,7 +4448,7 @@ impl Content {
         for item in &pinned {
             // A napplet is one manifest and one blob. Both stay, or the tile
             // stays and the app behind it is gone — which is what happened the
-            // first time "Delete cache" met an installed napplet.
+            // first time "Clear local database" met an installed napplet.
             if item.kind == LibraryKind::Napplet {
                 if let Some((event, index_hash)) = self.napplet_keep_set(item).await {
                     keep_events.insert(event.id.to_bytes());
@@ -5963,7 +5963,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// "Delete cache" keeps the user's own profile and relay lists. They are
+    /// "Clear local database" keeps the user's own profile and relay lists. They are
     /// published once, at first napplet use, and `user.nsec` outlives the
     /// wipe, so nothing would ever publish them again: without this the
     /// user's outbox plan degrades to fallback and napplets see a bare
@@ -6391,7 +6391,7 @@ pub(crate) mod library_kind_tests {
     }
 
     /// A newer manifest kept for an installed site does not change what the
-    /// site serves — the pinned version does — and "Delete cache" drops the
+    /// site serves — the pinned version does — and "Clear local database" drops the
     /// newer one and leaves the pinned version serving.
     #[tokio::test]
     async fn a_kept_newer_manifest_leaves_the_installed_version_serving() {
@@ -6561,7 +6561,7 @@ pub(crate) mod library_kind_tests {
 
     /// Profiles and manifests seen are kept only in the embedded store. With
     /// a custom relay there is no tap: browsing is not written to someone
-    /// else's relay, where "Delete cache" could not reach it.
+    /// else's relay, where "Clear local database" could not reach it.
     #[tokio::test]
     async fn a_custom_relay_turns_keeping_off() {
         let dir = tmp("keep-seen-custom-relay");
@@ -6676,7 +6676,7 @@ pub(crate) mod library_kind_tests {
     }
 
     /// Keeping an event moves it out of the cache; "Clear cache" leaves what
-    /// is kept alone; "Delete cache"'s retain leaves the cache to the clear
+    /// is kept alone; "Clear local database"'s retain leaves the cache to the clear
     /// the runtime spawns beside it.
     #[tokio::test]
     async fn keeping_dedups_and_both_clears_behave() {
@@ -6723,7 +6723,7 @@ pub(crate) mod library_kind_tests {
             .publish(passing.clone())
             .await
             .unwrap();
-        // "Delete cache" is the retain plus a cache clear the runtime spawns
+        // "Clear local database" is the retain plus a cache clear the runtime spawns
         // beside it; the retain alone leaves the cache for that.
         content.wipe_cache(None).await.unwrap();
         assert!(content.event_cache().contains(&passing.id.to_bytes()));
@@ -6731,6 +6731,34 @@ pub(crate) mod library_kind_tests {
         assert_eq!(content.event_cache().stats().count, 0);
         assert_eq!(content.blob_cache().stats().count, 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Storage screen reads these keys (`AppCoreClient.kt`, `cacheTier`)
+    /// and treats a missing one as 0 — so a rename here would compile, pass,
+    /// and show an empty cache. Pin them.
+    #[test]
+    fn the_cache_view_keeps_the_keys_the_app_reads() {
+        let mut view = CacheView::empty();
+        view.event_cache = myco_cache::CacheStats {
+            count: 1,
+            bytes: 2,
+            limit: 3,
+        };
+        view.blob_cache.limit = 4;
+        let v = serde_json::to_value(&view).unwrap();
+        assert_eq!(v["eventCache"]["count"], 1);
+        assert_eq!(v["eventCache"]["bytes"], 2);
+        assert_eq!(v["eventCache"]["limit"], 3);
+        assert_eq!(v["blobCache"]["limit"], 4);
+        for key in [
+            "relayEvents",
+            "blobCount",
+            "usedBytes",
+            "externalRelay",
+            "externalBlobs",
+        ] {
+            assert!(v.get(key).is_some(), "{key} is gone");
+        }
     }
 
     /// A PeerSource over fixed events and blobs.
@@ -6821,7 +6849,7 @@ pub(crate) mod library_kind_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// "Delete cache" keeps installed apps working. A napplet is one manifest
+    /// "Clear local database" keeps installed apps working. A napplet is one manifest
     /// and one blob; both survive, or the tile survives and the app does not.
     #[tokio::test]
     async fn wipe_cache_keeps_an_installed_napplet() {
