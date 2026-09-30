@@ -88,6 +88,49 @@ pub enum ToShell {
     /// nothing more — installing is the user's answer on the sheet.
     #[serde(rename = "review-napplet")]
     ReviewNapplet { pointer: String },
+    /// Open (or bring forward) the napplet at `pointer` in its own window,
+    /// and bind the NAP-INTENT delivery `token` to that window's session —
+    /// the handler another napplet's `intent.invoke` resolved to. Handled by
+    /// the window host, which starts the handler's task with the token; the
+    /// window that opens (or the one already open, in `onNewIntent`) hands it
+    /// back, and the runtime delivers the payload once the napplet listens.
+    /// The token names a pending delivery and nothing else: it grants
+    /// nothing, and an unknown or expired one binds to nothing.
+    #[serde(rename = "open-napplet")]
+    OpenNapplet {
+        pointer: String,
+        title: String,
+        token: String,
+    },
+    /// Open the nsite whose host label is `host`, through Myco's own nsite
+    /// opener (`myco://app/<host>`): NAP-INTENT's built-in handler for the
+    /// `nsite` archetype. Handled by the window host.
+    #[serde(rename = "open-nsite")]
+    OpenNsite { host: String },
+    /// Ask the user which app should handle a NAP-INTENT request: the
+    /// "open with…" chooser, drawn over the calling window. Answered through
+    /// the reducer (`answer_intent_chooser`) with `token`; closing it is a
+    /// cancel. `candidates` carry the host's keys — the window host is Myco's
+    /// own code, never the napplet, which is only told the answer.
+    #[serde(rename = "choose-intent-handler")]
+    ChooseIntentHandler {
+        token: String,
+        archetype: String,
+        action: String,
+        candidates: Vec<ChooserCandidate>,
+    },
+}
+
+/// One entry in the "open with…" chooser.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChooserCandidate {
+    /// The host's key for the handler (`<npub>:<d>`, or a built-in's name).
+    pub key: String,
+    pub title: String,
+    /// The napplet pointer, for the window host to find its icon; empty for
+    /// a built-in.
+    #[serde(default)]
+    pub pointer: String,
 }
 
 impl ToShell {
@@ -213,6 +256,40 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ToShell::Relaunch).unwrap(),
             serde_json::json!({"channel": "relaunch"})
+        );
+        assert_eq!(
+            serde_json::to_value(ToShell::OpenNapplet {
+                pointer: "npub1x:profiles".into(),
+                title: "Profiles".into(),
+                token: "t1".into(),
+            })
+            .unwrap(),
+            serde_json::json!({"channel": "open-napplet", "pointer": "npub1x:profiles",
+                               "title": "Profiles", "token": "t1"})
+        );
+        assert_eq!(
+            serde_json::to_value(ToShell::OpenNsite {
+                host: "npub1x".into()
+            })
+            .unwrap(),
+            serde_json::json!({"channel": "open-nsite", "host": "npub1x"})
+        );
+        assert_eq!(
+            serde_json::to_value(ToShell::ChooseIntentHandler {
+                token: "t2".into(),
+                archetype: "profile".into(),
+                action: "open".into(),
+                candidates: vec![ChooserCandidate {
+                    key: "npub1x:profiles".into(),
+                    title: "Profiles".into(),
+                    pointer: "npub1x:profiles".into(),
+                }],
+            })
+            .unwrap(),
+            serde_json::json!({"channel": "choose-intent-handler", "token": "t2",
+                               "archetype": "profile", "action": "open",
+                               "candidates": [{"key": "npub1x:profiles", "title": "Profiles",
+                                               "pointer": "npub1x:profiles"}]})
         );
     }
 

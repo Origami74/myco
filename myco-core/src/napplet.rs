@@ -159,7 +159,7 @@ impl NappletAddr {
 }
 
 /// One open napplet window.
-struct LiveNapplet {
+pub(crate) struct LiveNapplet {
     /// The window's session, behind an async lock so concurrent frames **queue**
     /// rather than race.
     ///
@@ -169,7 +169,7 @@ struct LiveNapplet {
     /// session never establishes and every capability call afterwards is
     /// refused with "session not established", long after the message that
     /// went missing.
-    session: Arc<tokio::sync::Mutex<Session>>,
+    pub(crate) session: Arc<tokio::sync::Mutex<Session>>,
     artifact: SrcdocArtifact,
     /// Frames the runtime wants to send this window without being asked —
     /// subscription deliveries, and later anything else the shell must be told.
@@ -177,7 +177,7 @@ struct LiveNapplet {
     /// Queued rather than pushed directly because the FFI only runs when
     /// called. The Activity drains this on a long poll, which is the same shape
     /// the BLE and TUN bridges already use.
-    outbox: mpsc::UnboundedSender<ToShell>,
+    pub(crate) outbox: mpsc::UnboundedSender<ToShell>,
     /// The draining end. Behind a lock because one window has one drainer, and
     /// two would split its frames between them.
     drain: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ToShell>>>,
@@ -401,8 +401,8 @@ pub struct NappletHost {
     manifests: Arc<dyn ManifestStore>,
     /// What the capabilities reach the world through. One per device — the
     /// seams are not per napplet; the session is.
-    ctx: NapContext,
-    sessions: Mutex<HashMap<String, LiveNapplet>>,
+    pub(crate) ctx: NapContext,
+    pub(crate) sessions: Mutex<HashMap<String, LiveNapplet>>,
     next_id: Mutex<u64>,
     /// NAP-LINK admission. See [`LinkGate`].
     links: LinkGate,
@@ -410,6 +410,9 @@ pub struct NappletHost {
     /// windows. Held weakly: the sessions own it, so it goes when the
     /// napplet's last window closes.
     ledgers: Mutex<HashMap<LedgerKey, Weak<std::sync::Mutex<Delivered>>>>,
+    /// NAP-INTENT: payloads on their way to handlers, open choosers. See
+    /// [`crate::intent`].
+    pub(crate) intents: crate::intent::IntentDesk,
 }
 
 impl NappletHost {
@@ -425,6 +428,7 @@ impl NappletHost {
             next_id: Mutex::new(1),
             links: LinkGate::default(),
             ledgers: Mutex::new(HashMap::new()),
+            intents: crate::intent::IntentDesk::default(),
         }
     }
 
@@ -634,6 +638,9 @@ impl NappletHost {
                 blob_token: new_blob_token(),
             },
         );
+        // What `intent.changed` diffs against, taken once a window is open to
+        // be told.
+        self.intent_baseline().await;
 
         Ok(OpenedNapplet {
             session_id,
@@ -695,6 +702,7 @@ impl NappletHost {
         let Ok(frame) = serde_json::from_str::<ToRuntime>(frame_json) else {
             return Vec::new();
         };
+        self.sweep_intents(std::time::Instant::now());
 
         // The mount reply needs no capability work, so it is answered without
         // taking the session across an await point.
@@ -767,11 +775,30 @@ impl NappletHost {
             };
         }
 
-        out.envelopes()
+        // NAP-INTENT: validated by the runtime, resolved and opened here. The
+        // result may come later — when the handler's window binds the token.
+        let out = match out {
+            Outcome::Intent(request) => {
+                return self
+                    .intent_invoke(session_id, request, std::time::Instant::now())
+                    .await
+            }
+            other => other,
+        };
+
+        let mut replies: Vec<ToShell> = out
+            .envelopes()
             .iter()
             .cloned()
             .map(ToShell::to_napplet)
-            .collect()
+            .collect();
+        // A napplet now listening may have a payload waiting for exactly this
+        // topic: handed over after the subscribe's result, so the shim has
+        // registered the handler by the time it arrives.
+        if message.msg_type == "inc.subscribe" {
+            replies.extend(self.intent_deliveries(session_id).await);
+        }
+        replies
     }
 
     /// Record the app's light/dark appearance for one window, and push
@@ -889,6 +916,9 @@ impl NappletHost {
     /// instead of spinning — the same shape the BLE and TUN bridges use. An
     /// empty result means the wait expired, not that the window is gone.
     pub async fn next_frames(&self, session_id: &str, timeout: Duration) -> Vec<ToShell> {
+        // Every window polls here, so a payload nobody claimed is answered
+        // for within one poll of expiring.
+        self.sweep_intents(std::time::Instant::now());
         let drain = {
             let sessions = self.sessions.lock().unwrap();
             match sessions.get(session_id) {
@@ -951,6 +981,7 @@ impl NappletHost {
     /// Drop a window's session. Every later frame for it is ignored.
     pub fn close(&self, session_id: &str) {
         self.sessions.lock().unwrap().remove(session_id);
+        self.drop_intents_of(session_id);
     }
 
     /// How many sessions are open — for state reporting and tests.
@@ -1951,6 +1982,7 @@ mod tests {
             blobs: blobs.clone(),
             fetcher: Arc::new(myco_napplet_runtime::seams::NoFetcher),
             kept_blobs: blobs,
+            intents: Arc::new(myco_napplet_runtime::NoIntents),
         }
     }
 

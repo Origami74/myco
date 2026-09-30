@@ -21,10 +21,11 @@ reuse), [../circle/circle.md](../circle/circle.md) (what "everyone nearby" means
 [../reference/nostr-kinds.md](../../reference/nostr-kinds.md) (event kinds).
 
 > Status: built through S2, S3's `NAP-OUTBOX`, `NAP-RESOURCE` (`blossom:`
-> only), `NAP-LINK` and `NAP-THEME` (default themes, no picker), and S5. Each
-> stage below says what shipped. Not built: S2b (intents, `NAP-INC`), S4
-> (composition), the rest of S3 (`storage`, `notify`, `config`). Login with your
-> own key is the roadmap's N1.
+> only), `NAP-LINK` and `NAP-THEME` (default themes, no picker), S5, and the
+> in-app half of S2b (`NAP-INTENT`, and the subscribe side of `NAP-INC`; see
+> [NAP-INTENT.md](NAP-INTENT.md)). Each stage below says what shipped. Not
+> built: S2b's Android entry points, S4 (composition), the rest of S3
+> (`storage`, `notify`, `config`). Login with your own key is the roadmap's N1.
 
 ---
 
@@ -637,9 +638,15 @@ pre-connected stream is the follow-up).
 
 ### S2b — Intents and deep links
 
-**Not built** beyond `myco://napplet/<naddr>` opening install review and a
-share by bump or QR. The archetype registry, `NAP-INTENT` and `NAP-INC` are
-still to come.
+**Built in-app** ([NAP-INTENT.md](NAP-INTENT.md)): the archetype catalog (the
+Library, from each installed napplet's `archetype` tags), `NAP-INTENT` with
+user defaults and an "open with…" chooser, Myco itself as the `nsite`
+handler, and NAP-INC's `inc.subscribe` as the delivery channel (`inc.emit`
+and channels are not routed). **Not built**: the Android side below —
+`myco://napplet/<naddr>?…` to a handler, the share-sheet target, and
+hand-off to the OS chooser when no napplet takes a role. Beyond that,
+`myco://napplet/<naddr>` opens install review, and a napplet is shared by bump
+or QR.
 
 Early rather than late: this is how a napplet gets *reached*, and what makes the Apps
 panel feel like a system rather than a list.

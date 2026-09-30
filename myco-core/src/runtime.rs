@@ -288,6 +288,9 @@ pub struct AppRuntime {
     /// The user's NAP-MESH caps, shared with the napplet mesh sink so a change
     /// takes effect on a napplet's next call rather than its next launch.
     napplet_mesh_limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
+    /// NAP-INTENT default handlers, from settings — shared with the catalog
+    /// so a default the user sets routes the very next invoke.
+    intent_defaults: crate::intent::IntentDefaults,
     /// Latest dev-menu peer speedtest result; written by the spawned run task and
     /// read back into `state()`. Shared so the async task can update it in place.
     speedtest: Arc<std::sync::Mutex<crate::state::SpeedtestView>>,
@@ -699,6 +702,7 @@ impl AppRuntime {
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
             napplet_updates: Default::default(),
             napplet_mesh_limits: Arc::new(std::sync::RwLock::new(settings.napplet_mesh_limits())),
+            intent_defaults: Arc::new(std::sync::RwLock::new(settings.intent_defaults.clone())),
             relay_hub,
             pending_relay_url: settings.relay_url().unwrap_or_default(),
             pending_blossom_url: settings.blossom_url().unwrap_or_default(),
@@ -891,6 +895,7 @@ impl AppRuntime {
             account: None,
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
             napplet_updates: Default::default(),
+            intent_defaults: Default::default(),
             napplet_mesh_limits: Arc::new(std::sync::RwLock::new(
                 crate::settings_store::Settings::default().napplet_mesh_limits(),
             )),
@@ -1042,6 +1047,23 @@ impl AppRuntime {
             NativeAppAction::DismissNappletReview => {
                 *self.napplet_review.lock().unwrap() = None;
                 self.rev += 1;
+            }
+            NativeAppAction::SetIntentDefault { archetype, handler } => {
+                self.set_intent_default(&archetype, handler.as_deref());
+                self.rev += 1;
+            }
+            NativeAppAction::AnswerIntentChooser {
+                token,
+                handler,
+                always,
+            } => {
+                self.answer_intent_chooser(&token, handler.as_deref(), always);
+                self.rev += 1;
+            }
+            NativeAppAction::CancelIntent { token } => {
+                if let Some(host) = self.napplet_host.clone() {
+                    host.fail_intent(&token, myco_napplet_runtime::nap::intent::USER_CANCELLED);
+                }
             }
             NativeAppAction::ForgetNapplet { pointer } => {
                 if let (Some(content), Ok(addr)) =
@@ -1457,6 +1479,73 @@ impl AppRuntime {
         }
     }
 
+    /// The user chose — or cleared, with `None` — the default handler for an
+    /// archetype. Only the user reaches this: Settings › Default apps and the
+    /// chooser's "Always use this". Saved, live for the next invoke, and
+    /// announced to open napplets as `intent.changed`.
+    fn set_intent_default(&mut self, archetype: &str, handler: Option<&str>) {
+        if !myco_napplet_runtime::manifest::is_slug(archetype) {
+            tracing::warn!(archetype, "intent default: not an archetype slug");
+            return;
+        }
+        let mut settings = crate::settings_store::load(Path::new(&self.data_dir));
+        match handler.filter(|h| !h.is_empty()) {
+            Some(key) => {
+                settings
+                    .intent_defaults
+                    .insert(archetype.to_string(), key.to_string());
+            }
+            None => {
+                settings.intent_defaults.remove(archetype);
+            }
+        }
+        match crate::settings_store::save(Path::new(&self.data_dir), &settings) {
+            Ok(()) => {
+                *self.intent_defaults.write().unwrap() = settings.intent_defaults.clone();
+                tracing::info!(archetype, ?handler, "settings: intent default saved");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "settings: could not save the intent default");
+                self.error = format!("Could not save the default app: {e}");
+                return;
+            }
+        }
+        self.announce_intents();
+    }
+
+    /// The user answered an "open with…" chooser. "Always use this" records
+    /// the pick as the archetype's default first, so the answer is routed
+    /// under it and the next invoke asks nobody.
+    fn answer_intent_chooser(&mut self, token: &str, handler: Option<&str>, always: bool) {
+        let Some(host) = self.napplet_host.clone() else {
+            return;
+        };
+        if always {
+            if let (Some(key), Some(archetype)) = (handler, host.intent_chooser_archetype(token)) {
+                self.set_intent_default(&archetype, Some(key));
+            }
+        }
+        if !host.answer_intent_chooser(token, handler) {
+            tracing::info!("intent chooser answered after it expired");
+        }
+    }
+
+    /// Tell open napplets the intent catalog may have changed.
+    fn announce_intents(&self) {
+        if let (Some(host), Some(rt)) = (self.napplet_host.clone(), self.rt.as_ref()) {
+            rt.spawn(async move { host.intents_changed().await });
+        }
+    }
+
+    /// The Default apps rows for Settings.
+    fn intent_views(&self) -> Vec<crate::intent::IntentArchetypeView> {
+        let Some(content) = self.content.as_ref() else {
+            return Vec::new();
+        };
+        let defaults = self.intent_defaults.read().unwrap().clone();
+        crate::intent::archetype_views(&content.library_snapshot(), &defaults)
+    }
+
     /// Everything needed to open a napplet, gathered under the runtime lock so
     /// the resolve itself can run **without** it.
     ///
@@ -1807,6 +1896,11 @@ impl AppRuntime {
             granted,
             requires: reviewed.requires.clone(),
             pointer: pointer.to_string(),
+            archetypes: reviewed
+                .manifest
+                .as_ref()
+                .and_then(|m| myco_napplet_runtime::NappletManifest::from_event(m.clone()).ok())
+                .map(|m| crate::content::LibraryArchetype::of_manifest(&m)),
         };
 
         // No manifest: nothing to download, and no answer to record. An
@@ -2040,6 +2134,12 @@ impl AppRuntime {
                     // `resource.keep` writes here: the configured Blossom.
                     kept_blobs: content.blobs(),
                     fetcher: Arc::new(crate::napplet::BlossomFetcher::new(content.clone())),
+                    // NAP-INTENT's catalog: the Library, and the user's
+                    // defaults.
+                    intents: Arc::new(crate::intent::LibraryIntents::new(
+                        content.clone(),
+                        self.intent_defaults.clone(),
+                    )),
                 })
                 // Served versions come from the content layer's pins, so a
                 // newer manifest with no blob behind it cannot displace the
@@ -2074,6 +2174,20 @@ impl AppRuntime {
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
+                    }
+                });
+            }
+
+            // The intent catalog is the Library: a write may change what an
+            // archetype resolves to, and open napplets hear `intent.changed`.
+            {
+                let changed = content.library_changed();
+                let host = Arc::downgrade(&host);
+                handle.spawn(async move {
+                    loop {
+                        changed.notified().await;
+                        let Some(host) = host.upgrade() else { break };
+                        host.intents_changed().await;
                     }
                 });
             }
@@ -2505,6 +2619,7 @@ impl AppRuntime {
                 .map(|d| d.to_string())
                 .collect(),
             account: self.account.as_ref().map(|a| a.view()).unwrap_or_default(),
+            intent_handlers: self.intent_views(),
             napplet_mesh_reach: {
                 let limits = *self.napplet_mesh_limits.read().unwrap();
                 crate::state::NappletMeshReachView {
@@ -3073,6 +3188,13 @@ pub struct NappletOpenRequest {
 }
 
 impl NappletOpenRequest {
+    /// The host and runtime this open runs on — for binding a NAP-INTENT
+    /// token to the window once it opens.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn intent_context(&self) -> (Arc<crate::napplet::NappletHost>, tokio::runtime::Handle) {
+        (self.host.clone(), self.rt.clone())
+    }
+
     /// Resolve, open the session, and record any widening in the Library.
     ///
     /// Returns the opened napplet, whether the Library changed, and — when
@@ -3238,6 +3360,8 @@ struct Install {
     granted: Vec<String>,
     requires: Vec<String>,
     pointer: String,
+    /// The roles the reviewed manifest declares, for the intent catalog.
+    archetypes: Option<Vec<crate::content::LibraryArchetype>>,
 }
 
 impl Install {
@@ -3259,6 +3383,13 @@ impl Install {
             &self.pointer,
             crate::content::now_secs(),
         );
+        if let Some(archetypes) = &self.archetypes {
+            content.record_napplet_archetypes(
+                &self.npub,
+                self.d_tag.as_deref(),
+                archetypes.clone(),
+            );
+        }
     }
 }
 
@@ -3619,6 +3750,7 @@ mod tests {
                 pointer: pointer.to_string(),
                 reviewed: reviewed.iter().map(|d| d.to_string()).collect(),
                 preinstalled: false,
+                archetypes: None,
             }
         };
         // AppStore as an old seed left it; DingDong reviewed by the user.

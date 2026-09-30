@@ -49,6 +49,9 @@ pub struct AppState {
     pub napplet_status: Vec<crate::content::NappletStatusView>,
     /// The user's cap on how far napplets reach over the mesh (NAP-MESH).
     pub napplet_mesh_reach: NappletMeshReachView,
+    /// NAP-INTENT: every archetype something installed can handle, with its
+    /// candidates and the user's default — Settings › Default apps.
+    pub intent_handlers: Vec<crate::intent::IntentArchetypeView>,
     /// The logged-in user (the Settings header and the Account page).
     pub account: AccountView,
     /// Every capability domain this build can grant a napplet, in the order

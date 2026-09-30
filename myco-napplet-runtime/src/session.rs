@@ -26,7 +26,8 @@ use crate::seams::{ScopeOwner, WorkScope};
 /// yet must not be advertised, or `shell.supports()` lies and the napplet takes
 /// a branch that cannot work.
 pub const IMPLEMENTED_DOMAINS: &[&str] = &[
-    "shell", "identity", "relay", "mesh", "outbox", "local", "resource", "link", "theme",
+    "shell", "identity", "relay", "mesh", "outbox", "local", "resource", "link", "theme", "inc",
+    "intent",
 ];
 
 /// Domains every napplet gets, grant or no grant.
@@ -72,18 +73,30 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// per app. Take it out of the defaults once the tooling keeps extension
 /// domains.
 ///
+/// `inc` and `intent` cost nothing to grant either. `intent` asks the shell to
+/// open another napplet by role, and where it goes is the user's decision: a
+/// default the user set, the only app installed for the role, or the chooser
+/// the user answers — never the calling napplet's. `inc` is how that payload
+/// reaches the napplet that was opened: a napplet can listen for a topic, and
+/// hears only what the shell routes to it. Napplets cannot message each other
+/// with it yet (`inc.emit` goes nowhere; see `nap::inc`).
+///
 /// Taking it out will not take it back. Every napplet opened meanwhile has
 /// `mesh` persisted in its Library `granted` list (widened at open, silently —
 /// a default gets no sheet), and a stored grant is honoured as given. Removing
 /// it from here therefore needs a migration that drops `mesh` from `granted`
 /// where it was never reviewed.
 pub const DEFAULT_GRANTS: &[&str] = &[
-    "identity", "link", "local", "mesh", "relay", "resource", "theme",
+    "identity", "inc", "intent", "link", "local", "mesh", "relay", "resource", "theme",
 ];
 
 /// The most live subscriptions one session may hold, across `relay`, `mesh`
 /// and `outbox`. See [`Session::subscribe_in`].
 pub const MAX_SUBSCRIPTIONS: usize = 64;
+
+/// The most NAP-INC topics one session may listen on. See
+/// [`Session::subscribe_topic`].
+pub const MAX_INC_TOPICS: usize = 64;
 
 /// Whether the app is drawing light or dark — which NAP-THEME theme applies.
 ///
@@ -169,6 +182,10 @@ pub struct Session {
     /// Per live subscription, the same: closing or replacing a subscription
     /// drops its owner and stops its remote pull.
     sub_work: BTreeMap<(String, String), Arc<ScopeOwner>>,
+    /// NAP-INC topics the napplet listens on (`inc.subscribe`). Exact strings:
+    /// NAP-INC routes by equality and never parses a topic. What NAP-INTENT
+    /// waits for before it hands a napplet the payload it was opened with.
+    inc_topics: BTreeSet<String>,
     /// What has been delivered to this napplet, so a signed publish or a
     /// `resource.keep` is honoured only for what it was shown. Shared by every
     /// clone — the snapshots a read runs against record into the same one —
@@ -201,6 +218,7 @@ impl Session {
             appearance: Appearance::default(),
             work: Arc::new(ScopeOwner::new()),
             sub_work: BTreeMap::new(),
+            inc_topics: BTreeSet::new(),
             delivered: Ledger::default(),
         }
     }
@@ -394,6 +412,37 @@ impl Session {
     /// How many subscriptions are live — for state reporting and tests.
     pub fn subscription_count(&self) -> usize {
         self.subscriptions.len()
+    }
+
+    /// Listen on a NAP-INC topic. Idempotent: a topic twice is one topic — the
+    /// shim keeps its own handler count and unsubscribes only when the last
+    /// one closes. Capped at [`MAX_INC_TOPICS`].
+    pub fn subscribe_topic(&mut self, topic: impl Into<String>) -> Result<(), String> {
+        let topic = topic.into();
+        if self.inc_topics.len() >= MAX_INC_TOPICS && !self.inc_topics.contains(&topic) {
+            return Err(format!(
+                "too many topics ({MAX_INC_TOPICS}); unsubscribe from one first"
+            ));
+        }
+        self.inc_topics.insert(topic);
+        Ok(())
+    }
+
+    /// Stop listening on a NAP-INC topic. An unknown topic is ignored.
+    pub fn unsubscribe_topic(&mut self, topic: &str) {
+        self.inc_topics.remove(topic);
+    }
+
+    /// Whether this napplet is listening on `topic` **and may be delivered
+    /// to**: established and still granted `inc`. A listener registered
+    /// before the grant was switched off hears nothing.
+    pub fn listens_on(&self, topic: &str) -> bool {
+        self.may_service("inc") && self.inc_topics.contains(topic)
+    }
+
+    /// The NAP-INC topics this napplet subscribed to, sorted.
+    pub fn inc_topics(&self) -> Vec<String> {
+        self.inc_topics.iter().cloned().collect()
     }
 
     /// The `relay` `subId`s whose filters match `event`.

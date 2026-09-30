@@ -238,6 +238,7 @@ mod tests {
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
+            intents: Arc::new(crate::nap::intent::NoIntents),
         };
         let reply = call(&ctx, "getPublicKey").await;
         assert_eq!(reply.field("pubkey").unwrap().as_str().unwrap(), "");
@@ -330,6 +331,7 @@ mod tests {
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
+            intents: Arc::new(crate::nap::intent::NoIntents),
         };
         let reply = call(&ctx, "getProfile").await;
         assert_eq!(reply.field("profile").unwrap()["name"], "Myco Guest 01234");
@@ -358,6 +360,7 @@ mod tests {
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
+            intents: Arc::new(crate::nap::intent::NoIntents),
         };
 
         let reply = call(&ctx, "getRelays").await;
@@ -423,6 +426,7 @@ mod tests {
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
+            intents: Arc::new(crate::nap::intent::NoIntents),
         };
         assert!(call(&ctx, "getProfile")
             .await

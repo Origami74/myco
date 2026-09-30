@@ -163,7 +163,9 @@ run. It asks Myco for what it needs, and gets only what the person grants:
 - the mesh: publish to and read from nearby paired phones, up to a hop limit
   the person sets,
 - pictures and files by content hash, from this phone, a paired phone, or
-  public servers.
+  public servers,
+- other apps, by role: "open this profile" opens the person's profile app,
+  the one they chose as the default, or the one they pick when asked.
 
 ### nsites, as a bonus
 
@@ -217,7 +219,7 @@ Read on:
 
 - [Concepts & glossary](docs/design/core/concepts.md) — start here
 - [Architecture](docs/design/core/architecture.md)
-- [Napplet runtime](docs/design/napplet/napplet-runtime.md) · [NAP-MESH](docs/design/napplet/NAP-MESH.md)
+- [Napplet runtime](docs/design/napplet/napplet-runtime.md) · [NAP-MESH](docs/design/napplet/NAP-MESH.md) · [NAP-INTENT](docs/design/napplet/NAP-INTENT.md)
 - [The nsite layer](docs/design/nsite/nsite-layer.md) · [Propagation](docs/design/nsite/propagation.md)
 - [Identity & pairing](docs/design/core/identity-pairing.md) · [Security](docs/design/core/security.md)
 - [Build from source](docs/how-to/build.md) · [All docs](docs/README.md) · [Roadmap](docs/roadmap.md)

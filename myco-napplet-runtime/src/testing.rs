@@ -368,6 +368,7 @@ pub fn test_context_with_mesh(
         blobs: blobs.clone(),
         kept_blobs: blobs,
         fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
+        intents: std::sync::Arc::new(crate::nap::intent::NoIntents),
     };
     (ctx, mesh, signer)
 }
@@ -402,6 +403,7 @@ pub fn test_context_with_outbox() -> (
         blobs: blobs.clone(),
         kept_blobs: blobs,
         fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
+        intents: std::sync::Arc::new(crate::nap::intent::NoIntents),
     };
     (ctx, outbox, signer)
 }

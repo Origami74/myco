@@ -109,6 +109,28 @@ pub enum NativeAppAction {
     /// stay cached; no grant is written, so the napplet has nothing.
     DismissNappletReview,
 
+    // --- NAP-INTENT ---
+    /// Set (`handler` a key) or clear (`None`) the default app for an
+    /// archetype. From Settings › Default apps; a napplet cannot reach it.
+    SetIntentDefault {
+        archetype: String,
+        #[serde(default)]
+        handler: Option<String>,
+    },
+    /// The user answered an "open with…" chooser: `handler` is the picked
+    /// candidate's key, `None` a cancel. `always` also makes it the
+    /// archetype's default.
+    AnswerIntentChooser {
+        token: String,
+        #[serde(default)]
+        handler: Option<String>,
+        #[serde(default)]
+        always: bool,
+    },
+    /// The window host would not open an intent's handler (the user declined
+    /// the confirmation): the calling napplet hears "user cancelled".
+    CancelIntent { token: String },
+
     // --- account ---
     /// Log out: the user key leaves the device, and napplets have no identity
     /// until the next login.
@@ -263,6 +285,36 @@ mod tests {
     }
 
     /// The Storage screen's cache actions, in the shape `NativeActions` sends.
+    #[test]
+    fn intent_actions_parse_as_the_app_sends_them() {
+        let parse = |json: &str| serde_json::from_str::<NativeAppAction>(json).unwrap();
+        assert!(matches!(
+            parse(r#"{"type":"set_intent_default","archetype":"profile","handler":"npub1x:p"}"#),
+            NativeAppAction::SetIntentDefault { archetype, handler: Some(h) }
+                if archetype == "profile" && h == "npub1x:p"
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"set_intent_default","archetype":"profile"}"#),
+            NativeAppAction::SetIntentDefault { handler: None, .. }
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"answer_intent_chooser","token":"t","handler":"myco","always":true}"#),
+            NativeAppAction::AnswerIntentChooser { always: true, .. }
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"answer_intent_chooser","token":"t"}"#),
+            NativeAppAction::AnswerIntentChooser {
+                handler: None,
+                always: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"cancel_intent","token":"t"}"#),
+            NativeAppAction::CancelIntent { .. }
+        ));
+    }
+
     #[test]
     fn cache_actions_parse_as_the_app_sends_them() {
         let parse = |json: &str| serde_json::from_str::<NativeAppAction>(json).unwrap();

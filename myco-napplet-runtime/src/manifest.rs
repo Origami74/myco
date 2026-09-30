@@ -273,7 +273,9 @@ fn validate_domain(domain: &str) -> Result<()> {
     }
 }
 
-fn is_slug(s: &str) -> bool {
+/// A lowercase slug: `[a-z0-9][a-z0-9-]*`. Archetype slugs, NAP domains and
+/// NAP-INTENT actions share it.
+pub fn is_slug(s: &str) -> bool {
     !s.is_empty()
         && s.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
         && s.chars()
@@ -300,6 +302,21 @@ fn parse_archetype(slice: &[String]) -> Result<Archetype> {
         slug: slug.clone(),
         convention: convention.clone(),
     })
+}
+
+/// Whether `convention` is a queryless `napplet:<archetype>/<intent>`
+/// identity — the shape an `archetype` tag and a NAP-INTENT request carry.
+pub fn is_convention(convention: &str) -> bool {
+    validate_convention(convention).is_ok()
+}
+
+/// The `<intent>` half of a convention (`open` in `napplet:note/open`) — what
+/// NAP-INTENT calls the action. `None` for anything that is not a convention.
+pub fn convention_intent(convention: &str) -> Option<&str> {
+    if !is_convention(convention) {
+        return None;
+    }
+    convention.rsplit_once('/').map(|(_, intent)| intent)
 }
 
 /// A convention is a **queryless** `napplet:<archetype>/<intent>` identity.

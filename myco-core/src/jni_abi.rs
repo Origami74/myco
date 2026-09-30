@@ -344,14 +344,33 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletRuntimeObject(
 /// because the caller is an Activity and an Activity can be started by an
 /// intent — accepting them here would let an inbound intent hand a napplet
 /// capabilities nobody approved.
+///
+/// `token` is a NAP-INTENT delivery (`""` for none): once the session is
+/// open it is bound to it, and the payload another napplet sent is handed
+/// over when this one listens. A token grants nothing — it names a pending
+/// delivery, is refused for any napplet but the one it was resolved to, and
+/// an open that fails answers the caller with "invoke failed".
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_nappletOpen(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
     pointer: JString,
+    token: JString,
 ) -> jstring {
     let pointer = get_string(&mut env, &pointer);
+    let token = get_string(&mut env, &token);
+    let fail_intent = |why: &str| {
+        if token.is_empty() {
+            return;
+        }
+        if let Some(h) = unsafe { handle_ref(handle) } {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some((host, _)) = guard.napplet_context() {
+                host.fail_intent(&token, why);
+            }
+        }
+    };
 
     // The lock is held only to gather the handles; the resolve — a relay read
     // and a blob read, a network round trip with a custom relay configured —
@@ -364,32 +383,75 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletOpen(
         None => None,
     };
 
+    let invoke_failed = myco_napplet_runtime::nap::intent::INVOKE_FAILED;
     let result = match prepared {
         None => serde_json::json!({"ok": false, "error": "native core is closed"}),
-        Some(Err(e)) => serde_json::json!({"ok": false, "error": e.to_string()}),
-        Some(Ok(request)) => match request.run() {
-            Ok((opened, widened, update_review)) => {
-                if widened {
-                    if let Some(h) = unsafe { handle_ref(handle) } {
-                        let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
-                        guard.note_library_changed();
+        Some(Err(e)) => {
+            fail_intent(invoke_failed);
+            serde_json::json!({"ok": false, "error": e.to_string()})
+        }
+        Some(Ok(request)) => {
+            let (host, rt) = request.intent_context();
+            match request.run() {
+                Ok((opened, widened, update_review)) => {
+                    if !token.is_empty() {
+                        rt.block_on(host.bind_intent(&opened.session_id, &token));
                     }
+                    if widened {
+                        if let Some(h) = unsafe { handle_ref(handle) } {
+                            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+                            guard.note_library_changed();
+                        }
+                    }
+                    // The served version declares more than was reviewed: the
+                    // window draws this review over the napplet it just opened.
+                    serde_json::json!({
+                        "ok": true,
+                        "sessionId": opened.session_id,
+                        "shellHost": opened.shell_host,
+                        "title": opened.title,
+                        "updateReview": update_review,
+                    })
                 }
-                // The served version declares more than was reviewed: the
-                // window draws this review over the napplet it just opened.
-                serde_json::json!({
-                    "ok": true,
-                    "sessionId": opened.session_id,
-                    "shellHost": opened.shell_host,
-                    "title": opened.title,
-                    "updateReview": update_review,
-                })
+                Err(e) => {
+                    if !token.is_empty() {
+                        host.fail_intent(&token, invoke_failed);
+                    }
+                    serde_json::json!({"ok": false, "error": e.to_string()})
+                }
             }
-            Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
-        },
+        }
     };
 
     jstr(&mut env, result.to_string())
+}
+
+/// Bind a NAP-INTENT delivery `token` to a window already open — the
+/// handler's window brought forward (`onNewIntent`) rather than created.
+/// Returns whether it was bound; see `NappletHost::bind_intent` for the
+/// refusals. Blocks briefly (a session lock); call it off the main thread.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletBindIntent(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_id: JString,
+    token: JString,
+) -> jboolean {
+    let session_id = get_string(&mut env, &session_id);
+    let token = get_string(&mut env, &token);
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.napplet_context()
+        }
+        None => None,
+    };
+    let bound = match ctx {
+        Some((host, rt_handle)) => rt_handle.block_on(host.bind_intent(&session_id, &token)),
+        None => false,
+    };
+    bound as jboolean
 }
 
 /// Carry one frame from a window's shell; returns the frames to send back,

@@ -60,7 +60,13 @@ internal object NativeCore {
      * Rust side, so an intent that starts [app.myco.NappletActivity] cannot hand
      * a napplet capabilities the user never approved.
      */
-    external fun nappletOpen(handle: Long, pointer: String): String
+    external fun nappletOpen(handle: Long, pointer: String, token: String): String
+
+    /**
+     * Bind a NAP-INTENT delivery token to a window already open (the handler
+     * window brought forward rather than created). True when bound.
+     */
+    external fun nappletBindIntent(handle: Long, sessionId: String, token: String): Boolean
 
     /** Carry one shell frame; returns a JSON array of frames to send back. */
     external fun nappletFrame(handle: Long, sessionId: String, frameJson: String): String

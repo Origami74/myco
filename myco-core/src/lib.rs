@@ -33,6 +33,7 @@ mod control_client;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod gossip;
 mod identity_store;
+mod intent;
 mod ip_source;
 // Profiles, relay lists and manifests seen from outside, kept in the local
 // relay on the way past.
