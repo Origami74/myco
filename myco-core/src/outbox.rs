@@ -665,6 +665,20 @@ impl OutboxService {
     }
 }
 
+/// Whether every filter asks only for replaceable or addressable kinds — a
+/// read whose late lanes can only bring newer versions of what was answered.
+fn only_replaceable(filters: &[Filter]) -> bool {
+    !filters.is_empty()
+        && filters.iter().all(|f| {
+            f.kinds.as_ref().is_some_and(|kinds| {
+                !kinds.is_empty()
+                    && kinds
+                        .iter()
+                        .all(|k| k.is_replaceable() || k.is_addressable())
+            })
+        })
+}
+
 /// How long one internet relay gets to say `OK` before a pool publish moves on.
 const POOL_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -1466,7 +1480,11 @@ impl LaneTransport for OutboxService {
                 .session_work(scope)
                 .map(|w| w.permits.clone().try_acquire_owned());
             match slot {
-                Some(Err(_)) => {
+                // A read of replaceable things only — profiles, follow and
+                // relay lists, manifests — always finishes: a newer version
+                // is the whole point of the lanes still out, each author
+                // costs one event, and what they bring is kept.
+                Some(Err(_)) if !only_replaceable(filters) => {
                     round.abort();
                     tracing::debug!("outbox query: no background slot; late lanes dropped");
                 }
@@ -2602,8 +2620,8 @@ mod tests {
 
     /// NAP-level `QUERY_EARLY`, restated: the runtime crate keeps it private.
     const NAP_EARLY: EarlyAnswer = EarlyAnswer {
-        grace: Duration::from_millis(400),
-        local_cap: Duration::from_millis(1500),
+        grace: Duration::ZERO,
+        local_cap: Duration::ZERO,
     };
 
     /// Poll the store until `id` is in it, or give up.
@@ -2663,12 +2681,13 @@ mod tests {
         assert!(answers[1].1.is_none(), "an unheard lane must read as None");
     }
 
-    /// The review's case: this device holds an old profile, a relay has the
-    /// new one and answers at 800 ms — a cold dial on a phone. The local
-    /// lane answering in a millisecond must not close the round on the
-    /// stale one: the relay's newer profile is in the answer.
+    /// This device holds an old profile, a relay has the new one and answers
+    /// at 800 ms — a cold dial on a phone. The answer does not wait for it:
+    /// the profile held here goes out at once, and the relay's newer one
+    /// lands in the local store behind the answer, for the next read and any
+    /// live subscription.
     #[tokio::test]
-    async fn a_relay_with_a_newer_replaceable_beats_the_stale_one_held_here() {
+    async fn the_held_version_answers_at_once_and_a_newer_one_lands_after() {
         let keys = Keys::generate();
         let old = EventBuilder::metadata(&nostr::Metadata::new().name("old"))
             .custom_created_at(nostr::Timestamp::from(
@@ -2687,6 +2706,7 @@ mod tests {
         let (svc, store, _hub) = streaming_service("early-stale", Vec::new());
         store.publish(old.clone()).await.unwrap();
 
+        let started = std::time::Instant::now();
         let answers = svc
             .query_early(
                 &[RelayLane::Local, RelayLane::Internet { url: relay }],
@@ -2696,12 +2716,43 @@ mod tests {
                 &WorkScope::detached(),
             )
             .await;
-        assert_eq!(answers[0].1.as_ref().map(|e| e[0].id), Some(old.id));
-        assert_eq!(
-            answers[1].1.as_ref().map(|e| e[0].id),
-            Some(new.id),
-            "the relay's newer profile missed the answer"
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the answer waited on the relay: {:?}",
+            started.elapsed()
         );
+        assert_eq!(answers[0].1.as_ref().map(|e| e[0].id), Some(old.id));
+        assert!(answers[1].1.is_none(), "the slow relay was waited for");
+        assert!(
+            lands(&store, new.id, Duration::from_secs(5)).await,
+            "the relay's newer profile never reached the local store"
+        );
+        let now = store
+            .query(&[Filter::new().kind(Kind::Metadata).author(keys.public_key())])
+            .await
+            .unwrap();
+        assert_eq!(
+            now.iter().map(|e| e.id).collect::<Vec<_>>(),
+            [new.id],
+            "the store kept both"
+        );
+    }
+
+    /// Reads of replaceable kinds only are the ones whose late lanes must
+    /// always finish; anything else may be cut when the napplet is busy.
+    #[test]
+    fn only_replaceable_reads_are_marked_to_finish() {
+        assert!(only_replaceable(&[
+            Filter::new().kinds([Kind::Metadata, Kind::ContactList])
+        ]));
+        assert!(only_replaceable(&[
+            Filter::new().kind(Kind::from(30_023u16))
+        ]));
+        assert!(!only_replaceable(&[Filter::new().kind(Kind::TextNote)]));
+        assert!(!only_replaceable(&[
+            Filter::new().author(Keys::generate().public_key())
+        ]));
+        assert!(!only_replaceable(&[]));
     }
 
     /// A second relay answering inside the grace that the first remote

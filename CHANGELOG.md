@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Apps show what your phone already has straight away.** When an app asks
+  for something this phone holds, it gets it at once instead of waiting up
+  to a second and a half for relays to maybe send a newer version; a newer
+  version still arrives and is kept for next time. Follow lists are now kept
+  on the phone like profiles, so a feed opens from your follows instantly.
 - **"Delete cache" is now "Clear local database".** It clears what this
   phone kept (except your pinned apps) and the cache, and asks first.
 - **Chat survives a restart until it expires.** Notes with an expiry time,
