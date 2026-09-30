@@ -421,6 +421,7 @@ impl OutboxService {
         authors: &[PublicKey],
         direction: Direction,
         hints: &[RelayLane],
+        lookup: Lookup,
     ) -> Vec<Listed> {
         let mut stored = self.stored_lists(authors).await;
         let now_secs = nostr::Timestamp::now().as_secs();
@@ -432,8 +433,21 @@ impl OutboxService {
             .copied()
             .collect();
         if !unknown.is_empty() {
-            self.fetch_relay_lists(&unknown, hints).await;
-            stored.extend(self.stored_lists(&unknown).await);
+            match lookup {
+                Lookup::Wait => {
+                    self.fetch_relay_lists(&unknown, hints).await;
+                    stored.extend(self.stored_lists(&unknown).await);
+                }
+                Lookup::Background => {
+                    // Shared with any plan already looking them up, so a
+                    // later `Wait` plan joins this lookup instead of
+                    // starting its own.
+                    let (this, unknown, hints) = (self.detached(), unknown.clone(), hints.to_vec());
+                    tokio::spawn(async move {
+                        this.fetch_relay_lists(&unknown, &hints).await;
+                    });
+                }
+            }
         }
 
         let mut stale: Vec<PublicKey> = Vec::new();
@@ -760,6 +774,39 @@ impl OutboxResolver for OutboxService {
         authors: &[PublicKey],
         hints: &[RelayLane],
     ) -> RelayPlan {
+        self.plan_with(direction, authors, hints, Lookup::Wait)
+            .await
+    }
+
+    async fn plan_stored(
+        &self,
+        direction: Direction,
+        authors: &[PublicKey],
+        hints: &[RelayLane],
+    ) -> RelayPlan {
+        self.plan_with(direction, authors, hints, Lookup::Background)
+            .await
+    }
+}
+
+/// Whether a plan may wait on the network for relay lists it lacks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lookup {
+    /// Look them up first; the plan uses what was found.
+    Wait,
+    /// Plan from what is held now — an author without a list gets the
+    /// fallback relays — and look the rest up behind it, for the next plan.
+    Background,
+}
+
+impl OutboxService {
+    async fn plan_with(
+        &self,
+        direction: Direction,
+        authors: &[PublicKey],
+        hints: &[RelayLane],
+        lookup: Lookup,
+    ) -> RelayPlan {
         if authors.is_empty() {
             let mut lanes = vec![RelayLane::Local];
             lanes.extend(self.fallback_lanes());
@@ -777,7 +824,7 @@ impl OutboxResolver for OutboxService {
         let mut author_relays: Vec<Vec<String>> = Vec::new();
         // Every author at once: the lists not stored here are looked up in
         // one round, not one author after another.
-        let listed = self.listed_for(authors, direction, hints).await;
+        let listed = self.listed_for(authors, direction, hints, lookup).await;
         for (author, listed) in authors.iter().zip(listed) {
             let listed = match listed {
                 Listed::Fresh(listed) => listed,
@@ -1248,64 +1295,111 @@ impl OutboxService {
         let this = self.detached();
         let session = self.session_work(scope);
         let task = tokio::spawn(async move {
-            let lanes = match plan {
-                Some((resolver, authors)) => {
-                    let plan = resolver
-                        .plan_hinted(Direction::Read, &authors, &lanes)
-                        .await;
-                    remote_lanes(plan.lanes.into_iter().chain(lanes))
-                }
-                None => remote_lanes(lanes),
-            };
-            if lanes.is_empty() {
-                return;
-            }
+            let mut started = std::collections::HashSet::new();
             let mut streams = tokio::task::JoinSet::new();
-            let mut once = Vec::new();
-            for lane in lanes {
-                // A lane on the skip list, or not usable now, takes no
-                // stream slot: it would hold one to do nothing. It gets the
-                // one pull, which costs it nothing either.
-                let usable = this.allowed(&lane)
-                    && lane
-                        .url()
-                        .is_none_or(|url| !crate::relay_health::is_skipped(url));
-                if !usable {
-                    once.push(lane);
-                    continue;
+            match plan {
+                Some((resolver, authors)) => {
+                    // The relays known now, at once: a stream forwards what
+                    // it can reach while the rest is still being found.
+                    let now = resolver
+                        .plan_stored(Direction::Read, &authors, &lanes)
+                        .await;
+                    let lacking = !now.missing_authors.is_empty();
+                    this.start_lanes(
+                        remote_lanes(now.lanes.into_iter().chain(lanes.iter().cloned())),
+                        &filters,
+                        &session,
+                        &mut started,
+                        &mut streams,
+                    );
+                    if lacking {
+                        // The lists that plan lacked, looked up behind the
+                        // streams already running; a relay they name joins
+                        // them. Nothing already open is torn down.
+                        let full = resolver
+                            .plan_hinted(Direction::Read, &authors, &lanes)
+                            .await;
+                        this.start_lanes(
+                            remote_lanes(full.lanes.into_iter().chain(lanes)),
+                            &filters,
+                            &session,
+                            &mut started,
+                            &mut streams,
+                        );
+                    }
                 }
-                let napplet = match &session {
-                    Some(work) => match work.streams.clone().try_acquire_owned() {
-                        Ok(permit) => Some(permit),
-                        Err(_) => {
-                            once.push(lane);
-                            continue;
-                        }
-                    },
-                    None => None,
-                };
-                let Ok(app) = all_streams().try_acquire_owned() else {
-                    once.push(lane);
-                    continue;
-                };
-                let (this, filters) = (this.clone(), filters.clone());
-                streams.spawn(async move {
-                    let _permits = (napplet, app);
-                    this.stream_lane(lane, filters).await;
-                });
-            }
-            if !once.is_empty() {
-                tracing::debug!(
-                    lanes = once.len(),
-                    "outbox: stream bound reached; pulling once"
-                );
-                this.run_round(&once, &filters, PULL_TIMEOUT, Deliver::Store)
-                    .await;
+                None => this.start_lanes(
+                    remote_lanes(lanes),
+                    &filters,
+                    &session,
+                    &mut started,
+                    &mut streams,
+                ),
             }
             // Held until aborted: dropping the set would close the streams.
             while streams.join_next().await.is_some() {}
         });
         self.track(scope, task.abort_handle());
+    }
+
+    /// Start feeding the local relay from each of `lanes` not in `started`:
+    /// a live stream where the bounds allow, one pull where they do not.
+    /// Only spawns; a lane's events land as it delivers them.
+    fn start_lanes(
+        self: &Arc<Self>,
+        lanes: Vec<RelayLane>,
+        filters: &[Filter],
+        session: &Option<Arc<SessionWork>>,
+        started: &mut std::collections::HashSet<String>,
+        streams: &mut tokio::task::JoinSet<()>,
+    ) {
+        let mut once = Vec::new();
+        for lane in lanes {
+            if !started.insert(myco_napplet_runtime::seams::lane_key(&lane)) {
+                continue;
+            }
+            // A lane on the skip list, or not usable now, takes no stream
+            // slot: it would hold one to do nothing. It gets the one pull,
+            // which costs it nothing either.
+            let usable = self.allowed(&lane)
+                && lane
+                    .url()
+                    .is_none_or(|url| !crate::relay_health::is_skipped(url));
+            if !usable {
+                once.push(lane);
+                continue;
+            }
+            let napplet = match session {
+                Some(work) => match work.streams.clone().try_acquire_owned() {
+                    Ok(permit) => Some(permit),
+                    Err(_) => {
+                        once.push(lane);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let Ok(app) = all_streams().try_acquire_owned() else {
+                once.push(lane);
+                continue;
+            };
+            let (this, filters) = (self.clone(), filters.to_vec());
+            streams.spawn(async move {
+                let _permits = (napplet, app);
+                this.stream_lane(lane, filters).await;
+            });
+        }
+        if !once.is_empty() {
+            tracing::debug!(
+                lanes = once.len(),
+                "outbox: stream bound reached; pulling once"
+            );
+            let (this, filters) = (self.clone(), filters.to_vec());
+            streams.spawn(async move {
+                this.run_round(&once, &filters, PULL_TIMEOUT, Deliver::Store)
+                    .await;
+            });
+        }
     }
 
     /// Keep one lane feeding the local relay for as long as the task runs.
@@ -2639,6 +2733,76 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         false
+    }
+
+    /// A stored plan never waits on a relay-list lookup: an author without a
+    /// list gets the fallback relays at once, named as missing, and the
+    /// lookup runs behind it.
+    #[tokio::test]
+    async fn a_stored_plan_does_not_wait_for_a_relay_list() {
+        let (slow, _) =
+            crate::ip_source::tests::mock_relay_delayed(Vec::new(), Duration::from_secs(3)).await;
+        let (svc, _store, _hub) = streaming_service("stored-plan", vec![slow.clone()]);
+        let nobody = Keys::generate().public_key();
+
+        let started = std::time::Instant::now();
+        let plan = svc.plan_stored(Direction::Read, &[nobody], &[]).await;
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the stored plan waited {:?} on a relay list",
+            started.elapsed()
+        );
+        assert_eq!(plan.missing_authors, vec![nobody]);
+        assert!(plan.lanes.contains(&RelayLane::Internet { url: slow }));
+    }
+
+    /// A subscription's pull starts streaming from the relays known now; it
+    /// does not wait for the relay-list lookup of an author it has no list
+    /// for, which here takes seconds.
+    #[tokio::test]
+    async fn a_subscription_streams_before_its_relay_lists_arrive() {
+        let author = Keys::generate();
+        let theirs = EventBuilder::text_note("from the fallback relay")
+            .sign_with_keys(&author)
+            .unwrap();
+        let (fast_store, fast) = mock_relay().await;
+        fast_store.publish(theirs.clone()).await.unwrap();
+        let (slow, _) =
+            crate::ip_source::tests::mock_relay_delayed(Vec::new(), Duration::from_secs(3)).await;
+        let (svc, store, _hub) = streaming_service("stream-first", vec![fast, slow]);
+        let svc = svc.detached();
+
+        let scope = WorkScope::detached();
+        svc.pull_plan_into_local(
+            svc.clone(),
+            vec![author.public_key()],
+            Vec::new(),
+            vec![Filter::new()
+                .author(author.public_key())
+                .kind(Kind::TextNote)],
+            &scope,
+        )
+        .await
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let mut landed = false;
+        while started.elapsed() < Duration::from_millis(1500) {
+            if !store
+                .query(&[Filter::new().id(theirs.id)])
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                landed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            landed,
+            "the note waited on the relay-list lookup instead of streaming"
+        );
     }
 
     /// The device observed: `local=6` and every internet lane slow or dead.

@@ -66,12 +66,7 @@ mod tests {
         let page = shell_page();
         assert_eq!(page.matches("fetch(").count(), 1);
         assert!(page.contains("fetch(blobBase + sha"));
-        for forbidden in [
-            "XMLHttpRequest",
-            "WebSocket",
-            "EventSource",
-            "import(",
-        ] {
+        for forbidden in ["XMLHttpRequest", "WebSocket", "EventSource", "import("] {
             assert!(
                 !shell_page().contains(forbidden),
                 "the shell page reaches the network with {forbidden}"
