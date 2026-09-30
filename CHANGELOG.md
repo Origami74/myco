@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Paired phones stay connected after a network change.** Since the fix for
+  the busy mesh reader, a phone whose tunnel restarted could keep the mesh
+  link up while no connection over it went through, so its Circle showed
+  nobody reachable. The reader now waits for packets without blocking the
+  restart.
+
 - **Scrolling back in a feed keeps finding older notes.** When an app asked
   for a page of older notes and the phone held only a few of them, it got
   just those few, and the feed soon said there was nothing older. The phone

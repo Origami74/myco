@@ -11,6 +11,10 @@ import android.net.NetworkCapabilities
 import android.net.ProxyInfo
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructPollfd
 import android.util.Log
 import app.myco.MainActivity
 import app.myco.R
@@ -128,12 +132,10 @@ class MycoVpnService : VpnService() {
             -1
         }
 
+        // The fd stays non-blocking (establish()'s default): readLoop waits on
+        // it with poll() and a timeout. See readLoop for why neither a spin
+        // nor a blocking read will do.
         val builder = Builder()
-            // establish() hands back a non-blocking fd by default. readLoop
-            // reads it with a plain blocking read, which on a non-blocking fd
-            // returns 0 at once (EAGAIN) and spun a core for as long as the
-            // tunnel was up.
-            .setBlocking(true)
             .setSession("Myco mesh")
             .setMtu(mtu)
             .addAddress(ula, 128) // this node's IPv6 ULA
@@ -343,10 +345,37 @@ class MycoVpnService : VpnService() {
     }
 
     /** TUN fd → mesh: read IPv6 packets and hand them to FIPS. */
+    /**
+     * TUN fd → mesh. Waits for a packet with poll() and a timeout, then reads.
+     *
+     * Neither simpler shape works. A plain read on the non-blocking fd
+     * returns 0 at once (EAGAIN) and spun a whole core while the tunnel was
+     * up. A blocking fd fixed that, but a thread blocked in read() is not
+     * woken by interrupt() or by closing the fd on a tunnel restart, so the
+     * old reader could hang holding the old tunnel, and the new tunnel's
+     * packets went unread: the mesh link stayed up while no connection over
+     * it could complete. With poll() the thread sleeps until there is a
+     * packet and looks at [running] at least every [READ_POLL_MS], so a
+     * restart always lets it go.
+     */
     private fun readLoop(pfd: ParcelFileDescriptor) {
         val input = FileInputStream(pfd.fileDescriptor)
         val buf = ByteArray(2048)
+        val poll = StructPollfd().apply {
+            fd = pfd.fileDescriptor
+            events = OsConstants.POLLIN.toShort()
+        }
         while (running.get()) {
+            val ready = try {
+                Os.poll(arrayOf(poll), READ_POLL_MS)
+            } catch (e: ErrnoException) {
+                if (e.errno == OsConstants.EINTR) continue
+                break
+            }
+            if (ready == 0) continue // timed out: look at running again
+            if (poll.revents.toInt() and (OsConstants.POLLERR or OsConstants.POLLHUP or OsConstants.POLLNVAL) != 0) {
+                break
+            }
             val n = try {
                 input.read(buf)
             } catch (_: Exception) {
@@ -526,6 +555,9 @@ class MycoVpnService : VpnService() {
     }
 
     companion object {
+        /** How long readLoop waits for a packet before looking at `running`. */
+        private const val READ_POLL_MS = 1000
+
         const val EXTRA_ULA = "app.myco.extra.ULA"
         const val EXTRA_MTU = "app.myco.extra.MTU"
         const val EXTRA_EXIT_PROXY = "app.myco.extra.EXIT_PROXY"
