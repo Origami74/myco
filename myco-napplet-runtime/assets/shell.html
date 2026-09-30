@@ -17,7 +17,9 @@
 // It also keeps keyboard focus in the napplet's frame, where the back
 // gesture arrives as an Escape keydown.
 //
-// It holds no key, opens no connection, and makes no policy decision. Every
+// It holds no key, opens no connection, and makes no policy decision — its
+// one fetch reads a delivered blob from its own origin, which the window
+// host serves itself and never sends to the network. Every
 // capability is implemented on the Rust side; this page cannot grant anything
 // because it has nothing to grant.
 (function () {
@@ -31,6 +33,10 @@
   var runtime = window.mycoNappletRuntime;
 
   var frame = null;
+  // Where this window's delivered blobs are served, from the load command:
+  // `<blobBase><sha256>`. It holds a per-window secret, so it stays here —
+  // never in anything posted to the napplet.
+  var blobBase = null;
 
   function toRuntime(payload) {
     if (runtime) runtime.postMessage(JSON.stringify(payload));
@@ -52,47 +58,85 @@
     }
 
     if (frameData.channel === 'napplet') {
-      // '*' is required, not lax: the napplet's origin is opaque, so there is
-      // no origin string that would ever match it.
       if (frame && frame.contentWindow) {
-        frame.contentWindow.postMessage(materialize(frameData.message), '*');
+        var message = frameData.message;
+        if (carriesBlobs(message)) {
+          materialize(message).then(post);
+        } else {
+          post(message);
+        }
       }
     }
   }
 
-  // The runtime's channel is JSON, so NAP-RESOURCE bytes arrive as base64.
-  // The napplet's shim resolves `resource.bytes()` with `result.blob` as a
-  // Blob, which structured clone carries across postMessage and JSON cannot —
-  // so it is built here, in trusted code, typed by the runtime's sniffed
-  // `mime`. Nothing else is touched.
-  function materialize(message) {
-    if (!message || typeof message !== 'object') return message;
-    if (message.type === 'resource.bytes.result' && typeof message.blob === 'string') {
-      return Object.assign({}, message, { blob: toBlob(message.blob, message.mime) });
-    }
-    if (message.type === 'resource.bytesMany.result' && Array.isArray(message.items)) {
-      return Object.assign({}, message, {
-        items: message.items.map(function (item) {
-          return item && typeof item.blob === 'string'
-            ? Object.assign({}, item, { blob: toBlob(item.blob, item.mime) })
-            : item;
-        })
-      });
-    }
-    return message;
+  function post(message) {
+    // '*' is required, not lax: the napplet's origin is opaque, so there is
+    // no origin string that would ever match it.
+    if (frame && frame.contentWindow) frame.contentWindow.postMessage(message, '*');
   }
 
-  function toBlob(b64, mime) {
-    var bin = atob(b64);
-    var bytes = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return new Blob([bytes], { type: typeof mime === 'string' ? mime : 'application/octet-stream' });
+  // NAP-RESOURCE bytes never ride the runtime's JSON channel. A result names
+  // its blob by `blobRef` (a sha256); the bytes are fetched here, from this
+  // page's own origin, where the window host serves them to the holder of
+  // `blobBase` only. The napplet's shim resolves `resource.bytes()` with
+  // `result.blob` as a Blob, typed by the runtime's sniffed `mime` — built
+  // here, in trusted code, with `blobRef` taken out. A blob that cannot be
+  // fetched becomes the error the napplet would have had anyway.
+  function carriesBlobs(message) {
+    return !!message && typeof message === 'object' &&
+      (message.type === 'resource.bytes.result' || message.type === 'resource.bytesMany.result');
+  }
+
+  function fetchBlob(sha, mime) {
+    var type = typeof mime === 'string' ? mime : 'application/octet-stream';
+    if (!blobBase || typeof sha !== 'string' || !/^[0-9a-f]{64}$/.test(sha)) {
+      return Promise.reject(new Error('no such blob'));
+    }
+    return fetch(blobBase + sha, { cache: 'no-store' }).then(function (response) {
+      if (!response.ok) throw new Error('blob ' + response.status);
+      return response.arrayBuffer();
+    }).then(function (bytes) {
+      return new Blob([bytes], { type: type });
+    });
+  }
+
+  function withoutRef(obj) {
+    var out = Object.assign({}, obj);
+    delete out.blobRef;
+    return out;
+  }
+
+  function materialize(message) {
+    if (message.type === 'resource.bytes.result') {
+      return fetchBlob(message.blobRef, message.mime).then(function (blob) {
+        return Object.assign(withoutRef(message), { blob: blob });
+      }, function () {
+        return {
+          type: 'resource.bytes.error',
+          id: message.id,
+          error: 'not-found',
+          message: 'the blob went missing before it could be delivered'
+        };
+      });
+    }
+    var items = Array.isArray(message.items) ? message.items : [];
+    return Promise.all(items.map(function (item) {
+      if (!item || typeof item.blobRef !== 'string') return item;
+      return fetchBlob(item.blobRef, item.mime).then(function (blob) {
+        return Object.assign(withoutRef(item), { blob: blob });
+      }, function () {
+        return { url: item.url, ok: false, error: 'not-found' };
+      });
+    })).then(function (done) {
+      return Object.assign({}, message, { items: done });
+    });
   }
 
   function load(command) {
     // One napplet per shell, for one lifetime. Reloading in place would leave
     // the previous napplet's frame reachable and its session ambiguous.
     if (frame) return;
+    blobBase = typeof command.blobs === 'string' ? command.blobs : null;
 
     frame = document.createElement('iframe');
     // Exactly what the runtime specified, and nothing this page composes

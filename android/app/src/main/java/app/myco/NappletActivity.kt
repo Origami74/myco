@@ -169,15 +169,16 @@ class NappletActivity : ComponentActivity() {
      */
     private suspend fun relay(frame: String): Boolean {
         val replies = runCatching { client.nappletFrame(sessionId, frame) }.getOrDefault(emptyList())
-        var init = false
+        // Sorted here, off the main thread: a reply can be a picture as
+        // megabytes of base64, and parsing that on the main thread froze the
+        // window for as long as a feed was loading pictures.
+        val sorted = replies.map { it to sortFrame(it) }
         withContext(Dispatchers.Main) {
-            for (reply in replies) {
-                if (hostCommand(reply)) continue
-                if (relayedType(reply) == "shell.init") init = true
-                replyChannel?.postMessage(reply)
+            for ((reply, kind) in sorted) {
+                if (kind is Outbound.Host) hostCommand(kind.obj) else replyChannel?.postMessage(reply)
             }
         }
-        return init
+        return sorted.any { it.second == Outbound.Init }
     }
 
     /**
@@ -187,6 +188,14 @@ class NappletActivity : ComponentActivity() {
      * the whole IO pool and stall the rest of the app behind it.
      */
     private val inFlight = Semaphore(MAX_IN_FLIGHT)
+
+    /**
+     * `resource.*` calls have slots of their own. A feed asks for a picture
+     * per card, each of which may wait on a slow server; sharing [inFlight]
+     * would let a screenful of pictures hold every slot and leave the
+     * queries and publishes behind them waiting.
+     */
+    private val resourceInFlight = Semaphore(MAX_RESOURCES_IN_FLIGHT)
 
     /** The install review drawn over this window, mirrored from app state. */
     private var review by mutableStateOf<NappletReview?>(null)
@@ -278,12 +287,10 @@ class NappletActivity : ComponentActivity() {
      * A runtime frame addressed to this window rather than the shell. Returns
      * true when [frame] was one and has been handled; main thread.
      */
-    private fun hostCommand(frame: String): Boolean {
-        val obj = runCatching { JSONObject(frame) }.getOrNull() ?: return false
-        return when (obj.optString("channel")) {
-            "open-external" -> { openLink(obj.optString("url")); true }
-            "review-napplet" -> { reviewNapplet(obj.optString("pointer")); true }
-            else -> false
+    private fun hostCommand(obj: JSONObject) {
+        when (obj.optString("channel")) {
+            "open-external" -> openLink(obj.optString("url"))
+            "review-napplet" -> reviewNapplet(obj.optString("pointer"))
         }
     }
 
@@ -569,6 +576,7 @@ class NappletActivity : ComponentActivity() {
             webViewClient = NappletWebViewClient(
                 client = client,
                 shellHost = shellHost,
+                sessionId = { synchronized(sessionLock) { sessionId } },
                 onContentVisible = { syncChrome() },
                 onRendererGone = { finish() },
                 onUnhandledEscape = ::backEscapeUnhandled,
@@ -630,7 +638,8 @@ class NappletActivity : ComponentActivity() {
             var established = false
             for (frame in inbound) {
                 if (established) {
-                    launch { inFlight.withPermit { relay(frame) } }
+                    val slots = if (isResourceCall(frame)) resourceInFlight else inFlight
+                    launch { slots.withPermit { relay(frame) } }
                 } else {
                     if (relay(frame)) established = true
                 }
@@ -647,19 +656,20 @@ class NappletActivity : ComponentActivity() {
                 val frames = withContext(Dispatchers.IO) {
                     runCatching { client.nappletNextFrames(sessionId, DRAIN_WAIT_MS) }
                         .getOrDefault(emptyList())
+                        .map { it to sortFrame(it) }
                 }
-                // postMessage is main-thread work; the wait above was not.
-                for (frame in frames) {
+                // postMessage is main-thread work; the wait and the sorting
+                // above were not.
+                for ((frame, kind) in frames) {
                     // A grant changed on the app's sheet: this window's napplet
                     // made its startup calls under the old grants, so start it
                     // over — new session, fresh handshake. Never in place: the
                     // shell runs one napplet for one lifetime.
-                    if (channelOf(frame) == "relaunch") {
+                    if (kind == Outbound.Relaunch) {
                         recreate()
                         break
                     }
-                    if (hostCommand(frame)) continue
-                    replyChannel?.postMessage(frame)
+                    if (kind is Outbound.Host) hostCommand(kind.obj) else replyChannel?.postMessage(frame)
                 }
             }
         }
@@ -833,6 +843,9 @@ class NappletActivity : ComponentActivity() {
         /** See [inFlight]. */
         private const val MAX_IN_FLIGHT = 8
 
+        /** See [resourceInFlight]. */
+        private const val MAX_RESOURCES_IN_FLIGHT = 6
+
         /** See [inbound]. */
         private const val INBOUND_CAPACITY = 64
 
@@ -845,9 +858,43 @@ class NappletActivity : ComponentActivity() {
         /** How long a requested review may take to appear in state before giving up. */
         private const val REVIEW_APPEAR_MS = 3_000L
 
-        /** The top-level `channel` of a runtime frame, or null if it is not one. */
-        private fun channelOf(frame: String): String? =
-            runCatching { JSONObject(frame).optString("channel") }.getOrNull()?.ifEmpty { null }
+        /** What a runtime frame asks of this window. See [sortFrame]. */
+        private sealed interface Outbound {
+            /** For the napplet: posted as it is. */
+            data object Post : Outbound
+            /** The napplet's `shell.init`: posted, and the handshake is done. */
+            data object Init : Outbound
+            /** Start the window over. */
+            data object Relaunch : Outbound
+            /** For this window itself: a link to open, a review to show. */
+            class Host(val obj: JSONObject) : Outbound
+        }
+
+        /**
+         * The runtime's frames lead with `"channel"` (serde writes the tag
+         * first), so a napplet frame is known by its first bytes and never
+         * parsed whole — it may carry a picture as megabytes of base64. Only
+         * a small one is parsed, to spot `shell.init`. The window's own
+         * frames are small and parsed. Call off the main thread.
+         */
+        private fun sortFrame(frame: String): Outbound {
+            if (frame.startsWith(NAPPLET_FRAME_PREFIX)) {
+                val init = frame.length <= SMALL_FRAME && relayedType(frame) == "shell.init"
+                return if (init) Outbound.Init else Outbound.Post
+            }
+            val obj = runCatching { JSONObject(frame) }.getOrNull() ?: return Outbound.Post
+            return when (obj.optString("channel")) {
+                "relaunch" -> Outbound.Relaunch
+                "open-external", "review-napplet" -> Outbound.Host(obj)
+                "napplet" -> if (relayedType(frame) == "shell.init") Outbound.Init else Outbound.Post
+                else -> Outbound.Post
+            }
+        }
+
+        private const val NAPPLET_FRAME_PREFIX = "{\"channel\":\"napplet\""
+
+        /** Larger than any `shell.init`; see [sortFrame]. */
+        private const val SMALL_FRAME = 64 * 1024
 
         /**
          * The `type` of a napplet-bound message inside a runtime frame, or null.
@@ -860,6 +907,14 @@ class NappletActivity : ComponentActivity() {
                 if (obj.optString("channel") != "napplet") return null
                 obj.optJSONObject("message")?.optString("type")
             }.getOrNull()?.ifEmpty { null }
+
+        /** Whether an inbound frame is a napplet's `resource.*` call. */
+        private fun isResourceCall(frame: String): Boolean =
+            runCatching {
+                val obj = JSONObject(frame)
+                obj.optString("channel") == "napplet" &&
+                    obj.optJSONObject("message")?.optString("type")?.startsWith("resource.") == true
+            }.getOrDefault(false)
 
         /** `naddr1…`, or the `<npub>:<dtag>` shorthand. */
         const val EXTRA_POINTER = "app.myco.extra.NAPPLET_POINTER"
@@ -916,6 +971,7 @@ class NappletActivity : ComponentActivity() {
 private class NappletWebViewClient(
     private val client: AppCoreClient,
     private val shellHost: String,
+    private val sessionId: () -> String,
     private val onContentVisible: () -> Unit,
     private val onRendererGone: () -> Unit,
     private val onUnhandledEscape: (KeyEvent) -> Boolean,
@@ -1017,6 +1073,40 @@ private class NappletWebViewClient(
             )
         }
 
+        // A delivered blob's bytes, fetched by the shell — how NAP-RESOURCE
+        // bytes reach the page without riding the JSON channel. A subresource
+        // request, so the main-frame rule below cannot apply; the path's
+        // token, which only the shell holds, is the gate, and Rust checks it
+        // with the grant and the delivery. This runs on WebView's IO thread.
+        val blobPath = uri.path.orEmpty()
+        if (blobPath.startsWith(BLOB_PREFIX)) {
+            val parts = blobPath.removePrefix(BLOB_PREFIX).split('/')
+            val bytes = if (parts.size == 2) {
+                runCatching { client.nappletBlob(sessionId(), parts[0], parts[1]) }.getOrNull()
+            } else {
+                null
+            }
+            return if (bytes != null) {
+                WebResourceResponse(
+                    "application/octet-stream",
+                    null,
+                    200,
+                    "OK",
+                    mapOf("Cache-Control" to "no-store"),
+                    ByteArrayInputStream(bytes),
+                )
+            } else {
+                WebResourceResponse(
+                    "text/plain",
+                    "utf-8",
+                    404,
+                    "Not Found",
+                    mapOf("Cache-Control" to "no-store"),
+                    ByteArrayInputStream(ByteArray(0)),
+                )
+            }
+        }
+
         // The shell page is a main-frame document, never a subframe's. The
         // napplet's iframe navigating itself here would otherwise be handed
         // the trusted shell page, and `shouldOverrideUrlLoading` never sees
@@ -1055,5 +1145,10 @@ private class NappletWebViewClient(
             mapOf("Cache-Control" to "no-store"),
             ByteArrayInputStream(client.nappletShellPage().toByteArray()),
         )
+    }
+
+    private companion object {
+        /** `/_blob/<token>/<sha256>`; see [shouldInterceptRequest]. */
+        const val BLOB_PREFIX = "/_blob/"
     }
 }
