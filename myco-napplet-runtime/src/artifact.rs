@@ -71,8 +71,15 @@ impl Default for CspPolicy {
                 // Nothing loads unless a directive below says otherwise.
                 "default-src 'none'",
                 // A napplet's executable JS is necessarily inline: an opaque
-                // origin has no server to fetch a `<script src>` from.
-                "script-src 'unsafe-inline'",
+                // origin has no server to fetch a `<script src>` from. And its
+                // WebAssembly compiles: `'wasm-unsafe-eval'` allows compiling
+                // a module from the napplet's own bytes — the same trust as the
+                // inline script it came with — and nothing else (no JS `eval`).
+                // NIP-5D says nothing against it, napplet.run's tooling bundles
+                // `.wasm` into the single file, and without it those napplets
+                // fail on this shell alone. A module has no network of its own:
+                // `connect-src` below binds it as it binds the script.
+                "script-src 'unsafe-inline' 'wasm-unsafe-eval'",
                 // A Worker built from the napplet's own bytes (`new Worker(
                 // URL.createObjectURL(blob))`) — how a map renderer or a
                 // parser moves work off the main thread. Same trust as the
@@ -86,9 +93,12 @@ impl Default for CspPolicy {
                 "img-src data: blob:",
                 "font-src data:",
                 "media-src data: blob:",
-                // The point of the exercise: no fetch, no WebSocket, no
-                // EventSource. Relay access is a capability, not a socket.
-                "connect-src 'none'",
+                // The point of the exercise: no network fetch, no WebSocket,
+                // no EventSource. Relay access is a capability, not a socket.
+                // `data:` and `blob:` read bytes already inside the page — how
+                // build tooling loads an inlined `.wasm` (`fetch(dataUrl)`) or
+                // a blob the napplet made — and never leave the device.
+                "connect-src data: blob:",
                 "form-action 'none'",
                 "base-uri 'none'",
                 "object-src 'none'",
@@ -269,10 +279,27 @@ mod tests {
     fn the_default_policy_denies_the_network() {
         let csp = CspPolicy::default();
         assert!(csp.as_str().contains("default-src 'none'"));
-        assert!(csp.as_str().contains("connect-src 'none'"));
+        // `connect-src` reaches only bytes already in the page: no scheme
+        // that leaves the device.
+        let connect = csp
+            .as_str()
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("connect-src"))
+            .unwrap();
+        assert_eq!(connect, "connect-src data: blob:");
         // Inline script is unavoidable — an opaque origin has no server to
-        // fetch an external one from — so it must be granted deliberately.
-        assert!(csp.as_str().contains("script-src 'unsafe-inline'"));
+        // fetch an external one from — so it must be granted deliberately,
+        // and WebAssembly compiles from the napplet's own bytes; JS `eval`
+        // stays off.
+        let script = csp
+            .as_str()
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("script-src"))
+            .unwrap();
+        assert_eq!(script, "script-src 'unsafe-inline' 'wasm-unsafe-eval'");
+        assert!(!csp.as_str().contains("'unsafe-eval'"));
         // A blob worker is the napplet's own code on another thread; a map
         // renderer cannot start without one, and it stays under connect-src.
         assert!(csp.as_str().contains("worker-src blob:"));
