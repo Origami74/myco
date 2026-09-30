@@ -183,6 +183,19 @@ struct LiveNapplet {
     drain: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ToShell>>>,
     /// The version this window opened. See [`NappletHost::newer_version`].
     opened: OpenedVersion,
+    /// The secret in this window's blob URLs (`/_blob/<token>/<sha256>`).
+    /// Only the shell learns it, from the load command; the napplet's frame
+    /// never does, so it cannot ask the window host for blobs itself. See
+    /// [`NappletHost::blob`].
+    blob_token: String,
+}
+
+/// A fresh blob-URL secret: 128 bits from the OS.
+fn new_blob_token() -> String {
+    use chacha20poly1305::aead::rand_core::RngCore as _;
+    let mut bytes = [0u8; 16];
+    chacha20poly1305::aead::OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 /// Which version of which napplet a window's session pinned at open — kept to
@@ -618,6 +631,7 @@ impl NappletHost {
                     created_at: event.created_at,
                     aggregate: resolved.aggregate.clone(),
                 },
+                blob_token: new_blob_token(),
             },
         );
 
@@ -690,7 +704,10 @@ impl NappletHost {
         {
             let sessions = self.sessions.lock().unwrap();
             return match sessions.get(session_id) {
-                Some(live) => vec![ToShell::load(&live.artifact)],
+                Some(live) => vec![ToShell::load(
+                    &live.artifact,
+                    &format!("/_blob/{}/", live.blob_token),
+                )],
                 None => Vec::new(),
             };
         }
@@ -834,6 +851,36 @@ impl NappletHost {
                 ));
             }
         }
+    }
+
+    /// The bytes of a blob this window's napplet was delivered, for the
+    /// window host to serve at `/_blob/<token>/<sha256>` — how NAP-RESOURCE
+    /// bytes reach the shell without riding the JSON channel.
+    ///
+    /// `None` unless the token is this window's, the napplet still holds
+    /// `resource`, and the blob was delivered to it (it is then in the
+    /// store; one evicted since is `None` too, and the shell says so).
+    pub async fn blob(&self, session_id: &str, token: &str, sha256_hex: &str) -> Option<Vec<u8>> {
+        let key = myco_napplet_runtime::delivered::parse_hex32(sha256_hex)?;
+        let session = {
+            let sessions = self.sessions.lock().unwrap();
+            let live = sessions.get(session_id)?;
+            if live.blob_token.is_empty() || live.blob_token != token {
+                return None;
+            }
+            live.session.clone()
+        };
+        {
+            let session = session.lock().await;
+            if !session.is_granted("resource") || !session.was_delivered_blob(&key) {
+                return None;
+            }
+        }
+        self.ctx
+            .blobs
+            .get(&sha256_hex.to_ascii_lowercase())
+            .await
+            .ok()?
     }
 
     /// Wait for frames this window should be sent unprompted, up to `timeout`.
@@ -3551,6 +3598,66 @@ mod tests {
                 .is_empty(),
             "delivered to a napplet that was never granted relay"
         );
+    }
+
+    /// A delivered blob is served to the holder of the window's token, and
+    /// nothing is served on a wrong token or for a blob never delivered.
+    #[tokio::test]
+    async fn a_delivered_blob_is_served_only_on_the_window_token() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host
+            .open(&addr, Some(vec!["resource".into()]))
+            .await
+            .unwrap();
+        let out = host
+            .frame(
+                &opened.session_id,
+                r#"{"channel":"shell","action":"mounted"}"#,
+            )
+            .await;
+        let ToShell::Shell { blobs, .. } = &out[0] else {
+            panic!("expected a load command")
+        };
+        let token = blobs
+            .strip_prefix("/_blob/")
+            .and_then(|t| t.strip_suffix('/'))
+            .unwrap()
+            .to_string();
+        assert_eq!(token.len(), 32);
+
+        let shown = host.ctx.blobs.put(b"\x89PNG\r\n\x1a\nshown").await.unwrap();
+        let hidden = host.ctx.blobs.put(b"never shown").await.unwrap();
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        let ask = format!(
+            r#"{{"channel":"napplet","message":{{"type":"resource.bytes","id":"b1","url":"blossom:{shown}"}}}}"#
+        );
+        let reply = host.frame(&opened.session_id, &ask).await;
+        let ToShell::Napplet { message } = &reply[0] else {
+            panic!("not a napplet frame")
+        };
+        assert_eq!(
+            message.field("blobRef").and_then(|v| v.as_str()),
+            Some(shown.as_str()),
+            "{message:?}"
+        );
+
+        assert!(host
+            .blob(&opened.session_id, &token, &shown)
+            .await
+            .is_some());
+        assert!(host
+            .blob(&opened.session_id, "0".repeat(32).as_str(), &shown)
+            .await
+            .is_none());
+        assert!(host
+            .blob(&opened.session_id, &token, &hidden)
+            .await
+            .is_none());
+        assert!(host.blob("napplet-none", &token, &shown).await.is_none());
     }
 
     /// One frame per line, whatever the frames carry, and each line a frame

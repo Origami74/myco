@@ -576,6 +576,7 @@ class NappletActivity : ComponentActivity() {
             webViewClient = NappletWebViewClient(
                 client = client,
                 shellHost = shellHost,
+                sessionId = { synchronized(sessionLock) { sessionId } },
                 onContentVisible = { syncChrome() },
                 onRendererGone = { finish() },
                 onUnhandledEscape = ::backEscapeUnhandled,
@@ -970,6 +971,7 @@ class NappletActivity : ComponentActivity() {
 private class NappletWebViewClient(
     private val client: AppCoreClient,
     private val shellHost: String,
+    private val sessionId: () -> String,
     private val onContentVisible: () -> Unit,
     private val onRendererGone: () -> Unit,
     private val onUnhandledEscape: (KeyEvent) -> Boolean,
@@ -1071,6 +1073,40 @@ private class NappletWebViewClient(
             )
         }
 
+        // A delivered blob's bytes, fetched by the shell — how NAP-RESOURCE
+        // bytes reach the page without riding the JSON channel. A subresource
+        // request, so the main-frame rule below cannot apply; the path's
+        // token, which only the shell holds, is the gate, and Rust checks it
+        // with the grant and the delivery. This runs on WebView's IO thread.
+        val blobPath = uri.path.orEmpty()
+        if (blobPath.startsWith(BLOB_PREFIX)) {
+            val parts = blobPath.removePrefix(BLOB_PREFIX).split('/')
+            val bytes = if (parts.size == 2) {
+                runCatching { client.nappletBlob(sessionId(), parts[0], parts[1]) }.getOrNull()
+            } else {
+                null
+            }
+            return if (bytes != null) {
+                WebResourceResponse(
+                    "application/octet-stream",
+                    null,
+                    200,
+                    "OK",
+                    mapOf("Cache-Control" to "no-store"),
+                    ByteArrayInputStream(bytes),
+                )
+            } else {
+                WebResourceResponse(
+                    "text/plain",
+                    "utf-8",
+                    404,
+                    "Not Found",
+                    mapOf("Cache-Control" to "no-store"),
+                    ByteArrayInputStream(ByteArray(0)),
+                )
+            }
+        }
+
         // The shell page is a main-frame document, never a subframe's. The
         // napplet's iframe navigating itself here would otherwise be handed
         // the trusted shell page, and `shouldOverrideUrlLoading` never sees
@@ -1109,5 +1145,10 @@ private class NappletWebViewClient(
             mapOf("Cache-Control" to "no-store"),
             ByteArrayInputStream(client.nappletShellPage().toByteArray()),
         )
+    }
+
+    private companion object {
+        /** `/_blob/<token>/<sha256>`; see [shouldInterceptRequest]. */
+        const val BLOB_PREFIX = "/_blob/"
     }
 }

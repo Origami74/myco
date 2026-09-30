@@ -417,8 +417,11 @@ not asked for again for ten minutes. What comes back is verified by hash, **stor
 napplet is local and the room can serve it over the mesh. `mime` is sniffed from the
 bytes, never a header; raw SVG is refused (`blocked-by-policy`) for want of a sandboxed
 rasterizer — checked over the whole body once the first kilobyte reads as text, not the
-first kilobyte alone. Bytes cross the JSON channel as base64 and the shell builds the `Blob` the
-vendored shim expects. `https:`, `htree:` and `nostr:` report `unsupported-scheme`. Signing is mediated: the napplet asks, Rust signs, no napplet ever
+first kilobyte alone. Bytes never cross the JSON channel: a result carries `blobRef` (the
+sha256), and the shell fetches `/_blob/<token>/<sha256>` from its own origin, where the
+window host serves the stored bytes — only on the per-window token the load command gave
+the shell, only while `resource` is granted, only for a blob delivered to that napplet —
+and builds the `Blob` the vendored shim expects, with `blobRef` removed. `https:`, `htree:` and `nostr:` report `unsupported-scheme`. Signing is mediated: the napplet asks, Rust signs, no napplet ever
 sees a key. A `relay` grant accepted at install covers publishing, with no per-event
 prompt (D8) — which means a granted napplet can publish as you at will, so the review
 screen has to say so in words a person understands, and revoking a grant has to be

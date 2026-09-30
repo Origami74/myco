@@ -34,7 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   internet at the same time instead of one after the other, tries the server
   a picture link names first, reuses connections, and stops asking for a
   picture nobody has for ten minutes. Picture loads no longer hold up an
-  app's other requests.
+  app's other requests, and pictures reach apps as raw bytes instead of
+  being packed into text on the way, which kept feeds from scrolling
+  smoothly.
 - **Myco no longer keeps a processor core busy while the mesh is on.** The
   mesh adapter's reader spun at full speed whenever the tunnel was up.
 - **Apps show what your phone already has straight away.** When an app asks

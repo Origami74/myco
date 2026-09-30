@@ -21,17 +21,19 @@
 //!
 //! ## Bytes on this wire
 //!
-//! The shell ↔ Rust channel is JSON, so `blob` travels as base64. The shell
-//! (`assets/shell.html`) turns it into a `Blob` typed by `mime` before the
-//! message reaches the napplet, which is what the vendored shim resolves
-//! `resource.bytes()` with. `mime` is sniffed from the bytes here, never
+//! None. The shell ↔ Rust channel is JSON, and bytes do not belong in it: a
+//! result carries `blobRef`, the sha256 of a blob now in the store, and the
+//! shell (`assets/shell.html`) fetches it from its own origin — served as
+//! bytes by the window host, only for a blob this napplet was delivered —
+//! and hands the napplet a `Blob` typed by `mime`, which is what the
+//! vendored shim resolves `resource.bytes()` with. The napplet sees the spec's
+//! `blob`, never `blobRef`. `mime` is sniffed from the bytes here, never
 //! taken from anyone's header — and raw SVG is refused rather than delivered,
 //! since this runtime has no sandboxed rasterizer to make it safe. The sniff
 //! looks for `<svg` across the whole body, not a leading window, so a prolog
 //! or comment long enough to push it past the first kilobyte does not
 //! smuggle it through as XML.
 
-use base64::Engine;
 use nsite_deck::sync::sha256_hex;
 
 use crate::dispatch::NapContext;
@@ -42,10 +44,9 @@ use crate::session::Session;
 pub const MAX_BYTES: usize = 10 * 1024 * 1024;
 /// The spec's recommended bulk cap.
 pub const MAX_URLS: usize = 100;
-/// The most one `bytesMany` may return in total. Every blob crosses the FFI
-/// as base64 inside one JSON string, and a hundred blobs at the per-blob cap
-/// would be a gigabyte of it; past this the remaining URLs are answered
-/// `too-large` without being fetched.
+/// The most one `bytesMany` may return in total. A hundred blobs at the
+/// per-blob cap would be a gigabyte handed to one napplet at once; past this
+/// the remaining URLs are answered `too-large` without being fetched.
 pub const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
 /// Handle an inbound `resource.*` message.
@@ -89,13 +90,11 @@ async fn bytes(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
         return error_for(message, "invalid-request", Some("bytes needs a url"));
     };
     match fetch(ctx, url).await {
-        Ok(Fetched {
-            blob, mime, sha, ..
-        }) => {
+        Ok(Fetched { mime, sha, .. }) => {
             record(session, &sha);
             message
                 .to_result()
-                .with_field("blob", blob)
+                .with_field("blobRef", sha)
                 .with_field("mime", mime)
         }
         Err(e) => {
@@ -145,15 +144,10 @@ async fn bytes_many(ctx: &NapContext, session: &Session, message: &Envelope) -> 
             continue;
         }
         let item = match fetch(ctx, &url).await {
-            Ok(Fetched {
-                blob,
-                mime,
-                len,
-                sha,
-            }) => {
+            Ok(Fetched { mime, len, sha }) => {
                 record(session, &sha);
                 total += len;
-                serde_json::json!({ "url": url, "ok": true, "blob": blob, "mime": mime })
+                serde_json::json!({ "url": url, "ok": true, "blobRef": sha, "mime": mime })
             }
             Err(e) => {
                 tracing::info!(url, code = e.code, message = ?e.message, "resource: not delivered");
@@ -169,10 +163,9 @@ async fn bytes_many(ctx: &NapContext, session: &Session, message: &Envelope) -> 
     message.to_result().with_field("items", items)
 }
 
-/// One delivered resource: base64 bytes, the sniffed type, the raw size, and
-/// the hash it was verified against.
+/// One delivered resource, now in the store: the sniffed type, the size, and
+/// the hash it was verified against — which is how the shell fetches it.
 struct Fetched {
-    blob: String,
     mime: String,
     len: usize,
     sha: String,
@@ -339,7 +332,6 @@ async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
         ));
     }
     Ok(Fetched {
-        blob: base64::engine::general_purpose::STANDARD.encode(&raw),
         mime: mime.to_string(),
         len: raw.len(),
         sha,
@@ -620,10 +612,8 @@ mod tests {
         assert_eq!(r["type"], "resource.bytes.result");
         assert_eq!(r["id"], "b1");
         assert_eq!(r["mime"], "image/png");
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(r["blob"].as_str().unwrap())
-            .unwrap();
-        assert_eq!(decoded, PNG);
+        assert_eq!(r["blobRef"], sha);
+        assert!(r.get("blob").is_none(), "bytes crossed the JSON channel");
         assert!(
             fetcher.asked().is_empty(),
             "the fetcher was asked for a stored blob"

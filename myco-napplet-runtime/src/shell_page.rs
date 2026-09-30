@@ -58,11 +58,15 @@ mod tests {
         assert!(shell_page().contains("channel: 'napplet'"));
     }
 
-    /// The shell holds no key and opens no connection of its own.
+    /// The shell holds no key and opens no connection of its own. Its one
+    /// `fetch` reads a delivered blob from its own origin, which the window
+    /// host answers itself and never hands to the network.
     #[test]
     fn the_page_opens_nothing() {
+        let page = shell_page();
+        assert_eq!(page.matches("fetch(").count(), 1);
+        assert!(page.contains("fetch(blobBase + sha"));
         for forbidden in [
-            "fetch(",
             "XMLHttpRequest",
             "WebSocket",
             "EventSource",
@@ -82,14 +86,16 @@ mod tests {
         assert!(shell_page().contains("frame.focus()"));
     }
 
-    /// NAP-RESOURCE bytes cross the JSON channel as base64 and reach the
-    /// napplet as a `Blob` — built here, typed by the runtime's sniffed mime.
+    /// NAP-RESOURCE bytes never cross the JSON channel: the page fetches a
+    /// result's `blobRef` from its own origin and hands the napplet a `Blob`,
+    /// typed by the runtime's sniffed mime, with the reference removed.
     #[test]
     fn the_page_materializes_resource_blobs() {
         let page = shell_page();
         assert!(page.contains("'resource.bytes.result'"));
         assert!(page.contains("'resource.bytesMany.result'"));
         assert!(page.contains("new Blob("));
-        assert!(page.contains("atob("));
+        assert!(page.contains("blobRef"));
+        assert!(!page.contains("atob("));
     }
 }

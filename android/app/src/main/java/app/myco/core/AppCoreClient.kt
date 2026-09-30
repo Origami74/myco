@@ -887,6 +887,14 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
         frameLines(NativeCore.nappletNextFrames(requireHandle(), sessionId, timeoutMs))
 
     /**
+     * A delivered blob's bytes for the shell's `/_blob/<token>/<sha256>`
+     * fetch, or null when the token, the grant or the delivery does not hold.
+     * Background thread only.
+     */
+    fun nappletBlob(sessionId: String, token: String, sha256: String): ByteArray? =
+        NativeCore.nappletBlob(requireHandle(), sessionId, token, sha256)
+
+    /**
      * The runtime sends a window's frames one compact JSON object per line
      * (`napplet::frames_as_lines`). Split, never parsed: a frame can carry a
      * picture as megabytes of base64.

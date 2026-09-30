@@ -61,6 +61,11 @@ pub enum ToShell {
         action: String,
         artifact: String,
         sandbox: String,
+        /// Where this window's delivered blobs are served, on the shell's own
+        /// origin: `<blobs><sha256>`. Holds a per-window secret, so only the
+        /// shell — never the napplet, which does not see this command — can
+        /// form the URL.
+        blobs: String,
     },
     /// Deliver a NAP message into the napplet's iframe.
     Napplet { message: Envelope },
@@ -87,11 +92,12 @@ pub enum ToShell {
 
 impl ToShell {
     /// The command that puts a verified napplet on screen.
-    pub fn load(artifact: &SrcdocArtifact) -> Self {
+    pub fn load(artifact: &SrcdocArtifact, blobs: &str) -> Self {
         Self::Shell {
             action: "load".to_string(),
             artifact: artifact.as_str().to_string(),
             sandbox: SrcdocArtifact::SANDBOX.to_string(),
+            blobs: blobs.to_string(),
         }
     }
 
@@ -173,7 +179,8 @@ mod tests {
             action,
             artifact: bytes,
             sandbox,
-        } = ToShell::load(&artifact)
+            blobs,
+        } = ToShell::load(&artifact, "/_blob/t/")
         else {
             panic!("expected a shell command");
         };
@@ -181,6 +188,7 @@ mod tests {
         assert_eq!(sandbox, "allow-scripts");
         assert!(!sandbox.contains("allow-same-origin"));
         assert_eq!(bytes, artifact.as_str());
+        assert_eq!(blobs, "/_blob/t/");
     }
 
     /// The window host switches on these exact channel names.
@@ -212,7 +220,7 @@ mod tests {
     fn frames_round_trip_through_json() {
         let artifact = assemble("<p>hi</p>", &Injection::default());
         for frame in [
-            ToShell::load(&artifact),
+            ToShell::load(&artifact, "/_blob/t/"),
             ToShell::to_napplet(Envelope::new("shell.init")),
             ToShell::Relaunch,
             ToShell::OpenExternal {
