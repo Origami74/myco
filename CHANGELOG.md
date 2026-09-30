@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   look up where people publish before it sees anything, a slow phone in the
   room no longer holds up the others, and a relay that answers slowly still
   counts for what it sent.
+- **Names show up for everyone you follow.** When an app asked for notes and
+  profiles together, the phone's store handed back only as many events as the
+  notes were limited to, and the profiles were cut off. Each part of such a
+  request now gets its own limit.
 - **Fewer relays turn Myco away.** Myco now keeps one connection to each
   relay and sends everything over it, instead of opening a new one for every
   request. Busy relays that limit connections no longer refuse it when an app

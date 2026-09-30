@@ -473,11 +473,9 @@ impl RelayBackend for RelayStore {
             }
         }
         out.sort_by_key(|e| std::cmp::Reverse(e.created_at));
-        // Honour the smallest limit any filter asked for, matching how a relay
-        // caps a multi-filter REQ.
-        if let Some(limit) = filters.iter().filter_map(|f| f.limit).min() {
-            out.truncate(limit);
-        }
+        // Each filter's limit is its own (NIP-01); each was run with it above,
+        // and the expired over-fetch is trimmed back here.
+        nsite_deck::cap_per_filter(&mut out, filters);
         Ok(out)
     }
 }
