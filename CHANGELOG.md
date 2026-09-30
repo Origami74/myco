@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Scrolling back in a feed keeps finding older notes.** When an app asked
+  for a page of older notes and the phone held only a few of them, it got
+  just those few, and the feed soon said there was nothing older. The phone
+  now answers at once only when it has the whole page, and otherwise waits
+  for the first relay that has more.
+
 - **Pictures in apps load faster.** Myco now asks nearby phones and the
   internet at the same time instead of one after the other, tries the server
   a picture link names first, reuses connections, and stops asking for a

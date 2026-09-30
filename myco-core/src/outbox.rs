@@ -1094,6 +1094,26 @@ const STREAM_QUEUE: usize = 256;
 /// How often an open stream checks whether "offline only" was switched on.
 const OFFLINE_CHECK_EVERY: Duration = Duration::from_secs(3);
 
+/// Whether `events` are the whole answer to `filters` as far as a count can
+/// tell: every filter with a `limit` has that many matches, and every filter
+/// naming `ids` has all of them. A filter with neither — a profile by author,
+/// say — has no count to meet, and any match is its answer.
+fn satisfies(filters: &[Filter], events: &[Event]) -> bool {
+    filters.iter().all(|f| {
+        let matching = || {
+            events
+                .iter()
+                .filter(|e| matches_any(std::slice::from_ref(f), e))
+        };
+        let ids_found = f
+            .ids
+            .as_ref()
+            .is_none_or(|ids| ids.iter().all(|id| events.iter().any(|e| e.id == *id)));
+        let limit_met = f.limit.is_none_or(|limit| matching().count() >= limit);
+        ids_found && limit_met
+    })
+}
+
 /// The filters that ask only for kinds the indexer relays hold: profiles
 /// (0), follow lists (3) and relay lists (10002).
 fn indexed_filters(filters: &[Filter]) -> Vec<Filter> {
@@ -1630,14 +1650,21 @@ impl LaneTransport for OutboxService {
         while heard.len() < lanes.len() {
             match tokio::time::timeout_at(deadline, rx.recv()).await {
                 Ok(Some(answer)) => {
-                    if answer.1.as_ref().is_some_and(|e| !e.is_empty()) {
-                        deadline = deadline.min(if answer.0 == RelayLane::Local {
-                            // This device's events: a floor, not the answer —
-                            // a relay may have a newer replaceable.
-                            started + early.local_cap
+                    let events = answer.1.as_deref().unwrap_or_default();
+                    if !events.is_empty() {
+                        if answer.0 == RelayLane::Local {
+                            // This device's events answer at once when they
+                            // are the whole answer — a full page for every
+                            // limited filter, every id asked for. A page of
+                            // history this device holds three notes of is not
+                            // answered with three: the first relay with more
+                            // is waited for, as when it holds nothing.
+                            if satisfies(filters, events) {
+                                deadline = deadline.min(started + early.local_cap);
+                            }
                         } else {
-                            tokio::time::Instant::now() + early.grace
-                        });
+                            deadline = deadline.min(tokio::time::Instant::now() + early.grace);
+                        }
                     }
                     heard.push(answer);
                 }
@@ -2931,6 +2958,66 @@ mod tests {
             landed,
             "the note waited on the relay-list lookup instead of streaming"
         );
+    }
+
+    /// A page of history this device holds only part of is not answered
+    /// with that part: the relay that has the rest is waited for. A page the
+    /// device fills on its own still answers at once.
+    #[tokio::test]
+    async fn a_page_the_device_cannot_fill_waits_for_a_relay() {
+        let author = Keys::generate();
+        let at = |t: u64, text: &str| {
+            EventBuilder::text_note(text)
+                .custom_created_at(nostr::Timestamp::from(t))
+                .sign_with_keys(&author)
+                .unwrap()
+        };
+        let held: Vec<Event> = (0..2).map(|i| at(1_000 + i, "held")).collect();
+        let far: Vec<Event> = (0..8).map(|i| at(900 + i, "far")).collect();
+        let (relay, _) =
+            crate::ip_source::tests::mock_relay_delayed(far.clone(), Duration::from_millis(300))
+                .await;
+        let (svc, store, _hub) = streaming_service("page", Vec::new());
+        for e in &held {
+            store.publish(e.clone()).await.unwrap();
+        }
+        let page = Filter::new()
+            .author(author.public_key())
+            .kind(Kind::TextNote)
+            .limit(10);
+        let answers = svc
+            .query_early(
+                &[RelayLane::Local, RelayLane::Internet { url: relay.clone() }],
+                std::slice::from_ref(&page),
+                Duration::from_secs(3),
+                early(0, 0),
+                &WorkScope::detached(),
+            )
+            .await;
+        let from_relay = answers[1].1.as_ref().map(Vec::len).unwrap_or(0);
+        assert_eq!(
+            from_relay, 8,
+            "the page was answered with what the device held"
+        );
+
+        // Two asked, two held: that is the whole answer, at once.
+        let started = std::time::Instant::now();
+        let small = page.clone().limit(2);
+        let answers = svc
+            .query_early(
+                &[RelayLane::Local, RelayLane::Internet { url: relay }],
+                std::slice::from_ref(&small),
+                Duration::from_secs(3),
+                early(0, 0),
+                &WorkScope::detached(),
+            )
+            .await;
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(answers[0].1.as_ref().map(Vec::len), Some(2));
     }
 
     /// The device observed: `local=6` and every internet lane slow or dead.
