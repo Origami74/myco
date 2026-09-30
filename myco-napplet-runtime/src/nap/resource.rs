@@ -21,32 +21,39 @@
 //!
 //! ## Bytes on this wire
 //!
-//! The shell ↔ Rust channel is JSON, so `blob` travels as base64. The shell
-//! (`assets/shell.html`) turns it into a `Blob` typed by `mime` before the
-//! message reaches the napplet, which is what the vendored shim resolves
-//! `resource.bytes()` with. `mime` is sniffed from the bytes here, never
+//! None. The shell ↔ Rust channel is JSON, and bytes do not belong in it: a
+//! result carries `blobRef`, the sha256 of a blob now in the store, and the
+//! shell (`assets/shell.html`) fetches it from its own origin — served as
+//! bytes by the window host, only for a blob this napplet was delivered —
+//! and hands the napplet a `Blob` typed by `mime`, which is what the
+//! vendored shim resolves `resource.bytes()` with. The napplet sees the spec's
+//! `blob`, never `blobRef`. `mime` is sniffed from the bytes here, never
 //! taken from anyone's header — and raw SVG is refused rather than delivered,
 //! since this runtime has no sandboxed rasterizer to make it safe. The sniff
 //! looks for `<svg` across the whole body, not a leading window, so a prolog
 //! or comment long enough to push it past the first kilobyte does not
 //! smuggle it through as XML.
 
-use base64::Engine;
 use nsite_deck::sync::sha256_hex;
 
 use crate::dispatch::NapContext;
 use crate::seams::Envelope;
 use crate::session::Session;
 
-/// The spec's recommended response cap.
-pub const MAX_BYTES: usize = 10 * 1024 * 1024;
+/// The most one resource may be: 64 MiB, the largest body this device's own
+/// Blossom accepts. Above the spec's recommended 10 MiB because a short video
+/// is routinely larger, and bytes no longer cross the JSON channel (the shell
+/// fetches them as bytes; see the module docs). Held in memory whole while it
+/// is fetched, checked and handed over, so not higher without a path that
+/// streams from disk.
+pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 /// The spec's recommended bulk cap.
 pub const MAX_URLS: usize = 100;
-/// The most one `bytesMany` may return in total. Every blob crosses the FFI
-/// as base64 inside one JSON string, and a hundred blobs at the per-blob cap
-/// would be a gigabyte of it; past this the remaining URLs are answered
-/// `too-large` without being fetched.
-pub const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+/// The most one `bytesMany` may return in total — one resource's worth. A
+/// hundred blobs at the per-blob cap would be gigabytes handed to one
+/// napplet at once; past this the remaining URLs are answered `too-large`
+/// without being fetched.
+pub const MAX_TOTAL_BYTES: usize = MAX_BYTES;
 
 /// Handle an inbound `resource.*` message.
 pub async fn handle(ctx: &NapContext, session: &Session, message: &Envelope) -> Vec<Envelope> {
@@ -89,13 +96,11 @@ async fn bytes(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
         return error_for(message, "invalid-request", Some("bytes needs a url"));
     };
     match fetch(ctx, url).await {
-        Ok(Fetched {
-            blob, mime, sha, ..
-        }) => {
+        Ok(Fetched { mime, sha, .. }) => {
             record(session, &sha);
             message
                 .to_result()
-                .with_field("blob", blob)
+                .with_field("blobRef", sha)
                 .with_field("mime", mime)
         }
         Err(e) => {
@@ -145,15 +150,10 @@ async fn bytes_many(ctx: &NapContext, session: &Session, message: &Envelope) -> 
             continue;
         }
         let item = match fetch(ctx, &url).await {
-            Ok(Fetched {
-                blob,
-                mime,
-                len,
-                sha,
-            }) => {
+            Ok(Fetched { mime, len, sha }) => {
                 record(session, &sha);
                 total += len;
-                serde_json::json!({ "url": url, "ok": true, "blob": blob, "mime": mime })
+                serde_json::json!({ "url": url, "ok": true, "blobRef": sha, "mime": mime })
             }
             Err(e) => {
                 tracing::info!(url, code = e.code, message = ?e.message, "resource: not delivered");
@@ -169,10 +169,9 @@ async fn bytes_many(ctx: &NapContext, session: &Session, message: &Envelope) -> 
     message.to_result().with_field("items", items)
 }
 
-/// One delivered resource: base64 bytes, the sniffed type, the raw size, and
-/// the hash it was verified against.
+/// One delivered resource, now in the store: the sniffed type, the size, and
+/// the hash it was verified against — which is how the shell fetches it.
 struct Fetched {
-    blob: String,
     mime: String,
     len: usize,
     sha: String,
@@ -196,7 +195,7 @@ async fn keep(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelo
     ) {
         (Some(sha), _) => sha.to_ascii_lowercase(),
         (None, Some(url)) => match parse_blossom_url(url) {
-            Ok(sha) => sha,
+            Ok((sha, _)) => sha,
             Err(e) => return error_for(message, e.code, e.message.as_deref()),
         },
         (None, None) => {
@@ -266,7 +265,7 @@ impl Failure {
 
 /// Resolve one URL: parse, local store, fetcher, verify, store, classify.
 async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
-    let sha = parse_blossom_url(url)?;
+    let (sha, hints) = parse_blossom_url(url)?;
 
     // Size before read: the local store may hold an nsite asset far over the
     // cap (Blossom accepts uploads to 64 MiB), and a `bytesMany` naming it a
@@ -295,7 +294,7 @@ async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
         None => {
             let fetched = ctx
                 .fetcher
-                .fetch(&sha, MAX_BYTES)
+                .fetch(&sha, MAX_BYTES, &hints)
                 .await
                 .map_err(|e| Failure::new("network-error", e.to_string()))?
                 .ok_or(Failure {
@@ -339,34 +338,122 @@ async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
         ));
     }
     Ok(Fetched {
-        blob: base64::engine::general_purpose::STANDARD.encode(&raw),
         mime: mime.to_string(),
         len: raw.len(),
         sha,
     })
 }
 
-/// The sha256 named by a `blossom:` URL. The canonical form is
-/// `blossom:sha256:<hex>`; the bare `blossom:<hex>` the shim's examples use
-/// is accepted too. Anything else is the spec's `unsupported-scheme`, with
-/// a malformed blossom URL as `invalid-request`.
-fn parse_blossom_url(url: &str) -> Result<String, Failure> {
+/// The sha256 named by a `blossom:` URL, and where it says to look. Accepted:
+///
+/// - `blossom:sha256:<hex>`, this runtime's canonical form;
+/// - `blossom:<hex>`, the shim's examples;
+/// - BUD-10's `blossom:<hex>.<ext>?xs=<server>&as=<pubkey>&sz=<bytes>`, as
+///   napplets rewrite `https://` media links into. The extension is ignored
+///   (the bytes are sniffed); `xs` and `as` become [`BlobHints`], and any
+///   other parameter is ignored.
+///
+/// Anything else is the spec's `unsupported-scheme`, with a malformed
+/// blossom URL as `invalid-request`.
+///
+/// [`BlobHints`]: crate::seams::BlobHints
+fn parse_blossom_url(url: &str) -> Result<(String, crate::seams::BlobHints), Failure> {
     let Some(rest) = url.strip_prefix("blossom:") else {
         return Err(Failure::new(
             "unsupported-scheme",
             format!("only blossom: is supported, not {}", scheme_of(url)),
         ));
     };
-    let hex = rest.strip_prefix("sha256:").unwrap_or(rest);
-    let hex = hex.split(['/', '?', '#']).next().unwrap_or("");
-    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        Ok(hex.to_ascii_lowercase())
-    } else {
-        Err(Failure::new(
+    let rest = rest.strip_prefix("sha256:").unwrap_or(rest);
+    let rest = rest.split('#').next().unwrap_or("");
+    let (name, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let name = name.split('/').next().unwrap_or("");
+    let hex = name.split_once('.').map_or(name, |(hex, _ext)| hex);
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Failure::new(
             "invalid-request",
             "blossom URL must name a sha256 hex",
-        ))
+        ));
     }
+    Ok((hex.to_ascii_lowercase(), blob_hints(query)))
+}
+
+/// Most hints of each kind taken from one URL: a napplet may name a handful
+/// of places, not make the fetcher walk a list it wrote.
+const MAX_HINTS: usize = 4;
+
+/// The `xs` servers and `as` authors in a BUD-10 query string. A server is a
+/// domain (`https://` is added) or an `https://` URL; an author is 64 hex.
+/// Anything malformed is dropped, never an error: hints are only hints.
+fn blob_hints(query: &str) -> crate::seams::BlobHints {
+    let mut hints = crate::seams::BlobHints::default();
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let value = percent_decode(value);
+        match key {
+            "xs" if hints.servers.len() < MAX_HINTS => {
+                if let Some(server) = hint_server(&value) {
+                    if !hints.servers.contains(&server) {
+                        hints.servers.push(server);
+                    }
+                }
+            }
+            "as" if hints.authors.len() < MAX_HINTS => {
+                let pk = value.to_ascii_lowercase();
+                if pk.len() == 64
+                    && pk.chars().all(|c| c.is_ascii_hexdigit())
+                    && !hints.authors.contains(&pk)
+                {
+                    hints.authors.push(pk);
+                }
+            }
+            _ => {}
+        }
+    }
+    hints
+}
+
+/// A server hint as a base URL, or `None` if it is not one. Only a host
+/// (and port) is kept: a path in a hint would let a napplet steer the fetch
+/// at an arbitrary URL rather than a Blossom server's `/<sha256>`.
+fn hint_server(value: &str) -> Option<String> {
+    let (scheme, host) = match value.split_once("://") {
+        Some(("https", rest)) => ("https", rest),
+        Some(_) => return None,
+        None => ("https", value),
+    };
+    let host = host.split(['/', '?', '#']).next().unwrap_or("");
+    let valid = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'));
+    valid.then(|| format!("{scheme}://{}", host.to_ascii_lowercase()))
+}
+
+/// `%XX` escapes decoded; a malformed escape is kept as written.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn scheme_of(url: &str) -> &str {
@@ -531,10 +618,8 @@ mod tests {
         assert_eq!(r["type"], "resource.bytes.result");
         assert_eq!(r["id"], "b1");
         assert_eq!(r["mime"], "image/png");
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(r["blob"].as_str().unwrap())
-            .unwrap();
-        assert_eq!(decoded, PNG);
+        assert_eq!(r["blobRef"], sha);
+        assert!(r.get("blob").is_none(), "bytes crossed the JSON channel");
         assert!(
             fetcher.asked().is_empty(),
             "the fetcher was asked for a stored blob"
@@ -624,6 +709,59 @@ mod tests {
             1,
             "the second ask went past the store"
         );
+    }
+
+    /// A BUD-10 URL — extension, `xs`, `as` — is fetched by its hash, and
+    /// the fetcher is told where the URL said to look.
+    #[tokio::test]
+    async fn a_bud10_url_carries_its_hints_to_the_fetcher() {
+        let (ctx, fetcher) = test_context_with_fetcher();
+        let sha = fetcher.hold(PNG);
+        let author = "AB".repeat(32);
+        let r = call(
+            &ctx,
+            Envelope::new("resource.bytes").with_id("b1").with_field(
+                "url",
+                format!(
+                    "blossom:{sha}.png?xs=cdn.example.com&xs=https%3A%2F%2Fb.example%3A8443%2Fignored\
+                     &xs=ftp://nope&as={author}&as=short&sz=12"
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(r["type"], "resource.bytes.result", "{r}");
+        assert_eq!(fetcher.asked(), vec![sha]);
+        assert_eq!(
+            fetcher.hints(),
+            vec![crate::seams::BlobHints {
+                servers: vec![
+                    "https://cdn.example.com".into(),
+                    "https://b.example:8443".into()
+                ],
+                authors: vec!["ab".repeat(32)],
+            }]
+        );
+    }
+
+    #[test]
+    fn blossom_urls_parse_with_and_without_hints() {
+        let hex = "c".repeat(64);
+        for url in [
+            format!("blossom:{hex}"),
+            format!("blossom:sha256:{hex}"),
+            format!("blossom:{hex}.jpg"),
+            format!("blossom:{hex}.jpg?sz=10#frag"),
+        ] {
+            let (sha, hints) = parse_blossom_url(&url).ok().unwrap();
+            assert_eq!(sha, hex, "{url}");
+            assert_eq!(hints, crate::seams::BlobHints::default(), "{url}");
+        }
+        assert!(parse_blossom_url(&format!("blossom:{}.jpg", "c".repeat(63))).is_err());
+        let many: String = (0..10).map(|i| format!("&xs=s{i}.example")).collect();
+        let (_, hints) = parse_blossom_url(&format!("blossom:{hex}?{many}"))
+            .ok()
+            .unwrap();
+        assert_eq!(hints.servers.len(), MAX_HINTS);
     }
 
     /// Bytes that do not hash to the name are never delivered or kept.
@@ -841,7 +979,8 @@ mod tests {
     #[tokio::test]
     async fn bytes_many_stops_at_the_total_cap() {
         let (ctx, fetcher) = crate::testing::test_context_with_fetcher();
-        let chunk = vec![1u8; MAX_BYTES];
+        // Five eighths of the total each: the first fits, the second crosses.
+        let chunk = vec![1u8; MAX_TOTAL_BYTES / 8 * 5];
         let held: Vec<String> = (0..3)
             .map(|i| {
                 let mut b = chunk.clone();
@@ -859,8 +998,8 @@ mod tests {
         .await;
         let items = r["items"].as_array().unwrap();
         let ok: Vec<bool> = items.iter().map(|i| i["ok"].as_bool().unwrap()).collect();
-        // 16 MiB total, 10 MiB blobs: the first fits, the second crosses the
-        // line and is delivered, the third is refused unfetched.
+        // The first fits, the second crosses the line and is delivered, the
+        // third is refused unfetched.
         assert_eq!(ok, vec![true, true, false], "{items:?}");
         assert_eq!(items[2]["error"], "too-large");
         assert_eq!(

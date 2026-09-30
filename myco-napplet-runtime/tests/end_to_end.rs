@@ -71,7 +71,8 @@ async fn a_verified_napplet_reaches_the_shell_and_completes_the_handshake() {
         action,
         artifact: bytes,
         sandbox,
-    } = ToShell::load(&artifact)
+        ..
+    } = ToShell::load(&artifact, "/_blob/t/")
     else {
         panic!("expected a load command");
     };

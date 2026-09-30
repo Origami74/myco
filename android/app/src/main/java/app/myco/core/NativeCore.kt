@@ -74,6 +74,12 @@ internal object NativeCore {
     external fun nappletNextFrames(handle: Long, sessionId: String, timeoutMs: Long): String
 
     /**
+     * The bytes of a blob this window's napplet was delivered, or null — for
+     * the shell's `/_blob/<token>/<sha256>` fetch. Background thread only.
+     */
+    external fun nappletBlob(handle: Long, sessionId: String, token: String, sha256: String): ByteArray?
+
+    /**
      * Tell a window's session whether the app is drawing dark, so NAP-THEME
      * answers with the matching theme and pushes `theme.changed` when it
      * changes. Brief: takes the session lock only.

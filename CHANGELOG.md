@@ -30,6 +30,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Pictures in apps load faster.** Myco now asks nearby phones and the
+  internet at the same time instead of one after the other, tries the server
+  a picture link names first, reuses connections, and stops asking for a
+  picture nobody has for ten minutes. Picture loads no longer hold up an
+  app's other requests, and pictures reach apps as raw bytes instead of
+  being packed into text on the way, which kept feeds from scrolling
+  smoothly.
+- **Apps can load files up to 64 MB.** Short videos and big pictures used to
+  be refused above 10 MB; the limit is now 64 MB, and slow downloads get
+  enough time to finish.
+- **Myco no longer keeps a processor core busy while the mesh is on.** The
+  mesh adapter's reader spun at full speed whenever the tunnel was up.
 - **Apps show what your phone already has straight away.** When an app asks
   for something this phone holds, it gets it at once instead of waiting up
   to a second and a half for relays to maybe send a newer version; a newer

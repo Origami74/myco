@@ -392,8 +392,9 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletOpen(
     jstr(&mut env, result.to_string())
 }
 
-/// Carry one frame from a window's shell; returns a JSON array of frames to
-/// send back (possibly empty).
+/// Carry one frame from a window's shell; returns the frames to send back,
+/// one JSON object per line (possibly none). See
+/// [`crate::napplet::frames_as_lines`].
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_nappletFrame(
     mut env: JNIEnv,
@@ -420,14 +421,44 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletFrame(
         None => Vec::new(),
     };
 
-    jstr(
-        &mut env,
-        serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()),
-    )
+    jstr(&mut env, crate::napplet::frames_as_lines(&out))
+}
+
+/// The bytes of a blob this window's napplet was delivered, or `null`. The
+/// window host serves them at `/_blob/<token>/<sha256>` on the shell origin.
+/// See [`crate::napplet::NappletHost::blob`]. Background thread only.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletBlob<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass,
+    handle: jlong,
+    session_id: JString,
+    token: JString,
+    sha256: JString,
+) -> jni::sys::jbyteArray {
+    let session_id = get_string(&mut env, &session_id);
+    let token = get_string(&mut env, &token);
+    let sha256 = get_string(&mut env, &sha256);
+
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.napplet_context()
+        }
+        None => None,
+    };
+    let bytes = match ctx {
+        Some((host, rt_handle)) => rt_handle.block_on(host.blob(&session_id, &token, &sha256)),
+        None => None,
+    };
+    match bytes.and_then(|b| env.byte_array_from_slice(&b).ok()) {
+        Some(array) => array.into_raw(),
+        None => std::ptr::null_mut(),
+    }
 }
 
 /// Wait for frames the runtime wants to send this window unprompted, up to
-/// `timeout_ms`; returns a JSON array, empty when the wait expired.
+/// `timeout_ms`; returns them one per line, nothing when the wait expired.
 ///
 /// A long poll rather than a callback, matching the BLE and TUN bridges: the
 /// FFI runs when Kotlin calls it, so a subscription delivery has to be waited
@@ -458,10 +489,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletNextFrames(
         None => Vec::new(),
     };
 
-    jstr(
-        &mut env,
-        serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string()),
-    )
+    jstr(&mut env, crate::napplet::frames_as_lines(&out))
 }
 
 /// Tell a window's session whether the app is drawing light or dark, so
