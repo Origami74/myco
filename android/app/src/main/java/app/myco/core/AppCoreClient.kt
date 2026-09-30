@@ -53,6 +53,17 @@ data class SiteStatus(
  * The user's caps on NAP-MESH: the most hops a napplet's mesh publish and
  * mesh subscribe may ask for. `0` means this phone only.
  */
+/** One app that can handle an archetype (NAP-INTENT), for Settings › Default apps. */
+data class IntentCandidate(val key: String, val title: String, val pointer: String)
+
+/** One archetype something installed can handle, its candidates and the user's default. */
+data class IntentArchetype(
+    val archetype: String,
+    /** The default's key, or "" when none is set. */
+    val defaultKey: String,
+    val candidates: List<IntentCandidate>,
+)
+
 data class NappletMeshReach(
     val publishTtl: Int = 3,
     val publishMax: Int = 3,
@@ -407,6 +418,8 @@ data class AppState(
     val nappletMeshReach: NappletMeshReach = NappletMeshReach(),
     /** Every capability Myco can grant a napplet, in sheet order. */
     val nappletDomains: List<String> = emptyList(),
+    /** NAP-INTENT default apps, per archetype. */
+    val intentHandlers: List<IntentArchetype> = emptyList(),
     val cache: CacheStatus,
     val circle: List<CircleContact>,
     /** Circle members with a live mesh relay connection right now — reachable
@@ -747,6 +760,32 @@ data class AppState(
                         subscribeMax = r.optInt("subscribeMax", 2),
                     )
                 } ?: NappletMeshReach(),
+                intentHandlers = buildList {
+                    o.optJSONArray("intentHandlers")?.let { arr ->
+                        for (i in 0 until arr.length()) {
+                            val a = arr.optJSONObject(i) ?: continue
+                            val cands = a.optJSONArray("candidates")
+                            add(
+                                IntentArchetype(
+                                    archetype = a.optString("archetype"),
+                                    defaultKey = a.optString("defaultKey"),
+                                    candidates = buildList {
+                                        if (cands != null) for (j in 0 until cands.length()) {
+                                            val c = cands.optJSONObject(j) ?: continue
+                                            add(
+                                                IntentCandidate(
+                                                    key = c.optString("key"),
+                                                    title = c.optString("title"),
+                                                    pointer = c.optString("pointer"),
+                                                ),
+                                            )
+                                        }
+                                    },
+                                ),
+                            )
+                        }
+                    }
+                },
                 cache = cache,
                 circle = circle,
                 reachableNpubs = buildSet {
@@ -873,8 +912,16 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
      * here, so an intent cannot supply them. A napplet that fails verification
      * returns an error rather than a session; there is no partial success.
      */
-    fun nappletOpen(pointer: String): NappletOpen =
-        NappletOpen.parse(NativeCore.nappletOpen(requireHandle(), pointer))
+    fun nappletOpen(pointer: String, intentToken: String = ""): NappletOpen =
+        NappletOpen.parse(NativeCore.nappletOpen(requireHandle(), pointer, intentToken))
+
+    /**
+     * Bind a NAP-INTENT delivery [token] to the already-open window
+     * [sessionId]. The token names a pending payload and grants nothing;
+     * Rust refuses it for any napplet but the one it was resolved to.
+     */
+    fun nappletBindIntent(sessionId: String, token: String): Boolean =
+        NativeCore.nappletBindIntent(requireHandle(), sessionId, token)
 
     /**
      * Carry one frame from a window's shell to Rust, and return the frames to
@@ -1098,6 +1145,31 @@ object NativeActions {
             .put("type", "set_napplet_mesh_reach")
             .put("publishTtl", publishTtl)
             .put("subscribeTtl", subscribeTtl)
+
+    /**
+     * Set ([handler] a candidate key) or clear (null) the default app for a
+     * NAP-INTENT archetype. A user action only — never on a napplet's behalf.
+     */
+    fun setIntentDefault(archetype: String, handler: String?): JSONObject =
+        JSONObject()
+            .put("type", "set_intent_default")
+            .put("archetype", archetype)
+            .apply { if (handler != null) put("handler", handler) }
+
+    /**
+     * Answer an "open with…" chooser: [handler] is the picked key, null a
+     * cancel; [always] also makes it the archetype's default.
+     */
+    fun answerIntentChooser(token: String, handler: String?, always: Boolean): JSONObject =
+        JSONObject()
+            .put("type", "answer_intent_chooser")
+            .put("token", token)
+            .put("always", always)
+            .apply { if (handler != null) put("handler", handler) }
+
+    /** The user declined to open an intent's handler: the caller hears "user cancelled". */
+    fun cancelIntent(token: String): JSONObject =
+        JSONObject().put("type", "cancel_intent").put("token", token)
 
     /**
      * Allow or withdraw one capability for an installed napplet. Live: an open

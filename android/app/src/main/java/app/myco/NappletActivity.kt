@@ -100,6 +100,25 @@ import java.io.ByteArrayInputStream
  * place). Nothing here installs: the review sheet's "Add" is the user's
  * answer, exactly as on the Apps screen.
  *
+ * ## Intents (NAP-INTENT)
+ *
+ * Three more frames come from another napplet opening one by role. The
+ * resolution is Rust's; this window only carries it out:
+ *
+ * - `choose-intent-handler` — the "open with…" sheet over this window, with
+ *   an "Always use this" box. The answer goes back through the reducer;
+ *   closing it tells the caller "user cancelled".
+ * - `open-napplet` — start (or bring forward) the handler's own window with a
+ *   delivery token. That window hands the token to Rust with its session —
+ *   at open, or in [onNewIntent] when its task already existed — and Rust
+ *   delivers the payload once the handler listens.
+ * - `open-nsite` — Myco's own handler for the `nsite` role: follow the same
+ *   `myco://app/<host>` path a deep link takes.
+ *
+ * Opening another window steals focus, so it is gated like a web link: a
+ * touch on this window (or an answer on the chooser) in the last few seconds
+ * vouches for it; otherwise the user confirms first.
+ *
  * ## An update that asks for more
  *
  * When the version this window opens declares a capability the user never
@@ -213,6 +232,19 @@ class NappletActivity : ComponentActivity() {
     /** A web link waiting on the user's tap, when no recent touch vouched for it. */
     private var pendingExternal by mutableStateOf<Uri?>(null)
 
+    /** An "open with…" question from a NAP-INTENT invoke, while it is up. */
+    private var chooser by mutableStateOf<IntentChooser?>(null)
+
+    /** Another app this napplet asked to open, waiting on the user's confirmation. */
+    private var pendingOpen by mutableStateOf<IntentOpen?>(null)
+
+    /**
+     * NAP-INTENT tokens that reached this window before its session existed
+     * (an [onNewIntent] during the splash). Bound once the open lands. Main
+     * thread only.
+     */
+    private val tokensBeforeOpen = mutableListOf<String>()
+
     /** Mirrors `state.nappletReview` into [review] while one is up. */
     private var reviewWatch: kotlinx.coroutines.Job? = null
 
@@ -291,6 +323,80 @@ class NappletActivity : ComponentActivity() {
         when (obj.optString("channel")) {
             "open-external" -> openLink(obj.optString("url"))
             "review-napplet" -> reviewNapplet(obj.optString("pointer"))
+            "open-napplet" -> openIntentTarget(
+                IntentOpen(
+                    title = obj.optString("title").ifEmpty { "another app" },
+                    pointer = obj.optString("pointer"),
+                    token = obj.optString("token"),
+                    nsiteHost = "",
+                ),
+            )
+            "open-nsite" -> openIntentTarget(
+                IntentOpen(title = "this site in Myco", pointer = "", token = "", nsiteHost = obj.optString("host")),
+            )
+            "choose-intent-handler" -> chooser = IntentChooser.parse(obj)
+        }
+    }
+
+    /** Whether a touch (or a chooser answer) in the last few seconds vouches for a navigation. */
+    private fun recentGesture(): Boolean = SystemClock.uptimeMillis() - lastTouchAt <= GESTURE_WINDOW_MS
+
+    /**
+     * NAP-INTENT resolved to [target]: open it now if the user just touched
+     * this window, else ask first. A napplet's `postMessage` carries no
+     * gesture, and opening a window takes the screen away from this one.
+     */
+    private fun openIntentTarget(target: IntentOpen) {
+        if (target.pointer.isEmpty() && target.nsiteHost.isEmpty()) return
+        if (recentGesture()) launchIntentTarget(target) else pendingOpen = target
+    }
+
+    private fun launchIntentTarget(target: IntentOpen) {
+        if (target.nsiteHost.isNotEmpty()) {
+            // Myco's own nsite path: MainActivity follows `myco://app/<host>`
+            // exactly as it follows a deep link — opening the site if it is
+            // here, fetching it if not.
+            startActivity(
+                Intent(this, MainActivity::class.java).apply {
+                    action = Intent.ACTION_VIEW
+                    data = Uri.parse(app.myco.share.MycoLink.buildAppLink(target.nsiteHost, "/"))
+                },
+            )
+            return
+        }
+        startActivity(intent(this, target.pointer, target.title, target.token))
+    }
+
+    /** The user declined to open [target]; a napplet handler's caller hears "user cancelled". */
+    private fun declineIntentTarget(target: IntentOpen) {
+        if (target.token.isNotEmpty()) act(NativeActions.cancelIntent(target.token))
+    }
+
+    /**
+     * This window's task was brought forward — the Apps grid, a shortcut, or a
+     * NAP-INTENT handing this napplet a payload. Only the last carries
+     * anything: a delivery token, bound to this window's session so the
+     * payload arrives without the napplet being restarted.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val token = intent.getStringExtra(EXTRA_INTENT_TOKEN).orEmpty()
+        if (token.isEmpty()) return
+        val id = synchronized(sessionLock) { sessionId }
+        if (id.isEmpty()) {
+            tokensBeforeOpen.add(token)
+            return
+        }
+        bindTokens(id, listOf(token))
+    }
+
+    private fun bindTokens(id: String, tokens: List<String>) {
+        if (tokens.isEmpty()) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            for (token in tokens) {
+                val bound = runCatching { client.nappletBindIntent(id, token) }.getOrDefault(false)
+                if (!bound) Log.i(TAG, "intent token not bound (expired, or for another app)")
+            }
         }
     }
 
@@ -372,7 +478,8 @@ class NappletActivity : ComponentActivity() {
 
     /** Whether a sheet or dialog of this window is on screen over the napplet. */
     private fun sheetUp(): Boolean =
-        review != null || updateReview != null || pendingExternal != null || updatedTo != null
+        review != null || updateReview != null || pendingExternal != null || updatedTo != null ||
+            chooser != null || pendingOpen != null
 
     /** The review sheets and the link confirmation, over the WebView. */
     private fun overlay(): ComposeView = ComposeView(this).apply {
@@ -436,6 +543,44 @@ class NappletActivity : ComponentActivity() {
                         },
                     )
                 }
+                chooser?.let { asked ->
+                    IntentChooserSheet(
+                        chooser = asked,
+                        onPick = { key, always ->
+                            chooser = null
+                            // The pick is the user's gesture: the handler
+                            // that comes back opens without a second ask.
+                            lastTouchAt = SystemClock.uptimeMillis()
+                            act(NativeActions.answerIntentChooser(asked.token, key, always))
+                        },
+                        onCancel = {
+                            chooser = null
+                            act(NativeActions.answerIntentChooser(asked.token, null, false))
+                        },
+                    )
+                }
+                pendingOpen?.let { target ->
+                    AlertDialog(
+                        onDismissRequest = {
+                            pendingOpen = null
+                            declineIntentTarget(target)
+                        },
+                        title = { Text("Open ${target.title}?") },
+                        text = { Text("This app wants to open ${target.title}.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                pendingOpen = null
+                                launchIntentTarget(target)
+                            }) { Text("Open") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                pendingOpen = null
+                                declineIntentTarget(target)
+                            }) { Text("Cancel") }
+                        },
+                    )
+                }
                 pendingExternal?.let { uri ->
                     AlertDialog(
                         onDismissRequest = { pendingExternal = null },
@@ -493,6 +638,11 @@ class NappletActivity : ComponentActivity() {
             finish()
             return
         }
+        // A NAP-INTENT delivery for this window, bound at open. Spent here: a
+        // recreate (a grant change, a restart onto an update) must not offer
+        // it again.
+        val intentToken = intent.getStringExtra(EXTRA_INTENT_TOKEN).orEmpty()
+        intent.removeExtra(EXTRA_INTENT_TOKEN)
 
         // Resolve and verify before anything is shown. A napplet that fails any
         // check gets no session and no window — there is no partial render to
@@ -512,7 +662,7 @@ class NappletActivity : ComponentActivity() {
         // cancellation), so anything after `withContext` may never run.
         lifecycleScope.launch {
             val opened = withContext(Dispatchers.IO + NonCancellable) {
-                val opened = client.nappletOpen(pointer)
+                val opened = client.nappletOpen(pointer, intentToken)
                 if (opened.ok) {
                     val orphaned = synchronized(sessionLock) {
                         if (windowGone) true else { sessionId = opened.sessionId; false }
@@ -542,6 +692,8 @@ class NappletActivity : ComponentActivity() {
             }
             shellHost = opened.shellHost
             openedPointer = pointer
+            bindTokens(opened.sessionId, tokensBeforeOpen.toList())
+            tokensBeforeOpen.clear()
             updateReview = opened.updateReview
             appTitle = intent.getStringExtra(EXTRA_TITLE).orEmpty()
                 .ifEmpty { opened.title.orEmpty() }
@@ -885,7 +1037,8 @@ class NappletActivity : ComponentActivity() {
             val obj = runCatching { JSONObject(frame) }.getOrNull() ?: return Outbound.Post
             return when (obj.optString("channel")) {
                 "relaunch" -> Outbound.Relaunch
-                "open-external", "review-napplet" -> Outbound.Host(obj)
+                "open-external", "review-napplet", "open-napplet", "open-nsite",
+                "choose-intent-handler" -> Outbound.Host(obj)
                 "napplet" -> if (relayedType(frame) == "shell.init") Outbound.Init else Outbound.Post
                 else -> Outbound.Post
             }
@@ -921,6 +1074,13 @@ class NappletActivity : ComponentActivity() {
         const val EXTRA_TITLE = "app.myco.extra.NAPPLET_TITLE"
 
         /**
+         * A NAP-INTENT delivery token: names a payload another napplet sent
+         * this one. Grants nothing — Rust binds it only to a window of the
+         * napplet it was resolved to, and only once.
+         */
+        const val EXTRA_INTENT_TOKEN = "app.myco.extra.NAPPLET_INTENT_TOKEN"
+
+        /**
          * A per-napplet document URI, so re-opening one re-surfaces its task.
          *
          * Keyed on the addressable pointer rather than the napplet's identity: a
@@ -935,7 +1095,7 @@ class NappletActivity : ComponentActivity() {
          * Apps grid, a home-screen shortcut, or an added review's Open — so all
          * of them land in the same task rather than a second card for one app.
          */
-        fun intent(context: Context, pointer: String, title: String): Intent =
+        fun intent(context: Context, pointer: String, title: String, intentToken: String = ""): Intent =
             Intent(context, NappletActivity::class.java).apply {
                 action = Intent.ACTION_VIEW
                 // Keyed on the addressable pointer, not the napplet's identity:
@@ -944,6 +1104,7 @@ class NappletActivity : ComponentActivity() {
                 data = documentUri(pointer)
                 putExtra(EXTRA_POINTER, pointer)
                 putExtra(EXTRA_TITLE, title)
+                if (intentToken.isNotEmpty()) putExtra(EXTRA_INTENT_TOKEN, intentToken)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
             }
     }

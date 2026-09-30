@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CallMade
 import androidx.compose.material.icons.filled.CallReceived
@@ -80,7 +81,7 @@ import app.myco.ui.radioWarnings
 
 
 /** The Settings surfaces: the root list and its drill-in sub-pages. */
-private enum class SettingsPage { Root, Account, Identity, Storage, Developer }
+private enum class SettingsPage { Root, Account, Identity, Storage, DefaultApps, Developer }
 
 /**
  * Stores the user pointed us at that cannot be reached, as (title, detail).
@@ -162,8 +163,10 @@ fun SettingsScreen(
             onOpenAccount = { page = SettingsPage.Account },
             onOpenIdentity = { page = SettingsPage.Identity },
             onOpenStorage = { page = SettingsPage.Storage },
+            onOpenDefaultApps = { page = SettingsPage.DefaultApps },
             onOpenDeveloper = { page = SettingsPage.Developer },
         )
+        SettingsPage.DefaultApps -> DefaultAppsSettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Account -> AccountSettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Identity -> IdentitySettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Storage -> StorageSettings(state, client, onBack = { page = SettingsPage.Root })
@@ -200,6 +203,7 @@ private fun RootSettings(
     onOpenAccount: () -> Unit,
     onOpenIdentity: () -> Unit,
     onOpenStorage: () -> Unit,
+    onOpenDefaultApps: () -> Unit,
     onOpenDeveloper: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -294,6 +298,23 @@ private fun RootSettings(
         // what they send and one for what they ask for. Two numbers because a
         // flooded read costs every hop an answer as well as a forward, so it
         // defaults lower. Zero keeps an app's traffic on this phone.
+        // Which app opens each role another app asks for (NAP-INTENT).
+        Spacer(Modifier.height(8.dp))
+        GroupLabel("APPS")
+        SectionCard {
+            val chosen = state.intentHandlers.count { it.defaultKey.isNotEmpty() }
+            SettingRow(
+                icon = Icons.Filled.Apps,
+                title = "Default apps",
+                subtitle = if (state.intentHandlers.isEmpty()) {
+                    "Which app opens a profile, a note, a site"
+                } else {
+                    "$chosen of ${state.intentHandlers.size} chosen"
+                },
+                onClick = onOpenDefaultApps,
+            )
+        }
+
         Spacer(Modifier.height(8.dp))
         GroupLabel("APP REACH")
         SectionCard {
