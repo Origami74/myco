@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Apps can open each other by role.** An app can ask Myco to open "a
+  profile", "a note" or "a site", and Myco opens the app you have for it,
+  handing it what to show. Tapping someone's name in Chronofeed opens your
+  profile app, if you have one. If you have several, Myco asks which ("Open
+  with…"), and "Always use this" remembers your answer. **Settings › Default
+  apps** shows and changes those choices. Myco itself opens sites
+  ("Open nsite → Myco"). An app that asks without you touching it first gets a
+  confirmation before another app opens. New installs list this as "Other
+  apps" and "App to app"; apps already installed get it the next time they
+  open, and it can be switched off per app.
+
 - **A cache for everything your apps look at.** Notes, profiles and pictures
   your apps fetch are now kept on the phone in a separate cache, so opening
   them again is instant and works offline, and paired phones nearby can get
