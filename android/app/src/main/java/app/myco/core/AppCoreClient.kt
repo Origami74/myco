@@ -873,11 +873,8 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
      * send back. Empty is normal — a duplicate handshake, or an unrecognized
      * message that NIP-5D says to ignore in silence.
      */
-    fun nappletFrame(sessionId: String, frameJson: String): List<String> {
-        val raw = NativeCore.nappletFrame(requireHandle(), sessionId, frameJson)
-        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
-        return (0 until array.length()).map { array.getJSONObject(it).toString() }
-    }
+    fun nappletFrame(sessionId: String, frameJson: String): List<String> =
+        frameLines(NativeCore.nappletFrame(requireHandle(), sessionId, frameJson))
 
     /**
      * Wait for frames the runtime wants to send this window unprompted — a
@@ -886,11 +883,16 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
      *
      * **Blocks** for up to [timeoutMs]. Background thread only.
      */
-    fun nappletNextFrames(sessionId: String, timeoutMs: Long): List<String> {
-        val raw = NativeCore.nappletNextFrames(requireHandle(), sessionId, timeoutMs)
-        val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
-        return (0 until array.length()).map { array.getJSONObject(it).toString() }
-    }
+    fun nappletNextFrames(sessionId: String, timeoutMs: Long): List<String> =
+        frameLines(NativeCore.nappletNextFrames(requireHandle(), sessionId, timeoutMs))
+
+    /**
+     * The runtime sends a window's frames one compact JSON object per line
+     * (`napplet::frames_as_lines`). Split, never parsed: a frame can carry a
+     * picture as megabytes of base64.
+     */
+    private fun frameLines(raw: String): List<String> =
+        if (raw.isEmpty()) emptyList() else raw.split('\n').filter { it.isNotEmpty() }
 
     /**
      * Report the window's light/dark appearance to its session (NAP-THEME).

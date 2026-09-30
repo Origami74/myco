@@ -1168,6 +1168,20 @@ impl BlobStore for SourceBlobs<'_> {
     }
 }
 
+/// Frames for a window, one compact JSON object per line — how they cross
+/// the FFI. Compact JSON never holds a raw newline (one inside a string is
+/// written `\n`), so the Kotlin side splits on it and hands each frame on
+/// as it is. A JSON array made that side parse every frame, pictures as
+/// megabytes of base64 included, only to write it back out.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn frames_as_lines(frames: &[ToShell]) -> String {
+    frames
+        .iter()
+        .filter_map(|f| serde_json::to_string(f).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// NAP-RESOURCE's fetcher: where a blob this device does not hold is looked
 /// for — the Circle's Blossom stores over the mesh and, when the internet is
 /// allowed, the servers the URL named, the author's servers (kind 10063, from
@@ -3537,6 +3551,33 @@ mod tests {
                 .is_empty(),
             "delivered to a napplet that was never granted relay"
         );
+    }
+
+    /// One frame per line, whatever the frames carry, and each line a frame
+    /// whose tag comes first — the window spots a napplet frame by it.
+    #[test]
+    fn frames_cross_the_ffi_one_per_line() {
+        let message = myco_napplet_runtime::seams::Envelope::new("relay.event")
+            .with_field("content", "two\nlines\r\nand \u{2028}");
+        let frames = vec![
+            ToShell::Napplet {
+                message: message.clone(),
+            },
+            ToShell::Relaunch,
+            ToShell::Napplet { message },
+        ];
+        let lines = frames_as_lines(&frames);
+        let split: Vec<&str> = lines.split('\n').collect();
+        assert_eq!(split.len(), 3);
+        assert!(
+            split[0].starts_with(r#"{"channel":"napplet""#),
+            "{}",
+            split[0]
+        );
+        for (line, frame) in split.iter().zip(&frames) {
+            assert_eq!(&serde_json::from_str::<ToShell>(line).unwrap(), frame);
+        }
+        assert_eq!(frames_as_lines(&[]), "");
     }
 
     /// The fetcher reaches the public servers when the store misses, and not
