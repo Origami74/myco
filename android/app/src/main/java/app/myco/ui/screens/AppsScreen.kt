@@ -844,6 +844,39 @@ internal fun NappletReviewSheet(
                 return@Column
             }
 
+            // Already here, with nothing to add: say so and offer the obvious
+            // next step. Checked before the error: a fetch that found nothing
+            // (offline, say) still has the installed copy to open.
+            if (!review.added && answer == ReviewAnswer.AlreadyInstalled) {
+                val name = review.title.ifEmpty { "This app" }
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+                ) {
+                    NappletMark(review, added = false)
+                    if (review.title.isNotEmpty()) {
+                        Spacer(Modifier.height(16.dp))
+                        Text(
+                            review.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "$name is already installed",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    Button(onClick = onOpen, modifier = Modifier.fillMaxWidth()) { Text("Open") }
+                    Spacer(Modifier.height(4.dp))
+                    TextButton(onClick = onDismiss) { Text("Close") }
+                }
+                return@Column
+            }
+
             if (review.error.isNotEmpty()) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -874,8 +907,8 @@ internal fun NappletReviewSheet(
                 val name = review.title.ifEmpty { "This app" }
                 val headline = when {
                     !review.installed -> "$name was added to your apps"
-                    review.unreviewed.isEmpty() -> "$name was downloaded again"
-                    else -> "$name was updated"
+                    review.updateAvailable || review.unreviewed.isNotEmpty() -> "$name was updated"
+                    else -> "$name was downloaded again"
                 }
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -949,10 +982,12 @@ internal fun NappletReviewSheet(
                     )
                 } else {
                     Text(
-                        if (answer == ReviewAnswer.Allow) {
-                            "This update asks for more. With it, this app will be able to:"
-                        } else {
-                            "This app will be able to:"
+                        when (answer) {
+                            ReviewAnswer.Allow ->
+                                "This update asks for more. With it, this app will be able to:"
+                            ReviewAnswer.Update ->
+                                "A newer version is available. This app will be able to:"
+                            else -> "This app will be able to:"
                         },
                         style = MaterialTheme.typography.titleSmall,
                     )
@@ -971,28 +1006,14 @@ internal fun NappletReviewSheet(
 
             }
 
-            val alreadyInstalled = answer == ReviewAnswer.AlreadyInstalled ||
-                answer == ReviewAnswer.DownloadAgain
             val reinstall = answer == ReviewAnswer.DownloadAgain
 
             Spacer(Modifier.height(20.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onDismiss, enabled = !review.installing) {
-                    Text(if (alreadyInstalled) "Close" else "Not now")
+                    Text(if (reinstall) "Close" else "Not now")
                 }
                 Spacer(Modifier.weight(1f))
-                if (alreadyInstalled && !reinstall) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Button(enabled = false, onClick = {}) { Text("Add to my apps") }
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "Already installed",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    return@Row
-                }
                 // Review ran on the manifest alone; the app itself is only
                 // downloaded once the user says yes, and the sheet closes when
                 // it has landed.
@@ -1006,11 +1027,18 @@ internal fun NappletReviewSheet(
                             strokeWidth = 2.dp,
                         )
                         Spacer(Modifier.size(8.dp))
-                        Text(if (reinstall) "Downloading…" else "Adding…")
+                        Text(
+                            when (answer) {
+                                ReviewAnswer.DownloadAgain -> "Downloading…"
+                                ReviewAnswer.Update -> "Updating…"
+                                else -> "Adding…"
+                            },
+                        )
                     } else {
                         Text(
                             when (answer) {
                                 ReviewAnswer.DownloadAgain -> "Download again"
+                                ReviewAnswer.Update -> "Update"
                                 ReviewAnswer.Allow -> "Allow"
                                 else -> "Add to my apps"
                             },
@@ -1026,27 +1054,35 @@ internal fun NappletReviewSheet(
 internal enum class ReviewAnswer {
     /** Not installed: add it, with what the sheet lists. */
     Add,
-    /** Installed and here, with nothing new to agree to: nothing to do. */
+    /** Installed and here, with nothing new to agree to: say so, and offer Open. */
     AlreadyInstalled,
     /** Installed, nothing new to agree to, but its files are not on this phone. */
     DownloadAgain,
+    /** Installed and here, and a newer version asks for nothing new: download it. */
+    Update,
     /** Installed, and this version asks for more than was reviewed: agree to it. */
     Allow,
 }
 
 /**
  * Already in the Library with nothing new to agree to: adding it again would
- * change nothing, so the sheet says so rather than offer it — or, when it is
- * not on this phone ("hold to reload"), offers its download; the grants it
- * has are kept either way. An installed app whose update declares more is
- * asked to be allowed: that is how the new permissions are agreed to, on the
- * Apps screen and over the app's own window alike.
+ * change nothing, so the sheet says so and offers to open it — the core's
+ * `alreadyInstalled`, decided once for every way into a review. When it is
+ * not on this phone ("hold to reload") the sheet offers its download, and a
+ * newer version is offered as an update; the grants it has are kept either
+ * way. An installed app whose update declares more is asked to be allowed:
+ * that is how the new permissions are agreed to, on the Apps screen and over
+ * the app's own window alike.
  */
 internal fun reviewAnswer(review: NappletReview): ReviewAnswer = when {
+    review.alreadyInstalled -> ReviewAnswer.AlreadyInstalled
     !review.installed -> ReviewAnswer.Add
     review.unreviewed.isNotEmpty() -> ReviewAnswer.Allow
-    review.ready -> ReviewAnswer.AlreadyInstalled
-    else -> ReviewAnswer.DownloadAgain
+    review.updateAvailable -> ReviewAnswer.Update
+    !review.ready -> ReviewAnswer.DownloadAgain
+    // Installed, here and current, but not marked by the core (a review
+    // built before the manifest was compared): nothing to add either way.
+    else -> ReviewAnswer.AlreadyInstalled
 }
 
 /** The app's mark on the review sheet, with a check once it has been added. */

@@ -1668,6 +1668,20 @@ pub struct NappletReview {
     /// Empty when the napplet is not installed, where everything is new.
     #[serde(default)]
     pub unreviewed: Vec<String>,
+    /// For an installed napplet: the fetched manifest is a newer version than
+    /// the one this phone serves (a later `created_at` over different bytes).
+    /// The sheet offers the update rather than "Already installed", with the
+    /// grants kept as they are; one that also asks for more is in
+    /// [`Self::unreviewed`] and asked about first.
+    #[serde(default)]
+    pub update_available: bool,
+    /// Installing would change nothing: installed, its files here, nothing new
+    /// to agree to and no newer version found ([`ReviewStanding::already_installed`]).
+    /// The sheet says so and offers to open it instead of asking. Decided
+    /// here so every way into a review — a scan, a tap, a link, a napplet's
+    /// `link.open`, a Library reload — lands on the same answer.
+    #[serde(default)]
+    pub already_installed: bool,
     /// The fetched manifest, kept so install downloads exactly what was
     /// reviewed rather than whatever the relays hold by then. Never sent to
     /// Kotlin.
@@ -1680,6 +1694,80 @@ pub struct NappletReview {
     /// Without it a retry in a room with no internet would search blind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holder: Option<String>,
+}
+
+/// Where a napplet under review stands against this phone, once its
+/// manifest has been fetched: what the review sheet decides on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewStanding {
+    /// Same author and `d` tag in the Library.
+    pub installed: bool,
+    /// Installed, and its files are here ([`is_ready_here`]).
+    pub installed_ready: bool,
+    /// What the fetched manifest would grant that was never reviewed.
+    pub unreviewed: Vec<String>,
+    /// Installed, and the fetched manifest is newer than the served one
+    /// ([`is_newer_version`]).
+    pub update_available: bool,
+}
+
+impl ReviewStanding {
+    /// Adding it again would change nothing: installed and here, with
+    /// nothing new to agree to and no newer version to download. Anything
+    /// else still goes through the sheet — an update is never blocked.
+    pub fn already_installed(&self) -> bool {
+        self.installed
+            && self.installed_ready
+            && self.unreviewed.is_empty()
+            && !self.update_available
+    }
+}
+
+/// Whether `fetched` is a newer version than `served`, the manifest this
+/// phone serves for the same napplet: a later `created_at` **and** different
+/// bytes (aggregate). A re-signed manifest over the same bytes is not an
+/// update; nothing served means nothing to compare against.
+pub fn is_newer_version(fetched: &nostr::Event, served: Option<&nostr::Event>) -> bool {
+    let Some(served) = served else {
+        return false;
+    };
+    if fetched.created_at <= served.created_at {
+        return false;
+    }
+    let aggregate = |e: &nostr::Event| {
+        myco_napplet_runtime::manifest::NappletManifest::from_event(e.clone())
+            .ok()
+            .map(|m| m.aggregate)
+    };
+    aggregate(fetched) != aggregate(served)
+}
+
+/// [`ReviewStanding`] for a fetched manifest `fetched` declaring `requires`.
+///
+/// Must run before the fetched manifest is kept locally: until the pin moves,
+/// the served version is what was here before, and once kept an unpinned
+/// slot would answer with the fetched one — comparing it with itself.
+pub async fn review_standing(
+    content: &crate::content::Content,
+    addr: &NappletAddr,
+    requires: &[String],
+    fetched: &nostr::Event,
+) -> ReviewStanding {
+    let (installed, unreviewed) = library_standing(content, addr, requires);
+    if !installed {
+        return ReviewStanding::default();
+    }
+    let served = content
+        .current(addr.kind(), &addr.author, addr.d_tag.as_deref())
+        .await
+        .ok()
+        .flatten();
+    ReviewStanding {
+        installed,
+        installed_ready: is_ready_here(content, addr),
+        unreviewed,
+        update_available: is_newer_version(fetched, served.as_ref()),
+    }
 }
 
 /// Where a napplet under review stands against the Library: whether it is
@@ -2118,6 +2206,8 @@ mod tests {
             installed: false,
             ready: false,
             unreviewed: Vec::new(),
+            update_available: false,
+            already_installed: false,
             manifest: None,
             error: String::new(),
             holder: None,
@@ -2150,6 +2240,8 @@ mod tests {
             installed: false,
             ready: false,
             unreviewed: Vec::new(),
+            update_available: false,
+            already_installed: false,
             manifest: None,
             error: String::new(),
             holder: None,
@@ -2223,6 +2315,8 @@ mod tests {
             installed: true,
             ready: true,
             unreviewed: vec!["outbox".into()],
+            update_available: false,
+            already_installed: false,
             manifest: None,
             error: String::new(),
             holder: None,
@@ -3016,6 +3110,144 @@ mod tests {
         let opened = open_as_device(&phone, &addr_of(&v2), table).await;
         assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
         assert!(!opened.granted().contains(&"outbox".to_string()));
+    }
+
+    /// Install `napplet` under its real shell host, so the status pass can
+    /// find its tile and call it ready.
+    async fn install_here(
+        phone: &Phone,
+        napplet: &myco_napplet_runtime::testing::TestNapplet,
+        reviewed: &[&str],
+    ) {
+        let source = holder_of(napplet).await;
+        phone
+            .host
+            .ingest_event(napplet.manifest.clone(), source.as_ref())
+            .await
+            .unwrap();
+        let reviewed: Vec<String> = reviewed.iter().map(|d| d.to_string()).collect();
+        phone.content.add_napplet_to_library(
+            &napplet.author.to_bech32().unwrap(),
+            Some("fixture"),
+            Some("Fixture"),
+            &myco_napplet_runtime::host::shell_host(&napplet.author.to_bytes(), Some("fixture")),
+            effective_grants(&reviewed),
+            reviewed,
+            "",
+            0,
+        );
+    }
+
+    /// What the review sheet would be told about `fetched`.
+    async fn standing_of(
+        phone: &Phone,
+        fetched: &myco_napplet_runtime::testing::TestNapplet,
+        requires: &[&str],
+    ) -> ReviewStanding {
+        let requires: Vec<String> = requires.iter().map(|d| d.to_string()).collect();
+        review_standing(
+            &phone.content,
+            &addr_of(fetched),
+            &requires,
+            &fetched.manifest,
+        )
+        .await
+    }
+
+    /// Not in the Library: an ordinary install review.
+    #[tokio::test]
+    async fn a_napplet_not_installed_is_reviewed_for_install() {
+        let phone = phone("standing-new");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "v1", &["theme"]);
+        let standing = standing_of(&phone, &v1, &["theme"]).await;
+        assert_eq!(standing, ReviewStanding::default());
+        assert!(!standing.already_installed());
+    }
+
+    /// Installed, here, and the same version fetched again: nothing to add,
+    /// so the sheet says it is already installed and offers to open it.
+    #[tokio::test]
+    async fn the_installed_version_fetched_again_is_already_installed() {
+        let phone = phone("standing-same");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "v1", &["theme"]);
+        install_here(&phone, &v1, &["theme"]).await;
+        phone.content.refresh_napplet_status().await;
+
+        let standing = standing_of(&phone, &v1, &["theme"]).await;
+        assert!(
+            standing.installed && standing.installed_ready,
+            "{standing:?}"
+        );
+        assert!(!standing.update_available);
+        assert!(standing.already_installed());
+    }
+
+    /// Installed, but its files are not on this phone: the sheet offers the
+    /// download, not "Already installed".
+    #[tokio::test]
+    async fn an_installed_napplet_not_here_is_not_already_installed() {
+        let phone = phone("standing-missing");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "v1", &["theme"]);
+        install_here(&phone, &v1, &["theme"]).await;
+        // No status pass: nothing has found its tile ready.
+
+        let standing = standing_of(&phone, &v1, &["theme"]).await;
+        assert!(
+            standing.installed && !standing.installed_ready,
+            "{standing:?}"
+        );
+        assert!(!standing.already_installed());
+    }
+
+    /// A newer version asking for nothing new is an update, not a re-install:
+    /// it is never answered with "Already installed".
+    #[tokio::test]
+    async fn a_newer_version_is_offered_as_an_update() {
+        let phone = phone("standing-newer");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "v1", &["theme"]);
+        let v2 = version(&keys, 2_000, "v2", &["theme"]);
+        install_here(&phone, &v1, &["theme"]).await;
+        phone.content.refresh_napplet_status().await;
+
+        let standing = standing_of(&phone, &v2, &["theme"]).await;
+        assert!(standing.update_available, "{standing:?}");
+        assert!(standing.unreviewed.is_empty());
+        assert!(!standing.already_installed());
+    }
+
+    /// A newer version asking for more still comes back to be reviewed.
+    #[tokio::test]
+    async fn a_newer_version_asking_for_more_is_reviewed() {
+        let phone = phone("standing-more");
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "v1", &["theme"]);
+        let v2 = version(&keys, 2_000, "v2", &["outbox", "theme"]);
+        install_here(&phone, &v1, &["theme"]).await;
+        phone.content.refresh_napplet_status().await;
+
+        let standing = standing_of(&phone, &v2, &["outbox", "theme"]).await;
+        assert!(standing.update_available);
+        assert_eq!(standing.unreviewed, vec!["outbox".to_string()]);
+        assert!(!standing.already_installed());
+    }
+
+    /// Newer means a later `created_at` over different bytes: a re-signed
+    /// manifest over the same files is not an update, nor is an older one.
+    #[test]
+    fn a_newer_version_is_later_and_different() {
+        let keys = nostr::Keys::generate();
+        let v1 = version(&keys, 1_000, "v1", &[]);
+        let v1_resigned = version(&keys, 2_000, "v1", &[]);
+        let v2 = version(&keys, 2_000, "v2", &[]);
+        assert!(is_newer_version(&v2.manifest, Some(&v1.manifest)));
+        assert!(!is_newer_version(&v1.manifest, Some(&v2.manifest)));
+        assert!(!is_newer_version(&v1_resigned.manifest, Some(&v1.manifest)));
+        assert!(!is_newer_version(&v1.manifest, Some(&v1.manifest)));
+        assert!(!is_newer_version(&v2.manifest, None));
     }
 
     /// The same author's napplet installed by the user, not seeded, gets no

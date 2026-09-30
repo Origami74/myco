@@ -79,6 +79,12 @@ data class NappletReview(
     /** For an installed napplet: what this version would grant that was never
      *  reviewed — an update declaring more. Empty when not installed. */
     val unreviewed: List<String> = emptyList(),
+    /** For an installed napplet: the fetched version is newer than the one
+     *  served here. Offered as an update, never as "Already installed". */
+    val updateAvailable: Boolean = false,
+    /** The core's answer: installed, here, nothing new to agree to and no
+     *  newer version. The sheet says so and offers Open instead of asking. */
+    val alreadyInstalled: Boolean = false,
     val title: String,
     val description: String,
     /** What it declared it needs — a statement of intent, not what it gets. */
@@ -102,6 +108,8 @@ data class NappletReview(
             unreviewed = json.optJSONArray("unreviewed")?.let { u ->
                 (0 until u.length()).map { u.optString(it) }
             }.orEmpty(),
+            updateAvailable = json.optBoolean("updateAvailable"),
+            alreadyInstalled = json.optBoolean("alreadyInstalled"),
             title = json.optString("title"),
             description = json.optString("description"),
             requires = json.optJSONArray("requires")?.let { r ->
