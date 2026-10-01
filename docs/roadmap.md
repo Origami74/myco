@@ -11,10 +11,11 @@ map, the [index](./README.md).
 
 ---
 
-## Status — 2026-09-27
+## Status — 2026-09-30
 
-**Shipped** (v0.8.1 — local-first napplet reads, author relay lookup, relay
-skip list and selection; v0.8.0 — accounts, the AppStore napplet, updates over
+**Shipped** (v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
+reads over a shared relay pool, Chronofeed and Simple Profile; v0.8.1 —
+local-first napplet reads, author relay lookup, relay skip list and selection; v0.8.0 — accounts, the AppStore napplet, updates over
 the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
 
 - **The mesh.** BLE L2CAP with per-peer PSM discovery, Wi-Fi Aware (several
@@ -38,8 +39,14 @@ the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
   Escape. NAPs: `shell`, `identity`, `relay` (pool reads, relay-pool publish),
   `outbox` (NIP-65 plans over local/mesh/internet lanes), `mesh` (hop-limited
   publish/subscribe, user-capped — Myco's own, [NAP-MESH](./design/napplet/NAP-MESH.md)),
-  `resource` (`blossom:` only, local store first, fetched blobs kept), `link`,
-  `theme`.
+  `resource` (`blossom:` only, local store first, fetched blobs kept, up to
+  64 MiB, delivered as bytes), `link`, `theme`, `local` (keep and pass on what
+  a napplet was shown, [NAP-LOCAL](./design/napplet/NAP-LOCAL.md)), `inc`
+  (topic subscriptions) and `intent` (open by role —
+  [NAP-INTENT](./design/napplet/NAP-INTENT.md)).
+- **The shell cache.** A bounded cache for events and blobs apart from what
+  the phone keeps; reads stream as results arrive over one pooled connection
+  per internet relay.
 - **Accounts.** A guest identity from the first launch, `nsec` login and
   logout, and login through a NIP-55 signer (Amber) — N1, N2.
 - **AppStore.** The app store is a preinstalled napplet: feed, stacks and
@@ -205,6 +212,10 @@ live. README and the intro diagrams updated to say "apps", not "sites".
 
 ### N7 — NAP-INTENT: open another napplet by role
 
+**Built** (slices 1 and 2) in v0.9.0 — `nap/intent.rs`, `nap/inc.rs`,
+`myco-core/src/intent.rs`; see [NAP-INTENT](./design/napplet/NAP-INTENT.md).
+Slice 3 (the Android bridge) is still to do.
+
 **Goal.** A napplet asks Myco to open "a `note` viewer" or "a `profile`" — a
 role (archetype), never a specific app — and Myco picks the handler from the
 installed napplets (the user's default, or an "Open with…" choice), opens its
@@ -237,6 +248,8 @@ installed-app page offers **Open**.
 §5.4, S2b · [NAP-INTENT](https://github.com/napplet/naps/blob/master/naps/NAP-INTENT.md).
 
 ### N8 — A shared relay pool
+
+**Built** in v0.9.0 — `relay_pool.rs` over rustic-applesauce's `RelayPool`.
 
 **Goal.** One WebSocket per internet relay, shared by every napplet,
 subscription and lookup, the way other Nostr clients work. Today each one-shot
