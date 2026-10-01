@@ -103,6 +103,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EAGAIN` from the non-blocking fd. It now waits with `poll(2)` and a 1 s
   timeout, so it sleeps until a packet arrives and lets go on a tunnel
   restart.
+- **Wi-Fi Aware is on from the first launch** where the phone supports it.
+  On a fresh install the Bluetooth and Wi-Fi Aware permission requests were
+  launched back to back on one `ActivityResultLauncher`, and Android drops a
+  second request while one is on screen, so `NEARBY_WIFI_DEVICES` was never
+  asked and the lane stayed off despite defaulting on. Every request now goes
+  through one `requestPermissions()`: startup asks for both radios at once,
+  and a request made while a dialog is up is queued until it closes.
 - **"Delete cache" is now "Clear local database"**, which clears what the
   phone kept (except pinned apps) and the cache, and asks first.
 - **Chat survives a restart until it expires.** NIP-40 events are stored in

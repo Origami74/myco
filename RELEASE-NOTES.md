@@ -55,6 +55,8 @@ exchange apps and messages as before. Everything upgrades in place.
 
 ## Also
 
+- **Wi-Fi Aware is on from the first launch** on phones that support it; its
+  permission used to be skipped on a fresh install.
 - **Installing an app you already have offers to open it**, or to update it
   when a newer version is available, instead of a greyed-out install button.
 - **Apps built with WebAssembly run.** They still can't reach the network on
