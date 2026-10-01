@@ -2913,6 +2913,16 @@ pub(crate) const DEFAULT_NAPPLETS: &[DefaultNapplet] = &[
         expected: &["identity", "inc", "outbox", "relay", "resource", "theme"],
         new_installs_only: true,
     },
+    // d=noris: a long-form reader after Boris — NIP-23 articles, NIP-84
+    // highlights. The `article` and `highlight` roles (NAP-INTENT), so an
+    // article or a highlight in Chronofeed opens it. Its published manifest
+    // declares these.
+    DefaultNapplet {
+        title: "Noris",
+        pointer: "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqptwdaexjuc6vq773",
+        expected: &["identity", "inc", "outbox", "relay", "resource", "theme"],
+        new_installs_only: true,
+    },
 ];
 
 /// The expected permissions of the default napplet at `(author_npub, d_tag)`,
@@ -3609,6 +3619,15 @@ mod tests {
             .filter(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("chronofeed"))
             .count();
         assert_eq!(chronofeed, 1, "a fresh install did not get Chronofeed");
+        let noris = rt
+            .content
+            .as_ref()
+            .unwrap()
+            .library_snapshot()
+            .into_iter()
+            .filter(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("noris"))
+            .count();
+        assert_eq!(noris, 1, "a fresh install did not get Noris");
 
         // A second launch does not duplicate it.
         let relaunched = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
@@ -4008,7 +4027,8 @@ mod tests {
         assert!(
             marker.contains(":dingdong\n")
                 && marker.contains(":discover\n")
-                && marker.contains(":chronofeed\n"),
+                && marker.contains(":chronofeed\n")
+                && marker.contains(":noris\n"),
             "{marker}"
         );
 

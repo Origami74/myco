@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Noris for new installs.** A long-form reader after Boris: NIP-23
+  articles, NIP-84 highlights (yours, your follows' and everyone's, painted in
+  the text), reading positions kept on the device. It fills the `article` and
+  `highlight` roles, so an article or a highlight opened from Chronofeed lands
+  in it. New installs only, like Chronofeed and Simple Profile.
+
 ### Changed
 
 - **The APK is about 22 MB, down from 78 MB.** Release builds run R8 code and
