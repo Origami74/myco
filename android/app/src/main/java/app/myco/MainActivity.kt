@@ -101,7 +101,17 @@ class MainActivity : ComponentActivity() {
     /** Hosts with a live [watchPendingLink] coroutine, so resumes don't stack them. */
     private val pendingWatchers = mutableSetOf<String>()
 
+    /**
+     * Permissions waiting for the dialog now on screen to finish. Android shows
+     * one permission request at a time and drops a second one launched while
+     * the first is up — on a first run that silently dropped Wi-Fi Aware's
+     * request behind Bluetooth's, and the lane stayed off. See [requestPermissions].
+     */
+    private val queuedPermissions = linkedSetOf<String>()
+    private var permissionRequestShowing = false
+
     private val permLauncher = registerForActivityResult(RequestMultiplePermissions()) {
+        permissionRequestShowing = false
         // BLE is enabled by default / remembered; (re)start it once perms land.
         if (prefs.getBoolean(PREF_BLE, true) && bleCorePermsGranted()) {
             BleService.start(this)
@@ -112,6 +122,29 @@ class MainActivity : ComponentActivity() {
         if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this) && awarePermsGranted()) {
             AwareService.start(this)
         }
+        // Whatever was asked for while that dialog was up, ask for now.
+        if (queuedPermissions.isNotEmpty()) {
+            val next = queuedPermissions.toList()
+            queuedPermissions.clear()
+            requestPermissions(next)
+        }
+    }
+
+    /**
+     * Ask for the ungranted ones among [permissions], never dropping a request:
+     * while a dialog is up they are queued and asked for when it finishes.
+     */
+    private fun requestPermissions(permissions: List<String>) {
+        val needed = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (needed.isEmpty()) return
+        if (permissionRequestShowing) {
+            queuedPermissions.addAll(needed)
+            return
+        }
+        permissionRequestShowing = true
+        permLauncher.launch(needed.distinct().toTypedArray())
     }
 
     private val vpnConsentLauncher =
@@ -311,16 +344,17 @@ class MainActivity : ComponentActivity() {
         // advert follow the Settings "Network" switch.
         ApRadio.ensureStarted(this, enabled = prefs.getBoolean(PREF_LAN, true))
 
-        // BLE on by default, and remembered thereafter.
+        // BLE and Wi-Fi Aware are ON by default (Aware only where the hardware
+        // supports it), and remembered thereafter. What either still needs is
+        // asked for in one request, so neither is dropped behind the other.
+        val radioPermissions = mutableListOf<String>()
         if (prefs.getBoolean(PREF_BLE, true)) {
-            if (bleCorePermsGranted()) BleService.start(this) else requestBlePermissionsIfNeeded()
+            if (bleCorePermsGranted()) BleService.start(this) else radioPermissions += blePermissions()
         }
-
-        // Wi-Fi Aware is ON by default; resume it unless the user turned it off,
-        // and only where the hardware supports it.
         if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this)) {
-            if (awarePermsGranted()) AwareService.start(this) else requestAwarePermissionsIfNeeded()
+            if (awarePermsGranted()) AwareService.start(this) else radioPermissions += awarePermissions()
         }
+        requestPermissions(radioPermissions)
 
         // The mesh adapter (app-owned TUN) is ON by default — it's how this device
         // reaches the mesh, so it's effectively required. Bring it up at launch,
@@ -735,12 +769,7 @@ class MainActivity : ComponentActivity() {
             .onFailure { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
     }
 
-    private fun requestAwarePermissionsIfNeeded() {
-        val needed = awarePermissions().filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (needed.isNotEmpty()) permLauncher.launch(needed.toTypedArray())
-    }
+    private fun requestAwarePermissionsIfNeeded() = requestPermissions(awarePermissions())
 
     private fun awarePermsGranted(): Boolean = awarePermissions().all {
         ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
@@ -1184,12 +1213,7 @@ class MainActivity : ComponentActivity() {
 
     // --- permissions ---
 
-    private fun requestBlePermissionsIfNeeded() {
-        val needed = blePermissions().filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (needed.isNotEmpty()) permLauncher.launch(needed.toTypedArray())
-    }
+    private fun requestBlePermissionsIfNeeded() = requestPermissions(blePermissions())
 
     /** The BLE radio's core permissions are granted (notifications are separate). */
     private fun bleCorePermsGranted(): Boolean = bleCorePermissions().all {
