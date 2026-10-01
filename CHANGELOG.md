@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The APK is about 22 MB, down from 78 MB.** Release builds run R8 code and
+  resource shrinking (no renaming, so stack traces stay readable): the dex
+  drops from 43 MB, mostly unused material-icons-extended, to 3.4 MB.
+  `libmyco_core.so` is built with fat LTO, one codegen unit and stripped
+  symbols, from 34 MB to 18 MB. Keep rules in `proguard-rules.pro` cover the
+  classes Rust calls over JNI by name (`NativeCore`, `BleRadio`).
+
 ## [0.9.0] - 2026-09-30
 
 ### Added

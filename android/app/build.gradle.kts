@@ -118,7 +118,15 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 drops unused Kotlin/Java code and resources; without it the
+            // dex alone was ~43 MB (mostly material-icons-extended). The keep
+            // rules for what Rust reaches over JNI are in proguard-rules.pro.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             // Signed only when a keystore is configured; otherwise an unsigned
             // release APK is produced (zsp / CI signs at publish time).
             signingConfig = if (hasReleaseKeystore)
