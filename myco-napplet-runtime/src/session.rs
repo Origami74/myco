@@ -11,12 +11,15 @@
 //! carries no payload by design, precisely so there is nothing in it for a
 //! runtime to be tricked into trusting.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use nostr::{Event, Filter};
 
 use crate::delivered::Ledger;
+use crate::seams::Envelope;
 use crate::seams::{ScopeOwner, WorkScope};
 
 /// NAP domains this build actually implements.
@@ -147,6 +150,111 @@ impl From<&crate::resolve::ResolvedNapplet> for NappletIdentity {
     }
 }
 
+/// How a host streams a subscription's backlog instead of answering it in
+/// the call's reply. The runtime never runs a task itself (it has no
+/// runtime); the host hands it these two.
+///
+/// Nostr is a stream: a subscription delivers each stored event the moment
+/// it is read, then whatever arrives live, deduplicated per subscription. It
+/// never waits for a batch to fill or a time to pass.
+#[derive(Clone)]
+pub struct Streamer {
+    /// Hand a frame to the napplet now, the way a live delivery is handed.
+    pub push: Arc<dyn Fn(Envelope) + Send + Sync>,
+    /// Run `work` elsewhere — a task on the host's runtime — and return at
+    /// once.
+    #[allow(clippy::type_complexity)]
+    pub spawn: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
+}
+
+impl std::fmt::Debug for Streamer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Streamer")
+    }
+}
+
+/// The most event ids a subscription remembers for deduplication. Past
+/// this, an event may reach it twice — Nostr subscriptions are
+/// at-least-once, and a napplet's store deduplicates anyway — rather than
+/// the set growing without bound on a long-lived feed. 4096 ids is about
+/// 300 KB at most per subscription.
+pub const SEEN_PER_SUBSCRIPTION: usize = 4096;
+
+/// One generation of a subscription: the ids it was handed, and whether it
+/// is over (closed, replaced, or its backlog read failed).
+///
+/// Each `subscribe` makes a new generation; a backlog task holds its own and
+/// never the map's key, so a subscription replaced under the same `subId`, or
+/// closed, cannot be written into by the task it outlived — even while a
+/// snapshot of the session keeps the old work scope alive.
+#[derive(Debug, Default)]
+struct Generation {
+    ids: HashSet<[u8; 32]>,
+    closed: bool,
+}
+
+type GenerationRef = Arc<Mutex<Generation>>;
+
+/// Per live subscription, its current generation. Shared by every clone of
+/// the session, so the backlog task and the live path see one set.
+type SeenSets = Arc<Mutex<HashMap<(String, String), GenerationRef>>>;
+
+fn sight(generation: &mut Generation, id: &nostr::EventId) -> bool {
+    if generation.closed {
+        return false;
+    }
+    if generation.ids.len() >= SEEN_PER_SUBSCRIPTION {
+        return true;
+    }
+    generation.ids.insert(id.to_bytes())
+}
+
+/// One subscription generation's delivery state, detached from the session
+/// so a backlog task can deliver without holding it.
+#[derive(Clone)]
+pub struct SubscriptionHandle {
+    generation: GenerationRef,
+    ledger: Ledger,
+}
+
+impl SubscriptionHandle {
+    /// Hand `id` to the napplet through `push`, if it is new to this
+    /// subscription and the subscription is still this one. The check, the
+    /// record and the push happen under one lock: a close or replace either
+    /// comes before (nothing is pushed) or after (the push was in time).
+    pub fn deliver(&self, id: &nostr::EventId, push: impl FnOnce()) -> bool {
+        let mut generation = self.generation.lock().unwrap();
+        if !sight(&mut generation, id) {
+            return false;
+        }
+        self.ledger.lock().unwrap().record_event(&id.to_bytes());
+        push();
+        true
+    }
+
+    /// Run `push` (an `eose`, a `.closed`) only while the subscription is
+    /// still this one, under the same lock as [`SubscriptionHandle::deliver`].
+    pub fn while_open(&self, push: impl FnOnce()) -> bool {
+        let generation = self.generation.lock().unwrap();
+        if generation.closed {
+            return false;
+        }
+        push();
+        true
+    }
+
+    /// End this generation: nothing more is delivered for it, by the backlog
+    /// or the live path. Its registration is dropped at the next subscribe.
+    pub fn close(&self) {
+        self.generation.lock().unwrap().closed = true;
+    }
+
+    /// Whether the subscription is over.
+    pub fn is_closed(&self) -> bool {
+        self.generation.lock().unwrap().closed
+    }
+}
+
 /// A napplet's live session.
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -171,7 +279,12 @@ pub struct Session {
     /// are delivered as different message types and gated on different grants,
     /// and a napplet may reuse a `subId` across the two — the spec scopes ids
     /// per domain, not per session.
-    subscriptions: BTreeMap<(String, String), Vec<Filter>>,
+    ///
+    /// Behind an `Arc`, shared copy-on-write: a read runs against a snapshot
+    /// of the session, and copying every live subscription's filters (a
+    /// follow list of hundreds of authors each) into every snapshot cost a
+    /// copy per capability call.
+    subscriptions: Arc<BTreeMap<(String, String), Vec<Filter>>>,
     /// Light or dark, as the window host last reported. See [`Appearance`].
     appearance: Appearance,
     /// The work this session started that outlives a call — cancelled when
@@ -181,7 +294,7 @@ pub struct Session {
     work: Arc<ScopeOwner>,
     /// Per live subscription, the same: closing or replacing a subscription
     /// drops its owner and stops its remote pull.
-    sub_work: BTreeMap<(String, String), Arc<ScopeOwner>>,
+    sub_work: Arc<BTreeMap<(String, String), Arc<ScopeOwner>>>,
     /// NAP-INC topics the napplet listens on (`inc.subscribe`). Exact strings:
     /// NAP-INC routes by equality and never parses a topic. What NAP-INTENT
     /// waits for before it hands a napplet the payload it was opened with.
@@ -191,6 +304,10 @@ pub struct Session {
     /// clone — the snapshots a read runs against record into the same one —
     /// and, through [`Session::with_ledger`], by the napplet's other windows.
     delivered: Ledger,
+    /// The ids each live subscription was handed. See [`SubscriptionHandle`].
+    seen: SeenSets,
+    /// Set by a host that streams backlogs. See [`Streamer`].
+    streamer: Option<Streamer>,
 }
 
 impl Session {
@@ -214,12 +331,81 @@ impl Session {
             granted: granted.into_iter().map(Into::into).collect(),
             implemented: implemented.into_iter().map(Into::into).collect(),
             established: false,
-            subscriptions: BTreeMap::new(),
+            subscriptions: Arc::new(BTreeMap::new()),
             appearance: Appearance::default(),
             work: Arc::new(ScopeOwner::new()),
-            sub_work: BTreeMap::new(),
+            sub_work: Arc::new(BTreeMap::new()),
             inc_topics: BTreeSet::new(),
             delivered: Ledger::default(),
+            seen: Arc::new(Mutex::new(HashMap::new())),
+            streamer: None,
+        }
+    }
+
+    /// Stream subscriptions' backlogs through `streamer` instead of
+    /// answering them in the call's reply.
+    pub fn with_streamer(mut self, streamer: Streamer) -> Self {
+        self.streamer = Some(streamer);
+        self
+    }
+
+    /// The host's streamer, if it streams.
+    pub fn streamer(&self) -> Option<&Streamer> {
+        self.streamer.as_ref()
+    }
+
+    /// The delivery state of the live subscription `(domain, sub_id)`.
+    /// The delivery state of the live subscription `(domain, sub_id)`'s
+    /// current generation. One that is not live gets a closed handle.
+    pub fn subscription_handle(&self, domain: &str, sub_id: &str) -> SubscriptionHandle {
+        let generation = self
+            .seen
+            .lock()
+            .unwrap()
+            .get(&(domain.to_string(), sub_id.to_string()))
+            .cloned()
+            .unwrap_or_else(|| {
+                Arc::new(Mutex::new(Generation {
+                    closed: true,
+                    ..Default::default()
+                }))
+            });
+        SubscriptionHandle {
+            generation,
+            ledger: self.delivered.clone(),
+        }
+    }
+
+    /// Whether `id` is new to the subscription `(domain, sub_id)` — recorded
+    /// if it is. Live deliveries and the backlog share this, so a subscription
+    /// is handed each event once. `false` for one that is not live.
+    pub fn first_sight(&self, domain: &str, sub_id: &str, id: &nostr::EventId) -> bool {
+        let generation = self
+            .seen
+            .lock()
+            .unwrap()
+            .get(&(domain.to_string(), sub_id.to_string()))
+            .cloned();
+        match generation {
+            Some(generation) => sight(&mut generation.lock().unwrap(), id),
+            None => false,
+        }
+    }
+
+    /// Drop the registrations of subscriptions that ended on their own (a
+    /// streamed backlog read that failed): they no longer count against the
+    /// cap, match events, or keep their pulls going.
+    fn prune_ended(&mut self) {
+        let ended: Vec<(String, String)> = self
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, generation)| generation.lock().unwrap().closed)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for (domain, sub_id) in ended {
+            self.unsubscribe_in(&domain, &sub_id);
         }
     }
 
@@ -384,15 +570,21 @@ impl Session {
         filters: Vec<Filter>,
     ) -> Result<(), String> {
         let key = (domain.into(), sub_id.into());
+        self.prune_ended();
         if self.subscriptions.len() >= MAX_SUBSCRIPTIONS && !self.subscriptions.contains_key(&key) {
             return Err(format!(
                 "too many live subscriptions ({MAX_SUBSCRIPTIONS}); close one first"
             ));
         }
         // A new owner: replacing a subscription stops the old one's pull.
-        self.sub_work
-            .insert(key.clone(), Arc::new(ScopeOwner::new()));
-        self.subscriptions.insert(key, filters);
+        Arc::make_mut(&mut self.sub_work).insert(key.clone(), Arc::new(ScopeOwner::new()));
+        // And a fresh generation: a replaced subscription starts over, and
+        // the old one's backlog task can no longer deliver.
+        let fresh: GenerationRef = Arc::default();
+        if let Some(old) = self.seen.lock().unwrap().insert(key.clone(), fresh) {
+            old.lock().unwrap().closed = true;
+        }
+        Arc::make_mut(&mut self.subscriptions).insert(key, filters);
         Ok(())
     }
 
@@ -405,8 +597,15 @@ impl Session {
     /// Drop a subscription in `domain`. Unknown ids are ignored.
     pub fn unsubscribe_in(&mut self, domain: &str, sub_id: &str) {
         let key = (domain.to_string(), sub_id.to_string());
-        self.subscriptions.remove(&key);
-        self.sub_work.remove(&key);
+        if self.subscriptions.contains_key(&key) {
+            Arc::make_mut(&mut self.subscriptions).remove(&key);
+        }
+        if self.sub_work.contains_key(&key) {
+            Arc::make_mut(&mut self.sub_work).remove(&key);
+        }
+        if let Some(old) = self.seen.lock().unwrap().remove(&key) {
+            old.lock().unwrap().closed = true;
+        }
     }
 
     /// How many subscriptions are live — for state reporting and tests.

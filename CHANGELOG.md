@@ -16,6 +16,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symbols, from 34 MB to 18 MB. Keep rules in `proguard-rules.pro` cover the
   classes Rust calls over JNI by name (`NativeCore`, `BleRadio`).
 
+- **Napplets open and fill faster.** Measured on a Pixel 7 Pro with Noris (a
+  long-form reader): from the window starting to articles on screen went
+  from about 650–700 ms to 240–330 ms.
+  - A subscription's backlog is **streamed**: the subscribe call answers at
+    once, and the stored events are pushed to the napplet as frames of their
+    own as soon as the store read returns, then `eose` — not carried back in
+    the call's reply. Each subscription is handed every event once; the
+    backlog and live deliveries share one seen-set, and a subscription closed
+    or replaced while its backlog is read gets nothing more from it.
+  - Fewer copies on the way: events become the napplet's JSON directly,
+    without a print-and-parse; frames cross JNI as a `String[]` instead of a
+    joined string split apart again; Kotlin no longer parses frames it only
+    forwards (the napplet itself, ~385 KB for Noris, was parsed on every
+    open; so was every delivered event under 64 KB); a session's
+    subscription maps are shared copy-on-write rather than copied into every
+    read's snapshot.
+  - The outbox reads many authors' stored relay lists in one query instead
+    of two store reads per author.
+
+### Fixed
+
+- **Tapping an app after Myco restarted no longer lands back in Myco.** A
+  napplet's Recents task, restored after an update or a reclaimed process,
+  is relaunched without its extras; the window now reads the napplet from
+  its `myco://napplet/<pointer>` document address instead of closing.
+
 ## [0.9.0] - 2026-09-30
 
 ### Added

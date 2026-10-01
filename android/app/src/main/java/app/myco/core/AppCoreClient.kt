@@ -950,12 +950,11 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
         NativeCore.nappletBlob(requireHandle(), sessionId, token, sha256)
 
     /**
-     * The runtime sends a window's frames one compact JSON object per line
-     * (`napplet::frames_as_lines`). Split, never parsed: a frame can carry a
-     * picture as megabytes of base64.
+     * The runtime sends a window's frames as a `String[]`, one compact JSON
+     * object each (`napplet::frames_as_json`). Handed on as they are, never
+     * parsed: a frame can carry a picture as megabytes of base64.
      */
-    private fun frameLines(raw: String): List<String> =
-        if (raw.isEmpty()) emptyList() else raw.split('\n').filter { it.isNotEmpty() }
+    private fun frameLines(frames: Array<String>?): List<String> = frames?.asList() ?: emptyList()
 
     /**
      * Report the window's light/dark appearance to its session (NAP-THEME).

@@ -115,10 +115,14 @@ pub fn deliveries_for(session: &Session, event: &Event) -> Vec<Envelope> {
 /// domain: one per matching subscription, gated on the session being
 /// established and still granted the domain (see
 /// [`Session::matching_subscriptions_in`]).
+///
+/// Each subscription is handed an event once: one its backlog already
+/// delivered, or that arrived twice, is skipped.
 pub(crate) fn deliveries_in(session: &Session, domain: &str, event: &Event) -> Vec<Envelope> {
     session
         .matching_subscriptions_in(domain, event)
         .into_iter()
+        .filter(|sub_id| session.first_sight(domain, sub_id, &event.id))
         .map(|sub_id| event_frame(domain, sub_id, event))
         .collect()
 }
@@ -131,42 +135,106 @@ pub(crate) fn event_frame(domain: &str, sub_id: impl Into<String>, event: &Event
 }
 
 /// The first half every subscribing domain shares: register the filters,
-/// then answer what the local relay already holds.
+/// then deliver what this device already holds — and after it, `after`
+/// (an `eose`, where the domain has one).
+///
+/// **Streamed** when the host gave the session a [`Streamer`]: the call
+/// answers at once with nothing, and a task reads the store and pushes each
+/// matching event to the napplet the moment the read returns it, then
+/// `after`. Nostr is a stream; nothing here waits for a batch, a count or a
+/// time. A session without a streamer (a host that does not stream, tests)
+/// gets the backlog and `after` in the reply, as before.
 ///
 /// Registered **before** the read, so an event landing between the two is
-/// delivered by the live path rather than falling through the gap. A napplet
-/// may see it twice; Nostr subscriptions are at-least-once and a duplicate id
-/// is something every client already handles, whereas a missed event is
-/// invisible. Returns the backlog frames, or the reason the subscription
-/// closed before it started — each domain wraps that in its own `.closed`.
+/// delivered by the live path rather than falling through the gap. Each
+/// subscription is handed an event once ([`Session::first_sight`]): the
+/// backlog and the live path share one set, so neither repeats the other.
 ///
 /// A subscription that closes before it started is not left registered: on
-/// a failed backlog the filters are removed again, so the napplet — which
-/// drops the id on `.closed` — is not matched and emitted for by a runtime
-/// that kept it. The session's cap ([`crate::session::MAX_SUBSCRIPTIONS`])
-/// is a reason too.
+/// a failed backlog read answered inline the filters are removed again, so
+/// the napplet — which drops the id on `.closed` — is not matched and
+/// emitted for by a runtime that kept it. The session's cap
+/// ([`crate::session::MAX_SUBSCRIPTIONS`]) is a reason too. A streamed read
+/// that fails pushes `<domain>.closed` and ends the subscription's
+/// generation: nothing more is delivered for it, and its registration is
+/// dropped at the next subscribe.
+///
+/// The backlog task delivers through its own generation
+/// ([`crate::session::SubscriptionHandle`]), never by `subId`: a subscription
+/// closed, or replaced under the same id, while its backlog is still being
+/// read gets nothing more from it — no old event, no stray `eose`.
 ///
 /// What follows differs per domain — which relays are pulled behind the
-/// backlog, and whether an `eose` marks its end — and stays with the domain.
+/// backlog — and stays with the domain.
+///
+/// [`Streamer`]: crate::session::Streamer
 pub(crate) async fn open_subscription(
     ctx: &NapContext,
     session: &mut Session,
     domain: &str,
     sub_id: &str,
-    filters: Vec<Filter>,
+    filters: &[Filter],
+    after: Vec<Envelope>,
 ) -> Result<Vec<Envelope>, String> {
-    session.subscribe_in(domain, sub_id, filters.clone())?;
-    let events = match ctx.relay.query(&filters).await {
+    session.subscribe_in(domain, sub_id, filters.to_vec())?;
+    let handle = session.subscription_handle(domain, sub_id);
+
+    if let Some(streamer) = session.streamer().cloned() {
+        let relay = ctx.relay.clone();
+        let filters = filters.to_vec();
+        let domain = domain.to_string();
+        let sub_id = sub_id.to_string();
+        (streamer.spawn)(Box::pin(async move {
+            match relay.query(&filters).await {
+                Ok(events) => {
+                    for event in &events {
+                        if handle.is_closed() {
+                            return;
+                        }
+                        // Checked, recorded and pushed under the generation's
+                        // lock: a close or replace cannot slip in between.
+                        handle.deliver(&event.id, || {
+                            (streamer.push)(event_frame(&domain, sub_id.as_str(), event))
+                        });
+                    }
+                    handle.while_open(|| {
+                        for frame in after {
+                            (streamer.push)(frame);
+                        }
+                    });
+                }
+                Err(e) => {
+                    // The napplet drops the id on `.closed`; the generation
+                    // ends with it, so nothing more is delivered and the
+                    // registration goes at the next subscribe.
+                    handle.while_open(|| {
+                        (streamer.push)(
+                            Envelope::new(format!("{domain}.closed"))
+                                .with_field("subId", sub_id.as_str())
+                                .with_field("reason", format!("query failed: {e}")),
+                        )
+                    });
+                    handle.close();
+                }
+            }
+        }));
+        return Ok(Vec::new());
+    }
+
+    let events = match ctx.relay.query(filters).await {
         Ok(events) => events,
         Err(e) => {
             session.unsubscribe_in(domain, sub_id);
             return Err(format!("query failed: {e}"));
         }
     };
-    Ok(events
-        .iter()
-        .map(|event| event_frame(domain, sub_id, event))
-        .collect())
+    let mut out: Vec<Envelope> = Vec::new();
+    for event in &events {
+        // Recorded as delivered by dispatch, with the rest of the reply.
+        handle.deliver(&event.id, || out.push(event_frame(domain, sub_id, event)));
+    }
+    out.extend(after);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -189,6 +257,167 @@ mod tests {
             .with_field("subId", sub_id)
             .with_field("filters", json!({"kinds": [1]}));
         dispatch(ctx, s, &e).await.envelopes().to_vec()
+    }
+
+    /// A session whose host streams: frames pushed to `pushed`, work spawned
+    /// on the test runtime.
+    fn streaming(pushed: std::sync::Arc<std::sync::Mutex<Vec<Envelope>>>) -> Session {
+        let push = pushed.clone();
+        granted().with_streamer(crate::session::Streamer {
+            push: std::sync::Arc::new(move |frame| push.lock().unwrap().push(frame)),
+            spawn: std::sync::Arc::new(|work| {
+                tokio::spawn(work);
+            }),
+        })
+    }
+
+    /// With a streamer, a subscription answers at once with nothing, then
+    /// each stored event is pushed as it is read, and `eose` after them.
+    #[tokio::test]
+    async fn a_streamed_backlog_is_pushed_and_eose_follows_it() {
+        let (ctx, _signer) = test_context();
+        let keys = nostr::Keys::generate();
+        let a = nostr::EventBuilder::text_note("a")
+            .sign_with_keys(&keys)
+            .unwrap();
+        // Another author: the test relay keeps one event per author and kind.
+        let b = nostr::EventBuilder::text_note("b")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        ctx.relay.publish(a.clone()).await.unwrap();
+        ctx.relay.publish(b.clone()).await.unwrap();
+
+        let pushed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut s = streaming(pushed.clone());
+        let out = subscribe(&ctx, &mut s, "feed").await;
+        assert!(out.is_empty(), "the call answers at once: {out:?}");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while pushed.lock().unwrap().len() < 3 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        let frames = pushed.lock().unwrap().clone();
+        let types: Vec<&str> = frames.iter().map(|f| f.msg_type.as_str()).collect();
+        assert_eq!(types, ["relay.event", "relay.event", "relay.eose"]);
+        // Pushed frames count as delivered (NAP-LOCAL).
+        assert!(s.was_delivered(&a.id) && s.was_delivered(&b.id));
+
+        // The same event arriving live is not handed to the subscription again;
+        // a new one is.
+        assert!(deliveries_for(&s, &a).is_empty());
+        let c = nostr::EventBuilder::text_note("c")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(deliveries_for(&s, &c).len(), 1);
+        assert!(deliveries_for(&s, &c).is_empty());
+    }
+
+    /// A subscription replaced under the same id while its first backlog is
+    /// still being read gets nothing from that first read — no old event, no
+    /// stray `eose` — and a closed one gets nothing either. The backlog
+    /// tasks here are held, then run only after the replace and the close.
+    #[tokio::test]
+    async fn a_replaced_or_closed_subscription_gets_nothing_from_its_old_backlog() {
+        let (ctx, _signer) = test_context();
+        let keys = nostr::Keys::generate();
+        let old = nostr::EventBuilder::text_note("old")
+            .sign_with_keys(&keys)
+            .unwrap();
+        ctx.relay.publish(old.clone()).await.unwrap();
+
+        type Work = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+        let held: std::sync::Arc<std::sync::Mutex<Vec<Work>>> = Default::default();
+        let pushed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Envelope>::new()));
+        let push = pushed.clone();
+        let hold = held.clone();
+        let mut s = granted().with_streamer(crate::session::Streamer {
+            push: std::sync::Arc::new(move |frame| push.lock().unwrap().push(frame)),
+            spawn: std::sync::Arc::new(move |work| hold.lock().unwrap().push(work)),
+        });
+        // A snapshot alive across the replace, as a read in flight holds one.
+        let _snapshot = s.clone();
+
+        subscribe(&ctx, &mut s, "feed").await;
+        let first = held.lock().unwrap().pop().unwrap();
+        // Replaced under the same id (another kind), then the new one closed.
+        let e = Envelope::new("relay.subscribe")
+            .with_id("again")
+            .with_field("subId", "feed")
+            .with_field("filters", serde_json::json!({"kinds": [30023]}));
+        dispatch(&ctx, &mut s, &e).await;
+        let second = held.lock().unwrap().pop().unwrap();
+        s.unsubscribe("feed");
+
+        first.await;
+        second.await;
+        assert!(
+            pushed.lock().unwrap().is_empty(),
+            "a stale backlog was delivered: {:?}",
+            pushed.lock().unwrap()
+        );
+    }
+
+    /// A streamed backlog read that fails says `.closed`, delivers nothing
+    /// more, and frees its slot at the next subscribe.
+    #[tokio::test]
+    async fn a_failed_streamed_backlog_ends_its_subscription() {
+        let (ctx, _signer) = test_context();
+        let mut s = granted();
+        s.subscribe_in(
+            "relay",
+            "feed",
+            vec![nostr::Filter::new().kind(nostr::Kind::TextNote)],
+        )
+        .unwrap();
+        let handle = s.subscription_handle("relay", "feed");
+        handle.close();
+        let keys = nostr::Keys::generate();
+        let note = nostr::EventBuilder::text_note("hi")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert!(deliveries_for(&s, &note).is_empty());
+        assert_eq!(s.subscription_count(), 1);
+        subscribe(&ctx, &mut s, "other").await;
+        assert_eq!(
+            s.subscription_count(),
+            1,
+            "the ended subscription kept its slot"
+        );
+    }
+
+    /// Without a streamer the backlog and `eose` come in the reply, each
+    /// event once, and a live repeat of one of them is skipped too.
+    #[tokio::test]
+    async fn an_inline_backlog_is_deduplicated_against_live_deliveries() {
+        let (ctx, _signer) = test_context();
+        let keys = nostr::Keys::generate();
+        let a = nostr::EventBuilder::text_note("a")
+            .sign_with_keys(&keys)
+            .unwrap();
+        ctx.relay.publish(a.clone()).await.unwrap();
+        let mut s = granted();
+        let out = subscribe(&ctx, &mut s, "feed").await;
+        let types: Vec<&str> = out.iter().map(|f| f.msg_type.as_str()).collect();
+        assert_eq!(types, ["relay.event", "relay.eose"]);
+        assert!(deliveries_for(&s, &a).is_empty());
+    }
+
+    /// A closed subscription is handed nothing more, and a reopened one
+    /// starts with an empty seen-set.
+    #[tokio::test]
+    async fn closing_forgets_what_a_subscription_saw() {
+        let (ctx, _signer) = test_context();
+        let keys = nostr::Keys::generate();
+        let a = nostr::EventBuilder::text_note("a")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut s = granted();
+        subscribe(&ctx, &mut s, "feed").await;
+        assert_eq!(deliveries_for(&s, &a).len(), 1);
+        s.unsubscribe("feed");
+        assert!(deliveries_for(&s, &a).is_empty());
+        subscribe(&ctx, &mut s, "feed").await;
+        assert_eq!(deliveries_for(&s, &a).len(), 1);
     }
 
     /// A napplet looping over fresh ids gets `.closed` at the cap, not a

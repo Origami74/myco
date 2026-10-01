@@ -598,11 +598,27 @@ impl NappletHost {
             ?unreviewed,
             "opening napplet"
         );
+        // The window's live channel, made first: the session streams each
+        // subscription's backlog into it (see `Streamer`), on this runtime,
+        // rather than answering it in the subscribe call's reply.
+        let (outbox, drain) = mpsc::unbounded_channel();
+        let push_to = outbox.clone();
+        let rt = tokio::runtime::Handle::current();
         let session = Session::new(
             NappletIdentity::from(&resolved),
             grants.granted.iter().cloned(),
         )
-        .with_ledger(self.ledger_for(addr));
+        .with_ledger(self.ledger_for(addr))
+        .with_streamer(myco_napplet_runtime::Streamer {
+            push: Arc::new(move |frame| {
+                // A closed window's receiver is gone; what it was owed goes
+                // nowhere, which is what closing means.
+                let _ = push_to.send(ToShell::to_napplet(frame));
+            }),
+            spawn: Arc::new(move |work| {
+                rt.spawn(work);
+            }),
+        });
         let prelude = render_for(&session);
         let artifact = assemble(
             &resolved.index_html,
@@ -622,7 +638,6 @@ impl NappletHost {
             *next += 1;
             id
         };
-        let (outbox, drain) = mpsc::unbounded_channel();
         self.sessions.lock().unwrap().insert(
             session_id.clone(),
             LiveNapplet {
@@ -1246,18 +1261,18 @@ impl BlobStore for SourceBlobs<'_> {
     }
 }
 
-/// Frames for a window, one compact JSON object per line — how they cross
-/// the FFI. Compact JSON never holds a raw newline (one inside a string is
-/// written `\n`), so the Kotlin side splits on it and hands each frame on
-/// as it is. A JSON array made that side parse every frame, pictures as
-/// megabytes of base64 included, only to write it back out.
+/// Frames for a window, each one compact JSON object — how they cross the
+/// FFI, as a Java `String[]` with one frame per element. Kotlin hands each
+/// on as it is: never parsed (a frame can carry a picture as megabytes of
+/// base64, or a long-form article), and never joined into one string here
+/// only to be split apart again there — that was two more copies of every
+/// payload.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub fn frames_as_lines(frames: &[ToShell]) -> String {
+pub fn frames_as_json(frames: &[ToShell]) -> Vec<String> {
     frames
         .iter()
         .filter_map(|f| serde_json::to_string(f).ok())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 /// NAP-RESOURCE's fetcher: where a blob this device does not hold is looked
@@ -2074,7 +2089,14 @@ mod tests {
                         "filters": [{"ids": [note.id.to_hex()]}]},
         })
         .to_string();
-        let shown = host.frame(&windows[0], &subscribe).await;
+        // The backlog is streamed: the call answers at once, and the note
+        // arrives on the window's live channel.
+        let answered = host.frame(&windows[0], &subscribe).await;
+        assert!(
+            answered.is_empty(),
+            "the subscribe call carried frames: {answered:?}"
+        );
+        let shown = host.next_frames(&windows[0], Duration::from_secs(2)).await;
         assert!(
             format!("{shown:?}").contains(&note.id.to_hex()),
             "the backlog did not carry the note"
@@ -2602,10 +2624,15 @@ mod tests {
                 r#"{"channel":"napplet","message":{"type":"relay.subscribe","id":"a1","subId":"sub-1","filters":[{"kinds":[20666]}]}}"#,
             )
             .await;
-        // Nothing stored yet, so the subscription opens straight to EOSE.
-        assert_eq!(out.len(), 1);
-        let ToShell::Napplet { message } = &out[0] else {
-            panic!("expected a relayed reply");
+        // The backlog is streamed: the call answers at once with nothing, and
+        // — nothing being stored yet — EOSE arrives on the live channel.
+        assert!(out.is_empty(), "the subscribe call carried frames: {out:?}");
+        let backlog = host
+            .next_frames(&opened.session_id, Duration::from_secs(2))
+            .await;
+        assert_eq!(backlog.len(), 1);
+        let ToShell::Napplet { message } = &backlog[0] else {
+            panic!("expected a napplet frame");
         };
         assert_eq!(message.msg_type, "relay.eose");
 
@@ -2646,6 +2673,15 @@ mod tests {
             r#"{"channel":"napplet","message":{"type":"relay.subscribe","id":"a1","subId":"sub-1","filters":[{"kinds":[20666]}]}}"#,
         )
         .await;
+        // The streamed backlog: nothing stored, so only its EOSE.
+        let backlog = host
+            .next_frames(&opened.session_id, Duration::from_secs(2))
+            .await;
+        assert_eq!(
+            backlog.len(),
+            1,
+            "the backlog was more than its EOSE: {backlog:?}"
+        );
 
         // A kind nobody subscribed to.
         let other = nostr::EventBuilder::text_note("not for you")
@@ -3945,18 +3981,13 @@ mod tests {
             ToShell::Relaunch,
             ToShell::Napplet { message },
         ];
-        let lines = frames_as_lines(&frames);
-        let split: Vec<&str> = lines.split('\n').collect();
-        assert_eq!(split.len(), 3);
-        assert!(
-            split[0].starts_with(r#"{"channel":"napplet""#),
-            "{}",
-            split[0]
-        );
-        for (line, frame) in split.iter().zip(&frames) {
-            assert_eq!(&serde_json::from_str::<ToShell>(line).unwrap(), frame);
+        let out = frames_as_json(&frames);
+        assert_eq!(out.len(), 3);
+        assert!(out[0].starts_with(r#"{"channel":"napplet""#), "{}", out[0]);
+        for (json, frame) in out.iter().zip(&frames) {
+            assert_eq!(&serde_json::from_str::<ToShell>(json).unwrap(), frame);
         }
-        assert_eq!(frames_as_lines(&[]), "");
+        assert!(frames_as_json(&[]).is_empty());
     }
 
     /// The fetcher reaches the public servers when the store misses, and not

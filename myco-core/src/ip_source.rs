@@ -175,6 +175,37 @@ impl AuthorOutbox {
             .max_by_key(|e| e.created_at)
     }
 
+    /// Each of `authors`' newest stored relay list, read in **one** query
+    /// rather than one per author: a check over a follow list of hundreds
+    /// made that many store reads in a row.
+    pub async fn stored_lists_for(
+        &self,
+        authors: &[PublicKey],
+    ) -> std::collections::HashMap<PublicKey, Event> {
+        let mut out: std::collections::HashMap<PublicKey, Event> = std::collections::HashMap::new();
+        if authors.is_empty() {
+            return out;
+        }
+        let filter = nostr::Filter::new()
+            .kind(nostr::Kind::RelayList)
+            .authors(authors.iter().copied());
+        let Ok(found) = self.store.query(&[filter]).await else {
+            return out;
+        };
+        for e in found {
+            if e.kind != nostr::Kind::RelayList || !authors.contains(&e.pubkey) {
+                continue;
+            }
+            match out.get(&e.pubkey) {
+                Some(have) if have.created_at >= e.created_at => {}
+                _ => {
+                    out.insert(e.pubkey, e);
+                }
+            }
+        }
+        out
+    }
+
     /// Keep a list fetched from the network. The local relay keeps the newest
     /// of a replaceable kind on its own, so an older one is a no-op.
     pub async fn remember(&self, list: Event) {
@@ -273,12 +304,13 @@ impl AuthorOutbox {
     ) -> (Vec<String>, Vec<PublicKey>) {
         let mut out = Vec::new();
         let mut missing = Vec::new();
+        let lists = self.stored_lists_for(authors).await;
         for author in authors {
-            let Some(list) = self.stored_list(author).await else {
+            let Some(list) = lists.get(author) else {
                 missing.push(*author);
                 continue;
             };
-            for url in self.write_relays(&list) {
+            for url in self.write_relays(list) {
                 if out.len() >= cap {
                     break;
                 }
@@ -363,8 +395,9 @@ impl AuthorOutbox {
     /// this fetch or another path (a list riding along with a manifest
     /// query).
     pub async fn note_misses_among(&self, authors: &[PublicKey]) {
+        let lists = self.stored_lists_for(authors).await;
         for author in authors {
-            if self.stored_list(author).await.is_none() {
+            if !lists.contains_key(author) {
                 self.note_miss(author);
             }
         }
@@ -373,8 +406,9 @@ impl AuthorOutbox {
     /// As [`AuthorOutbox::note_misses_among`], for a lookup that was not a
     /// clean "no": remembered for [`LIST_SOFT_MISS_FOR`] only.
     pub async fn note_soft_misses_among(&self, authors: &[PublicKey]) {
+        let lists = self.stored_lists_for(authors).await;
         for author in authors {
-            if self.stored_list(author).await.is_none() {
+            if !lists.contains_key(author) {
                 self.note_soft_miss(author);
             }
         }

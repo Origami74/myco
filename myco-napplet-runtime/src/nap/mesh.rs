@@ -120,8 +120,17 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
         Err(e) => return vec![message.to_error(e)],
     };
 
-    let mut out =
-        match crate::nap::open_subscription(ctx, session, "mesh", &sub_id, filters.clone()).await {
+    // Peers are asked with the raw filters: hops ride the envelope, and the
+    // filters stay canonical NIP-01 all the way out.
+    let ttl = ctx.mesh.limits().await.clamp_subscribe(requested);
+    // The local backlog's end follows the backlog, streamed or not.
+    let eose = Envelope::new("mesh.eose")
+        .with_field("subId", sub_id.clone())
+        .with_field("ttl", ttl);
+    let out =
+        match crate::nap::open_subscription(ctx, session, "mesh", &sub_id, &filters, vec![eose])
+            .await
+        {
             Ok(backlog) => backlog,
             Err(reason) => {
                 return vec![Envelope::new("mesh.closed")
@@ -130,9 +139,6 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
             }
         };
 
-    // Peers are asked with the raw filters: hops ride the envelope, and the
-    // filters stay canonical NIP-01 all the way out.
-    let ttl = ctx.mesh.limits().await.clamp_subscribe(requested);
     if ttl > 0 {
         let raw = match message.field("filters") {
             Some(serde_json::Value::Array(items)) => items.clone(),
@@ -146,11 +152,6 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
         }
     }
 
-    out.push(
-        Envelope::new("mesh.eose")
-            .with_field("subId", sub_id)
-            .with_field("ttl", ttl),
-    );
     out
 }
 
@@ -539,8 +540,15 @@ mod tests {
             Envelope::new("mesh.close").with_field("subId", "sub-1"),
         )
         .await;
-        assert!(crate::nap::deliveries_for(&s, &doorbell).is_empty());
-        assert_eq!(crate::nap::deliveries_for(&s, &note).len(), 1);
+        let again = EventBuilder::new(nostr::Kind::from(20666u16), "dong")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert!(crate::nap::deliveries_for(&s, &again).is_empty());
+        // A new note (a subscription is handed each event once).
+        let another = EventBuilder::text_note("hi again")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(crate::nap::deliveries_for(&s, &another).len(), 1);
     }
 
     /// Revoking `mesh` stops deliveries on the next event, as with `relay`.

@@ -68,8 +68,8 @@ internal object NativeCore {
      */
     external fun nappletBindIntent(handle: Long, sessionId: String, token: String): Boolean
 
-    /** Carry one shell frame; returns a JSON array of frames to send back. */
-    external fun nappletFrame(handle: Long, sessionId: String, frameJson: String): String
+    /** Carry one shell frame; returns the frames to send back, one JSON object each. */
+    external fun nappletFrame(handle: Long, sessionId: String, frameJson: String): Array<String>?
 
     /**
      * Wait for frames the runtime wants to send unprompted (subscription
@@ -77,7 +77,7 @@ internal object NativeCore {
      *
      * **Blocks** — call it from a background thread, never the UI thread.
      */
-    external fun nappletNextFrames(handle: Long, sessionId: String, timeoutMs: Long): String
+    external fun nappletNextFrames(handle: Long, sessionId: String, timeoutMs: Long): Array<String>?
 
     /**
      * The bytes of a blob this window's napplet was delivered, or null — for

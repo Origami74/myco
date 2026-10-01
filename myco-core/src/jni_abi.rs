@@ -10,7 +10,7 @@
 use std::sync::Mutex;
 
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jboolean, jbyteArray, jlong, jstring};
+use jni::sys::{jboolean, jbyteArray, jlong, jobjectArray, jstring};
 use jni::JNIEnv;
 
 use crate::runtime::AppRuntime;
@@ -24,6 +24,26 @@ fn jstr(env: &mut JNIEnv, s: String) -> jstring {
     env.new_string(s)
         .map(|o| o.into_raw())
         .unwrap_or(std::ptr::null_mut())
+}
+
+/// A Java `String[]`, one element per string; null if the JVM refused.
+fn jstr_array(env: &mut JNIEnv, items: Vec<String>) -> jobjectArray {
+    let Ok(array) = env.new_object_array(items.len() as i32, "java/lang/String", JObject::null())
+    else {
+        return std::ptr::null_mut();
+    };
+    for (i, item) in items.into_iter().enumerate() {
+        let Ok(s) = env.new_string(item) else {
+            return std::ptr::null_mut();
+        };
+        if env.set_object_array_element(&array, i as i32, &s).is_err() {
+            return std::ptr::null_mut();
+        }
+        // Local references are few per frame; free each as we go so a burst
+        // of hundreds does not exhaust the local reference table.
+        let _ = env.delete_local_ref(s);
+    }
+    array.into_raw()
 }
 
 fn get_string(env: &mut JNIEnv, s: &JString) -> String {
@@ -464,7 +484,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletFrame(
     handle: jlong,
     session_id: JString,
     frame_json: JString,
-) -> jstring {
+) -> jobjectArray {
     let session_id = get_string(&mut env, &session_id);
     let frame_json = get_string(&mut env, &frame_json);
 
@@ -483,7 +503,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletFrame(
         None => Vec::new(),
     };
 
-    jstr(&mut env, crate::napplet::frames_as_lines(&out))
+    jstr_array(&mut env, crate::napplet::frames_as_json(&out))
 }
 
 /// The bytes of a blob this window's napplet was delivered, or `null`. The
@@ -532,7 +552,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletNextFrames(
     handle: jlong,
     session_id: JString,
     timeout_ms: jlong,
-) -> jstring {
+) -> jobjectArray {
     let session_id = get_string(&mut env, &session_id);
 
     let ctx = match unsafe { handle_ref(handle) } {
@@ -551,7 +571,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletNextFrames(
         None => Vec::new(),
     };
 
-    jstr(&mut env, crate::napplet::frames_as_lines(&out))
+    jstr_array(&mut env, crate::napplet::frames_as_json(&out))
 }
 
 /// Tell a window's session whether the app is drawing light or dark, so

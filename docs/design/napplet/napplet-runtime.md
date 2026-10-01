@@ -455,7 +455,15 @@ lookup that found nothing is not repeated for a minute, or ten when every relay 
 What the specs allow shapes how:
 
 - **Subscriptions stream, for as long as they are open.** `relay.subscribe` and
-  `outbox.subscribe` answer the local backlog at once. Each remote lane — planned, or
+  `outbox.subscribe` answer the local backlog at once — **streamed**: the call returns with
+  nothing, and a task the host runs (the session's `Streamer`) reads the local relay and
+  pushes the matching events to the window's live channel as soon as that read returns,
+  each as its own frame, then `EOSE` on the same channel. Nothing waits on relays, a count
+  or a time; the store read itself returns its answer whole. Each subscription is handed an
+  event once: its backlog and its live deliveries share one seen-set (at most 4096 ids). A
+  subscription closed, or replaced under the same id, while its backlog is being read gets
+  nothing more from that read — the task delivers through its own generation, never by id.
+  A host without a streamer answers the backlog in the reply, as before. Each remote lane — planned, or
   named by the napplet in `options.relays` (at most 10) — then gets a `REQ` held open for
   the subscription's life: its stored events and then every new one land in the local
   relay as they come, and are delivered from there. The local relay dedupes by id, so an
@@ -474,7 +482,10 @@ What the specs allow shapes how:
     peer — so it is re-asked every 45 s (plus jitter). What Circle members publish reaches
     this device through the flood anyway.
 - **`EOSE` marks the end of this device's backlog.** NAP-RELAY sends it "when stored events
-  are exhausted"; the local relay is the shell's store, so it goes right after the backlog.
+  are exhausted"; the local relay is the shell's store, so it goes right after the backlog,
+  pushed by the same task on the same channel after every event that task delivered. A
+  stored event the live path happened to deliver first reaches the napplet as a live event
+  and may come after `EOSE`; nothing is lost either way.
   Pulled events arrive after it, as live events. Holding `EOSE` until the fast relays had
   answered was considered and not done: pulled events reach a napplet through the hub's live
   bus, which has no ordering against a frame pushed separately, so a late `EOSE` could

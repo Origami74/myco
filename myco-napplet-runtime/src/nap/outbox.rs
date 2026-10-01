@@ -270,12 +270,13 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
         Err(e) => return closed(e),
     };
 
-    let out = match crate::nap::open_subscription(ctx, session, "outbox", &sub_id, filters.clone())
-        .await
-    {
-        Ok(backlog) => backlog,
-        Err(reason) => return closed(reason),
-    };
+    let out =
+        match crate::nap::open_subscription(ctx, session, "outbox", &sub_id, &filters, Vec::new())
+            .await
+        {
+            Ok(backlog) => backlog,
+            Err(reason) => return closed(reason),
+        };
 
     if let Err(e) = ctx
         .lanes

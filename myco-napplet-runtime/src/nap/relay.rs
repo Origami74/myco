@@ -40,7 +40,7 @@
 //! it. The refusal is per call and surfaces as `ok: false` with the reason on
 //! the `.result` frame, never silently. See `REFUSED_KINDS`.
 
-use nostr::{Filter, JsonUtil, Kind, Tag, Timestamp, UnsignedEvent};
+use nostr::{Filter, Kind, Tag, Timestamp, UnsignedEvent};
 
 use crate::dispatch::NapContext;
 use crate::seams::{Direction, Envelope, RelayLane};
@@ -225,6 +225,7 @@ async fn subscribe(
     // A named relay skips the local backlog — the napplet asked for that
     // relay's view — but the subscription is registered either way, since the
     // pull lands in the local relay and is delivered from there.
+    let named_relay = target.is_some();
     let mut out = match target {
         Some(_) => {
             if let Err(reason) = session.subscribe(sub_id.clone(), filters.clone()) {
@@ -235,8 +236,17 @@ async fn subscribe(
             Vec::new()
         }
         None => {
-            match crate::nap::open_subscription(ctx, session, "relay", &sub_id, filters.clone())
-                .await
+            // The backlog's end follows the backlog, streamed or not.
+            let eose = Envelope::new("relay.eose").with_field("subId", sub_id.clone());
+            match crate::nap::open_subscription(
+                ctx,
+                session,
+                "relay",
+                &sub_id,
+                &filters,
+                vec![eose],
+            )
+            .await
             {
                 Ok(backlog) => backlog,
                 Err(reason) => {
@@ -263,7 +273,10 @@ async fn subscribe(
         }
     }
 
-    out.push(Envelope::new("relay.eose").with_field("subId", sub_id));
+    // A named relay has no local backlog: its `eose` is said here.
+    if named_relay {
+        out.push(Envelope::new("relay.eose").with_field("subId", sub_id));
+    }
     out
 }
 
@@ -431,8 +444,12 @@ pub(crate) async fn signed_or_template(
 }
 
 /// An event as the JSON a napplet reads.
+///
+/// Built straight from the event's fields: never printed to a string and
+/// parsed back, which on a backlog of long-form articles cost more than the
+/// store read itself.
 pub(crate) fn event_json(event: &nostr::Event) -> serde_json::Value {
-    serde_json::from_str::<serde_json::Value>(&event.as_json()).unwrap_or(serde_json::Value::Null)
+    serde_json::to_value(event).unwrap_or(serde_json::Value::Null)
 }
 
 /// The `relay.event` frames a session should receive for an arriving event.
