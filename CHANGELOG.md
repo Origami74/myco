@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Wi-Fi Aware is on from the first launch where the phone supports it.** On
+  a fresh install the Bluetooth and Wi-Fi Aware permission requests were
+  launched back to back, and Android drops a second request while one is on
+  screen, so Aware's was never asked and the lane stayed off. Startup now asks
+  for both in one request, and any request made while a dialog is up is queued
+  and asked for when it closes.
+
 ### Added
 
 - **Apps can open each other by role.** An app can ask Myco to open "a
