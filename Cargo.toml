@@ -73,3 +73,13 @@ axum = { version = "0.8", features = ["ws"] }
 # Bind the mesh servers IPV6_V6ONLY so `[::]:port` doesn't collide with another
 # app squatting on `127.0.0.1:port` (the mesh is IPv6-only anyway).
 socket2 = "0.6"
+
+# The release library ships inside the APK, so build it small: one codegen
+# unit with whole-program LTO lets the linker drop unused code across crates,
+# and stripping removes the symbol tables (a third of the file). Panics still
+# unwind (no `panic = "abort"`): tokio contains a panicking task instead of
+# the whole app going down.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
