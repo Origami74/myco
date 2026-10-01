@@ -155,8 +155,14 @@ pub(crate) fn event_frame(domain: &str, sub_id: impl Into<String>, event: &Event
 /// the napplet — which drops the id on `.closed` — is not matched and
 /// emitted for by a runtime that kept it. The session's cap
 /// ([`crate::session::MAX_SUBSCRIPTIONS`]) is a reason too. A streamed read
-/// that fails pushes `<domain>.closed`; the napplet drops the id, and the
-/// filters go with the session.
+/// that fails pushes `<domain>.closed` and ends the subscription's
+/// generation: nothing more is delivered for it, and its registration is
+/// dropped at the next subscribe.
+///
+/// The backlog task delivers through its own generation
+/// ([`crate::session::SubscriptionHandle`]), never by `subId`: a subscription
+/// closed, or replaced under the same id, while its backlog is still being
+/// read gets nothing more from it — no old event, no stray `eose`.
 ///
 /// What follows differs per domain — which relays are pulled behind the
 /// backlog — and stays with the domain.
@@ -185,25 +191,30 @@ pub(crate) async fn open_subscription(
                         if handle.is_closed() {
                             return;
                         }
-                        if handle.first_sight(&event.id) {
-                            handle.record_delivered(&event.id);
-                            (streamer.push)(event_frame(&domain, sub_id.as_str(), event));
-                        }
+                        // Checked, recorded and pushed under the generation's
+                        // lock: a close or replace cannot slip in between.
+                        handle.deliver(&event.id, || {
+                            (streamer.push)(event_frame(&domain, sub_id.as_str(), event))
+                        });
                     }
-                    if !handle.is_closed() {
+                    handle.while_open(|| {
                         for frame in after {
                             (streamer.push)(frame);
                         }
-                    }
+                    });
                 }
                 Err(e) => {
-                    if !handle.is_closed() {
+                    // The napplet drops the id on `.closed`; the generation
+                    // ends with it, so nothing more is delivered and the
+                    // registration goes at the next subscribe.
+                    handle.while_open(|| {
                         (streamer.push)(
                             Envelope::new(format!("{domain}.closed"))
                                 .with_field("subId", sub_id.as_str())
                                 .with_field("reason", format!("query failed: {e}")),
-                        );
-                    }
+                        )
+                    });
+                    handle.close();
                 }
             }
         }));
@@ -217,11 +228,11 @@ pub(crate) async fn open_subscription(
             return Err(format!("query failed: {e}"));
         }
     };
-    let mut out: Vec<Envelope> = events
-        .iter()
-        .filter(|event| handle.first_sight(&event.id))
-        .map(|event| event_frame(domain, sub_id, event))
-        .collect();
+    let mut out: Vec<Envelope> = Vec::new();
+    for event in &events {
+        // Recorded as delivered by dispatch, with the rest of the reply.
+        handle.deliver(&event.id, || out.push(event_frame(domain, sub_id, event)));
+    }
     out.extend(after);
     Ok(out)
 }
@@ -281,11 +292,8 @@ mod tests {
         let out = subscribe(&ctx, &mut s, "feed").await;
         assert!(out.is_empty(), "the call answers at once: {out:?}");
 
-        for _ in 0..50 {
-            if pushed.lock().unwrap().len() >= 3 {
-                break;
-            }
-            tokio::task::yield_now().await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while pushed.lock().unwrap().len() < 3 && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
         let frames = pushed.lock().unwrap().clone();
@@ -302,6 +310,79 @@ mod tests {
             .unwrap();
         assert_eq!(deliveries_for(&s, &c).len(), 1);
         assert!(deliveries_for(&s, &c).is_empty());
+    }
+
+    /// A subscription replaced under the same id while its first backlog is
+    /// still being read gets nothing from that first read — no old event, no
+    /// stray `eose` — and a closed one gets nothing either. The backlog
+    /// tasks here are held, then run only after the replace and the close.
+    #[tokio::test]
+    async fn a_replaced_or_closed_subscription_gets_nothing_from_its_old_backlog() {
+        let (ctx, _signer) = test_context();
+        let keys = nostr::Keys::generate();
+        let old = nostr::EventBuilder::text_note("old")
+            .sign_with_keys(&keys)
+            .unwrap();
+        ctx.relay.publish(old.clone()).await.unwrap();
+
+        type Work = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+        let held: std::sync::Arc<std::sync::Mutex<Vec<Work>>> = Default::default();
+        let pushed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Envelope>::new()));
+        let push = pushed.clone();
+        let hold = held.clone();
+        let mut s = granted().with_streamer(crate::session::Streamer {
+            push: std::sync::Arc::new(move |frame| push.lock().unwrap().push(frame)),
+            spawn: std::sync::Arc::new(move |work| hold.lock().unwrap().push(work)),
+        });
+        // A snapshot alive across the replace, as a read in flight holds one.
+        let _snapshot = s.clone();
+
+        subscribe(&ctx, &mut s, "feed").await;
+        let first = held.lock().unwrap().pop().unwrap();
+        // Replaced under the same id (another kind), then the new one closed.
+        let e = Envelope::new("relay.subscribe")
+            .with_id("again")
+            .with_field("subId", "feed")
+            .with_field("filters", serde_json::json!({"kinds": [30023]}));
+        dispatch(&ctx, &mut s, &e).await;
+        let second = held.lock().unwrap().pop().unwrap();
+        s.unsubscribe("feed");
+
+        first.await;
+        second.await;
+        assert!(
+            pushed.lock().unwrap().is_empty(),
+            "a stale backlog was delivered: {:?}",
+            pushed.lock().unwrap()
+        );
+    }
+
+    /// A streamed backlog read that fails says `.closed`, delivers nothing
+    /// more, and frees its slot at the next subscribe.
+    #[tokio::test]
+    async fn a_failed_streamed_backlog_ends_its_subscription() {
+        let (ctx, _signer) = test_context();
+        let mut s = granted();
+        s.subscribe_in(
+            "relay",
+            "feed",
+            vec![nostr::Filter::new().kind(nostr::Kind::TextNote)],
+        )
+        .unwrap();
+        let handle = s.subscription_handle("relay", "feed");
+        handle.close();
+        let keys = nostr::Keys::generate();
+        let note = nostr::EventBuilder::text_note("hi")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert!(deliveries_for(&s, &note).is_empty());
+        assert_eq!(s.subscription_count(), 1);
+        subscribe(&ctx, &mut s, "other").await;
+        assert_eq!(
+            s.subscription_count(),
+            1,
+            "the ended subscription kept its slot"
+        );
     }
 
     /// Without a streamer the backlog and `eose` come in the reply, each

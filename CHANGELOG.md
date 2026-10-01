@@ -20,10 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   long-form reader): from the window starting to articles on screen went
   from about 650–700 ms to 240–330 ms.
   - A subscription's backlog is **streamed**: the subscribe call answers at
-    once, and each stored event is pushed to the napplet as soon as the
-    store read returns it, then `eose`. Nothing waits for a batch, a count or
-    a time. Each subscription is handed every event once; the backlog and
-    live deliveries share one seen-set.
+    once, and the stored events are pushed to the napplet as frames of their
+    own as soon as the store read returns, then `eose` — not carried back in
+    the call's reply. Each subscription is handed every event once; the
+    backlog and live deliveries share one seen-set, and a subscription closed
+    or replaced while its backlog is read gets nothing more from it.
   - Fewer copies on the way: events become the napplet's JSON directly,
     without a print-and-parse; frames cross JNI as a `String[]` instead of a
     joined string split apart again; Kotlin no longer parses frames it only

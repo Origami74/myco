@@ -1102,15 +1102,20 @@ class NappletActivity : ComponentActivity() {
          * keying the *task* on it would strand the old Recents card on every
          * update. The session still pins the hash — see the design doc §7.8.
          */
-        fun documentUri(pointer: String): Uri = Uri.parse("myco://napplet/$pointer")
+        fun documentUri(pointer: String): Uri = Uri.parse("$DOCUMENT_PREFIX$pointer")
 
-        /** The pointer a [documentUri] carries, or "" when `uri` is not one. */
-        fun pointerFromDocumentUri(uri: Uri?): String =
-            if (uri?.scheme == "myco" && uri.host == "napplet") {
-                uri.path.orEmpty().trimStart('/')
-            } else {
-                ""
-            }
+        /**
+         * The pointer a [documentUri] carries, or "" when `uri` is not one.
+         * Read from the raw string, the way [documentUri] wrote it (unencoded):
+         * a decoded path would turn a `d` tag's `%` escapes into something else,
+         * and a `?` or `#` in it would cut it short.
+         */
+        fun pointerFromDocumentUri(uri: Uri?): String {
+            val raw = uri?.toString() ?: return ""
+            return if (raw.startsWith(DOCUMENT_PREFIX)) raw.removePrefix(DOCUMENT_PREFIX) else ""
+        }
+
+        private const val DOCUMENT_PREFIX = "myco://napplet/"
 
         /**
          * The intent that opens a napplet as its own fullscreen task — from the

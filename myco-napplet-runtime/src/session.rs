@@ -176,50 +176,83 @@ impl std::fmt::Debug for Streamer {
 /// The most event ids a subscription remembers for deduplication. Past
 /// this, an event may reach it twice — Nostr subscriptions are
 /// at-least-once, and a napplet's store deduplicates anyway — rather than
-/// the set growing without bound on a long-lived feed.
-pub const SEEN_PER_SUBSCRIPTION: usize = 20_000;
+/// the set growing without bound on a long-lived feed. 4096 ids is about
+/// 300 KB at most per subscription.
+pub const SEEN_PER_SUBSCRIPTION: usize = 4096;
 
-/// Per live subscription, the event ids it was handed. Shared by every clone
-/// of the session, so the backlog task and the live path see one set.
-type SeenSets = Arc<Mutex<HashMap<(String, String), HashSet<[u8; 32]>>>>;
+/// One generation of a subscription: the ids it was handed, and whether it
+/// is over (closed, replaced, or its backlog read failed).
+///
+/// Each `subscribe` makes a new generation; a backlog task holds its own and
+/// never the map's key, so a subscription replaced under the same `subId`, or
+/// closed, cannot be written into by the task it outlived — even while a
+/// snapshot of the session keeps the old work scope alive.
+#[derive(Debug, Default)]
+struct Generation {
+    ids: HashSet<[u8; 32]>,
+    closed: bool,
+}
 
-/// One subscription's delivery state, detached from the session so a
-/// backlog task can deliver without holding it.
+type GenerationRef = Arc<Mutex<Generation>>;
+
+/// Per live subscription, its current generation. Shared by every clone of
+/// the session, so the backlog task and the live path see one set.
+type SeenSets = Arc<Mutex<HashMap<(String, String), GenerationRef>>>;
+
+fn sight(generation: &mut Generation, id: &nostr::EventId) -> bool {
+    if generation.closed {
+        return false;
+    }
+    if generation.ids.len() >= SEEN_PER_SUBSCRIPTION {
+        return true;
+    }
+    generation.ids.insert(id.to_bytes())
+}
+
+/// One subscription generation's delivery state, detached from the session
+/// so a backlog task can deliver without holding it.
 #[derive(Clone)]
 pub struct SubscriptionHandle {
-    key: (String, String),
-    seen: SeenSets,
+    generation: GenerationRef,
     ledger: Ledger,
-    scope: WorkScope,
 }
 
 impl SubscriptionHandle {
-    /// Whether `id` is new to this subscription — recorded if it is. `false`
-    /// once the subscription has closed: nothing is delivered for it then.
-    pub fn first_sight(&self, id: &nostr::EventId) -> bool {
-        first_sight(&self.seen, &self.key, id)
-    }
-
-    /// Record `id` as delivered to the napplet (NAP-LOCAL).
-    pub fn record_delivered(&self, id: &nostr::EventId) {
+    /// Hand `id` to the napplet through `push`, if it is new to this
+    /// subscription and the subscription is still this one. The check, the
+    /// record and the push happen under one lock: a close or replace either
+    /// comes before (nothing is pushed) or after (the push was in time).
+    pub fn deliver(&self, id: &nostr::EventId, push: impl FnOnce()) -> bool {
+        let mut generation = self.generation.lock().unwrap();
+        if !sight(&mut generation, id) {
+            return false;
+        }
         self.ledger.lock().unwrap().record_event(&id.to_bytes());
+        push();
+        true
     }
 
-    /// Whether the subscription (or its session) is gone.
+    /// Run `push` (an `eose`, a `.closed`) only while the subscription is
+    /// still this one, under the same lock as [`SubscriptionHandle::deliver`].
+    pub fn while_open(&self, push: impl FnOnce()) -> bool {
+        let generation = self.generation.lock().unwrap();
+        if generation.closed {
+            return false;
+        }
+        push();
+        true
+    }
+
+    /// End this generation: nothing more is delivered for it, by the backlog
+    /// or the live path. Its registration is dropped at the next subscribe.
+    pub fn close(&self) {
+        self.generation.lock().unwrap().closed = true;
+    }
+
+    /// Whether the subscription is over.
     pub fn is_closed(&self) -> bool {
-        self.scope.is_cancelled()
+        self.generation.lock().unwrap().closed
     }
-}
-
-fn first_sight(seen: &SeenSets, key: &(String, String), id: &nostr::EventId) -> bool {
-    let mut sets = seen.lock().unwrap();
-    let Some(set) = sets.get_mut(key) else {
-        return false;
-    };
-    if set.len() >= SEEN_PER_SUBSCRIPTION {
-        return true;
-    }
-    set.insert(id.to_bytes())
 }
 
 /// A napplet's live session.
@@ -322,20 +355,58 @@ impl Session {
     }
 
     /// The delivery state of the live subscription `(domain, sub_id)`.
+    /// The delivery state of the live subscription `(domain, sub_id)`'s
+    /// current generation. One that is not live gets a closed handle.
     pub fn subscription_handle(&self, domain: &str, sub_id: &str) -> SubscriptionHandle {
+        let generation = self
+            .seen
+            .lock()
+            .unwrap()
+            .get(&(domain.to_string(), sub_id.to_string()))
+            .cloned()
+            .unwrap_or_else(|| {
+                Arc::new(Mutex::new(Generation {
+                    closed: true,
+                    ..Default::default()
+                }))
+            });
         SubscriptionHandle {
-            key: (domain.to_string(), sub_id.to_string()),
-            seen: self.seen.clone(),
+            generation,
             ledger: self.delivered.clone(),
-            scope: self.sub_work(domain, sub_id),
         }
     }
 
     /// Whether `id` is new to the subscription `(domain, sub_id)` — recorded
     /// if it is. Live deliveries and the backlog share this, so a subscription
-    /// is handed each event once.
+    /// is handed each event once. `false` for one that is not live.
     pub fn first_sight(&self, domain: &str, sub_id: &str, id: &nostr::EventId) -> bool {
-        first_sight(&self.seen, &(domain.to_string(), sub_id.to_string()), id)
+        let generation = self
+            .seen
+            .lock()
+            .unwrap()
+            .get(&(domain.to_string(), sub_id.to_string()))
+            .cloned();
+        match generation {
+            Some(generation) => sight(&mut generation.lock().unwrap(), id),
+            None => false,
+        }
+    }
+
+    /// Drop the registrations of subscriptions that ended on their own (a
+    /// streamed backlog read that failed): they no longer count against the
+    /// cap, match events, or keep their pulls going.
+    fn prune_ended(&mut self) {
+        let ended: Vec<(String, String)> = self
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, generation)| generation.lock().unwrap().closed)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for (domain, sub_id) in ended {
+            self.unsubscribe_in(&domain, &sub_id);
+        }
     }
 
     /// Share `ledger` — the one the napplet's other open windows record into —
@@ -499,6 +570,7 @@ impl Session {
         filters: Vec<Filter>,
     ) -> Result<(), String> {
         let key = (domain.into(), sub_id.into());
+        self.prune_ended();
         if self.subscriptions.len() >= MAX_SUBSCRIPTIONS && !self.subscriptions.contains_key(&key) {
             return Err(format!(
                 "too many live subscriptions ({MAX_SUBSCRIPTIONS}); close one first"
@@ -506,11 +578,12 @@ impl Session {
         }
         // A new owner: replacing a subscription stops the old one's pull.
         Arc::make_mut(&mut self.sub_work).insert(key.clone(), Arc::new(ScopeOwner::new()));
-        // And a fresh seen-set: a replaced subscription starts over.
-        self.seen
-            .lock()
-            .unwrap()
-            .insert(key.clone(), HashSet::new());
+        // And a fresh generation: a replaced subscription starts over, and
+        // the old one's backlog task can no longer deliver.
+        let fresh: GenerationRef = Arc::default();
+        if let Some(old) = self.seen.lock().unwrap().insert(key.clone(), fresh) {
+            old.lock().unwrap().closed = true;
+        }
         Arc::make_mut(&mut self.subscriptions).insert(key, filters);
         Ok(())
     }
@@ -530,7 +603,9 @@ impl Session {
         if self.sub_work.contains_key(&key) {
             Arc::make_mut(&mut self.sub_work).remove(&key);
         }
-        self.seen.lock().unwrap().remove(&key);
+        if let Some(old) = self.seen.lock().unwrap().remove(&key) {
+            old.lock().unwrap().closed = true;
+        }
     }
 
     /// How many subscriptions are live — for state reporting and tests.
