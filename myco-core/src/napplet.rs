@@ -1261,18 +1261,18 @@ impl BlobStore for SourceBlobs<'_> {
     }
 }
 
-/// Frames for a window, one compact JSON object per line — how they cross
-/// the FFI. Compact JSON never holds a raw newline (one inside a string is
-/// written `\n`), so the Kotlin side splits on it and hands each frame on
-/// as it is. A JSON array made that side parse every frame, pictures as
-/// megabytes of base64 included, only to write it back out.
+/// Frames for a window, each one compact JSON object — how they cross the
+/// FFI, as a Java `String[]` with one frame per element. Kotlin hands each
+/// on as it is: never parsed (a frame can carry a picture as megabytes of
+/// base64, or a long-form article), and never joined into one string here
+/// only to be split apart again there — that was two more copies of every
+/// payload.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub fn frames_as_lines(frames: &[ToShell]) -> String {
+pub fn frames_as_json(frames: &[ToShell]) -> Vec<String> {
     frames
         .iter()
         .filter_map(|f| serde_json::to_string(f).ok())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 /// NAP-RESOURCE's fetcher: where a blob this device does not hold is looked
@@ -3981,18 +3981,13 @@ mod tests {
             ToShell::Relaunch,
             ToShell::Napplet { message },
         ];
-        let lines = frames_as_lines(&frames);
-        let split: Vec<&str> = lines.split('\n').collect();
-        assert_eq!(split.len(), 3);
-        assert!(
-            split[0].starts_with(r#"{"channel":"napplet""#),
-            "{}",
-            split[0]
-        );
-        for (line, frame) in split.iter().zip(&frames) {
-            assert_eq!(&serde_json::from_str::<ToShell>(line).unwrap(), frame);
+        let out = frames_as_json(&frames);
+        assert_eq!(out.len(), 3);
+        assert!(out[0].starts_with(r#"{"channel":"napplet""#), "{}", out[0]);
+        for (json, frame) in out.iter().zip(&frames) {
+            assert_eq!(&serde_json::from_str::<ToShell>(json).unwrap(), frame);
         }
-        assert_eq!(frames_as_lines(&[]), "");
+        assert!(frames_as_json(&[]).is_empty());
     }
 
     /// The fetcher reaches the public servers when the store misses, and not

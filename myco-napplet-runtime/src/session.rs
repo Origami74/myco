@@ -246,7 +246,12 @@ pub struct Session {
     /// are delivered as different message types and gated on different grants,
     /// and a napplet may reuse a `subId` across the two — the spec scopes ids
     /// per domain, not per session.
-    subscriptions: BTreeMap<(String, String), Vec<Filter>>,
+    ///
+    /// Behind an `Arc`, shared copy-on-write: a read runs against a snapshot
+    /// of the session, and copying every live subscription's filters (a
+    /// follow list of hundreds of authors each) into every snapshot cost a
+    /// copy per capability call.
+    subscriptions: Arc<BTreeMap<(String, String), Vec<Filter>>>,
     /// Light or dark, as the window host last reported. See [`Appearance`].
     appearance: Appearance,
     /// The work this session started that outlives a call — cancelled when
@@ -256,7 +261,7 @@ pub struct Session {
     work: Arc<ScopeOwner>,
     /// Per live subscription, the same: closing or replacing a subscription
     /// drops its owner and stops its remote pull.
-    sub_work: BTreeMap<(String, String), Arc<ScopeOwner>>,
+    sub_work: Arc<BTreeMap<(String, String), Arc<ScopeOwner>>>,
     /// NAP-INC topics the napplet listens on (`inc.subscribe`). Exact strings:
     /// NAP-INC routes by equality and never parses a topic. What NAP-INTENT
     /// waits for before it hands a napplet the payload it was opened with.
@@ -293,10 +298,10 @@ impl Session {
             granted: granted.into_iter().map(Into::into).collect(),
             implemented: implemented.into_iter().map(Into::into).collect(),
             established: false,
-            subscriptions: BTreeMap::new(),
+            subscriptions: Arc::new(BTreeMap::new()),
             appearance: Appearance::default(),
             work: Arc::new(ScopeOwner::new()),
-            sub_work: BTreeMap::new(),
+            sub_work: Arc::new(BTreeMap::new()),
             inc_topics: BTreeSet::new(),
             delivered: Ledger::default(),
             seen: Arc::new(Mutex::new(HashMap::new())),
@@ -500,14 +505,13 @@ impl Session {
             ));
         }
         // A new owner: replacing a subscription stops the old one's pull.
-        self.sub_work
-            .insert(key.clone(), Arc::new(ScopeOwner::new()));
+        Arc::make_mut(&mut self.sub_work).insert(key.clone(), Arc::new(ScopeOwner::new()));
         // And a fresh seen-set: a replaced subscription starts over.
         self.seen
             .lock()
             .unwrap()
             .insert(key.clone(), HashSet::new());
-        self.subscriptions.insert(key, filters);
+        Arc::make_mut(&mut self.subscriptions).insert(key, filters);
         Ok(())
     }
 
@@ -520,8 +524,12 @@ impl Session {
     /// Drop a subscription in `domain`. Unknown ids are ignored.
     pub fn unsubscribe_in(&mut self, domain: &str, sub_id: &str) {
         let key = (domain.to_string(), sub_id.to_string());
-        self.subscriptions.remove(&key);
-        self.sub_work.remove(&key);
+        if self.subscriptions.contains_key(&key) {
+            Arc::make_mut(&mut self.subscriptions).remove(&key);
+        }
+        if self.sub_work.contains_key(&key) {
+            Arc::make_mut(&mut self.sub_work).remove(&key);
+        }
         self.seen.lock().unwrap().remove(&key);
     }
 
