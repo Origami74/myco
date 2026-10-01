@@ -11,81 +11,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Apps can open each other by role.** An app can ask Myco to open "a
-  profile", "a note" or "a site", and Myco opens the app you have for it,
-  handing it what to show. Tapping someone's name in Chronofeed opens your
-  profile app, if you have one. If you have several, Myco asks which ("Open
-  with…"), and "Always use this" remembers your answer. **Settings › Default
-  apps** shows and changes those choices. Myco itself opens sites
-  ("Open nsite → Myco"). An app that asks without you touching it first gets a
-  confirmation before another app opens. New installs list this as "Other
-  apps" and "App to app"; apps already installed get it the next time they
-  open, and it can be switched off per app.
-- **A cache for everything your apps look at.** Notes, profiles and pictures
-  your apps fetch are now kept on the phone in a separate cache, so opening
-  them again is instant and works offline, and paired phones nearby can get
-  them from you. The cache has a size limit (500 MB of notes and 1.5 GB of
-  files by default). When it is full, what you looked at once goes first, and
-  what you keep coming back to stays. What you publish and the apps you
-  install are stored separately and never pushed out, and private messages
-  are never cached. Settings › Storage shows the cache and what this phone
-  keeps separately, lets you set the cache size, and has a **Clear cache**
-  button that empties it without touching anything kept.
-- **Apps can keep what they showed you, and pass it on.** A napplet can keep
-  a note or picture on your phone so the cache never throws it away, and can
-  send a note it showed you on to nearby phones or public relays again. It
-  only works for things the app was actually shown, and it never signs
-  someone else's note as you. New installs list it on the install screen as
-  "Keep on this phone"; apps already installed get it the next time they
-  open, like other defaults, and it can be switched off per app.
-- **Chronofeed and Simple Profile come with Myco.** A chronological feed of
-  the people you follow, and a profile app that opens when you tap someone,
-  are installed with new installs of the app, next to DingDong and the
-  AppStore. Existing installs are left as they are.
+- **Apps can open each other by role (NAP-INTENT).** A napplet asks for "a
+  `profile`" or "a `note`", never a specific app, and Myco opens the user's
+  app for that role. `intent.invoke` / `open`, `available`, `handlers` and the
+  `intent.changed` push are implemented. Roles come from the `archetype` tags
+  of installed manifests, stored on each Library entry and backfilled from the
+  pinned manifest. Resolution: the user's default for the role, else the only
+  candidate, else an **Open with…** sheet ("Always use this" sets the default;
+  **Settings › Default apps** changes it, and napplets can't). A request naming
+  a specific app gets the sheet too. The payload is delivered as a NAP-INC
+  `inc.event` on the convention topic (`napplet:profile/open`), held under a
+  one-time token until the handler has sent `inc.subscribe` for it, since
+  Myco's prelude announces readiness before napplet code runs. Only the
+  resolved handler's window can bind it; held payloads expire after 60 s.
+  Myco itself handles `napplet:nsite/open`. Without a touch in the last 5 s
+  the user confirms first. `intent` and `inc` are default grants; NAP-INC is
+  minimal (`inc.subscribe` / `unsubscribe`; `inc.emit` is accepted and not
+  routed). Design: `docs/design/napplet/NAP-INTENT.md`.
+- **A cache for everything apps look at, apart from what the phone keeps.**
+  Query answers, pulls, mesh pass-through and napplet blob fetches go to a new
+  `myco-cache` crate: a second `nostr-lmdb` store and a blob directory, each
+  held to a byte budget by a segmented LRU (500 MB of events and 1.5 GB of
+  blobs by default; a second read promotes an entry to the protected
+  segment). The local relay and Blossom now hold only what the device keeps:
+  its own events, profiles, follow and relay lists, manifests, and private
+  messages, which are never cached. `tiered.rs` reads relay and cache as one,
+  merged by id and newest per replaceable slot, and routes each write. Circle
+  peers read both through the existing gate. Upkeep runs every 15 minutes
+  (expiry sweep, eviction, snapshot only when changed). **Settings › Storage**
+  shows usage, sets the budgets and has **Clear cache**.
+- **Napplets can keep what they were shown, and pass it on (NAP-LOCAL,
+  provisional).** `local.publish` keeps an event on the device: a template is
+  signed as the user, and a signed event is kept as is. `relay`, `outbox` and
+  `mesh.publish` accept a signed event too, sent unmodified. `resource.keep`
+  moves a blob from the cache into the device's Blossom. All of these work
+  only for events and blobs the napplet was actually delivered. Delivery is
+  tracked per napplet in scalable bloom filters of event ids and sha256s
+  (about 0.1% false positives, 8 MB cap). Another author's event is never
+  re-signed. A signed `mesh.publish` floods again past the seen-set, at most
+  once per 30 s per event. Design: `docs/design/napplet/NAP-LOCAL.md`.
+- **Chronofeed and Simple Profile come with Myco** on new installs, next to
+  DingDong and the AppStore. `DefaultNapplet::new_installs_only`: an install
+  that has seeded before records them as seeded without installing them.
 
 ### Changed
 
-- **Apps get their data much faster and more completely.** Reading from
-  relays and nearby phones was rebuilt around streams: what your phone
-  already holds is shown at once, and every relay's and every nearby phone's
-  answer is passed on the moment it arrives, instead of waiting for the
-  slowest. Myco now keeps one connection per relay (using rustic-applesauce)
-  instead of opening a new one for every request, so busy relays no longer
-  turn it away. Profiles are also looked up on the relays that collect them
-  for everyone, and a request for notes and profiles together no longer cuts
-  the profiles off, so names show up for everyone you follow. Scrolling back
-  in a feed keeps finding older notes, and follow lists are kept on the phone
-  so a feed opens from your follows instantly.
-- **Pictures in apps load faster.** Myco now asks nearby phones and the
-  internet at the same time instead of one after the other, tries the server
-  a picture link names first, reuses connections, and stops asking for a
-  picture nobody has for ten minutes. Picture loads no longer hold up an
-  app's other requests, and pictures reach apps as raw bytes instead of
-  being packed into text on the way, which kept feeds from scrolling
-  smoothly.
-- **Apps can load files up to 64 MB.** Short videos and big pictures used to
-  be refused above 10 MB; the limit is now 64 MB, and slow downloads get
-  enough time to finish.
-- **Installing an app you already have offers to open it.** When you tap
-  install on an app that is already on your phone (from a shared link, a
-  scan, the AppStore or another app), Myco now says "<App> is already
-  installed" with an **Open** button, instead of an install screen with a
-  greyed-out button. It also works offline, when the app can't be looked up.
-  If a newer version is available, you get an **Update** button instead, and
-  your app's permissions stay as they are.
-- **Apps built with WebAssembly run.** Myco blocked apps from running the
-  WebAssembly they ship with, so some showed "this host blocks WebAssembly".
-  They run now, and still cannot reach the network on their own.
-- **Myco no longer keeps a processor core busy while the mesh is on.** The
-  mesh adapter's reader spun at full speed whenever the tunnel was up; it now
-  sleeps until a packet arrives, and a tunnel restart after a network change
-  no longer leaves paired phones unable to reach each other.
-- **"Delete cache" is now "Clear local database".** It clears what this
-  phone kept (except your pinned apps) and the cache, and asks first.
-- **Chat survives a restart until it expires.** Notes with an expiry time,
-  like chat, used to be kept in memory only. They are now stored like other
-  notes and deleted once they expire, so restarting Myco mid-conversation no
-  longer empties the room.
+- **Apps get their data much faster and more completely.** Reads were
+  rebuilt around streams:
+  - **Local first.** A query answers from the device at once when that
+    satisfies it (a full `limit` for each limited filter, every requested id).
+    Otherwise it takes the first relay with events.
+  - **Plans don't wait on lookups.** Reads plan from the NIP-65 lists held now
+    (`plan_stored`); missing lists are looked up in the background, and a
+    subscription adds the relays they name to the streams already running.
+  - **Streamed pulls.** Mesh pulls stream per event: the peer pool
+    (`request_stream`), multi-peer pulls merged across the Circle, and
+    forwarded mesh `REQ`s, which send the stored backlog at once and `EOSE`
+    after the forwarded pull, without stalling the connection. Resync after a
+    peer returns goes through the hub to live subscribers.
+  - **Shared relay pool.** Internet relays use one multiplexed connection each
+    (`relay_pool.rs`, over [rustic-applesauce](https://github.com/hzrd149/rustic-applesauce)'s
+    `RelayPool`, pinned). Myco's connector checks the skip list, records each
+    dial in relay health, pings every 30 s, drops a socket silent for 90 s,
+    and fails waiting reads at once when a dial fails.
+  - **Fixes.** Kinds 0, 3 and 10002 are also asked of the indexer relays. A
+    multi-filter query is capped per filter (NIP-01) instead of at the
+    smallest limit, which had cut profiles out of feed requests. Follow lists
+    (kind 3) are kept like profiles.
+- **Pictures in apps load faster, and bytes no longer travel as text.**
+  - **Hints:** BUD-10 `blossom:<sha>.<ext>?xs=&as=` URIs are parsed. Servers
+    named in `xs`, then the author's kind 10063 servers, are tried before the
+    defaults.
+  - **Fetching:** the mesh and the internet are raced over one shared HTTP
+    client (5 s connect, 15 s read timeout). A confirmed miss isn't retried
+    for 10 minutes.
+  - **Delivery:** a `resource.*` result carries `blobRef`, and the shell
+    fetches `/_blob/<token>/<sha256>`, which the window host serves as bytes
+    behind a per-window token. Window frames cross the FFI one per line and
+    are sorted off the main thread, and `resource.*` calls get their own
+    in-flight slots.
+  - **Size cap:** a resource can be up to 64 MiB (was 10 MiB).
+- **Installing an app you already have offers to open it.** The review state
+  carries `already_installed` and `update_available`, decided in the core for
+  every entry point (links, scans, the AppStore, `link.open`). A newer version
+  that asks for no new permissions gets **Update**.
+- **Apps built with WebAssembly run.** The napplet CSP adds
+  `'wasm-unsafe-eval'` (JS `eval` stays off) and `connect-src data: blob:`,
+  which reads only bytes already in the page; network access is still only
+  through capabilities.
+- **The mesh adapter no longer keeps a core busy.** The TUN reader spun on
+  `EAGAIN` from the non-blocking fd. It now waits with `poll(2)` and a 1 s
+  timeout, so it sleeps until a packet arrives and lets go on a tunnel
+  restart.
+- **"Delete cache" is now "Clear local database"**, which clears what the
+  phone kept (except pinned apps) and the cache, and asks first.
+- **Chat survives a restart until it expires.** NIP-40 events are stored in
+  LMDB like any other, instead of in memory, and swept once expired.
 
 ## [0.8.1] - 2026-09-27
 
