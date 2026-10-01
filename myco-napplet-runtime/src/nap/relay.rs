@@ -225,6 +225,7 @@ async fn subscribe(
     // A named relay skips the local backlog — the napplet asked for that
     // relay's view — but the subscription is registered either way, since the
     // pull lands in the local relay and is delivered from there.
+    let named_relay = target.is_some();
     let mut out = match target {
         Some(_) => {
             if let Err(reason) = session.subscribe(sub_id.clone(), filters.clone()) {
@@ -235,8 +236,17 @@ async fn subscribe(
             Vec::new()
         }
         None => {
-            match crate::nap::open_subscription(ctx, session, "relay", &sub_id, filters.clone())
-                .await
+            // The backlog's end follows the backlog, streamed or not.
+            let eose = Envelope::new("relay.eose").with_field("subId", sub_id.clone());
+            match crate::nap::open_subscription(
+                ctx,
+                session,
+                "relay",
+                &sub_id,
+                &filters,
+                vec![eose],
+            )
+            .await
             {
                 Ok(backlog) => backlog,
                 Err(reason) => {
@@ -263,7 +273,10 @@ async fn subscribe(
         }
     }
 
-    out.push(Envelope::new("relay.eose").with_field("subId", sub_id));
+    // A named relay has no local backlog: its `eose` is said here.
+    if named_relay {
+        out.push(Envelope::new("relay.eose").with_field("subId", sub_id));
+    }
     out
 }
 

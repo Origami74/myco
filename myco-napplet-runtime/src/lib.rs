@@ -69,6 +69,9 @@ pub use seams::{
     OutboxResolver, PlanSource, RelayBackend, RelayLane, RelayPlan, ScopeOwner, Signer,
     StoreOnlySink, WorkScope,
 };
-pub use session::{Appearance, NappletIdentity, Session, IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
+pub use session::{
+    Appearance, NappletIdentity, Session, Streamer, SubscriptionHandle, IMPLEMENTED_DOMAINS,
+    MANDATORY_DOMAINS,
+};
 pub use shell_link::{ChooserCandidate, ShellAction, ToRuntime, ToShell};
 pub use shell_page::{shell_page, RUNTIME_OBJECT};

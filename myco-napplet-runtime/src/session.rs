@@ -11,12 +11,15 @@
 //! carries no payload by design, precisely so there is nothing in it for a
 //! runtime to be tricked into trusting.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use nostr::{Event, Filter};
 
 use crate::delivered::Ledger;
+use crate::seams::Envelope;
 use crate::seams::{ScopeOwner, WorkScope};
 
 /// NAP domains this build actually implements.
@@ -147,6 +150,78 @@ impl From<&crate::resolve::ResolvedNapplet> for NappletIdentity {
     }
 }
 
+/// How a host streams a subscription's backlog instead of answering it in
+/// the call's reply. The runtime never runs a task itself (it has no
+/// runtime); the host hands it these two.
+///
+/// Nostr is a stream: a subscription delivers each stored event the moment
+/// it is read, then whatever arrives live, deduplicated per subscription. It
+/// never waits for a batch to fill or a time to pass.
+#[derive(Clone)]
+pub struct Streamer {
+    /// Hand a frame to the napplet now, the way a live delivery is handed.
+    pub push: Arc<dyn Fn(Envelope) + Send + Sync>,
+    /// Run `work` elsewhere — a task on the host's runtime — and return at
+    /// once.
+    #[allow(clippy::type_complexity)]
+    pub spawn: Arc<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>,
+}
+
+impl std::fmt::Debug for Streamer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Streamer")
+    }
+}
+
+/// The most event ids a subscription remembers for deduplication. Past
+/// this, an event may reach it twice — Nostr subscriptions are
+/// at-least-once, and a napplet's store deduplicates anyway — rather than
+/// the set growing without bound on a long-lived feed.
+pub const SEEN_PER_SUBSCRIPTION: usize = 20_000;
+
+/// Per live subscription, the event ids it was handed. Shared by every clone
+/// of the session, so the backlog task and the live path see one set.
+type SeenSets = Arc<Mutex<HashMap<(String, String), HashSet<[u8; 32]>>>>;
+
+/// One subscription's delivery state, detached from the session so a
+/// backlog task can deliver without holding it.
+#[derive(Clone)]
+pub struct SubscriptionHandle {
+    key: (String, String),
+    seen: SeenSets,
+    ledger: Ledger,
+    scope: WorkScope,
+}
+
+impl SubscriptionHandle {
+    /// Whether `id` is new to this subscription — recorded if it is. `false`
+    /// once the subscription has closed: nothing is delivered for it then.
+    pub fn first_sight(&self, id: &nostr::EventId) -> bool {
+        first_sight(&self.seen, &self.key, id)
+    }
+
+    /// Record `id` as delivered to the napplet (NAP-LOCAL).
+    pub fn record_delivered(&self, id: &nostr::EventId) {
+        self.ledger.lock().unwrap().record_event(&id.to_bytes());
+    }
+
+    /// Whether the subscription (or its session) is gone.
+    pub fn is_closed(&self) -> bool {
+        self.scope.is_cancelled()
+    }
+}
+
+fn first_sight(seen: &SeenSets, key: &(String, String), id: &nostr::EventId) -> bool {
+    let mut sets = seen.lock().unwrap();
+    let Some(set) = sets.get_mut(key) else {
+        return false;
+    };
+    if set.len() >= SEEN_PER_SUBSCRIPTION {
+        return true;
+    }
+    set.insert(id.to_bytes())
+}
+
 /// A napplet's live session.
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -191,6 +266,10 @@ pub struct Session {
     /// clone — the snapshots a read runs against record into the same one —
     /// and, through [`Session::with_ledger`], by the napplet's other windows.
     delivered: Ledger,
+    /// The ids each live subscription was handed. See [`SubscriptionHandle`].
+    seen: SeenSets,
+    /// Set by a host that streams backlogs. See [`Streamer`].
+    streamer: Option<Streamer>,
 }
 
 impl Session {
@@ -220,7 +299,38 @@ impl Session {
             sub_work: BTreeMap::new(),
             inc_topics: BTreeSet::new(),
             delivered: Ledger::default(),
+            seen: Arc::new(Mutex::new(HashMap::new())),
+            streamer: None,
         }
+    }
+
+    /// Stream subscriptions' backlogs through `streamer` instead of
+    /// answering them in the call's reply.
+    pub fn with_streamer(mut self, streamer: Streamer) -> Self {
+        self.streamer = Some(streamer);
+        self
+    }
+
+    /// The host's streamer, if it streams.
+    pub fn streamer(&self) -> Option<&Streamer> {
+        self.streamer.as_ref()
+    }
+
+    /// The delivery state of the live subscription `(domain, sub_id)`.
+    pub fn subscription_handle(&self, domain: &str, sub_id: &str) -> SubscriptionHandle {
+        SubscriptionHandle {
+            key: (domain.to_string(), sub_id.to_string()),
+            seen: self.seen.clone(),
+            ledger: self.delivered.clone(),
+            scope: self.sub_work(domain, sub_id),
+        }
+    }
+
+    /// Whether `id` is new to the subscription `(domain, sub_id)` — recorded
+    /// if it is. Live deliveries and the backlog share this, so a subscription
+    /// is handed each event once.
+    pub fn first_sight(&self, domain: &str, sub_id: &str, id: &nostr::EventId) -> bool {
+        first_sight(&self.seen, &(domain.to_string(), sub_id.to_string()), id)
     }
 
     /// Share `ledger` — the one the napplet's other open windows record into —
@@ -392,6 +502,11 @@ impl Session {
         // A new owner: replacing a subscription stops the old one's pull.
         self.sub_work
             .insert(key.clone(), Arc::new(ScopeOwner::new()));
+        // And a fresh seen-set: a replaced subscription starts over.
+        self.seen
+            .lock()
+            .unwrap()
+            .insert(key.clone(), HashSet::new());
         self.subscriptions.insert(key, filters);
         Ok(())
     }
@@ -407,6 +522,7 @@ impl Session {
         let key = (domain.to_string(), sub_id.to_string());
         self.subscriptions.remove(&key);
         self.sub_work.remove(&key);
+        self.seen.lock().unwrap().remove(&key);
     }
 
     /// How many subscriptions are live — for state reporting and tests.
