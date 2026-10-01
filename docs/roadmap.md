@@ -66,6 +66,56 @@ gossip hops); Linux interop (P6) as a tested pair; external-browser access
 
 Ordered by what unblocks what. Each is its own PR or short series.
 
+### N9 — An onboarding flow for permissions
+
+**Goal.** A first run that explains what Myco needs before Android asks:
+Bluetooth, Nearby Wi-Fi devices (Wi-Fi Aware), notifications, and the
+one-time VPN consent for the mesh adapter. One screen at a time, each saying
+what it's for, then the system prompt. Today the prompts fire at launch with
+no context, and a refused one leaves a lane silently off until a Settings
+warning catches it.
+
+**Shape.**
+
+- A short paged flow on first launch, and again after an update that adds a
+  permission. Each page asks for one permission, or one group.
+- Refusing is fine: the page says what won't work and moves on. Settings
+  keeps a **Permissions** entry that reopens the flow at the missing ones.
+- The radio and mesh services start as their permission lands. The flow is
+  the single place permissions are requested from (see the request queue in
+  `MainActivity.requestPermissions`).
+- Optionally, the battery-optimisation exemption, explained, for phones that
+  kill background radios.
+
+**Exit criterion.** On a fresh install every lane the phone supports comes up
+on once the user says yes, and nothing is asked without a sentence about why.
+
+### N10 — Connect to public internet mesh nodes
+
+**Goal.** When a phone is online, it can also peer with public FIPS nodes
+over the internet, so Circle members who aren't in the same room still reach
+each other: gossip, pulls, file sharing and app updates over the mesh as if
+they were nearby. Today internet reach is only Nostr relays; the mesh itself
+stops at the radios and the LAN.
+
+**Shape.**
+
+- A short list of public nodes, shipped and user-editable, dialled over FIPS's
+  TCP/UDP transports when the internet is up. They're ordinary peers in the
+  mesh routing; they're not Circle members, and the Circle gate is unchanged.
+- **Opt-in, with the trade-off said plainly.** A public node learns this
+  phone's IP address and which mesh addresses it talks to, though not the
+  contents. A Tor transport is the private alternative where available.
+- Battery-aware: connect while online and active, back off in the background,
+  never instead of a radio path that works.
+- Diagnostics in the Dev tab: which public nodes are up and the path to each
+  Circle member.
+
+**Exit criterion.** Two paired phones on different networks, with no radio
+path between them, see each other as reachable in the Circle and exchange a
+`mesh.publish` through a public node; switching the option off drops those
+links.
+
 ### N1 — Account and login (nsec)
 
 **Built** — `account.rs`, `user_key.rs`, `guest_avatar.rs`; the Account page in
