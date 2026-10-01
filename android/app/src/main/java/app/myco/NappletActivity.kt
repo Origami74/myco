@@ -633,7 +633,12 @@ class NappletActivity : ComponentActivity() {
         // once mounted (a later callback takes precedence).
         onBackPressedDispatcher.addCallback(this) { moveTaskToBack(true) }
 
+        // The extra, else the document URI. A task Android restores from
+        // Recents — after Myco's process was restarted, an update installed —
+        // is relaunched from a base intent that has lost its extras; with no
+        // pointer the window closed at once and the tap landed back in Myco.
         val pointer = intent.getStringExtra(EXTRA_POINTER).orEmpty()
+            .ifEmpty { pointerFromDocumentUri(intent.data) }
         if (pointer.isEmpty()) {
             finish()
             return
@@ -1098,6 +1103,14 @@ class NappletActivity : ComponentActivity() {
          * update. The session still pins the hash — see the design doc §7.8.
          */
         fun documentUri(pointer: String): Uri = Uri.parse("myco://napplet/$pointer")
+
+        /** The pointer a [documentUri] carries, or "" when `uri` is not one. */
+        fun pointerFromDocumentUri(uri: Uri?): String =
+            if (uri?.scheme == "myco" && uri.host == "napplet") {
+                uri.path.orEmpty().trimStart('/')
+            } else {
+                ""
+            }
 
         /**
          * The intent that opens a napplet as its own fullscreen task — from the
