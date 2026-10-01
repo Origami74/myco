@@ -37,7 +37,7 @@ What Myco does not do yet:
 - It is **Android only** (Android 10 or newer, 64-bit ARM phones).
 - **Myco itself** comes from a download, not from another phone. See
   [Get Myco](#get-myco). Sharing Myco from inside Myco is on the
-  [roadmap](docs/roadmap.md#later).
+  [roadmap](docs/roadmap.md#n11--share-myco-itself).
 - Phones find each other **only while Myco is open on screen**. A phone in a
   pocket finds nobody.
 
@@ -237,7 +237,7 @@ Read on:
   works everywhere.
 
 Myco cannot pass itself on from phone to phone yet
-([on the roadmap](docs/roadmap.md#later)). Each person needs the APK
+([on the roadmap](docs/roadmap.md#n11--share-myco-itself)). Each person needs the APK
 before they can receive apps.
 
 ## Status
