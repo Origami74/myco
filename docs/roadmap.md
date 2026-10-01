@@ -116,6 +116,33 @@ path between them, see each other as reachable in the Circle and exchange a
 `mesh.publish` through a public node; switching the option off drops those
 links.
 
+### N11 — Share Myco itself
+
+**Goal.** Hand the Myco app on from inside Myco, so someone without it gets
+it from a phone nearby instead of a download. Today every newcomer needs the
+APK from GitHub Releases or Zapstore first, which is the one step of joining
+a group that needs the internet.
+
+**Shape.**
+
+- **To a phone without Myco.** A **Share Myco** entry that hands over the
+  installed APK with what the other phone already has: the Android share
+  sheet (Quick Share, Bluetooth), or a QR code to a one-off local download
+  served from this phone over the shared Wi-Fi or a local hotspot. The page
+  says how to allow the install and how to check it's genuine.
+- **Updates from phones nearby.** A phone with a newer Myco offers it to its
+  Circle over the mesh: the APK as a Blossom blob, announced by a signed
+  release event. The receiver installs only if the APK's signing certificate
+  matches its own (Android enforces this for updates anyway) and the release
+  is signed by the Myco release key.
+- Installing from inside Myco needs `REQUEST_INSTALL_PACKAGES` and the
+  PackageInstaller session API. Zapstore and F-Droid builds may need to keep
+  that path off, depending on the store's rules.
+
+**Exit criterion.** In airplane mode, a phone without Myco installs it from a
+nearby phone and pairs; a paired phone on an older version updates from a
+newer one with no internet.
+
 ### N1 — Account and login (nsec)
 
 **Built** — `account.rs`, `user_key.rs`, `guest_avatar.rs`; the Account page in
@@ -336,9 +363,6 @@ are skipped".
 
 Each its own milestone with its own design pass. Roughly in order of pull.
 
-- **Share Myco itself.** Hand the Myco app on from inside Myco, so someone
-  without it can get it from a phone nearby instead of a download. Today every
-  newcomer needs the APK from GitHub Releases or Zapstore first.
 - **Reclaiming event-cache disk sooner.** The shell cache evicts to its
   budget, but LMDB never shrinks its file in place: space freed by eviction
   is reused, and after "Clear cache" the file shrinks only at the next start.
