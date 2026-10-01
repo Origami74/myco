@@ -186,12 +186,12 @@ class NappletActivity : ComponentActivity() {
      * Returns true when a reply was `shell.init` — the handshake has answered
      * and later frames may overlap.
      */
-    private suspend fun relay(frame: String): Boolean {
+    private suspend fun relay(frame: String, awaitingInit: Boolean = false): Boolean {
         val replies = runCatching { client.nappletFrame(sessionId, frame) }.getOrDefault(emptyList())
         // Sorted here, off the main thread: a reply can be a picture as
         // megabytes of base64, and parsing that on the main thread froze the
         // window for as long as a feed was loading pictures.
-        val sorted = replies.map { it to sortFrame(it) }
+        val sorted = replies.map { it to sortFrame(it, awaitingInit) }
         withContext(Dispatchers.Main) {
             for ((reply, kind) in sorted) {
                 if (kind is Outbound.Host) hostCommand(kind.obj) else replyChannel?.postMessage(reply)
@@ -793,7 +793,7 @@ class NappletActivity : ComponentActivity() {
                     val slots = if (isResourceCall(frame)) resourceInFlight else inFlight
                     launch { slots.withPermit { relay(frame) } }
                 } else {
-                    if (relay(frame)) established = true
+                    if (relay(frame, awaitingInit = true)) established = true
                 }
             }
         }
@@ -808,7 +808,7 @@ class NappletActivity : ComponentActivity() {
                 val frames = withContext(Dispatchers.IO) {
                     runCatching { client.nappletNextFrames(sessionId, DRAIN_WAIT_MS) }
                         .getOrDefault(emptyList())
-                        .map { it to sortFrame(it) }
+                        .map { it to sortFrame(it, awaitingInit = false) }
                 }
                 // postMessage is main-thread work; the wait and the sorting
                 // above were not.
@@ -1024,27 +1024,36 @@ class NappletActivity : ComponentActivity() {
 
         /**
          * The runtime's frames lead with `"channel"` (serde writes the tag
-         * first), so a napplet frame is known by its first bytes and never
-         * parsed whole — it may carry a picture as megabytes of base64. Only
-         * a small one is parsed, to spot `shell.init`. The window's own
-         * frames are small and parsed. Call off the main thread.
+         * first), so a frame for the page is known by its first bytes and
+         * never parsed whole:
+         * - a napplet frame may carry a picture as megabytes of base64, or a
+         *   long-form article; it is parsed only while the window still waits
+         *   for `shell.init` ([awaitingInit]), and only when small. After the
+         *   handshake nothing needs its type, and parsing every delivered
+         *   event a second time here was most of a backlog's cost;
+         * - the shell's `load` carries the whole napplet (hundreds of KB) and
+         *   is for the page alone.
+         * The window's own frames are small and parsed. Call off the main
+         * thread.
          */
-        private fun sortFrame(frame: String): Outbound {
+        private fun sortFrame(frame: String, awaitingInit: Boolean): Outbound {
             if (frame.startsWith(NAPPLET_FRAME_PREFIX)) {
-                val init = frame.length <= SMALL_FRAME && relayedType(frame) == "shell.init"
+                val init = awaitingInit && frame.length <= SMALL_FRAME && relayedType(frame) == "shell.init"
                 return if (init) Outbound.Init else Outbound.Post
             }
+            if (frame.startsWith(SHELL_FRAME_PREFIX)) return Outbound.Post
             val obj = runCatching { JSONObject(frame) }.getOrNull() ?: return Outbound.Post
             return when (obj.optString("channel")) {
                 "relaunch" -> Outbound.Relaunch
                 "open-external", "review-napplet", "open-napplet", "open-nsite",
                 "choose-intent-handler" -> Outbound.Host(obj)
-                "napplet" -> if (relayedType(frame) == "shell.init") Outbound.Init else Outbound.Post
+                "napplet" -> if (awaitingInit && relayedType(frame) == "shell.init") Outbound.Init else Outbound.Post
                 else -> Outbound.Post
             }
         }
 
         private const val NAPPLET_FRAME_PREFIX = "{\"channel\":\"napplet\""
+        private const val SHELL_FRAME_PREFIX = "{\"channel\":\"shell\""
 
         /** Larger than any `shell.init`; see [sortFrame]. */
         private const val SMALL_FRAME = 64 * 1024

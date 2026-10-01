@@ -40,7 +40,7 @@
 //! it. The refusal is per call and surfaces as `ok: false` with the reason on
 //! the `.result` frame, never silently. See `REFUSED_KINDS`.
 
-use nostr::{Filter, JsonUtil, Kind, Tag, Timestamp, UnsignedEvent};
+use nostr::{Filter, Kind, Tag, Timestamp, UnsignedEvent};
 
 use crate::dispatch::NapContext;
 use crate::seams::{Direction, Envelope, RelayLane};
@@ -431,8 +431,12 @@ pub(crate) async fn signed_or_template(
 }
 
 /// An event as the JSON a napplet reads.
+///
+/// Built straight from the event's fields: never printed to a string and
+/// parsed back, which on a backlog of long-form articles cost more than the
+/// store read itself.
 pub(crate) fn event_json(event: &nostr::Event) -> serde_json::Value {
-    serde_json::from_str::<serde_json::Value>(&event.as_json()).unwrap_or(serde_json::Value::Null)
+    serde_json::to_value(event).unwrap_or(serde_json::Value::Null)
 }
 
 /// The `relay.event` frames a session should receive for an arriving event.
