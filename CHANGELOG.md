@@ -45,18 +45,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Names show up for everyone you follow.** When an app asked for notes and
-  profiles together, the phone's store handed back only as many events as the
-  notes were limited to, and the profiles were cut off. Each part of such a
-  request now gets its own limit.
-- **More names and pictures show up in apps.** Profiles are now also looked
-  for on the relays that collect them for everyone, so a person whose own
-  relays are unknown or down still shows with their name.
-- **Scrolling back in a feed keeps finding older notes.** When an app asked
-  for a page of older notes and the phone held only a few of them, it got
-  just those few, and the feed soon said there was nothing older. The phone
-  now answers at once only when it has the whole page, and otherwise waits
-  for the first relay that has more.
+- **Apps get their data much faster and more completely.** Reading from
+  relays and nearby phones was rebuilt around streams: what your phone
+  already holds is shown at once, and every relay's and every nearby phone's
+  answer is passed on the moment it arrives, instead of waiting for the
+  slowest. Myco now keeps one connection per relay (using rustic-applesauce)
+  instead of opening a new one for every request, so busy relays no longer
+  turn it away. Profiles are also looked up on the relays that collect them
+  for everyone, and a request for notes and profiles together no longer cuts
+  the profiles off, so names show up for everyone you follow. Scrolling back
+  in a feed keeps finding older notes, and follow lists are kept on the phone
+  so a feed opens from your follows instantly.
 - **Pictures in apps load faster.** Myco now asks nearby phones and the
   internet at the same time instead of one after the other, tries the server
   a picture link names first, reuses connections, and stops asking for a
@@ -67,22 +66,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Apps can load files up to 64 MB.** Short videos and big pictures used to
   be refused above 10 MB; the limit is now 64 MB, and slow downloads get
   enough time to finish.
-- **Fewer relays turn Myco away.** Myco now keeps one connection to each
-  relay and sends everything over it, instead of opening a new one for every
-  request. Busy relays that limit connections no longer refuse it when an app
-  loads a feed.
-- **Apps show what your phone already has straight away.** When an app asks
-  for something this phone holds, it gets it at once instead of waiting up
-  to a second and a half for relays to maybe send a newer version; a newer
-  version still arrives and is kept for next time. Follow lists are now kept
-  on the phone like profiles, so a feed opens from your follows instantly.
-- **Apps and nearby phones get what Myco finds as it finds it.** Reads no
-  longer wait for the slowest relay or the farthest phone: what this phone
-  holds goes out at once, and each relay's and each nearby phone's answer is
-  passed on the moment it arrives. An app no longer waits seconds for Myco to
-  look up where people publish before it sees anything, a slow phone in the
-  room no longer holds up the others, and a relay that answers slowly still
-  counts for what it sent.
 - **Installing an app you already have offers to open it.** When you tap
   install on an app that is already on your phone (from a shared link, a
   scan, the AppStore or another app), Myco now says "<App> is already

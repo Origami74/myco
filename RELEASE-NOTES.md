@@ -39,26 +39,17 @@ exchange apps and messages as before. Everything upgrades in place.
 
 ## Faster and more complete
 
-- **Names show up for everyone you follow.** A feed that asked for notes and
-  profiles together got the profiles cut off; each part of a request now gets
-  its own limit. Profiles are also looked for on the relays that collect them
-  for everyone, so people whose own relays are unknown or down still show
-  with their name.
-- **Feeds keep scrolling back.** A page of older notes waits for a relay when
-  the phone holds only part of it, instead of ending the feed about a week
-  back.
+- **Apps get their data much faster.** Reading from relays and nearby phones
+  was rebuilt around streams: what the phone holds goes out at once, and each
+  relay's and each nearby phone's answer is passed on the moment it arrives,
+  never waiting on the slowest. One shared connection per relay (built on
+  rustic-applesauce) replaces a new connection per request, so busy relays no
+  longer turn Myco away. Names now show up for everyone you follow, and feeds
+  keep scrolling back past what the phone holds.
 - **Pictures load fast.** Nearby phones and the internet are asked at the
-  same time, the server a link names is tried first, connections are reused,
-  missing pictures aren't asked for again for ten minutes, and pictures reach
-  apps as raw bytes. Apps can load files up to 64 MB (was 10 MB), so short
-  videos play.
-- **One connection per relay.** Myco keeps a single connection to each relay
-  and sends every request over it, so relays that limit connections no longer
-  turn it away while a feed loads.
-- **Answers as they come.** What the phone holds goes out at once; each
-  relay's and each nearby phone's answer is passed on the moment it arrives.
-  No more waiting on the slowest relay, the farthest phone, or a lookup of
-  where someone publishes.
+  same time, the server a link names is tried first, missing pictures aren't
+  asked for again for ten minutes, and pictures reach apps as raw bytes. Apps
+  can load files up to 64 MB (was 10 MB), so short videos play.
 - **Less battery.** The mesh adapter no longer keeps a processor core busy
   while the mesh is on.
 
