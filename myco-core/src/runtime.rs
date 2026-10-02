@@ -2923,6 +2923,15 @@ pub(crate) const DEFAULT_NAPPLETS: &[DefaultNapplet] = &[
         expected: &["identity", "inc", "outbox", "relay", "resource", "theme"],
         new_installs_only: true,
     },
+    // d=composer: write a note, a reply or a quote. The `composer` role
+    // (NAP-INTENT, `napplet:composer/open`), so Reply and Quote elsewhere
+    // open it. Its published manifest declares these.
+    DefaultNapplet {
+        title: "Composer",
+        pointer: "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzrrdakhqmmnv4eq8x2lsv",
+        expected: &["identity", "inc", "outbox", "relay", "resource", "theme"],
+        new_installs_only: true,
+    },
 ];
 
 /// The expected permissions of the default napplet at `(author_npub, d_tag)`,
@@ -3628,6 +3637,15 @@ mod tests {
             .filter(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("noris"))
             .count();
         assert_eq!(noris, 1, "a fresh install did not get Noris");
+        let composer = rt
+            .content
+            .as_ref()
+            .unwrap()
+            .library_snapshot()
+            .into_iter()
+            .filter(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("composer"))
+            .count();
+        assert_eq!(composer, 1, "a fresh install did not get Composer");
 
         // A second launch does not duplicate it.
         let relaunched = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
@@ -4028,7 +4046,8 @@ mod tests {
             marker.contains(":dingdong\n")
                 && marker.contains(":discover\n")
                 && marker.contains(":chronofeed\n")
-                && marker.contains(":noris\n"),
+                && marker.contains(":noris\n")
+                && marker.contains(":composer\n"),
             "{marker}"
         );
 

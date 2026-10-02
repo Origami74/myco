@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Composer for new installs.** Write a Nostr note, a reply or a quote:
+  replies tagged the NIP-10 way so the whole thread is notified, quotes with a
+  `q` tag (NIP-18), `@` mentions suggested from the people you follow
+  (NIP-27), hashtags, and a preview. It fills the `composer` role
+  (`napplet:composer/open`), so other apps' Reply and Quote open it. New
+  installs only.
 - **Noris for new installs.** A long-form reader after Boris: NIP-23
   articles, NIP-84 highlights (yours, your follows' and everyone's, painted in
   the text), reading positions kept on the device. It fills the `article` and
