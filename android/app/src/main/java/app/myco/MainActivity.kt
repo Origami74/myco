@@ -616,6 +616,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // A napplet or nsite opened from here finds the WebView renderer up.
+        // Re-armed on every return: it is let go while Myco is out of sight.
+        WebViewWarmer.warmWhenIdle(this)
         // Self-heal the tunnel. Another VPN app taking the slot revokes ours
         // and stops the service; the node and its radio links carry on, so the
         // mesh looks healthy while no mesh traffic can flow. When the slot comes
