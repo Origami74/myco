@@ -1,68 +1,43 @@
-# Myco v0.9.0
+# Myco v0.9.1
 
-**Released**: 2026-09-30
+**Released**: 2026-10-02
 
-v0.9.0 turns Myco's apps into something you can live in: a **feed** that
-loads instantly and keeps scrolling, **apps that open each other**, and a
-**cache** that makes everything you've looked at fast and available offline.
+v0.9.1 lets you **write**, not just read, and makes apps **open faster**.
 
-- Chronofeed, a chronological feed of the people you follow, and Simple Profile come with new installs.
-- Apps can open each other by role: tap a person and your profile app opens.
-- Everything your apps look at is cached, instantly available and shared with your Circle.
-- Pictures load fast and feeds scroll smoothly.
+- Composer, for writing notes, replies and quotes, and Noris, a reader for
+  long-form articles and highlights, come with new installs.
+- Apps open and fill about twice as fast.
+- The download is a third of the size: about 22 MB.
 
-**No wire-format change from v0.8.1.** v0.9.0 and v0.8.1 phones pair and
+**No wire-format change from v0.9.0.** v0.9.1 and v0.9.0 phones pair and
 exchange apps and messages as before. Everything upgrades in place.
 
 ## At a glance
 
-- **Apps open each other by role.** An app can ask Myco to open "a profile",
-  "a note" or "a site" (NAP-INTENT). Myco opens the app you have for that
-  role and hands it what to show. With several candidates it asks ("Open
-  with…", with "Always use this"). **Settings › Default apps** lists your
-  choices. Only you can set them. An app that asks without a recent tap gets a
-  confirmation first. Myco itself opens sites, so "Open nsite → Myco" works.
-- **A cache for everything your apps look at.** Notes, profiles and pictures
-  your apps fetch are kept in a cache apart from what the phone keeps on
-  purpose: 500 MB of notes and 1.5 GB of files by default, with what you come
-  back to kept longest. Opening them again is instant and works offline, and
-  paired phones nearby can get them from you. **Settings › Storage** shows the
-  cache, sets its size and clears it.
-- **Apps can keep what they showed you.** A napplet can keep a note or
-  picture it showed you on your phone, or pass a note on to nearby phones or
-  relays. It only works for things the app was actually shown, and it never
-  signs someone else's note as you.
-- **Chronofeed and Simple Profile come with Myco** on new installs, next to
-  DingDong and the AppStore. Tapping a person in Chronofeed opens Simple
-  Profile. Existing installs are left as they are; both can be installed from
-  the AppStore.
+- **Composer comes with Myco** on new installs. Write a note, reply to one or
+  quote one. A reply shows the note you're answering while you type, and
+  everyone in the conversation is notified. Type `@` to mention someone you
+  follow; `#words` become hashtags; Preview shows the note before it goes out.
+  Other apps open it by role, so their Reply and Quote buttons land in it.
+- **Noris comes with Myco** on new installs. Read long-form Nostr articles in
+  a calm reader after Boris: highlights from you, people you follow and
+  everyone else are painted in the text, you can highlight what you read, and
+  Noris remembers where you stopped. Articles and highlights opened from
+  Chronofeed land in it.
+- **Apps open faster.** An app's data now streams in instead of arriving in
+  one batch, and far less work is repeated on the way: on a Pixel 7 Pro,
+  Noris's articles appear in about a quarter to a third of a second instead of
+  two-thirds.
+- **A smaller download.** The app is about 22 MB, down from 78 MB.
 
-## Faster and more complete
-
-- **Apps get their data much faster.** Reading from relays and nearby phones
-  was rebuilt around streams: what the phone holds goes out at once, and each
-  relay's and each nearby phone's answer is passed on the moment it arrives,
-  never waiting on the slowest. One shared connection per relay (built on
-  rustic-applesauce) replaces a new connection per request, so busy relays no
-  longer turn Myco away. Names now show up for everyone you follow, and feeds
-  keep scrolling back past what the phone holds.
-- **Pictures load fast.** Nearby phones and the internet are asked at the
-  same time, the server a link names is tried first, missing pictures aren't
-  asked for again for ten minutes, and pictures reach apps as raw bytes. Apps
-  can load files up to 64 MB (was 10 MB), so short videos play.
-- **Less battery.** The mesh adapter no longer keeps a processor core busy
-  while the mesh is on.
+Existing installs keep their apps as they are; Composer and Noris can be
+installed from the AppStore.
 
 ## Also
 
-- **Wi-Fi Aware is on from the first launch** on phones that support it; its
-  permission used to be skipped on a fresh install.
-- **Installing an app you already have offers to open it**, or to update it
-  when a newer version is available, instead of a greyed-out install button.
-- **Apps built with WebAssembly run.** They still can't reach the network on
-  their own.
-- **Chat survives a restart** until it expires.
-- **"Delete cache" is now "Clear local database"**, and asks first.
+- **Tapping an app after Myco restarted opens it.** After an update, or when
+  Android had closed Myco in the background, tapping an app could land you
+  back in Myco instead.
 
 ## Known issues
 
@@ -71,10 +46,18 @@ exchange apps and messages as before. Everything upgrades in place.
   Chronofeed). `https:` image support is still to come;
   [#67](https://github.com/Origami74/myco/issues/67) covers Blossom server
   discovery.
-- **Few apps declare a role yet.** Opening "a profile" needs a profile app
-  whose manifest declares the `profile` archetype (`napplet:profile/open`),
-  such as Simple Profile; other profile napplets don't yet. Messages between
-  apps other than opening by role (`inc.emit`) aren't routed yet.
+- **Few apps declare a role yet.** Opening "a profile", "an article" or "a
+  composer" needs an app whose manifest declares that archetype, such as
+  Simple Profile, Noris or Composer; other napplets don't yet. `article`,
+  `highlight` and the `composer` convention are ours, not yet in the NAAT
+  registry. Messages between apps other than opening by role (`inc.emit`)
+  aren't routed yet.
+- **Reading positions in Noris stay on the phone.** Boris publishes them as
+  public events; Noris keeps them on the device instead, because Myco can't
+  encrypt for an app yet (`relay.publishEncrypted`). Without app storage they
+  last for the session.
+- **Composer can't attach pictures yet.** Myco doesn't offer uploads to apps
+  (NAP-UPLOAD); pasting a Blossom link works.
 - **A custom relay is read, not streamed.** With a custom relay set, reads wait
   for it rather than streaming as they arrive.
 - **Big files are held in memory** while they load (up to 64 MB each).
