@@ -152,7 +152,12 @@ class NappletActivity : ComponentActivity() {
     private var windowGone = false
     private val sessionLock = Any()
 
-    /** This window's shell origin — the only origin the channel is scoped to. */
+    /**
+     * This window's shell origin — the only origin the channel is scoped to.
+     * Empty until the open lands. Volatile: WebView's IO thread reads it in
+     * `shouldInterceptRequest`.
+     */
+    @Volatile
     private var shellHost: String = ""
 
     /** Whether the shell page asked for the status-bar region. See [ChromelessChrome]. */
@@ -649,6 +654,13 @@ class NappletActivity : ComponentActivity() {
         val intentToken = intent.getStringExtra(EXTRA_INTENT_TOKEN).orEmpty()
         intent.removeExtra(EXTRA_INTENT_TOKEN)
 
+        // The WebView is built now, while the open below runs, not after it:
+        // loading `about:blank` binds the renderer process, and starting that
+        // (a fork plus Chromium's load, ~100 ms on a mid-range tablet) used to
+        // wait for the resolve to finish first. Nothing of the napplet's is
+        // in it yet — the shell origin is only loaded in [mountShell].
+        createWebView()
+
         // Resolve and verify before anything is shown. A napplet that fails any
         // check gets no session and no window — there is no partial render to
         // fall back to, by design. Off the main thread: the resolve reads the
@@ -708,17 +720,7 @@ class NappletActivity : ComponentActivity() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun mountShell() {
-        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
-            // WebView 88+ carries this. Older ones need the WebMessagePort
-            // fallback, which is not built yet — refuse rather than run a
-            // napplet with no way to reach its capabilities.
-            Log.w(TAG, "WebView is too old for the capability channel")
-            client.nappletClose(sessionId)
-            finish()
-            return
-        }
-
+    private fun createWebView() {
         webView = WebView(this).apply {
             setBackgroundColor(Color.BLACK)
             settings.javaScriptEnabled = true
@@ -732,7 +734,7 @@ class NappletActivity : ComponentActivity() {
             settings.mediaPlaybackRequiresUserGesture = false
             webViewClient = NappletWebViewClient(
                 client = client,
-                shellHost = shellHost,
+                shellHostOf = { shellHost },
                 sessionId = { synchronized(sessionLock) { sessionId } },
                 onContentVisible = { syncChrome() },
                 onRendererGone = { finish() },
@@ -758,6 +760,19 @@ class NappletActivity : ComponentActivity() {
                     ) = Unit
                 },
             )
+            loadUrl("about:blank")
+        }
+    }
+
+    private fun mountShell() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            // WebView 88+ carries this. Older ones need the WebMessagePort
+            // fallback, which is not built yet — refuse rather than run a
+            // napplet with no way to reach its capabilities.
+            Log.w(TAG, "WebView is too old for the capability channel")
+            client.nappletClose(sessionId)
+            finish()
+            return
         }
 
         // The capability channel. `allowedOriginRules` is this one origin,
@@ -1158,7 +1173,8 @@ class NappletActivity : ComponentActivity() {
  */
 private class NappletWebViewClient(
     private val client: AppCoreClient,
-    private val shellHost: String,
+    /** Empty until the open lands; until then the view holds only `about:blank`. */
+    private val shellHostOf: () -> String,
     private val sessionId: () -> String,
     private val onContentVisible: () -> Unit,
     private val onRendererGone: () -> Unit,
@@ -1175,9 +1191,22 @@ private class NappletWebViewClient(
         super.onUnhandledKeyEvent(view, event)
     }
 
-    override fun onPageCommitVisible(view: WebView, url: String) = onContentVisible()
+    private val shellHost: String get() = shellHostOf()
 
-    override fun onPageFinished(view: WebView, url: String) = onContentVisible()
+    // Only the shell's page: the `about:blank` the view was warmed with
+    // commits before the window has any chrome to sync.
+    override fun onPageCommitVisible(view: WebView, url: String) {
+        if (isShell(url)) onContentVisible()
+    }
+
+    override fun onPageFinished(view: WebView, url: String) {
+        if (isShell(url)) onContentVisible()
+    }
+
+    private fun isShell(url: String): Boolean {
+        val host = shellHost
+        return host.isNotEmpty() && Uri.parse(url).host?.equals(host, ignoreCase = true) == true
+    }
 
     /**
      * The renderer died — a napplet that allocated until OOM, or any crash in
@@ -1242,6 +1271,7 @@ private class NappletWebViewClient(
     ): WebResourceResponse? {
         val uri = request.url
         val host = uri.host.orEmpty()
+        val shellHost = shellHost
 
         // This window's shell origin, and only it. Everything else is answered
         // with a refusal rather than handed to the network: the shell loads
@@ -1250,7 +1280,9 @@ private class NappletWebViewClient(
         // frame navigation, a WebView quirk) still reaches nothing. Another
         // napplet's shell origin is refused here just as firmly as an nsite
         // host: each window serves itself.
-        if (!host.equals(shellHost, ignoreCase = true)) {
+        // Before the open lands there is no shell origin, and nothing is
+        // served — a host-less URL must not match the empty one.
+        if (shellHost.isEmpty() || !host.equals(shellHost, ignoreCase = true)) {
             return WebResourceResponse(
                 "text/plain",
                 "utf-8",
