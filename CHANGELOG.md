@@ -7,47 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-02
+
 ### Added
 
-- **Composer for new installs.** Write a Nostr note, a reply or a quote:
-  replies tagged the NIP-10 way so the whole thread is notified, quotes with a
-  `q` tag (NIP-18), `@` mentions suggested from the people you follow
-  (NIP-27), hashtags, and a preview. It fills the `composer` role
-  (`napplet:composer/open`), so other apps' Reply and Quote open it. New
-  installs only.
+- **Composer for new installs.** Write a Nostr note, a reply or a quote.
+  Replies are tagged the NIP-10 way (marked `root`/`reply` `e` tags, the
+  parent's people as `p`) so the whole thread is notified; quotes get a
+  NIP-18 `q` tag and the `nostr:nevent` in the text; `@` suggests the people
+  you follow and inserts NIP-27 mentions; hashtags become `t` tags; there is
+  a preview. It fills the `composer` role (`napplet:composer/open`, with
+  `{ replyTo?, quote?, content?, mentions? }`), so another app's Reply opens
+  it with the note being answered on screen. New installs only.
 - **Noris for new installs.** A long-form reader after Boris: NIP-23
   articles, NIP-84 highlights (yours, your follows' and everyone's, painted in
-  the text), reading positions kept on the device. It fills the `article` and
-  `highlight` roles, so an article or a highlight opened from Chronofeed lands
-  in it. New installs only, like Chronofeed and Simple Profile.
+  the text), and reading positions kept on the device. It fills the `article`
+  and `highlight` roles, so an article or a highlight opened from Chronofeed
+  lands in it. New installs only, like Chronofeed and Simple Profile.
 
 ### Changed
 
+- **Napplets open and fill faster.** Measured on a Pixel 7 Pro with Noris:
+  from the window starting to articles on screen went from about 650–700 ms
+  to 240–330 ms.
+  - A subscription's backlog is **streamed**: the subscribe call answers at
+    once, and the stored events are pushed to the napplet as frames of their
+    own as soon as the store read returns, then `eose`, instead of riding back
+    in the call's reply. Each subscription is handed every event once (a
+    per-subscription seen-set shared by the backlog and live deliveries), and
+    a subscription closed or replaced while its backlog is read gets nothing
+    more from it.
+  - Fewer copies on the way: events become the napplet's JSON directly,
+    without a print-and-parse; frames cross JNI as a `String[]`; Kotlin no
+    longer parses frames it only forwards (the napplet itself, ~385 KB for
+    Noris, was parsed on every open, and so was every delivered event under
+    64 KB); a session's subscription maps are shared copy-on-write rather than
+    copied into every read's snapshot.
+  - The outbox reads many authors' stored relay lists in one query instead
+    of two store reads per author.
 - **The APK is about 22 MB, down from 78 MB.** Release builds run R8 code and
   resource shrinking (no renaming, so stack traces stay readable): the dex
   drops from 43 MB, mostly unused material-icons-extended, to 3.4 MB.
   `libmyco_core.so` is built with fat LTO, one codegen unit and stripped
   symbols, from 34 MB to 18 MB. Keep rules in `proguard-rules.pro` cover the
   classes Rust calls over JNI by name (`NativeCore`, `BleRadio`).
-
-- **Napplets open and fill faster.** Measured on a Pixel 7 Pro with Noris (a
-  long-form reader): from the window starting to articles on screen went
-  from about 650–700 ms to 240–330 ms.
-  - A subscription's backlog is **streamed**: the subscribe call answers at
-    once, and the stored events are pushed to the napplet as frames of their
-    own as soon as the store read returns, then `eose` — not carried back in
-    the call's reply. Each subscription is handed every event once; the
-    backlog and live deliveries share one seen-set, and a subscription closed
-    or replaced while its backlog is read gets nothing more from it.
-  - Fewer copies on the way: events become the napplet's JSON directly,
-    without a print-and-parse; frames cross JNI as a `String[]` instead of a
-    joined string split apart again; Kotlin no longer parses frames it only
-    forwards (the napplet itself, ~385 KB for Noris, was parsed on every
-    open; so was every delivered event under 64 KB); a session's
-    subscription maps are shared copy-on-write rather than copied into every
-    read's snapshot.
-  - The outbox reads many authors' stored relay lists in one query instead
-    of two store reads per author.
 
 ### Fixed
 
