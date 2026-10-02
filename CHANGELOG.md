@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Less black screen when a napplet opens.** The WebView renderer process is
   kept running while Myco is on screen instead of being restarted for every
   window, and a napplet's WebView is built while the napplet is being verified
-  rather than after. Fresh Noris open on a mid-range tablet: 683 → 559 ms of
-  black (median of 8). The renderer is let go when Myco leaves the screen.
+  rather than after. Fresh Noris open on a mid-range tablet: about 570 ms of
+  black instead of 670–780 ms. The renderer is let go when Myco leaves the
+  screen.
 
 ## [0.9.1] - 2026-10-02
 
