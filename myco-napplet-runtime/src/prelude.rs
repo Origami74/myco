@@ -228,6 +228,24 @@ mod tests {
         );
     }
 
+    /// NAP-UPLOAD: the vendored installer carries the namespace, and the
+    /// supplement replaces `upload.upload` with one that waits as long as a
+    /// publish — the authorization is signed as the user first. The vendored
+    /// one gives up after 30 s.
+    #[test]
+    fn upload_waits_the_signing_timeout() {
+        assert!(PRELUDE_IIFE.contains(r#"domains.has("upload")"#));
+        assert!(PRELUDE_IIFE.contains("upload.upload timed out"));
+        assert!(SUPPLEMENT_IIFE.contains(r#"domains.has("upload") && napplet.upload"#));
+        assert!(SUPPLEMENT_IIFE.contains("napplet.upload.upload = function upload("));
+        assert!(SUPPLEMENT_IIFE.contains(r#"{ type: "upload.upload", request: req }"#));
+        assert!(SUPPLEMENT_IIFE.contains(r#"["upload.upload.result"]"#));
+        assert!(SUPPLEMENT_IIFE.contains("resolve(msg.result)"));
+        // And `upload` reaches both installers' allowlist.
+        let s = Session::new(NappletIdentity::new("d", "a"), Vec::<String>::new());
+        assert!(s.available_domains().contains(&"upload".to_string()));
+    }
+
     /// NAP-LINK and NAP-THEME need nothing from the supplement: the vendored
     /// installer carries both namespaces and routes their results, gated on
     /// the same domain list.

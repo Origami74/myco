@@ -123,6 +123,7 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 | --- | --- |
 | [napplet-runtime.md](./design/napplet/napplet-runtime.md) | NIP-5D manifests over the nsite shape, verified resolve into a sandboxed iframe, the NAP capability seam, grants and the review screen, the three relay lanes. |
 | [NAP-MESH.md](./design/napplet/NAP-MESH.md) | Myco's own capability: hop-limited publish and subscribe over the mesh, in the registry's template so it can be proposed upstream. |
+| [NAP-UPLOAD.md](./design/napplet/NAP-UPLOAD.md) | Uploading a napplet's file to the user's Blossom servers, signed as the user: servers, auth, the shell's byte hop, caps, consent. |
 
 #### `fips/` — the transport lanes
 

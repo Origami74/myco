@@ -30,7 +30,7 @@ use crate::seams::{ScopeOwner, WorkScope};
 /// a branch that cannot work.
 pub const IMPLEMENTED_DOMAINS: &[&str] = &[
     "shell", "identity", "relay", "mesh", "outbox", "local", "resource", "link", "theme", "inc",
-    "intent",
+    "intent", "upload",
 ];
 
 /// Domains every napplet gets, grant or no grant.
@@ -96,6 +96,10 @@ pub const DEFAULT_GRANTS: &[&str] = &[
 /// The most live subscriptions one session may hold, across `relay`, `mesh`
 /// and `outbox`. See [`Session::subscribe_in`].
 pub const MAX_SUBSCRIPTIONS: usize = 64;
+
+/// The most NAP-UPLOAD results one session remembers for `upload.status`.
+/// Older ones are forgotten and answer "unknown upload".
+pub const MAX_UPLOAD_RECORDS: usize = 32;
 
 /// The most NAP-INC topics one session may listen on. See
 /// [`Session::subscribe_topic`].
@@ -308,6 +312,9 @@ pub struct Session {
     seen: SeenSets,
     /// Set by a host that streams backlogs. See [`Streamer`].
     streamer: Option<Streamer>,
+    /// The last NAP-UPLOAD results, by `uploadId`, for `upload.status`.
+    /// Shared by every clone: an upload runs against a snapshot.
+    uploads: Arc<Mutex<std::collections::VecDeque<(String, serde_json::Value)>>>,
 }
 
 impl Session {
@@ -339,6 +346,7 @@ impl Session {
             delivered: Ledger::default(),
             seen: Arc::new(Mutex::new(HashMap::new())),
             streamer: None,
+            uploads: Arc::default(),
         }
     }
 
@@ -347,6 +355,27 @@ impl Session {
     pub fn with_streamer(mut self, streamer: Streamer) -> Self {
         self.streamer = Some(streamer);
         self
+    }
+
+    /// Remember an upload's last status under `upload_id`, replacing any
+    /// earlier one; past [`MAX_UPLOAD_RECORDS`] the oldest is forgotten.
+    pub fn record_upload(&self, upload_id: &str, status: serde_json::Value) {
+        let mut uploads = self.uploads.lock().unwrap();
+        uploads.retain(|(id, _)| id != upload_id);
+        if uploads.len() >= MAX_UPLOAD_RECORDS {
+            uploads.pop_front();
+        }
+        uploads.push_back((upload_id.to_string(), status));
+    }
+
+    /// The last status recorded for `upload_id`, if it is still remembered.
+    pub fn upload_status(&self, upload_id: &str) -> Option<serde_json::Value> {
+        self.uploads
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| id == upload_id)
+            .map(|(_, status)| status.clone())
     }
 
     /// The host's streamer, if it streams.

@@ -19,6 +19,9 @@
 //   publish is signed first: with a signer app (NIP-55) that is a human
 //   reading an approval screen, which routinely takes longer. See
 //   `SIGNING_TIMEOUT_MS`.
+// - `window.napplet.upload.upload` — replaced for the same reason
+//   (NAP-UPLOAD, napplet/naps PR #33): the upload's
+//   authorization is signed as the user before anything is sent.
 //
 // Same wire as everything else: flat NIP-5D envelopes posted to the parent
 // frame, results correlated by `id`, pushes routed by `subId`. Nothing here is
@@ -60,6 +63,7 @@ var MycoPrelude = (function () {
     if (domains.has("mesh")) installMesh(napplet, routers);
     if (domains.has("local")) installLocal(napplet, routers);
     if (domains.has("resource") && napplet.resource) installResourceKeep(napplet, routers);
+    if (domains.has("upload") && napplet.upload) installUploadUpload(napplet, routers);
     return napplet;
   }
 
@@ -158,6 +162,29 @@ var MycoPrelude = (function () {
           reject(e);
         }
       });
+    };
+  }
+
+  // --- NAP-UPLOAD: upload, with a signing-length wait ----------------------
+  //
+  // A drop-in for the vendored `upload.upload`: the same envelope (the
+  // request, bytes and all, by structured clone — the shell page turns the
+  // bytes into something Rust can read), resolved with `msg.result` or
+  // rejected with `msg.error` as the vendored one does, but waiting
+  // `SIGNING_TIMEOUT_MS` rather than 30 s. The runtime answers once the upload
+  // is finished, and the upload's BUD-02 authorization is signed as the user
+  // first. `info`, `status` and `onStatus` stay the vendored ones.
+  function installUploadUpload(napplet, routers) {
+    if (Object.isFrozen(napplet.upload)) {
+      console.warn("myco: upload is frozen; uploads keep the 30 s wait");
+      return;
+    }
+    var request = requester(routers, ["upload.upload.result"]);
+    napplet.upload.upload = function upload(req) {
+      return request({ type: "upload.upload", request: req }, function (msg, resolve, reject) {
+        if (msg.result !== undefined) resolve(msg.result);
+        else reject(new Error(msg.error || "upload failed"));
+      }, SIGNING_TIMEOUT_MS);
     };
   }
 

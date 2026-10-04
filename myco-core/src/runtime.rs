@@ -2126,6 +2126,15 @@ impl AppRuntime {
                 self.identity.own_npub.clone(),
             ));
 
+            // NAP-UPLOAD: signs as the same user, finds their servers through
+            // the same outbox lanes.
+            let uploads = Arc::new(crate::blossom_upload::BlossomUploader::new(
+                content.clone(),
+                signer.clone(),
+                outbox.clone(),
+                outbox.clone(),
+            ));
+
             let host = Arc::new(
                 crate::napplet::NappletHost::new(myco_napplet_runtime::dispatch::NapContext {
                     signer,
@@ -2149,6 +2158,7 @@ impl AppRuntime {
                         content.clone(),
                         self.intent_defaults.clone(),
                     )),
+                    uploads,
                 })
                 // Served versions come from the content layer's pins, so a
                 // newer manifest with no blob behind it cannot displace the

@@ -369,6 +369,7 @@ pub fn test_context_with_mesh(
         kept_blobs: blobs,
         fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
         intents: std::sync::Arc::new(crate::nap::intent::NoIntents),
+        uploads: std::sync::Arc::new(crate::seams::NoUploads),
     };
     (ctx, mesh, signer)
 }
@@ -404,8 +405,79 @@ pub fn test_context_with_outbox() -> (
         kept_blobs: blobs,
         fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
         intents: std::sync::Arc::new(crate::nap::intent::NoIntents),
+        uploads: std::sync::Arc::new(crate::seams::NoUploads),
     };
     (ctx, outbox, signer)
+}
+
+/// As [`test_context`], with a [`MemUploads`] behind NAP-UPLOAD, handed back
+/// so a test can assert what was uploaded.
+pub fn test_context_with_uploads() -> (crate::dispatch::NapContext, std::sync::Arc<MemUploads>) {
+    let (mut ctx, _signer) = test_context();
+    let uploads = std::sync::Arc::new(MemUploads::default());
+    ctx.uploads = uploads.clone();
+    (ctx, uploads)
+}
+
+/// An [`UploadSink`](crate::seams::UploadSink) that records what it was
+/// given and answers with made-up URLs on `blossom.test` (and one mirror on
+/// `mirror.test`) — or fails every upload with one reason.
+#[derive(Default)]
+pub struct MemUploads {
+    uploaded: std::sync::Mutex<Vec<crate::seams::UploadBlob>>,
+    fail_with: Option<crate::seams::UploadErrorCode>,
+    /// Report this as the stored hash, as a server that transformed the file.
+    stored_sha256: Option<String>,
+}
+
+impl MemUploads {
+    /// One whose every upload fails with `code`.
+    pub fn failing(code: crate::seams::UploadErrorCode) -> Self {
+        Self {
+            fail_with: Some(code),
+            ..Default::default()
+        }
+    }
+
+    /// One whose server "transformed" every file: it reports `sha256` as
+    /// what it stored.
+    pub fn transforming(sha256: &str) -> Self {
+        Self {
+            stored_sha256: Some(sha256.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Every blob handed to `upload`, in order.
+    pub fn uploaded(&self) -> Vec<crate::seams::UploadBlob> {
+        self.uploaded.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::seams::UploadSink for MemUploads {
+    async fn available(&self) -> bool {
+        self.fail_with != Some(crate::seams::UploadErrorCode::PolicyDenied)
+    }
+
+    async fn upload(
+        &self,
+        blob: &crate::seams::UploadBlob,
+    ) -> Result<crate::seams::Uploaded, crate::seams::UploadError> {
+        if let Some(code) = self.fail_with {
+            return Err(crate::seams::UploadError::new(code, "staged failure"));
+        }
+        self.uploaded.lock().unwrap().push(blob.clone());
+        let sha = self.stored_sha256.clone().unwrap_or(blob.sha256.clone());
+        let ext = blob.mime.rsplit('/').next().unwrap_or("bin");
+        Ok(crate::seams::Uploaded {
+            url: format!("https://blossom.test/{sha}.{ext}"),
+            fallback_urls: vec![format!("https://mirror.test/{sha}.{ext}")],
+            sha256: sha,
+            size: blob.bytes.len() as u64,
+            mime: None,
+        })
+    }
 }
 
 /// As [`test_context`], with the [`MemFetcher`] handed back so a test can

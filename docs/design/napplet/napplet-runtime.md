@@ -21,7 +21,8 @@ reuse), [../circle/circle.md](../circle/circle.md) (what "everyone nearby" means
 [../reference/nostr-kinds.md](../../reference/nostr-kinds.md) (event kinds).
 
 > Status: built through S2, S3's `NAP-OUTBOX`, `NAP-RESOURCE` (`blossom:`
-> only), `NAP-LINK` and `NAP-THEME` (default themes, no picker), S5, and the
+> only), `NAP-LINK`, `NAP-THEME` (default themes, no picker) and `NAP-UPLOAD`
+> (Blossom only; see [NAP-UPLOAD.md](NAP-UPLOAD.md)), S5, and the
 > in-app half of S2b (`NAP-INTENT`, and the subscribe side of `NAP-INC`; see
 > [NAP-INTENT.md](NAP-INTENT.md)). Each stage below says what shipped. Not
 > built: S2b's Android entry points, S4 (composition), the rest of S3
@@ -705,8 +706,8 @@ is not yet claimed — the resolver needs the same normalization regardless.
 
 ### S3 — Fill out the seam
 
-`NAP-STORAGE` (scoped per identity tuple), `NAP-THEME`, `NAP-NOTIFY`, `NAP-LINK` and
-`NAP-CONFIG`.
+`NAP-STORAGE` (scoped per identity tuple), `NAP-THEME`, `NAP-NOTIFY`, `NAP-LINK`,
+`NAP-UPLOAD` and `NAP-CONFIG`.
 
 **`NAP-OUTBOX` shipped** (registry draft PR #32, pinned copy in
 `reference/naps/drafts/NAP-OUTBOX.md`): `getEvent`, `query`, `subscribe`/`close`, `publish`,
@@ -815,6 +816,16 @@ With `mesh` on for every app, the roadmap's
 [mesh rate limits](../../roadmap.md#later) item (a per-session token bucket on
 `mesh.publish` / `mesh.subscribe`) is more urgent: any installed napplet can now flood
 the Circle up to the user's App reach cap.
+
+**`NAP-UPLOAD` shipped** (upstream draft, [napplet/naps PR #33](https://github.com/napplet/naps/pull/33), not merged; Myco's notes in [`NAP-UPLOAD.md`](NAP-UPLOAD.md)), Blossom only. A
+napplet hands over bytes; the shell finds the user's servers (kind 10063, else
+public defaults), signs a BUD-02 authorization as the user, uploads, checks the
+returned descriptor, and answers with the URL and NIP-94 tags. A `Blob` does not survive
+the shell page's JSON hop to Rust, so the shell page reads it into base64 for that
+hop only. `upload` is **not** a default grant: only a napplet that declares it gets
+it, from the install sheet, and a reviewed list recorded before this build does not
+count for it. Runtime: `UploadSink` seam, `nap/upload.rs`. Core:
+`BlossomUploader` in `myco-core/src/blossom_upload.rs`.
 
 ### S4 — Composition
 

@@ -22,7 +22,7 @@ use std::sync::Arc;
 use crate::nap;
 use crate::seams::{
     BlobFetcher, BlobStore, Envelope, EventSink, LaneTransport, MeshSink, OutboxResolver,
-    RelayBackend, Signer,
+    RelayBackend, Signer, UploadSink,
 };
 use crate::session::Session;
 
@@ -60,6 +60,9 @@ pub struct NapContext {
     /// The installed-napplet catalog behind NAP-INTENT's `available` and
     /// `handlers`. See [`nap::intent::IntentCatalog`].
     pub intents: Arc<dyn nap::intent::IntentCatalog>,
+    /// Where NAP-UPLOAD puts a napplet's bytes: the user's Blossom servers.
+    /// See [`UploadSink`].
+    pub uploads: Arc<dyn UploadSink>,
 }
 
 /// What to do with an inbound message.
@@ -129,6 +132,11 @@ fn refusal(message: &Envelope, why: &str) -> Envelope {
         out.id = message.id.clone();
         return out;
     }
+    // NAP-UPLOAD (napplet/naps PR #33) names its refusal: "policy denied".
+    // What was refused is in the log line above.
+    if message.domain() == "upload" {
+        return message.to_error(nap::upload::POLICY_DENIED);
+    }
     message.to_error(why)
 }
 
@@ -189,6 +197,7 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
         "theme" => Outcome::Reply(nap::theme::handle(session, message)),
         "inc" => Outcome::Reply(nap::inc::handle(session, message)),
         "intent" => nap::intent::handle(ctx, message).await,
+        "upload" => Outcome::Reply(nap::upload::handle(ctx, session, message).await),
         // Implemented, granted, established — and still unrouted. Reaching here
         // means the implemented set grew without a handler, which is a bug in
         // this crate rather than anything the napplet did.

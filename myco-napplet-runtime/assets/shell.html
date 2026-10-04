@@ -14,6 +14,8 @@
 //   2. carry messages both ways,
 //   3. verify MessageEvent.source on every inbound message,
 //   4. hand everything else to Rust.
+// It also reads an upload's bytes (NAP-UPLOAD) into base64, since a Blob
+// does not survive the JSON channel to Rust.
 // It also keeps keyboard focus in the napplet's frame, where the back
 // gesture arrives as an Escape keydown.
 //
@@ -166,8 +168,81 @@
     // Wrapped, never forwarded raw — the channel tag is written here, by
     // trusted code, so a napplet cannot dress a message up as shell control
     // traffic.
-    toRuntime({ channel: 'napplet', message: event.data });
+    var message = event.data;
+    if (isUpload(message)) {
+      withUploadBytes(message).then(function (carried) {
+        toRuntime({ channel: 'napplet', message: carried });
+      });
+      return;
+    }
+    toRuntime({ channel: 'napplet', message: message });
   });
+
+  // NAP-UPLOAD bytes. `request.data` is a Blob or an ArrayBuffer, which the
+  // JSON channel to Rust would flatten to `{}`. So it is read here and sent as
+  // base64 in `request.dataBase64`, with the blob's own type as
+  // `request.dataType`. These names are this page's: whatever the napplet put
+  // under them is dropped first. Rust decodes, re-checks the cap and hashes;
+  // the bytes are still the napplet's and are treated so.
+  //
+  // Past the cap nothing is read: the request goes on with only
+  // `request.dataSize`, and Rust answers the refusal. The decision stays on
+  // the Rust side (`nap::upload::MAX_BYTES`, which a test pins this to).
+  var UPLOAD_MAX_BYTES = 16777216;
+
+  function isUpload(message) {
+    return !!message && typeof message === 'object' && message.type === 'upload.upload' &&
+      !!message.request && typeof message.request === 'object';
+  }
+
+  function withUploadBytes(message) {
+    var request = Object.assign({}, message.request);
+    var data = request.data;
+    delete request.data;
+    delete request.dataBase64;
+    delete request.dataType;
+    delete request.dataSize;
+    var carried = Object.assign({}, message, { request: request });
+
+    var size = null;
+    var read = null;
+    if (typeof Blob !== 'undefined' && data instanceof Blob) {
+      size = data.size;
+      if (data.type) request.dataType = String(data.type);
+      read = function () { return data.arrayBuffer(); };
+    } else if (data instanceof ArrayBuffer) {
+      size = data.byteLength;
+      read = function () { return Promise.resolve(data); };
+    } else if (ArrayBuffer.isView(data)) {
+      size = data.byteLength;
+      read = function () {
+        return Promise.resolve(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+      };
+    }
+    // Not bytes at all: Rust says so.
+    if (read === null) return Promise.resolve(carried);
+    if (size > UPLOAD_MAX_BYTES) {
+      request.dataSize = size;
+      return Promise.resolve(carried);
+    }
+    return read().then(function (buffer) {
+      request.dataBase64 = toBase64(new Uint8Array(buffer));
+      return carried;
+    }, function () {
+      // Unreadable (a revoked or failed blob): sent without bytes, refused
+      // by Rust like any other missing data.
+      return carried;
+    });
+  }
+
+  function toBase64(bytes) {
+    // In chunks: one `fromCharCode` over megabytes overflows the stack.
+    var parts = [];
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)));
+    }
+    return btoa(parts.join(''));
+  }
 
   // --- start ------------------------------------------------------------
 

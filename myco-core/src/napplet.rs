@@ -565,7 +565,7 @@ impl NappletHost {
                 let reviewed = if reviewed_is_declared {
                     effective_grants(&requires)
                 } else {
-                    effective_grants(&grants.reviewed)
+                    reviewed_grants(&grants.reviewed)
                 };
                 for domain in effective_grants(&requires) {
                     if grants.granted.contains(&domain) || grants.denied.contains(&domain) {
@@ -1656,6 +1656,26 @@ pub fn effective_grants(requires: &[String]) -> Vec<String> {
     out
 }
 
+/// Domains a stored reviewed list does not stand in for: they are granted
+/// only from a review sheet that showed them.
+///
+/// The reviewed list records the manifest's `requires`, but the sheet shows
+/// only what the build that drew it implemented ([`effective_grants`]). A
+/// napplet that declared `upload` before Myco had it was never shown it, and
+/// `upload` sends files to the internet signed as the user — so it is not
+/// granted at open on the strength of that list. It comes back as
+/// `unreviewed`, and the update review puts it in front of the user.
+const GRANTED_ONLY_WHEN_SHOWN: &[&str] = &["upload"];
+
+/// What a stored reviewed list covers: [`effective_grants`] of it, less
+/// [`GRANTED_ONLY_WHEN_SHOWN`].
+fn reviewed_grants(reviewed: &[String]) -> Vec<String> {
+    effective_grants(reviewed)
+        .into_iter()
+        .filter(|d| !GRANTED_ONLY_WHEN_SHOWN.contains(&d.as_str()))
+        .collect()
+}
+
 /// A fetched, verified napplet awaiting the user's answer on install review.
 ///
 /// Carries what the napplet asked for, never what it was given. A grant exists
@@ -1893,7 +1913,7 @@ pub fn unreviewed_domains(
     grants: &crate::content::NappletGrants,
     requires: &[String],
 ) -> Vec<String> {
-    let reviewed = effective_grants(&grants.reviewed);
+    let reviewed = reviewed_grants(&grants.reviewed);
     effective_grants(requires)
         .into_iter()
         .filter(|d| !grants.granted.contains(d) && !grants.denied.contains(d))
@@ -1921,6 +1941,39 @@ mod tests {
     use myco_napplet_runtime::testing::NappletBuilder;
     use nostr::nips::nip19::ToBech32;
     use nsite_deck::testing::{MemBlobs, MemRelay};
+
+    /// `upload` is offered only when declared, and a reviewed list from
+    /// before it was implemented (so never shown) does not grant it: it
+    /// comes back unreviewed, for the update review. `outbox`, on the same
+    /// list, is granted at open as before.
+    #[test]
+    fn upload_is_offered_when_declared_and_granted_only_when_shown() {
+        assert!(!effective_grants(&[]).contains(&"upload".to_string()));
+        assert!(effective_grants(&["upload".into()]).contains(&"upload".to_string()));
+
+        let requires: Vec<String> = vec!["mesh".into(), "outbox".into(), "upload".into()];
+        let installed_before = crate::content::NappletGrants {
+            granted: effective_grants(&[]),
+            denied: Vec::new(),
+            reviewed: requires.clone(),
+        };
+        assert_eq!(
+            unreviewed_domains(&installed_before, &requires),
+            vec!["upload".to_string()]
+        );
+
+        // Once the sheet showed it and the user answered, it is decided.
+        let granted = crate::content::NappletGrants {
+            granted: effective_grants(&requires),
+            ..installed_before.clone()
+        };
+        assert!(unreviewed_domains(&granted, &requires).is_empty());
+        let denied = crate::content::NappletGrants {
+            denied: vec!["upload".into()],
+            ..installed_before
+        };
+        assert!(unreviewed_domains(&denied, &requires).is_empty());
+    }
 
     /// A [`PeerSource`] over in-memory stores — "somewhere else", with no
     /// network. Mirrors what `IpPeerSource` does over public relays.
@@ -1998,6 +2051,7 @@ mod tests {
             fetcher: Arc::new(myco_napplet_runtime::seams::NoFetcher),
             kept_blobs: blobs,
             intents: Arc::new(myco_napplet_runtime::NoIntents),
+            uploads: Arc::new(myco_napplet_runtime::NoUploads),
         }
     }
 
