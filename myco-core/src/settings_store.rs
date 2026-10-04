@@ -74,6 +74,11 @@ pub struct Settings {
     /// apps. Written only by the user — the chooser's "Always use this" and
     /// Settings › Default apps — never by a napplet.
     pub intent_defaults: std::collections::BTreeMap<String, String>,
+
+    /// Public internet mesh nodes (N10): the opt-in, the per-node choices, and
+    /// the recommended list as last refreshed. Persisted here rather than by
+    /// Kotlin so the core can act on it from launch without being told twice.
+    pub public_nodes: crate::public_nodes::PublicNodeSettings,
 }
 
 /// The least a cache budget may be set to: below this a cache holds too little

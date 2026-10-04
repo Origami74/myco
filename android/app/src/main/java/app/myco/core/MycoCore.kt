@@ -27,6 +27,9 @@ object MycoCore {
                     ExternalSigner.start(app, it)
                     // Foreground + periodic update checks, throttled by the core.
                     UpdateChecks.start(it)
+                    // The public-node internet lane: on-screen state, and its
+                    // socket pinned to the default internet network.
+                    PublicNodesLane.start(app, it)
                 }
             }
         }

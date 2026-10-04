@@ -76,6 +76,10 @@ pub struct AppState {
     pub pending_pair_requests: Vec<crate::content::PairRequestView>,
     /// "Mesh-only": the IP online fallback is disabled (pull only over the mesh).
     pub offline_only: bool,
+    /// Public internet mesh nodes (N10): the opt-in, why it is idle if it is,
+    /// and every node heard of — recommended ones first — with its link state.
+    /// Settings lists these; the Dev tab shows which are up.
+    pub public_nodes: crate::public_nodes::PublicNodesView,
     /// The configured custom relay and whether it can be reached. Empty `url`
     /// means the built-in store; a non-empty `error` is what the Storage screen
     /// warns about, the same way it warns about a radio being off.

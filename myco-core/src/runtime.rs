@@ -101,6 +101,10 @@ pub(crate) fn udp_instance_for_lane(lane: &str) -> &'static str {
     if lane == "aware" {
         return AWARE_UDP_INSTANCES[0];
     }
+    // The public-node lane: Kotlin pins it to the default internet network.
+    if lane == crate::public_nodes::PUBLIC_UDP_INSTANCE {
+        return crate::public_nodes::PUBLIC_UDP_INSTANCE;
+    }
     AWARE_UDP_INSTANCES
         .iter()
         .find(|instance| **instance == lane)
@@ -310,6 +314,10 @@ pub struct AppRuntime {
     /// running on the FFI thread. `None` only on a startup error, in which case
     /// attempts simply have no persistence — never an `AppState.error`.
     attempt_store: Option<Arc<crate::attempt_store::AttemptStore>>,
+    /// Public internet mesh nodes (N10): the user's choices, the nodes read
+    /// off Nostr, and the dial state the driver task keeps. `None` only on a
+    /// startup error, where there is no data dir to persist choices to.
+    public_nodes: Option<Arc<crate::public_nodes::PublicNodes>>,
 }
 
 impl AppRuntime {
@@ -448,6 +456,10 @@ impl AppRuntime {
         let peer_feed: Arc<std::sync::Mutex<PeerFeedHealth>> =
             Arc::new(std::sync::Mutex::new(PeerFeedHealth::default()));
         let node_live = Arc::new(AtomicBool::new(false));
+        let public_nodes = Arc::new(crate::public_nodes::PublicNodes::new(
+            data_dir,
+            settings.public_nodes.clone(),
+        ));
 
         // Serve the relay + Blossom over the mesh so paired peers can pull this
         // device's nsites at ws://<npub>.fips:4870 / http://<npub>.fips:24243.
@@ -633,6 +645,17 @@ impl AppRuntime {
             // node rebuilds and the window before the first StartNode.
             crate::platform_peers::spawn_drainer(&rt, control.clone(), node_live.clone());
 
+            // Public internet mesh nodes: reads their adverts off Nostr and
+            // dials the chosen ones over the internet lane, when the user has
+            // opted in and the internet is there. Its own cadence, apart from
+            // the keepwarm tick below, because most of what it does is wait.
+            rt.spawn(public_nodes.clone().run(
+                control.clone(),
+                content.clone(),
+                peer_cache.clone(),
+                node_live.clone(),
+            ));
+
             {
                 let content = content.clone();
                 let peer_cache = peer_cache.clone();
@@ -731,6 +754,7 @@ impl AppRuntime {
             attempt_store: Some(Arc::new(crate::attempt_store::AttemptStore::load(
                 Path::new(data_dir),
             ))),
+            public_nodes: Some(public_nodes),
         })
     }
 
@@ -854,6 +878,23 @@ impl AppRuntime {
                 slots,
                 "Wi-Fi Aware UDP pool sized from the chipset's report"
             );
+            // The internet lane for public mesh nodes (N10). Outbound-only:
+            // it binds an ephemeral port and accepts no handshakes, because a
+            // phone is never dialled from the internet and an open listener
+            // would be one more thing to explain. Bound unconditionally like
+            // the rest, so switching the feature never restarts the node; with
+            // the feature off nothing is dialled over it and it carries nothing.
+            // A backup role on a multi-path core: an internet path is the one
+            // to use only when no radio or LAN path is eligible.
+            instances.insert(
+                crate::public_nodes::PUBLIC_UDP_INSTANCE.to_string(),
+                fips::config::UdpConfig {
+                    outbound_only: Some(true),
+                    #[cfg(feature = "fips-multipath")]
+                    role: Some(fips::config::TransportRole::Backup),
+                    ..Default::default()
+                },
+            );
             config.transports.udp = fips::config::TransportInstances::Named(instances);
         }
         fips::Node::new(config).map_err(|e| anyhow::anyhow!("fips Node::new failed: {e}"))
@@ -925,6 +966,7 @@ impl AppRuntime {
             // No valid data dir on this path, so there is nowhere to persist to.
             // Attempts still render live; they just do not survive a restart.
             attempt_store: None,
+            public_nodes: None,
         }
     }
 
@@ -1174,6 +1216,39 @@ impl AppRuntime {
             NativeAppAction::SetOfflineOnly { enabled } => {
                 if let Some(content) = &self.content {
                     content.set_offline_only(enabled);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SetPublicNodesEnabled { enabled } => {
+                if let Some(public_nodes) = &self.public_nodes {
+                    match public_nodes.set_enabled(enabled) {
+                        Ok(()) => tracing::info!(enabled, "settings: public mesh nodes"),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "settings: could not save public mesh nodes");
+                            self.error = format!("Could not save the public nodes setting: {e}");
+                        }
+                    }
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SetPublicNodeSelected { npub, selected } => {
+                if let Some(public_nodes) = &self.public_nodes {
+                    if let Err(e) = public_nodes.set_selected(&npub, selected) {
+                        tracing::warn!(error = %e, "settings: could not save a public node choice");
+                        self.error = format!("Could not save the public node choice: {e}");
+                    }
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::RefreshPublicNodes => {
+                if let Some(public_nodes) = &self.public_nodes {
+                    public_nodes.request_refresh();
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::SetAppForeground { foreground } => {
+                if let Some(public_nodes) = &self.public_nodes {
+                    public_nodes.set_foreground(foreground);
                 }
                 self.rev += 1;
             }
@@ -2732,6 +2807,18 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.is_offline_only())
                 .unwrap_or(false),
+            public_nodes: match (self.public_nodes.as_ref(), self.content.as_ref()) {
+                (Some(public_nodes), Some(content)) => public_nodes.view(
+                    &peer_views,
+                    crate::public_nodes::Gate {
+                        offline_only: content.is_offline_only(),
+                        internet_down: content.internet_looks_down(),
+                        node_live: self.node_live.load(Ordering::Relaxed),
+                    },
+                    now_ms(),
+                ),
+                _ => Default::default(),
+            },
             relay_backend: self
                 .content
                 .as_ref()

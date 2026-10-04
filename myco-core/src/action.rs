@@ -206,6 +206,21 @@ pub enum NativeAppAction {
     /// when this device has internet (e.g. it's acting as a hotspot).
     SetOfflineOnly { enabled: bool },
 
+    /// Opt in to (or out of) peering with public FIPS nodes over the internet
+    /// (N10). Persisted. Off drops the links to them on the driver's next pass,
+    /// which this wakes. Mesh-only overrides it: nothing is dialled while
+    /// mesh-only is on, whatever this says.
+    SetPublicNodesEnabled { enabled: bool },
+    /// Select or deselect one public node for dialling. Persisted as a delta
+    /// against join.fips.network's recommended list. `npub` must decode.
+    SetPublicNodeSelected { npub: String, selected: bool },
+    /// Read the advert relays now, even with the feature off, so Settings can
+    /// list the nodes before the user opts in. Mesh-only still forbids it.
+    RefreshPublicNodes,
+    /// Whether Myco is on screen (`ProcessLifecycleOwner` start/stop). Off
+    /// screen, public-node refreshes and redials slow down.
+    SetAppForeground { foreground: bool },
+
     /// Point the event store at a **custom relay**, or back at the built-in one
     /// with an empty `url`.
     ///
@@ -312,6 +327,30 @@ mod tests {
         assert!(matches!(
             parse(r#"{"type":"cancel_intent","token":"t"}"#),
             NativeAppAction::CancelIntent { .. }
+        ));
+    }
+
+    #[test]
+    fn public_node_actions_parse_as_the_app_sends_them() {
+        let parse = |json: &str| serde_json::from_str::<NativeAppAction>(json).unwrap();
+        assert!(matches!(
+            parse(r#"{"type":"set_public_nodes_enabled","enabled":true}"#),
+            NativeAppAction::SetPublicNodesEnabled { enabled: true }
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"set_public_node_selected","npub":"npub1x","selected":false}"#),
+            NativeAppAction::SetPublicNodeSelected {
+                selected: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"refresh_public_nodes"}"#),
+            NativeAppAction::RefreshPublicNodes
+        ));
+        assert!(matches!(
+            parse(r#"{"type":"set_app_foreground","foreground":false}"#),
+            NativeAppAction::SetAppForeground { foreground: false }
         ));
     }
 

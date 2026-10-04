@@ -92,6 +92,9 @@ on once the user says yes, and nothing is asked without a sentence about why.
 
 ### N10 — Connect to public internet mesh nodes
 
+> Status: built, awaiting the two-network test —
+> [design/fips/public-mesh-nodes.md](design/fips/public-mesh-nodes.md).
+
 **Goal.** When a phone is online, it can also peer with public FIPS nodes
 over the internet, so Circle members who aren't in the same room still reach
 each other: gossip, pulls, file sharing and app updates over the mesh as if

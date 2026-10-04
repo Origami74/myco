@@ -40,6 +40,10 @@ What Myco does not do yet:
   [roadmap](docs/roadmap.md#n11--share-myco-itself).
 - Phones find each other **only while Myco is open on screen**. A phone in a
   pocket finds nobody.
+- **Mesh over the internet** is opt-in (Settings › Mesh › Internet) and not
+  yet tested on two phones on different networks. It links to public FIPS
+  nodes, which see your phone's IP address but not what you send
+  ([how it works](docs/design/fips/public-mesh-nodes.md)).
 
 ## Pick your way in
 

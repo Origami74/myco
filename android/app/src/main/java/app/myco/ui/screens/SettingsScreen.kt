@@ -81,7 +81,7 @@ import app.myco.ui.radioWarnings
 
 
 /** The Settings surfaces: the root list and its drill-in sub-pages. */
-private enum class SettingsPage { Root, Account, Identity, Storage, DefaultApps, Developer }
+private enum class SettingsPage { Root, Account, Identity, Storage, DefaultApps, Internet, Developer }
 
 /**
  * Stores the user pointed us at that cannot be reached, as (title, detail).
@@ -164,9 +164,11 @@ fun SettingsScreen(
             onOpenIdentity = { page = SettingsPage.Identity },
             onOpenStorage = { page = SettingsPage.Storage },
             onOpenDefaultApps = { page = SettingsPage.DefaultApps },
+            onOpenInternet = { page = SettingsPage.Internet },
             onOpenDeveloper = { page = SettingsPage.Developer },
         )
         SettingsPage.DefaultApps -> DefaultAppsSettings(state, client, onBack = { page = SettingsPage.Root })
+        SettingsPage.Internet -> PublicNodesSettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Account -> AccountSettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Identity -> IdentitySettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Storage -> StorageSettings(state, client, onBack = { page = SettingsPage.Root })
@@ -204,6 +206,7 @@ private fun RootSettings(
     onOpenIdentity: () -> Unit,
     onOpenStorage: () -> Unit,
     onOpenDefaultApps: () -> Unit,
+    onOpenInternet: () -> Unit,
     onOpenDeveloper: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -287,10 +290,18 @@ private fun RootSettings(
                 enabled = meshEnabled,
             )
             RowDivider()
-            SoonRow(
+            // Public mesh nodes over the internet (N10): opt-in, with the
+            // trade-off spelled out on the page it opens.
+            val up = state.publicNodes.nodes.count { it.state == "connected" }
+            SettingRow(
                 icon = Icons.Filled.Public,
                 title = "Internet",
-                subtitle = "Mesh over the internet",
+                subtitle = when {
+                    !state.publicNodes.enabled -> "Mesh over the internet · off"
+                    up > 0 -> "Linked to $up public node${if (up == 1) "" else "s"}"
+                    else -> "Mesh over the internet · on"
+                },
+                onClick = onOpenInternet,
             )
         }
 

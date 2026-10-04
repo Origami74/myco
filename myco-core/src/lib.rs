@@ -97,6 +97,10 @@ mod relay_pool;
 // node's control socket, where pushing a platform-discovered peer now lives.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod platform_peers;
+// Public internet mesh nodes (N10): adverts read off Nostr, the recommended
+// list, and the dials over the internet lane. The driver runs on Android only.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod public_nodes;
 mod runtime;
 mod state;
 mod update_gate;

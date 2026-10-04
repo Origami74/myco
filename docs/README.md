@@ -132,6 +132,7 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 | [ble-interop.md](./design/fips/ble-interop.md) | BLE L2CAP over fips's `BleIo` seam: per-peer PSM discovery, MAC randomization, the foreground service. |
 | [wifi-aware-interop.md](./design/fips/wifi-aware-interop.md) | Wi-Fi Aware as a bulk lane: Kotlin raises the data path, fips's UDP transport dials it. |
 | [ap-lane.md](./design/fips/ap-lane.md) | The LAN lane: same-network peers over ordinary UDP, found by mDNS. |
+| [public-mesh-nodes.md](./design/fips/public-mesh-nodes.md) | The internet lane: public fips nodes found on Nostr, join.fips.network's recommended first, opt-in. |
 | [usb-transport.md](./design/fips/usb-transport.md) | Proposed, not started: USB/AOA for seeding large sites. |
 
 #### Shared assets
