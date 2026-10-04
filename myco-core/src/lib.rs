@@ -103,6 +103,10 @@ mod tun_bridge;
 // System-wide `.fips` DNS interception; driven by the TUN pump on Android.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod dns_intercept;
+// Full-tunnel exit: non-mesh TCP from the TUN, carried to a SOCKS5 proxy on a
+// mesh exit node. Turned on by the Android VpnService.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod socks_exit;
 // Surfaces each UDP transport instance's raw fd, keyed by instance name, so
 // Android can pin the right socket to the right `Network` (the Aware NDP vs.
 // the AP/LAN lane). Android-only consumer.

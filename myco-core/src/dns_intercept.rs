@@ -295,12 +295,25 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(4);
 /// only when the network underneath has none, so a query to an IPv4 resolver
 /// leaves via the real network without needing to be `protect()`ed.
 fn forward_upstream(src_addr: &[u8], src_port: u16, dns_query: &[u8]) {
+    let mut querier = [0u8; 16];
+    querier.copy_from_slice(src_addr);
+    // With the SOCKS exit on, ask through it: the exit is the phone's way out,
+    // and the tunnel now claims the routes these sockets would take.
+    if let Some(proxy) = crate::socks_exit::proxy() {
+        let query = dns_query.to_vec();
+        std::thread::spawn(move || {
+            if let Some(reply) = crate::socks_exit::dns_over_tcp(&proxy, &query) {
+                if reply.len() >= 2 && reply[..2] == query[..2] {
+                    crate::tun_bridge::push_local(build_reply(&querier, src_port, &reply));
+                }
+            }
+        });
+        return;
+    }
     let servers = upstream().lock().unwrap().clone();
     if servers.is_empty() {
         return; // nothing to relay to; the querier will time out and retry
     }
-    let mut querier = [0u8; 16];
-    querier.copy_from_slice(src_addr);
     let query = dns_query.to_vec();
 
     std::thread::spawn(move || {

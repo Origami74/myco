@@ -181,6 +181,11 @@ internal object NativeCore {
      *  nothing but mesh names. */
     external fun setUpstreamDns(servers: String)
 
+    /** Turn the full-tunnel SOCKS exit on (`"host:port"` of a SOCKS5 proxy on a
+     *  mesh exit node) or off (`""`). While on, every non-mesh TCP packet the
+     *  tunnel captures is carried through that proxy, and DNS with it. */
+    external fun setSocksExit(proxy: String)
+
     /** Raw fd of the UDP transport socket carrying `lane` (`"aware"` or
      *  `"udp"`), if the core has announced one newer than `sinceVersion`.
      *  Blocks up to `timeoutMs`.

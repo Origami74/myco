@@ -9,7 +9,7 @@ for it.
 
 This is the *simple* first cut: an **HTTP proxy** on the exit + Android's VPN
 `setHttpProxy`. It covers proxy-aware apps (browsers) — enough to load google.com.
-A full-tunnel (capture *all* IP traffic via tun2socks) is a later, bigger step.
+For every app, see [Full tunnel over SOCKS5](#4-full-tunnel-over-socks5).
 
 The exit is addressed by its **npub**: `<exit-npub>.fips`. Myco resolves `.fips`
 names system-wide (see [System-wide `.fips` DNS](#system-wide-fips-dns)), so the
@@ -138,9 +138,30 @@ curl -x http://localhost:8080 https://ifconfig.me   # → the exit's public IP
   compares the incoming config against the live one), so there is no need to
   toggle the mesh off and on.
 
-## 4. Next step (real full-tunnel)
+## 4. Full tunnel over SOCKS5
 
-Capture `0.0.0.0/0 + ::/0`, terminate every flow in a userspace netstack
-(smoltcp / hev-socks5-tunnel embedded in `myco-core`), relay SOCKS to the exit.
-`readLoop` classifies `fd00::` → FIPS, everything else → tun2socks. That makes
-*all* app traffic exit, not just proxy-aware apps.
+Enter the exit as `socks5://<exit-npub>.fips:1080` instead (the port defaults to
+1080). `fips-exitnode` already serves SOCKS5 on `:1080`.
+
+### How it works
+
+- The VPN claims the default routes: all public IPv4 and `::/0`. Private,
+  loopback, link-local and multicast IPv4 stay off it, so the LAN keeps working.
+  Myco's own mesh lanes are pinned to their networks and never enter the tunnel.
+- Packets for `fd00::/8` go to FIPS as before. Everything else goes to a
+  userspace TCP/IP stack in the core
+  ([`socks_exit`](../../myco-core/src/socks_exit.rs)), which turns each TCP
+  connection into a SOCKS5 `CONNECT` to the exit.
+- DNS: `.fips` names are still answered on the phone. Other names go over TCP
+  through the exit to `1.1.1.1:53`.
+
+### Limits
+
+- **TCP only.** UDP, QUIC included, is dropped; apps fall back to TCP.
+- **No-auth SOCKS5 only.**
+- **The exit sees everything.** Every TCP connection and every DNS query (sent
+  in clear to `1.1.1.1:53`) leaves through it. Use an exit you trust.
+- **The exit is the phone's only way out.** If the mesh path or the exit
+  stalls, the whole phone loses internet, not only the browser.
+- An exit that refuses a destination (SOCKS reply code 2) refuses DNS to
+  `1.1.1.1:53` too, and then no name resolves.

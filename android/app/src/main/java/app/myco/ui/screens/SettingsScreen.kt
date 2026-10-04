@@ -781,7 +781,9 @@ private fun DeveloperSettings(
             ) {
                 Text(
                     "Route web traffic through an HTTP proxy on a mesh exit node. " +
-                        "Enter the exit as <npub>.fips:8080 (or [fd00::…]:8080). Blank = off.",
+                        "Enter the exit as <npub>.fips:8080 (or [fd00::…]:8080). " +
+                        "Use socks5://<npub>.fips:1080 to send all of the phone's TCP " +
+                        "traffic through a SOCKS5 proxy instead. Blank = off.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

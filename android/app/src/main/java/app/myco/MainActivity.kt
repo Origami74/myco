@@ -436,7 +436,8 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Set (or clear) the mesh **exit proxy** — a `[fd00::exit]:port` HTTP proxy on
-     * a mesh node. Persisted, then applied by re-establishing the VPN so the new
+     * a mesh node, or a `socks5://…` one that carries all TCP (see
+     * [MycoVpnService]). Persisted, then applied by re-establishing the VPN so the new
      * proxy takes effect (the service re-configures in place when the config
      * changes). Empty string turns exit mode off (back to mesh-only routing).
      */

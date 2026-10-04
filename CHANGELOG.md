@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Full-tunnel exit over SOCKS5 (experimental).** Entering the exit node as
+  `socks5://<exit-npub>.fips:1080` sends all of the phone's TCP traffic through
+  a SOCKS5 proxy on the exit, not only the web traffic of apps that honour the
+  HTTP proxy. DNS goes through the exit too. UDP (QUIC included) is dropped,
+  so apps fall back to TCP. `.fips` addresses and the local network stay off
+  the exit. The plain `host:port` HTTP-proxy exit is unchanged.
+
 ### Changed
 
 - **Less black screen when a napplet opens.** The WebView renderer process is

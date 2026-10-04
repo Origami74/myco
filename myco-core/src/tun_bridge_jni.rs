@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use jni::objects::{JByteArray, JClass};
+use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jboolean, jint};
 use jni::JNIEnv;
 
@@ -53,4 +53,16 @@ pub extern "system" fn Java_app_myco_core_NativeCore_tunNextPacket(
         }
         None => 0,
     }
+}
+
+/// Kotlin → Rust: turn the SOCKS exit on (`"host:port"` of a SOCKS5 proxy on a
+/// mesh exit node) or off (`""`). See [`crate::socks_exit`].
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_setSocksExit(
+    mut env: JNIEnv,
+    _class: JClass,
+    proxy: JString,
+) {
+    let proxy: Option<String> = env.get_string(&proxy).ok().map(Into::into);
+    crate::socks_exit::set_proxy(proxy);
 }
