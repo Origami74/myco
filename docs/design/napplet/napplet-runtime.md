@@ -72,7 +72,7 @@ transport-neutral; the *web projection* binds them to iframes, `postMessage`, an
 | D6 | First milestone | A full verified resolve — manifest, blobs, aggregate, `srcdoc`, handshake. No shortcuts that get thrown away. |
 | D7 | Specification drift | Pin one `napplet/naps` revision and re-audit deliberately (§8). |
 | D8 | Capability policy | An install-time review screen; grants stored per library entry as two sets — `granted` and `denied` — and switchable per capability on the app's sheet afterwards (live — an open window obeys on its next call, and relaunches). A launch may grant a declared domain this build newly implements, but never one the user switched off: "never decided" and "said no" are different slots — and only if the domain was on the list the review sheet showed; a later manifest declaring more goes back through the review sheet, drawn over the napplet's own window, before it gets it. Preinstalled napplets carry the permissions Myco vetted them for as their reviewed list (§7.3). A granted `relay` covers publishing with no per-event prompt, except — interim, until the permission model adds prompts — kinds 0, 3, 5 and 10000–19999, which are refused per call. |
-| D9 | Acquisition | Fetch online when added by `naddr`; local and mesh-replicable from then on. |
+| D9 | Acquisition | Fetch when added by `naddr` — from the sharer and Circle members in reach, then online; local and mesh-replicable from then on. |
 | D10 | Crate | A new `myco-napplet-runtime`, over shared NIP-5A primitives in `nsite-deck`. |
 | D11 | Intents | Android Intents and NAP-INTENT resolve through one shared resolver, bridged both ways, landed early. Claiming the `nostr:` URI scheme is deferred. |
 | D12 | Shell origin | One loopback origin per napplet, `<pubkeyB36><dTag>.localhost`, mirroring nsite hosts. |
@@ -395,6 +395,36 @@ is downloaded before the user says yes: "Add" fetches the blob, verifies it agai
 manifest that was reviewed (kept in memory, so a newer version published meanwhile
 cannot slip in), stores both, and only then records grants on the library entry. The
 Apps panel grows a type discriminant and its 🦆 / ＠ annotations.
+
+Review and "Add" ask the same sources, in order:
+
+1. **The mesh, all at once** (`ip_source::FirstOf`): the sharer, when the pointer names
+   one (`holder`), and every other Circle member in reach (`Content::reachable_npubs`).
+   This is what finds a napplet opened from a bare `naddr` link, which names no sharer.
+   The first manifest signed by the author for the asked slot wins; a peer with nothing,
+   or with a forged answer, is passed over, and a dead peer — a sharer who has walked
+   off included — does not hold up a live one. Only Circle members: no one else's relay
+   or Blossom lets this phone pull.
+2. **The public relays** — the pointer's hints, the author's NIP-65 relays and the
+   defaults — unless offline-only is on. The mesh is not the internet, so offline-only
+   keeps 1.
+
+Manifests are raced, being one small `REQ` each; bytes are not. The blobs come from one
+phone at a time: the one whose manifest answer won — in reach, quick, and holding this
+app. "Add" starts from a fresh source, so before its first blob the manifest is raced once
+more to pick that phone. When it lacks a blob, fails, or goes silent for 5 s (no response,
+no next chunk — `NAPPLET_MESH_STALL`), it is dropped and the next phone is picked the same
+way from those not yet asked. Silence, not total time: a slow link still sends something,
+so a large download that is getting there is never cut off, while a phone that walked out
+of range costs 5 s rather than the HTTP client's 60 s. The
+first answer wins rather than the newest: getting the app onto the phone comes first,
+and a newer version reaches it later the way updates do (§7.3).
+
+Whatever answers is untrusted: `fetch_manifest` checks signature, author, address and `d`
+tag, and every blob is verified against the manifest before it is kept. Asking the Circle
+tells its members which napplet you are looking at — the disclosure §7.11 describes, for
+an app you chose to install rather than an attachment a feed showed you. The update check
+(§7.2) still asks the public relays only.
 
 *Done when* a real napplet, fetched by `naddr`, renders on a phone and completes the
 handshake. Every implemented API is injected whatever was granted, and

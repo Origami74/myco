@@ -4402,6 +4402,315 @@ mod tests {
         let err = NappletAddr::parse(&naddr).unwrap_err();
         assert!(err.to_string().contains("35128"), "unexpected error: {err}");
     }
+
+    /// A Circle member in reach: holding `napplet`, or nothing at all.
+    async fn nearby_peer(
+        napplet: Option<&myco_napplet_runtime::testing::TestNapplet>,
+    ) -> Box<dyn PeerSource> {
+        let source = FakeSource {
+            relay: MemRelay::new(),
+            blobs: MemBlobs::new(),
+            kind: KIND_NAMED,
+        };
+        if let Some(napplet) = napplet {
+            for (_, bytes) in &napplet.blobs {
+                source.blobs.put(bytes).await.unwrap();
+            }
+            source
+                .relay
+                .publish(napplet.manifest.clone())
+                .await
+                .unwrap();
+        }
+        Box::new(source)
+    }
+
+    /// A peer that is in the Circle list but never answers — out of range
+    /// since the list was read, or a link that stalls.
+    struct Silent;
+
+    #[async_trait::async_trait]
+    impl PeerSource for Silent {
+        async fn fetch_manifest(
+            &self,
+            _author: &PublicKey,
+            _d_tag: Option<&str>,
+        ) -> anyhow::Result<Option<nostr::Event>> {
+            std::future::pending().await
+        }
+
+        async fn fetch_blob(
+            &self,
+            _sha256_hex: &str,
+            _servers: &[String],
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            std::future::pending().await
+        }
+    }
+
+    /// The phones in reach as one source for `addr`, as `napplet_sources`
+    /// builds it.
+    fn mesh_of(peers: Vec<Box<dyn PeerSource>>, addr: &NappletAddr) -> crate::ip_source::FirstOf {
+        crate::ip_source::FirstOf::new(peers, addr.author, addr.d_tag.clone(), addr.kind())
+    }
+
+    /// A peer that counts the blobs it is asked for and answers manifests
+    /// after `delay` — a slower link than the others.
+    struct Counted {
+        peer: Box<dyn PeerSource>,
+        blobs_asked: Arc<std::sync::atomic::AtomicUsize>,
+        delay: std::time::Duration,
+    }
+
+    impl Counted {
+        fn new(
+            peer: Box<dyn PeerSource>,
+            delay_ms: u64,
+        ) -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let blobs_asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = Self {
+                peer,
+                blobs_asked: blobs_asked.clone(),
+                delay: std::time::Duration::from_millis(delay_ms),
+            };
+            (counted, blobs_asked)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PeerSource for Counted {
+        async fn fetch_manifest(
+            &self,
+            author: &PublicKey,
+            d_tag: Option<&str>,
+        ) -> anyhow::Result<Option<nostr::Event>> {
+            tokio::time::sleep(self.delay).await;
+            self.peer.fetch_manifest(author, d_tag).await
+        }
+
+        async fn fetch_blob(
+            &self,
+            sha256_hex: &str,
+            servers: &[String],
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            self.blobs_asked
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.peer.fetch_blob(sha256_hex, servers).await
+        }
+    }
+
+    fn fixture_addr(napplet: &myco_napplet_runtime::testing::TestNapplet) -> NappletAddr {
+        NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
+        }
+    }
+
+    /// Long enough for in-memory sources, far short of a mesh timeout: a
+    /// test that needs a silent peer's answer fails instead of hanging.
+    const NO_WAITING: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// A bare `naddr` names no sharer; a Circle member in reach that holds
+    /// the napplet is found, reviewed and installed from.
+    #[tokio::test]
+    async fn a_napplet_is_found_on_a_nearby_peer() {
+        let napplet = NappletBuilder::new().build();
+        let addr = fixture_addr(&napplet);
+        let nearby = mesh_of(vec![nearby_peer(Some(&napplet)).await], &addr);
+
+        let (event, _) = fetch_manifest(&addr, &nearby).await.unwrap();
+        assert_eq!(event.id, napplet.manifest.id);
+        let host = NappletHost::new(test_ctx(
+            Arc::new(MemRelay::new()),
+            Arc::new(MemBlobs::new()),
+        ));
+        host.ingest_event(event, &nearby).await.unwrap();
+        assert!(host.open(&addr, None).await.is_ok());
+    }
+
+    /// A peer that has nothing does not end the search: the next one is
+    /// still heard.
+    #[tokio::test]
+    async fn a_peer_with_nothing_does_not_stop_the_search() {
+        let napplet = NappletBuilder::new().build();
+        let addr = fixture_addr(&napplet);
+        let nearby = mesh_of(
+            vec![nearby_peer(None).await, nearby_peer(Some(&napplet)).await],
+            &addr,
+        );
+
+        let (event, _) = fetch_manifest(&addr, &nearby).await.unwrap();
+        assert_eq!(event.id, napplet.manifest.id);
+    }
+
+    /// Peers are asked at once: one that never answers does not hold up one
+    /// that does — neither for the manifest nor, at install, for the bytes.
+    #[tokio::test]
+    async fn a_silent_peer_does_not_hold_up_one_that_answers() {
+        let napplet = NappletBuilder::new().build();
+        let addr = fixture_addr(&napplet);
+        let nearby = || async {
+            mesh_of(
+                vec![Box::new(Silent), nearby_peer(Some(&napplet)).await],
+                &addr,
+            )
+        };
+
+        let (event, _) = tokio::time::timeout(NO_WAITING, async {
+            fetch_manifest(&addr, &nearby().await).await
+        })
+        .await
+        .expect("a silent peer held up the review")
+        .unwrap();
+        // Install asks afresh, as `InstallNapplet` does: no peer has
+        // answered this source yet.
+        let host = NappletHost::new(test_ctx(
+            Arc::new(MemRelay::new()),
+            Arc::new(MemBlobs::new()),
+        ));
+        tokio::time::timeout(NO_WAITING, async {
+            host.ingest_event(event, &nearby().await).await
+        })
+        .await
+        .expect("a silent peer held up the install")
+        .unwrap();
+        assert!(host.open(&addr, None).await.is_ok());
+    }
+
+    /// Peers stay untrusted: a forged manifest from one is passed over, not
+    /// handed on to fail the whole search while another holds the real one.
+    #[tokio::test]
+    async fn a_forged_answer_does_not_shadow_a_real_one() {
+        let keys = nostr::Keys::generate();
+        let napplet = NappletBuilder::new().keys(keys.clone()).build();
+        let forged = NappletBuilder::new().keys(keys).break_signature().build();
+        let addr = fixture_addr(&napplet);
+        let nearby = mesh_of(
+            vec![
+                nearby_peer(Some(&forged)).await,
+                nearby_peer(Some(&napplet)).await,
+            ],
+            &addr,
+        );
+
+        let (event, _) = fetch_manifest(&addr, &nearby).await.unwrap();
+        assert_eq!(event.id, napplet.manifest.id);
+    }
+
+    /// Install starts from a fresh source, with no peer heard from yet. The
+    /// bytes still come from one phone — the quickest to answer for the
+    /// manifest — not from every phone in the room at once.
+    #[tokio::test]
+    async fn the_bytes_come_from_one_peer_not_all_of_them() {
+        let napplet = NappletBuilder::new().build();
+        let addr = fixture_addr(&napplet);
+        let (quick, quick_asked) = Counted::new(nearby_peer(Some(&napplet)).await, 0);
+        let (slow, slow_asked) = Counted::new(nearby_peer(Some(&napplet)).await, 100);
+        let nearby = mesh_of(vec![Box::new(slow), Box::new(quick)], &addr);
+
+        let host = NappletHost::new(test_ctx(
+            Arc::new(MemRelay::new()),
+            Arc::new(MemBlobs::new()),
+        ));
+        host.ingest_event(napplet.manifest.clone(), &nearby)
+            .await
+            .unwrap();
+        let asked =
+            |n: &std::sync::atomic::AtomicUsize| n.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            asked(&slow_asked),
+            0,
+            "the slower phone was asked for bytes too"
+        );
+        assert_eq!(asked(&quick_asked), napplet.blobs.len());
+    }
+
+    /// The quickest phone may hold the manifest and not the bytes — it
+    /// reviewed the napplet and never installed it. The others are asked
+    /// then, and the install still lands.
+    #[tokio::test]
+    async fn a_quick_peer_without_the_bytes_hands_over_to_one_with_them() {
+        let napplet = NappletBuilder::new().build();
+        let addr = fixture_addr(&napplet);
+        let manifest_only = FakeSource {
+            relay: MemRelay::new(),
+            blobs: MemBlobs::new(),
+            kind: KIND_NAMED,
+        };
+        manifest_only
+            .relay
+            .publish(napplet.manifest.clone())
+            .await
+            .unwrap();
+        let (quick, quick_asked) = Counted::new(Box::new(manifest_only), 0);
+        let (slow, slow_asked) = Counted::new(nearby_peer(Some(&napplet)).await, 100);
+        let nearby = mesh_of(vec![Box::new(slow), Box::new(quick)], &addr);
+
+        let host = NappletHost::new(test_ctx(
+            Arc::new(MemRelay::new()),
+            Arc::new(MemBlobs::new()),
+        ));
+        tokio::time::timeout(
+            NO_WAITING,
+            host.ingest_event(napplet.manifest.clone(), &nearby),
+        )
+        .await
+        .expect("the install waited on a phone without the bytes")
+        .unwrap();
+        assert!(host.open(&addr, None).await.is_ok());
+        let asked =
+            |n: &std::sync::atomic::AtomicUsize| n.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(asked(&quick_asked), 1, "asked once, then passed over");
+        assert_eq!(asked(&slow_asked), napplet.blobs.len());
+    }
+
+    /// A phone that answers the manifest and then fails the download — it
+    /// stalled, or walked off — is dropped for the next one. One phone at a
+    /// time, never two at once, and the failed one is not asked again.
+    #[tokio::test]
+    async fn a_peer_that_fails_the_download_is_dropped_for_the_next() {
+        struct Failing(Box<dyn PeerSource>);
+
+        #[async_trait::async_trait]
+        impl PeerSource for Failing {
+            async fn fetch_manifest(
+                &self,
+                author: &PublicKey,
+                d_tag: Option<&str>,
+            ) -> anyhow::Result<Option<nostr::Event>> {
+                self.0.fetch_manifest(author, d_tag).await
+            }
+
+            async fn fetch_blob(
+                &self,
+                _sha256_hex: &str,
+                _servers: &[String],
+            ) -> anyhow::Result<Option<Vec<u8>>> {
+                anyhow::bail!("stalled")
+            }
+        }
+
+        let napplet = NappletBuilder::new().build();
+        let addr = fixture_addr(&napplet);
+        let (quick, quick_asked) =
+            Counted::new(Box::new(Failing(nearby_peer(Some(&napplet)).await)), 0);
+        let (slow, slow_asked) = Counted::new(nearby_peer(Some(&napplet)).await, 100);
+        let nearby = mesh_of(vec![Box::new(slow), Box::new(quick)], &addr);
+
+        let host = NappletHost::new(test_ctx(
+            Arc::new(MemRelay::new()),
+            Arc::new(MemBlobs::new()),
+        ));
+        host.ingest_event(napplet.manifest.clone(), &nearby)
+            .await
+            .unwrap();
+        assert!(host.open(&addr, None).await.is_ok());
+        let asked =
+            |n: &std::sync::atomic::AtomicUsize| n.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(asked(&quick_asked), 1, "the failed phone was asked again");
+        assert_eq!(asked(&slow_asked), napplet.blobs.len());
+    }
 }
 
 #[cfg(test)]
