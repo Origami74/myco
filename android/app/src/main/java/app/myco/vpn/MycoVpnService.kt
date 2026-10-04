@@ -224,6 +224,7 @@ class MycoVpnService : VpnService() {
         }
         if (pfd == null) {
             Log.e(TAG, "establish() returned null — VPN not consented or Builder rejected (ula=$ula)")
+            establishFailedAt = android.os.SystemClock.elapsedRealtime()
             relay?.close()
             relay = null
             android.widget.Toast.makeText(
@@ -606,6 +607,18 @@ class MycoVpnService : VpnService() {
         private var tunnelUp = false
 
         fun isUp(): Boolean = tunnelUp
+
+        /** `elapsedRealtime` of the last `establish()` that failed; 0 if none has. */
+        @Volatile
+        private var establishFailedAt = 0L
+
+        /**
+         * Whether `establish()` has failed at or after [since] (an
+         * `elapsedRealtime`). The setup popup reads this right after the VPN
+         * consent: consent given and then no tunnel almost always means another
+         * app's VPN holds the slot (see `MeshSetup.tunnel`).
+         */
+        fun establishFailedSince(since: Long): Boolean = establishFailedAt != 0L && establishFailedAt >= since
 
         /**
          * Parse an exit-proxy spec into (host, port). Accepts `<npub>.fips:8080`,

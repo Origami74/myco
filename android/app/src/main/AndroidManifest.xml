@@ -28,6 +28,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Settings › Permissions › Keep running: ask to be left out of battery
+         optimisation, for phones that suspend background radios. Optional and
+         user-initiated. Google Play restricts this permission; Myco ships via
+         GitHub Releases and Zapstore, and F-Droid has no rule against it. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- App-owned TUN: the VpnService routes only fd00::/8 (the mesh ULA). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- P2 content entry: fetch a pasted nsite link from public relays/Blossom

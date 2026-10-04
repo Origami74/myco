@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dials while mesh-only is on. A public node sees this
   phone's IP address and which mesh addresses it talks to, not what you send.
   The Dev tab shows which public nodes are up.
+- **Setting up the mesh, explained first.** After the intro, a popup asks
+  "Enable mesh?" and says what comes next: Android's nearby-devices prompt,
+  then its VPN prompt (the VPN only links Myco phones). Saying yes is three
+  taps on Android 13+. A refused step gets a card that says what won't work
+  and how to retry, including when another app's VPN is set to always on and
+  holds the slot. "No thanks" leaves the mesh off, with a way back from
+  Settings. Phones upgrading with a working mesh don't see it. Permissions are
+  no longer all asked for at launch, and notifications are no longer asked
+  for with Bluetooth.
+- **Settings › Permissions.** One page for the mesh switch, nearby phones,
+  the mesh connection, notifications and, optionally, keeping Myco running in
+  the background (the battery-optimisation exemption), each with its state and
+  a Fix or Allow.
 
 - **Full-tunnel exit over SOCKS5 (experimental).** Entering the exit node as
   `socks5://<exit-npub>.fips:1080` sends all of the phone's TCP traffic through
