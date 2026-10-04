@@ -466,6 +466,9 @@ pub struct IpPeerSource {
     /// Look up the author's NIP-65 relays too. See
     /// [`IpPeerSource::with_author_outbox`].
     author_outbox: Option<std::sync::Arc<AuthorOutbox>>,
+    /// Give up on a blob when nothing arrives for this long. See
+    /// [`IpPeerSource::with_stall_timeout`].
+    stall_timeout: Option<Duration>,
 }
 
 impl IpPeerSource {
@@ -486,6 +489,7 @@ impl IpPeerSource {
             kind_override: None,
             first_answer_grace: None,
             max_blob_bytes: None,
+            stall_timeout: None,
         }
     }
 
@@ -552,6 +556,20 @@ impl IpPeerSource {
     /// body, over BLE if the holder is a peer in the room.
     pub fn with_max_blob_bytes(mut self, max: usize) -> Self {
         self.max_blob_bytes = Some(max);
+        self
+    }
+
+    /// Give up on a blob when the server sends nothing — no response, no
+    /// next chunk — for `stall`, rather than when the whole download has
+    /// taken the client's 60 s.
+    ///
+    /// A peer that walked out of range sends nothing at all; one on a slow
+    /// link still sends something every few hundred milliseconds. Telling
+    /// the two apart by silence, not total time, lets a caller with other
+    /// peers to ask (see [`FirstOf`]) move on in seconds without cutting off
+    /// a large download that is getting there.
+    pub fn with_stall_timeout(mut self, stall: Duration) -> Self {
+        self.stall_timeout = Some(stall);
         self
     }
 
@@ -890,6 +908,145 @@ pub fn mesh_source_for(
     .over_peer_relay(pool, holder_npub))
 }
 
+/// Several sources asked at once — the sharer and the Circle members in
+/// reach — for one napplet or nsite slot, where the first good answer wins.
+///
+/// Asking them in turn would cost a dead peer's whole timeout (20 s for a
+/// mesh source) before the next is tried, while the user watches "Looking
+/// for this app". Every answer is still untrusted: a manifest that is not
+/// signed by the slot's author for the slot, or bytes that do not hash to
+/// the asked name, are passed over as if the source had said nothing, so one
+/// bad peer cannot shadow a good one. The caller verifies what wins as it
+/// would any single source's answer.
+///
+/// Manifests are raced: a `REQ` is small. Blobs are not — racing a blob
+/// across every peer downloads it from all of them at once, over BLE. A blob
+/// comes from one source at a time: the one that answered last, or, when
+/// none has (install starts from a fresh source), the winner of a manifest
+/// race — in reach, quick, and holding this app. When that source has
+/// nothing, fails, or stalls (give mesh sources a
+/// [`IpPeerSource::with_stall_timeout`]), it is dropped and the next is
+/// picked the same way from the sources not yet asked for this blob.
+pub struct FirstOf {
+    sources: Vec<Box<dyn PeerSource>>,
+    author: PublicKey,
+    d_tag: Option<String>,
+    /// Only manifests of this kind count.
+    kind: u16,
+    /// Index of the source that answered last; `usize::MAX` for none yet.
+    preferred: std::sync::atomic::AtomicUsize,
+}
+
+impl FirstOf {
+    pub fn new(
+        sources: Vec<Box<dyn PeerSource>>,
+        author: PublicKey,
+        d_tag: Option<String>,
+        kind: u16,
+    ) -> Self {
+        Self {
+            sources,
+            author,
+            d_tag,
+            kind,
+            preferred: std::sync::atomic::AtomicUsize::new(usize::MAX),
+        }
+    }
+
+    fn prefer(&self, index: usize) {
+        self.preferred
+            .store(index, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether `event` is a signed manifest by `author` for the asked slot.
+    fn answers(&self, event: &Event, author: &PublicKey, d_tag: Option<&str>) -> bool {
+        event.verify().is_ok()
+            && event.pubkey == *author
+            && event.kind.as_u16() == self.kind
+            && (d_tag.is_none() || event_d_tag(event).as_deref() == d_tag)
+    }
+
+    /// Race the manifest across every source not in `skip`; the first good
+    /// answer and whose it was. The winner becomes the preferred source.
+    async fn race_manifest(
+        &self,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+        skip: &[usize],
+    ) -> Option<(usize, Event)> {
+        let mut asks: futures_util::stream::FuturesUnordered<_> = self
+            .sources
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !skip.contains(i))
+            .map(|(i, source)| async move { (i, source.fetch_manifest(author, d_tag).await) })
+            .collect();
+        while let Some((i, answer)) = asks.next().await {
+            match answer {
+                Ok(Some(event)) if self.answers(&event, author, d_tag) => {
+                    self.prefer(i);
+                    return Some((i, event));
+                }
+                Ok(Some(_)) => tracing::debug!("source {i} answered with the wrong manifest"),
+                Ok(None) => {}
+                Err(e) => tracing::debug!("source {i}: {e}"),
+            }
+        }
+        None
+    }
+}
+
+#[async_trait]
+impl PeerSource for FirstOf {
+    async fn fetch_manifest(
+        &self,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+    ) -> anyhow::Result<Option<Event>> {
+        Ok(self
+            .race_manifest(author, d_tag, &[])
+            .await
+            .map(|(_, event)| event))
+    }
+
+    async fn fetch_blob(
+        &self,
+        sha256_hex_want: &str,
+        servers: &[String],
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        let mut asked: Vec<usize> = Vec::new();
+        while asked.len() < self.sources.len() {
+            let preferred = self.preferred.load(std::sync::atomic::Ordering::Relaxed);
+            let pick = if preferred < self.sources.len() && !asked.contains(&preferred) {
+                preferred
+            } else {
+                match self
+                    .race_manifest(&self.author, self.d_tag.as_deref(), &asked)
+                    .await
+                {
+                    Some((i, _)) => i,
+                    // No one left holds the app; the caller moves on to its
+                    // next source.
+                    None => break,
+                }
+            };
+            asked.push(pick);
+            match self.sources[pick]
+                .fetch_blob(sha256_hex_want, servers)
+                .await
+            {
+                Ok(Some(bytes)) if sha256_hex(&bytes) == sha256_hex_want => {
+                    self.prefer(pick);
+                    return Ok(Some(bytes));
+                }
+                Ok(_) => tracing::debug!("source {pick} has no {sha256_hex_want}"),
+                Err(e) => tracing::debug!("source {pick}: {e}"),
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// Dev-menu **speedtest** against a mesh peer: PUT a fresh `bytes`-sized payload to
 /// the peer's Blossom (`http://[fd00::peer]:24243/upload`), then GET it back, timing
 /// each leg. Returns `(up_mbps, down_mbps)` — upload (this device → peer) and
@@ -1169,7 +1326,19 @@ impl PeerSource for IpPeerSource {
                 continue;
             }
             let url = format!("{}/{}", server.trim_end_matches('/'), sha256_hex_want);
-            let resp = match self.http.get(&url).send().await {
+            let sent = match self.stall_timeout {
+                Some(stall) => {
+                    match tokio::time::timeout(stall, self.http.get(&url).send()).await {
+                        Ok(sent) => sent,
+                        Err(_) => {
+                            tracing::debug!("{server}: no response in {stall:?}");
+                            continue;
+                        }
+                    }
+                }
+                None => self.http.get(&url).send().await,
+            };
+            let resp = match sent {
                 Ok(r) => {
                     let retry_after = r
                         .headers()
@@ -1192,7 +1361,9 @@ impl PeerSource for IpPeerSource {
                     continue;
                 }
             };
-            let Some(bytes) = read_body_bounded(resp, self.max_blob_bytes).await else {
+            let Some(bytes) =
+                read_body_bounded(resp, self.max_blob_bytes, self.stall_timeout).await
+            else {
                 continue;
             };
             // Self-authenticating: only accept bytes that hash to the wanted name.
@@ -1206,23 +1377,35 @@ impl PeerSource for IpPeerSource {
 
 /// Read a response body, stopping early — `None` — the moment it is known to
 /// exceed `max`: from `Content-Length` when the server sends one, otherwise as
-/// the chunks arrive. `None` for a read error too; the caller tries the next
-/// server either way.
-async fn read_body_bounded(mut resp: reqwest::Response, max: Option<usize>) -> Option<Vec<u8>> {
-    let Some(max) = max else {
+/// the chunks arrive. `None` too when no chunk arrives for `stall`, and for a
+/// read error; the caller tries the next server either way.
+async fn read_body_bounded(
+    mut resp: reqwest::Response,
+    max: Option<usize>,
+    stall: Option<Duration>,
+) -> Option<Vec<u8>> {
+    if max.is_none() && stall.is_none() {
         return resp.bytes().await.ok().map(|b| b.to_vec());
-    };
-    if resp.content_length().is_some_and(|len| len > max as u64) {
-        return None;
+    }
+    if let (Some(max), Some(len)) = (max, resp.content_length()) {
+        if len > max as u64 {
+            return None;
+        }
     }
     let mut out = Vec::new();
-    while let Some(chunk) = resp.chunk().await.ok()? {
-        if out.len() + chunk.len() > max {
+    loop {
+        let chunk = match stall {
+            Some(stall) => tokio::time::timeout(stall, resp.chunk()).await.ok()?,
+            None => resp.chunk().await,
+        };
+        let Some(chunk) = chunk.ok()? else {
+            return Some(out);
+        };
+        if max.is_some_and(|max| out.len() + chunk.len() > max) {
             return None;
         }
         out.extend_from_slice(&chunk);
     }
-    Some(out)
 }
 
 fn event_d_tag(event: &Event) -> Option<String> {
@@ -1305,6 +1488,79 @@ pub(crate) mod tests {
 
     /// A mock Blossom: serve `GET /<hash>` from a (hash -> bytes) map. Returns the
     /// `http://` base URL.
+    /// A Blossom server that serves `bytes` in `chunks` pieces, `every` apart
+    /// — a slow link — and goes silent after `send` of them, or before even
+    /// the response when `send` is 0: a peer that walked out of range.
+    async fn mock_blossom_dripping(
+        bytes: Vec<u8>,
+        chunks: usize,
+        every: Duration,
+        send: usize,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let bytes = bytes.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    if send == 0 {
+                        std::future::pending::<()>().await;
+                    }
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    for (i, piece) in bytes.chunks(bytes.len().div_ceil(chunks)).enumerate() {
+                        if i == send {
+                            std::future::pending::<()>().await;
+                        }
+                        tokio::time::sleep(every).await;
+                        let _ = stream.write_all(piece).await;
+                        let _ = stream.flush().await;
+                    }
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A peer that went silent is given up on after the stall timeout, not
+    /// the client's 60 s — before the response, or halfway through the body.
+    #[tokio::test]
+    async fn a_silent_server_is_given_up_on_after_the_stall_timeout() {
+        let bytes = vec![7u8; 4096];
+        let hash = sha256_hex(&bytes);
+        for send in [0, 2] {
+            let server =
+                mock_blossom_dripping(bytes.clone(), 4, Duration::from_millis(20), send).await;
+            let source = IpPeerSource::new(Vec::new(), vec![server])
+                .ignoring_manifest_servers()
+                .with_stall_timeout(Duration::from_millis(300));
+            let got = tokio::time::timeout(Duration::from_secs(3), source.fetch_blob(&hash, &[]))
+                .await
+                .expect("a silent server was waited on past the stall timeout")
+                .unwrap();
+            assert!(got.is_none(), "after {send} chunks");
+        }
+    }
+
+    /// A slow server that keeps sending is not cut off, however long the
+    /// whole download takes: the timeout is for silence, not for size.
+    #[tokio::test]
+    async fn a_slow_server_that_keeps_sending_is_not_cut_off() {
+        let bytes = vec![9u8; 4096];
+        let hash = sha256_hex(&bytes);
+        // Five pieces 150 ms apart: 750 ms in all, against a 300 ms stall.
+        let server = mock_blossom_dripping(bytes.clone(), 5, Duration::from_millis(150), 5).await;
+        let source = IpPeerSource::new(Vec::new(), vec![server])
+            .ignoring_manifest_servers()
+            .with_stall_timeout(Duration::from_millis(300));
+        assert_eq!(source.fetch_blob(&hash, &[]).await.unwrap(), Some(bytes));
+    }
+
     pub(crate) async fn mock_blossom(blobs: Vec<(String, Vec<u8>)>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   black instead of 670–780 ms. The renderer is let go when Myco leaves the
   screen.
 
+### Fixed
+
+- **A napplet link finds the app on phones nearby.** Opening a napplet from a
+  link (a bare `naddr`, with no sharer named) asked only the internet relays,
+  so a phone without internet could not install it even with the app on a
+  paired phone next to it. Review and install now ask the sharer and every
+  Circle member in reach, all at once and before the internet — and with
+  offline-only on as well. A sharer who has walked off no longer holds up the
+  others. The app's files come from one phone, the quickest to answer, not
+  from all of them. What a peer sends is still fully verified.
+
 ## [0.9.1] - 2026-10-02
 
 ### Added

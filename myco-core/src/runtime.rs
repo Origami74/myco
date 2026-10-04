@@ -1669,6 +1669,7 @@ impl AppRuntime {
         let pointer = pointer.to_string();
         let review = self.napplet_review.clone();
         let peer_relays = content.peer_relays();
+        let reachable = content.reachable_npubs();
         let store = content.relay();
         // Read before the spawn, as the update check does: offline-only is a
         // setting, and a fetch that starts under it does not get to consult
@@ -1716,17 +1717,23 @@ impl AppRuntime {
         });
 
         rt.spawn(async move {
-            let sources =
-                napplet_sources(&addr, holder.as_deref(), peer_relays, store, offline_only);
+            let sources = napplet_sources(
+                &addr,
+                holder.as_deref(),
+                &reachable,
+                peer_relays,
+                store,
+                offline_only,
+            );
             let mut found = Err(anyhow::anyhow!(if offline_only && sources.is_empty() {
-                "Offline-only is on and nobody nearby shared this app"
+                "Offline-only is on and nobody in your Circle is nearby"
             } else {
                 "no source had this napplet"
             }));
             // The manifest only: review needs nothing else, and nothing is
             // downloaded before the user says yes.
             for source in &sources {
-                found = crate::napplet::fetch_manifest(&addr, source).await;
+                found = crate::napplet::fetch_manifest(&addr, source.as_ref()).await;
                 if found.is_ok() {
                     break;
                 }
@@ -1926,6 +1933,7 @@ impl AppRuntime {
             review.installing = true;
         }
         let peer_relays = content.peer_relays();
+        let reachable = content.reachable_npubs();
         let store = content.relay();
         let offline_only = content.is_offline_only();
         let review = self.napplet_review.clone();
@@ -1934,13 +1942,14 @@ impl AppRuntime {
             let sources = napplet_sources(
                 &addr,
                 reviewed.holder.as_deref(),
+                &reachable,
                 peer_relays,
                 store,
                 offline_only,
             );
             let mut ingested = Err(anyhow::anyhow!("no source had this napplet"));
             for source in &sources {
-                ingested = host.ingest_event(manifest.clone(), source).await;
+                ingested = host.ingest_event(manifest.clone(), source.as_ref()).await;
                 if ingested.is_ok() {
                     break;
                 }
@@ -3344,36 +3353,95 @@ fn answered_update(
     }
 }
 
-/// Where to look for a napplet, in the order worth trying. The peer who
-/// handed it over comes first: they demonstrably have it, they are in the
-/// room, and a napplet shared by a tap should not need the internet. Then
-/// the pointer's own relay hints, the author's NIP-65 relays and the
-/// defaults — unless offline-only is on, when the sharer's phone is the only
-/// source, as it is for every other acquisition path.
+/// How long a phone may send nothing — no response, no next chunk — before
+/// a napplet's bytes are asked of the next phone in reach instead. A phone
+/// still on the link sends something well inside this; one that walked out
+/// of range sends nothing, and waiting out the HTTP client's 60 s for it
+/// leaves the user staring at a progress ring.
+const NAPPLET_MESH_STALL: Duration = Duration::from_secs(5);
+
+/// Who [`napplet_sources`] asks for a napplet.
+#[derive(Debug, PartialEq)]
+struct NappletAsk {
+    /// The phones asked over the mesh, all at once: the sharer first, if the
+    /// pointer named one, then the other Circle members in reach.
+    mesh: Vec<String>,
+    /// The public relays, after the mesh.
+    public: bool,
+}
+
+/// The plan behind [`napplet_sources`]: the sharer and every other Circle
+/// member in reach (`reachable`), then — unless offline-only is on — the
+/// public relays. The mesh is not the internet, so offline-only leaves it in.
+fn napplet_ask(holder: Option<&str>, reachable: &[String], offline_only: bool) -> NappletAsk {
+    let mut mesh: Vec<String> = holder.map(str::to_string).into_iter().collect();
+    for npub in reachable {
+        if !mesh.contains(npub) {
+            mesh.push(npub.clone());
+        }
+    }
+    NappletAsk {
+        mesh,
+        public: !offline_only,
+    }
+}
+
+/// Where to look for a napplet, in the order worth trying. The mesh first:
+/// the peer who handed it over (they demonstrably have it, and a napplet
+/// shared by a tap should not need the internet) and the Circle members in
+/// reach (`reachable`, from [`Content::reachable_npubs`]) — a bare `naddr`
+/// from a link names no sharer, and a phone in the room may still hold it.
+/// They are asked at once, first good answer wins, so a sharer who has
+/// walked off does not hold up a phone that is still here; the bytes then
+/// come from that one phone (see [`crate::ip_source::FirstOf`]). Only
+/// Circle members: no one else's relay or Blossom lets this phone pull.
+/// Last the pointer's own relay hints, the author's NIP-65 relays and the
+/// defaults — unless offline-only is on, when the mesh is the only source,
+/// as it is for every other acquisition path.
 fn napplet_sources(
     addr: &crate::napplet::NappletAddr,
     holder: Option<&str>,
+    reachable: &[String],
     peer_relays: Arc<crate::peer_relay::PeerRelayPool>,
     store: Arc<dyn nsite_deck::seams::RelayBackend>,
     offline_only: bool,
-) -> Vec<crate::ip_source::IpPeerSource> {
-    let mut sources = Vec::new();
-    if let Some(npub) = holder {
-        match crate::ip_source::mesh_source_for(peer_relays, npub) {
-            Ok(mesh) => sources.push(mesh.with_kind(addr.kind())),
-            Err(e) => tracing::warn!("cannot reach the sharer {npub}: {e}"),
-        }
+) -> Vec<Box<dyn nsite_deck::seams::PeerSource>> {
+    let ask = napplet_ask(holder, reachable, offline_only);
+    let mut sources: Vec<Box<dyn nsite_deck::seams::PeerSource>> = Vec::new();
+    let mesh: Vec<Box<dyn nsite_deck::seams::PeerSource>> = ask
+        .mesh
+        .iter()
+        .filter_map(
+            |npub| match crate::ip_source::mesh_source_for(peer_relays.clone(), npub) {
+                Ok(mesh) => Some(Box::new(
+                    mesh.with_kind(addr.kind())
+                        .with_stall_timeout(NAPPLET_MESH_STALL),
+                ) as Box<_>),
+                Err(e) => {
+                    tracing::warn!("cannot ask {npub}: {e}");
+                    None
+                }
+            },
+        )
+        .collect();
+    if !mesh.is_empty() {
+        sources.push(Box::new(crate::ip_source::FirstOf::new(
+            mesh,
+            addr.author,
+            addr.d_tag.clone(),
+            addr.kind(),
+        )));
     }
-    if offline_only {
-        tracing::info!("offline-only: a napplet is asked of the sharer only");
-    } else {
+    if ask.public {
         // A short grace: the newest version usually comes from the first
         // relay to answer, and the user is watching "Looking for this app".
         // The update check keeps the longer default.
-        sources.push(
+        sources.push(Box::new(
             addr.public_source(store)
                 .with_first_answer_grace(Duration::from_millis(250)),
-        );
+        ));
+    } else {
+        tracing::info!("offline-only: a napplet is asked of the mesh only");
     }
     sources
 }
@@ -4895,5 +4963,66 @@ mod tests {
             ("naddr1b", "B")
         );
         assert!(!current.loading);
+    }
+
+    /// A bare `naddr` names no sharer: the Circle members in reach are
+    /// asked, then the public relays.
+    #[test]
+    fn a_napplet_with_no_sharer_is_asked_of_the_peers_in_reach() {
+        let ask = napplet_ask(None, &["npub1peer".to_string()], false);
+        assert_eq!(
+            ask,
+            NappletAsk {
+                mesh: vec!["npub1peer".to_string()],
+                public: true,
+            }
+        );
+    }
+
+    /// Offline-only keeps the internet out, not the phones in the room.
+    #[test]
+    fn offline_only_still_asks_the_peers_in_reach() {
+        let ask = napplet_ask(None, &["npub1peer".to_string()], true);
+        assert_eq!(ask.mesh, vec!["npub1peer".to_string()]);
+        assert!(!ask.public);
+    }
+
+    /// The sharer is asked alongside the phones in reach — not ahead of
+    /// them, where a sharer who walked off would hold them up — and once.
+    #[test]
+    fn the_sharer_is_asked_with_the_peers_in_reach_and_once() {
+        let reachable = ["npub1other".to_string(), "npub1sharer".to_string()];
+        let ask = napplet_ask(Some("npub1sharer"), &reachable, false);
+        assert_eq!(
+            ask.mesh,
+            vec!["npub1sharer".to_string(), "npub1other".to_string()]
+        );
+    }
+
+    /// With offline-only on and no sharer, a peer in reach is still a
+    /// source: the review does not stop at "nobody nearby" without asking.
+    #[test]
+    fn offline_only_with_a_peer_in_reach_has_somewhere_to_ask() {
+        use nostr::nips::nip19::ToBech32;
+        let keys = nostr::Keys::generate();
+        let addr = crate::napplet::NappletAddr {
+            author: keys.public_key(),
+            d_tag: Some("doodleduo".to_string()),
+            relays: Vec::new(),
+        };
+        let peer = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        let sources = |reachable: &[String]| {
+            napplet_sources(
+                &addr,
+                None,
+                reachable,
+                Arc::new(crate::peer_relay::PeerRelayPool::new()),
+                Arc::new(nsite_deck::testing::MemRelay::new()),
+                true,
+            )
+            .len()
+        };
+        assert_eq!(sources(&[]), 0);
+        assert_eq!(sources(&[peer]), 1);
     }
 }
