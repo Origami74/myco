@@ -31,6 +31,12 @@ use tokio::sync::{mpsc, oneshot};
 /// still approving, and the event could then go out anyway.
 pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The error a request fails with when the user said no in the signer app
+/// (or it "always rejects"). Kotlin answers with exactly this string
+/// (`ExternalSigner.REJECTED`); callers compare against this constant
+/// rather than spelling it, so a "no" can be told apart from a failure.
+pub const REJECTED: &str = "rejected";
+
 /// One request for Kotlin to carry to the signer app.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

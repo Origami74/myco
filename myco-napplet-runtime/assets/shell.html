@@ -169,6 +169,9 @@
     // trusted code, so a napplet cannot dress a message up as shell control
     // traffic.
     var message = event.data;
+    // An upload goes on once its bytes are read, so a message the napplet
+    // sends after it can reach Rust first. Nothing depends on that order
+    // today; a later message type that does must not take this path.
     if (isUpload(message)) {
       withUploadBytes(message).then(function (carried) {
         toRuntime({ channel: 'napplet', message: carried });

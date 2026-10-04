@@ -48,7 +48,10 @@ The napplet never names a server. In order:
    (`ip_source::default_blossom_servers`) are replicas that don't.
 
 At most five servers, tried one at a time. Only `https://` servers whose
-names resolve to public addresses.
+names resolve to public addresses. Redirects are never followed: a 3xx
+counts as that server refusing, and the next one is tried. Otherwise a
+redirect could send the signed upload to an address that was never checked,
+such as this phone's own relay or Blossom on loopback.
 
 The first server that takes it gives `url`. One more is then tried as a
 mirror for up to 15 s; if it stored the same bytes, it is `fallbackUrls`.
@@ -112,7 +115,11 @@ Per napplet, the spec's three policies are:
   do anything, and can be switched off per app; a prompt per upload would
   ask about every picture a game posts.
 - A signer app may still ask the user to approve the 24242 event. Saying no
-  there ends the upload as `cancelled`, `user cancelled`.
+  there ends the upload as `cancelled`, `user cancelled`. That relies on the
+  signer answering NIP-55's `rejected`. One that reports the "no" as a failed
+  result instead reads as a failure, and the upload ends as `failed`.
+  Myco's signer code and the uploader share one string for it
+  (`external_signer::REJECTED` / `ExternalSigner.REJECTED`).
 - A napplet installed before this build that declared `upload` was never
   shown it: the sheet lists only what the build implements. Its stored
   reviewed list does not count for `upload` (`GRANTED_ONLY_WHEN_SHOWN` in

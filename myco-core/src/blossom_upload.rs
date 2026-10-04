@@ -124,6 +124,12 @@ impl BlossomUploader {
             http: reqwest::Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 .read_timeout(READ_TIMEOUT)
+                // Never follow a redirect: the public-address check in `put`
+                // covers the URL it was given, and a redirect could send the
+                // signed upload somewhere it never looked — this phone's own
+                // relay or Blossom on loopback, say. A 3xx is that server's
+                // refusal, and the next server is tried.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_default(),
             guard: true,
@@ -251,9 +257,9 @@ impl BlossomUploader {
             crate::content::now_secs(),
         );
         // The signer bounds itself (a signer app gets its own answer
-        // timeout). A signer app's "no" comes back as `rejected`.
+        // timeout). A signer app's "no" is `external_signer::REJECTED`.
         let auth = self.signer.sign(template).await.map_err(|e| {
-            let said_no = e.to_string().contains("rejected");
+            let said_no = said_no(&e);
             UploadError::new(
                 if said_no {
                     UploadErrorCode::UserCancelled
@@ -504,6 +510,13 @@ fn host_of(server: &str) -> String {
         .unwrap_or_else(|| server.to_string())
 }
 
+/// Whether signing failed because the user said no, rather than broke.
+/// Anywhere in the error's chain, so added context doesn't hide it.
+fn said_no(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|cause| cause.to_string() == crate::external_signer::REJECTED)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,7 +696,7 @@ mod tests {
     /// The returned flag is offline-only.
     fn uploader(
         relay: Arc<dyn RelayBackend>,
-        signer: Arc<TestSigner>,
+        signer: Arc<dyn Signer>,
         servers: Vec<String>,
     ) -> (BlossomUploader, Arc<std::sync::atomic::AtomicBool>) {
         let offline = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -767,6 +780,80 @@ mod tests {
         let done = up.upload(&blob(b"bytes")).await.unwrap();
         assert_eq!(done.sha256, stored);
         assert!(done.url.contains(&stored));
+    }
+
+    /// A server answering with a redirect is not followed: the signed upload
+    /// never reaches where it points (here, another loopback server standing
+    /// in for this phone's own services), and the next server takes it.
+    #[tokio::test]
+    async fn a_redirect_is_a_refusal_and_never_followed() {
+        use axum::{routing::put, Router};
+        let (target, hit) = fake_blossom(None, false).await;
+        let (next, seen) = fake_blossom(None, false).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirecting = format!("http://{}", listener.local_addr().unwrap());
+        let to = format!("{target}/upload");
+        let app = Router::new().route(
+            "/upload",
+            put(move || {
+                let to = to.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [("location", to)],
+                        String::new(),
+                    )
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let (up, _) = uploader(
+            mem_relay(),
+            Arc::new(TestSigner::new()),
+            vec![redirecting, next.clone()],
+        );
+        let b = blob(b"bytes");
+        let done = up.upload(&b).await.unwrap();
+        assert_eq!(done.url, format!("{next}/{}.png", b.sha256));
+        assert!(hit.lock().unwrap().is_empty(), "the redirect was followed");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// The user saying no in the signer app is `user cancelled`; any other
+    /// signing failure is `upload failed`. Nothing is sent either way.
+    #[tokio::test]
+    async fn a_signer_no_is_a_cancel_and_a_failure_is_not() {
+        struct Refusing(&'static str);
+        #[async_trait::async_trait]
+        impl Signer for Refusing {
+            async fn public_key(&self) -> anyhow::Result<PublicKey> {
+                Ok(nostr::Keys::generate().public_key())
+            }
+            async fn sign(&self, _: UnsignedEvent) -> anyhow::Result<Event> {
+                Err(anyhow::anyhow!("{}", self.0))
+            }
+        }
+        let (server, seen) = fake_blossom(None, false).await;
+        for (why, code) in [
+            (
+                crate::external_signer::REJECTED,
+                UploadErrorCode::UserCancelled,
+            ),
+            (
+                "the signer app did not answer",
+                UploadErrorCode::UploadFailed,
+            ),
+        ] {
+            let (up, _) = uploader(mem_relay(), Arc::new(Refusing(why)), vec![server.clone()]);
+            let err = up.upload(&blob(b"bytes")).await.unwrap_err();
+            assert_eq!(err.code, code, "{why}");
+        }
+        assert!(seen.lock().unwrap().is_empty());
+        // Context added on top of the signer's "no" still reads as a no.
+        assert!(said_no(
+            &anyhow::anyhow!(crate::external_signer::REJECTED).context("signing the upload")
+        ));
     }
 
     /// Every server refusing is `server rejected`, with the reasons logged.
