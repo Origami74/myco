@@ -39,6 +39,9 @@ socket2 = { workspace = true }
 # `dns_intercept` synthesises the AAAA query it sends to the node's built-in
 # `.fips` responder for route warming. Matches fips's pin.
 simple-dns = "0.11.2"
+# The SOCKS exit (`socks_exit`): a userspace TCP/IP stack that terminates the
+# TUN's non-mesh TCP flows so each can be re-opened through the exit's proxy.
+ipstack = "1"
 # The guest avatar (`guest_avatar`): the bundled logo, decoded, tinted from the
 # npub and re-encoded. Pure Rust and scalar-only (no SIMD features), so the
 # same npub always yields the same bytes — and so the same Blossom hash.

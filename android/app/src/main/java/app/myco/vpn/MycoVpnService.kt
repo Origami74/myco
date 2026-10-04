@@ -54,6 +54,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * loopback relay ([ExitRelay]) carries those connections to the exit's mesh
  * address. Because the exit is named by npub, `<npub>.fips:8080` works and the
  * exit need not peer this device directly — FIPS forwards multi-hop.
+ *
+ * A `socks5://host:port` exit is a **full tunnel** instead: the service claims
+ * the default routes (all public IPv4, and `::/0`), and the native core carries
+ * every non-mesh TCP connection — from any app, proxy-aware or not — to that
+ * SOCKS5 proxy, DNS included (see `myco-core`'s `socks_exit`). Private and
+ * multicast IPv4 stay off the tunnel, so the LAN keeps working.
  */
 class MycoVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
@@ -94,7 +100,10 @@ class MycoVpnService : VpnService() {
         }
         // See the route block below; computed up front so a change in the
         // underlying network's IPv6 also counts as a config change.
-        val claimIpv6 = !underlyingHasGlobalIpv6()
+        // A SOCKS exit only counts once it parses: a malformed one must not
+        // claim the default routes with nothing behind them.
+        val socks = isSocksExit(exitProxy) && parseExit(exitProxy, 1080) != null
+        val claimIpv6 = socks || !underlyingHasGlobalIpv6()
 
         // Already up on this exact config — nothing to do. A changed one (the
         // user set or cleared the exit, or IPv6 appeared/vanished underneath)
@@ -118,8 +127,8 @@ class MycoVpnService : VpnService() {
 
         // In exit mode, stand the loopback relay up first — we need its port to
         // advertise the proxy below.
-        val exit = parseExit(exitProxy)
-        val relayPort: Int = if (exit != null) {
+        val exit = parseExit(exitProxy, if (socks) 1080 else 8080)
+        val relayPort: Int = if (exit != null && !socks) {
             val r = try {
                 ExitRelay(exit.first, exit.second).also { it.start() }
             } catch (t: Throwable) {
@@ -162,6 +171,14 @@ class MycoVpnService : VpnService() {
         // succeeds via the underlying default route, so the claim isn't needed;
         // where it doesn't, there is no IPv6 traffic to lose.
         if (claimIpv6) builder.addRoute("::", 0)
+        // SOCKS exit: claim all public IPv4 too, so every app's traffic reaches
+        // the pump. Myco's own mesh lanes are pinned to their networks with
+        // bindSocket and stay off the tunnel; its own internet traffic rides
+        // the exit like everyone else's.
+        if (socks) PUBLIC_IPV4.forEach { cidr ->
+            val (a, len) = cidr.split("/")
+            builder.addRoute(a, len.toInt())
+        }
         // Advertise the in-mesh sentinel resolver so every app on the VPN can
         // resolve `<npub>.fips` names system-wide. The native TUN pump answers
         // queries to this address (see dns_intercept); it never leaves the
@@ -218,6 +235,14 @@ class MycoVpnService : VpnService() {
             stopSelf()
             return
         }
+        NativeCore.setSocksExit(
+            if (socks && exit != null) {
+                val (h, p) = exit
+                if (':' in h) "[$h]:$p" else "$h:$p"
+            } else {
+                ""
+            },
+        )
         tun = pfd
         curUla = ula
         curMtu = mtuHint
@@ -232,7 +257,8 @@ class MycoVpnService : VpnService() {
             TAG,
             "mesh TUN up at $ula (route fd00::/8, dns $DNS_SENTINEL" +
                 "${if (claimIpv6) ", claiming ::/0" else ""}" +
-                "${if (relayPort > 0) ", exit on" else ""})",
+                "${if (relayPort > 0) ", exit on" else ""}" +
+                "${if (socks) ", socks exit on" else ""})",
         )
     }
 
@@ -414,6 +440,7 @@ class MycoVpnService : VpnService() {
         tun = null
         relay?.close()
         relay = null
+        NativeCore.setSocksExit("")
         curUla = ""
         curMtu = 0
         curExit = ""
@@ -583,12 +610,12 @@ class MycoVpnService : VpnService() {
         /**
          * Parse an exit-proxy spec into (host, port). Accepts `<npub>.fips:8080`,
          * `[fd00::ab]:8080`, `fd00::ab 8080`, `host:8080`, or a bare host
-         * (default port 8080), and tolerates a pasted `http(s)://…/` URL.
-         * Returns null when [spec] is blank or unparseable.
+         * (default port [defaultPort]), and tolerates a pasted `http(s)://…/`
+         * or `socks5://` URL. Returns null when [spec] is blank or unparseable.
          */
-        fun parseExit(spec: String): Pair<String, Int>? {
+        fun parseExit(spec: String, defaultPort: Int = 8080): Pair<String, Int>? {
             var s = spec.trim()
-            s = s.removePrefix("https://").removePrefix("http://")
+            s = s.replace(Regex("^(https?|socks5)://", RegexOption.IGNORE_CASE), "")
             // Drop a path but never a port — only cut at '/' (IPv6 literals use
             // brackets, so they carry no slashes).
             val slash = s.indexOf('/')
@@ -600,7 +627,7 @@ class MycoVpnService : VpnService() {
                     s.startsWith("[") -> {
                         val close = s.indexOf(']')
                         val host = s.substring(1, close)
-                        val port = s.substring(close + 1).removePrefix(":").ifEmpty { "8080" }
+                        val port = s.substring(close + 1).removePrefix(":").ifEmpty { "$defaultPort" }
                         host to port.toInt()
                     }
                     ' ' in s -> {
@@ -611,12 +638,31 @@ class MycoVpnService : VpnService() {
                         val (h, p) = s.split(":", limit = 2)
                         h to p.toInt()
                     }
-                    else -> s to 8080 // bare host, or a bracket-less IPv6 literal
+                    else -> s to defaultPort // bare host, or a bracket-less IPv6 literal
                 }
             } catch (_: Exception) {
                 null
             }
         }
+
+        /** Whether [spec] names a SOCKS5 exit — a full tunnel, not an HTTP proxy. */
+        fun isSocksExit(spec: String): Boolean = spec.trim().startsWith("socks5://", ignoreCase = true)
+
+        /** All IPv4 except this-network, private, loopback, link-local and
+         *  multicast/reserved (0/8, 10/8, 127/8, 169.254/16, 172.16/12,
+         *  192.168/16, 224/3) — the SOCKS exit's routes. Pre-API-33 VpnService
+         *  has no excludeRoute, so the complement is spelled out. */
+        private val PUBLIC_IPV4 = listOf(
+            "1.0.0.0/8", "2.0.0.0/7", "4.0.0.0/6", "8.0.0.0/7", "11.0.0.0/8", "12.0.0.0/6",
+            "16.0.0.0/4", "32.0.0.0/3", "64.0.0.0/3", "96.0.0.0/4", "112.0.0.0/5", "120.0.0.0/6",
+            "124.0.0.0/7", "126.0.0.0/8", "128.0.0.0/3", "160.0.0.0/5", "168.0.0.0/8",
+            "169.0.0.0/9", "169.128.0.0/10", "169.192.0.0/11", "169.224.0.0/12", "169.240.0.0/13",
+            "169.248.0.0/14", "169.252.0.0/15", "169.255.0.0/16", "170.0.0.0/7", "172.0.0.0/12",
+            "172.32.0.0/11", "172.64.0.0/10", "172.128.0.0/9", "173.0.0.0/8", "174.0.0.0/7",
+            "176.0.0.0/4", "192.0.0.0/9", "192.128.0.0/11", "192.160.0.0/13", "192.169.0.0/16",
+            "192.170.0.0/15", "192.172.0.0/14", "192.176.0.0/12", "192.192.0.0/10", "193.0.0.0/8",
+            "194.0.0.0/7", "196.0.0.0/6", "200.0.0.0/5", "208.0.0.0/4",
+        )
 
         fun start(context: Context, ula: String, mtu: Int, exitProxy: String = "") {
             context.startService(

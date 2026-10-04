@@ -223,7 +223,8 @@ the gossip, every capability a napplet gets.
 - **No membership authority.** A Circle is a local list on each phone; there
   is no roster, admin, or join event. Two people pair; nobody approves it.
 - **No exit node, no tunnel-all.** The TUN routes `fd00::/8` only, for Myco's
-  uid only. (An experimental exit-node demo exists as a how-to; it is not in
-  the product.)
+  uid only. (An experimental exit-node demo exists as a how-to, including a
+  SOCKS5 full tunnel that claims the default routes while it is set; it is not
+  in the product.)
 - **No store-and-forward in FIPS.** Survival across partition is layer 3's,
   by every phone being a holder.
