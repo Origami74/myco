@@ -2343,6 +2343,8 @@ impl AppRuntime {
                 // A partial start can still have left children up (a transport
                 // bound, the responder listening). Tear down what exists rather
                 // than dropping the node on top of them.
+                #[cfg(target_os = "android")]
+                crate::udp_fd_bridge::withdraw_all();
                 node.finish_shutdown().await;
                 return;
             }
@@ -2375,6 +2377,13 @@ impl AppRuntime {
             // holding `Arc` clones of the pool, the io and the stats; only
             // `Transport::stop` — reached from here — aborts them, and `Drop`
             // cannot run async teardown to catch them.
+            //
+            // Withdraw the UDP descriptors first, so the radios stop pinning
+            // a number that is about to be closed and may then be reused.
+            // Android-only like the `install` it undoes: on the host the lane
+            // registry belongs to the bridge's own tests, which this would race.
+            #[cfg(target_os = "android")]
+            crate::udp_fd_bridge::withdraw_all();
             node.finish_shutdown().await;
             // The responder socket is gone with the node's children, so retract
             // its address now (not at `StopNode`: it kept answering for the
@@ -2441,6 +2450,8 @@ impl AppRuntime {
                     task.abort();
                     let _ = task.await;
                     // The task never reached its own retraction.
+                    #[cfg(target_os = "android")]
+                    crate::udp_fd_bridge::withdraw_all();
                     crate::dns_intercept::set_responder_addr(None);
                 }
                 // Releases the gate in `start_node`: the transports are down (or

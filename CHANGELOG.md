@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offline-only on as well. A sharer who has walked off no longer holds up the
   others. The app's files come from one phone, the quickest to answer, not
   from all of them. What a peer sends is still fully verified.
+- **Wi-Fi and Wi-Fi Aware keep working after the mesh restarts.** When Myco's
+  mesh restarted in the background, a phone could come back connected over
+  Bluetooth only: phones on the same Wi-Fi and Wi-Fi Aware links were found
+  but never used, until Myco was force-stopped. A restart now brings both back.
 
 ## [0.9.1] - 2026-10-02
 

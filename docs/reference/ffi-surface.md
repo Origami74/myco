@@ -200,6 +200,9 @@ external fun nextUdpTransportFd(lane, sinceVersion, timeoutMs): Long  // the nod
 ```
 
 No byte bridge: fips's own UDP transport dials the address Kotlin pushes.
+`nextUdpTransportFd` returns a new version with fd `-1` when the node stops:
+Kotlin keeps only the number, never a dup, so the stopped node's socket closes
+and the next node can bind the same port.
 Design: [wifi-aware-interop.md](../design/fips/wifi-aware-interop.md),
 [ap-lane.md](../design/fips/ap-lane.md).
 
