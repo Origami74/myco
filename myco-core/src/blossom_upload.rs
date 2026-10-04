@@ -8,17 +8,22 @@
 //!
 //! 1. **Servers.** The user's BUD-03 list (kind 10063, `server` tags): this
 //!    device's relay first, then the user's own relays (their NIP-65 write
-//!    relays, through the outbox lanes) when the internet is up. With no
-//!    list, [`DEFAULT_SERVERS`].
+//!    relays, through the outbox lanes) when the internet is up. Only when
+//!    the lookup finished and found no list, [`DEFAULT_SERVERS`]: a list
+//!    that could not be fetched, or names nothing usable, is an error rather
+//!    than a quiet upload to servers the user did not pick.
 //! 2. **Authorization.** A BUD-02 kind-24242 event — `t` `upload`, `x` the
 //!    hash, `expiration` five minutes out — signed through the napplet
 //!    [`Signer`]: the user key, guest or a NIP-55 signer app (which may ask
 //!    the user). Sent as `Authorization: Nostr <base64(event json)>`.
 //! 3. **Upload.** `PUT <server>/upload`, one server at a time, until one
-//!    answers 2xx with a blob descriptor. What it says it stored is what is
-//!    reported — a hash other than ours is a transform, reported as both
-//!    hashes, never success the server did not confirm. Then one more server
-//!    is tried as a mirror, briefly; it becomes `fallbackUrls`.
+//!    answers 2xx with a blob descriptor naming the hash that was sent.
+//!    BUD-02's `/upload` stores bytes as given, so a descriptor naming
+//!    another hash is that server failing, and the next is tried. Then one
+//!    more server is tried as a mirror, briefly; it becomes `fallbackUrls`.
+//!
+//! One upload at a time: a 16 MiB upload is held in memory several times
+//! over on its way here, for minutes while a signer app waits.
 //!
 //! Offline-only refuses at once, and so does an internet the breaker says is
 //! down. Every stage is bounded; the sum stays under the prelude's
@@ -56,7 +61,8 @@ const MAX_SERVERS: usize = 5;
 /// How long finding the user's server list may take, both lookups together.
 const LIST_LOOKUP_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long the uploads to the primary candidates may take, together.
-const UPLOAD_BUDGET: Duration = Duration::from_secs(60);
+/// 16 MiB in 120 s needs a little over 1 Mbit/s up.
+const UPLOAD_BUDGET: Duration = Duration::from_secs(120);
 /// How long the mirror gets once the upload landed.
 const MIRROR_BUDGET: Duration = Duration::from_secs(15);
 /// How long one server gets to accept the connection.
@@ -83,6 +89,19 @@ pub struct BlossomUploader {
     /// Only `https://` servers whose names resolve to public addresses. Off
     /// only in tests, whose "Blossom" is on `127.0.0.1` over plain HTTP.
     guard: bool,
+    /// One upload at a time. A second one while this is held is refused at
+    /// once rather than queued, so its bytes are not held waiting.
+    one_at_a_time: tokio::sync::Semaphore,
+}
+
+/// What looking for the user's server list found.
+enum ServerList {
+    /// Their list.
+    Found(Vec<Event>),
+    /// Every place it could be answered, and it is not there.
+    Missing,
+    /// Their relays did not answer: whether they have a list is unknown.
+    Unknown,
 }
 
 impl BlossomUploader {
@@ -133,6 +152,7 @@ impl BlossomUploader {
                 .build()
                 .unwrap_or_default(),
             guard: true,
+            one_at_a_time: tokio::sync::Semaphore::new(1),
         }
     }
 
@@ -145,42 +165,68 @@ impl BlossomUploader {
         self
     }
 
-    /// The servers to try, in order: the user's list, else the defaults.
-    async fn servers_for(&self, user: PublicKey) -> Vec<String> {
+    /// The servers to try, in order: the user's list, else — only when they
+    /// have none — the defaults. A list that could not be fetched, or that
+    /// names no server this can upload to, is an error: the user picked
+    /// their servers, and a file of theirs does not go elsewhere unasked.
+    async fn servers_for(&self, user: PublicKey) -> Result<Vec<String>, UploadError> {
         let found = tokio::time::timeout(LIST_LOOKUP_TIMEOUT, self.server_list(user))
             .await
-            .unwrap_or_default();
-        let servers = servers_from_lists(&found, self.guard);
-        if servers.is_empty() {
-            self.defaults.clone()
-        } else {
-            servers
+            .unwrap_or(ServerList::Unknown);
+        match found {
+            ServerList::Missing => Ok(self.defaults.clone()),
+            ServerList::Unknown => Err(UploadError::new(
+                UploadErrorCode::UploadFailed,
+                "your relays did not answer, so your Blossom server list is unknown",
+            )),
+            ServerList::Found(lists) => {
+                let servers = servers_from_lists(&lists, self.guard);
+                if servers.is_empty() {
+                    Err(UploadError::new(
+                        UploadErrorCode::NoServerConfigured,
+                        "your Blossom server list names no https server on a public address",
+                    ))
+                } else {
+                    Ok(servers)
+                }
+            }
         }
     }
 
     /// The user's kind 10063: this device's copy, else their relays'.
-    async fn server_list(&self, user: PublicKey) -> Vec<Event> {
+    async fn server_list(&self, user: PublicKey) -> ServerList {
         let filter = nostr::Filter::new()
             .kind(Kind::from(KIND_SERVER_LIST))
             .author(user)
             .limit(1);
         if let Ok(held) = self.relay.query(std::slice::from_ref(&filter)).await {
             if !held.is_empty() {
-                return held;
+                return ServerList::Found(held);
             }
         }
         let plan = self.outbox.plan(Direction::Read, &[user]).await;
         let lanes = myco_napplet_runtime::seams::remote_lanes(plan.lanes);
+        // No relays of theirs known: nowhere else a list could be.
         if lanes.is_empty() {
-            return Vec::new();
+            return ServerList::Missing;
         }
-        self.lanes
+        let answers = self
+            .lanes
             .query(&lanes, &[filter], LIST_LOOKUP_TIMEOUT)
-            .await
+            .await;
+        let answered = answers.iter().any(|(_, events)| events.is_some());
+        let found: Vec<Event> = answers
             .into_iter()
             .flat_map(|(_, events)| events.unwrap_or_default())
             .filter(|e| e.pubkey == user && e.kind == Kind::from(KIND_SERVER_LIST))
-            .collect()
+            .collect();
+        if !found.is_empty() {
+            ServerList::Found(found)
+        } else if answered {
+            ServerList::Missing
+        } else {
+            ServerList::Unknown
+        }
     }
 
     /// One `PUT <server>/upload`: what the server confirmed it stored.
@@ -233,7 +279,15 @@ impl BlossomUploader {
                 ));
             }
         }
-        descriptor(&body, server, blob.bytes.len() as u64)
+        let stored = descriptor(&body, server, blob.bytes.len() as u64, !self.guard)?;
+        // BUD-02's `/upload` stores what it is sent. Another hash is not a
+        // transform this asked for; it is not the napplet's file.
+        if stored.sha256 != blob.sha256 {
+            return Err(PutFailure::Failed(
+                "it stored other bytes than were sent".into(),
+            ));
+        }
+        Ok(stored)
     }
 
     async fn upload_inner(&self, blob: &UploadBlob) -> Result<Uploaded, UploadError> {
@@ -243,19 +297,14 @@ impl BlossomUploader {
                 "not signed in: an upload is signed as you",
             )
         })?;
-        let servers = self.servers_for(user).await;
+        let servers = self.servers_for(user).await?;
         if servers.is_empty() {
             return Err(UploadError::new(
                 UploadErrorCode::NoServerConfigured,
                 "no Blossom server to try",
             ));
         }
-        let template = auth_template(
-            user,
-            &blob.sha256,
-            blob.filename.as_deref(),
-            crate::content::now_secs(),
-        );
+        let template = auth_template(user, &blob.sha256, crate::content::now_secs());
         // The signer bounds itself (a signer app gets its own answer
         // timeout). A signer app's "no" is `external_signer::REJECTED`.
         let auth = self.signer.sign(template).await.map_err(|e| {
@@ -301,14 +350,12 @@ impl BlossomUploader {
         };
         tracing::info!(server = %host_of(&servers[i]), url = %stored.url, "napplet upload landed");
 
-        // One mirror, briefly: a second place for the same stored bytes. A
-        // mirror that stored something else is not the same file.
+        // One mirror, briefly: a second place for the same bytes (`put`
+        // refuses a server that stored anything else).
         let mirror = async {
             for server in servers.iter().skip(i + 1) {
                 if let Ok(copy) = self.put(server, blob, &header).await {
-                    if copy.sha256 == stored.sha256 {
-                        return Some(copy.url);
-                    }
+                    return Some(copy.url);
                 }
             }
             None
@@ -348,6 +395,12 @@ impl UploadSink for BlossomUploader {
                 "no internet right now: an upload has to reach a Blossom server",
             ));
         }
+        let Ok(_only_one) = self.one_at_a_time.try_acquire() else {
+            return Err(UploadError::new(
+                UploadErrorCode::UploadFailed,
+                "another upload is still running: one at a time",
+            ));
+        };
         self.upload_inner(blob).await
     }
 }
@@ -390,16 +443,12 @@ pub fn servers_from_lists(lists: &[Event], https_only: bool) -> Vec<String> {
 }
 
 /// The BUD-02 authorization for uploading the blob `sha256`, unsigned.
-pub fn auth_template(
-    user: PublicKey,
-    sha256: &str,
-    filename: Option<&str>,
-    now: u64,
-) -> UnsignedEvent {
-    let content = match filename {
-        Some(name) => format!("Upload {name}"),
-        None => "Upload a file".to_string(),
-    };
+///
+/// The content is fixed. A signer app shows it on its approval screen, and
+/// napplet-chosen text there (a "filename" reading "tap Approve to log in")
+/// would be the napplet talking in the signer's voice.
+pub fn auth_template(user: PublicKey, sha256: &str, now: u64) -> UnsignedEvent {
+    let content = "Upload a file";
     let tags = [
         ["t", "upload"].map(String::from),
         ["x".to_string(), sha256.to_string()],
@@ -470,10 +519,10 @@ fn failure_code(failures: &[PutFailure]) -> UploadErrorCode {
 }
 
 /// Read a BUD-02 blob descriptor: what the server says it stored. It must
-/// name a hash. A hash other than the one sent means the server transformed
-/// the file; that is reported (as NAP-UPLOAD's `sha256` / `originalSha256`),
-/// never hidden. A descriptor without a URL gets `<server>/<stored hash>`.
-fn descriptor(body: &[u8], server: &str, sent: u64) -> Result<Stored, PutFailure> {
+/// name a hash (the caller checks it is the one sent). Its URL is used only
+/// if it is one a note can carry for this blob — see [`usable_url`] —
+/// else `<server>/<hash>`, which BUD-01 says the server serves it at.
+fn descriptor(body: &[u8], server: &str, sent: u64, any_http: bool) -> Result<Stored, PutFailure> {
     let not = || PutFailure::Failed("the answer was not a blob descriptor".into());
     let value: serde_json::Value = serde_json::from_slice(body).map_err(|_| not())?;
     let sha256 = value
@@ -485,7 +534,7 @@ fn descriptor(body: &[u8], server: &str, sent: u64) -> Result<Stored, PutFailure
     let url = value
         .get("url")
         .and_then(|v| v.as_str())
-        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+        .filter(|u| usable_url(u, &sha256, any_http))
         .map(str::to_string)
         .unwrap_or_else(|| format!("{server}/{sha256}"));
     let size = value.get("size").and_then(|v| v.as_u64()).unwrap_or(sent);
@@ -500,6 +549,29 @@ fn descriptor(body: &[u8], server: &str, sent: u64) -> Result<Stored, PutFailure
         size,
         mime,
     })
+}
+
+/// Whether a descriptor's `url` is one to hand the napplet for the blob
+/// `sha256`: `https`, or plain `http` on a `.fips` mesh name (the mesh is
+/// encrypted underneath), and naming the hash, so a server cannot point
+/// the user's post at some other file or host. `any_http` is for tests on
+/// loopback.
+fn usable_url(url: &str, sha256: &str, any_http: bool) -> bool {
+    let Ok(parsed) = nostr::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let scheme_ok = match parsed.scheme() {
+        "https" => true,
+        "http" => any_http || host.to_ascii_lowercase().ends_with(".fips"),
+        _ => false,
+    };
+    scheme_ok
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.path().to_ascii_lowercase().contains(sha256)
 }
 
 /// A server as a person reads it in an error: its host.
@@ -569,10 +641,10 @@ mod tests {
     fn the_auth_event_is_bud02() {
         let keys = nostr::Keys::generate();
         let sha = "ab".repeat(32);
-        let unsigned = auth_template(keys.public_key(), &sha, Some("score.png"), 1_000);
+        let unsigned = auth_template(keys.public_key(), &sha, 1_000);
         let event = unsigned.sign_with_keys(&keys).unwrap();
         assert_eq!(event.kind.as_u16(), 24242);
-        assert_eq!(event.content, "Upload score.png");
+        assert_eq!(event.content, "Upload a file");
         let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
         assert_eq!(
             tags,
@@ -593,19 +665,53 @@ mod tests {
     #[test]
     fn a_descriptor_says_what_was_stored() {
         let sha = "cd".repeat(32);
+        let read = |v: serde_json::Value| {
+            descriptor(v.to_string().as_bytes(), "https://x.example", 9, false)
+        };
         let ok = serde_json::json!({
-            "url": "https://x.example/a.png", "sha256": sha, "size": 3, "type": "image/png"
+            "url": format!("https://cdn.example/{sha}.png"), "sha256": sha, "size": 3, "type": "image/png"
         });
-        let got = descriptor(ok.to_string().as_bytes(), "https://x.example", 9).unwrap();
-        assert_eq!(got.url, "https://x.example/a.png");
+        let got = read(ok).unwrap();
+        assert_eq!(got.url, format!("https://cdn.example/{sha}.png"));
         assert_eq!((got.sha256.as_str(), got.size), (sha.as_str(), 3));
         assert_eq!(got.mime.as_deref(), Some("image/png"));
         let no_url = serde_json::json!({"sha256": sha});
-        let got = descriptor(no_url.to_string().as_bytes(), "https://x.example", 9).unwrap();
+        let got = read(no_url).unwrap();
         assert_eq!((got.url, got.size), (format!("https://x.example/{sha}"), 9));
         let no_hash = serde_json::json!({"url": "https://x.example/b"});
-        assert!(descriptor(no_hash.to_string().as_bytes(), "https://x.example", 9).is_err());
-        assert!(descriptor(b"<html>", "https://x.example", 9).is_err());
+        assert!(read(no_hash).is_err());
+        assert!(descriptor(b"<html>", "https://x.example", 9, false).is_err());
+    }
+
+    /// A descriptor's URL is used only when a note can carry it for this
+    /// blob: https, or http on a `.fips` name, naming the hash. Anything
+    /// else falls back to `<server>/<hash>`.
+    #[test]
+    fn a_descriptor_url_must_be_https_or_fips_and_name_the_hash() {
+        let sha = "cd".repeat(32);
+        let url_of = |url: String| {
+            let v = serde_json::json!({"url": url, "sha256": sha});
+            descriptor(v.to_string().as_bytes(), "https://x.example", 9, false)
+                .unwrap()
+                .url
+        };
+        let fallback = format!("https://x.example/{sha}");
+        for kept in [
+            format!("https://cdn.example/{sha}.png"),
+            format!("http://npub1abc.fips:24243/{sha}"),
+            format!("https://cdn.example/{}", sha.to_uppercase()),
+        ] {
+            assert_eq!(url_of(kept.clone()), kept);
+        }
+        for refused in [
+            format!("http://cdn.example/{sha}.png"),
+            "https://cdn.example/someone-elses.png".to_string(),
+            format!("https://cdn.example/x?h={sha}"),
+            format!("https://u:p@cdn.example/{sha}"),
+            format!("ftp://cdn.example/{sha}"),
+        ] {
+            assert_eq!(url_of(refused.clone()), fallback, "{refused}");
+        }
     }
 
     #[test]
@@ -770,16 +876,40 @@ mod tests {
         assert_eq!(mirrored.lock().unwrap()[0].1, b.bytes);
     }
 
-    /// A server that answers with another hash transformed the file: what it
-    /// stored is reported, not hidden and not refused.
+    /// A server that answers with another hash did not store the napplet's
+    /// file (BUD-02's `/upload` stores what it is sent): that server failed,
+    /// and the next one takes it. Alone, it is `upload failed`.
     #[tokio::test]
-    async fn a_descriptor_with_another_hash_is_reported_as_stored() {
-        let stored = "00".repeat(32);
-        let (transforming, _) = fake_blossom(Some(stored.clone()), false).await;
-        let (up, _) = uploader(mem_relay(), Arc::new(TestSigner::new()), vec![transforming]);
-        let done = up.upload(&blob(b"bytes")).await.unwrap();
-        assert_eq!(done.sha256, stored);
-        assert!(done.url.contains(&stored));
+    async fn a_descriptor_with_another_hash_is_that_server_failing() {
+        let (lying, _) = fake_blossom(Some("00".repeat(32)), false).await;
+        let (honest, _) = fake_blossom(None, false).await;
+        let b = blob(b"bytes");
+        let (up, _) = uploader(
+            mem_relay(),
+            Arc::new(TestSigner::new()),
+            vec![lying.clone(), honest.clone()],
+        );
+        let done = up.upload(&b).await.unwrap();
+        assert_eq!(done.sha256, b.sha256);
+        assert!(done.url.starts_with(&honest), "{}", done.url);
+
+        let (up, _) = uploader(mem_relay(), Arc::new(TestSigner::new()), vec![lying]);
+        let err = up.upload(&b).await.unwrap_err();
+        assert_eq!(err.code, UploadErrorCode::UploadFailed);
+        assert!(err.detail.contains("other bytes"), "{}", err.detail);
+    }
+
+    /// One upload at a time: a second, while one runs, is refused at once.
+    #[tokio::test]
+    async fn a_second_upload_while_one_runs_is_refused() {
+        let (server, seen) = fake_blossom(None, false).await;
+        let (up, _) = uploader(mem_relay(), Arc::new(TestSigner::new()), vec![server]);
+        let running = up.one_at_a_time.try_acquire().unwrap();
+        let err = up.upload(&blob(b"x")).await.unwrap_err();
+        assert_eq!(err.code, UploadErrorCode::UploadFailed);
+        assert!(seen.lock().unwrap().is_empty());
+        drop(running);
+        up.upload(&blob(b"x")).await.unwrap();
     }
 
     /// A server answering with a redirect is not followed: the signed upload
@@ -912,6 +1042,52 @@ mod tests {
         let done = up.upload(&blob(b"found it")).await.unwrap();
         assert!(done.url.starts_with(&theirs), "{}", done.url);
         assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// The user's relays not answering is not "no list": nothing goes to
+    /// the defaults, which the user may never have picked.
+    #[tokio::test]
+    async fn an_unknown_list_does_not_fall_back_to_the_defaults() {
+        let (default, unused) = fake_blossom(None, false).await;
+        let keys = nostr::Keys::generate();
+        let relay = mem_relay();
+        let outbox = Arc::new(OutboxFixture::new(relay.clone()));
+        outbox.set_plan(
+            keys.public_key(),
+            Direction::Read,
+            &["wss://their.relay"],
+            myco_napplet_runtime::PlanSource::Nip65,
+        );
+        outbox.mark_dead("wss://their.relay");
+        let up = BlossomUploader::with_parts(
+            relay,
+            Arc::new(|| false),
+            Arc::new(|| false),
+            Arc::new(TestSigner::with_keys(keys)),
+            outbox.clone(),
+            outbox,
+        )
+        .for_test(vec![default]);
+        let err = up.upload(&blob(b"x")).await.unwrap_err();
+        assert_eq!(err.code, UploadErrorCode::UploadFailed);
+        assert!(unused.lock().unwrap().is_empty());
+    }
+
+    /// A list naming only servers this cannot upload to is `no server
+    /// configured`, not an upload to the defaults.
+    #[tokio::test]
+    async fn a_list_with_nothing_usable_does_not_fall_back_to_the_defaults() {
+        let (default, unused) = fake_blossom(None, false).await;
+        let keys = nostr::Keys::generate();
+        let relay = mem_relay();
+        relay
+            .publish(list(&keys, &["ftp://nope.example"], 100))
+            .await
+            .unwrap();
+        let (up, _) = uploader(relay, Arc::new(TestSigner::with_keys(keys)), vec![default]);
+        let err = up.upload(&blob(b"x")).await.unwrap_err();
+        assert_eq!(err.code, UploadErrorCode::NoServerConfigured);
+        assert!(unused.lock().unwrap().is_empty());
     }
 
     /// Offline-only refuses before anything is signed or sent.

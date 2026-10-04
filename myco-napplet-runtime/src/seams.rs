@@ -668,8 +668,9 @@ pub struct UploadBlob {
     pub sha256: String,
     /// The MIME type the upload is sent with.
     pub mime: String,
-    /// The napplet's suggested filename, if any. Used in the authorization
-    /// event's description, never as a path.
+    /// The napplet's suggested filename, if any. Never a path, and never
+    /// put in the authorization event: a signer app shows that event's
+    /// text, and it is not the napplet's to write.
     pub filename: Option<String>,
 }
 

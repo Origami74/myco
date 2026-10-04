@@ -47,6 +47,11 @@ The napplet never names a server. In order:
    Both take uploads from any key. The other read defaults
    (`ip_source::default_blossom_servers`) are replicas that don't.
 
+The defaults are used only when the lookup finished and there is no list.
+If the user's relays don't answer in time, it's `upload failed`. If the list
+names no server Myco can use, it's `no server configured`. Either way nothing
+goes to servers the user never picked.
+
 At most five servers, tried one at a time. Only `https://` servers whose
 names resolve to public addresses. Redirects are never followed: a 3xx
 counts as that server refusing, and the next one is tried. Otherwise a
@@ -59,19 +64,23 @@ mirror for up to 15 s; if it stored the same bytes, it is `fallbackUrls`.
 ## Authorization
 
 A BUD-02 kind 24242 event: `t` `upload`, `x` the sha256 Myco computed,
-`expiration` five minutes out. Signed through the napplet `Signer`: the user's
+`expiration` five minutes out, content `Upload a file`. The napplet's
+filename is not put in it: a signer app shows that text on its approval
+screen, and it isn't the napplet's to write. Signed through the napplet `Signer`: the user's
 key, guest or a NIP-55 signer app. Sent as `Authorization: Nostr <base64>` on
 `PUT <server>/upload`. One event covers every server tried.
 
 ## What is reported
 
-- `sha256` is what the server's blob descriptor says it stored. If that
-  differs from the hash of what was sent, the server transformed the file:
-  Myco reports both (`sha256` and `originalSha256`, `x` and `ox`) rather than
-  failing, and claims no dimensions.
-- Success is only ever a 2xx with a descriptor naming a hash. Nothing else
-  counts.
-- `nip94`: `url`, `m`, `x`, `ox` when transformed, `size`, `dim` (PNG and GIF
+- Success is only ever a 2xx with a descriptor naming the hash that was
+  sent. BUD-02's `PUT /upload` stores bytes as given, so a descriptor naming
+  another hash is that server failing, and the next one is tried. The runtime
+  can still report a transform (`originalSha256`, `ox`) from an `UploadSink`
+  that makes one; the Blossom uploader never does.
+- `url` is the descriptor's only if it is `https` (or `http` on a `.fips`
+  mesh name) and names the hash. Anything else gets `<server>/<sha256>`, so a
+  server can't point the user's post at another file or host.
+- `nip94`: `url`, `m`, `x`, `size`, `dim` (PNG and GIF
   headers only), `fallback`, and `alt` from the caption.
 - `mimeType` is the server's `type` if it gave one, else what was sent.
 
@@ -98,7 +107,10 @@ Per napplet, the spec's three policies are:
 - **Rails:** Blossom, for every napplet granted `upload`.
 - **Size:** 16 MiB (`nap::upload::MAX_BYTES`, pinned to the shell page by a
   test). Over it: `file too large`. The bytes cross to Rust as base64 and are
-  copied a few times, so this is also what one upload may cost in memory.
+  held several times over on the way (JS string, Java string, Rust string,
+  JSON value, decoded bytes), so one upload can cost around 100 MB for a
+  moment. Hence **one upload at a time** per phone: a second, while one
+  runs, is `upload failed` at once rather than queued.
 - **MIME types:** any. The napplet's `mimeType` if it is a valid
   `type/subtype`, else the blob's type, else sniffed from the bytes
   (`application/octet-stream` when nothing matches). No `mimeTypes` in `info`.
@@ -130,7 +142,7 @@ Per napplet, the spec's three policies are:
 
 - **Offline-only on:** `policy denied`, before anything is signed.
 - **No internet** (the breaker is tripped): `upload failed`.
-- **Bounds:** server list 8 s, uploads 60 s together, mirror 15 s, per server
+- **Bounds:** server list 8 s, uploads 120 s together, mirror 15 s, per server
   5 s to connect and 20 s without progress, plus the signer's own wait (120 s
   for a signer app). The sum stays under the prelude's 5 min wait, checked by
   a test, so the napplet hears why rather than "timed out".
@@ -157,8 +169,8 @@ Per napplet, the spec's three policies are:
 - EXIF or other metadata stripping. Files go up as the napplet sent them.
 - A consent prompt showing type, size, target server and napplet, or a
   preview (spec SHOULD). Consent is the install grant.
-- Rate limiting per napplet (spec SHOULD). The size cap bounds one upload;
-  nothing bounds how many.
+- Rate limiting per napplet (spec SHOULD). The size cap bounds one upload
+  and only one runs at a time; nothing bounds how many in a row.
 - `noTransform` and `metadata` are ignored. BUD-02 `PUT /upload` does not
   transform anyway.
 - Cancelling an upload in flight.

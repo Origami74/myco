@@ -231,9 +231,11 @@
     return read().then(function (buffer) {
       request.dataBase64 = toBase64(new Uint8Array(buffer));
       return carried;
-    }, function () {
-      // Unreadable (a revoked or failed blob): sent without bytes, refused
-      // by Rust like any other missing data.
+    }).catch(function () {
+      // Unreadable (a revoked or failed blob), or too big to encode here:
+      // sent without bytes, refused by Rust like any other missing data,
+      // rather than never sent and left to the napplet's timeout.
+      delete request.dataBase64;
       return carried;
     });
   }
