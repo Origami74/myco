@@ -7,8 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-05
+
 ### Added
 
+- **Napplets can upload files (NAP-UPLOAD).** A napplet that asks for it, and
+  that you allow on the install sheet, can put a file — a picture to post,
+  say — on your Blossom servers, signed as you. Myco uses your server list
+  (kind 10063), or public defaults only if you have none; if your list can't
+  be found or names nothing usable, nothing is uploaded. It reports only what
+  the server confirmed, keeps a copy on the phone for paired phones, and
+  hands back the URL and NIP-94 tags. Up to 16 MiB, one upload at a time.
+  Nothing is uploaded with offline-only on. Apps installed earlier that
+  declared it are asked again. Doodle Duo uses it for its score picture.
 - **Mesh over the internet (opt-in).** Settings › Mesh › Internet links this
   phone to public FIPS nodes when it is online, so your Circle reaches you
   when you are not in the same room. Myco lists the nodes advertising on
@@ -48,14 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HTTP proxy. DNS goes through the exit too. UDP (QUIC included) is dropped,
   so apps fall back to TCP. `.fips` addresses and the local network stay off
   the exit. The plain `host:port` HTTP-proxy exit is unchanged.
-- **Napplets can upload files (NAP-UPLOAD).** A napplet that asks for it, and
-  that you allow on the install sheet, can put a file — a picture to post,
-  say — on your Blossom servers, signed as you. Myco uses your server list
-  (kind 10063) or public defaults, reports only what the server confirmed,
-  keeps a copy on the phone for paired phones, and hands back the URL and
-  NIP-94 tags. Up to 16 MiB. Nothing is uploaded with offline-only on. Apps
-  installed earlier that declared it are asked again. Doodle Duo uses it for
-  its score picture.
 
 ### Changed
 

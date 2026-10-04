@@ -11,9 +11,9 @@ map, the [index](./README.md).
 
 ---
 
-## Status — 2026-10-02
+## Status — 2026-10-05
 
-**Shipped** (v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
+**Shipped** (v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
 reads over a shared relay pool, Chronofeed and Simple Profile; v0.8.1 —
 local-first napplet reads, author relay lookup, relay skip list and selection; v0.8.0 — accounts, the AppStore napplet, updates over
 the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
@@ -42,8 +42,9 @@ the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
   `resource` (`blossom:` only, local store first, fetched blobs kept, up to
   64 MiB, delivered as bytes), `link`, `theme`, `local` (keep and pass on what
   a napplet was shown, [NAP-LOCAL](./design/napplet/NAP-LOCAL.md)), `inc`
-  (topic subscriptions) and `intent` (open by role —
-  [NAP-INTENT](./design/napplet/NAP-INTENT.md)).
+  (topic subscriptions), `intent` (open by role —
+  [NAP-INTENT](./design/napplet/NAP-INTENT.md)) and `upload` (to the user's
+  Blossom servers, signed as them — [NAP-UPLOAD](./design/napplet/NAP-UPLOAD.md)).
 - **The shell cache.** A bounded cache for events and blobs apart from what
   the phone keeps; reads stream as results arrive over one pooled connection
   per internet relay.
