@@ -185,7 +185,6 @@ fun SettingsScreen(
         )
         SettingsPage.Permissions -> PermissionsSettings(
             meshEnabled = meshEnabled,
-            onMeshToggle = onMeshToggle,
             onFixNearby = onFixNearby,
             onFixConnection = onFixConnection,
             onBack = { page = SettingsPage.Root },

@@ -63,15 +63,16 @@ Myco lets them hand it to you in person.**
 1. **[Get Myco](#get-myco)** on your phone. This step needs a download.
    Android asks whether your browser may install apps. Allow it for this
    install.
-2. **Open it and tap "Yes, I want mesh".** Android then asks twice:
+2. **Open it and tap "Yes, enable".** Android then asks twice:
    - **Nearby devices**, to find the phones around you. On Android 12 and
      older this includes **location**: Android requires it to scan for
      Bluetooth. Myco does not record where you are.
    - **A VPN prompt.** The VPN stays on your phone. Myco uses it to talk to
      other phones, not to send your traffic anywhere.
 
-   The **camera** is asked for only when you scan a code. **Notifications**
-   are optional: turn them on in **Settings › Permissions**.
+   Then keep the suggested name or change it: it is what the people you pair
+   with see. The **camera** is asked for only when you scan a code.
+   **Notifications** are optional: turn them on in **Settings › Permissions**.
 3. **Pair**, in the **Circle** tab. Any one of these:
    - **Bump:** hold your phone back to back with theirs.
    - **Nearby:** tap them in the list of phones Myco found over Bluetooth,

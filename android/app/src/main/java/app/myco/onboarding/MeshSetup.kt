@@ -1,13 +1,14 @@
 package app.myco.onboarding
 
 /**
- * Where the mesh setup popup is.
+ * Where the setup popup is.
  *
- * The popup has three segments — Install Myco (always done), Nearby phones and
- * Connection — and these are the states it can be in across the last two. Only
- * [EnableMesh] and the three refusal cards ask the user anything; the `Asking…`
- * and [Connecting] states are what sits behind Android's own prompts, so the
- * happy path is three taps: "Yes", Android's nearby prompt, Android's VPN prompt.
+ * The popup has up to four segments — Install Myco (always done), Nearby
+ * phones, Connection and Name — and these are the states it can be in across
+ * the last three. Only [EnableMesh], the three refusal cards and [Name] ask the
+ * user anything; the `Asking…` and [Connecting] states are what sits behind
+ * Android's own prompts, so the happy path is "Yes", Android's nearby prompt,
+ * Android's VPN prompt, then "Keep using this".
  */
 enum class SetupStep {
     /** "Enable mesh?" — the first card, and the only one on the happy path. */
@@ -30,10 +31,44 @@ enum class SetupStep {
 
     /** Another app's always-on VPN holds the slot: "Another VPN is always on". */
     AlwaysOnVpn,
+
+    /** The device name: keep the default, or change it. Always last. */
+    Name,
 }
 
+/** A segment of the progress bar. */
+enum class Segment { Install, Nearby, Connection, Name }
+
 /** How one segment of the progress bar draws. */
-enum class SegmentState { Done, Active, Problem, Pending }
+enum class SegmentState { Done, Active, Problem, Pending, Skipped }
+
+/**
+ * Which segments this run of the popup has. [mesh] covers Nearby phones and
+ * Connection together; [name] is the name step. A fresh install has both; the
+ * mesh switch reopens it with only the mesh steps once the name is chosen; an
+ * upgrade whose mesh already works but never chose a name gets only the name.
+ */
+data class SetupPlan(val mesh: Boolean, val name: Boolean) {
+    val segments: List<Segment> = buildList {
+        add(Segment.Install)
+        if (mesh) addAll(listOf(Segment.Nearby, Segment.Connection))
+        if (name) add(Segment.Name)
+    }
+}
+
+/**
+ * How the mesh steps of this run went, for drawing the segments behind the
+ * one on screen.
+ *
+ * @param declined "No thanks": Nearby and Connection were skipped.
+ * @param nearbyRefused carried on past a nearby refusal.
+ * @param connectionSkipped "Not now" / "Continue without" on the VPN.
+ */
+data class MeshOutcome(
+    val declined: Boolean = false,
+    val nearbyRefused: Boolean = false,
+    val connectionSkipped: Boolean = false,
+)
 
 /** What to do about the popup when the app starts. */
 enum class LaunchDecision {
@@ -134,28 +169,60 @@ object MeshSetup {
     fun meshOnNeedsSetup(nearbyGranted: Boolean, vpnPrepared: Boolean): Boolean =
         !(nearbyGranted && vpnPrepared)
 
-    /** "Step N of 3": the Nearby phones steps are 2, the Connection steps 3. */
-    fun stepNumber(step: SetupStep): Int = when (step) {
-        SetupStep.EnableMesh, SetupStep.AskingNearby, SetupStep.NearbyRefused -> 2
-        else -> 3
+    /**
+     * What this launch puts in the popup: the mesh steps when [atLaunch] says
+     * [LaunchDecision.Show], the name step when no name was ever chosen.
+     * Null when there is nothing to ask.
+     */
+    fun launchPlan(mesh: LaunchDecision, nameChosen: Boolean): SetupPlan? {
+        val plan = SetupPlan(mesh = mesh == LaunchDecision.Show, name = !nameChosen)
+        return if (plan.mesh || plan.name) plan else null
     }
 
+    /** The card a run of the popup opens on. */
+    fun firstStep(plan: SetupPlan): SetupStep =
+        if (plan.mesh) SetupStep.EnableMesh else SetupStep.Name
+
     /**
-     * The three segments — Install Myco, Nearby phones, Connection — for
-     * [step]. [nearbyRefused] keeps the Nearby segment amber once the user
-     * carried on past a refusal.
+     * Where to go once the mesh steps are over, whichever way they ended
+     * ("No thanks" included — the name matters without mesh too): the name
+     * step if this run has one, otherwise null, which closes the popup.
      */
-    fun segments(step: SetupStep, nearbyRefused: Boolean): List<SegmentState> {
-        val nearbyDone = if (nearbyRefused) SegmentState.Problem else SegmentState.Done
-        return when (step) {
-            SetupStep.EnableMesh, SetupStep.AskingNearby ->
-                listOf(SegmentState.Done, SegmentState.Active, SegmentState.Pending)
-            SetupStep.NearbyRefused ->
-                listOf(SegmentState.Done, SegmentState.Problem, SegmentState.Pending)
-            SetupStep.AskingVpn, SetupStep.Connecting ->
-                listOf(SegmentState.Done, nearbyDone, SegmentState.Active)
-            SetupStep.VpnRefused, SetupStep.AlwaysOnVpn ->
-                listOf(SegmentState.Done, nearbyDone, SegmentState.Problem)
+    fun afterMesh(plan: SetupPlan): SetupStep? = if (plan.name) SetupStep.Name else null
+
+    /** The segment [step] belongs to. */
+    fun segmentOf(step: SetupStep): Segment = when (step) {
+        SetupStep.EnableMesh, SetupStep.AskingNearby, SetupStep.NearbyRefused -> Segment.Nearby
+        SetupStep.AskingVpn, SetupStep.Connecting, SetupStep.VpnRefused, SetupStep.AlwaysOnVpn ->
+            Segment.Connection
+        SetupStep.Name -> Segment.Name
+    }
+
+    /** "Step N of [SetupPlan.segments].size": [step]'s place in this run. */
+    fun stepNumber(step: SetupStep, plan: SetupPlan): Int =
+        plan.segments.indexOf(segmentOf(step)) + 1
+
+    /**
+     * How each of [plan]'s segments draws while [step] is on screen. Segments
+     * behind it say how they went — done, amber for a refusal the user carried
+     * on past, struck through for steps "No thanks" skipped — and the ones
+     * ahead are pending, so the count stays the same on every path.
+     */
+    fun segments(step: SetupStep, plan: SetupPlan, outcome: MeshOutcome): List<SegmentState> {
+        val current = segmentOf(step)
+        val currentIndex = plan.segments.indexOf(current)
+        val refusalCard = step == SetupStep.NearbyRefused ||
+            step == SetupStep.VpnRefused || step == SetupStep.AlwaysOnVpn
+        return plan.segments.mapIndexed { i, seg ->
+            when {
+                seg == Segment.Install -> SegmentState.Done
+                i > currentIndex -> SegmentState.Pending
+                i == currentIndex -> if (refusalCard) SegmentState.Problem else SegmentState.Active
+                outcome.declined -> SegmentState.Skipped
+                seg == Segment.Nearby && outcome.nearbyRefused -> SegmentState.Problem
+                seg == Segment.Connection && outcome.connectionSkipped -> SegmentState.Problem
+                else -> SegmentState.Done
+            }
         }
     }
 

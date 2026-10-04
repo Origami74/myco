@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.net.VpnService
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
@@ -12,7 +13,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -29,7 +29,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -67,7 +66,6 @@ private data class PermissionSnapshot(
     val tunnelUp: Boolean,
     val notificationsOn: Boolean,
     val batteryExempt: Boolean,
-    val declined: Boolean,
 ) {
     companion object {
         /** Binder calls (`VpnService.prepare`, power manager): off the main thread. */
@@ -81,7 +79,6 @@ private data class PermissionSnapshot(
                 tunnelUp = MycoVpnService.isUp(),
                 notificationsOn = MeshPermissions.notificationsEnabled(context),
                 batteryExempt = MeshPermissions.ignoringBatteryOptimizations(context),
-                declined = prefs.getBoolean(MainActivity.PREF_MESH_DECLINED, false),
             )
         }
     }
@@ -89,17 +86,17 @@ private data class PermissionSnapshot(
 
 /**
  * **Settings › Permissions** — what Myco has from Android, one row each, with
- * the way to fix it beside it.
+ * the way to fix it beside it. Permissions only: the mesh switch lives where
+ * it always has (Settings › Mesh, the status pill).
  *
- * The mesh rows (Nearby phones, Mesh connection) don't ask Android themselves:
- * their Fix reopens the setup popup at that step, so there is one place mesh
- * permissions are asked from. Notifications and the battery exemption are not
+ * With the mesh on, the mesh rows' Fix reopens the setup popup at that step,
+ * which also brings the lanes up. With it off they ask Android directly, since
+ * there is nothing to start. Notifications and the battery exemption are not
  * part of setup at all — they are asked for here, when the user wants them.
  */
 @Composable
 internal fun PermissionsSettings(
     meshEnabled: Boolean,
-    onMeshToggle: (Boolean) -> Unit,
     onFixNearby: () -> Unit,
     onFixConnection: () -> Unit,
     onBack: () -> Unit,
@@ -134,67 +131,82 @@ internal fun PermissionsSettings(
         if (MeshSetup.refusedForGood(granted, elapsed, rationale)) openNotificationSettings(context)
     }
 
-    SettingsColumn {
-        SubHeader("Permissions", onBack)
-        val s = snap ?: return@SettingsColumn
-
-        PermissionCard {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Mesh", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Text(
-                        when {
-                            meshEnabled -> "On — phones nearby can find this one"
-                            s.declined -> "Off — you chose “No thanks”"
-                            else -> "Off"
-                        },
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Switch(checked = meshEnabled, onCheckedChange = onMeshToggle)
-            }
-        }
-        if (!meshEnabled) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-            ) {
-                Text(
-                    "Turning Mesh on asks for nearby devices and the VPN — the same steps as “Yes” in setup.",
-                    color = MaterialTheme.colorScheme.primary,
-                    fontSize = 11.5.sp,
+    // Asked from here only while the mesh is off; with it on, the setup popup
+    // asks (see the rows). The results need no handling beyond the next
+    // re-read, except a refusal for good, which goes to the app's settings.
+    var nearbyAskedAt by remember { mutableLongStateOf(0L) }
+    val nearbyLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results ->
+        val allGranted = results.isNotEmpty() && results.values.all { it }
+        val rationale = (context as? Activity)?.let { a ->
+            results.keys.any { ActivityCompat.shouldShowRequestPermissionRationale(a, it) }
+        } == true
+        if (results.isNotEmpty() &&
+            MeshSetup.refusedForGood(allGranted, SystemClock.elapsedRealtime() - nearbyAskedAt, rationale)
+        ) {
+            runCatching {
+                context.startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")),
                 )
             }
         }
+    }
+    val vpnLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
+
+    SettingsColumn {
+        SubHeader("Permissions", onBack)
+        val s = snap ?: return@SettingsColumn
 
         PermissionRow(
             icon = { PhonesIcon(it, Modifier.size(22.dp)) },
             title = "Nearby phones",
             status = when {
                 s.nearbyGranted -> "Allowed — Bluetooth and Wi-Fi can find phones nearby"
-                !meshEnabled && !s.nearbyAsked -> "Not asked yet — needs Mesh on"
-                !meshEnabled -> "Not allowed — needs Mesh on"
+                !s.nearbyAsked -> "Not asked yet"
                 else -> "Not allowed — Myco can’t look for phones nearby"
             },
-            action = if (meshEnabled && !s.nearbyGranted) "Fix" else null,
-            onAction = onFixNearby,
+            action = if (s.nearbyGranted) null else if (s.nearbyAsked) "Fix" else "Allow",
+            onAction = {
+                // Mesh on: the setup popup's nearby step, which also starts
+                // the radios. Mesh off: just ask — nothing is to start.
+                if (meshEnabled) {
+                    onFixNearby()
+                } else {
+                    context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE).edit()
+                        .putBoolean(MainActivity.PREF_NEARBY_ASKED, true).apply()
+                    nearbyAskedAt = SystemClock.elapsedRealtime()
+                    nearbyLauncher.launch(MeshPermissions.nearby(context).toTypedArray())
+                }
+            },
         )
         PermissionRow(
             icon = { MeshIcon(it, Modifier.size(22.dp)) },
             title = "Mesh connection",
             status = when {
-                !meshEnabled && !s.vpnPrepared && !s.vpnAsked -> "Not asked yet — needs Mesh on"
-                !meshEnabled && !s.vpnPrepared -> "Not allowed — needs Mesh on"
-                !meshEnabled -> "Allowed — off while Mesh is off"
+                !s.vpnPrepared && !s.vpnAsked -> "Not asked yet"
                 !s.vpnPrepared -> "Not allowed, or another app’s VPN holds the slot"
-                !s.tunnelUp -> "Allowed, but not running"
-                else -> "Running — the VPN only links Myco phones"
+                meshEnabled && !s.tunnelUp -> "Allowed, but not running"
+                meshEnabled -> "Running — the VPN only links Myco phones"
+                else -> "Allowed — the VPN only links Myco phones"
             },
-            action = if (meshEnabled && !(s.vpnPrepared && s.tunnelUp)) "Fix" else null,
-            onAction = onFixConnection,
+            action = when {
+                !s.vpnPrepared -> if (s.vpnAsked) "Fix" else "Allow"
+                meshEnabled && !s.tunnelUp -> "Fix"
+                else -> null
+            },
+            onAction = {
+                // Mesh on: the popup's Connection step (it brings the tunnel
+                // up). Mesh off: only Android's consent; no tunnel to start.
+                val consent = VpnService.prepare(context)
+                if (meshEnabled) {
+                    onFixConnection()
+                } else if (consent != null) {
+                    context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE).edit()
+                        .putBoolean(MainActivity.PREF_VPN_ASKED, true).apply()
+                    vpnLauncher.launch(consent)
+                }
+            },
         )
         PermissionRow(
             icon = { Icon(Icons.Outlined.Notifications, contentDescription = null, tint = it) },

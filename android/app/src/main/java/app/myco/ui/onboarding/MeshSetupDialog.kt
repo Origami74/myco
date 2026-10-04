@@ -19,7 +19,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Badge
 import androidx.compose.material.icons.outlined.GppMaybe
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -30,6 +33,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -47,8 +54,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
+import app.myco.onboarding.MeshOutcome
 import app.myco.onboarding.MeshSetup
+import app.myco.onboarding.Segment
 import app.myco.onboarding.SegmentState
+import app.myco.onboarding.SetupPlan
+import app.myco.share.DeviceName
 import app.myco.onboarding.SetupStep
 
 /** A button in the setup popup. The Activity turns each into its side effect. */
@@ -62,29 +73,36 @@ enum class SetupAction {
     NotNow,
     OpenVpnSettings,
     ContinueWithout,
+    KeepName,
 }
 
 /**
- * The mesh setup popup: a card over the dimmed app with a three-segment
- * progress bar (Install Myco · Nearby phones · Connection).
+ * The setup popup: a card over the dimmed app with a segmented progress bar
+ * (Install Myco · Nearby phones · Connection · Name, as [plan] has them).
  *
  * Stateless — the Activity owns [step], because Android's permission and VPN
  * results land there, and it has to survive the Activity being recreated
  * behind a system prompt. Not dismissable by back or an outside tap: every
  * card has its own way out, and a stray tap must not decide for the user.
  *
- * @param nearbyRefused the user carried on past a nearby refusal; the Nearby
- *   segment stays amber on the Connection cards.
+ * @param outcome how the mesh steps behind the current one went.
  * @param nearbyBlocked Android refused the nearby permissions without asking,
  *   so "Try again" becomes "Open app settings".
+ * @param name the name the Name step offers to keep.
+ * @param onSaveName a name typed into "Change it".
  */
 @Composable
 fun MeshSetupDialog(
     step: SetupStep,
-    nearbyRefused: Boolean,
+    plan: SetupPlan,
+    outcome: MeshOutcome,
     nearbyBlocked: Boolean,
+    name: String,
     onAction: (SetupAction) -> Unit,
+    onSaveName: (String) -> Unit,
 ) {
+    // "Change it" is a modal over the card: the card's own UI state.
+    var editingName by rememberSaveable { mutableStateOf(false) }
     Dialog(
         onDismissRequest = {},
         properties = DialogProperties(
@@ -105,8 +123,8 @@ fun MeshSetupDialog(
                 .widthIn(max = 440.dp)
                 .fillMaxWidth(),
         ) {
-            SetupCard(step, MeshSetup.segments(step, nearbyRefused)) {
-                StepContent(step, nearbyBlocked, onAction)
+            SetupCard(step, plan, MeshSetup.segments(step, plan, outcome)) {
+                StepContent(step, nearbyBlocked, name, onAction, onChangeName = { editingName = true })
             }
             footnote(step, nearbyBlocked)?.let {
                 Spacer(Modifier.height(18.dp))
@@ -119,11 +137,20 @@ fun MeshSetupDialog(
                 )
             }
         }
+        if (editingName && step == SetupStep.Name) {
+            ChangeNameDialog(
+                initial = name,
+                onSave = {
+                    editingName = false
+                    onSaveName(it)
+                },
+                onCancel = { editingName = false },
+            )
+        }
     }
 }
 
 private fun footnote(step: SetupStep, nearbyBlocked: Boolean): String? = when (step) {
-    SetupStep.EnableMesh -> "You can turn mesh off any time in Settings"
     SetupStep.VpnRefused -> "“Try again” shows Android’s VPN prompt again"
     SetupStep.NearbyRefused ->
         if (nearbyBlocked) "Android won’t ask again — allow Nearby devices in Myco’s app info" else null
@@ -131,22 +158,22 @@ private fun footnote(step: SetupStep, nearbyBlocked: Boolean): String? = when (s
 }
 
 @Composable
-private fun StepContent(step: SetupStep, nearbyBlocked: Boolean, onAction: (SetupAction) -> Unit) {
+private fun StepContent(
+    step: SetupStep,
+    nearbyBlocked: Boolean,
+    name: String,
+    onAction: (SetupAction) -> Unit,
+    onChangeName: () -> Unit,
+) {
     when (step) {
+        // Deliberately short: the title and one line. What the VPN is and
+        // isn't is said on the cards that need it, after a refusal.
         SetupStep.EnableMesh -> {
             IconBadge(warn = false) { PhonesIcon(MaterialTheme.colorScheme.primary) }
             Title("Enable mesh?")
-            Body(
-                "Phones nearby find each other and share apps and messages over " +
-                    "Bluetooth and Wi-Fi — no internet needed.",
-            )
-            Note(
-                "Next, Android asks you to allow nearby devices, then to set up a VPN. " +
-                    "Myco’s VPN only links Myco phones — your internet traffic doesn’t " +
-                    "go through it.",
-            )
+            Body("Mesh needs a few permissions in order to work.")
             Spacer(Modifier.height(28.dp))
-            PrimaryButton("Yes, I want mesh") { onAction(SetupAction.Yes) }
+            PrimaryButton("Yes, enable") { onAction(SetupAction.Yes) }
             Spacer(Modifier.height(10.dp))
             NeutralButton("No thanks") { onAction(SetupAction.NoThanks) }
         }
@@ -235,17 +262,76 @@ private fun StepContent(step: SetupStep, nearbyBlocked: Boolean, onAction: (Setu
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             )
         }
+        SetupStep.Name -> {
+            IconBadge(warn = false) {
+                Icon(
+                    Icons.Outlined.Badge,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(34.dp),
+                )
+            }
+            Title("What should people call you?")
+            Body("Phones you pair with see this name.")
+            Spacer(Modifier.height(16.dp))
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f), RoundedCornerShape(12.dp))
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 14.dp),
+            ) {
+                Text(name, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+            }
+            Spacer(Modifier.height(24.dp))
+            PrimaryButton("Keep using this") { onAction(SetupAction.KeepName) }
+            Spacer(Modifier.height(10.dp))
+            NeutralButton("Change it", onChangeName)
+        }
     }
+}
+
+/** "Change it": one field, Save or Cancel. Save finishes the popup. */
+@Composable
+private fun ChangeNameDialog(initial: String, onSave: (String) -> Unit, onCancel: () -> Unit) {
+    var text by rememberSaveable { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Your name") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it.take(DeviceName.MAX_LENGTH) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(enabled = text.isNotBlank(), onClick = { onSave(text.trim()) }) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } },
+    )
 }
 
 // ----------------------------------------------------------------------------
 // Card and progress bar
 // ----------------------------------------------------------------------------
 
-private val SEGMENT_LABELS = listOf("Install Myco", "Nearby phones", "Connection")
+private fun label(segment: Segment): String = when (segment) {
+    Segment.Install -> "Install Myco"
+    Segment.Nearby -> "Nearby phones"
+    Segment.Connection -> "Connection"
+    Segment.Name -> "Name"
+}
 
 @Composable
-private fun SetupCard(step: SetupStep, segments: List<SegmentState>, content: @Composable () -> Unit) {
+private fun SetupCard(
+    step: SetupStep,
+    plan: SetupPlan,
+    segments: List<SegmentState>,
+    content: @Composable () -> Unit,
+) {
     Surface(
         shape = RoundedCornerShape(28.dp),
         color = MaterialTheme.colorScheme.surface,
@@ -260,7 +346,7 @@ private fun SetupCard(step: SetupStep, segments: List<SegmentState>, content: @C
         ) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(
-                    "Step ${MeshSetup.stepNumber(step)} of 3",
+                    "Step ${MeshSetup.stepNumber(step, plan)} of ${plan.segments.size}",
                     color = muted(),
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 12.sp,
@@ -268,7 +354,7 @@ private fun SetupCard(step: SetupStep, segments: List<SegmentState>, content: @C
                 Text("Set up Myco", color = muted(), fontSize = 12.sp)
             }
             Spacer(Modifier.height(10.dp))
-            SegmentBar(segments)
+            SegmentBar(plan.segments, segments)
             Spacer(Modifier.height(28.dp))
             content()
         }
@@ -278,10 +364,10 @@ private fun SetupCard(step: SetupStep, segments: List<SegmentState>, content: @C
 /**
  * The segmented progress bar. Done is a full green bar; the current step is
  * half filled inside a green ring; a refused step is amber inside an amber
- * ring; a step not reached is a grey track.
+ * ring; a step not reached, or skipped, is a grey track.
  */
 @Composable
-private fun SegmentBar(segments: List<SegmentState>) {
+private fun SegmentBar(labels: List<Segment>, segments: List<SegmentState>) {
     val primary = MaterialTheme.colorScheme.primary
     val warn = MaterialTheme.colorScheme.tertiary
     val track = MaterialTheme.colorScheme.outline
@@ -298,7 +384,7 @@ private fun SegmentBar(segments: List<SegmentState>) {
                         SegmentState.Done -> primary to 1f
                         SegmentState.Active -> primary to 0.5f
                         SegmentState.Problem -> warn to 1f
-                        SegmentState.Pending -> track to 0f
+                        SegmentState.Pending, SegmentState.Skipped -> track to 0f
                     }
                     drawRoundRect(track, origin, barSize, r)
                     if (fraction > 0f) {
@@ -316,11 +402,12 @@ private fun SegmentBar(segments: List<SegmentState>) {
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                val label = SEGMENT_LABELS[i]
+                val label = label(labels[i])
                 Text(
                     when (seg) {
                         SegmentState.Done -> "✓ $label"
                         SegmentState.Problem -> "! $label"
+                        SegmentState.Skipped -> "– $label"
                         else -> label
                     },
                     color = when (seg) {

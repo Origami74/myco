@@ -126,16 +126,17 @@ newer one with no internet.
 
 **Built** — `onboarding/MeshSetup.kt` (the decisions, unit-tested),
 `ui/onboarding/MeshSetupDialog.kt`, `ui/screens/PermissionsSettings.kt`.
-A popup over the app after the intro and the name question, with a
-three-step bar (Install Myco · Nearby phones · Connection): "Enable mesh?",
-then Android's nearby-devices prompt and its VPN prompt with no card in
-between — three taps on Android 13+. A refusal gets its own card (nearby
-refused, VPN refused, another app's always-on VPN); "No thanks" leaves the
-mesh off with a snackbar into Settings. It shows on a fresh install, and on
-an upgrade only when the mesh is on and something it needs is missing.
-Notifications and the battery exemption are not in it: they live in
-**Settings › Permissions**, next to the mesh rows, whose Fix reopens the
-popup at that step. The launch-time permission queue is gone; the popup is
+A popup over the app after the intro, with a four-step bar (Install Myco ·
+Nearby phones · Connection · Name): "Enable mesh?", then Android's
+nearby-devices prompt and its VPN prompt with no card in between, then the
+name (keep the suggested one, or change it). A refusal gets its own card
+(nearby refused, VPN refused, another app's always-on VPN); "No thanks"
+leaves the mesh off and goes on to the name. The mesh steps show on a fresh
+install, and on an upgrade only when the mesh is on and something it needs
+is missing; the name step only if no name was ever chosen. Notifications and
+the battery exemption are not in it: they live in **Settings ›
+Permissions**, next to the mesh rows; with the mesh on, their Fix reopens
+the popup at that step. The launch-time permission queue is gone; the popup is
 the one place the mesh's permissions are asked for.
 
 **Goal.** A first run that explains what Myco needs before Android asks:

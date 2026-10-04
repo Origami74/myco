@@ -2,6 +2,7 @@ package app.myco.onboarding
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -68,40 +69,95 @@ class MeshSetupTest {
         assertTrue(MeshSetup.meshOnNeedsSetup(nearbyGranted = true, vpnPrepared = false))
     }
 
-    // --- progress bar ---
+    // --- which steps a run has ---
+
+    private val full = SetupPlan(mesh = true, name = true)
+    private val meshOnly = SetupPlan(mesh = true, name = false)
+    private val nameOnly = SetupPlan(mesh = false, name = true)
+    private val D = SegmentState.Done
+    private val A = SegmentState.Active
+    private val P = SegmentState.Pending
+    private val X = SegmentState.Problem
+    private val S = SegmentState.Skipped
 
     @Test
-    fun theFirstCardIsStepTwoWithInstallDone() {
-        assertEquals(2, MeshSetup.stepNumber(SetupStep.EnableMesh))
-        assertEquals(
-            listOf(SegmentState.Done, SegmentState.Active, SegmentState.Pending),
-            MeshSetup.segments(SetupStep.EnableMesh, nearbyRefused = false),
-        )
+    fun aFreshInstallHasAllFourSegments() {
+        val plan = MeshSetup.launchPlan(LaunchDecision.Show, nameChosen = false)
+        assertEquals(full, plan)
+        assertEquals(listOf(Segment.Install, Segment.Nearby, Segment.Connection, Segment.Name), full.segments)
+        assertEquals(SetupStep.EnableMesh, MeshSetup.firstStep(full))
+    }
+
+    @Test
+    fun anUpgradeWithAWorkingMeshButNoNameAsksOnlyTheName() {
+        val plan = MeshSetup.launchPlan(LaunchDecision.MarkDone, nameChosen = false)
+        assertEquals(nameOnly, plan)
+        assertEquals(SetupStep.Name, MeshSetup.firstStep(nameOnly))
+        assertEquals(2, MeshSetup.stepNumber(SetupStep.Name, nameOnly))
+        assertEquals(2, nameOnly.segments.size)
+        assertEquals(listOf(D, A), MeshSetup.segments(SetupStep.Name, nameOnly, MeshOutcome()))
+    }
+
+    @Test
+    fun nothingToAskOpensNothing() {
+        assertNull(MeshSetup.launchPlan(LaunchDecision.MarkDone, nameChosen = true))
+        assertNull(MeshSetup.launchPlan(LaunchDecision.None, nameChosen = true))
+        assertEquals(meshOnly, MeshSetup.launchPlan(LaunchDecision.Show, nameChosen = true))
+    }
+
+    @Test
+    fun theNameComesAfterTheMeshStepsWhicheverWayTheyEnded() {
+        assertEquals(SetupStep.Name, MeshSetup.afterMesh(full))
+        // The mesh switch reopening it after the name was chosen: no name step.
+        assertNull(MeshSetup.afterMesh(meshOnly))
+    }
+
+    // --- progress bar: mesh yes / no × name keep / change ---
+
+    @Test
+    fun yesThenNameCountsOneToFour() {
+        assertEquals(2, MeshSetup.stepNumber(SetupStep.EnableMesh, full))
+        assertEquals(listOf(D, A, P, P), MeshSetup.segments(SetupStep.EnableMesh, full, MeshOutcome()))
+        assertEquals(3, MeshSetup.stepNumber(SetupStep.Connecting, full))
+        assertEquals(listOf(D, D, A, P), MeshSetup.segments(SetupStep.Connecting, full, MeshOutcome()))
+        // Keep or change, the Name card is the same step: 4 of 4.
+        assertEquals(4, MeshSetup.stepNumber(SetupStep.Name, full))
+        assertEquals(listOf(D, D, D, A), MeshSetup.segments(SetupStep.Name, full, MeshOutcome()))
+    }
+
+    @Test
+    fun noThanksStillEndsOnTheNameWithMeshStepsSkipped() {
+        val declined = MeshOutcome(declined = true)
+        assertEquals(4, MeshSetup.stepNumber(SetupStep.Name, full))
+        assertEquals(listOf(D, S, S, A), MeshSetup.segments(SetupStep.Name, full, declined))
+    }
+
+    @Test
+    fun theMeshSwitchRunCountsToThree() {
+        assertEquals(2, MeshSetup.stepNumber(SetupStep.AskingNearby, meshOnly))
+        assertEquals(3, MeshSetup.stepNumber(SetupStep.VpnRefused, meshOnly))
+        assertEquals(3, meshOnly.segments.size)
     }
 
     @Test
     fun aNearbyRefusalIsAmberOnItsOwnCardAndAfter() {
-        assertEquals(2, MeshSetup.stepNumber(SetupStep.NearbyRefused))
-        assertEquals(
-            listOf(SegmentState.Done, SegmentState.Problem, SegmentState.Pending),
-            MeshSetup.segments(SetupStep.NearbyRefused, nearbyRefused = true),
-        )
-        // Carried on past it: still amber while the VPN step runs.
-        assertEquals(
-            listOf(SegmentState.Done, SegmentState.Problem, SegmentState.Active),
-            MeshSetup.segments(SetupStep.AskingVpn, nearbyRefused = true),
-        )
+        assertEquals(listOf(D, X, P, P), MeshSetup.segments(SetupStep.NearbyRefused, full, MeshOutcome()))
+        val refused = MeshOutcome(nearbyRefused = true)
+        assertEquals(listOf(D, X, A, P), MeshSetup.segments(SetupStep.AskingVpn, full, refused))
+        assertEquals(listOf(D, X, D, A), MeshSetup.segments(SetupStep.Name, full, refused))
     }
 
     @Test
     fun theVpnCardsAreStepThreeWithConnectionAmber() {
         for (step in listOf(SetupStep.VpnRefused, SetupStep.AlwaysOnVpn)) {
-            assertEquals(3, MeshSetup.stepNumber(step))
-            assertEquals(
-                listOf(SegmentState.Done, SegmentState.Done, SegmentState.Problem),
-                MeshSetup.segments(step, nearbyRefused = false),
-            )
+            assertEquals(3, MeshSetup.stepNumber(step, full))
+            assertEquals(listOf(D, D, X, P), MeshSetup.segments(step, full, MeshOutcome()))
         }
+        // "Not now" / "Continue without", then the name.
+        assertEquals(
+            listOf(D, D, X, A),
+            MeshSetup.segments(SetupStep.Name, full, MeshOutcome(connectionSkipped = true)),
+        )
     }
 
     // --- the always-on heuristic ---

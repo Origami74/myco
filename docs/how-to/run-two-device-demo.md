@@ -29,11 +29,11 @@ adb -s <A> install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb -s <B> install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Open Myco on each. The intro runs once; then you are asked for a **name** —
-the memorable label the other phone will see. Then the setup popup asks
-"Enable mesh?": tap **Yes, I want mesh** and accept Android's two prompts
-(nearby devices, then the VPN consent for the app-owned TUN). Notifications
-are separate, in Settings › Permissions. Each phone generates its **device key** on this launch; the
+Open Myco on each. The intro runs once; then the setup popup asks
+"Enable mesh?": tap **Yes, enable** and accept Android's two prompts (nearby
+devices, then the VPN consent for the app-owned TUN). Its last step is the
+**name** — the memorable label the other phone will see. Notifications are
+separate, in Settings › Permissions. Each phone generates its **device key** on this launch; the
 Settings › Identity page shows the npub.
 
 Settings › Mesh should show **Enable** on, **Bluetooth** on. Leave Wi-Fi Aware
