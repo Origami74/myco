@@ -27,7 +27,7 @@ class SignerActivity : ComponentActivity() {
         val answer = when {
             // NIP-55: not OK means the signer failed, not that the user said no.
             result.resultCode != Activity.RESULT_OK -> Result.failure(IllegalStateException("the signer app failed"))
-            data?.getBooleanExtra("rejected", false) == true -> Result.failure(IllegalStateException("rejected"))
+            data?.getBooleanExtra("rejected", false) == true -> Result.failure(IllegalStateException(ExternalSigner.REJECTED))
             else -> {
                 val event = data?.getStringExtra("event")?.takeIf { it.isNotBlank() }
                 val sig = data?.getStringExtra("result")?.takeIf { it.isNotBlank() }
@@ -66,7 +66,7 @@ class SignerActivity : ComponentActivity() {
         // now rather than leaving the request to time out. A second complete
         // after a real answer is a no-op.
         if (isFinishing) {
-            ExternalSigner.complete(requestId, Result.failure(IllegalStateException("rejected")))
+            ExternalSigner.complete(requestId, Result.failure(IllegalStateException(ExternalSigner.REJECTED)))
         }
         super.onDestroy()
     }

@@ -19,6 +19,7 @@ pub mod relay;
 pub mod resource;
 pub mod shell;
 pub mod theme;
+pub mod upload;
 
 use nostr::{Event, Filter};
 

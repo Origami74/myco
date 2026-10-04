@@ -17,6 +17,8 @@
 //! - [`MeshSink`] — hop-limited publish and pull over the device's mesh,
 //!   behind NAP-MESH. The runtime never sees a radio or a peer address; it
 //!   hands over an event and a hop budget, and asks for backlog with one.
+//! - [`UploadSink`] — puts bytes on the user's Blossom servers, behind
+//!   NAP-UPLOAD. The runtime never sees a server or the authorization.
 //! - [`NapTransport`] — the shell ↔ Rust channel. A seam so that dispatch,
 //!   policy and capabilities never learn whether they are talking over
 //!   `addWebMessageListener`, a `WebMessagePort`, or the desktop harness's
@@ -630,6 +632,128 @@ impl BlobFetcher for NoFetcher {
         _hints: &BlobHints,
     ) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
+    }
+}
+
+/// Puts a napplet's bytes on the user's Blossom servers — the seam behind
+/// NAP-UPLOAD (napplet/naps PR #33).
+///
+/// The handler has already checked the grant, decoded and capped the bytes,
+/// settled the MIME type and hashed them. What is left is the part that
+/// touches the world: choosing servers, signing the BUD-02 authorization as
+/// the user, and the HTTP upload. A napplet never names a server and never
+/// sees the authorization.
+#[async_trait]
+pub trait UploadSink: Send + Sync {
+    /// Whether an upload could go anywhere right now. `false` when the user
+    /// switched the internet off (offline-only), or there is no uploader.
+    /// Advisory: `upload.info` reports it, and an upload can still fail.
+    async fn available(&self) -> bool;
+
+    /// Upload `blob` and say where it landed. `Err` says why, as one of the
+    /// spec's error strings ([`UploadErrorCode`]) plus a detail for the log.
+    ///
+    /// An implementation must bound itself (the call waits on a signer and
+    /// the network) and must report only what a server confirmed: the
+    /// descriptor's hash, which may differ from `blob.sha256` if the server
+    /// transformed the file.
+    async fn upload(&self, blob: &UploadBlob) -> Result<Uploaded, UploadError>;
+}
+
+/// What NAP-UPLOAD hands an [`UploadSink`]: verified, capped bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadBlob {
+    pub bytes: Vec<u8>,
+    /// Lowercase hex sha256 of `bytes`, computed by the handler.
+    pub sha256: String,
+    /// The MIME type the upload is sent with.
+    pub mime: String,
+    /// The napplet's suggested filename, if any. Never a path, and never
+    /// put in the authorization event: a signer app shows that event's
+    /// text, and it is not the napplet's to write.
+    pub filename: Option<String>,
+}
+
+/// Where an upload landed, as the server confirmed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Uploaded {
+    /// The first server's URL for the blob.
+    pub url: String,
+    /// The same blob on other servers.
+    pub fallback_urls: Vec<String>,
+    /// The hash of what the server stored. Equal to the sent hash unless the
+    /// server transformed the file.
+    pub sha256: String,
+    /// Bytes stored, as the server reported it.
+    pub size: u64,
+    /// The stored type, when the server said.
+    pub mime: Option<String>,
+}
+
+/// Why an upload failed: one of the error strings the upstream NAP-UPLOAD
+/// draft lists (napplet/naps PR #33), so a napplet can branch on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadErrorCode {
+    PolicyDenied,
+    NoServerConfigured,
+    UserCancelled,
+    ServerRejected,
+    UploadFailed,
+    QuotaExceeded,
+}
+
+impl UploadErrorCode {
+    /// The spec's spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PolicyDenied => "policy denied",
+            Self::NoServerConfigured => "no server configured",
+            Self::UserCancelled => "user cancelled",
+            Self::ServerRejected => "server rejected",
+            Self::UploadFailed => "upload failed",
+            Self::QuotaExceeded => "quota exceeded",
+        }
+    }
+}
+
+/// A failed upload: the code the napplet is shown, and the detail logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadError {
+    pub code: UploadErrorCode,
+    pub detail: String,
+}
+
+impl UploadError {
+    pub fn new(code: UploadErrorCode, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for UploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.detail)
+    }
+}
+
+/// An [`UploadSink`] with nowhere to upload to — the honest default for a
+/// runtime with no network, and what tests use when uploading is not the
+/// point.
+pub struct NoUploads;
+
+#[async_trait]
+impl UploadSink for NoUploads {
+    async fn available(&self) -> bool {
+        false
+    }
+
+    async fn upload(&self, _blob: &UploadBlob) -> Result<Uploaded, UploadError> {
+        Err(UploadError::new(
+            UploadErrorCode::NoServerConfigured,
+            "this device has nowhere to upload to",
+        ))
     }
 }
 

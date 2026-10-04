@@ -37,6 +37,13 @@ object ExternalSigner {
     @Volatile
     private var started = false
 
+    /**
+     * The failure message for "the user said no" (or the signer always
+     * rejects). The core tells a no from a failure by this exact string —
+     * `external_signer::REJECTED` in myco-core; keep the two equal.
+     */
+    const val REJECTED = "rejected"
+
     /** Start the pump, once per process. */
     fun start(context: Context, client: AppCoreClient) {
         synchronized(this) {
@@ -103,7 +110,7 @@ object ExternalSigner {
             is ContentResolverSigner.Answer.Signed -> return Result.success(quiet.value)
             is ContentResolverSigner.Answer.Rejected ->
                 // NIP-55: an "always reject" is final — no approval screen.
-                return Result.failure(IllegalStateException("rejected"))
+                return Result.failure(IllegalStateException(REJECTED))
             ContentResolverSigner.Answer.NotRemembered -> Unit
         }
         // Started from the application context. Android 10+ blocks activity

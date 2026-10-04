@@ -93,4 +93,24 @@ mod tests {
         assert!(page.contains("blobRef"));
         assert!(!page.contains("atob("));
     }
+
+    /// NAP-UPLOAD bytes do cross the JSON channel, the other way: a Blob would
+    /// arrive as `{}`, so the page reads it into `request.dataBase64`. The
+    /// field names are the page's — whatever the napplet put there is dropped
+    /// before the page writes its own — and the wrapped message still goes
+    /// out under the page's channel tag.
+    #[test]
+    fn the_page_carries_upload_bytes_as_base64() {
+        let page = shell_page();
+        assert!(page.contains("message.type === 'upload.upload'"));
+        for field in ["data", "dataBase64", "dataType", "dataSize"] {
+            assert!(
+                page.contains(&format!("delete request.{field};")),
+                "the page keeps a napplet-supplied {field}"
+            );
+        }
+        assert!(page.contains("request.dataBase64 = toBase64("));
+        assert!(page.contains("btoa("));
+        assert!(page.contains("toRuntime({ channel: 'napplet', message: carried })"));
+    }
 }
