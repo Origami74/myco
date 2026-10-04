@@ -200,8 +200,9 @@ internal object NativeCore {
      *  lane's peers at all.
      *
      *  Returns `(version shl 32) or fd` — JNI has no tuple, and two calls could
-     *  not be made atomic. Use [UdpSocketAnnouncement.of]. `fd` is -1 when
-     *  nothing newer arrived; otherwise pass the returned version back next
+     *  not be made atomic. An unchanged version means nothing newer arrived;
+     *  a new version with `fd` -1 means the node stopped and withdrew the
+     *  socket, so forget the old number. Pass the returned version back next
      *  time. Poll in a slow loop: the latest socket per lane is retained, so a
      *  radio started after the node still learns it, and a node restart bumps
      *  the version even if the kernel reuses the fd number. */

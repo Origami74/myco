@@ -35,6 +35,12 @@
 //! so the latest descriptor per lane is *retained*, with a version that
 //! increments on each new one. A caller passes back the version it last saw and
 //! blocks only for something newer.
+//!
+//! # Withdrawal
+//!
+//! When the node stops, every lane is re-announced as `-1` under a new version
+//! ([`withdraw_all`]), so a radio forgets the number before the socket behind
+//! it is closed and the kernel can hand that number to something else.
 
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
@@ -47,8 +53,9 @@ use fips::AppOwnedUdpSocket;
 
 /// The retained descriptor for one lane.
 ///
-/// `version` starts at 0, meaning "no socket announced yet", and increments on
-/// every announcement — including a re-announcement of the same fd number,
+/// `fd` is `-1` once the socket has been withdrawn. `version` starts at 0,
+/// meaning "no socket announced yet", and increments on every announcement or
+/// withdrawal — including a re-announcement of the same fd number,
 /// which a node rebuild can easily produce and which still needs re-binding
 /// because the socket behind the number is a new one.
 #[derive(Clone, Copy)]
@@ -69,6 +76,20 @@ impl Lane {
         let version = state.map_or(0, |a| a.version) + 1;
         *state = Some(Announced { version, fd });
         self.changed.notify_all();
+    }
+
+    /// Re-announce this lane as having no socket. A no-op for a lane that never
+    /// had one or is already withdrawn, so a repeated withdrawal does not make
+    /// every radio wake for nothing.
+    fn withdraw(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(a) = state.filter(|a| a.fd >= 0) {
+            *state = Some(Announced {
+                version: a.version + 1,
+                fd: -1,
+            });
+            self.changed.notify_all();
+        }
     }
 
     /// Block until this lane's version exceeds `since_version`, or `timeout`
@@ -146,11 +167,29 @@ fn fan_out(receiver: Receiver<AppOwnedUdpSocket>, generation: u64) {
     }
 }
 
+/// Withdraw every lane's descriptor: the node that owns them is stopping.
+///
+/// A radio waiting in [`next_fd`] is handed `-1` under a new version and must
+/// drop the number it holds — the socket behind it is about to close.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn withdraw_all() {
+    let lanes: Vec<Arc<Lane>> = lanes()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .cloned()
+        .collect();
+    for lane in lanes {
+        lane.withdraw();
+    }
+}
+
 /// Wait for a UDP socket on `instance` newer than `since_version`, blocking up
 /// to `timeout`.
 ///
 /// Returns `(version, fd)`, or `(since_version, -1)` if nothing newer arrived —
-/// which is also what a lane whose socket never bound gets. Never another
+/// which is also what a lane whose socket never bound gets. A newer version
+/// with fd `-1` means the socket was withdrawn. Never another
 /// lane's descriptor. Pass `0` the first time; pass back the returned version
 /// afterwards, so a socket announced before the caller existed is still seen
 /// exactly once, and a node restart's replacement socket is seen even when the
@@ -219,5 +258,42 @@ mod tests {
         // Held until here so the fan-out thread does not exit on a disconnect
         // before it has forwarded everything.
         drop(tx);
+    }
+
+    /// Calls `Lane::withdraw` directly: `withdraw_all` would also reach the
+    /// lanes of the test above, which runs in parallel on the same registry.
+    #[test]
+    fn a_withdrawn_lane_reports_no_socket_under_a_new_version() {
+        let lane = lane("test-withdraw");
+        lane.withdraw(); // never announced: nothing to withdraw
+        assert_eq!(
+            next_fd("test-withdraw", 0, Duration::from_millis(50)),
+            (0, -1)
+        );
+
+        lane.announce(7);
+        let (v, fd) = next_fd("test-withdraw", 0, Duration::from_millis(50));
+        assert_eq!((v, fd), (1, 7));
+
+        // The holder of version 1 is told the socket is gone.
+        lane.withdraw();
+        assert_eq!(
+            next_fd("test-withdraw", v, Duration::from_millis(50)),
+            (v + 1, -1)
+        );
+
+        // Withdrawing again does not wake anyone.
+        lane.withdraw();
+        assert_eq!(
+            next_fd("test-withdraw", v + 1, Duration::from_millis(50)),
+            (v + 1, -1)
+        );
+
+        // The next node's socket is announced as usual.
+        lane.announce(7);
+        assert_eq!(
+            next_fd("test-withdraw", v + 1, Duration::from_millis(50)),
+            (v + 2, 7)
+        );
     }
 }

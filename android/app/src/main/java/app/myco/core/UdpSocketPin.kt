@@ -3,8 +3,9 @@ package app.myco.core
 import android.net.Network
 import android.os.Handler
 import android.os.ParcelFileDescriptor
+import android.system.Os
 import android.util.Log
-import java.io.FileDescriptor
+import java.net.SocketAddress
 
 /**
  * Pins one lane's UDP transport socket to one [Network].
@@ -34,9 +35,19 @@ import java.io.FileDescriptor
  *
  * # Lifecycle
  *
- * The fd is a *borrow*: the core keeps the socket. [ParcelFileDescriptor.fromFd]
- * dups it so this class holds a descriptor that stays valid while it may still
- * need to re-bind on a network change, without ever closing the core's own.
+ * The fd is a *borrow*: the core owns the socket. Only the number is kept;
+ * each pin dups it ([ParcelFileDescriptor.fromFd]), marks the dup — the mark is
+ * on the socket, so it holds for the core's descriptor too — and closes the
+ * dup at once. Holding the dup instead kept a stopped node's socket open and
+ * bound: the next node could not bind its ports and came up with no UDP
+ * transports at all, while nothing ever announced a replacement that would
+ * have released the dup.
+ *
+ * The core withdraws the number (announces `-1`) before it closes the socket.
+ * Withdrawal is asynchronous, so a pin already queued can still reach a number
+ * the kernel has since reused; each pin therefore checks the descriptor still
+ * has the local address it had when announced (every lane has its own port)
+ * and leaves anything else alone.
  *
  * A poll loop rather than a one-shot read, because a node restart (a mesh
  * off→on cycle) replaces the socket. The core retains the latest announcement
@@ -54,8 +65,11 @@ internal class UdpSocketPin(
     /** The owning radio's log tag, so pin messages sit with its own. */
     private val tag: String,
 ) {
-    private var pfd: ParcelFileDescriptor? = null
-    private var fd: FileDescriptor? = null
+    /** The core's descriptor number for this lane's socket, or -1 for none. */
+    private var fd = -1
+
+    /** That socket's local address when announced, to recognise a reused number. */
+    private var localAddr: SocketAddress? = null
 
     /** The network to pin to, remembered so a later fd (or a later network) can
      *  be married up with whichever half arrived first. */
@@ -72,21 +86,22 @@ internal class UdpSocketPin(
             var version = 0L
             while (running) {
                 val packed = NativeCore.nextUdpTransportFd(lane, version, POLL_TIMEOUT_MS)
+                val next = packed ushr 32
+                if (next == version) continue // nothing newer within the timeout
+                version = next
+                // -1 under a new version: the node stopped and withdrew it.
                 val fd = packed.toInt()
-                if (fd < 0) continue // nothing newer within the timeout
-                version = packed ushr 32
                 handler.post { onFd(fd) }
             }
         }, "myco-udpfd-$lane").apply { isDaemon = true; start() }
     }
 
-    /** Stop watching and release our dup of the socket. The core's own
-     *  descriptor is untouched. Must run on [handler]'s thread. */
+    /** Stop watching. The core's descriptor is untouched. Must run on
+     *  [handler]'s thread. */
     fun stop() {
         running = false
-        pfd?.let { runCatching { it.close() } }
-        pfd = null
-        fd = null
+        fd = -1
+        localAddr = null
         target = null
     }
 
@@ -110,21 +125,35 @@ internal class UdpSocketPin(
 
     private fun onFd(raw: Int) {
         if (!running) return
-        val dup = runCatching { ParcelFileDescriptor.fromFd(raw) }.getOrElse {
-            Log.w(tag, "could not dup $lane UDP transport fd $raw", it)
+        fd = raw
+        localAddr = null
+        if (raw < 0) {
+            Log.i(tag, "$lane UDP transport withdrawn")
             return
         }
-        pfd?.let { old -> runCatching { old.close() } }
-        pfd = dup
-        fd = dup.fileDescriptor
-        Log.i(tag, "learned $lane UDP transport fd $raw")
+        localAddr = runCatching {
+            ParcelFileDescriptor.fromFd(raw).use { Os.getsockname(it.fileDescriptor) }
+        }.getOrElse {
+            Log.w(tag, "could not read $lane UDP transport fd $raw", it)
+            fd = -1
+            return
+        }
+        Log.i(tag, "learned $lane UDP transport fd $raw ($localAddr)")
         bind()
     }
 
     private fun bind() {
-        val socket = fd ?: return       // node not started yet; onFd binds when it is
-        val network = target ?: return  // no network to pin to yet
-        runCatching { network.bindSocket(socket) }
+        if (fd < 0) return             // no live socket; onFd binds when one comes
+        val network = target ?: return // no network to pin to yet
+        runCatching {
+            ParcelFileDescriptor.fromFd(fd).use { dup ->
+                if (Os.getsockname(dup.fileDescriptor) != localAddr) {
+                    Log.w(tag, "$lane UDP fd $fd is no longer our socket; not pinning")
+                    return
+                }
+                network.bindSocket(dup.fileDescriptor)
+            }
+        }
             .onSuccess { Log.i(tag, "pinned $lane UDP socket to $network") }
             .onFailure { Log.w(tag, "pinning $lane UDP socket to $network failed", it) }
     }

@@ -192,8 +192,9 @@ pub extern "system" fn Java_app_myco_core_NativeCore_setUpstreamDns(
 /// each of its peers needs a socket marked for that peer's own NDP.
 ///
 /// The result packs `(version << 32) | fd`, because JNI has no tuple and two
-/// calls could not be made atomic. `fd` is `-1` when nothing newer arrived; the
-/// caller passes the returned version back on the next call, and 0 on the
+/// calls could not be made atomic. An unchanged version means nothing newer
+/// arrived; a new version with `fd` `-1` means the node withdrew the socket.
+/// The caller passes the returned version back on the next call, and 0 on the
 /// first. Versioning rather than plain edge-triggering because a radio is
 /// created and destroyed with its lane's toggle while the node keeps running,
 /// so it must be able to learn a socket announced before it existed — and
