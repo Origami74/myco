@@ -121,6 +121,13 @@ class ApRadio private constructor(private val context: Context) {
 
     private val resolveQueue = ArrayDeque<NsdServiceInfo>()
     private var resolving = false
+    /** The in-flight resolve's listener, kept so [abandonResolve] can cancel it. */
+    private var activeResolve: NsdManager.ResolveListener? = null
+    /** The service the in-flight resolve is for. */
+    private var activeService: String? = null
+    /** Bumped per resolve; a callback carrying an older value belongs to a
+     *  resolve already abandoned and is dropped. */
+    private var resolveGen = 0
     private var browsing = false
     /** The Settings "Network" switch. Off means no browse and no advert while
      *  Wi-Fi is up; the Wi-Fi watch itself keeps running so a later "on" can
@@ -270,7 +277,7 @@ class ApRadio private constructor(private val context: Context) {
                 handler.post {
                     if (browseListener !== this) return@post
                     found[info.serviceName] = info
-                    resolveQueue.add(info)
+                    queueResolve(info)
                     pumpResolve()
                 }
             }
@@ -309,6 +316,7 @@ class ApRadio private constructor(private val context: Context) {
         handler.removeCallbacks(repush)
         handler.removeCallbacks(rediscover)
         resolveQueue.clear()
+        abandonResolve()
         // The LAN is gone with the link: tell the core so it closes the pooled
         // UDP sessions instead of re-using dead sockets.
         for (npub in pushed.keys) NativeCore.awarePeerLost(npub, LANE)
@@ -462,15 +470,27 @@ class ApRadio private constructor(private val context: Context) {
 
     // --- resolve (NsdManager allows one in-flight resolve at a time) ---
 
+    /** Queue a resolve of `info`, once. [rediscover] re-reports every cached
+     *  service each cycle, including peers that left without a goodbye, and
+     *  each of those can cost a full [RESOLVE_TIMEOUT_MS]: queued twice, they
+     *  would pile up faster than they drain and starve live peers again. */
+    private fun queueResolve(info: NsdServiceInfo) {
+        if (info.serviceName == activeService) return
+        val i = resolveQueue.indexOfFirst { it.serviceName == info.serviceName }
+        if (i >= 0) resolveQueue[i] = info else resolveQueue.add(info)
+    }
+
     private fun pumpResolve() {
         if (resolving) return
         val next = resolveQueue.removeFirstOrNull() ?: return
         resolving = true
-        @Suppress("DEPRECATION") // registerServiceInfoCallback is 34+; minSdk 29
-        nsd.resolveService(next, object : NsdManager.ResolveListener {
+        activeService = next.serviceName
+        val gen = ++resolveGen
+        val listener = object : NsdManager.ResolveListener {
             override fun onServiceResolved(info: NsdServiceInfo) {
                 handler.post {
-                    resolving = false
+                    if (gen != resolveGen) return@post
+                    finishResolve()
                     resolved(info)
                     pumpResolve()
                 }
@@ -478,7 +498,8 @@ class ApRadio private constructor(private val context: Context) {
 
             override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
                 handler.post {
-                    resolving = false
+                    if (gen != resolveGen) return@post
+                    finishResolve()
                     if (errorCode == NsdManager.FAILURE_ALREADY_ACTIVE) {
                         // Another app's resolve is in flight; retry shortly.
                         resolveQueue.add(info)
@@ -489,7 +510,41 @@ class ApRadio private constructor(private val context: Context) {
                     }
                 }
             }
-        })
+        }
+        activeResolve = listener
+        handler.postDelayed(resolveTimeout, RESOLVE_TIMEOUT_MS)
+        @Suppress("DEPRECATION") // registerServiceInfoCallback is 34+; minSdk 29
+        nsd.resolveService(next, listener)
+    }
+
+    private fun finishResolve() {
+        handler.removeCallbacks(resolveTimeout)
+        activeResolve = null
+        activeService = null
+        resolving = false
+    }
+
+    /** Give up on the in-flight resolve, if any. Its late callbacks are
+     *  dropped by the [resolveGen] check. */
+    private fun abandonResolve() {
+        val listener = activeResolve
+        resolveGen++
+        finishResolve()
+        if (listener != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            runCatching { nsd.stopServiceResolution(listener) }
+        }
+    }
+
+    /** A resolve of a service that left the LAN between browse hit and resolve
+     *  never calls back on the Java mDNS backend (Android 14+) — it re-queries
+     *  forever. Since resolves are serialised, that one stuck resolve held
+     *  [resolving] for the life of the process and no later peer was ever
+     *  resolved or pushed. Time it out and move on to the next. */
+    private val resolveTimeout = Runnable {
+        if (!resolving) return@Runnable
+        Log.w(TAG, "resolve of $activeService timed out after ${RESOLVE_TIMEOUT_MS}ms; skipping")
+        abandonResolve()
+        pumpResolve()
     }
 
     private fun resolved(info: NsdServiceInfo) {
@@ -566,6 +621,13 @@ class ApRadio private constructor(private val context: Context) {
 
     private fun serviceLost(serviceName: String) {
         found.remove(serviceName)
+        // Nothing left to resolve: drop it from the queue, and don't sit out
+        // the timeout on a resolve that can no longer answer.
+        resolveQueue.removeAll { it.serviceName == serviceName }
+        if (activeService == serviceName) {
+            abandonResolve()
+            pumpResolve()
+        }
         val npub = npubByService.remove(serviceName) ?: return
         candidates.remove(npub)
         candidateIdx.remove(npub)
@@ -693,6 +755,10 @@ class ApRadio private constructor(private val context: Context) {
 
         /** The LAN lane's fixed UDP port — `LAN_UDP_PORT` in `runtime.rs`. */
         private const val LAN_UDP_PORT = 4871
+
+        /** How long one resolve may run before [resolveTimeout] abandons it.
+         *  A live peer on the LAN answers in well under a second. */
+        private const val RESOLVE_TIMEOUT_MS = 10_000L
 
         /** Retry cadence for an advert that could not be registered yet. */
         private const val ADVERT_RETRY_MS = 5_000L

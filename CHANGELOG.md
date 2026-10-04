@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mesh restarted in the background, a phone could come back connected over
   Bluetooth only: phones on the same Wi-Fi and Wi-Fi Aware links were found
   but never used, until Myco was force-stopped. A restart now brings both back.
+- **Phones on the same Wi-Fi keep finding each other.** If another phone left
+  the network at the wrong moment, a phone could stop connecting to anyone new
+  on that Wi-Fi until Myco was restarted. It now skips the phone that left and
+  carries on.
 
 ## [0.9.1] - 2026-10-02
 
