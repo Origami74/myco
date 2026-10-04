@@ -39,9 +39,9 @@ import java.util.Date
  *
  * Off by default, and the page says what turning it on costs before the
  * switch: a public node learns this phone's IP address and which mesh
- * addresses it talks to, never what is said. The list is every dialable node
- * heard of on Nostr, the ones join.fips.network recommends first and starred;
- * those are selected unless the user unticks them.
+ * addresses it talks to, never what is said. The list is every node advertising
+ * on Nostr right now, the ones join.fips.network recommends first and starred.
+ * Myco ticks up to three recommended ones at random; the user can change that.
  */
 @Composable
 internal fun PublicNodesSettings(state: AppState, client: AppCoreClient, onBack: () -> Unit) {
@@ -99,12 +99,16 @@ internal fun PublicNodesSettings(state: AppState, client: AppCoreClient, onBack:
         val recommended = pub.nodes.filter { it.recommended }
         val others = pub.nodes.filter { !it.recommended }
 
-        GroupLabel("RECOMMENDED")
-        SectionCard {
-            recommended.forEachIndexed { i, node ->
-                if (i > 0) RowDivider()
-                NodeRow(node) { selected ->
-                    client.dispatch(NativeActions.setPublicNodeSelected(node.npub, selected))
+        // Only nodes advertising right now are in the list, so this group can
+        // be empty while the first read is under way.
+        if (recommended.isNotEmpty()) {
+            GroupLabel("RECOMMENDED")
+            SectionCard {
+                recommended.forEachIndexed { i, node ->
+                    if (i > 0) RowDivider()
+                    NodeRow(node) { selected ->
+                        client.dispatch(NativeActions.setPublicNodeSelected(node.npub, selected))
+                    }
                 }
             }
         }

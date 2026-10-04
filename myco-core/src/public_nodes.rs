@@ -24,7 +24,15 @@
 //! the internet is up, refreshes it from the site's bundle at most once a day
 //! ([`parse_join_bundle`]). A refresh that finds nothing keeps what it had, so
 //! the shipped list is the floor: offline-first, and a redesign of the site
-//! costs freshness, never the feature.
+//! costs freshness, never the feature. `next` nodes (`test-us03-next`) are
+//! dropped from every list: Myco cannot speak their protocol.
+//!
+//! Only nodes advertising right now are listed or dialled. Of the advertising
+//! recommended ones, Myco **preselects at most three at random** — once, on
+//! the first read with adverts — and keeps that pick in `settings.json`, so
+//! phones spread over the test nodes and nothing reshuffles per launch. A
+//! preselected node unseen for a day is replaced by another random one. The
+//! user's own ticks and unticks win over the pick.
 //!
 //! # When it dials
 //!
@@ -89,8 +97,9 @@ const ADVERT_PROTOCOL: &str = "fips-overlay-v1";
 pub const RECOMMENDED_SOURCE_URL: &str = "https://join.fips.network/";
 
 /// The nodes join.fips.network recommends, as of 2026-10-04 (read out of its
-/// bundle, `x1` in `assets/index-*.js`). Shipped so the recommendation works
-/// with no internet beyond the advert relays; refreshed at runtime.
+/// bundle, `x1` in `assets/index-*.js`), less its `next` entry
+/// (`test-us03-next`) — see [`is_next_node`]. Shipped so the recommendation
+/// works with no internet beyond the advert relays; refreshed at runtime.
 pub const SHIPPED_RECOMMENDED: &[(&str, &str)] = &[
     (
         "test-us01",
@@ -103,10 +112,6 @@ pub const SHIPPED_RECOMMENDED: &[(&str, &str)] = &[
     (
         "test-us03",
         "npub136yqae6na688fs75g95ppps3lxe07fvxefj77938zf47uhm6074sxw8ctm",
-    ),
-    (
-        "test-us03-next",
-        "npub15m6c4ghuegx4pcde6tra8f7smn8vfv2wundyxwhkjynuerkrzmgsy09sh3",
     ),
     (
         "test-us04",
@@ -187,20 +192,33 @@ pub struct Recommended {
     pub npub: String,
 }
 
+/// Whether a recommended entry is a fips `next` node (`test-us03-next`). Those
+/// speak a protocol this build cannot, so they are never shown, selected or
+/// dialled — whether they come from the shipped list, a refresh, or an older
+/// saved list.
+fn is_next_node(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with("-next")
+}
+
 /// What the user chose, persisted in `settings.json`.
 ///
-/// Selection is stored as deltas against the recommended list rather than as
-/// a set, so a node join.fips.network starts recommending is picked up without
-/// the user doing anything, and one they switched off stays off.
+/// Selection is Myco's **preselection** — at most [`PRESELECT_MAX`] advertising
+/// recommended nodes, picked at random once and kept — plus the user's own
+/// deltas against it: `added` wins for any node, `removed` switches a
+/// preselected one off and keeps it off.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PublicNodeSettings {
     /// The opt-in. Off by default.
     pub enabled: bool,
-    /// Non-recommended nodes the user selected.
+    /// Nodes the user selected that Myco had not preselected.
     pub added: BTreeSet<String>,
-    /// Recommended nodes the user deselected.
+    /// Preselected nodes the user deselected. They are never preselected again.
     pub removed: BTreeSet<String>,
+    /// Myco's random preselection: npub → when it was last seen advertising,
+    /// ms since the epoch. A node unseen for [`PRESELECT_REPLACE_AFTER_MS`] is
+    /// replaced by another random one.
+    pub preselected: std::collections::BTreeMap<String, u64>,
     /// The recommended list as last refreshed from join.fips.network; `None`
     /// means never refreshed, and [`SHIPPED_RECOMMENDED`] applies.
     pub recommended: Option<Vec<Recommended>>,
@@ -208,10 +226,19 @@ pub struct PublicNodeSettings {
     pub recommended_at_ms: u64,
 }
 
+/// How many recommended nodes Myco preselects. Random rather than the first
+/// few, so phones spread over the test nodes instead of piling onto one.
+pub const PRESELECT_MAX: usize = 3;
+/// A preselected node that has not advertised for this long is replaced.
+const PRESELECT_REPLACE_AFTER_MS: u64 = 24 * 3600 * 1000;
+/// Last-seen stamps are only rewritten to disk when they move this much.
+const PRESELECT_STAMP_GRANULARITY_MS: u64 = 3600 * 1000;
+
 impl PublicNodeSettings {
-    /// The recommended list in effect: the refreshed one, or the shipped one.
+    /// The recommended list in effect: the refreshed one, or the shipped one,
+    /// without `next` nodes.
     pub fn recommended(&self) -> Vec<Recommended> {
-        match &self.recommended {
+        let list: Vec<Recommended> = match &self.recommended {
             Some(list) if !list.is_empty() => list.clone(),
             _ => SHIPPED_RECOMMENDED
                 .iter()
@@ -220,33 +247,98 @@ impl PublicNodeSettings {
                     npub: npub.to_string(),
                 })
                 .collect(),
-        }
+        };
+        list.into_iter()
+            .filter(|r| !is_next_node(&r.name))
+            .collect()
     }
 
-    /// Whether `npub` is one the user wants dialled: recommended and not
-    /// switched off, or explicitly added.
-    pub fn is_selected(&self, npub: &str, recommended: &[Recommended]) -> bool {
-        if self.added.contains(npub) {
-            return true;
-        }
-        recommended.iter().any(|r| r.npub == npub) && !self.removed.contains(npub)
+    /// Whether `npub` is one to dial: added by the user, or preselected and
+    /// not switched off.
+    pub fn is_selected(&self, npub: &str) -> bool {
+        self.added.contains(npub)
+            || (self.preselected.contains_key(npub) && !self.removed.contains(npub))
     }
 
     /// Record a per-node choice as the smallest delta against the
-    /// recommended list.
-    pub fn set_selected(&mut self, npub: &str, selected: bool, recommended: &[Recommended]) {
-        let is_recommended = recommended.iter().any(|r| r.npub == npub);
+    /// preselection.
+    pub fn set_selected(&mut self, npub: &str, selected: bool) {
+        let preselected = self.preselected.contains_key(npub);
         if selected {
             self.removed.remove(npub);
-            if !is_recommended {
+            if !preselected {
                 self.added.insert(npub.to_string());
             }
         } else {
             self.added.remove(npub);
-            if is_recommended {
+            if preselected {
                 self.removed.insert(npub.to_string());
             }
         }
+    }
+
+    /// Keep the preselection current against the nodes advertising now:
+    /// stamp the ones seen, drop ones unseen for a day, and fill up to
+    /// [`PRESELECT_MAX`] at random from advertising recommended nodes the user
+    /// has not switched off. Strangers are never preselected — a node from
+    /// outside the recommended list is the user's call.
+    ///
+    /// `pick(n)` returns an index below `n`; injected so tests are
+    /// deterministic. Returns whether anything worth saving changed.
+    pub fn maintain_preselection(
+        &mut self,
+        advertising: &HashSet<String>,
+        now_ms: u64,
+        pick: &mut dyn FnMut(usize) -> usize,
+    ) -> bool {
+        let mut changed = false;
+        for (npub, seen) in self.preselected.iter_mut() {
+            if advertising.contains(npub)
+                && now_ms.saturating_sub(*seen) >= PRESELECT_STAMP_GRANULARITY_MS
+            {
+                *seen = now_ms;
+                changed = true;
+            }
+        }
+        let before = self.preselected.len();
+        self.preselected
+            .retain(|_, seen| now_ms.saturating_sub(*seen) < PRESELECT_REPLACE_AFTER_MS);
+        changed |= self.preselected.len() != before;
+
+        let active = self
+            .preselected
+            .keys()
+            .filter(|n| !self.removed.contains(*n))
+            .count();
+        let mut pool: Vec<String> = self
+            .recommended()
+            .into_iter()
+            .map(|r| r.npub)
+            .filter(|n| advertising.contains(n))
+            .filter(|n| !self.preselected.contains_key(n) && !self.removed.contains(n))
+            .collect();
+        for _ in active..PRESELECT_MAX {
+            if pool.is_empty() {
+                break;
+            }
+            let npub = pool.swap_remove(pick(pool.len()) % pool.len());
+            self.preselected.insert(npub, now_ms);
+            changed = true;
+        }
+        changed
+    }
+}
+
+/// A small xorshift generator seeded from the OS (via a fresh key), for the
+/// preselection's one-off draw. Not cryptographic, and needs not be.
+fn os_seeded_picker() -> impl FnMut(usize) -> usize {
+    let bytes = nostr::Keys::generate().secret_key().secret_bytes();
+    let mut state = u64::from_le_bytes(bytes[..8].try_into().unwrap_or([7; 8])) | 1;
+    move |n: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % n.max(1) as u64) as usize
     }
 }
 
@@ -425,7 +517,8 @@ fn is_public_v4(v4: Ipv4Addr) -> bool {
 /// matches exactly that shape and validates each hit: a name of at most 32
 /// plain characters and an npub that decodes. Anything else in a 250 KB bundle
 /// — npubs in other contexts included — is ignored. An empty result means the
-/// site changed shape, and the caller keeps the list it had.
+/// site changed shape, and the caller keeps the list it had. `next` nodes are
+/// dropped here too ([`is_next_node`]).
 pub fn parse_join_bundle(js: &str) -> Vec<Recommended> {
     const OPEN: &str = "{name:\"";
     const MID: &str = "\",npub:\"";
@@ -453,7 +546,11 @@ pub fn parse_join_bundle(js: &str) -> Vec<Recommended> {
             && name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-        if name_ok && PublicKey::from_bech32(npub).is_ok() && !out.iter().any(|r| r.npub == npub) {
+        if name_ok
+            && !is_next_node(name)
+            && PublicKey::from_bech32(npub).is_ok()
+            && !out.iter().any(|r| r.npub == npub)
+        {
             out.push(Recommended {
                 name: name.to_string(),
                 npub: npub.to_string(),
@@ -597,8 +694,7 @@ impl PublicNodes {
         }
         let choices = {
             let mut inner = self.lock();
-            let recommended = inner.settings.recommended();
-            inner.settings.set_selected(npub, selected, &recommended);
+            inner.settings.set_selected(npub, selected);
             inner.settings.clone()
         };
         self.wake.notify_one();
@@ -661,6 +757,28 @@ impl PublicNodes {
         }
     }
 
+    /// Bring the random preselection up to date with what is advertising now
+    /// ([`PublicNodeSettings::maintain_preselection`]). Returns the choices to
+    /// save when something changed.
+    fn maintain_preselection(
+        &self,
+        now_ms: u64,
+        pick: &mut dyn FnMut(usize) -> usize,
+    ) -> Option<PublicNodeSettings> {
+        let mut inner = self.lock();
+        let now_secs = now_ms / 1000;
+        let advertising: HashSet<String> = inner
+            .directory
+            .values()
+            .filter(|n| n.valid_until > now_secs)
+            .map(|n| n.npub.clone())
+            .collect();
+        inner
+            .settings
+            .maintain_preselection(&advertising, now_ms, pick)
+            .then(|| inner.settings.clone())
+    }
+
     /// Decide what this tick does. Pure over the held state, the clock and
     /// the gate; records the dials it plans so the next tick sees them.
     ///
@@ -684,6 +802,7 @@ impl PublicNodes {
             .map(String::as_str)
             .chain(recommended.iter().map(|r| r.npub.as_str()))
             .chain(inner.settings.added.iter().map(String::as_str))
+            .chain(inner.settings.preselected.keys().map(String::as_str))
             .collect();
         let public_connected: Vec<&String> = connected
             .iter()
@@ -707,7 +826,7 @@ impl PublicNodes {
             plan.disconnect = public_connected
                 .iter()
                 .filter(|n| !circle.contains(n.as_str()))
-                .filter(|n| !enabled || !inner.settings.is_selected(n, &recommended))
+                .filter(|n| !enabled || !inner.settings.is_selected(n))
                 .map(|n| (*n).clone())
                 .collect();
             plan.disconnect.sort();
@@ -757,7 +876,7 @@ impl PublicNodes {
             .count();
         let have = public_connected
             .iter()
-            .filter(|n| inner.settings.is_selected(n, &recommended))
+            .filter(|n| inner.settings.is_selected(n))
             .count()
             + in_flight;
         if have >= TARGET_LINKS {
@@ -772,7 +891,7 @@ impl PublicNodes {
             .values()
             .filter(|n| n.valid_until > now_secs)
             .filter(|n| !connected.contains(&n.npub))
-            .filter(|n| inner.settings.is_selected(&n.npub, &recommended))
+            .filter(|n| inner.settings.is_selected(&n.npub))
             .filter(|n| n.dial_addr().is_some())
             .filter(|n| {
                 inner.dials.get(&n.npub).is_none_or(|d| {
@@ -829,11 +948,9 @@ impl PublicNodes {
                 .filter(|n| n.valid_until > now_secs);
             let peer = peer_by_npub.get(npub).filter(|p| p.connected);
             let dial = inner.dials.get(npub);
-            let selected = inner.settings.is_selected(npub, &recommended);
+            let selected = inner.settings.is_selected(npub);
             let state = if peer.is_some() {
                 "connected"
-            } else if node.is_none() {
-                "no-advert"
             } else if !inner.settings.enabled || !selected {
                 "idle"
             } else if dial.is_some_and(|d| {
@@ -862,8 +979,17 @@ impl PublicNodes {
             }
         };
 
+        // Only nodes advertising right now are listed: a recommended node
+        // without a live advert drops out, and comes back when it advertises.
+        let advertising = |npub: &str| {
+            inner
+                .directory
+                .get(npub)
+                .is_some_and(|n| n.valid_until > now_secs)
+        };
         let mut nodes: Vec<PublicNodeView> = recommended
             .iter()
+            .filter(|r| advertising(&r.npub))
             .map(|r| row(&r.npub, r.name.clone(), true))
             .collect();
         let mut others: Vec<&PublicNode> = inner
@@ -873,17 +999,8 @@ impl PublicNodes {
             .filter(|n| !recommended.iter().any(|r| r.npub == n.npub))
             .collect();
         others.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.npub.cmp(&b.npub)));
-        let mut listed: HashSet<String> = nodes.iter().map(|n| n.npub.clone()).collect();
         for node in others.into_iter().take(MAX_LISTED_OTHERS) {
-            listed.insert(node.npub.clone());
             nodes.push(row(&node.npub, short_npub(&node.npub), false));
-        }
-        // A node the user added stays listed while it is not advertising, so
-        // it can still be switched off.
-        for npub in &inner.settings.added {
-            if !listed.contains(npub) {
-                nodes.push(row(npub, short_npub(npub), false));
-            }
         }
 
         PublicNodesView {
@@ -1038,6 +1155,13 @@ impl PublicNodes {
         }
         let kept = nodes.len();
         self.observe(nodes, now);
+        // The first read with adverts picks the preselection; later ones keep
+        // it current. Persisted, so it does not reshuffle per launch.
+        if let Some(choices) = self.maintain_preselection(now_ms(), &mut os_seeded_picker()) {
+            if let Err(e) = self.save(&choices) {
+                tracing::warn!(error = %e, "public nodes: could not save the preselection");
+            }
+        }
         let mut inner = self.lock();
         inner.fetch.running = false;
         inner.fetch.last_ms = now_ms();
@@ -1197,7 +1321,8 @@ pub struct PublicNodeView {
     /// The advert's `created_at`, ms; 0 without one.
     pub advertised_at_ms: u64,
     /// `connected`, `connecting`, `waiting` (selected, between dials),
-    /// `idle` (not selected, or the feature off), or `no-advert`.
+    /// or `idle` (not selected, or the feature off). Only advertising nodes
+    /// are listed at all.
     pub state: String,
     /// Link round trip as fips measures it, while connected.
     pub srtt_ms: Option<f64>,
@@ -1379,9 +1504,10 @@ mod tests {
     #[test]
     fn the_join_bundle_list_is_extracted() {
         let us01 = SHIPPED_RECOMMENDED[0].1;
-        let de01 = SHIPPED_RECOMMENDED[5].1;
+        let de01 = SHIPPED_RECOMMENDED[4].1;
+        let next = NEXT_NPUB;
         let js = format!(
-            r#"var a="npub1qqqq";x1=[{{name:"test-us01",npub:"{us01}"}},{{name:"test-de01",npub:"{de01}"}},{{name:"bad name!",npub:"{us01}"}},{{name:"dup",npub:"{us01}"}},{{name:"junk",npub:"npub1notreal"}}],E1={{class:"hero"}}"#
+            r#"var a="npub1qqqq";x1=[{{name:"test-us01",npub:"{us01}"}},{{name:"test-us03-next",npub:"{next}"}},{{name:"test-de01",npub:"{de01}"}},{{name:"bad name!",npub:"{us01}"}},{{name:"dup",npub:"{us01}"}},{{name:"junk",npub:"npub1notreal"}}],E1={{class:"hero"}}"#
         );
         let list = parse_join_bundle(&js);
         assert_eq!(
@@ -1413,33 +1539,146 @@ mod tests {
         assert_eq!(join_bundle_path("<html></html>"), None);
     }
 
-    /// Every shipped entry is well formed, so the floor is never broken.
+    /// test-us03-next, as join.fips.network lists it.
+    const NEXT_NPUB: &str = "npub15m6c4ghuegx4pcde6tra8f7smn8vfv2wundyxwhkjynuerkrzmgsy09sh3";
+
+    /// Every shipped entry is well formed and none is a `next` node, so the
+    /// floor is never broken.
     #[test]
     fn the_shipped_list_is_valid() {
         for (name, npub) in SHIPPED_RECOMMENDED {
             assert!(PublicKey::from_bech32(npub).is_ok(), "{name}");
+            assert!(!is_next_node(name), "{name} is a next node");
+            assert_ne!(*npub, NEXT_NPUB);
         }
     }
 
+    /// A `next` entry saved by an older build, or slipped into a refresh, is
+    /// never recommended.
     #[test]
-    fn selection_is_stored_as_deltas_against_the_recommendation() {
-        let mut s = PublicNodeSettings::default();
-        let rec = s.recommended();
-        let us01 = rec[0].npub.clone();
+    fn next_nodes_are_never_recommended() {
+        let s = PublicNodeSettings {
+            recommended: Some(vec![
+                Recommended {
+                    name: "test-us03-next".into(),
+                    npub: NEXT_NPUB.into(),
+                },
+                Recommended {
+                    name: "test-us01".into(),
+                    npub: SHIPPED_RECOMMENDED[0].1.into(),
+                },
+            ]),
+            ..Default::default()
+        };
+        let names: Vec<String> = s.recommended().into_iter().map(|r| r.name).collect();
+        assert_eq!(names, vec!["test-us01".to_string()]);
+    }
+
+    /// A deterministic picker for tests: a fixed sequence of draws.
+    fn picker(draws: &[usize]) -> impl FnMut(usize) -> usize + '_ {
+        let mut i = 0;
+        move |n| {
+            let d = draws[i % draws.len()];
+            i += 1;
+            d % n
+        }
+    }
+
+    fn advertising(npubs: &[&str]) -> HashSet<String> {
+        npubs.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// At most three, only from advertising recommended nodes, chosen by the
+    /// picker rather than list order, and then left alone.
+    #[test]
+    fn preselection_is_random_capped_and_stable() {
+        let rec: Vec<&str> = SHIPPED_RECOMMENDED.iter().map(|(_, n)| *n).collect();
         let stranger = Keys::generate().public_key().to_bech32().unwrap();
+        let mut all = rec.clone();
+        all.push(&stranger);
+        let live = advertising(&all);
 
-        assert!(s.is_selected(&us01, &rec), "recommended means selected");
-        assert!(!s.is_selected(&stranger, &rec));
+        let mut s = PublicNodeSettings::default();
+        assert!(s.maintain_preselection(&live, 1_000, &mut picker(&[6, 0, 3])));
+        let first: BTreeSet<String> = s.preselected.keys().cloned().collect();
+        assert_eq!(first.len(), PRESELECT_MAX);
+        assert!(
+            !first.contains(&stranger),
+            "strangers are never preselected"
+        );
+        assert!(first.iter().all(|n| rec.contains(&n.as_str())));
+        let first_three: BTreeSet<String> = rec[..3].iter().map(|n| n.to_string()).collect();
+        assert_ne!(first, first_three, "not simply the first three");
+        assert!(first.iter().all(|n| s.is_selected(n)));
 
-        s.set_selected(&us01, false, &rec);
-        s.set_selected(&stranger, true, &rec);
-        assert!(!s.is_selected(&us01, &rec));
-        assert!(s.is_selected(&stranger, &rec));
-        assert!(s.added.contains(&stranger) && s.removed.contains(&us01));
+        // Later reads with other draws: nothing reshuffles.
+        assert!(!s.maintain_preselection(&live, 2_000, &mut picker(&[1, 2, 3])));
+        assert_eq!(
+            s.preselected.keys().cloned().collect::<BTreeSet<_>>(),
+            first
+        );
 
-        s.set_selected(&us01, true, &rec);
-        s.set_selected(&stranger, false, &rec);
-        assert_eq!(s.added.len() + s.removed.len(), 0, "back to no deltas");
+        // The same draws give the same pick; other draws a different one.
+        let mut a = PublicNodeSettings::default();
+        let mut b = PublicNodeSettings::default();
+        a.maintain_preselection(&live, 1_000, &mut picker(&[6, 0, 3]));
+        b.maintain_preselection(&live, 1_000, &mut picker(&[0, 0, 0]));
+        assert_eq!(
+            a.preselected.keys().cloned().collect::<BTreeSet<_>>(),
+            first
+        );
+        assert_ne!(a.preselected, b.preselected);
+    }
+
+    /// Nothing advertising: nothing is picked, and the first read with adverts
+    /// does the picking. Fewer than three advertising: no top-up.
+    #[test]
+    fn preselection_waits_for_adverts_and_never_tops_up_with_strangers() {
+        let mut s = PublicNodeSettings::default();
+        assert!(!s.maintain_preselection(&HashSet::new(), 1_000, &mut picker(&[0])));
+        assert!(s.preselected.is_empty());
+
+        let stranger = Keys::generate().public_key().to_bech32().unwrap();
+        let live = advertising(&[SHIPPED_RECOMMENDED[2].1, &stranger, NEXT_NPUB]);
+        s.maintain_preselection(&live, 2_000, &mut picker(&[0]));
+        assert_eq!(
+            s.preselected.keys().cloned().collect::<Vec<_>>(),
+            vec![SHIPPED_RECOMMENDED[2].1.to_string()]
+        );
+    }
+
+    /// The user's word wins: a deselected node stays off and another takes
+    /// its place; one gone quiet for a day is swapped for another.
+    #[test]
+    fn preselection_respects_the_user_and_replaces_the_long_gone() {
+        let rec: Vec<&str> = SHIPPED_RECOMMENDED.iter().map(|(_, n)| *n).collect();
+        let live = advertising(&rec);
+        let mut s = PublicNodeSettings::default();
+        s.maintain_preselection(&live, 1_000, &mut picker(&[0]));
+        let gone = s.preselected.keys().next().unwrap().clone();
+        let off = s.preselected.keys().nth(1).unwrap().clone();
+
+        s.set_selected(&off, false);
+        assert!(!s.is_selected(&off));
+        s.maintain_preselection(&live, 2_000, &mut picker(&[0]));
+        assert!(!s.is_selected(&off), "deselected stays deselected");
+        let selected =
+            |s: &PublicNodeSettings| s.preselected.keys().filter(|n| s.is_selected(n)).count();
+        assert_eq!(selected(&s), PRESELECT_MAX, "a deselected one is replaced");
+
+        // `gone` stops advertising for over a day: replaced.
+        let quiet: HashSet<String> = live.iter().filter(|n| **n != gone).cloned().collect();
+        let later = 1_000 + PRESELECT_REPLACE_AFTER_MS + 1;
+        assert!(s.maintain_preselection(&quiet, later, &mut picker(&[0])));
+        assert!(!s.preselected.contains_key(&gone));
+        assert_eq!(selected(&s), PRESELECT_MAX);
+
+        // A user-added stranger is selected whatever the preselection says.
+        let stranger = Keys::generate().public_key().to_bech32().unwrap();
+        s.set_selected(&stranger, true);
+        assert!(s.is_selected(&stranger) && s.added.contains(&stranger));
+        s.set_selected(&stranger, false);
+        assert!(!s.added.contains(&stranger) && !s.is_selected(&stranger));
     }
 
     // --- plan ----------------------------------------------------------------
@@ -1456,6 +1695,15 @@ mod tests {
         );
         let rec = nodes.lock().settings.recommended();
         let picked: Vec<String> = rec.iter().take(n).map(|r| r.npub.clone()).collect();
+        // Preselected in list order here, so the plan tests read plainly; the
+        // random draw has its own tests.
+        for npub in &picked {
+            nodes
+                .lock()
+                .settings
+                .preselected
+                .insert(npub.clone(), NOW * 1000);
+        }
         nodes.observe(
             picked.iter().enumerate().map(|(i, npub)| PublicNode {
                 npub: npub.clone(),
@@ -1563,9 +1811,7 @@ mod tests {
     fn a_deselected_node_is_dropped_and_not_redialled() {
         let (_d, nodes, picked) = dir_with(3);
         {
-            let mut inner = nodes.lock();
-            let rec = inner.settings.recommended();
-            inner.settings.set_selected(&picked[0], false, &rec);
+            nodes.lock().settings.set_selected(&picked[0], false);
         }
         let up: HashSet<String> = [picked[0].clone()].into();
         let plan = nodes.plan(NOW * 1000, open_gate(), &up, &HashSet::new());
@@ -1621,7 +1867,7 @@ mod tests {
     }
 
     #[test]
-    fn the_view_lists_recommended_first_and_marks_state() {
+    fn the_view_lists_advertising_nodes_recommended_first() {
         let (_d, nodes, picked) = dir_with(2);
         let stranger = PublicNode {
             npub: Keys::generate().public_key().to_bech32().unwrap(),
@@ -1637,14 +1883,15 @@ mod tests {
             ..Default::default()
         }];
         let view = nodes.view(&peers, open_gate(), NOW * 1000);
-        let rec_count = SHIPPED_RECOMMENDED.len();
-        assert_eq!(view.nodes.len(), rec_count + 1);
-        assert!(view.nodes[..rec_count].iter().all(|n| n.recommended));
+        // Two recommended nodes advertise; the rest do not and are not shown.
+        assert_eq!(view.nodes.len(), 3);
+        assert!(view.nodes[..2]
+            .iter()
+            .all(|n| n.recommended && n.advertised));
         assert_eq!(view.nodes[0].name, "test-us01");
         assert_eq!(view.nodes[0].state, "connected");
         assert_eq!(view.nodes[0].srtt_ms, Some(42.0));
         assert_eq!(view.nodes[1].state, "waiting");
-        assert_eq!(view.nodes[2].state, "no-advert");
         let last = view.nodes.last().unwrap();
         assert!(!last.recommended && !last.selected);
         assert_eq!(last.npub, stranger.npub);

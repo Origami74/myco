@@ -75,7 +75,13 @@ The rest were NAT-only browser nodes.
 
 [join.fips.network](https://join.fips.network) stars the project's own test
 nodes (`test-us01`, `test-de01`, …). Myco recommends the same ones: listed
-first, starred, and selected by default.
+first and starred.
+
+`next` nodes are excluded everywhere. Their adverts carry
+`d=fips-overlay-v1-next` and are refused, and recommended entries named
+`*-next` (`test-us03-next`) are dropped from the shipped list, from a
+refresh and from a list saved by an older build. They are never shown,
+selected or dialled.
 
 The site publishes no machine-readable list. It is a single-page app with
 the npubs compiled into its bundle as `{name:"…",npub:"…"}` literals. So:
@@ -92,18 +98,43 @@ read the same literals out of the current bundle.
 
 ## Choosing and dialling
 
-### Selection
+### Only what advertises
 
-Stored as deltas against the recommended list (`added`, `removed`), so a
-node the site starts recommending is picked up without the user doing
-anything, and one they switched off stays off.
+The Settings list and the dial plan contain only nodes with a live kind
+37195 advert. A recommended node that stops advertising drops out of the
+list, and comes back when it advertises again.
+
+### Preselection
+
+Myco ticks **at most three** recommended nodes for the user, **at random**,
+so phones spread over the test nodes instead of all piling onto the first
+ones in the list.
+
+- **When**: on the first advert read that finds recommended nodes
+  advertising. Only those are eligible.
+- **Stable**: the pick is saved in `settings.json` (npub → last seen
+  advertising) and kept across launches and refreshes.
+- **Replaced when gone**: a picked node not seen advertising for a day is
+  dropped, and another advertising recommended node is drawn in its place.
+- **No top-up with strangers**: with fewer than three recommended nodes
+  advertising, the pick is smaller. A node from outside the recommended list
+  is run by someone nobody vouched for, so dialling it is the user's call.
+
+The randomness is a xorshift seeded from the OS once per draw; tests inject
+the draws.
+
+### The user's choices
+
+Stored as deltas against the preselection: `added` (ticked by the user) and
+`removed` (a preselected node the user unticked). The user wins. An unticked
+node stays off and is never drawn again, and another is drawn to keep three.
 
 ### How many
 
 Myco holds **two** public links at once. One is a single point of failure.
 More is battery spent on redundancy, since the public nodes peer with each
-other. Recommended nodes are tried first, in the site's order, then the
-newest other selected node.
+other. Of the selected nodes, recommended ones are tried first, in the site's
+order, then the newest other one.
 
 ### How
 

@@ -272,7 +272,7 @@ data class PublicNode(
     val advertised: Boolean,
     val endpoint: String,
     val advertisedAtMs: Long,
-    /** "connected" | "connecting" | "waiting" | "idle" | "no-advert". */
+    /** "connected" | "connecting" | "waiting" | "idle". Only advertising nodes are listed. */
     val state: String,
     val srttMs: Double?,
     val connectedSinceMs: Long,

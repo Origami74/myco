@@ -11,9 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Mesh over the internet (opt-in).** Settings › Mesh › Internet links this
   phone to public FIPS nodes when it is online, so your Circle reaches you
-  when you are not in the same room. Myco finds the nodes on Nostr and
-  recommends the ones join.fips.network stars. It holds two links, slows down
-  off screen, and never dials while mesh-only is on. A public node sees this
+  when you are not in the same room. Myco lists the nodes advertising on
+  Nostr, stars the ones join.fips.network recommends, and ticks up to three of
+  those at random (you can change the pick). Nodes on the fips `next`
+  protocol are left out. It holds two links, slows down off screen, and never
+  dials while mesh-only is on. A public node sees this
   phone's IP address and which mesh addresses it talks to, not what you send.
   The Dev tab shows which public nodes are up.
 
