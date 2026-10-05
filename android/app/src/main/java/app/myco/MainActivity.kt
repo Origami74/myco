@@ -1,13 +1,11 @@
 package app.myco
 
-import android.Manifest
 import android.content.ComponentName
 import android.content.ContentValues
 import android.content.Intent
 import android.provider.Settings
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
-import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
 import android.graphics.Bitmap
@@ -17,12 +15,10 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.drawable.Icon
 import android.net.Uri
-import android.net.VpnService
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.cardemulation.CardEmulation
 import android.nfc.tech.Ndef
-import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.widget.Toast
@@ -30,6 +26,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -41,9 +38,6 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.unit.dp
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions
-import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
 import app.myco.ap.ApRadio
@@ -59,6 +53,16 @@ import app.myco.core.FileTransfer
 import app.myco.core.MycoCore
 import app.myco.core.NativeActions
 import app.myco.nfc.NfcReader
+import app.myco.onboarding.LaunchDecision
+import app.myco.onboarding.MeshOutcome
+import app.myco.onboarding.MeshSetup
+import app.myco.onboarding.SetupEntry
+import app.myco.onboarding.SetupNotice
+import app.myco.onboarding.SetupPlan
+import app.myco.onboarding.SetupStep
+import app.myco.onboarding.SystemAsk
+import app.myco.onboarding.TunnelWait
+import app.myco.onboarding.VpnConsent
 import app.myco.nfc.PairPresent
 import app.myco.share.DeviceName
 import app.myco.share.ExternalShare
@@ -68,12 +72,18 @@ import app.myco.share.NsiteShare
 import app.myco.share.PendingDeepLinks
 import app.myco.ui.MycoApp
 import app.myco.ui.intro.IntroMode
-import app.myco.ui.FirstRunNameDialog
 import app.myco.ui.applyDeviceName
+import app.myco.ui.publishProvisionalName
 import app.myco.ui.intro.IntroScreen
+import app.myco.hotspot.HotspotService
+import app.myco.ui.onboarding.Confirmed
+import app.myco.ui.onboarding.ExplainAskDialog
+import app.myco.ui.onboarding.MeshSetupDialog
+import app.myco.ui.onboarding.SetupAction
 import app.myco.ui.theme.MycoTheme
 import app.myco.vpn.MycoVpnService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -101,68 +111,50 @@ class MainActivity : ComponentActivity() {
     /** Hosts with a live [watchPendingLink] coroutine, so resumes don't stack them. */
     private val pendingWatchers = mutableSetOf<String>()
 
-    /**
-     * Permissions waiting for the dialog now on screen to finish. Android shows
-     * one permission request at a time and drops a second one launched while
-     * the first is up — on a first run that silently dropped Wi-Fi Aware's
-     * request behind Bluetooth's, and the lane stayed off. See [requestPermissions].
-     */
-    private val queuedPermissions = linkedSetOf<String>()
-    private var permissionRequestShowing = false
+    // --- mesh setup popup (N9) ---
+    //
+    // With the mesh on, the popup is where the mesh's permissions are asked
+    // for: the nearby-devices group (Bluetooth, Wi-Fi Aware, location where
+    // Android wants it) in a single request, then the VPN consent. On a first
+    // run it ends with the device name, which is asked whatever the mesh
+    // answer was. Every run opens on "Enable mesh?", and Android's prompts are
+    // launched only from a tap on one of its explain or refusal cards
+    // ([onSetupAsk]) — never by the popup opening, the mesh switch or a
+    // Settings Fix. Every prompt goes through [asker].
+    // Its state lives here rather than in Compose because the results land
+    // here, and they can land in a recreated Activity — so it is saved in
+    // onSaveInstanceState. The decisions themselves are in [MeshSetup], where
+    // they are tested.
 
-    private val permLauncher = registerForActivityResult(RequestMultiplePermissions()) {
-        permissionRequestShowing = false
-        // BLE is enabled by default / remembered; (re)start it once perms land.
-        if (prefs.getBoolean(PREF_BLE, true) && bleCorePermsGranted()) {
-            BleService.start(this)
-        }
-        // The Wi-Fi Aware lane is ON by default — it is a peering transport, and
-        // a lane the user never turned on is a lane that silently never carries
-        // anyone. (Re)start it if its perms just landed.
-        if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this) && awarePermsGranted()) {
-            AwareService.start(this)
-        }
-        // Whatever was asked for while that dialog was up, ask for now.
-        if (queuedPermissions.isNotEmpty()) {
-            val next = queuedPermissions.toList()
-            queuedPermissions.clear()
-            requestPermissions(next)
-        }
-    }
+    /** The mesh master switch. Hoisted here: a setup result can turn it off. */
+    private val meshEnabled = mutableStateOf(true)
 
-    /**
-     * Ask for the ungranted ones among [permissions], never dropping a request:
-     * while a dialog is up they are queued and asked for when it finishes.
-     */
-    private fun requestPermissions(permissions: List<String>) {
-        val needed = permissions.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (needed.isEmpty()) return
-        if (permissionRequestShowing) {
-            queuedPermissions.addAll(needed)
-            return
-        }
-        permissionRequestShowing = true
-        permLauncher.launch(needed.distinct().toTypedArray())
-    }
+    /** Where the popup is; null while it is closed. */
+    private val setupStep = mutableStateOf<SetupStep?>(null)
 
-    private val vpnConsentLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == RESULT_OK) {
-                startMeshNow()
-            } else {
-                // Consent declined: without the VPN slot no mesh traffic can
-                // flow, so don't pretend — persist the mesh off. (The Settings
-                // warning card explains and offers to retry.)
-                prefs.edit().putBoolean(PREF_MESH, false).apply()
-                Toast.makeText(
-                    this,
-                    "VPN permission declined — mesh disabled",
-                    Toast.LENGTH_LONG,
-                ).show()
-            }
-        }
+    /** Which steps this run of the popup has; set whenever it opens. */
+    private val setupPlan = mutableStateOf(SetupPlan(mesh = true, name = false))
+
+    /** How this run's mesh steps went, for the segments behind the current one. */
+    private val setupOutcome = mutableStateOf(MeshOutcome())
+
+    /** The name the Name step's field starts with; read when the step opens. */
+    private val setupName = mutableStateOf("")
+
+    /** Android refused nearby without asking; "Try again" opens app info instead. */
+    private val setupNearbyBlocked = mutableStateOf(false)
+
+    /** The snackbar the popup leaves behind, until MycoApp has shown it. */
+    private val setupNotice = mutableStateOf<SetupNotice?>(null)
+
+    /** `elapsedRealtime` when the wait for the tunnel began ([waitForTunnel]). */
+    private var tunnelSince = 0L
+
+    /** The wait for the tunnel after VPN consent ([waitForTunnel]). */
+    private var tunnelWait: Job? = null
+
+    /** The one place an Android prompt is launched; its results land in [onAskResult]. */
+    private val asker = SystemAsker(this, ::onAskResult)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Black splash (Myco mark) until Compose draws its first frame; must be
@@ -192,19 +184,28 @@ class MainActivity : ComponentActivity() {
         // (Device name is asserted in onResume, which also covers identity not yet
         // being ready at this point.)
 
+        meshEnabled.value = prefs.getBoolean(PREF_MESH, true)
+        asker.restore(savedInstanceState)
+        if (savedInstanceState != null) {
+            restoreSetup(savedInstanceState)
+        } else {
+            decideSetupAtLaunch()
+        }
+
         // Nothing starts and nothing is asked for until the intro has been seen
         // once. On a cold install this block would otherwise run before the
         // first frame: LAN browse up, the Bluetooth and Wi-Fi Aware permission
         // dialogs stacked, and the system's "Myco wants to set up a VPN
         // connection" prompt on top of them — four system dialogs over a splash
         // animation, before the app has said what it is. Every one of them now
-        // arrives after the intro, which is the first thing that explains
-        // anything. Returning launches are unchanged: the flag is set, so this
-        // runs here exactly as it always did.
+        // arrives after the intro, and only from the setup popup, which says
+        // what each is for first. Returning launches are unchanged: the flag is
+        // set, so this runs here exactly as it always did.
         if (prefs.getBoolean(PREF_INTRO_SEEN, false)) startEnabledLanes()
 
         setContent {
-            MycoTheme {
+            // Every screen asks Android through [asker], never on its own.
+            CompositionLocalProvider(LocalSystemAsker provides asker) { MycoTheme {
                 // The intro is an overlay, not a nav destination: the app is
                 // composed and laid out underneath it from the first frame. The
                 // pupil is a hole in that overlay, so the app is what shows
@@ -228,16 +229,6 @@ class MainActivity : ComponentActivity() {
                 // without being able to read it. Modifier.blur is a no-op
                 // below API 31, where the wash carries it alone.
                 var frost by remember { mutableFloatStateOf(if (introShowing) 1f else 0f) }
-                // The name question, asked exactly once. Raised here rather than
-                // only from the intro's completion so an upgrade from a build
-                // that never asked still gets it on its next launch, with the
-                // intro already behind it.
-                var askName by rememberSaveable {
-                    mutableStateOf(
-                        !prefs.getBoolean(PREF_NAME_CHOSEN, false) &&
-                            prefs.getBoolean(PREF_INTRO_SEEN, false),
-                    )
-                }
 
                 Box(Modifier.fillMaxSize()) {
                     Box(Modifier.blur(14.dp * frost)) {
@@ -253,8 +244,12 @@ class MainActivity : ComponentActivity() {
                             onPinNappletToHome = { pointer, title -> pinNappletToHomeScreen(pointer, title) },
                             onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
                             onScanned = { text -> handleScannedText(text) },
-                            initialMeshEnabled = prefs.getBoolean(PREF_MESH, true),
-                            onMeshToggle = { enabled -> setMeshEnabled(enabled) },
+                            meshEnabled = meshEnabled.value,
+                            onMeshToggle = { enabled -> onMeshToggle(enabled) },
+                            onFixNearby = { fixNearby() },
+                            onFixConnection = { fixConnection() },
+                            setupNotice = setupNotice.value,
+                            onSetupNoticeShown = { setupNotice.value = null },
                             onOfflineOnlyToggle = { enabled -> setOfflineOnly(enabled) },
                             initialDeveloperMode = prefs.getBoolean(PREF_DEV, BuildConfig.DEBUG),
                             onDeveloperModeToggle = { enabled -> prefs.edit().putBoolean(PREF_DEV, enabled).apply() },
@@ -276,20 +271,31 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    // Sits above the app and below nothing: the intro is gone
-                    // by the time this can show.
-                    if (askName && !introShowing) {
-                        // Read once, not on every keystroke — state() crosses
-                        // JNI and takes the core's locks.
-                        val npub = remember { core.state().ownNpub }
-                        FirstRunNameDialog(ownNpub = npub) { picked ->
-                            applyDeviceName(this@MainActivity, core, npub, picked)
-                            prefs.edit().putBoolean(PREF_NAME_CHOSEN, true).apply()
-                            askName = false
-                            // Deferred from the intro on a first run; a no-op
-                            // when the lanes are already up.
-                            startEnabledLanes()
-                        }
+                    // The setup popup waits for the intro, so it is never
+                    // stacked on it.
+                    val step = setupStep.value
+                    if (step != null && !introShowing) {
+                        MeshSetupDialog(
+                            step = step,
+                            plan = setupPlan.value,
+                            outcome = setupOutcome.value,
+                            nearbyBlocked = setupNearbyBlocked.value,
+                            name = setupName.value,
+                            onAction = ::onSetupAction,
+                            onAsk = ::onSetupAsk,
+                            onSaveName = ::chooseName,
+                        )
+                    }
+
+                    // Every other screen's prompt: its explanation, whose
+                    // button is the tap that asks.
+                    val explaining = asker.explaining.value
+                    if (explaining != null && !introShowing) {
+                        ExplainAskDialog(
+                            ask = explaining,
+                            onConfirm = { asker.launch(it) },
+                            onDismiss = asker::dismissExplain,
+                        )
                     }
 
                     if (introShowing) {
@@ -301,25 +307,18 @@ class MainActivity : ComponentActivity() {
                                 val firstRun = !prefs.getBoolean(PREF_INTRO_SEEN, false)
                                 prefs.edit().putBoolean(PREF_INTRO_SEEN, true).apply()
                                 // First run: onCreate deliberately started
-                                // nothing. Ask the name before the radios come
-                                // up rather than after — the permission dialogs
-                                // would sit on top of this one, and the name is
-                                // what every later pair request carries, so it
-                                // should be settled before anything can send
-                                // one. A replayed intro has already answered it
-                                // and falls through to starting the lanes,
-                                // which is a no-op there since every call in
-                                // startEnabledLanes is idempotent.
-                                if (firstRun && !prefs.getBoolean(PREF_NAME_CHOSEN, false)) {
-                                    askName = true
-                                } else if (firstRun) {
-                                    startEnabledLanes()
-                                }
+                                // nothing. Start what is already allowed (on a
+                                // fresh install, only the LAN watch); the setup
+                                // popup, now on screen, asks for the rest and
+                                // ends with the name. A replayed intro falls
+                                // through to nothing: every call in
+                                // startEnabledLanes is idempotent anyway.
+                                if (firstRun) startEnabledLanes()
                             },
                         )
                     }
                 }
-            }
+            } }
         }
 
         handleDeepLink(intent)
@@ -328,8 +327,8 @@ class MainActivity : ComponentActivity() {
     // --- mesh adapter (app-owned TUN) ---
 
     /**
-     * Bring up every lane the user has left enabled, and ask for whatever
-     * permission each one still needs.
+     * Bring up every lane the user has left enabled and Android has allowed.
+     * Asks for nothing: what is missing is the setup popup's to ask for.
      *
      * Called from `onCreate` on every launch after the first, and from the
      * intro's completion on the first — see the gate at its `onCreate` call
@@ -345,32 +344,48 @@ class MainActivity : ComponentActivity() {
         ApRadio.ensureStarted(this, enabled = prefs.getBoolean(PREF_LAN, true))
 
         // BLE and Wi-Fi Aware are ON by default (Aware only where the hardware
-        // supports it), and remembered thereafter. What either still needs is
-        // asked for in one request, so neither is dropped behind the other.
-        val radioPermissions = mutableListOf<String>()
-        if (prefs.getBoolean(PREF_BLE, true)) {
-            if (bleCorePermsGranted()) BleService.start(this) else radioPermissions += blePermissions()
+        // supports it), and remembered thereafter.
+        if (prefs.getBoolean(PREF_BLE, true) && bleCorePermsGranted()) BleService.start(this)
+        if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this) && awarePermsGranted()) {
+            AwareService.start(this)
         }
-        if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this)) {
-            if (awarePermsGranted()) AwareService.start(this) else radioPermissions += awarePermissions()
-        }
-        requestPermissions(radioPermissions)
 
-        // The mesh adapter (app-owned TUN) is ON by default — it's how this device
-        // reaches the mesh, so it's effectively required. Bring it up at launch,
-        // prompting for the one-time VPN consent the first time it's needed.
-        // The fips node's lifecycle follows this master "Enable" switch (the
-        // radio toggles only gate their radios), so start it here too — the
-        // dispatch is idempotent with the radio services' own startNode calls.
-        if (prefs.getBoolean(PREF_MESH, true)) {
+        // The mesh adapter (app-owned TUN) is ON by default — it's how this
+        // device reaches the mesh. The fips node's lifecycle follows this
+        // master switch (the radio toggles only gate their radios), so start it
+        // here too — idempotent with the radio services' own startNode calls.
+        // Not while a first run's popup is in its mesh steps: nobody has said
+        // yes yet, and its "Yes" starts it. An upgrade's popup doesn't hold a
+        // mesh that already ran ([MeshSetup.holdsMeshBack]). A VPN consent
+        // that is missing is not asked for here either — the popup, or the
+        // Settings warning that routes to it, owns that.
+        if (meshEnabled.value && !holdsMeshBack()) {
             core.dispatch(NativeActions.startNode())
-            val consent = VpnService.prepare(this)
-            if (consent == null) startMeshNow() else vpnConsentLauncher.launch(consent)
+            if (SystemAsk.Vpn.granted(this)) startMeshNow()
+        }
+    }
+
+    /** The mesh switch, flipped by the user (Settings, the status pill). */
+    private fun onMeshToggle(enabled: Boolean) {
+        if (!enabled) {
+            setMeshEnabled(false)
+            return
+        }
+        // Anything missing goes through the popup, on its "Enable mesh?" card:
+        // the mesh stays off and Android asks nothing until "Yes, enable" is
+        // tapped. With nothing missing there is no popup to flash past.
+        if (MeshSetup.meshOnNeedsSetup(SystemAsk.Nearby.granted(this), SystemAsk.Vpn.granted(this))) {
+            openMeshRun(SetupEntry.MeshSwitch)
+        } else {
+            setMeshEnabled(true)
+            startMeshNow()
         }
     }
 
     /**
      * The mesh master switch. Takes the node **and the BLE radio** with it.
+     * Switching on brings up only what is already allowed; asking for the
+     * rest is the setup popup's job ([onMeshToggle], [onSetupAction]).
      *
      * The radio has to follow, and this is the one place it does. The BLE
      * byte-bridge hands its scan and accept receivers to whichever transport
@@ -386,16 +401,14 @@ class MainActivity : ComponentActivity() {
      */
     private fun setMeshEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(PREF_MESH, enabled).apply()
+        meshEnabled.value = enabled
         val bleOn = prefs.getBoolean(PREF_BLE, true)
         if (enabled) {
             // Node follows the master switch (radio toggles only gate radios).
             core.dispatch(NativeActions.startNode())
             startBleWhenNodeUp()
-            // Android requires user consent before any app can run a VPN.
-            val consent = VpnService.prepare(this)
-            android.util.Log.i("MycoVpn", "setMeshEnabled(true): consent needed=${consent != null}")
-            if (consent != null) vpnConsentLauncher.launch(consent) else startMeshNow()
         } else {
+            tunnelWait?.cancel()
             MycoVpnService.stop(this)
             // Stop the node first: its drain wants to get a shutdown Disconnect
             // out over whatever links are still up, including BLE.
@@ -420,10 +433,8 @@ class MainActivity : ComponentActivity() {
      */
     private fun startBleWhenNodeUp(attempt: Int = 0) {
         if (!prefs.getBoolean(PREF_BLE, true)) return
-        if (!bleCorePermsGranted()) {
-            requestBlePermissionsIfNeeded()
-            return
-        }
+        // Not allowed yet: the setup popup asks, and starts it when it lands.
+        if (!bleCorePermsGranted()) return
         // Out of retries: start anyway rather than leaving BLE off entirely. A
         // bridge that arrives late is picked up in place — the running scanner
         // re-resolves the slot and takes the new receivers.
@@ -469,6 +480,409 @@ class MainActivity : ComponentActivity() {
         } else {
             Toast.makeText(this, "Mesh address not ready — try toggling the mesh off and on", Toast.LENGTH_LONG).show()
         }
+    }
+
+    // --- setup popup ---
+
+    /**
+     * Whether this launch opens the popup, and with which steps — see
+     * [MeshSetup.atLaunch] and [MeshSetup.launchPlan]. In short: a fresh
+     * install sees all of it; an upgrade sees the mesh steps only when the
+     * mesh is on and something it needs is missing (a mesh already working, or
+     * switched off on purpose, is recorded as set up and left be), and the
+     * name step only if no name was ever chosen.
+     */
+    private fun decideSetupAtLaunch() {
+        val mesh = if (prefs.getBoolean(PREF_SETUP_DONE, false)) {
+            LaunchDecision.None
+        } else {
+            val meshPref = if (prefs.contains(PREF_MESH)) prefs.getBoolean(PREF_MESH, true) else null
+            MeshSetup.atLaunch(
+                onboardingDone = false,
+                meshPref = meshPref,
+                nearbyGranted = SystemAsk.Nearby.granted(this),
+                vpnPrepared = SystemAsk.Vpn.granted(this),
+            )
+        }
+        if (mesh == LaunchDecision.MarkDone) prefs.edit().putBoolean(PREF_SETUP_DONE, true).apply()
+        // A first run is one whose intro hasn't been seen yet, or one that
+        // showed the popup and was closed before it finished; anything else
+        // reaching here is an upgrade ([MeshSetup.launchEntry]).
+        val entry = MeshSetup.launchEntry(
+            introSeen = prefs.getBoolean(PREF_INTRO_SEEN, false),
+            firstRunUnfinished = prefs.getBoolean(PREF_SETUP_FIRST_RUN, false),
+        )
+        val plan = MeshSetup.launchPlan(mesh, nameChosen = prefs.getBoolean(PREF_NAME_CHOSEN, false), entry = entry)
+            ?: return
+        if (plan.mesh && entry == SetupEntry.Launch) prefs.edit().putBoolean(PREF_SETUP_FIRST_RUN, true).apply()
+        openSetup(plan)
+    }
+
+    /**
+     * Open the popup on [plan]'s first card, with a clean outcome. Only shows
+     * a card: whatever Android is to be asked is asked from a button on it.
+     */
+    private fun openSetup(plan: SetupPlan) {
+        setupPlan.value = plan
+        setupOutcome.value = MeshOutcome()
+        setupNearbyBlocked.value = false
+        goTo(MeshSetup.firstStep(plan))
+    }
+
+    /** Show [step]; the Name step reads the name it offers as it opens. */
+    private fun goTo(step: SetupStep) {
+        if (step == SetupStep.Name) setupName.value = offeredName()
+        setupStep.value = step
+    }
+
+    /** Whether the popup is keeping the node and tunnel down; see [MeshSetup.holdsMeshBack]. */
+    private fun holdsMeshBack(): Boolean = MeshSetup.holdsMeshBack(setupStep.value, setupPlan.value)
+
+    /**
+     * The mesh steps opened from outside the popup — the mesh switch, a radio
+     * toggle, a Settings fix. A closed popup opens on "Enable mesh?"; one
+     * already open is left where it is. Either way nothing is asked here.
+     */
+    private fun openMeshRun(entry: SetupEntry) {
+        if (setupStep.value != null) return
+        openSetup(MeshSetup.reopenPlan(entry, nameChosen = prefs.getBoolean(PREF_NAME_CHOSEN, false)))
+    }
+
+    /**
+     * The name the Name step's field starts with: a name the user set before,
+     * otherwise the phone's own name (Settings › About phone), otherwise the
+     * generated one — the same order the first-run name dialog used.
+     */
+    private fun offeredName(): String = DeviceName.current(this, core.state().ownNpub)
+
+    private fun restoreSetup(state: Bundle) {
+        setupStep.value = state.getString(STATE_SETUP_STEP)?.let { name ->
+            SetupStep.entries.firstOrNull { it.name == name }
+        }
+        setupPlan.value = SetupPlan(
+            mesh = state.getBoolean(STATE_SETUP_PLAN_MESH, true),
+            name = state.getBoolean(STATE_SETUP_PLAN_NAME),
+            entry = state.getString(STATE_SETUP_ENTRY)
+                ?.let { name -> SetupEntry.entries.firstOrNull { it.name == name } }
+                ?: SetupEntry.Launch,
+        )
+        setupOutcome.value = MeshOutcome(
+            declined = state.getBoolean(STATE_SETUP_DECLINED),
+            nearbyRefused = state.getBoolean(STATE_SETUP_REFUSED),
+            connectionSkipped = state.getBoolean(STATE_SETUP_SKIPPED),
+            dismissed = state.getBoolean(STATE_SETUP_DISMISSED),
+        )
+        setupNearbyBlocked.value = state.getBoolean(STATE_SETUP_BLOCKED)
+        setupName.value = state.getString(STATE_SETUP_NAME).orEmpty()
+        tunnelSince = state.getLong(STATE_PROMPT_AT)
+        // The wait was a coroutine of the Activity that is gone; pick it up.
+        if (setupStep.value == SetupStep.Connecting) waitForTunnel(since = tunnelSince)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_SETUP_STEP, setupStep.value?.name)
+        outState.putBoolean(STATE_SETUP_PLAN_MESH, setupPlan.value.mesh)
+        outState.putBoolean(STATE_SETUP_PLAN_NAME, setupPlan.value.name)
+        outState.putString(STATE_SETUP_ENTRY, setupPlan.value.entry.name)
+        outState.putBoolean(STATE_SETUP_DECLINED, setupOutcome.value.declined)
+        outState.putBoolean(STATE_SETUP_REFUSED, setupOutcome.value.nearbyRefused)
+        outState.putBoolean(STATE_SETUP_SKIPPED, setupOutcome.value.connectionSkipped)
+        outState.putBoolean(STATE_SETUP_DISMISSED, setupOutcome.value.dismissed)
+        outState.putBoolean(STATE_SETUP_BLOCKED, setupNearbyBlocked.value)
+        outState.putString(STATE_SETUP_NAME, setupName.value)
+        outState.putLong(STATE_PROMPT_AT, tunnelSince)
+        asker.save(outState)
+    }
+
+    private fun onSetupAction(action: SetupAction) {
+        when (action) {
+            // On to the "Nearby devices" card — or past it, with nothing left
+            // to ask. Android's prompts wait for the cards' buttons.
+            // Always switched on here, not only when it was off: on a first
+            // run the stored switch is already on (its default), but nothing
+            // has started it — [holdsMeshBack] kept the node down until now.
+            SetupAction.Yes -> {
+                setMeshEnabled(true)
+                if (SystemAsk.Nearby.granted(this)) {
+                    afterNearbyStep()
+                } else {
+                    setupStep.value = SetupStep.ExplainNearby
+                }
+            }
+            // "Not now" on a run opened later (mesh switch, Fix) or on an
+            // upgrade: nothing was asked and nothing changes — the mesh stays
+            // as it was.
+            SetupAction.NotNowEnable -> {
+                setupOutcome.value = setupOutcome.value.copy(dismissed = true)
+                val next = MeshSetup.afterMesh(setupPlan.value)
+                if (next != null) goTo(next) else finishSetup()
+            }
+            SetupAction.NoThanks -> {
+                setMeshEnabled(false)
+                setupOutcome.value = setupOutcome.value.copy(declined = true)
+                endMeshSteps()
+            }
+            // Coming back lands in onResume, which carries on if it was allowed.
+            SetupAction.OpenAppSettings -> openAppSettings()
+            SetupAction.ContinueAfterNearby -> {
+                setupOutcome.value = setupOutcome.value.copy(nearbyRefused = true)
+                afterNearbyStep()
+            }
+            SetupAction.OpenVpnSettings -> runCatching {
+                startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
+            }
+            // The mesh can't carry anything without the VPN, so don't leave it
+            // looking on: switch it off, and say so in the snackbar.
+            SetupAction.NotNow, SetupAction.ContinueWithout -> {
+                setMeshEnabled(false)
+                setupOutcome.value = MeshSetup.skipConnection(setupOutcome.value)
+                endMeshSteps()
+            }
+        }
+    }
+
+    /**
+     * A tap on the popup that asks Android: "Allow nearby devices" on "Nearby devices" or
+     * "Mesh connection", after the card said what the prompt is for, or "Try
+     * again" on a refusal card.
+     */
+    private fun onSetupAsk(confirmed: Confirmed) {
+        when (confirmed.ask) {
+            SystemAsk.Nearby -> requestNearbyStep(confirmed)
+            SystemAsk.Vpn -> beginVpnStep(confirmed)
+            else -> Unit
+        }
+    }
+
+    /**
+     * Every prompt's result. The popup's nearby and VPN steps read theirs;
+     * the rest only need what the prompt was for done, or nothing at all —
+     * the screens re-read [SystemAsk.granted] off [SystemAsker.revision].
+     */
+    private fun onAskResult(result: AskResult) {
+        when (result.ask) {
+            SystemAsk.Nearby -> onNearbyResult(result)
+            SystemAsk.Vpn -> onVpnConsentResult(result.resultOk, result.elapsedMs)
+            // Refused without a dialog: Android won't ask again, so its
+            // settings are the way — or the next tap would do nothing at all.
+            SystemAsk.Hotspot -> if (result.granted) {
+                HotspotService.start(this)
+            } else if (result.refusedForGood) {
+                openAppSettings()
+            }
+            SystemAsk.Camera -> if (result.refusedForGood) openAppSettings()
+            SystemAsk.Notifications -> if (result.refusedForGood) openNotificationSettings(this)
+            SystemAsk.Battery, SystemAsk.BluetoothOn -> Unit
+        }
+    }
+
+    private fun openAppSettings() {
+        runCatching {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }
+    }
+
+    /** The mesh steps are over, however they ended: on to the name, or close. */
+    private fun endMeshSteps() {
+        tunnelWait?.cancel()
+        tunnelWait = null
+        // Asked at all means asked: launch doesn't bring the mesh steps back.
+        prefs.edit().putBoolean(PREF_SETUP_DONE, true).remove(PREF_SETUP_FIRST_RUN).apply()
+        val next = MeshSetup.afterMesh(setupPlan.value)
+        if (next != null) goTo(next) else finishSetup()
+    }
+
+    /**
+     * The Name step's answer: the field's content on "Use this name". The
+     * same path the first-run name dialog took: published everywhere by
+     * [applyDeviceName], and remembered as answered.
+     */
+    private fun chooseName(picked: String) {
+        val name = picked.trim().take(DeviceName.MAX_LENGTH)
+        if (name.isEmpty()) return
+        applyDeviceName(this, core, core.state().ownNpub, name)
+        prefs.edit().putBoolean(PREF_NAME_CHOSEN, true).apply()
+        finishSetup()
+    }
+
+    /**
+     * Ask for the nearby group in one request — or, with it all granted
+     * already, go straight on ([afterNearbyStep]). Reached only from a popup
+     * button ("Allow nearby devices" on the "Nearby devices" card, "Try again") — the
+     * popup is open, and the user just acted on it.
+     */
+    private fun requestNearbyStep(confirmed: Confirmed) {
+        // Never with the popup closed: opening it is a separate, prompt-free
+        // step ([openMeshRun]).
+        val from = setupStep.value ?: return
+        // One system prompt at a time: Android drops a request launched
+        // behind another, so never stack them.
+        if (MeshSetup.systemPromptUp(from)) return
+        if (SystemAsk.Nearby.granted(this)) {
+            afterNearbyStep()
+            return
+        }
+        setupStep.value = SetupStep.AskingNearby
+        if (!asker.launch(confirmed)) setupStep.value = from
+    }
+
+    /**
+     * The nearby prompt's answer. From the popup: on to the VPN, or the
+     * refusal card. From Settings › Permissions with the mesh off: nothing to
+     * do but send a refusal for good to the app's settings.
+     */
+    private fun onNearbyResult(result: AskResult) {
+        // Whatever landed, start it. In the popup the node is up (or coming
+        // up) from "Yes"; elsewhere it follows the mesh switch.
+        if (meshEnabled.value) {
+            startBleWhenNodeUp()
+            if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this) && awarePermsGranted()) {
+                AwareService.start(this)
+            }
+        }
+        if (setupStep.value != SetupStep.AskingNearby) {
+            if (result.refusedForGood) openAppSettings()
+            return
+        }
+        if (result.granted) {
+            setupOutcome.value = setupOutcome.value.copy(nearbyRefused = false)
+            afterNearbyStep()
+            return
+        }
+        setupNearbyBlocked.value = result.refusedForGood
+        setupStep.value = SetupStep.NearbyRefused
+    }
+
+    /**
+     * The nearby step is behind: show the "Mesh connection" card, which says
+     * what the VPN is before Android asks — or, with the consent already
+     * Myco's (no prompt to come), bring the tunnel up. Never the VPN prompt
+     * itself; that waits for the card's "Allow VPN" ([MeshSetup.afterNearby]).
+     */
+    private fun afterNearbyStep() {
+        if (setupStep.value == null) return
+        when (MeshSetup.afterNearby(SystemAsk.Vpn.granted(this))) {
+            SetupStep.ExplainVpn -> setupStep.value = SetupStep.ExplainVpn
+            else -> connectMesh()
+        }
+    }
+
+    /**
+     * Ask for the VPN consent, or with it already Myco's, bring the tunnel up.
+     * Reached only from a tap: "Allow VPN" on the connection card, or a "Try
+     * again" on the VPN refusal cards.
+     */
+    private fun beginVpnStep(confirmed: Confirmed) {
+        val from = setupStep.value ?: return
+        if (MeshSetup.systemPromptUp(from)) return
+        if (SystemAsk.Vpn.granted(this)) {
+            connectMesh()
+            return
+        }
+        setupStep.value = SetupStep.AskingVpn
+        if (!asker.launch(confirmed)) setupStep.value = from
+    }
+
+    /** The consent is Myco's: bring the tunnel up and wait for it on "Starting the mesh…". */
+    private fun connectMesh() {
+        val since = SystemClock.elapsedRealtime()
+        startMeshNow()
+        waitForTunnel(since)
+    }
+
+    private fun onVpnConsentResult(ok: Boolean, elapsed: Long) {
+        if (setupStep.value != SetupStep.AskingVpn) {
+            // Not ours to read (the popup was closed meanwhile); just honour a yes.
+            if (ok && meshEnabled.value) startMeshNow()
+            return
+        }
+        when (MeshSetup.classifyConsent(ok, elapsed)) {
+            VpnConsent.Granted -> connectMesh()
+            VpnConsent.Refused -> setupStep.value = SetupStep.VpnRefused
+            // Android bounced the consent activity without showing it: another
+            // app is the always-on VPN. See MeshSetup.FAST_ANSWER_MS.
+            VpnConsent.BlockedByAlwaysOn -> setupStep.value = SetupStep.AlwaysOnVpn
+        }
+    }
+
+    /**
+     * Hold the popup on "Starting the mesh…" until the tunnel is up, then move
+     * on. A failed `establish()` after consent is the other sign of an
+     * always-on VPN elsewhere ([MeshSetup.tunnel]); a node slow to publish its
+     * address only holds the popup for [MeshSetup.TUNNEL_WAIT_MS].
+     */
+    private fun waitForTunnel(since: Long) {
+        setupStep.value = SetupStep.Connecting
+        tunnelSince = since
+        tunnelWait?.cancel()
+        tunnelWait = lifecycleScope.launch {
+            val start = SystemClock.elapsedRealtime()
+            while (true) {
+                val wait = MeshSetup.tunnel(
+                    isUp = MycoVpnService.isUp(),
+                    establishFailed = MycoVpnService.establishFailedSince(since),
+                    waitedMs = SystemClock.elapsedRealtime() - start,
+                )
+                when (wait) {
+                    TunnelWait.Up, TunnelWait.GaveUp -> {
+                        endMeshSteps()
+                        return@launch
+                    }
+                    TunnelWait.Blocked -> {
+                        setupStep.value = SetupStep.AlwaysOnVpn
+                        return@launch
+                    }
+                    TunnelWait.Waiting -> delay(TUNNEL_POLL_MS)
+                }
+            }
+        }
+    }
+
+    /**
+     * Close the popup and leave an honest snackbar. A name-only run (an
+     * upgrade whose mesh was already set up) has nothing to report about the
+     * mesh, so it leaves none.
+     */
+    private fun finishSetup() {
+        tunnelWait?.cancel()
+        tunnelWait = null
+        val plan = setupPlan.value
+        val outcome = setupOutcome.value
+        setupStep.value = null
+        setupNearbyBlocked.value = false
+        // Done whichever way it closed — an upgrade's "Not now" included, so
+        // launch doesn't ask again. Only a run that changed something leaves
+        // a snackbar.
+        if (plan.mesh) prefs.edit().putBoolean(PREF_SETUP_DONE, true).remove(PREF_SETUP_FIRST_RUN).apply()
+        if (plan.mesh && !outcome.dismissed) {
+            setupNotice.value = MeshSetup.notice(
+                meshOn = meshEnabled.value,
+                nearbyGranted = SystemAsk.Nearby.granted(this),
+                declined = outcome.declined,
+            )
+        }
+        // Whatever the popup held back while it was in the mesh steps; a no-op
+        // for lanes that are already up.
+        startEnabledLanes()
+    }
+
+    /**
+     * Settings › Permissions "Fix" on Nearby devices, with the mesh on: the
+     * popup, on "Enable mesh?"; its "Yes" asks and starts the radios when
+     * they're allowed. (With the mesh off the page asks Android itself —
+     * nothing should start.)
+     */
+    private fun fixNearby() = openMeshRun(SetupEntry.Fix)
+
+    /**
+     * Settings "Fix" on the mesh connection with the mesh on (Permissions, and
+     * the VPN warning card). With the consent already Myco's there is nothing
+     * to ask — just bring the tunnel back, no popup; otherwise the popup, on
+     * "Enable mesh?", whose "Yes" goes on to the VPN prompt.
+     */
+    private fun fixConnection() {
+        if (SystemAsk.Vpn.granted(this)) startMeshNow() else openMeshRun(SetupEntry.Fix)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -626,11 +1040,23 @@ class MainActivity : ComponentActivity() {
         // back (prepare() re-authorises a consented app silently on 12+) nothing
         // restarts the service — so check here, where the user has just come
         // back from wherever they went to release it.
-        if (prefs.getBoolean(PREF_MESH, true) && !MycoVpnService.isUp() &&
-            prefs.getBoolean(PREF_INTRO_SEEN, false) && VpnService.prepare(this) == null
+        // Not while a first run's popup holds the mesh back: its "Yes" starts it.
+        if (meshEnabled.value && !holdsMeshBack() && !MycoVpnService.isUp() &&
+            prefs.getBoolean(PREF_INTRO_SEEN, false) && SystemAsk.Vpn.granted(this)
         ) {
             android.util.Log.i("MycoVpn", "onResume: mesh on, slot ours, tunnel down — restarting")
             startMeshNow()
+        }
+        // Back from Myco's app info after a refusal for good: carry on if the
+        // nearby permissions were allowed there.
+        if (setupStep.value == SetupStep.NearbyRefused && SystemAsk.Nearby.granted(this)) {
+            startBleWhenNodeUp()
+            if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this) && awarePermsGranted()) {
+                AwareService.start(this)
+            }
+            setupOutcome.value = setupOutcome.value.copy(nearbyRefused = false)
+            setupNearbyBlocked.value = false
+            afterNearbyStep()
         }
         // Presenting is owned by the Circle screen (it's the only place we emulate a
         // card). Here we just (re)apply the current presenting state — re-claiming
@@ -651,7 +1077,13 @@ class MainActivity : ComponentActivity() {
             // radio that started after the last rename.
             val stored = getSharedPreferences("myco_prefs", MODE_PRIVATE)
                 .getString("device_name", "").orEmpty()
-            applyDeviceName(this, core, it, stored)
+            // No name chosen yet (the setup popup's last step): the radios may
+            // already be up, so publish the pseudonym, not the phone's own name.
+            if (prefs.getBoolean(PREF_NAME_CHOSEN, false) || stored.isNotBlank()) {
+                applyDeviceName(this, core, it, stored)
+            } else {
+                publishProvisionalName(core, it)
+            }
         }
         // Deep links followed before the app existed (possibly in a previous process)
         // get their chance every time Myco comes back to the foreground.
@@ -734,7 +1166,10 @@ class MainActivity : ComponentActivity() {
     private fun setBleEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(PREF_BLE, enabled).apply()
         if (enabled) {
-            if (bleCorePermsGranted()) BleService.start(this) else requestBlePermissionsIfNeeded()
+            // Not allowed yet: the nearby explanation, whose button asks;
+            // [onNearbyResult] starts the radio if the mesh is on. Not the
+            // setup popup — its "Yes" would switch the whole mesh on.
+            if (bleCorePermsGranted()) BleService.start(this) else asker.explain(SystemAsk.Nearby)
         } else {
             BleService.stop(this)
         }
@@ -746,7 +1181,8 @@ class MainActivity : ComponentActivity() {
         prefs.edit().putBoolean(PREF_AWARE, enabled).apply()
         if (enabled) {
             if (!awarePermsGranted()) {
-                requestAwarePermissionsIfNeeded()
+                // As for Bluetooth: explained, then asked; started on the answer.
+                asker.explain(SystemAsk.Nearby)
                 return
             }
             AwareService.start(this)
@@ -773,19 +1209,7 @@ class MainActivity : ComponentActivity() {
             .onFailure { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
     }
 
-    private fun requestAwarePermissionsIfNeeded() = requestPermissions(awarePermissions())
-
-    private fun awarePermsGranted(): Boolean = awarePermissions().all {
-        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-    }
-
-    /** NEARBY_WIFI_DEVICES on API 33+; ACCESS_FINE_LOCATION gates Aware on 29–32. */
-    private fun awarePermissions(): List<String> =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            listOf(Manifest.permission.NEARBY_WIFI_DEVICES)
-        } else {
-            listOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
+    private fun awarePermsGranted(): Boolean = SystemAsk.granted(this, SystemAsk.wifiNearby())
 
     // --- nsite launching ---
 
@@ -1217,36 +1641,50 @@ class MainActivity : ComponentActivity() {
 
     // --- permissions ---
 
-    private fun requestBlePermissionsIfNeeded() = requestPermissions(blePermissions())
+    // Every prompt is a SystemAsk, asked through [asker]; these only read.
 
     /** The BLE radio's core permissions are granted (notifications are separate). */
-    private fun bleCorePermsGranted(): Boolean = bleCorePermissions().all {
-        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun bleCorePermissions(): List<String> =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            listOf(
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_ADVERTISE,
-                Manifest.permission.BLUETOOTH_CONNECT,
-            )
-        } else {
-            listOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-
-    private fun blePermissions(): List<String> = buildList {
-        addAll(bleCorePermissions())
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-    }
+    private fun bleCorePermsGranted(): Boolean = SystemAsk.granted(this, SystemAsk.ble())
 
     // Non-private: the radio services read PREF_MESH to gate node startup.
     companion object {
         /** startMeshNow: how many 500ms retries to wait for the node's mesh address. */
         private const val MESH_START_RETRIES = 20
         private const val MESH_START_RETRY_MS = 500L
+
+        /** How often the setup popup looks at the tunnel while it waits for it. */
+        private const val TUNNEL_POLL_MS = 250L
+
+        /**
+         * Set once the setup popup has run to the end (any end), or launch
+         * found nothing to ask. Never cleared: after that, Settings ›
+         * Permissions and the mesh switch reopen the popup, launch doesn't.
+         */
+        const val PREF_SETUP_DONE = "mesh_setup_done"
+
+        /**
+         * Set while a first run's popup is in progress, so a launch that
+         * finds it unfinished (the app closed mid-setup) is still a first run
+         * and not an upgrade. Cleared with [PREF_SETUP_DONE].
+         */
+        const val PREF_SETUP_FIRST_RUN = "mesh_setup_first_run"
+
+        /** Android has been asked for the nearby group / the VPN at least once ([SystemAsker]). */
+        const val PREF_NEARBY_ASKED = "nearby_asked"
+        const val PREF_VPN_ASKED = "vpn_asked"
+
+
+        private const val STATE_SETUP_STEP = "setup_step"
+        private const val STATE_SETUP_PLAN_MESH = "setup_plan_mesh"
+        private const val STATE_SETUP_PLAN_NAME = "setup_plan_name"
+        private const val STATE_SETUP_DECLINED = "setup_declined"
+        private const val STATE_SETUP_REFUSED = "setup_nearby_refused"
+        private const val STATE_SETUP_SKIPPED = "setup_connection_skipped"
+        private const val STATE_SETUP_DISMISSED = "setup_dismissed"
+        private const val STATE_SETUP_ENTRY = "setup_entry"
+        private const val STATE_SETUP_NAME = "setup_name"
+        private const val STATE_SETUP_BLOCKED = "setup_nearby_blocked"
+        private const val STATE_PROMPT_AT = "setup_prompt_at"
 
         const val PREF_BLE = "ble_enabled"
         const val PREF_AWARE = "wifi_aware_enabled"
@@ -1272,7 +1710,7 @@ class MainActivity : ComponentActivity() {
         /** Set once the intro has played all the way through. */
         const val PREF_INTRO_SEEN = "intro_seen"
 
-        /** Set once the first-run name question has been answered. Separate from
+        /** Set once the setup popup's name step has been answered. Separate from
          *  [PREF_INTRO_SEEN] so replaying the intro doesn't re-ask it, and so an
          *  upgrade from a build that never asked still gets the question once. */
         private const val PREF_NAME_CHOSEN = "name_chosen"

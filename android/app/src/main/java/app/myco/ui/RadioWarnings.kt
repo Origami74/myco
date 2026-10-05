@@ -3,11 +3,11 @@ package app.myco.ui
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.location.LocationManager
-import android.net.VpnService
 import android.net.wifi.WifiManager
 import app.myco.aware.AwareHealth
 import app.myco.ble.BleHealth
 import app.myco.core.AppState
+import app.myco.onboarding.SystemAsk
 import app.myco.vpn.MycoVpnService
 
 /** What tapping a [RadioWarning] should do. Dispatched in SettingsScreen. */
@@ -20,15 +20,15 @@ data class RadioWarning(val title: String, val detail: String, val action: Radio
  * Cross-check the app's transport toggles against the phone's actual radio /
  * VPN state, and return every mismatch that silently breaks peering. Cheap
  * enough to recompute on each 1s state poll: three service lookups and (when
- * the mesh is on) one `VpnService.prepare` binder call.
+ * the mesh is on) one VPN-consent binder call ([SystemAsk.Vpn]).
  */
 fun radioWarnings(context: Context, state: AppState, meshEnabled: Boolean): List<RadioWarning> {
     val warnings = mutableListOf<RadioWarning>()
 
-    // The mesh rides an app-owned VPN/TUN. prepare() != null means the VPN
+    // The mesh rides an app-owned VPN/TUN. Consent not granted means the VPN
     // slot is NOT ours (consent revoked, or another VPN app took the slot) —
     // the node may look healthy but no mesh traffic can flow.
-    if (meshEnabled && VpnService.prepare(context) != null) {
+    if (meshEnabled && !SystemAsk.Vpn.granted(context)) {
         warnings += RadioWarning(
             title = "Mesh has no VPN slot",
             detail = "Another app holds the VPN slot (or access was revoked), so no mesh " +

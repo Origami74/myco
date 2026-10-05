@@ -1,6 +1,5 @@
 package app.myco.hotspot
 
-import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -413,16 +412,6 @@ class HotspotService : Service() {
                 Intent(context, HotspotService::class.java).setAction(ACTION_STOP),
             )
         }
-
-        /** What [WifiManager.startLocalOnlyHotspot] gates on: NEARBY_WIFI_DEVICES
-         *  on 33+ (declared neverForLocation), fine location below — the same
-         *  split as the Wi-Fi Aware lane. */
-        fun permissions(): List<String> =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                listOf(Manifest.permission.NEARBY_WIFI_DEVICES)
-            } else {
-                listOf(Manifest.permission.ACCESS_FINE_LOCATION)
-            }
     }
 }
 

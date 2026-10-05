@@ -5,8 +5,10 @@
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <!-- Location gates BLE (<=30) and Wi-Fi Aware (<=32); NEARBY_WIFI_DEVICES
-         replaces it for Aware on 33+. -->
+         replaces it for Aware on 33+. Coarse is declared and asked for with
+         fine: on 31+ Android ignores a fine request that comes without it. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="32" />
     <!-- BLE: runtime permissions for API 31+ (scan declares it never derives location) -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
@@ -28,6 +30,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Settings › Permissions › Keep running: ask to be left out of battery
+         optimisation, for phones that suspend background radios. Optional and
+         user-initiated. Google Play restricts this permission; Myco ships via
+         GitHub Releases and Zapstore, and F-Droid has no rule against it. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- App-owned TUN: the VpnService routes only fd00::/8 (the mesh ULA). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- P2 content entry: fetch a pasted nsite link from public relays/Blossom

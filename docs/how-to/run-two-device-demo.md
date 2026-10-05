@@ -29,10 +29,13 @@ adb -s <A> install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb -s <B> install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Open Myco on each. The intro runs once; then you are asked for a **name** —
-the memorable label the other phone will see. Accept the permission prompts
-(Bluetooth, nearby devices, notifications, and the VPN consent for the
-app-owned TUN). Each phone generates its **device key** on this launch; the
+Open Myco on each. The intro runs once; then the setup popup asks
+"Enable mesh?": tap **Yes, enable**, tap **Allow nearby devices** on the "Nearby devices" card
+and allow Android's prompt, tap **Allow VPN** on the "Mesh connection" card, and accept the VPN consent for
+the app-owned TUN. Its last step is the
+**name** — the memorable label the other phone will see, prefilled with the
+phone's own name and edited in place. Notifications are
+separate, in Settings › Permissions. Each phone generates its **device key** on this launch; the
 Settings › Identity page shows the npub.
 
 Settings › Mesh should show **Enable** on, **Bluetooth** on. Leave Wi-Fi Aware
@@ -113,7 +116,8 @@ event` on B).
 | "Couldn't find this app" on a napplet share | Same as above, or the sharer's link dropped mid-fetch | **Try again** on the sheet |
 | App opens but a napplet says a capability was refused | Not granted at install (declared nothing) | Long-press › **Manage permissions** |
 | Everything works until the phones are apart | That's the mesh: live-path only. The app stays, the feed does not | Expected — B is now a holder; a third phone can pull from B |
-| VPN consent dialog again | The app-owned TUN was revoked (another VPN, or the system) | Accept; Settings › Mesh › Enable re-prompts |
+| VPN consent dialog again | The app-owned TUN was revoked (another VPN, or the system) | Accept; Settings › Permissions › Mesh connection › Fix re-prompts |
+| "Another VPN is always on" card | Another app is set as the always-on VPN, so Android won't hand Myco the slot | Settings › Network & internet › VPN › that app: turn off Always-on VPN, then Try again |
 
 ---
 

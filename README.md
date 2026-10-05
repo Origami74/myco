@@ -63,14 +63,20 @@ Myco lets them hand it to you in person.**
 1. **[Get Myco](#get-myco)** on your phone. This step needs a download.
    Android asks whether your browser may install apps. Allow it for this
    install.
-2. **Open it and allow what it asks for:**
-   - **Bluetooth and nearby devices**, to find the phones around you.
-   - **Location**, on Android 12 and older only. Android requires it to scan
-     for Bluetooth. Myco does not record where you are.
-   - **Camera**, only when you scan a code.
-   - **Notifications.**
-   - **A VPN prompt.** The VPN stays on your phone. Myco uses it to talk to
-     other phones, not to send your traffic anywhere.
+2. **Open it and tap "Yes, enable".** Android then asks twice, each time
+   after a card that explains it — tap **Allow nearby devices**, then
+   **Allow VPN**:
+   - **Nearby devices**, to find nearby mesh devices. On Android 12 and
+     older this includes **location**: Android requires it to scan for
+     Bluetooth. Myco does not record where you are.
+   - **A VPN prompt.** The
+     VPN connects your phone to the FIPS mesh, so any app can reach devices
+     on it. Your regular internet traffic doesn't go through it.
+
+   Then check your name — the phone's own name is filled in; edit it right
+   there if you like, and tap **Use this name**. It is what the people you pair
+   with see. The **camera** is asked for only when you scan a code.
+   **Notifications** are optional: turn them on in **Settings › Permissions**.
 3. **Pair**, in the **Circle** tab. Any one of these:
    - **Bump:** hold your phone back to back with theirs.
    - **Nearby:** tap them in the list of phones Myco found over Bluetooth,

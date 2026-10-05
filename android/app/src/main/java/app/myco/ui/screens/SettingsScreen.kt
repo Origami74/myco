@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
@@ -53,6 +54,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,9 +68,11 @@ import kotlin.system.exitProcess
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import app.myco.LocalSystemAsker
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
+import app.myco.onboarding.SystemAsk
 import app.myco.share.DeviceName
 import app.myco.ui.GroupLabel
 import app.myco.ui.NameSuggestions
@@ -81,7 +85,7 @@ import app.myco.ui.radioWarnings
 
 
 /** The Settings surfaces: the root list and its drill-in sub-pages. */
-private enum class SettingsPage { Root, Account, Identity, Storage, DefaultApps, Internet, Developer }
+private enum class SettingsPage { Root, Account, Identity, Storage, DefaultApps, Internet, Developer, Permissions }
 
 /**
  * Stores the user pointed us at that cannot be reached, as (title, detail).
@@ -135,8 +139,19 @@ fun SettingsScreen(
     initialExitProxy: String = "",
     onExitProxyChange: (String) -> Unit = {},
     onReplayIntro: () -> Unit = {},
+    onFixNearby: () -> Unit = {},
+    onFixConnection: () -> Unit = {},
+    /** Open straight on Settings › Permissions (the setup snackbar's action). */
+    openPermissions: Boolean = false,
+    onPermissionsOpened: () -> Unit = {},
 ) {
     var page by remember { mutableStateOf(SettingsPage.Root) }
+    LaunchedEffect(openPermissions) {
+        if (openPermissions) {
+            page = SettingsPage.Permissions
+            onPermissionsOpened()
+        }
+    }
 
     // Sub-pages are local state, not NavHost destinations, so the system back
     // gesture would pop straight to the Apps start destination. Intercept it while
@@ -166,6 +181,14 @@ fun SettingsScreen(
             onOpenDefaultApps = { page = SettingsPage.DefaultApps },
             onOpenInternet = { page = SettingsPage.Internet },
             onOpenDeveloper = { page = SettingsPage.Developer },
+            onOpenPermissions = { page = SettingsPage.Permissions },
+            onFixConnection = onFixConnection,
+        )
+        SettingsPage.Permissions -> PermissionsSettings(
+            meshEnabled = meshEnabled,
+            onFixNearby = onFixNearby,
+            onFixConnection = onFixConnection,
+            onBack = { page = SettingsPage.Root },
         )
         SettingsPage.DefaultApps -> DefaultAppsSettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Internet -> PublicNodesSettings(state, client, onBack = { page = SettingsPage.Root })
@@ -208,6 +231,8 @@ private fun RootSettings(
     onOpenDefaultApps: () -> Unit,
     onOpenInternet: () -> Unit,
     onOpenDeveloper: () -> Unit,
+    onOpenPermissions: () -> Unit,
+    onFixConnection: () -> Unit,
 ) {
     val context = LocalContext.current
     val deviceName = DeviceName.current(context, state.ownNpub)
@@ -239,6 +264,16 @@ private fun RootSettings(
                     "${humanBytes(state.cache.usedBytes)} of files kept",
                 alert = backendErrors.isNotEmpty(),
                 onClick = onOpenStorage,
+            )
+            RowDivider()
+            // What Android has allowed. The dot is for the one gap no warning
+            // card below covers: the mesh is on, but nearby phones aren't allowed.
+            SettingRow(
+                icon = Icons.Filled.Security,
+                title = "Permissions",
+                subtitle = "Nearby devices, VPN, notifications",
+                alert = meshEnabled && !SystemAsk.Nearby.granted(context),
+                onClick = onOpenPermissions,
             )
         }
 
@@ -362,18 +397,14 @@ private fun RootSettings(
 
         // Radio/VPN misconfigurations that silently break peering — recomputed
         // on every state poll (the `state` param changes each second).
+        val asker = LocalSystemAsker.current
         radioWarnings(context, state, meshEnabled).forEach { warning ->
             Spacer(Modifier.height(8.dp))
             RadioWarningCard(warning) {
                 when (warning.action) {
-                    RadioAction.FIX_VPN -> onMeshToggle(true) // re-runs the VPN consent flow
-                    RadioAction.ENABLE_BLUETOOTH -> runCatching {
-                        context.startActivity(
-                            android.content.Intent(
-                                android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE,
-                            ),
-                        )
-                    }
+                    RadioAction.FIX_VPN -> onFixConnection() // the setup popup, on "Enable mesh?"
+                    // Android's "turn Bluetooth on?" dialog, after its explanation.
+                    RadioAction.ENABLE_BLUETOOTH -> asker?.explain(SystemAsk.BluetoothOn)
                     RadioAction.ENABLE_WIFI -> runCatching {
                         context.startActivity(
                             android.content.Intent(android.provider.Settings.Panel.ACTION_WIFI),

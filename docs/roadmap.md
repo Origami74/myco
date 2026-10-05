@@ -66,30 +66,6 @@ gossip hops); Linux interop (P6) as a tested pair; external-browser access
 
 Ordered by what unblocks what. Each is its own PR or short series.
 
-### N9 — An onboarding flow for permissions
-
-**Goal.** A first run that explains what Myco needs before Android asks:
-Bluetooth, Nearby Wi-Fi devices (Wi-Fi Aware), notifications, and the
-one-time VPN consent for the mesh adapter. One screen at a time, each saying
-what it's for, then the system prompt. Today the prompts fire at launch with
-no context, and a refused one leaves a lane silently off until a Settings
-warning catches it.
-
-**Shape.**
-
-- A short paged flow on first launch, and again after an update that adds a
-  permission. Each page asks for one permission, or one group.
-- Refusing is fine: the page says what won't work and moves on. Settings
-  keeps a **Permissions** entry that reopens the flow at the missing ones.
-- The radio and mesh services start as their permission lands. The flow is
-  the single place permissions are requested from (see the request queue in
-  `MainActivity.requestPermissions`).
-- Optionally, the battery-optimisation exemption, explained, for phones that
-  kill background radios.
-
-**Exit criterion.** On a fresh install every lane the phone supports comes up
-on once the user says yes, and nothing is asked without a sentence about why.
-
 ### N10 — Connect to public internet mesh nodes
 
 > Status: built, awaiting the two-network test —
@@ -145,6 +121,53 @@ a group that needs the internet.
 **Exit criterion.** In airplane mode, a phone without Myco installs it from a
 nearby phone and pairs; a paired phone on an older version updates from a
 newer one with no internet.
+
+### N9 — An onboarding flow for permissions
+
+**Built** — `onboarding/MeshSetup.kt` (the decisions, unit-tested),
+`ui/onboarding/MeshSetupDialog.kt`, `ui/screens/PermissionsSettings.kt`.
+
+**One code path per prompt.** `onboarding/SystemAsk.kt` is the registry:
+each prompt's permissions or intent, whether it is granted, and its
+explanation. `SystemAsker.kt` is the only code that launches one.
+`ui/onboarding/ExplainCard.kt` is the one explanation; its button ("Allow
+nearby devices", "Allow VPN", …) is the only tap that can ask.
+`SystemAskTest` fails the build if a prompt is asked anywhere else.
+
+**The popup.** It shows over the app after the intro, with a four-step bar
+(Install Myco · Nearby devices · Connection · Name):
+
+- "Enable mesh?", then a "Nearby devices" card, then a "Mesh connection"
+  card. Each card says what Android is about to ask before its button puts
+  the prompt up; a card is skipped when Android has nothing left to ask.
+- The name comes last, edited in place and prefilled with the phone's own
+  name. Until it is answered the radios advertise the generated name, not
+  the phone's.
+- A refusal gets its own card: nearby refused, VPN refused, or another
+  app's always-on VPN.
+
+**When it shows.**
+
+- A fresh install sees all of it. "No thanks" leaves the mesh off and goes
+  on to the name.
+- An upgrade sees the mesh steps only when the mesh is on and something it
+  needs is missing. Its grey button is "Not now", which leaves the mesh
+  running as it was.
+- The mesh switch and every Fix open it on "Enable mesh?". Android is asked
+  nothing until "Yes, enable".
+
+**Settings › Permissions** lists nearby devices, the mesh connection,
+notifications and the battery exemption. The last two are not part of the
+popup.
+
+**Goal.** A first run that explains what Myco needs before Android asks:
+Bluetooth, Nearby Wi-Fi devices (Wi-Fi Aware), notifications, and the
+one-time VPN consent for the mesh adapter. Before N9 the prompts fired at
+launch with no context, and a refused one left a lane silently off until a
+Settings warning caught it.
+
+**Exit criterion.** On a fresh install every lane the phone supports comes up
+once the user says yes, and nothing is asked without a sentence about why.
 
 ### N1 — Account and login (nsec)
 

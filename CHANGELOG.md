@@ -18,7 +18,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dials while mesh-only is on. A public node sees this
   phone's IP address and which mesh addresses it talks to, not what you send.
   The Dev tab shows which public nodes are up.
-
+- **A setup popup on first launch.** After the intro, one popup with a
+  progress bar sets up the mesh and your name. "Enable mesh?" leads to a
+  "Nearby devices" card and then a "Mesh connection" card; each says what
+  Android is about to ask for, and only its button ("Allow nearby
+  devices", "Allow VPN") shows Android's
+  prompt. Last comes your name, filled in with the phone's own name and
+  editable right there, with a clear button; "Use this name" saves it. A refused step gets a card that says what won't work
+  and how to retry, including when another app's VPN is set to always on and
+  holds the slot. "No thanks" leaves the mesh off and still asks your name.
+  Switching the mesh on later, or a Fix in Settings, opens the popup on
+  "Enable mesh?" again; Android asks nothing until you tap "Yes, enable".
+  Phones upgrading with a working mesh don't see the mesh steps; an upgrade
+  that is missing something sees them with "Not now", which keeps the mesh
+  running. Until you choose a name, Bluetooth advertises a generated one,
+  not the phone's own. Permissions
+  are no longer all asked for at launch, and notifications are no longer
+  asked for with Bluetooth. The camera is asked for only when you tap "Allow
+  camera" on the scanner, not when it opens.
+- **Settings › Permissions.** One page for nearby devices, the mesh connection,
+  notifications and, optionally, keeping Myco running in the background (the
+  battery-optimisation exemption), each with its state and a Fix or Allow.
+  Every Allow, the file-share hotspot, the camera's "Allow camera" and the
+  "Bluetooth is off" warning now show what Android is about to ask first;
+  Android asks only after you tap the card's button.
 - **Full-tunnel exit over SOCKS5 (experimental).** Entering the exit node as
   `socks5://<exit-npub>.fips:1080` sends all of the phone's TCP traffic through
   a SOCKS5 proxy on the exit, not only the web traffic of apps that honour the
@@ -45,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Wi-Fi Aware on Android 12.** Its location permission is now asked for
+  with approximate location as well as precise. Android 12 ignores a request
+  for precise location alone, so Aware could never be allowed there.
 - **A napplet link finds the app on phones nearby.** Opening a napplet from a
   link (a bare `naddr`, with no sharer named) asked only the internet relays,
   so a phone without internet could not install it even with the app on a

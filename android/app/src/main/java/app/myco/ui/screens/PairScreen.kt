@@ -1,9 +1,5 @@
 package app.myco.ui.screens
 
-import android.Manifest
-import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -36,8 +32,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -51,12 +47,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import app.myco.LocalSystemAsker
 import app.myco.core.AppState
 import app.myco.nfc.PairPresent
+import app.myco.onboarding.SystemAsk
 import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
 import com.google.zxing.BarcodeFormat
@@ -104,13 +101,21 @@ fun QrScreen(
 @Composable
 internal fun ScanPanel(onScanned: (String) -> Unit) {
     val context = LocalContext.current
-    var granted by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-        )
+    val asker = LocalSystemAsker.current
+    // Re-read after every prompt, and on every return to the app (allowed
+    // in Android's settings, say). The camera is asked only from "Allow
+    // camera", by way of its explanation — never on opening the panel.
+    val revision = asker?.revision?.intValue ?: 0
+    var resumes by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumes++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
-    LaunchedEffect(Unit) { if (!granted) permLauncher.launch(Manifest.permission.CAMERA) }
+    val granted = remember(revision, resumes) { SystemAsk.Camera.granted(context) }
 
     Box(
         modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(Color.Black),
@@ -121,9 +126,14 @@ internal fun ScanPanel(onScanned: (String) -> Unit) {
             ReticleOverlay()
         } else {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Camera access needed to scan", color = Color.White, textAlign = TextAlign.Center)
+                Text(
+                    SystemAsk.Camera.explanation.note,
+                    color = Color.White,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = { permLauncher.launch(Manifest.permission.CAMERA) }) { Text("Allow camera") }
+                Button(onClick = { asker?.explain(SystemAsk.Camera) }) { Text("Allow camera") }
             }
         }
     }

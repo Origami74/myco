@@ -41,6 +41,9 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -49,6 +52,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -78,6 +82,9 @@ import app.myco.core.FileTransfer
 import app.myco.core.NativeActions
 import app.myco.hotspot.TransferGate
 import app.myco.nfc.PairPresent
+import app.myco.onboarding.SetupNotice
+import app.myco.ui.onboarding.SetupSnackbar
+import app.myco.ui.onboarding.SetupSnackbarVisuals
 import app.myco.share.DeviceName
 import app.myco.share.PairSecrets
 import app.myco.ui.screens.PairConnectedDialog
@@ -136,8 +143,16 @@ fun MycoApp(
     onPinNappletToHome: (pointer: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,
-    initialMeshEnabled: Boolean,
+    /** The mesh master switch; owned by the Activity, which the setup popup reports to. */
+    meshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
+    /** Settings › Permissions "Fix" on Nearby devices: reopens the setup popup there. */
+    onFixNearby: () -> Unit = {},
+    /** "Fix" on the mesh connection (Permissions, the VPN warning card). */
+    onFixConnection: () -> Unit = {},
+    /** What the setup popup ended with, to show as a snackbar once. */
+    setupNotice: SetupNotice? = null,
+    onSetupNoticeShown: () -> Unit = {},
     onOfflineOnlyToggle: (Boolean) -> Unit,
     initialDeveloperMode: Boolean,
     onDeveloperModeToggle: (Boolean) -> Unit,
@@ -159,8 +174,8 @@ fun MycoApp(
     onOpenReceivedFile: (FileTransfer, Uri) -> Unit = { _, _ -> },
 ) {
     var state by remember { mutableStateOf(client.state()) }
-    // Mesh toggle is hoisted here so it survives tab switches.
-    var meshEnabled by remember { mutableStateOf(initialMeshEnabled) }
+    // The 1 Hz loop below outlives any one value of the switch.
+    val currentMeshEnabled by rememberUpdatedState(meshEnabled)
     // Developer mode gates the Dev tab; hoisted so toggling it rebuilds the nav bar.
     var developerMode by remember { mutableStateOf(initialDeveloperMode) }
     // Kotlin-owned like developerMode: the LAN browse is an Android NsdManager
@@ -195,7 +210,7 @@ fun MycoApp(
                 state = withContext(Dispatchers.IO) { client.state() }
                 bleExhausted = BleHealth.advertiserExhausted
                 radioAlert = withContext(Dispatchers.IO) {
-                    radioWarnings(context, state, meshEnabled).isNotEmpty()
+                    radioWarnings(context, state, currentMeshEnabled).isNotEmpty()
                 }
                 delay(1000)
             }
@@ -268,6 +283,23 @@ fun MycoApp(
     var pickedShareUris by rememberSaveable(stateSaver = UriListSaver) {
         mutableStateOf<List<Uri>>(emptyList())
     }
+    // The setup popup's parting word. A "Settings" tap goes to Settings ›
+    // Permissions, where everything it skipped can be fixed.
+    val snackbars = remember { SnackbarHostState() }
+    var openPermissions by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(setupNotice) {
+        val notice = setupNotice ?: return@LaunchedEffect
+        val result = snackbars.showSnackbar(SetupSnackbarVisuals(notice))
+        if (result == SnackbarResult.ActionPerformed) {
+            openPermissions = true
+            nav.navigate("settings") {
+                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                launchSingleTop = true
+            }
+        }
+        // Last: clearing it changes this effect's key and cancels it.
+        onSetupNoticeShown()
+    }
     val pickFilesForPeer = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
@@ -277,12 +309,10 @@ fun MycoApp(
     // File offers must not be owned by Circle or any other selected destination.
     Box(Modifier.fillMaxSize()) {
         androidx.compose.runtime.CompositionLocalProvider(
-            LocalMeshControl provides MeshControl(meshEnabled) { on ->
-                meshEnabled = on
-                onMeshToggle(on)
-            },
+            LocalMeshControl provides MeshControl(meshEnabled, onMeshToggle),
         ) {
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbars) { SetupSnackbar(it) } },
         bottomBar = {
             val current by nav.currentBackStackEntryAsState()
             // The full-screen pairing / Add surfaces hide the bottom bar.
@@ -363,7 +393,11 @@ fun MycoApp(
                         lanEnabled = lanEnabled,
                         onLanToggle = { on -> lanEnabled = on; onLanToggle(on) },
                         meshEnabled = meshEnabled,
-                        onMeshToggle = { on -> meshEnabled = on; onMeshToggle(on) },
+                        onMeshToggle = onMeshToggle,
+                        onFixNearby = onFixNearby,
+                        onFixConnection = onFixConnection,
+                        openPermissions = openPermissions,
+                        onPermissionsOpened = { openPermissions = false },
                         onOfflineOnlyToggle = onOfflineOnlyToggle,
                         developerMode = developerMode,
                         onDeveloperModeToggle = { on -> developerMode = on; onDeveloperModeToggle(on) },
