@@ -1,6 +1,5 @@
 package app.myco.ui.screens
 
-import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -67,10 +66,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import app.myco.LocalSystemAsker
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.CircleContact
@@ -82,6 +81,7 @@ import app.myco.hotspot.SharedFiles
 import app.myco.nfc.NfcState
 import app.myco.nfc.NfcStatus
 import app.myco.nfc.PairPresent
+import app.myco.onboarding.SystemAsk
 import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
 import app.myco.ui.NameSuggestions
@@ -129,12 +129,8 @@ fun CircleScreen(
     // survives dismissing the sheet and leaving the tab.
     var hotspotSheet by remember { mutableStateOf(false) }
     val hotspot by HotspotService.view.collectAsState()
+    val asker = LocalSystemAsker.current
     val sharedFiles by SharedFiles.get(context).entries.collectAsState()
-    val hotspotPerms = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { grants ->
-        if (grants.values.all { it }) HotspotService.start(context)
-    }
     val pickShareFiles = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
@@ -413,12 +409,11 @@ fun CircleScreen(
         HotspotSheet(
             view = hotspot,
             shared = sharedFiles,
+            // Not allowed yet: the explanation first, whose "Continue" asks;
+            // MainActivity starts the hotspot when Android says yes.
             onStart = {
-                val needed = HotspotService.permissions().filter {
-                    ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
-                }
-                if (needed.isEmpty()) HotspotService.start(context)
-                else hotspotPerms.launch(needed.toTypedArray())
+                if (SystemAsk.Hotspot.granted(context)) HotspotService.start(context)
+                else asker?.explain(SystemAsk.Hotspot)
             },
             onStop = { HotspotService.stop(context) },
             onShareFiles = { pickShareFiles.launch(arrayOf("*/*")) },

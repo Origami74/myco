@@ -68,10 +68,11 @@ import kotlin.system.exitProcess
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import app.myco.LocalSystemAsker
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
-import app.myco.onboarding.MeshPermissions
+import app.myco.onboarding.SystemAsk
 import app.myco.share.DeviceName
 import app.myco.ui.GroupLabel
 import app.myco.ui.NameSuggestions
@@ -271,7 +272,7 @@ private fun RootSettings(
                 icon = Icons.Filled.Security,
                 title = "Permissions",
                 subtitle = "Nearby phones, VPN, notifications",
-                alert = meshEnabled && !MeshPermissions.nearbyGranted(context),
+                alert = meshEnabled && !SystemAsk.Nearby.granted(context),
                 onClick = onOpenPermissions,
             )
         }
@@ -396,18 +397,14 @@ private fun RootSettings(
 
         // Radio/VPN misconfigurations that silently break peering — recomputed
         // on every state poll (the `state` param changes each second).
+        val asker = LocalSystemAsker.current
         radioWarnings(context, state, meshEnabled).forEach { warning ->
             Spacer(Modifier.height(8.dp))
             RadioWarningCard(warning) {
                 when (warning.action) {
                     RadioAction.FIX_VPN -> onFixConnection() // the setup popup, on "Enable mesh?"
-                    RadioAction.ENABLE_BLUETOOTH -> runCatching {
-                        context.startActivity(
-                            android.content.Intent(
-                                android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE,
-                            ),
-                        )
-                    }
+                    // Android's "turn Bluetooth on?" dialog, after its explanation.
+                    RadioAction.ENABLE_BLUETOOTH -> asker?.explain(SystemAsk.BluetoothOn)
                     RadioAction.ENABLE_WIFI -> runCatching {
                         context.startActivity(
                             android.content.Intent(android.provider.Settings.Panel.ACTION_WIFI),

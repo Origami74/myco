@@ -74,24 +74,22 @@ import app.myco.onboarding.SegmentState
 import app.myco.onboarding.SetupPlan
 import app.myco.share.DeviceName
 import app.myco.onboarding.SetupStep
+import app.myco.onboarding.SystemAsk
 
-/** A button in the setup popup. The Activity turns each into its side effect. */
+/**
+ * A button in the setup popup that asks Android nothing. The Activity turns
+ * each into its side effect. The buttons that do ask — "Continue" on the
+ * explain cards, "Try again" on the refusal cards — come back as a
+ * [Confirmed] through `onAsk` instead.
+ */
 enum class SetupAction {
     Yes,
     NoThanks,
 
     /** The grey button on "Enable mesh?" in a run opened later: close, change nothing. */
     NotNowEnable,
-    RetryNearby,
     OpenAppSettings,
     ContinueAfterNearby,
-
-    /** "Continue" on "Nearby devices": the tap that puts Android's nearby prompt up. */
-    ContinueToNearby,
-
-    /** "Continue" on "Mesh connection": the tap that puts Android's VPN prompt up. */
-    ContinueToVpn,
-    RetryVpn,
     NotNow,
     OpenVpnSettings,
     ContinueWithout,
@@ -110,6 +108,7 @@ enum class SetupAction {
  * @param nearbyBlocked Android refused the nearby permissions without asking,
  *   so "Try again" becomes "Open app settings".
  * @param name what the Name step's field starts with.
+ * @param onAsk a tap that asks Android: "Continue" on an explain card, "Try again".
  * @param onSaveName the field's trimmed content, on "Use this name".
  */
 @Composable
@@ -120,6 +119,7 @@ fun MeshSetupDialog(
     nearbyBlocked: Boolean,
     name: String,
     onAction: (SetupAction) -> Unit,
+    onAsk: (Confirmed) -> Unit,
     onSaveName: (String) -> Unit,
 ) {
     Dialog(
@@ -150,7 +150,7 @@ fun MeshSetupDialog(
                 .fillMaxWidth(),
         ) {
             SetupCard(step, plan, MeshSetup.segments(step, plan, outcome)) {
-                StepContent(step, plan, nearbyBlocked, name, onAction, onSaveName)
+                StepContent(step, plan, nearbyBlocked, name, onAction, onAsk, onSaveName)
             }
             footnote(step, nearbyBlocked)?.let {
                 Spacer(Modifier.height(18.dp))
@@ -180,6 +180,7 @@ private fun StepContent(
     nearbyBlocked: Boolean,
     name: String,
     onAction: (SetupAction) -> Unit,
+    onAsk: (Confirmed) -> Unit,
     onSaveName: (String) -> Unit,
 ) {
     when (step) {
@@ -204,16 +205,8 @@ private fun StepContent(
         }
         // Said before Android asks, so its nearby prompt never comes
         // unexplained. Only "Continue" asks; "Not now" carries on without it.
-        SetupStep.ExplainNearby -> {
-            IconBadge(warn = false) { PhonesIcon(MaterialTheme.colorScheme.primary) }
-            Title("Nearby devices")
-            Body("Next, Android asks to find nearby devices.")
-            Note("Myco uses Bluetooth and Wi-Fi to find nearby mesh devices. It doesn’t record where you are.")
-            Spacer(Modifier.height(28.dp))
-            PrimaryButton("Continue") { onAction(SetupAction.ContinueToNearby) }
-            Spacer(Modifier.height(10.dp))
-            NeutralButton("Not now") { onAction(SetupAction.ContinueAfterNearby) }
-        }
+        SetupStep.ExplainNearby ->
+            ExplainCard(SystemAsk.Nearby, onAsk) { onAction(SetupAction.ContinueAfterNearby) }
         SetupStep.AskingNearby -> Waiting(
             icon = { PhonesIcon(MaterialTheme.colorScheme.primary) },
             title = "Allow nearby devices",
@@ -231,23 +224,15 @@ private fun StepContent(
             if (nearbyBlocked) {
                 PrimaryButton("Open app settings") { onAction(SetupAction.OpenAppSettings) }
             } else {
-                PrimaryButton("Try again") { onAction(SetupAction.RetryNearby) }
+                AskButton(SystemAsk.Nearby, "Try again", onAsk)
             }
             Spacer(Modifier.height(6.dp))
             QuietButton("Continue") { onAction(SetupAction.ContinueAfterNearby) }
         }
         // Said before Android asks, so its VPN prompt never comes unexplained.
         // Only "Continue" asks; "Not now" skips the VPN as a refusal would.
-        SetupStep.ExplainVpn -> {
-            IconBadge(warn = false) { MeshIcon(MaterialTheme.colorScheme.primary) }
-            Title("Mesh connection")
-            Body("Next, Android asks to set up a VPN.")
-            Note("The VPN connects this phone to the FIPS mesh, so any app can reach devices on it. Your regular internet traffic doesn’t go through it.")
-            Spacer(Modifier.height(28.dp))
-            PrimaryButton("Continue") { onAction(SetupAction.ContinueToVpn) }
-            Spacer(Modifier.height(10.dp))
-            NeutralButton("Not now") { onAction(SetupAction.NotNow) }
-        }
+        SetupStep.ExplainVpn ->
+            ExplainCard(SystemAsk.Vpn, onAsk) { onAction(SetupAction.NotNow) }
         SetupStep.AskingVpn -> Waiting(
             icon = { MeshIcon(MaterialTheme.colorScheme.primary) },
             title = "Allow the VPN",
@@ -264,7 +249,7 @@ private fun StepContent(
             Body("The VPN connects this phone to the FIPS mesh; your regular internet traffic doesn’t go through it.")
             Note("Without it, apps on nearby phones can’t be reached. Apps on this phone still open.")
             Spacer(Modifier.height(20.dp))
-            PrimaryButton("Try again") { onAction(SetupAction.RetryVpn) }
+            AskButton(SystemAsk.Vpn, "Try again", onAsk)
             Spacer(Modifier.height(6.dp))
             QuietButton("Not now") { onAction(SetupAction.NotNow) }
         }
@@ -298,7 +283,7 @@ private fun StepContent(
             PrimaryButton("Open VPN settings") { onAction(SetupAction.OpenVpnSettings) }
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                QuietButton("Try again", Modifier.weight(1f)) { onAction(SetupAction.RetryVpn) }
+                AskButton(SystemAsk.Vpn, "Try again", onAsk, AskButtonStyle.Quiet, Modifier.weight(1f))
                 QuietButton("Continue without", Modifier.weight(1f)) {
                     onAction(SetupAction.ContinueWithout)
                 }
@@ -505,13 +490,13 @@ private fun SegmentBar(labels: List<Segment>, segments: List<SegmentState>) {
 
 /** Secondary text: the design's zinc-400 on black, a muted ink on white. */
 @Composable
-private fun muted(): Color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f)
+internal fun muted(): Color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f)
 
 @Composable
-private fun isDark(): Boolean = MaterialTheme.colorScheme.background.luminance() < 0.5f
+internal fun isDark(): Boolean = MaterialTheme.colorScheme.background.luminance() < 0.5f
 
 @Composable
-private fun IconBadge(warn: Boolean, size: Int = 76, icon: @Composable () -> Unit) {
+internal fun IconBadge(warn: Boolean, size: Int = 76, icon: @Composable () -> Unit) {
     val tint = if (warn) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary
     Box(
         contentAlignment = Alignment.Center,
@@ -521,7 +506,7 @@ private fun IconBadge(warn: Boolean, size: Int = 76, icon: @Composable () -> Uni
 }
 
 @Composable
-private fun Title(text: String, size: Int = 22) {
+internal fun Title(text: String, size: Int = 22) {
     Text(
         text,
         color = MaterialTheme.colorScheme.onSurface,
@@ -533,7 +518,7 @@ private fun Title(text: String, size: Int = 22) {
 }
 
 @Composable
-private fun Body(text: String) {
+internal fun Body(text: String) {
     Text(
         text,
         color = MaterialTheme.colorScheme.onSurface,
@@ -544,7 +529,7 @@ private fun Body(text: String) {
 }
 
 @Composable
-private fun Note(text: String) {
+internal fun Note(text: String) {
     Spacer(Modifier.height(10.dp))
     Text(text, color = muted(), fontSize = 12.5.sp, lineHeight = 18.sp, textAlign = TextAlign.Center)
 }
@@ -579,7 +564,7 @@ private fun Waiting(icon: @Composable () -> Unit, title: String, body: String) {
 }
 
 @Composable
-private fun PrimaryButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
+internal fun PrimaryButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
     Button(
         onClick = onClick,
         enabled = enabled,
@@ -594,7 +579,7 @@ private fun PrimaryButton(text: String, enabled: Boolean = true, onClick: () -> 
 
 /** "No thanks" / "Not now": filled, but grey — a real choice, not a hidden one. */
 @Composable
-private fun NeutralButton(text: String, onClick: () -> Unit) {
+internal fun NeutralButton(text: String, onClick: () -> Unit) {
     val dark = isDark()
     Button(
         onClick = onClick,
@@ -608,7 +593,7 @@ private fun NeutralButton(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun QuietButton(text: String, modifier: Modifier = Modifier.fillMaxWidth(), onClick: () -> Unit) {
+internal fun QuietButton(text: String, modifier: Modifier = Modifier.fillMaxWidth(), onClick: () -> Unit) {
     TextButton(onClick = onClick, modifier = modifier.height(48.dp)) {
         Text(text, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
     }

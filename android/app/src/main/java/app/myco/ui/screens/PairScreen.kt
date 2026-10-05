@@ -1,9 +1,5 @@
 package app.myco.ui.screens
 
-import android.Manifest
-import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -50,12 +46,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import app.myco.LocalSystemAsker
 import app.myco.core.AppState
 import app.myco.nfc.PairPresent
+import app.myco.onboarding.SystemAsk
 import app.myco.share.DeviceName
 import app.myco.share.NsiteShare
 import com.google.zxing.BarcodeFormat
@@ -103,14 +100,11 @@ fun QrScreen(
 @Composable
 internal fun ScanPanel(onScanned: (String) -> Unit) {
     val context = LocalContext.current
-    var granted by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-        )
-    }
-    // Asked only from "Allow camera", under a line that says what it's for —
-    // never on opening the panel.
-    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
+    val asker = LocalSystemAsker.current
+    // Re-read after every prompt; the camera is asked only from "Allow
+    // camera", by way of its explanation — never on opening the panel.
+    val revision = asker?.revision?.intValue ?: 0
+    val granted = remember(revision) { SystemAsk.Camera.granted(context) }
 
     Box(
         modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(Color.Black),
@@ -122,13 +116,13 @@ internal fun ScanPanel(onScanned: (String) -> Unit) {
         } else {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    "Myco uses the camera only to scan codes.",
+                    SystemAsk.Camera.explanation.note,
                     color = Color.White,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = { permLauncher.launch(Manifest.permission.CAMERA) }) { Text("Allow camera") }
+                Button(onClick = { asker?.explain(SystemAsk.Camera) }) { Text("Allow camera") }
             }
         }
     }

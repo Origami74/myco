@@ -1,16 +1,6 @@
 package app.myco.ui.screens
 
-import android.Manifest
-import android.app.Activity
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.net.VpnService
-import android.os.Build
-import android.os.SystemClock
-import android.provider.Settings
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -33,7 +23,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -43,13 +32,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.app.ActivityCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import app.myco.LocalSystemAsker
 import app.myco.MainActivity
-import app.myco.onboarding.MeshPermissions
-import app.myco.onboarding.MeshSetup
+import app.myco.onboarding.SystemAsk
 import app.myco.ui.onboarding.MeshIcon
 import app.myco.ui.onboarding.PhonesIcon
 import app.myco.vpn.MycoVpnService
@@ -72,13 +60,13 @@ private data class PermissionSnapshot(
         fun read(context: Context): PermissionSnapshot {
             val prefs = context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE)
             return PermissionSnapshot(
-                nearbyGranted = MeshPermissions.nearbyGranted(context),
+                nearbyGranted = SystemAsk.Nearby.granted(context),
                 nearbyAsked = prefs.getBoolean(MainActivity.PREF_NEARBY_ASKED, false),
-                vpnPrepared = MeshPermissions.vpnPrepared(context),
+                vpnPrepared = SystemAsk.Vpn.granted(context),
                 vpnAsked = prefs.getBoolean(MainActivity.PREF_VPN_ASKED, false),
                 tunnelUp = MycoVpnService.isUp(),
-                notificationsOn = MeshPermissions.notificationsEnabled(context),
-                batteryExempt = MeshPermissions.ignoringBatteryOptimizations(context),
+                notificationsOn = SystemAsk.Notifications.granted(context),
+                batteryExempt = SystemAsk.Battery.granted(context),
             )
         }
     }
@@ -90,9 +78,12 @@ private data class PermissionSnapshot(
  * it always has (Settings › Mesh, the status pill).
  *
  * With the mesh on, the mesh rows' Fix reopens the setup popup on "Enable
- * mesh?"; its "Yes" asks Android and brings the lanes up. With it off they ask Android directly, since
- * there is nothing to start. Notifications and the battery exemption are not
- * part of setup at all — they are asked for here, when the user wants them.
+ * mesh?"; its "Yes" leads to the explain cards, and they ask Android and bring
+ * the lanes up. With it off there is nothing to start, so they show the same
+ * explanation in the explain dialog, whose "Continue" asks. Notifications and
+ * the battery exemption are not part of setup at all — they are asked for
+ * here, the same way, when the user wants them. Nothing on this page asks
+ * Android itself: every Allow goes through [app.myco.SystemAsker].
  */
 @Composable
 internal fun PermissionsSettings(
@@ -116,43 +107,7 @@ internal fun PermissionsSettings(
         }
     }
 
-    // POST_NOTIFICATIONS (API 33+). A request Android answers faster than
-    // anyone could tap was refused without a dialog — "don't ask again" — so
-    // go to the app's notification settings instead (same heuristic as the
-    // nearby step, see MeshSetup.FAST_ANSWER_MS).
-    var notifAskedAt by remember { mutableLongStateOf(0L) }
-    val notifLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        val elapsed = SystemClock.elapsedRealtime() - notifAskedAt
-        val rationale = (context as? Activity)?.let {
-            ActivityCompat.shouldShowRequestPermissionRationale(it, Manifest.permission.POST_NOTIFICATIONS)
-        } == true
-        if (MeshSetup.refusedForGood(granted, elapsed, rationale)) openNotificationSettings(context)
-    }
-
-    // Asked from here only while the mesh is off; with it on, the setup popup
-    // asks (see the rows). The results need no handling beyond the next
-    // re-read, except a refusal for good, which goes to the app's settings.
-    var nearbyAskedAt by remember { mutableLongStateOf(0L) }
-    val nearbyLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions(),
-    ) { results ->
-        val allGranted = results.isNotEmpty() && results.values.all { it }
-        val rationale = (context as? Activity)?.let { a ->
-            results.keys.any { ActivityCompat.shouldShowRequestPermissionRationale(a, it) }
-        } == true
-        if (results.isNotEmpty() &&
-            MeshSetup.refusedForGood(allGranted, SystemClock.elapsedRealtime() - nearbyAskedAt, rationale)
-        ) {
-            runCatching {
-                context.startActivity(
-                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")),
-                )
-            }
-        }
-    }
-    val vpnLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
+    val asker = LocalSystemAsker.current
 
     SettingsColumn {
         SubHeader("Permissions", onBack)
@@ -168,16 +123,10 @@ internal fun PermissionsSettings(
             },
             action = if (s.nearbyGranted) null else if (s.nearbyAsked) "Fix" else "Allow",
             onAction = {
-                // Mesh on: the setup popup, whose "Yes" asks and starts the
-                // radios. Mesh off: just ask — nothing is to start.
-                if (meshEnabled) {
-                    onFixNearby()
-                } else {
-                    context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE).edit()
-                        .putBoolean(MainActivity.PREF_NEARBY_ASKED, true).apply()
-                    nearbyAskedAt = SystemClock.elapsedRealtime()
-                    nearbyLauncher.launch(MeshPermissions.nearby(context).toTypedArray())
-                }
+                // Mesh on: the setup popup, whose "Yes" leads to the explain
+                // card and starts the radios. Mesh off: the explanation, then
+                // the ask — nothing is to start.
+                if (meshEnabled) onFixNearby() else asker?.explain(SystemAsk.Nearby)
             },
         )
         PermissionRow(
@@ -198,16 +147,10 @@ internal fun PermissionsSettings(
                 else -> null
             },
             onAction = {
-                // Mesh on: the setup popup, whose "Yes" asks and brings the
-                // tunnel up. Mesh off: only Android's consent; no tunnel to start.
-                val consent = VpnService.prepare(context)
-                if (meshEnabled) {
-                    onFixConnection()
-                } else if (consent != null) {
-                    context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE).edit()
-                        .putBoolean(MainActivity.PREF_VPN_ASKED, true).apply()
-                    vpnLauncher.launch(consent)
-                }
+                // Mesh on: the setup popup, whose "Yes" leads to the explain
+                // card and brings the tunnel up. Mesh off: the explanation,
+                // then only Android's consent; no tunnel to start.
+                if (meshEnabled) onFixConnection() else asker?.explain(SystemAsk.Vpn)
             },
         )
         PermissionRow(
@@ -219,16 +162,9 @@ internal fun PermissionsSettings(
                 "Off — tell me when someone sends me a file"
             },
             action = if (s.notificationsOn) null else "Allow",
-            onAction = {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    notifAskedAt = SystemClock.elapsedRealtime()
-                    notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                } else {
-                    // No runtime permission below 33: notifications were
-                    // switched off in Android's settings, so that's the fix.
-                    openNotificationSettings(context)
-                }
-            },
+            // Below API 33 there is no prompt: the ask opens Android's
+            // notification settings, where they were switched off.
+            onAction = { asker?.explain(SystemAsk.Notifications) },
         )
         PermissionRow(
             icon = { Icon(Icons.Outlined.BatteryFull, contentDescription = null, tint = it) },
@@ -239,7 +175,7 @@ internal fun PermissionsSettings(
                 "Optional — stay connected while the screen is off"
             },
             action = if (s.batteryExempt) null else "Allow",
-            onAction = { requestBatteryExemption(context) },
+            onAction = { asker?.explain(SystemAsk.Battery) },
         )
     }
 }
@@ -287,34 +223,5 @@ private fun PermissionRow(
                 }
             }
         }
-    }
-}
-
-private fun openNotificationSettings(context: Context) {
-    runCatching {
-        context.startActivity(
-            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
-        )
-    }
-}
-
-/**
- * Ask Android to leave Myco out of battery optimisation, so phones that
- * suspend background apps don't cut the radios while the screen is off.
- *
- * The direct request needs `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` in the
- * manifest. Google Play only allows that permission for a short list of app
- * types; Myco ships through GitHub Releases and Zapstore, which have no such
- * rule (F-Droid doesn't either). Should a store ever object, the fallback
- * below — Android's own list of apps — needs no permission at all.
- */
-private fun requestBatteryExemption(context: Context) {
-    runCatching {
-        context.startActivity(
-            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}")),
-        )
-    }.onFailure {
-        runCatching { context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
     }
 }

@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Settings › Permissions.** One page for nearby phones, the mesh connection,
   notifications and, optionally, keeping Myco running in the background (the
   battery-optimisation exemption), each with its state and a Fix or Allow.
+  Every Allow, the file-share hotspot, the camera's "Allow camera" and the
+  "Bluetooth is off" warning now show what Android is about to ask first;
+  Android asks only after you tap "Continue".
 - **Full-tunnel exit over SOCKS5 (experimental).** Entering the exit node as
   `socks5://<exit-npub>.fips:1080` sends all of the phone's TCP traffic through
   a SOCKS5 proxy on the exit, not only the web traffic of apps that honour the

@@ -126,6 +126,12 @@ newer one with no internet.
 
 **Built** — `onboarding/MeshSetup.kt` (the decisions, unit-tested),
 `ui/onboarding/MeshSetupDialog.kt`, `ui/screens/PermissionsSettings.kt`.
+Every Android prompt has one code path: `onboarding/SystemAsk.kt` is the
+registry (each prompt's permissions or intent, whether it is granted, and
+its explanation), `SystemAsker.kt` the only code that launches one, and
+`ui/onboarding/ExplainCard.kt` the one explanation, whose "Continue" is the
+only tap that can ask. `SystemAskTest` fails the build if a prompt is asked
+anywhere else.
 A popup over the app after the intro, with a four-step bar (Install Myco ·
 Nearby phones · Connection · Name): "Enable mesh?", then a "Nearby devices"
 card whose "Continue" puts Android's nearby prompt up, then a "Mesh connection" card that says what the VPN

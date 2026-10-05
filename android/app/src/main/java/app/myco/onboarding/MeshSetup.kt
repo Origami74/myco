@@ -147,7 +147,7 @@ enum class SetupNotice {
 
 /**
  * The decisions behind the mesh setup popup, kept free of Android so they can
- * be unit-tested. The Activity owns the launchers and the side effects; this
+ * be unit-tested. The Activity owns the side effects (`SystemAsker` the prompts); this
  * only says what comes next.
  */
 object MeshSetup {
