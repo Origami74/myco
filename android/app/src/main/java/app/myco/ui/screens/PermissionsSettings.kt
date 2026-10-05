@@ -186,11 +186,11 @@ internal fun PermissionsSettings(
             status = when {
                 // Said before "Allow" puts Android's VPN prompt up (mesh off).
                 !s.vpnPrepared && !s.vpnAsked ->
-                    "Not asked yet — a VPN that only links Myco devices; your internet doesn’t go through it"
+                    "Not asked yet — connects this phone to the FIPS mesh; your regular internet doesn’t go through it"
                 !s.vpnPrepared -> "Not allowed, or another app’s VPN holds the slot"
                 meshEnabled && !s.tunnelUp -> "Allowed, but not running"
-                meshEnabled -> "Running — the VPN only links Myco phones"
-                else -> "Allowed — the VPN only links Myco phones"
+                meshEnabled -> "Running — this phone is on the FIPS mesh"
+                else -> "Allowed — connects this phone to the FIPS mesh"
             },
             action = when {
                 !s.vpnPrepared -> if (s.vpnAsked) "Fix" else "Allow"

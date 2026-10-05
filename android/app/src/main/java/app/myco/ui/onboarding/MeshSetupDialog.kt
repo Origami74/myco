@@ -227,7 +227,7 @@ private fun StepContent(
             IconBadge(warn = false) { MeshIcon(MaterialTheme.colorScheme.primary) }
             Title("Mesh connection")
             Body("Next, Android asks to set up a VPN.")
-            Note("Myco’s VPN only links Myco devices — your internet traffic doesn’t go through it.")
+            Note("The VPN connects this phone to the FIPS mesh, so any app can reach devices on it. Your regular internet traffic doesn’t go through it.")
             Spacer(Modifier.height(28.dp))
             PrimaryButton("Continue") { onAction(SetupAction.ContinueToVpn) }
             Spacer(Modifier.height(10.dp))
@@ -246,7 +246,7 @@ private fun StepContent(
         SetupStep.VpnRefused -> {
             IconBadge(warn = true) { MeshIcon(MaterialTheme.colorScheme.tertiary) }
             Title("Mesh needs the VPN")
-            Body("Myco’s VPN only links Myco phones; your internet traffic doesn’t go through it.")
+            Body("The VPN connects this phone to the FIPS mesh; your regular internet traffic doesn’t go through it.")
             Note("Without it, apps on nearby phones can’t be reached. Apps on this phone still open.")
             Spacer(Modifier.height(20.dp))
             PrimaryButton("Try again") { onAction(SetupAction.RetryVpn) }

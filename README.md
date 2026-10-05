@@ -68,8 +68,8 @@ Myco lets them hand it to you in person.**
      older this includes **location**: Android requires it to scan for
      Bluetooth. Myco does not record where you are.
    - **A VPN prompt**, after a card that explains it: tap **Continue**. The
-     VPN stays on your phone. Myco uses it to talk to other phones, not to
-     send your traffic anywhere.
+     VPN connects your phone to the FIPS mesh, so any app can reach devices
+     on it. Your regular internet traffic doesn't go through it.
 
    Then check your name — the phone's own name is filled in; edit it right
    there if you like, and tap **Use this name**. It is what the people you pair
