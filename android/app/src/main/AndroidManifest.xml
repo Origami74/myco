@@ -5,8 +5,10 @@
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <!-- Location gates BLE (<=30) and Wi-Fi Aware (<=32); NEARBY_WIFI_DEVICES
-         replaces it for Aware on 33+. -->
+         replaces it for Aware on 33+. Coarse is declared and asked for with
+         fine: on 31+ Android ignores a fine request that comes without it. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="32" />
     <!-- BLE: runtime permissions for API 31+ (scan declares it never derives location) -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"

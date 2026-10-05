@@ -46,7 +46,7 @@ data class AskResult(
  * another prompt is up is dropped, as Android would drop it.
  *
  * Screens outside the setup popup ask through [explain], which puts the
- * explain dialog up; its "Continue" comes back here as [launch]. Results go
+ * explain dialog up; its ask button comes back here as [launch]. Results go
  * to [onResult] in the Activity, which survives being recreated behind a
  * prompt ([save] / [restore]).
  */
@@ -80,8 +80,8 @@ class SystemAsker(
         }
 
     /**
-     * Show [ask]'s explanation in the explain dialog. Its "Continue" is
-     * the tap that asks. Nothing happens while a prompt is up.
+     * Show [ask]'s explanation in the explain dialog. Its button
+     * ([Explanation.button]) is the tap that asks. Nothing happens while a prompt is up.
      */
     fun explain(ask: SystemAsk) {
         if (pending == null) explaining.value = ask

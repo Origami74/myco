@@ -29,11 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds the slot. "No thanks" leaves the mesh off and still asks your name.
   Switching the mesh on later, or a Fix in Settings, opens the popup on
   "Enable mesh?" again; Android asks nothing until you tap "Yes, enable".
-  Phones upgrading with a working mesh don't see the mesh steps. Permissions
+  Phones upgrading with a working mesh don't see the mesh steps; an upgrade
+  that is missing something sees them with "Not now", which keeps the mesh
+  running. Until you choose a name, Bluetooth advertises a generated one,
+  not the phone's own. Permissions
   are no longer all asked for at launch, and notifications are no longer
   asked for with Bluetooth. The camera is asked for only when you tap "Allow
   camera" on the scanner, not when it opens.
-- **Settings › Permissions.** One page for nearby phones, the mesh connection,
+- **Settings › Permissions.** One page for nearby devices, the mesh connection,
   notifications and, optionally, keeping Myco running in the background (the
   battery-optimisation exemption), each with its state and a Fix or Allow.
   Every Allow, the file-share hotspot, the camera's "Allow camera" and the
@@ -65,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Wi-Fi Aware on Android 12.** Its location permission is now asked for
+  with approximate location as well as precise. Android 12 ignores a request
+  for precise location alone, so Aware could never be allowed there.
 - **A napplet link finds the app on phones nearby.** Opening a napplet from a
   link (a bare `naddr`, with no sharer named) asked only the internet relays,
   so a phone without internet could not install it even with the app on a

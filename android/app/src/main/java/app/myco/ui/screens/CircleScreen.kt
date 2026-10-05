@@ -409,7 +409,7 @@ fun CircleScreen(
         HotspotSheet(
             view = hotspot,
             shared = sharedFiles,
-            // Not allowed yet: the explanation first, whose "Continue" asks;
+            // Not allowed yet: the explanation first, whose button asks;
             // MainActivity starts the hotspot when Android says yes.
             onStart = {
                 if (SystemAsk.Hotspot.granted(context)) HotspotService.start(context)

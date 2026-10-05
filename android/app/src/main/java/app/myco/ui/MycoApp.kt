@@ -146,7 +146,7 @@ fun MycoApp(
     /** The mesh master switch; owned by the Activity, which the setup popup reports to. */
     meshEnabled: Boolean,
     onMeshToggle: (Boolean) -> Unit,
-    /** Settings › Permissions "Fix" on Nearby phones: reopens the setup popup there. */
+    /** Settings › Permissions "Fix" on Nearby devices: reopens the setup popup there. */
     onFixNearby: () -> Unit = {},
     /** "Fix" on the mesh connection (Permissions, the VPN warning card). */
     onFixConnection: () -> Unit = {},

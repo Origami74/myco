@@ -157,6 +157,48 @@ class MeshSetupTest {
         assertFalse(MeshSetup.greyButtonCloses(meshOnly))
     }
 
+    // --- first run or upgrade ---
+
+    @Test
+    fun aLaunchBeforeTheIntroIsAFirstRun() {
+        assertEquals(SetupEntry.Launch, MeshSetup.launchEntry(introSeen = false, firstRunUnfinished = false))
+    }
+
+    @Test
+    fun aFirstRunClosedMidSetupIsStillAFirstRun() {
+        // The intro is behind it, but the popup it showed never finished.
+        assertEquals(SetupEntry.Launch, MeshSetup.launchEntry(introSeen = true, firstRunUnfinished = true))
+    }
+
+    @Test
+    fun aLaunchAfterTheIntroIsAnUpgrade() {
+        assertEquals(SetupEntry.Upgrade, MeshSetup.launchEntry(introSeen = true, firstRunUnfinished = false))
+    }
+
+    @Test
+    fun anUpgradeSaysNotNowAndKeepsItsMesh() {
+        val plan = MeshSetup.launchPlan(LaunchDecision.Show, nameChosen = true, entry = SetupEntry.Upgrade)!!
+        assertEquals(SetupEntry.Upgrade, plan.entry)
+        // "No thanks" would switch off a mesh that was running.
+        assertTrue(MeshSetup.greyButtonCloses(plan))
+        assertNull(MeshSetup.afterMesh(plan))
+    }
+
+    @Test
+    fun onlyAFirstRunHoldsTheMeshBack() {
+        val first = MeshSetup.launchPlan(LaunchDecision.Show, nameChosen = false, entry = SetupEntry.Launch)!!
+        for (step in SetupStep.entries - SetupStep.Name) {
+            assertTrue("$step", MeshSetup.holdsMeshBack(step, first))
+        }
+        // The name is asked after the mesh steps; nothing left to hold.
+        assertFalse(MeshSetup.holdsMeshBack(SetupStep.Name, first))
+        assertFalse(MeshSetup.holdsMeshBack(null, first))
+        for (entry in SetupEntry.entries - SetupEntry.Launch) {
+            val plan = SetupPlan(mesh = true, name = false, entry = entry)
+            for (step in SetupStep.entries) assertFalse("$entry $step", MeshSetup.holdsMeshBack(step, plan))
+        }
+    }
+
     @Test
     fun notNowOnALaterRunWithTheNameStillOpenGoesOnToIt() {
         val plan = MeshSetup.reopenPlan(SetupEntry.MeshSwitch, nameChosen = false)

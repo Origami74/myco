@@ -271,7 +271,7 @@ private fun RootSettings(
             SettingRow(
                 icon = Icons.Filled.Security,
                 title = "Permissions",
-                subtitle = "Nearby phones, VPN, notifications",
+                subtitle = "Nearby devices, VPN, notifications",
                 alert = meshEnabled && !SystemAsk.Nearby.granted(context),
                 onClick = onOpenPermissions,
             )

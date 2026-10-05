@@ -67,8 +67,39 @@ class SystemAskTest {
         )
         assertEquals(SystemAsk.ble(33), SystemAsk.Nearby.permissions(sdk = 33, awareLane = false))
         assertEquals(SystemAsk.wifiNearby(33), SystemAsk.Nearby.permissions(sdk = 33, bleLane = false))
-        // Below 31 both halves are fine location: asked once.
-        assertEquals(1, SystemAsk.Nearby.permissions(sdk = 29).size)
+        // Below 31 both halves are location: asked once.
+        assertEquals(SystemAsk.ble(29), SystemAsk.Nearby.permissions(sdk = 29))
+    }
+
+    @Test
+    fun fineLocationIsAlwaysAskedWithCoarse() {
+        // From API 31 Android ignores a request for fine location alone, so
+        // on Android 12 the Wi-Fi half of Nearby could never be granted.
+        val fine = "android.permission.ACCESS_FINE_LOCATION"
+        val coarse = "android.permission.ACCESS_COARSE_LOCATION"
+        for (sdk in 29..32) {
+            for (ask in listOf(SystemAsk.Nearby, SystemAsk.Hotspot)) {
+                val perms = ask.permissions(sdk)
+                assertTrue("$ask on $sdk asks for fine", fine in perms)
+                assertTrue("$ask on $sdk asks for fine without coarse", coarse in perms)
+            }
+        }
+        for (sdk in 33..36) {
+            assertFalse(fine in SystemAsk.Nearby.permissions(sdk))
+            assertFalse(coarse in SystemAsk.Nearby.permissions(sdk))
+        }
+    }
+
+    @Test
+    fun fineAloneCountsAsLocationGranted() {
+        // A phone upgrading from a build that never declared coarse holds fine
+        // alone: it is allowed, and must not be asked again.
+        val fine = "android.permission.ACCESS_FINE_LOCATION"
+        val coarse = "android.permission.ACCESS_COARSE_LOCATION"
+        assertTrue(SystemAsk.granted(listOf(fine, coarse)) { it == fine })
+        assertFalse(SystemAsk.granted(listOf(fine, coarse)) { it == coarse })
+        assertFalse(SystemAsk.granted(listOf(fine, coarse)) { false })
+        assertTrue(SystemAsk.granted(listOf(coarse)) { it == fine })
     }
 
     @Test
@@ -85,6 +116,8 @@ class SystemAskTest {
     private val rules: List<Pair<Regex, Set<String>>> = listOf(
         // The registry is the only place a prompt's permissions, consent or intent are named.
         Regex("""Manifest\.permission\.""") to setOf(REGISTRY),
+        // An aliased import (`import android.Manifest as M`) would dodge the rule above.
+        Regex("""^import android\.Manifest\b""") to setOf(REGISTRY),
         Regex("""VpnService\.prepare\(""") to setOf(REGISTRY),
         Regex("""ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS""") to setOf(REGISTRY),
         Regex("""ACTION_REQUEST_ENABLE""") to setOf(REGISTRY),

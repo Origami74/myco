@@ -40,3 +40,22 @@ fun applyDeviceName(
     BleRadio.localNodeAddrHex = client.state().nodeAddrHex
     return resolved
 }
+
+/**
+ * Publish the generated name to the core and the BLE radio, without storing
+ * it, until the user has answered the setup popup's name step.
+ *
+ * The radios come up during the popup's mesh steps, before its last step
+ * asks for the name. [applyDeviceName] with no override set would publish the
+ * phone's own name (often the owner's, e.g. "A52 of Alex") to everyone in
+ * range before they chose to share it. The pseudonym goes out instead; the
+ * name step still offers the phone's name, and nothing is stored here, so
+ * what the user picks is what [applyDeviceName] publishes next.
+ */
+fun publishProvisionalName(client: AppCoreClient, ownNpub: String): String {
+    val name = DeviceName.generated(ownNpub)
+    client.dispatch(NativeActions.setDeviceName(name))
+    BleRadio.localName = name
+    BleRadio.localNodeAddrHex = client.state().nodeAddrHex
+    return name
+}

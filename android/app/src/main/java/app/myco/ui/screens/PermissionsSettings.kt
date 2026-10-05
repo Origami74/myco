@@ -80,7 +80,7 @@ private data class PermissionSnapshot(
  * With the mesh on, the mesh rows' Fix reopens the setup popup on "Enable
  * mesh?"; its "Yes" leads to the explain cards, and they ask Android and bring
  * the lanes up. With it off there is nothing to start, so they show the same
- * explanation in the explain dialog, whose "Continue" asks. Notifications and
+ * explanation in the explain dialog, whose button asks. Notifications and
  * the battery exemption are not part of setup at all — they are asked for
  * here, the same way, when the user wants them. Nothing on this page asks
  * Android itself: every Allow goes through [app.myco.SystemAsker].
@@ -115,11 +115,11 @@ internal fun PermissionsSettings(
 
         PermissionRow(
             icon = { PhonesIcon(it, Modifier.size(22.dp)) },
-            title = "Nearby phones",
+            title = "Nearby devices",
             status = when {
                 s.nearbyGranted -> "Allowed — Bluetooth and Wi-Fi can find nearby mesh devices"
                 !s.nearbyAsked -> "Not asked yet — lets Bluetooth and Wi-Fi find nearby mesh devices"
-                else -> "Not allowed — Myco can’t look for phones nearby"
+                else -> "Not allowed — Myco can’t find nearby mesh devices"
             },
             action = if (s.nearbyGranted) null else if (s.nearbyAsked) "Fix" else "Allow",
             onAction = {

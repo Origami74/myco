@@ -4,7 +4,7 @@ package app.myco.onboarding
  * Where the setup popup is.
  *
  * The popup has up to four segments — Install Myco (always done), Nearby
- * phones, Connection and Name — and these are the states it can be in across
+ * devices, Connection and Name — and these are the states it can be in across
  * the last three. Only [EnableMesh], the two explain cards, the three refusal
  * cards and [Name] ask the user anything; the `Asking…` and [Connecting]
  * states are what sits behind Android's own prompts. Each Android prompt comes
@@ -61,8 +61,15 @@ enum class SetupStep {
  * "Enable mesh?" does.
  */
 enum class SetupEntry {
-    /** The app starting: a fresh install, or an upgrade with something missing. */
+    /** The app starting on a fresh install (see [MeshSetup.launchEntry]). */
     Launch,
+
+    /**
+     * The app starting after an upgrade, with the mesh on and something it
+     * needs missing. The mesh already ran, so the grey button is "Not now"
+     * and leaves it on, and the popup doesn't hold it down while it shows.
+     */
+    Upgrade,
 
     /** The user switched the mesh on (Settings, the status pill) with something missing. */
     MeshSwitch,
@@ -78,7 +85,7 @@ enum class Segment { Install, Nearby, Connection, Name }
 enum class SegmentState { Done, Active, Problem, Pending, Skipped }
 
 /**
- * Which segments this run of the popup has. [mesh] covers Nearby phones and
+ * Which segments this run of the popup has. [mesh] covers Nearby devices and
  * Connection together; [name] is the name step. A fresh install has both; the
  * mesh switch reopens it with only the mesh steps once the name is chosen; an
  * upgrade whose mesh already works but never chose a name gets only the name.
@@ -102,8 +109,9 @@ data class SetupPlan(
  * @param declined "No thanks": Nearby and Connection were skipped.
  * @param nearbyRefused carried on past a nearby refusal.
  * @param connectionSkipped "Not now" / "Continue without" on the VPN.
- * @param dismissed "Not now" on "Enable mesh?" in a run the user opened
- *   later: nothing was asked and nothing changed, so it leaves no snackbar.
+ * @param dismissed "Not now" on "Enable mesh?" on an upgrade or in a run the
+ *   user opened later: nothing was asked and nothing changed, so it leaves
+ *   no snackbar.
  */
 data class MeshOutcome(
     val declined: Boolean = false,
@@ -166,6 +174,9 @@ object MeshSetup {
      * this to bounce the activity (we then show "Mesh needs the VPN", which is
      * still correct about the outcome, just not the cause), and nothing here can
      * name the app holding the slot — so the card says "another app's VPN".
+     * A device whose admin set `DISALLOW_CONFIG_VPN` bounces it the same way
+     * and gets the same card; its advice (turn the other VPN off) won't apply
+     * there, but no prompt could have succeeded either.
      */
     const val FAST_ANSWER_MS = 500L
 
@@ -216,10 +227,34 @@ object MeshSetup {
      * [LaunchDecision.Show], the name step when no name was ever chosen.
      * Null when there is nothing to ask.
      */
-    fun launchPlan(mesh: LaunchDecision, nameChosen: Boolean): SetupPlan? {
-        val plan = SetupPlan(mesh = mesh == LaunchDecision.Show, name = !nameChosen)
+    fun launchPlan(
+        mesh: LaunchDecision,
+        nameChosen: Boolean,
+        entry: SetupEntry = SetupEntry.Launch,
+    ): SetupPlan? {
+        val plan = SetupPlan(mesh = mesh == LaunchDecision.Show, name = !nameChosen, entry = entry)
         return if (plan.mesh || plan.name) plan else null
     }
+
+    /**
+     * Whether a launch-time popup is a first run ([SetupEntry.Launch]) or an
+     * upgrade ([SetupEntry.Upgrade]). The intro plays once, before anything
+     * else, so a launch that hasn't seen it is a fresh install. So is one
+     * whose first-run popup was left unfinished ([firstRunUnfinished]: the
+     * app was closed mid-setup, after the intro). Anything else already ran
+     * a build of Myco, mesh and all.
+     */
+    fun launchEntry(introSeen: Boolean, firstRunUnfinished: Boolean): SetupEntry =
+        if (!introSeen || firstRunUnfinished) SetupEntry.Launch else SetupEntry.Upgrade
+
+    /**
+     * Whether the popup keeps the node and tunnel down while it shows: only
+     * a first run's mesh steps, where nobody has said yes yet and "Yes"
+     * starts them. An upgrade's mesh already ran, and a run opened later
+     * leaves the mesh as it is until something is answered.
+     */
+    fun holdsMeshBack(step: SetupStep?, plan: SetupPlan): Boolean =
+        plan.entry == SetupEntry.Launch && step != null && step != SetupStep.Name
 
     /**
      * The mesh steps opened from outside the popup — the mesh switch, a
@@ -248,8 +283,9 @@ object MeshSetup {
     /**
      * Whether the grey button on "Enable mesh?" just closes the popup ("Not
      * now", nothing changed) rather than declining the mesh ("No thanks", on
-     * to the name). Only the launch run declines; a run the user opened later
-     * by switching the mesh on or tapping a Fix closes and leaves things be.
+     * to the name). Only a first run declines; an upgrade, or a run the user
+     * opened later by switching the mesh on or tapping a Fix, closes and
+     * leaves things be — "No thanks" there would switch off a mesh that ran.
      */
     fun greyButtonCloses(plan: SetupPlan): Boolean = plan.entry != SetupEntry.Launch
 

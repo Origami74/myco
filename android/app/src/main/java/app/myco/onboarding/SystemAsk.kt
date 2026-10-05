@@ -214,23 +214,44 @@ enum class SystemAsk(
                     Manifest.permission.BLUETOOTH_CONNECT,
                 )
             } else {
-                listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                location()
             }
 
         /**
-         * NEARBY_WIFI_DEVICES on API 33+ (declared neverForLocation), fine
-         * location on 29–32: what Wi-Fi Aware and the local-only hotspot gate
-         * on — the Wi-Fi half of [Nearby], and all of [Hotspot].
+         * NEARBY_WIFI_DEVICES on API 33+ (declared neverForLocation), location
+         * on 29–32: what Wi-Fi Aware and the local-only hotspot gate on — the
+         * Wi-Fi half of [Nearby], and all of [Hotspot].
          */
         fun wifiNearby(sdk: Int = Build.VERSION.SDK_INT): List<String> =
             if (sdk >= Build.VERSION_CODES.TIRAMISU) {
                 listOf(Manifest.permission.NEARBY_WIFI_DEVICES)
             } else {
-                listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                location()
             }
 
-        fun granted(context: Context, permissions: List<String>): Boolean = permissions.all {
+        /**
+         * Fine location, always with coarse: from API 31 Android ignores a
+         * request for fine alone (logcat: "ACCESS_FINE_LOCATION must be
+         * requested with ACCESS_COARSE_LOCATION"), so on Android 12 the Wi-Fi
+         * half of [Nearby] could never be granted. Harmless below 31.
+         */
+        private fun location(): List<String> =
+            listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+
+        fun granted(context: Context, permissions: List<String>): Boolean = granted(permissions) {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+        }
+
+        /**
+         * Whether [permissions] are all held, by [isGranted]. Coarse location
+         * counts as held when fine is: below API 31 a phone upgrading from a
+         * build that never declared coarse holds fine alone, and that is all
+         * its radios check — it shouldn't read as "not allowed", or be asked
+         * again. (From 31 on, fine is never held without coarse.)
+         */
+        fun granted(permissions: List<String>, isGranted: (String) -> Boolean): Boolean = permissions.all {
+            isGranted(it) ||
+                (it == Manifest.permission.ACCESS_COARSE_LOCATION && isGranted(Manifest.permission.ACCESS_FINE_LOCATION))
         }
 
         /**

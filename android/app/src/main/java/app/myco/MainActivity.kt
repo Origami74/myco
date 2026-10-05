@@ -73,6 +73,7 @@ import app.myco.share.PendingDeepLinks
 import app.myco.ui.MycoApp
 import app.myco.ui.intro.IntroMode
 import app.myco.ui.applyDeviceName
+import app.myco.ui.publishProvisionalName
 import app.myco.ui.intro.IntroScreen
 import app.myco.hotspot.HotspotService
 import app.myco.ui.onboarding.Confirmed
@@ -353,11 +354,12 @@ class MainActivity : ComponentActivity() {
         // device reaches the mesh. The fips node's lifecycle follows this
         // master switch (the radio toggles only gate their radios), so start it
         // here too — idempotent with the radio services' own startNode calls.
-        // Not while the setup popup is open: nobody has said yes yet, and its
-        // "Yes" starts it. A VPN consent that is missing is not asked for
-        // here either — the popup, or the Settings warning that routes to it,
-        // owns that.
-        if (meshEnabled.value && !inMeshSteps()) {
+        // Not while a first run's popup is in its mesh steps: nobody has said
+        // yes yet, and its "Yes" starts it. An upgrade's popup doesn't hold a
+        // mesh that already ran ([MeshSetup.holdsMeshBack]). A VPN consent
+        // that is missing is not asked for here either — the popup, or the
+        // Settings warning that routes to it, owns that.
+        if (meshEnabled.value && !holdsMeshBack()) {
             core.dispatch(NativeActions.startNode())
             if (SystemAsk.Vpn.granted(this)) startMeshNow()
         }
@@ -398,9 +400,7 @@ class MainActivity : ComponentActivity() {
      * going down regardless; the radio is following it, not driving it.
      */
     private fun setMeshEnabled(enabled: Boolean) {
-        val edit = prefs.edit().putBoolean(PREF_MESH, enabled)
-        if (enabled) edit.putBoolean(PREF_MESH_DECLINED, false)
-        edit.apply()
+        prefs.edit().putBoolean(PREF_MESH, enabled).apply()
         meshEnabled.value = enabled
         val bleOn = prefs.getBoolean(PREF_BLE, true)
         if (enabled) {
@@ -505,8 +505,16 @@ class MainActivity : ComponentActivity() {
             )
         }
         if (mesh == LaunchDecision.MarkDone) prefs.edit().putBoolean(PREF_SETUP_DONE, true).apply()
-        val plan = MeshSetup.launchPlan(mesh, nameChosen = prefs.getBoolean(PREF_NAME_CHOSEN, false))
+        // A first run is one whose intro hasn't been seen yet, or one that
+        // showed the popup and was closed before it finished; anything else
+        // reaching here is an upgrade ([MeshSetup.launchEntry]).
+        val entry = MeshSetup.launchEntry(
+            introSeen = prefs.getBoolean(PREF_INTRO_SEEN, false),
+            firstRunUnfinished = prefs.getBoolean(PREF_SETUP_FIRST_RUN, false),
+        )
+        val plan = MeshSetup.launchPlan(mesh, nameChosen = prefs.getBoolean(PREF_NAME_CHOSEN, false), entry = entry)
             ?: return
+        if (plan.mesh && entry == SetupEntry.Launch) prefs.edit().putBoolean(PREF_SETUP_FIRST_RUN, true).apply()
         openSetup(plan)
     }
 
@@ -527,8 +535,8 @@ class MainActivity : ComponentActivity() {
         setupStep.value = step
     }
 
-    /** Whether the popup is somewhere in its mesh steps (not closed, not at Name). */
-    private fun inMeshSteps(): Boolean = setupStep.value.let { it != null && it != SetupStep.Name }
+    /** Whether the popup is keeping the node and tunnel down; see [MeshSetup.holdsMeshBack]. */
+    private fun holdsMeshBack(): Boolean = MeshSetup.holdsMeshBack(setupStep.value, setupPlan.value)
 
     /**
      * The mesh steps opened from outside the popup — the mesh switch, a radio
@@ -591,16 +599,20 @@ class MainActivity : ComponentActivity() {
         when (action) {
             // On to the "Nearby devices" card — or past it, with nothing left
             // to ask. Android's prompts wait for the cards' buttons.
+            // Always switched on here, not only when it was off: on a first
+            // run the stored switch is already on (its default), but nothing
+            // has started it — [holdsMeshBack] kept the node down until now.
             SetupAction.Yes -> {
-                if (!meshEnabled.value) setMeshEnabled(true)
+                setMeshEnabled(true)
                 if (SystemAsk.Nearby.granted(this)) {
                     afterNearbyStep()
                 } else {
                     setupStep.value = SetupStep.ExplainNearby
                 }
             }
-            // "Not now" on a run opened later (mesh switch, Fix): nothing was
-            // asked and nothing changes — the mesh stays as it was.
+            // "Not now" on a run opened later (mesh switch, Fix) or on an
+            // upgrade: nothing was asked and nothing changes — the mesh stays
+            // as it was.
             SetupAction.NotNowEnable -> {
                 setupOutcome.value = setupOutcome.value.copy(dismissed = true)
                 val next = MeshSetup.afterMesh(setupPlan.value)
@@ -608,7 +620,6 @@ class MainActivity : ComponentActivity() {
             }
             SetupAction.NoThanks -> {
                 setMeshEnabled(false)
-                prefs.edit().putBoolean(PREF_MESH_DECLINED, true).apply()
                 setupOutcome.value = setupOutcome.value.copy(declined = true)
                 endMeshSteps()
             }
@@ -653,10 +664,16 @@ class MainActivity : ComponentActivity() {
         when (result.ask) {
             SystemAsk.Nearby -> onNearbyResult(result)
             SystemAsk.Vpn -> onVpnConsentResult(result.resultOk, result.elapsedMs)
-            SystemAsk.Hotspot -> if (result.granted) HotspotService.start(this)
-            // Refused without a dialog: Android won't ask again, so its settings are the way.
+            // Refused without a dialog: Android won't ask again, so its
+            // settings are the way — or the next tap would do nothing at all.
+            SystemAsk.Hotspot -> if (result.granted) {
+                HotspotService.start(this)
+            } else if (result.refusedForGood) {
+                openAppSettings()
+            }
+            SystemAsk.Camera -> if (result.refusedForGood) openAppSettings()
             SystemAsk.Notifications -> if (result.refusedForGood) openNotificationSettings(this)
-            SystemAsk.Battery, SystemAsk.Camera, SystemAsk.BluetoothOn -> Unit
+            SystemAsk.Battery, SystemAsk.BluetoothOn -> Unit
         }
     }
 
@@ -671,7 +688,7 @@ class MainActivity : ComponentActivity() {
         tunnelWait?.cancel()
         tunnelWait = null
         // Asked at all means asked: launch doesn't bring the mesh steps back.
-        prefs.edit().putBoolean(PREF_SETUP_DONE, true).apply()
+        prefs.edit().putBoolean(PREF_SETUP_DONE, true).remove(PREF_SETUP_FIRST_RUN).apply()
         val next = MeshSetup.afterMesh(setupPlan.value)
         if (next != null) goTo(next) else finishSetup()
     }
@@ -716,7 +733,8 @@ class MainActivity : ComponentActivity() {
      * do but send a refusal for good to the app's settings.
      */
     private fun onNearbyResult(result: AskResult) {
-        // Whatever landed, start it. The node is up (or coming up) from "Yes".
+        // Whatever landed, start it. In the popup the node is up (or coming
+        // up) from "Yes"; elsewhere it follows the mesh switch.
         if (meshEnabled.value) {
             startBleWhenNodeUp()
             if (prefs.getBoolean(PREF_AWARE, true) && AwareRadio.isSupported(this) && awarePermsGranted()) {
@@ -833,8 +851,11 @@ class MainActivity : ComponentActivity() {
         val outcome = setupOutcome.value
         setupStep.value = null
         setupNearbyBlocked.value = false
+        // Done whichever way it closed — an upgrade's "Not now" included, so
+        // launch doesn't ask again. Only a run that changed something leaves
+        // a snackbar.
+        if (plan.mesh) prefs.edit().putBoolean(PREF_SETUP_DONE, true).remove(PREF_SETUP_FIRST_RUN).apply()
         if (plan.mesh && !outcome.dismissed) {
-            prefs.edit().putBoolean(PREF_SETUP_DONE, true).apply()
             setupNotice.value = MeshSetup.notice(
                 meshOn = meshEnabled.value,
                 nearbyGranted = SystemAsk.Nearby.granted(this),
@@ -847,7 +868,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Settings › Permissions "Fix" on Nearby phones, with the mesh on: the
+     * Settings › Permissions "Fix" on Nearby devices, with the mesh on: the
      * popup, on "Enable mesh?"; its "Yes" asks and starts the radios when
      * they're allowed. (With the mesh off the page asks Android itself —
      * nothing should start.)
@@ -1019,8 +1040,8 @@ class MainActivity : ComponentActivity() {
         // back (prepare() re-authorises a consented app silently on 12+) nothing
         // restarts the service — so check here, where the user has just come
         // back from wherever they went to release it.
-        // Not while the setup popup is open: it starts the tunnel itself.
-        if (meshEnabled.value && !inMeshSteps() && !MycoVpnService.isUp() &&
+        // Not while a first run's popup holds the mesh back: its "Yes" starts it.
+        if (meshEnabled.value && !holdsMeshBack() && !MycoVpnService.isUp() &&
             prefs.getBoolean(PREF_INTRO_SEEN, false) && SystemAsk.Vpn.granted(this)
         ) {
             android.util.Log.i("MycoVpn", "onResume: mesh on, slot ours, tunnel down — restarting")
@@ -1056,7 +1077,13 @@ class MainActivity : ComponentActivity() {
             // radio that started after the last rename.
             val stored = getSharedPreferences("myco_prefs", MODE_PRIVATE)
                 .getString("device_name", "").orEmpty()
-            applyDeviceName(this, core, it, stored)
+            // No name chosen yet (the setup popup's last step): the radios may
+            // already be up, so publish the pseudonym, not the phone's own name.
+            if (prefs.getBoolean(PREF_NAME_CHOSEN, false) || stored.isNotBlank()) {
+                applyDeviceName(this, core, it, stored)
+            } else {
+                publishProvisionalName(core, it)
+            }
         }
         // Deep links followed before the app existed (possibly in a previous process)
         // get their chance every time Myco comes back to the foreground.
@@ -1139,8 +1166,10 @@ class MainActivity : ComponentActivity() {
     private fun setBleEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(PREF_BLE, enabled).apply()
         if (enabled) {
-            // Not allowed yet: open the popup, whose "Yes" asks and starts it.
-            if (bleCorePermsGranted()) BleService.start(this) else openMeshRun(SetupEntry.Fix)
+            // Not allowed yet: the nearby explanation, whose button asks;
+            // [onNearbyResult] starts the radio if the mesh is on. Not the
+            // setup popup — its "Yes" would switch the whole mesh on.
+            if (bleCorePermsGranted()) BleService.start(this) else asker.explain(SystemAsk.Nearby)
         } else {
             BleService.stop(this)
         }
@@ -1152,7 +1181,8 @@ class MainActivity : ComponentActivity() {
         prefs.edit().putBoolean(PREF_AWARE, enabled).apply()
         if (enabled) {
             if (!awarePermsGranted()) {
-                openMeshRun(SetupEntry.Fix)
+                // As for Bluetooth: explained, then asked; started on the answer.
+                asker.explain(SystemAsk.Nearby)
                 return
             }
             AwareService.start(this)
@@ -1632,8 +1662,12 @@ class MainActivity : ComponentActivity() {
          */
         const val PREF_SETUP_DONE = "mesh_setup_done"
 
-        /** The user chose "No thanks"; cleared when they switch the mesh on. */
-        const val PREF_MESH_DECLINED = "mesh_declined"
+        /**
+         * Set while a first run's popup is in progress, so a launch that
+         * finds it unfinished (the app closed mid-setup) is still a first run
+         * and not an upgrade. Cleared with [PREF_SETUP_DONE].
+         */
+        const val PREF_SETUP_FIRST_RUN = "mesh_setup_first_run"
 
         /** Android has been asked for the nearby group / the VPN at least once ([SystemAsker]). */
         const val PREF_NEARBY_ASKED = "nearby_asked"

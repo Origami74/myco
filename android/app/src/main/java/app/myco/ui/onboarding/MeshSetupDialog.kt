@@ -97,7 +97,7 @@ enum class SetupAction {
 
 /**
  * The setup popup: a card over the dimmed app with a segmented progress bar
- * (Install Myco · Nearby phones · Connection · Name, as [plan] has them).
+ * (Install Myco · Nearby devices · Connection · Name, as [plan] has them).
  *
  * Stateless — the Activity owns [step], because Android's permission and VPN
  * results land there, and it has to survive the Activity being recreated
@@ -108,7 +108,8 @@ enum class SetupAction {
  * @param nearbyBlocked Android refused the nearby permissions without asking,
  *   so "Try again" becomes "Open app settings".
  * @param name what the Name step's field starts with.
- * @param onAsk a tap that asks Android: "Continue" on an explain card, "Try again".
+ * @param onAsk a tap that asks Android: an explain card's button ("Allow nearby
+ *   devices", "Allow VPN"), or "Try again".
  * @param onSaveName the field's trimmed content, on "Use this name".
  */
 @Composable
@@ -214,9 +215,9 @@ private fun StepContent(
         )
         SetupStep.NearbyRefused -> {
             IconBadge(warn = true) { PhonesIcon(MaterialTheme.colorScheme.tertiary) }
-            Title("Nearby phones are off")
+            Title("Nearby devices are off")
             Body(
-                "Without nearby devices, Myco can’t look for phones around you over " +
+                "Without this permission, Myco can’t find nearby mesh devices over " +
                     "Bluetooth and Wi-Fi.",
             )
             Note("Phones on the same Wi-Fi network can still connect. Apps on this phone still open.")
@@ -247,7 +248,7 @@ private fun StepContent(
             IconBadge(warn = true) { MeshIcon(MaterialTheme.colorScheme.tertiary) }
             Title("Mesh needs the VPN")
             Body("The VPN connects this phone to the FIPS mesh; your regular internet traffic doesn’t go through it.")
-            Note("Without it, apps on nearby phones can’t be reached. Apps on this phone still open.")
+            Note("Without it, apps on nearby mesh devices can’t be reached. Apps on this phone still open.")
             Spacer(Modifier.height(20.dp))
             AskButton(SystemAsk.Vpn, "Try again", onAsk)
             Spacer(Modifier.height(6.dp))
@@ -271,7 +272,7 @@ private fun StepContent(
             // off, and the radios only start the node while it is on — but the
             // gateway, relay and Blossom store are local and never needed it.
             Note(
-                "Apps already on this phone still open. Finding nearby phones and " +
+                "Apps already on this phone still open. Finding nearby mesh devices and " +
                     "sharing apps with them won’t work until it’s fixed.",
             )
             Spacer(Modifier.height(16.dp))
@@ -375,7 +376,7 @@ private fun NameField(initial: String, onSave: (String) -> Unit) {
 
 private fun label(segment: Segment): String = when (segment) {
     Segment.Install -> "Install Myco"
-    Segment.Nearby -> "Nearby phones"
+    Segment.Nearby -> "Nearby devices"
     Segment.Connection -> "Connection"
     Segment.Name -> "Name"
 }
@@ -603,7 +604,7 @@ internal fun QuietButton(text: String, modifier: Modifier = Modifier.fillMaxWidt
 // Icons — drawn, to match the design; Material has no two-phones or mesh glyph.
 // ----------------------------------------------------------------------------
 
-/** Two phones with a signal between them: "Nearby phones". */
+/** Two phones with a signal between them: "Nearby devices". */
 @Composable
 internal fun PhonesIcon(color: Color, modifier: Modifier = Modifier.size(40.dp)) {
     Canvas(modifier) {

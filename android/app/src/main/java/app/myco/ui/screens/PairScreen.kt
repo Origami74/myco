@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -101,10 +102,20 @@ fun QrScreen(
 internal fun ScanPanel(onScanned: (String) -> Unit) {
     val context = LocalContext.current
     val asker = LocalSystemAsker.current
-    // Re-read after every prompt; the camera is asked only from "Allow
+    // Re-read after every prompt, and on every return to the app (allowed
+    // in Android's settings, say). The camera is asked only from "Allow
     // camera", by way of its explanation — never on opening the panel.
     val revision = asker?.revision?.intValue ?: 0
-    val granted = remember(revision) { SystemAsk.Camera.granted(context) }
+    var resumes by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumes++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    val granted = remember(revision, resumes) { SystemAsk.Camera.granted(context) }
 
     Box(
         modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(Color.Black),
