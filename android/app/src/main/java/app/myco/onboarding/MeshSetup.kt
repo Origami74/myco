@@ -8,7 +8,11 @@ package app.myco.onboarding
  * the last three. Only [EnableMesh], the three refusal cards and [Name] ask the
  * user anything; the `Asking…` and [Connecting] states are what sits behind
  * Android's own prompts, so the happy path is "Yes", Android's nearby prompt,
- * Android's VPN prompt, then "Keep using this".
+ * Android's VPN prompt, then "Use this name".
+ *
+ * Every run that has mesh steps opens on [EnableMesh], whoever opened it: an
+ * Android prompt is only ever launched by a tap on one of the popup's buttons,
+ * never by the popup opening (see [MeshSetup.systemPromptUp]).
  */
 enum class SetupStep {
     /** "Enable mesh?" — the first card, and the only one on the happy path. */
@@ -32,8 +36,23 @@ enum class SetupStep {
     /** Another app's always-on VPN holds the slot: "Another VPN is always on". */
     AlwaysOnVpn,
 
-    /** The device name: keep the default, or change it. Always last. */
+    /** The device name, edited in place on the card. Always last. */
     Name,
+}
+
+/**
+ * What opened this run of the popup. It decides what the grey button on
+ * "Enable mesh?" does.
+ */
+enum class SetupEntry {
+    /** The app starting: a fresh install, or an upgrade with something missing. */
+    Launch,
+
+    /** The user switched the mesh on (Settings, the status pill) with something missing. */
+    MeshSwitch,
+
+    /** A Fix in Settings (Permissions, the VPN warning card) or a radio toggle. */
+    Fix,
 }
 
 /** A segment of the progress bar. */
@@ -48,7 +67,11 @@ enum class SegmentState { Done, Active, Problem, Pending, Skipped }
  * mesh switch reopens it with only the mesh steps once the name is chosen; an
  * upgrade whose mesh already works but never chose a name gets only the name.
  */
-data class SetupPlan(val mesh: Boolean, val name: Boolean) {
+data class SetupPlan(
+    val mesh: Boolean,
+    val name: Boolean,
+    val entry: SetupEntry = SetupEntry.Launch,
+) {
     val segments: List<Segment> = buildList {
         add(Segment.Install)
         if (mesh) addAll(listOf(Segment.Nearby, Segment.Connection))
@@ -63,11 +86,14 @@ data class SetupPlan(val mesh: Boolean, val name: Boolean) {
  * @param declined "No thanks": Nearby and Connection were skipped.
  * @param nearbyRefused carried on past a nearby refusal.
  * @param connectionSkipped "Not now" / "Continue without" on the VPN.
+ * @param dismissed "Not now" on "Enable mesh?" in a run the user opened
+ *   later: nothing was asked and nothing changed, so it leaves no snackbar.
  */
 data class MeshOutcome(
     val declined: Boolean = false,
     val nearbyRefused: Boolean = false,
     val connectionSkipped: Boolean = false,
+    val dismissed: Boolean = false,
 )
 
 /** What to do about the popup when the app starts. */
@@ -179,9 +205,37 @@ object MeshSetup {
         return if (plan.mesh || plan.name) plan else null
     }
 
-    /** The card a run of the popup opens on. */
+    /**
+     * The mesh steps opened from outside the popup — the mesh switch, a
+     * Settings fix, a radio toggle — with the name step only if it was never
+     * answered. Opens on "Enable mesh?" like every other run ([firstStep]).
+     */
+    fun reopenPlan(entry: SetupEntry, nameChosen: Boolean): SetupPlan =
+        SetupPlan(mesh = true, name = !nameChosen, entry = entry)
+
+    /**
+     * The card a run of the popup opens on. With mesh steps that is always
+     * the "Enable mesh?" confirmation — never an `Asking…` step, so opening
+     * the popup never puts an Android prompt up by itself.
+     */
     fun firstStep(plan: SetupPlan): SetupStep =
         if (plan.mesh) SetupStep.EnableMesh else SetupStep.Name
+
+    /**
+     * Whether [step] is one that sits behind an Android prompt. The Activity
+     * enters these only from a button tap on the popup, which launches the
+     * prompt in the same call.
+     */
+    fun systemPromptUp(step: SetupStep?): Boolean =
+        step == SetupStep.AskingNearby || step == SetupStep.AskingVpn
+
+    /**
+     * Whether the grey button on "Enable mesh?" just closes the popup ("Not
+     * now", nothing changed) rather than declining the mesh ("No thanks", on
+     * to the name). Only the launch run declines; a run the user opened later
+     * by switching the mesh on or tapping a Fix closes and leaves things be.
+     */
+    fun greyButtonCloses(plan: SetupPlan): Boolean = plan.entry != SetupEntry.Launch
 
     /**
      * Where to go once the mesh steps are over, whichever way they ended
@@ -218,7 +272,7 @@ object MeshSetup {
                 seg == Segment.Install -> SegmentState.Done
                 i > currentIndex -> SegmentState.Pending
                 i == currentIndex -> if (refusalCard) SegmentState.Problem else SegmentState.Active
-                outcome.declined -> SegmentState.Skipped
+                outcome.declined || outcome.dismissed -> SegmentState.Skipped
                 seg == Segment.Nearby && outcome.nearbyRefused -> SegmentState.Problem
                 seg == Segment.Connection && outcome.connectionSkipped -> SegmentState.Problem
                 else -> SegmentState.Done

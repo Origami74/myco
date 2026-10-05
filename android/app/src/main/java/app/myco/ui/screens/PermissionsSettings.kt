@@ -89,8 +89,8 @@ private data class PermissionSnapshot(
  * the way to fix it beside it. Permissions only: the mesh switch lives where
  * it always has (Settings › Mesh, the status pill).
  *
- * With the mesh on, the mesh rows' Fix reopens the setup popup at that step,
- * which also brings the lanes up. With it off they ask Android directly, since
+ * With the mesh on, the mesh rows' Fix reopens the setup popup on "Enable
+ * mesh?"; its "Yes" asks Android and brings the lanes up. With it off they ask Android directly, since
  * there is nothing to start. Notifications and the battery exemption are not
  * part of setup at all — they are asked for here, when the user wants them.
  */
@@ -168,8 +168,8 @@ internal fun PermissionsSettings(
             },
             action = if (s.nearbyGranted) null else if (s.nearbyAsked) "Fix" else "Allow",
             onAction = {
-                // Mesh on: the setup popup's nearby step, which also starts
-                // the radios. Mesh off: just ask — nothing is to start.
+                // Mesh on: the setup popup, whose "Yes" asks and starts the
+                // radios. Mesh off: just ask — nothing is to start.
                 if (meshEnabled) {
                     onFixNearby()
                 } else {
@@ -196,8 +196,8 @@ internal fun PermissionsSettings(
                 else -> null
             },
             onAction = {
-                // Mesh on: the popup's Connection step (it brings the tunnel
-                // up). Mesh off: only Android's consent; no tunnel to start.
+                // Mesh on: the setup popup, whose "Yes" asks and brings the
+                // tunnel up. Mesh off: only Android's consent; no tunnel to start.
                 val consent = VpnService.prepare(context)
                 if (meshEnabled) {
                     onFixConnection()

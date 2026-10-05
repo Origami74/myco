@@ -70,7 +70,8 @@ Myco lets them hand it to you in person.**
    - **A VPN prompt.** The VPN stays on your phone. Myco uses it to talk to
      other phones, not to send your traffic anywhere.
 
-   Then keep the suggested name or change it: it is what the people you pair
+   Then check your name — the phone's own name is filled in; edit it right
+   there if you like, and tap **Use this name**. It is what the people you pair
    with see. The **camera** is asked for only when you scan a code.
    **Notifications** are optional: turn them on in **Settings › Permissions**.
 3. **Pair**, in the **Circle** tab. Any one of these:

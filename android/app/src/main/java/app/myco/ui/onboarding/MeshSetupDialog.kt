@@ -1,5 +1,6 @@
 package app.myco.ui.onboarding
 
+import android.view.WindowManager
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -21,7 +22,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Badge
 import androidx.compose.material.icons.outlined.GppMaybe
-import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -47,7 +50,11 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,6 +73,9 @@ import app.myco.onboarding.SetupStep
 enum class SetupAction {
     Yes,
     NoThanks,
+
+    /** The grey button on "Enable mesh?" in a run opened later: close, change nothing. */
+    NotNowEnable,
     RetryNearby,
     OpenAppSettings,
     ContinueAfterNearby,
@@ -73,7 +83,6 @@ enum class SetupAction {
     NotNow,
     OpenVpnSettings,
     ContinueWithout,
-    KeepName,
 }
 
 /**
@@ -88,8 +97,8 @@ enum class SetupAction {
  * @param outcome how the mesh steps behind the current one went.
  * @param nearbyBlocked Android refused the nearby permissions without asking,
  *   so "Try again" becomes "Open app settings".
- * @param name the name the Name step offers to keep.
- * @param onSaveName a name typed into "Change it".
+ * @param name what the Name step's field starts with.
+ * @param onSaveName the field's trimmed content, on "Use this name".
  */
 @Composable
 fun MeshSetupDialog(
@@ -101,8 +110,6 @@ fun MeshSetupDialog(
     onAction: (SetupAction) -> Unit,
     onSaveName: (String) -> Unit,
 ) {
-    // "Change it" is a modal over the card: the card's own UI state.
-    var editingName by rememberSaveable { mutableStateOf(false) }
     Dialog(
         onDismissRequest = {},
         properties = DialogProperties(
@@ -113,18 +120,25 @@ fun MeshSetupDialog(
     ) {
         // The platform's dialog dim is lighter than the design's; the card
         // should read as the only thing on screen.
+        // Resize, not pan, for the keyboard: the Name step's field and its
+        // button stay on screen, the card scrolling if it has to.
         val window = (LocalView.current.parent as? DialogWindowProvider)?.window
-        SideEffect { window?.setDimAmount(0.72f) }
+        SideEffect {
+            window?.setDimAmount(0.72f)
+            @Suppress("DEPRECATION")
+            window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        }
 
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
+                .imePadding()
                 .padding(horizontal = 20.dp)
                 .widthIn(max = 440.dp)
                 .fillMaxWidth(),
         ) {
             SetupCard(step, plan, MeshSetup.segments(step, plan, outcome)) {
-                StepContent(step, nearbyBlocked, name, onAction, onChangeName = { editingName = true })
+                StepContent(step, plan, nearbyBlocked, name, onAction, onSaveName)
             }
             footnote(step, nearbyBlocked)?.let {
                 Spacer(Modifier.height(18.dp))
@@ -136,16 +150,6 @@ fun MeshSetupDialog(
                     textAlign = TextAlign.Center,
                 )
             }
-        }
-        if (editingName && step == SetupStep.Name) {
-            ChangeNameDialog(
-                initial = name,
-                onSave = {
-                    editingName = false
-                    onSaveName(it)
-                },
-                onCancel = { editingName = false },
-            )
         }
     }
 }
@@ -160,14 +164,17 @@ private fun footnote(step: SetupStep, nearbyBlocked: Boolean): String? = when (s
 @Composable
 private fun StepContent(
     step: SetupStep,
+    plan: SetupPlan,
     nearbyBlocked: Boolean,
     name: String,
     onAction: (SetupAction) -> Unit,
-    onChangeName: () -> Unit,
+    onSaveName: (String) -> Unit,
 ) {
     when (step) {
         // Deliberately short: the title and one line. What the VPN is and
         // isn't is said on the cards that need it, after a refusal.
+        // Every run with mesh steps opens here, and only "Yes, enable" asks
+        // Android anything.
         SetupStep.EnableMesh -> {
             IconBadge(warn = false) { PhonesIcon(MaterialTheme.colorScheme.primary) }
             Title("Enable mesh?")
@@ -175,7 +182,13 @@ private fun StepContent(
             Spacer(Modifier.height(28.dp))
             PrimaryButton("Yes, enable") { onAction(SetupAction.Yes) }
             Spacer(Modifier.height(10.dp))
-            NeutralButton("No thanks") { onAction(SetupAction.NoThanks) }
+            // At launch the grey button declines the mesh and goes on; in a
+            // run the user opened later it only closes the popup.
+            if (MeshSetup.greyButtonCloses(plan)) {
+                NeutralButton("Not now") { onAction(SetupAction.NotNowEnable) }
+            } else {
+                NeutralButton("No thanks") { onAction(SetupAction.NoThanks) }
+            }
         }
         SetupStep.AskingNearby -> Waiting(
             icon = { PhonesIcon(MaterialTheme.colorScheme.primary) },
@@ -274,44 +287,49 @@ private fun StepContent(
             Title("What should people call you?")
             Body("Phones you pair with see this name.")
             Spacer(Modifier.height(16.dp))
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f), RoundedCornerShape(12.dp))
-                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 14.dp, vertical = 14.dp),
-            ) {
-                Text(name, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-            }
-            Spacer(Modifier.height(24.dp))
-            PrimaryButton("Keep using this") { onAction(SetupAction.KeepName) }
-            Spacer(Modifier.height(10.dp))
-            NeutralButton("Change it", onChangeName)
+            NameField(name, onSaveName)
         }
     }
 }
 
-/** "Change it": one field, Save or Cancel. Save finishes the popup. */
+/**
+ * The name, editable right on the card: a tap puts the cursor in it with the
+ * keyboard up. Starts with [initial] (the phone's own name, or the one set
+ * before), cursor at the end. "Use this name" — or the keyboard's Done —
+ * saves the trimmed text; both do nothing while it is empty.
+ */
 @Composable
-private fun ChangeNameDialog(initial: String, onSave: (String) -> Unit, onCancel: () -> Unit) {
-    var text by rememberSaveable { mutableStateOf(initial) }
-    AlertDialog(
-        onDismissRequest = onCancel,
-        title = { Text("Your name") },
-        text = {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it.take(DeviceName.MAX_LENGTH) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+private fun NameField(initial: String, onSave: (String) -> Unit) {
+    var field by rememberSaveable(initial, stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(initial, TextRange(initial.length)))
+    }
+    val trimmed = field.text.trim()
+    OutlinedTextField(
+        value = field,
+        onValueChange = { v ->
+            field = if (v.text.length > DeviceName.MAX_LENGTH) {
+                val text = v.text.take(DeviceName.MAX_LENGTH)
+                v.copy(text = text, selection = TextRange(minOf(v.selection.end, text.length)))
+            } else {
+                v
+            }
         },
-        confirmButton = {
-            TextButton(enabled = text.isNotBlank(), onClick = { onSave(text.trim()) }) { Text("Save") }
-        },
-        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } },
+        singleLine = true,
+        shape = RoundedCornerShape(12.dp),
+        textStyle = MaterialTheme.typography.bodyLarge.copy(
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 17.sp,
+            textAlign = TextAlign.Center,
+        ),
+        keyboardOptions = KeyboardOptions(
+            capitalization = KeyboardCapitalization.Words,
+            imeAction = ImeAction.Done,
+        ),
+        keyboardActions = KeyboardActions(onDone = { if (trimmed.isNotEmpty()) onSave(trimmed) }),
+        modifier = Modifier.fillMaxWidth(),
     )
+    Spacer(Modifier.height(24.dp))
+    PrimaryButton("Use this name", enabled = trimmed.isNotEmpty()) { onSave(trimmed) }
 }
 
 // ----------------------------------------------------------------------------
@@ -509,9 +527,10 @@ private fun Waiting(icon: @Composable () -> Unit, title: String, body: String) {
 }
 
 @Composable
-private fun PrimaryButton(text: String, onClick: () -> Unit) {
+private fun PrimaryButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
     Button(
         onClick = onClick,
+        enabled = enabled,
         shape = RoundedCornerShape(24.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = MaterialTheme.colorScheme.primary,
@@ -521,7 +540,7 @@ private fun PrimaryButton(text: String, onClick: () -> Unit) {
     ) { Text(text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp) }
 }
 
-/** "No thanks": filled, but grey — a real choice, not a hidden one. */
+/** "No thanks" / "Not now": filled, but grey — a real choice, not a hidden one. */
 @Composable
 private fun NeutralButton(text: String, onClick: () -> Unit) {
     val dark = isDark()

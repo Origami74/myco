@@ -112,7 +112,59 @@ class MeshSetupTest {
         assertNull(MeshSetup.afterMesh(meshOnly))
     }
 
-    // --- progress bar: mesh yes / no × name keep / change ---
+    // --- runs opened later: confirm first, ask only on a tap ---
+
+    @Test
+    fun meshSwitchedOnLaterOpensOnTheConfirmCardWithNoRequestPending() {
+        // Fresh install, "No thanks", name done; later the mesh switch is
+        // turned on with the permissions still missing.
+        assertTrue(MeshSetup.meshOnNeedsSetup(nearbyGranted = false, vpnPrepared = false))
+        val plan = MeshSetup.reopenPlan(SetupEntry.MeshSwitch, nameChosen = true)
+        assertEquals(SetupPlan(mesh = true, name = false, entry = SetupEntry.MeshSwitch), plan)
+        val first = MeshSetup.firstStep(plan)
+        assertEquals(SetupStep.EnableMesh, first)
+        assertFalse(MeshSetup.systemPromptUp(first))
+        assertEquals(listOf(D, A, P), MeshSetup.segments(first, plan, MeshOutcome()))
+        // The grey button is "Not now": it closes, nothing else follows.
+        assertTrue(MeshSetup.greyButtonCloses(plan))
+        assertNull(MeshSetup.afterMesh(plan))
+    }
+
+    @Test
+    fun aSettingsFixOpensOnTheConfirmCardWithNoRequestPending() {
+        for (nameChosen in listOf(true, false)) {
+            val plan = MeshSetup.reopenPlan(SetupEntry.Fix, nameChosen = nameChosen)
+            val first = MeshSetup.firstStep(plan)
+            assertEquals(SetupStep.EnableMesh, first)
+            assertFalse(MeshSetup.systemPromptUp(first))
+            assertTrue(MeshSetup.greyButtonCloses(plan))
+        }
+    }
+
+    @Test
+    fun noRunOpensBehindAnAndroidPrompt() {
+        val plans = listOf(full, meshOnly, nameOnly) +
+            SetupEntry.entries.flatMap { e -> listOf(true, false).map { MeshSetup.reopenPlan(e, it) } }
+        for (plan in plans) assertFalse(MeshSetup.systemPromptUp(MeshSetup.firstStep(plan)))
+        assertTrue(MeshSetup.systemPromptUp(SetupStep.AskingNearby))
+        assertTrue(MeshSetup.systemPromptUp(SetupStep.AskingVpn))
+        assertFalse(MeshSetup.systemPromptUp(null))
+    }
+
+    @Test
+    fun onlyTheLaunchRunSaysNoThanks() {
+        assertFalse(MeshSetup.greyButtonCloses(full))
+        assertFalse(MeshSetup.greyButtonCloses(meshOnly))
+    }
+
+    @Test
+    fun notNowOnALaterRunWithTheNameStillOpenGoesOnToIt() {
+        val plan = MeshSetup.reopenPlan(SetupEntry.MeshSwitch, nameChosen = false)
+        assertEquals(SetupStep.Name, MeshSetup.afterMesh(plan))
+        assertEquals(listOf(D, S, S, A), MeshSetup.segments(SetupStep.Name, plan, MeshOutcome(dismissed = true)))
+    }
+
+    // --- progress bar: mesh yes / no, then the name ---
 
     @Test
     fun yesThenNameCountsOneToFour() {
@@ -120,7 +172,7 @@ class MeshSetupTest {
         assertEquals(listOf(D, A, P, P), MeshSetup.segments(SetupStep.EnableMesh, full, MeshOutcome()))
         assertEquals(3, MeshSetup.stepNumber(SetupStep.Connecting, full))
         assertEquals(listOf(D, D, A, P), MeshSetup.segments(SetupStep.Connecting, full, MeshOutcome()))
-        // Keep or change, the Name card is the same step: 4 of 4.
+        // The Name card is the last step: 4 of 4.
         assertEquals(4, MeshSetup.stepNumber(SetupStep.Name, full))
         assertEquals(listOf(D, D, D, A), MeshSetup.segments(SetupStep.Name, full, MeshOutcome()))
     }

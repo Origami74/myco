@@ -20,13 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The Dev tab shows which public nodes are up.
 - **A setup popup on first launch.** After the intro, one popup with a
   progress bar sets up the mesh and your name. "Enable mesh?" leads to
-  Android's nearby-devices prompt and then its VPN prompt. Last, you keep the
-  suggested name or change it. A refused step gets a card that says what
-  won't work and how to retry, including when another app's VPN is set to
-  always on and holds the slot. "No thanks" leaves the mesh off and still
-  asks your name. Phones upgrading with a working mesh don't see the mesh
-  steps. Permissions are no longer all asked for at launch, and notifications
-  are no longer asked for with Bluetooth.
+  Android's nearby-devices prompt and then its VPN prompt. Last comes your
+  name, filled in with the phone's own name and editable right there; "Use
+  this name" saves it. A refused step gets a card that says what won't work
+  and how to retry, including when another app's VPN is set to always on and
+  holds the slot. "No thanks" leaves the mesh off and still asks your name.
+  Switching the mesh on later, or a Fix in Settings, opens the popup on
+  "Enable mesh?" again; Android asks nothing until you tap "Yes, enable".
+  Phones upgrading with a working mesh don't see the mesh steps. Permissions
+  are no longer all asked for at launch, and notifications are no longer
+  asked for with Bluetooth.
 - **Settings › Permissions.** One page for nearby phones, the mesh connection,
   notifications and, optionally, keeping Myco running in the background (the
   battery-optimisation exemption), each with its state and a Fix or Allow.
@@ -47,9 +50,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The suggested name is the generated one.** The name step offers the
-  phone's generated name rather than the handset's own (which often carries a
-  real name); "Change it" sets any other.
 - **Less black screen when a napplet opens.** The WebView renderer process is
   kept running while Myco is on screen instead of being restarted for every
   window, and a napplet's WebView is built while the napplet is being verified

@@ -400,7 +400,7 @@ private fun RootSettings(
             Spacer(Modifier.height(8.dp))
             RadioWarningCard(warning) {
                 when (warning.action) {
-                    RadioAction.FIX_VPN -> onFixConnection() // the setup popup's Connection step
+                    RadioAction.FIX_VPN -> onFixConnection() // the setup popup, on "Enable mesh?"
                     RadioAction.ENABLE_BLUETOOTH -> runCatching {
                         context.startActivity(
                             android.content.Intent(
