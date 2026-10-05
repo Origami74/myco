@@ -46,6 +46,7 @@ import app.myco.core.NativeActions
 import app.myco.core.PeerAttempt
 import app.myco.core.PeerDiagnostic
 import app.myco.core.PeerPath
+import app.myco.core.PublicNode
 import app.myco.share.DeviceName
 import app.myco.ui.KeyVal
 import app.myco.ui.ScreenHeader
@@ -174,6 +175,42 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
                         EmptyLine("no fips node on this lan")
                     } else {
                         apNodes.forEach { ApNodeRow(it) }
+                    }
+                }
+                // Public internet nodes (N10): which are up, over what endpoint.
+                // Only the ones that matter here — connected, being dialled, or
+                // selected — not the whole Nostr directory Settings lists.
+                val pub = devState.publicNodes
+                DevCard("PUBLIC NODES (INTERNET)") {
+                    KeyValDot(
+                        "lane",
+                        when {
+                            !pub.enabled -> "off"
+                            pub.blocked == "offline-only" -> "on — held by mesh-only"
+                            pub.blocked == "no-internet" -> "on — no internet"
+                            else -> "on"
+                        },
+                        pub.enabled && pub.blocked.isEmpty(),
+                    )
+                    KeyVal(
+                        "adverts",
+                        if (pub.lastFetchMs == 0L) {
+                            if (pub.fetching) "reading…" else "not read yet"
+                        } else {
+                            "${pub.nodes.count { it.advertised }} dialable · " +
+                                "${pub.relaysAnswered}/${pub.relaysAsked} relays · " +
+                                "${elapsedExact(pub.lastFetchMs)} ago"
+                        },
+                    )
+                    if (pub.fetchError.isNotEmpty()) KeyVal("advert error", pub.fetchError)
+                    val shown = pub.nodes.filter {
+                        it.state == "connected" || it.state == "connecting" ||
+                            (pub.enabled && it.selected)
+                    }
+                    if (shown.isEmpty()) {
+                        EmptyLine("no public node links")
+                    } else {
+                        shown.forEach { PublicNodeRow(it) }
                     }
                 }
                 // Stable alphabetical order — the state arrays arrive in snapshot
@@ -801,6 +838,31 @@ private fun ApNodeRow(n: LanFipsNode) {
             "${short(n.npub)}  ${n.addr}",
             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
         )
+    }
+}
+
+@Composable
+private fun PublicNodeRow(n: PublicNode) {
+    val up = n.state == "connected"
+    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Text(
+            (if (up) "● " else "○ ") + n.state +
+                (n.srttMs?.let { "  ${"%.0f".format(it)}ms" } ?: "") +
+                (if (n.recommended) "  ★" else ""),
+            color = if (up) StatusConnected else MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.labelMedium,
+        )
+        Text(
+            "${n.name}  ${n.endpoint.ifEmpty { "(no advert)" }}",
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        )
+        if (n.lastError.isNotEmpty()) {
+            Text(
+                n.lastError,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
     }
 }
 

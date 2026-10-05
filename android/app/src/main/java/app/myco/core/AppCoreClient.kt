@@ -199,6 +199,81 @@ data class CacheStatus(
     val cacheLimit: Long get() = eventCache.limit + blobCache.limit
 }
 
+/**
+ * Public internet mesh nodes (N10): the opt-in and every node heard of on
+ * Nostr, recommended ones (join.fips.network's) first. Built in Rust; see
+ * `myco-core/src/public_nodes.rs`.
+ */
+data class PublicNodes(
+    val enabled: Boolean = false,
+    /** Why nothing happens although it is on: "offline-only", "no-internet", or "". */
+    val blocked: String = "",
+    val fetching: Boolean = false,
+    /** When the last advert read finished, ms; 0 if never. */
+    val lastFetchMs: Long = 0,
+    val relaysAnswered: Int = 0,
+    val relaysAsked: Int = 0,
+    val fetchError: String = "",
+    /** How many links Myco holds at once. */
+    val targetLinks: Int = 0,
+    val nodes: List<PublicNode> = emptyList(),
+) {
+    companion object {
+        fun parse(o: JSONObject?): PublicNodes {
+            if (o == null) return PublicNodes()
+            val arr = o.optJSONArray("nodes")
+            return PublicNodes(
+                enabled = o.optBoolean("enabled"),
+                blocked = o.optString("blocked"),
+                fetching = o.optBoolean("fetching"),
+                lastFetchMs = o.optLong("lastFetchMs"),
+                relaysAnswered = o.optInt("relaysAnswered"),
+                relaysAsked = o.optInt("relaysAsked"),
+                fetchError = o.optString("fetchError"),
+                targetLinks = o.optInt("targetLinks"),
+                nodes = buildList {
+                    if (arr != null) for (i in 0 until arr.length()) {
+                        val n = arr.optJSONObject(i) ?: continue
+                        add(
+                            PublicNode(
+                                npub = n.optString("npub"),
+                                name = n.optString("name"),
+                                recommended = n.optBoolean("recommended"),
+                                selected = n.optBoolean("selected"),
+                                advertised = n.optBoolean("advertised"),
+                                endpoint = n.optString("endpoint"),
+                                advertisedAtMs = n.optLong("advertisedAtMs"),
+                                state = n.optString("state"),
+                                srttMs = if (n.isNull("srttMs")) null else n.optDouble("srttMs"),
+                                connectedSinceMs = n.optLong("connectedSinceMs"),
+                                lastError = n.optString("lastError"),
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+    }
+}
+
+/** One public node. */
+data class PublicNode(
+    val npub: String,
+    /** The recommended name ("test-us01"), else an abbreviated npub. */
+    val name: String,
+    val recommended: Boolean,
+    val selected: Boolean,
+    /** It has a live, dialable advert right now. */
+    val advertised: Boolean,
+    val endpoint: String,
+    val advertisedAtMs: Long,
+    /** "connected" | "connecting" | "waiting" | "idle". Only advertising nodes are listed. */
+    val state: String,
+    val srttMs: Double?,
+    val connectedSinceMs: Long,
+    val lastError: String,
+)
+
 /** The configured custom relay, and why it is unreachable if it is. */
 data class RelayBackendHealth(
     /** Empty when the built-in store is in use. */
@@ -429,6 +504,8 @@ data class AppState(
     /** Invites we sent that are still waiting to be accepted. */
     val outboundPairs: List<OutboundPair> = emptyList(),
     val offlineOnly: Boolean,
+    /** Public internet mesh nodes (N10). */
+    val publicNodes: PublicNodes = PublicNodes(),
     /** The configured custom relay and whether it can be reached. */
     val relayBackend: RelayBackendHealth = RelayBackendHealth(),
     /** The custom relay URL as last saved; may differ from the one in use until restart. */
@@ -796,6 +873,7 @@ data class AppState(
                 pendingPairRequests = pendingPairRequests,
                 outboundPairs = outboundPairs,
                 offlineOnly = o.optBoolean("offlineOnly"),
+                publicNodes = PublicNodes.parse(o.optJSONObject("publicNodes")),
                 relayBackend = o.optJSONObject("relayBackend").let { rb ->
                     RelayBackendHealth(
                         url = rb?.optString("url").orEmpty(),
@@ -1257,6 +1335,22 @@ object NativeActions {
     /** Toggle mesh-only: when enabled, don't use the public IP relay/Blossom fallback. */
     fun setOfflineOnly(enabled: Boolean): JSONObject =
         JSONObject().put("type", "set_offline_only").put("enabled", enabled)
+
+    /** Opt in to (or out of) peering with public mesh nodes over the internet. */
+    fun setPublicNodesEnabled(enabled: Boolean): JSONObject =
+        JSONObject().put("type", "set_public_nodes_enabled").put("enabled", enabled)
+
+    /** Select or deselect one public node for dialling. */
+    fun setPublicNodeSelected(npub: String, selected: Boolean): JSONObject =
+        JSONObject().put("type", "set_public_node_selected")
+            .put("npub", npub).put("selected", selected)
+
+    /** Read the public-node adverts now (Settings asks on open). */
+    fun refreshPublicNodes(): JSONObject = JSONObject().put("type", "refresh_public_nodes")
+
+    /** Whether Myco is on screen; off screen the public-node lane slows down. */
+    fun setAppForeground(foreground: Boolean): JSONObject =
+        JSONObject().put("type", "set_app_foreground").put("foreground", foreground)
 
     /** Set this device's memorable name; stamped on outgoing pair events so peers
      *  see the chosen name. The app owns the value and re-applies it on launch. */
