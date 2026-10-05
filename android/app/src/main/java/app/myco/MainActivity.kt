@@ -287,7 +287,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     // Every other screen's prompt: its explanation, whose
-                    // "Continue" is the tap that asks.
+                    // button is the tap that asks.
                     val explaining = asker.explaining.value
                     if (explaining != null && !introShowing) {
                         ExplainAskDialog(
@@ -590,7 +590,7 @@ class MainActivity : ComponentActivity() {
     private fun onSetupAction(action: SetupAction) {
         when (action) {
             // On to the "Nearby devices" card — or past it, with nothing left
-            // to ask. Android's prompts wait for the cards' "Continue".
+            // to ask. Android's prompts wait for the cards' buttons.
             SetupAction.Yes -> {
                 if (!meshEnabled.value) setMeshEnabled(true)
                 if (SystemAsk.Nearby.granted(this)) {
@@ -632,7 +632,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * A tap on the popup that asks Android: "Continue" on "Nearby devices" or
+     * A tap on the popup that asks Android: "Allow nearby devices" on "Nearby devices" or
      * "Mesh connection", after the card said what the prompt is for, or "Try
      * again" on a refusal card.
      */
@@ -692,7 +692,7 @@ class MainActivity : ComponentActivity() {
     /**
      * Ask for the nearby group in one request — or, with it all granted
      * already, go straight on ([afterNearbyStep]). Reached only from a popup
-     * button ("Continue" on the "Nearby devices" card, "Try again") — the
+     * button ("Allow nearby devices" on the "Nearby devices" card, "Try again") — the
      * popup is open, and the user just acted on it.
      */
     private fun requestNearbyStep(confirmed: Confirmed) {
@@ -740,7 +740,7 @@ class MainActivity : ComponentActivity() {
      * The nearby step is behind: show the "Mesh connection" card, which says
      * what the VPN is before Android asks — or, with the consent already
      * Myco's (no prompt to come), bring the tunnel up. Never the VPN prompt
-     * itself; that waits for the card's "Continue" ([MeshSetup.afterNearby]).
+     * itself; that waits for the card's "Allow VPN" ([MeshSetup.afterNearby]).
      */
     private fun afterNearbyStep() {
         if (setupStep.value == null) return
@@ -752,7 +752,7 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Ask for the VPN consent, or with it already Myco's, bring the tunnel up.
-     * Reached only from a tap: "Continue" on the connection card, or a "Try
+     * Reached only from a tap: "Allow VPN" on the connection card, or a "Try
      * again" on the VPN refusal cards.
      */
     private fun beginVpnStep(confirmed: Confirmed) {

@@ -21,6 +21,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -55,16 +56,27 @@ fun AskButton(
     style: AskButtonStyle = AskButtonStyle.Primary,
     modifier: Modifier = Modifier.fillMaxWidth(),
 ) {
+    // A card that has only just appeared — the popup moving on as Android's
+    // dialog closes — can be under a finger that was aimed at something
+    // else. Its first [ASK_TAP_GUARD_MS] ignore taps, so Android is only
+    // asked by someone who could see the button.
+    val shownAt = remember { android.os.SystemClock.uptimeMillis() }
+    val tap = {
+        if (android.os.SystemClock.uptimeMillis() - shownAt >= ASK_TAP_GUARD_MS) onConfirm(Tapped(ask))
+    }
     when (style) {
-        AskButtonStyle.Primary -> PrimaryButton(text) { onConfirm(Tapped(ask)) }
-        AskButtonStyle.Quiet -> QuietButton(text, modifier) { onConfirm(Tapped(ask)) }
+        AskButtonStyle.Primary -> PrimaryButton(text, onClick = tap)
+        AskButtonStyle.Quiet -> QuietButton(text, modifier, tap)
     }
 }
+
+/** How long a newly shown [AskButton] ignores taps. */
+const val ASK_TAP_GUARD_MS = 500L
 
 /**
  * The explanation shown before every Android prompt, from the registry
  * ([SystemAsk.explanation]): what Android is about to ask, what Myco does
- * with it, "Continue" (the tap that asks) and "Not now". The setup popup's
+ * with it, the button that asks (its label from the registry) and "Not now". The setup popup's
  * "Nearby devices" and "Mesh connection" cards are this; so is the explain
  * dialog every other screen asks through ([ExplainAskDialog]).
  */
@@ -76,7 +88,7 @@ fun ExplainCard(ask: SystemAsk, onConfirm: (Confirmed) -> Unit, onNotNow: () -> 
     Body(e.body)
     Note(e.note)
     Spacer(Modifier.height(28.dp))
-    AskButton(ask, "Continue", onConfirm)
+    AskButton(ask, e.button, onConfirm)
     Spacer(Modifier.height(10.dp))
     NeutralButton("Not now", onNotNow)
 }

@@ -78,7 +78,7 @@ import app.myco.onboarding.SystemAsk
 
 /**
  * A button in the setup popup that asks Android nothing. The Activity turns
- * each into its side effect. The buttons that do ask — "Continue" on the
+ * each into its side effect. The buttons that do ask — the button on the
  * explain cards, "Try again" on the refusal cards — come back as a
  * [Confirmed] through `onAsk` instead.
  */
@@ -204,7 +204,7 @@ private fun StepContent(
             }
         }
         // Said before Android asks, so its nearby prompt never comes
-        // unexplained. Only "Continue" asks; "Not now" carries on without it.
+        // unexplained. Only "Allow nearby devices" asks; "Not now" carries on without it.
         SetupStep.ExplainNearby ->
             ExplainCard(SystemAsk.Nearby, onAsk) { onAction(SetupAction.ContinueAfterNearby) }
         SetupStep.AskingNearby -> Waiting(
@@ -230,7 +230,7 @@ private fun StepContent(
             QuietButton("Continue") { onAction(SetupAction.ContinueAfterNearby) }
         }
         // Said before Android asks, so its VPN prompt never comes unexplained.
-        // Only "Continue" asks; "Not now" skips the VPN as a refusal would.
+        // Only "Allow VPN" asks; "Not now" skips the VPN as a refusal would.
         SetupStep.ExplainVpn ->
             ExplainCard(SystemAsk.Vpn, onAsk) { onAction(SetupAction.NotNow) }
         SetupStep.AskingVpn -> Waiting(

@@ -134,8 +134,8 @@ only tap that can ask. `SystemAskTest` fails the build if a prompt is asked
 anywhere else.
 A popup over the app after the intro, with a four-step bar (Install Myco ·
 Nearby phones · Connection · Name): "Enable mesh?", then a "Nearby devices"
-card whose "Continue" puts Android's nearby prompt up, then a "Mesh connection" card that says what the VPN
-is before its "Continue" puts Android's VPN prompt up (skipped when the
+card whose "Allow nearby devices" puts Android's nearby prompt up, then a "Mesh connection" card that says what the VPN
+is before its "Allow VPN" puts Android's VPN prompt up (skipped when the
 consent is already Myco's), then the name, edited in place and prefilled with the phone's own name. A refusal gets its own card
 (nearby refused, VPN refused, another app's always-on VPN); "No thanks"
 leaves the mesh off and goes on to the name. The mesh steps show on a fresh

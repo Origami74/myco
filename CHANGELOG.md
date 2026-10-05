@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A setup popup on first launch.** After the intro, one popup with a
   progress bar sets up the mesh and your name. "Enable mesh?" leads to a
   "Nearby devices" card and then a "Mesh connection" card; each says what
-  Android is about to ask for, and only its "Continue" shows Android's
+  Android is about to ask for, and only its button ("Allow nearby
+  devices", "Allow VPN") shows Android's
   prompt. Last comes your name, filled in with the phone's own name and
   editable right there, with a clear button; "Use this name" saves it. A refused step gets a card that says what won't work
   and how to retry, including when another app's VPN is set to always on and
@@ -37,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   battery-optimisation exemption), each with its state and a Fix or Allow.
   Every Allow, the file-share hotspot, the camera's "Allow camera" and the
   "Bluetooth is off" warning now show what Android is about to ask first;
-  Android asks only after you tap "Continue".
+  Android asks only after you tap the card's button.
 - **Full-tunnel exit over SOCKS5 (experimental).** Entering the exit node as
   `socks5://<exit-npub>.fips:1080` sends all of the phone's TCP traffic through
   a SOCKS5 proxy on the exit, not only the web traffic of apps that honour the

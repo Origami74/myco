@@ -64,7 +64,8 @@ Myco lets them hand it to you in person.**
    Android asks whether your browser may install apps. Allow it for this
    install.
 2. **Open it and tap "Yes, enable".** Android then asks twice, each time
-   after a card that explains it — tap **Continue** on the card:
+   after a card that explains it — tap **Allow nearby devices**, then
+   **Allow VPN**:
    - **Nearby devices**, to find nearby mesh devices. On Android 12 and
      older this includes **location**: Android requires it to scan for
      Bluetooth. Myco does not record where you are.

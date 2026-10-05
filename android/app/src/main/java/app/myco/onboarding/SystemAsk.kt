@@ -18,11 +18,18 @@ import app.myco.aware.AwareRadio
 
 /**
  * What a [SystemAsk] says before Android shows its prompt: a title, one line
- * on what Android is about to ask, and one note on what Myco does with it.
+ * on what Android is about to ask, one note on what Myco does with it, and
+ * the label of the button that asks — naming what it opens, so the tap that
+ * puts Android's prompt up never reads as "next page".
  * Rendered only by `ExplainCard` — in the setup popup and in the small
  * explain dialog — so a prompt can't be shown with different, or no, words.
  */
-data class Explanation(val title: String, val body: String, val note: String)
+data class Explanation(
+    val title: String,
+    val body: String,
+    val note: String,
+    val button: String = "Continue",
+)
 
 /** How Android is asked. */
 enum class AskMechanism {
@@ -64,6 +71,7 @@ enum class SystemAsk(
             title = "Nearby devices",
             body = "Next, Android asks to find nearby devices.",
             note = "Myco uses Bluetooth and Wi-Fi to find nearby mesh devices. It doesn’t record where you are.",
+            button = "Allow nearby devices",
         ),
     ),
 
@@ -75,6 +83,7 @@ enum class SystemAsk(
             body = "Next, Android asks to set up a VPN.",
             note = "The VPN connects this phone to the FIPS mesh, so any app can reach devices on it. " +
                 "Your regular internet traffic doesn’t go through it.",
+            button = "Allow VPN",
         ),
     ),
 

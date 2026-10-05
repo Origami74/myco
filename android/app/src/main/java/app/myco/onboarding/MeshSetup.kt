@@ -8,8 +8,8 @@ package app.myco.onboarding
  * the last three. Only [EnableMesh], the two explain cards, the three refusal
  * cards and [Name] ask the user anything; the `Asking…` and [Connecting]
  * states are what sits behind Android's own prompts. Each Android prompt comes
- * after a card that says what it is for, and only on that card's "Continue":
- * the happy path is "Yes", "Continue", Android's nearby prompt, "Continue",
+ * after a card that says what it is for, and only on that card's button:
+ * the happy path is "Yes", "Allow nearby devices", Android's nearby prompt, "Allow VPN",
  * Android's VPN prompt, then "Use this name".
  *
  * Every run that has mesh steps opens on [EnableMesh], whoever opened it: an
@@ -22,7 +22,7 @@ enum class SetupStep {
 
     /**
      * "Nearby devices": what Android is about to ask for, before it asks. Its
-     * "Continue" launches the nearby prompt; "Not now" carries on without it,
+     * "Allow nearby devices" launches the nearby prompt; "Not now" carries on without it,
      * as "Continue" on a refusal would. Shown only when a prompt would follow.
      */
     ExplainNearby,
@@ -35,7 +35,7 @@ enum class SetupStep {
 
     /**
      * "Mesh connection": what the VPN Android is about to ask for is, before
-     * it asks. Its "Continue" launches the consent prompt; "Not now" skips the
+     * it asks. Its "Allow VPN" launches the consent prompt; "Not now" skips the
      * VPN like a refusal would. Shown only when a prompt would follow.
      */
     ExplainVpn,
@@ -280,7 +280,7 @@ object MeshSetup {
         if (vpnPrepared) SetupStep.Connecting else SetupStep.ExplainVpn
 
     /**
-     * The step a tap that asks for the VPN ("Continue" on the connection card,
+     * The step a tap that asks for the VPN ("Allow VPN" on the connection card,
      * "Try again") lands on: Android's consent prompt, or, with the consent
      * already Myco's, the wait for the tunnel.
      */

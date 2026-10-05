@@ -25,7 +25,11 @@ class SystemAskTest {
             assertTrue("$ask has no title", e.title.isNotBlank())
             assertTrue("$ask has no body", e.body.isNotBlank())
             assertTrue("$ask has no note", e.note.isNotBlank())
+            assertTrue("$ask has no button label", e.button.isNotBlank())
         }
+        // The two mesh prompts name what their button opens.
+        assertEquals("Allow nearby devices", SystemAsk.Nearby.explanation.button)
+        assertEquals("Allow VPN", SystemAsk.Vpn.explanation.button)
     }
 
     @Test
