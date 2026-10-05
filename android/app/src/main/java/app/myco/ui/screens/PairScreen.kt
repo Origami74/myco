@@ -36,7 +36,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -109,8 +108,9 @@ internal fun ScanPanel(onScanned: (String) -> Unit) {
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         )
     }
+    // Asked only from "Allow camera", under a line that says what it's for —
+    // never on opening the panel.
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
-    LaunchedEffect(Unit) { if (!granted) permLauncher.launch(Manifest.permission.CAMERA) }
 
     Box(
         modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(22.dp)).background(Color.Black),
@@ -121,7 +121,12 @@ internal fun ScanPanel(onScanned: (String) -> Unit) {
             ReticleOverlay()
         } else {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Camera access needed to scan", color = Color.White, textAlign = TextAlign.Center)
+                Text(
+                    "Myco uses the camera only to scan codes.",
+                    color = Color.White,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { permLauncher.launch(Manifest.permission.CAMERA) }) { Text("Allow camera") }
             }

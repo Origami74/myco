@@ -30,8 +30,9 @@ adb -s <B> install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 Open Myco on each. The intro runs once; then the setup popup asks
-"Enable mesh?": tap **Yes, enable** and accept Android's two prompts (nearby
-devices, then the VPN consent for the app-owned TUN). Its last step is the
+"Enable mesh?": tap **Yes, enable**, allow Android's nearby-devices prompt,
+tap **Continue** on the "Mesh connection" card, and accept the VPN consent for
+the app-owned TUN. Its last step is the
 **name** — the memorable label the other phone will see, prefilled with the
 phone's own name and edited in place. Notifications are
 separate, in Settings › Permissions. Each phone generates its **device key** on this launch; the

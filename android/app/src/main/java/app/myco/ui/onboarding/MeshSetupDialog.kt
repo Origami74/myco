@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.outlined.Badge
 import androidx.compose.material.icons.outlined.GppMaybe
 import androidx.compose.foundation.layout.imePadding
@@ -30,6 +31,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -38,10 +40,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -49,6 +54,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
@@ -79,6 +85,9 @@ enum class SetupAction {
     RetryNearby,
     OpenAppSettings,
     ContinueAfterNearby,
+
+    /** "Continue" on "Mesh connection": the tap that puts Android's VPN prompt up. */
+    ContinueToVpn,
     RetryVpn,
     NotNow,
     OpenVpnSettings,
@@ -172,7 +181,7 @@ private fun StepContent(
 ) {
     when (step) {
         // Deliberately short: the title and one line. What the VPN is and
-        // isn't is said on the cards that need it, after a refusal.
+        // isn't is said on "Mesh connection", just before Android asks.
         // Every run with mesh steps opens here, and only "Yes, enable" asks
         // Android anything.
         SetupStep.EnableMesh -> {
@@ -211,6 +220,18 @@ private fun StepContent(
             }
             Spacer(Modifier.height(6.dp))
             QuietButton("Continue") { onAction(SetupAction.ContinueAfterNearby) }
+        }
+        // Said before Android asks, so its VPN prompt never comes unexplained.
+        // Only "Continue" asks; "Not now" skips the VPN as a refusal would.
+        SetupStep.ExplainVpn -> {
+            IconBadge(warn = false) { MeshIcon(MaterialTheme.colorScheme.primary) }
+            Title("Mesh connection")
+            Body("Next, Android asks to set up a VPN.")
+            Note("Myco’s VPN only links Myco devices — your internet traffic doesn’t go through it.")
+            Spacer(Modifier.height(28.dp))
+            PrimaryButton("Continue") { onAction(SetupAction.ContinueToVpn) }
+            Spacer(Modifier.height(10.dp))
+            NeutralButton("Not now") { onAction(SetupAction.NotNow) }
         }
         SetupStep.AskingVpn -> Waiting(
             icon = { MeshIcon(MaterialTheme.colorScheme.primary) },
@@ -296,7 +317,8 @@ private fun StepContent(
  * The name, editable right on the card: a tap puts the cursor in it with the
  * keyboard up. Starts with [initial] (the phone's own name, or the one set
  * before), cursor at the end. "Use this name" — or the keyboard's Done —
- * saves the trimmed text; both do nothing while it is empty.
+ * saves the trimmed text; both do nothing while it is empty. The clear (X)
+ * button empties it and keeps the cursor and keyboard there, ready to type.
  */
 @Composable
 private fun NameField(initial: String, onSave: (String) -> Unit) {
@@ -304,6 +326,8 @@ private fun NameField(initial: String, onSave: (String) -> Unit) {
         mutableStateOf(TextFieldValue(initial, TextRange(initial.length)))
     }
     val trimmed = field.text.trim()
+    val focus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
     OutlinedTextField(
         value = field,
         onValueChange = { v ->
@@ -315,6 +339,19 @@ private fun NameField(initial: String, onSave: (String) -> Unit) {
             }
         },
         singleLine = true,
+        trailingIcon = if (field.text.isNotEmpty()) {
+            {
+                IconButton(onClick = {
+                    field = TextFieldValue("")
+                    focus.requestFocus()
+                    keyboard?.show()
+                }) {
+                    Icon(Icons.Filled.Clear, contentDescription = "Clear name")
+                }
+            }
+        } else {
+            null
+        },
         shape = RoundedCornerShape(12.dp),
         textStyle = MaterialTheme.typography.bodyLarge.copy(
             fontWeight = FontWeight.SemiBold,
@@ -326,7 +363,7 @@ private fun NameField(initial: String, onSave: (String) -> Unit) {
             imeAction = ImeAction.Done,
         ),
         keyboardActions = KeyboardActions(onDone = { if (trimmed.isNotEmpty()) onSave(trimmed) }),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().focusRequester(focus),
     )
     Spacer(Modifier.height(24.dp))
     PrimaryButton("Use this name", enabled = trimmed.isNotEmpty()) { onSave(trimmed) }

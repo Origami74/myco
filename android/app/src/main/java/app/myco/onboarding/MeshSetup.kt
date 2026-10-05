@@ -15,7 +15,7 @@ package app.myco.onboarding
  * never by the popup opening (see [MeshSetup.systemPromptUp]).
  */
 enum class SetupStep {
-    /** "Enable mesh?" — the first card, and the only one on the happy path. */
+    /** "Enable mesh?" — the first card of every run with mesh steps. */
     EnableMesh,
 
     /** Android's nearby-devices prompt is up. */
@@ -23,6 +23,13 @@ enum class SetupStep {
 
     /** The nearby permissions were refused: what won't work, Try again / Continue. */
     NearbyRefused,
+
+    /**
+     * "Mesh connection": what the VPN Android is about to ask for is, before
+     * it asks. Its "Continue" launches the consent prompt; "Not now" skips the
+     * VPN like a refusal would. Shown only when a prompt would follow.
+     */
+    ExplainVpn,
 
     /** Android's VPN consent prompt is up. */
     AskingVpn,
@@ -244,11 +251,36 @@ object MeshSetup {
      */
     fun afterMesh(plan: SetupPlan): SetupStep? = if (plan.name) SetupStep.Name else null
 
+    /**
+     * Where to go once the nearby step is behind (granted, or carried on past
+     * a refusal): the "Mesh connection" card that explains the VPN before
+     * Android asks for it — or, with the consent already Myco's and so no
+     * prompt to come, straight to bringing the tunnel up. Never an `Asking…`
+     * step: the VPN prompt waits for a tap on the card ([vpnStep]).
+     */
+    fun afterNearby(vpnPrepared: Boolean): SetupStep =
+        if (vpnPrepared) SetupStep.Connecting else SetupStep.ExplainVpn
+
+    /**
+     * The step a tap that asks for the VPN ("Continue" on the connection card,
+     * "Try again") lands on: Android's consent prompt, or, with the consent
+     * already Myco's, the wait for the tunnel.
+     */
+    fun vpnStep(vpnPrepared: Boolean): SetupStep =
+        if (vpnPrepared) SetupStep.Connecting else SetupStep.AskingVpn
+
+    /**
+     * "Not now" on the connection card or a VPN refusal, "Continue without" on
+     * the always-on card: the Connection segment is marked skipped (the mesh
+     * goes off), then [afterMesh].
+     */
+    fun skipConnection(outcome: MeshOutcome): MeshOutcome = outcome.copy(connectionSkipped = true)
+
     /** The segment [step] belongs to. */
     fun segmentOf(step: SetupStep): Segment = when (step) {
         SetupStep.EnableMesh, SetupStep.AskingNearby, SetupStep.NearbyRefused -> Segment.Nearby
-        SetupStep.AskingVpn, SetupStep.Connecting, SetupStep.VpnRefused, SetupStep.AlwaysOnVpn ->
-            Segment.Connection
+        SetupStep.ExplainVpn, SetupStep.AskingVpn, SetupStep.Connecting,
+        SetupStep.VpnRefused, SetupStep.AlwaysOnVpn -> Segment.Connection
         SetupStep.Name -> Segment.Name
     }
 

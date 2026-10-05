@@ -164,6 +164,46 @@ class MeshSetupTest {
         assertEquals(listOf(D, S, S, A), MeshSetup.segments(SetupStep.Name, plan, MeshOutcome(dismissed = true)))
     }
 
+    // --- the VPN is explained before Android asks for it ---
+
+    @Test
+    fun afterTheNearbyResultComesTheConnectionCardWithNoPromptPending() {
+        val next = MeshSetup.afterNearby(vpnPrepared = false)
+        assertEquals(SetupStep.ExplainVpn, next)
+        assertFalse(MeshSetup.systemPromptUp(next))
+        // Step 3 of 4, Connection active (a card, not a problem).
+        assertEquals(3, MeshSetup.stepNumber(next, full))
+        assertEquals(listOf(D, D, A, P), MeshSetup.segments(next, full, MeshOutcome()))
+        // Carried on past a nearby refusal: the same card, Nearby amber behind it.
+        assertEquals(
+            listOf(D, X, A, P),
+            MeshSetup.segments(next, full, MeshOutcome(nearbyRefused = true)),
+        )
+    }
+
+    @Test
+    fun continueOnTheConnectionCardAsksForTheVpn() {
+        val next = MeshSetup.vpnStep(vpnPrepared = false)
+        assertEquals(SetupStep.AskingVpn, next)
+        assertTrue(MeshSetup.systemPromptUp(next))
+    }
+
+    @Test
+    fun notNowOnTheConnectionCardSkipsTheVpnLikeARefusal() {
+        val outcome = MeshSetup.skipConnection(MeshOutcome())
+        assertEquals(MeshOutcome(connectionSkipped = true), outcome)
+        assertEquals(SetupStep.Name, MeshSetup.afterMesh(full))
+        assertEquals(listOf(D, D, X, A), MeshSetup.segments(SetupStep.Name, full, outcome))
+        assertNull(MeshSetup.afterMesh(meshOnly))
+    }
+
+    @Test
+    fun withTheVpnAlreadyMycosTheCardIsSkipped() {
+        assertEquals(SetupStep.Connecting, MeshSetup.afterNearby(vpnPrepared = true))
+        assertEquals(SetupStep.Connecting, MeshSetup.vpnStep(vpnPrepared = true))
+        assertFalse(MeshSetup.systemPromptUp(SetupStep.Connecting))
+    }
+
     // --- progress bar: mesh yes / no, then the name ---
 
     @Test

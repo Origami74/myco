@@ -163,7 +163,7 @@ internal fun PermissionsSettings(
             title = "Nearby phones",
             status = when {
                 s.nearbyGranted -> "Allowed — Bluetooth and Wi-Fi can find nearby mesh devices"
-                !s.nearbyAsked -> "Not asked yet"
+                !s.nearbyAsked -> "Not asked yet — lets Bluetooth and Wi-Fi find nearby mesh devices"
                 else -> "Not allowed — Myco can’t look for phones nearby"
             },
             action = if (s.nearbyGranted) null else if (s.nearbyAsked) "Fix" else "Allow",
@@ -184,7 +184,9 @@ internal fun PermissionsSettings(
             icon = { MeshIcon(it, Modifier.size(22.dp)) },
             title = "Mesh connection",
             status = when {
-                !s.vpnPrepared && !s.vpnAsked -> "Not asked yet"
+                // Said before "Allow" puts Android's VPN prompt up (mesh off).
+                !s.vpnPrepared && !s.vpnAsked ->
+                    "Not asked yet — a VPN that only links Myco devices; your internet doesn’t go through it"
                 !s.vpnPrepared -> "Not allowed, or another app’s VPN holds the slot"
                 meshEnabled && !s.tunnelUp -> "Allowed, but not running"
                 meshEnabled -> "Running — the VPN only links Myco phones"

@@ -605,9 +605,10 @@ class MainActivity : ComponentActivity() {
             }
             SetupAction.ContinueAfterNearby -> {
                 setupOutcome.value = setupOutcome.value.copy(nearbyRefused = true)
-                beginVpnStep()
+                afterNearbyStep()
             }
-            SetupAction.RetryVpn -> beginVpnStep()
+            // The tap that puts Android's VPN prompt up, after the card said what it is.
+            SetupAction.ContinueToVpn, SetupAction.RetryVpn -> beginVpnStep()
             SetupAction.OpenVpnSettings -> runCatching {
                 startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
             }
@@ -615,7 +616,7 @@ class MainActivity : ComponentActivity() {
             // looking on: switch it off, and say so in the snackbar.
             SetupAction.NotNow, SetupAction.ContinueWithout -> {
                 setMeshEnabled(false)
-                setupOutcome.value = setupOutcome.value.copy(connectionSkipped = true)
+                setupOutcome.value = MeshSetup.skipConnection(setupOutcome.value)
                 endMeshSteps()
             }
         }
@@ -646,7 +647,7 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Ask for the nearby group in one request — or, with it all granted
-     * already, go straight on to the VPN. Reached only from a popup button
+     * already, go straight on ([afterNearbyStep]). Reached only from a popup button
      * ("Yes, enable", "Try again", "Continue") or the return from app info on
      * the refusal card — the popup is open, and the user just acted on it.
      */
@@ -659,7 +660,7 @@ class MainActivity : ComponentActivity() {
         if (MeshSetup.systemPromptUp(setupStep.value)) return
         val needed = MeshPermissions.nearby(this).filterNot { MeshPermissions.granted(this, listOf(it)) }
         if (needed.isEmpty()) {
-            beginVpnStep()
+            afterNearbyStep()
             return
         }
         setupStep.value = SetupStep.AskingNearby
@@ -679,7 +680,7 @@ class MainActivity : ComponentActivity() {
         if (setupStep.value != SetupStep.AskingNearby) return
         if (MeshPermissions.nearbyGranted(this)) {
             setupOutcome.value = setupOutcome.value.copy(nearbyRefused = false)
-            beginVpnStep()
+            afterNearbyStep()
             return
         }
         val denied = MeshPermissions.nearby(this).filterNot { MeshPermissions.granted(this, listOf(it)) }
@@ -694,7 +695,25 @@ class MainActivity : ComponentActivity() {
         setupStep.value = SetupStep.NearbyRefused
     }
 
-    /** Ask for the VPN consent, or with it already Myco's, bring the tunnel up. */
+    /**
+     * The nearby step is behind: show the "Mesh connection" card, which says
+     * what the VPN is before Android asks — or, with the consent already
+     * Myco's (no prompt to come), bring the tunnel up. Never the VPN prompt
+     * itself; that waits for the card's "Continue" ([MeshSetup.afterNearby]).
+     */
+    private fun afterNearbyStep() {
+        if (setupStep.value == null) return
+        when (MeshSetup.afterNearby(MeshPermissions.vpnPrepared(this))) {
+            SetupStep.ExplainVpn -> setupStep.value = SetupStep.ExplainVpn
+            else -> beginVpnStep()
+        }
+    }
+
+    /**
+     * Ask for the VPN consent, or with it already Myco's, bring the tunnel up.
+     * Reached only from a tap: "Continue" on the connection card, or a "Try
+     * again" on the VPN refusal cards.
+     */
     private fun beginVpnStep() {
         if (setupStep.value == null || setupStep.value == SetupStep.AskingVpn) return
         val consent = VpnService.prepare(this)
@@ -977,7 +996,7 @@ class MainActivity : ComponentActivity() {
             }
             setupOutcome.value = setupOutcome.value.copy(nearbyRefused = false)
             setupNearbyBlocked.value = false
-            beginVpnStep()
+            afterNearbyStep()
         }
         // Presenting is owned by the Circle screen (it's the only place we emulate a
         // card). Here we just (re)apply the current presenting state — re-claiming

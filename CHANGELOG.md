@@ -20,16 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The Dev tab shows which public nodes are up.
 - **A setup popup on first launch.** After the intro, one popup with a
   progress bar sets up the mesh and your name. "Enable mesh?" leads to
-  Android's nearby-devices prompt and then its VPN prompt. Last comes your
-  name, filled in with the phone's own name and editable right there; "Use
-  this name" saves it. A refused step gets a card that says what won't work
+  Android's nearby-devices prompt. A "Mesh connection" card then says what
+  the VPN is for before Android asks for it; its "Continue" shows the VPN
+  prompt. Last comes your name, filled in with the phone's own name and
+  editable right there, with a clear button; "Use this name" saves it. A refused step gets a card that says what won't work
   and how to retry, including when another app's VPN is set to always on and
   holds the slot. "No thanks" leaves the mesh off and still asks your name.
   Switching the mesh on later, or a Fix in Settings, opens the popup on
   "Enable mesh?" again; Android asks nothing until you tap "Yes, enable".
   Phones upgrading with a working mesh don't see the mesh steps. Permissions
   are no longer all asked for at launch, and notifications are no longer
-  asked for with Bluetooth.
+  asked for with Bluetooth. The camera is asked for only when you tap "Allow
+  camera" on the scanner, not when it opens.
 - **Settings › Permissions.** One page for nearby phones, the mesh connection,
   notifications and, optionally, keeping Myco running in the background (the
   battery-optimisation exemption), each with its state and a Fix or Allow.
