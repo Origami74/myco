@@ -164,6 +164,24 @@ class MeshSetupTest {
         assertEquals(listOf(D, S, S, A), MeshSetup.segments(SetupStep.Name, plan, MeshOutcome(dismissed = true)))
     }
 
+    // --- nearby devices are explained before Android asks for them ---
+
+    @Test
+    fun yesLeadsToTheNearbyCardWithNoPromptPending() {
+        val next = MeshSetup.afterYes(nearbyGranted = false, vpnPrepared = false)
+        assertEquals(SetupStep.ExplainNearby, next)
+        assertFalse(MeshSetup.systemPromptUp(next))
+        // Step 2 of 4, Nearby active.
+        assertEquals(2, MeshSetup.stepNumber(next, full))
+        assertEquals(listOf(D, A, P, P), MeshSetup.segments(next, full, MeshOutcome()))
+    }
+
+    @Test
+    fun withNearbyAlreadyGrantedYesSkipsTheNearbyCard() {
+        assertEquals(SetupStep.ExplainVpn, MeshSetup.afterYes(nearbyGranted = true, vpnPrepared = false))
+        assertEquals(SetupStep.Connecting, MeshSetup.afterYes(nearbyGranted = true, vpnPrepared = true))
+    }
+
     // --- the VPN is explained before Android asks for it ---
 
     @Test

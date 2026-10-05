@@ -86,6 +86,9 @@ enum class SetupAction {
     OpenAppSettings,
     ContinueAfterNearby,
 
+    /** "Continue" on "Nearby devices": the tap that puts Android's nearby prompt up. */
+    ContinueToNearby,
+
     /** "Continue" on "Mesh connection": the tap that puts Android's VPN prompt up. */
     ContinueToVpn,
     RetryVpn,
@@ -198,6 +201,18 @@ private fun StepContent(
             } else {
                 NeutralButton("No thanks") { onAction(SetupAction.NoThanks) }
             }
+        }
+        // Said before Android asks, so its nearby prompt never comes
+        // unexplained. Only "Continue" asks; "Not now" carries on without it.
+        SetupStep.ExplainNearby -> {
+            IconBadge(warn = false) { PhonesIcon(MaterialTheme.colorScheme.primary) }
+            Title("Nearby devices")
+            Body("Next, Android asks to find nearby devices.")
+            Note("Myco uses Bluetooth and Wi-Fi to find nearby mesh devices. It doesn’t record where you are.")
+            Spacer(Modifier.height(28.dp))
+            PrimaryButton("Continue") { onAction(SetupAction.ContinueToNearby) }
+            Spacer(Modifier.height(10.dp))
+            NeutralButton("Not now") { onAction(SetupAction.ContinueAfterNearby) }
         }
         SetupStep.AskingNearby -> Waiting(
             icon = { PhonesIcon(MaterialTheme.colorScheme.primary) },

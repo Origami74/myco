@@ -127,8 +127,8 @@ newer one with no internet.
 **Built** — `onboarding/MeshSetup.kt` (the decisions, unit-tested),
 `ui/onboarding/MeshSetupDialog.kt`, `ui/screens/PermissionsSettings.kt`.
 A popup over the app after the intro, with a four-step bar (Install Myco ·
-Nearby phones · Connection · Name): "Enable mesh?", then Android's
-nearby-devices prompt, then a "Mesh connection" card that says what the VPN
+Nearby phones · Connection · Name): "Enable mesh?", then a "Nearby devices"
+card whose "Continue" puts Android's nearby prompt up, then a "Mesh connection" card that says what the VPN
 is before its "Continue" puts Android's VPN prompt up (skipped when the
 consent is already Myco's), then the name, edited in place and prefilled with the phone's own name. A refusal gets its own card
 (nearby refused, VPN refused, another app's always-on VPN); "No thanks"

@@ -578,11 +578,18 @@ class MainActivity : ComponentActivity() {
 
     private fun onSetupAction(action: SetupAction) {
         when (action) {
-            // The one tap that starts Android's prompts.
+            // On to the "Nearby devices" card — or past it, with nothing left
+            // to ask. Android's prompts wait for the cards' "Continue".
             SetupAction.Yes -> {
                 if (!meshEnabled.value) setMeshEnabled(true)
-                requestNearbyStep()
+                if (MeshPermissions.nearbyGranted(this)) {
+                    afterNearbyStep()
+                } else {
+                    setupStep.value = SetupStep.ExplainNearby
+                }
             }
+            // The tap that puts Android's nearby prompt up, after the card said what it is.
+            SetupAction.ContinueToNearby -> requestNearbyStep()
             // "Not now" on a run opened later (mesh switch, Fix): nothing was
             // asked and nothing changes — the mesh stays as it was.
             SetupAction.NotNowEnable -> {
@@ -648,8 +655,8 @@ class MainActivity : ComponentActivity() {
     /**
      * Ask for the nearby group in one request — or, with it all granted
      * already, go straight on ([afterNearbyStep]). Reached only from a popup button
-     * ("Yes, enable", "Try again", "Continue") or the return from app info on
-     * the refusal card — the popup is open, and the user just acted on it.
+     * ("Continue" on the "Nearby devices" card, "Try again") or the return from
+     * app info on the refusal card — the popup is open, and the user just acted on it.
      */
     private fun requestNearbyStep() {
         // Never with the popup closed: opening it is a separate, prompt-free

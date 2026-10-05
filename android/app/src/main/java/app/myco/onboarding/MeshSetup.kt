@@ -5,9 +5,11 @@ package app.myco.onboarding
  *
  * The popup has up to four segments — Install Myco (always done), Nearby
  * phones, Connection and Name — and these are the states it can be in across
- * the last three. Only [EnableMesh], the three refusal cards and [Name] ask the
- * user anything; the `Asking…` and [Connecting] states are what sits behind
- * Android's own prompts, so the happy path is "Yes", Android's nearby prompt,
+ * the last three. Only [EnableMesh], the two explain cards, the three refusal
+ * cards and [Name] ask the user anything; the `Asking…` and [Connecting]
+ * states are what sits behind Android's own prompts. Each Android prompt comes
+ * after a card that says what it is for, and only on that card's "Continue":
+ * the happy path is "Yes", "Continue", Android's nearby prompt, "Continue",
  * Android's VPN prompt, then "Use this name".
  *
  * Every run that has mesh steps opens on [EnableMesh], whoever opened it: an
@@ -17,6 +19,13 @@ package app.myco.onboarding
 enum class SetupStep {
     /** "Enable mesh?" — the first card of every run with mesh steps. */
     EnableMesh,
+
+    /**
+     * "Nearby devices": what Android is about to ask for, before it asks. Its
+     * "Continue" launches the nearby prompt; "Not now" carries on without it,
+     * as "Continue" on a refusal would. Shown only when a prompt would follow.
+     */
+    ExplainNearby,
 
     /** Android's nearby-devices prompt is up. */
     AskingNearby,
@@ -252,6 +261,15 @@ object MeshSetup {
     fun afterMesh(plan: SetupPlan): SetupStep? = if (plan.name) SetupStep.Name else null
 
     /**
+     * Where "Yes, enable" leads: the "Nearby devices" card that explains the
+     * nearby prompt before Android shows it — or, with the nearby group
+     * already granted and so no prompt to come, straight past the nearby step
+     * ([afterNearby]). Never an `Asking…` step.
+     */
+    fun afterYes(nearbyGranted: Boolean, vpnPrepared: Boolean): SetupStep =
+        if (nearbyGranted) afterNearby(vpnPrepared) else SetupStep.ExplainNearby
+
+    /**
      * Where to go once the nearby step is behind (granted, or carried on past
      * a refusal): the "Mesh connection" card that explains the VPN before
      * Android asks for it — or, with the consent already Myco's and so no
@@ -278,7 +296,8 @@ object MeshSetup {
 
     /** The segment [step] belongs to. */
     fun segmentOf(step: SetupStep): Segment = when (step) {
-        SetupStep.EnableMesh, SetupStep.AskingNearby, SetupStep.NearbyRefused -> Segment.Nearby
+        SetupStep.EnableMesh, SetupStep.ExplainNearby, SetupStep.AskingNearby,
+        SetupStep.NearbyRefused -> Segment.Nearby
         SetupStep.ExplainVpn, SetupStep.AskingVpn, SetupStep.Connecting,
         SetupStep.VpnRefused, SetupStep.AlwaysOnVpn -> Segment.Connection
         SetupStep.Name -> Segment.Name

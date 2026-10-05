@@ -19,9 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   phone's IP address and which mesh addresses it talks to, not what you send.
   The Dev tab shows which public nodes are up.
 - **A setup popup on first launch.** After the intro, one popup with a
-  progress bar sets up the mesh and your name. "Enable mesh?" leads to
-  Android's nearby-devices prompt. A "Mesh connection" card then says what
-  the VPN is for before Android asks for it; its "Continue" shows the VPN
+  progress bar sets up the mesh and your name. "Enable mesh?" leads to a
+  "Nearby devices" card and then a "Mesh connection" card; each says what
+  Android is about to ask for, and only its "Continue" shows Android's
   prompt. Last comes your name, filled in with the phone's own name and
   editable right there, with a clear button; "Use this name" saves it. A refused step gets a card that says what won't work
   and how to retry, including when another app's VPN is set to always on and

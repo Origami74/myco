@@ -63,11 +63,12 @@ Myco lets them hand it to you in person.**
 1. **[Get Myco](#get-myco)** on your phone. This step needs a download.
    Android asks whether your browser may install apps. Allow it for this
    install.
-2. **Open it and tap "Yes, enable".** Android then asks twice:
-   - **Nearby devices**, to find the phones around you. On Android 12 and
+2. **Open it and tap "Yes, enable".** Android then asks twice, each time
+   after a card that explains it — tap **Continue** on the card:
+   - **Nearby devices**, to find nearby mesh devices. On Android 12 and
      older this includes **location**: Android requires it to scan for
      Bluetooth. Myco does not record where you are.
-   - **A VPN prompt**, after a card that explains it: tap **Continue**. The
+   - **A VPN prompt.** The
      VPN connects your phone to the FIPS mesh, so any app can reach devices
      on it. Your regular internet traffic doesn't go through it.
 
