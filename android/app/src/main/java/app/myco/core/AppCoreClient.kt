@@ -214,9 +214,6 @@ data class PublicNodes(
     val relaysAnswered: Int = 0,
     val relaysAsked: Int = 0,
     val fetchError: String = "",
-    val recommendedSource: String = "",
-    /** When the recommended list was refreshed; 0 means the list shipped with Myco. */
-    val recommendedUpdatedMs: Long = 0,
     /** How many links Myco holds at once. */
     val targetLinks: Int = 0,
     val nodes: List<PublicNode> = emptyList(),
@@ -233,8 +230,6 @@ data class PublicNodes(
                 relaysAnswered = o.optInt("relaysAnswered"),
                 relaysAsked = o.optInt("relaysAsked"),
                 fetchError = o.optString("fetchError"),
-                recommendedSource = o.optString("recommendedSource"),
-                recommendedUpdatedMs = o.optLong("recommendedUpdatedMs"),
                 targetLinks = o.optInt("targetLinks"),
                 nodes = buildList {
                     if (arr != null) for (i in 0 until arr.length()) {

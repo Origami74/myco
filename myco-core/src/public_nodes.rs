@@ -14,22 +14,20 @@
 //! **kind 37195** event, `d` = `fips-overlay-v1`, whose content names the
 //! node's endpoints (`{"transport":"udp","addr":"203.0.113.7:2121"}`). fips
 //! publishes these to `relay.damus.io`, `nos.lol` and `offchain.pub` with a
-//! one-hour NIP-40 expiration. Myco reads the same relays, verifies every
-//! event, and keeps the nodes it could actually dial — see [`parse_advert`].
+//! one-hour NIP-40 expiration. Myco reads the same relays with the same filter
+//! fips uses (kind + `#d`), verifies every event, and keeps the nodes it could
+//! actually dial — see [`parse_advert`].
 //!
 //! Which of those to **recommend** is the list <https://join.fips.network>
-//! stars: the project's own test nodes. That site publishes no machine-readable
-//! list — it is a single-page app with the npubs compiled into its bundle — so
-//! Myco ships a copy ([`SHIPPED_RECOMMENDED`]) and, while the feature is on and
-//! the internet is up, refreshes it from the site's bundle at most once a day
-//! ([`parse_join_bundle`]). A refresh that finds nothing keeps what it had, so
-//! the shipped list is the floor: offline-first, and a redesign of the site
-//! costs freshness, never the feature. `next` nodes (`test-us03-next`) are
-//! dropped from every list: Myco cannot speak their protocol.
+//! stars: the project's own test nodes. Myco ships that list
+//! ([`SHIPPED_RECOMMENDED`]) and only uses it to highlight nodes the adverts
+//! already found; it never fetches the site. `next` nodes (`test-us03-next`)
+//! are left out: their adverts carry another `d`, and Myco cannot speak their
+//! protocol.
 //!
 //! Only nodes advertising right now are listed or dialled. Of the advertising
 //! recommended ones, Myco **preselects at most three at random** — once, on
-//! the first read with adverts — and keeps that pick in `settings.json`, so
+//! the first read with adverts — and keeps that pick in `public_nodes.json`, so
 //! phones spread over the test nodes and nothing reshuffles per launch. A
 //! preselected node unseen for a day is replaced by another random one. The
 //! user's own ticks and unticks win over the pick.
@@ -71,8 +69,8 @@ use crate::control_client::PeerView;
 /// pinned to the Wi-Fi network for link-local peers, and a phone on cellular
 /// has no Wi-Fi to reach a public node through. This one is outbound-only (no
 /// listener: a phone behind NAT is never dialled from the internet anyway) and
-/// Kotlin pins it to whichever validated, non-VPN network is the default, so
-/// a full-tunnel VPN never captures the mesh's own traffic.
+/// Kotlin pins it to the network the system picks for an internet, non-VPN
+/// request, so a full-tunnel VPN never captures the mesh's own traffic.
 pub const PUBLIC_UDP_INSTANCE: &str = "internet";
 
 /// The `transport` a public node is dialled with over the control socket.
@@ -93,13 +91,10 @@ pub const ADVERT_RELAYS: [&str; 3] = [
 /// namespace, which happens to be the same string as the `d` identifier.
 const ADVERT_PROTOCOL: &str = "fips-overlay-v1";
 
-/// The site whose starred nodes Myco recommends.
-pub const RECOMMENDED_SOURCE_URL: &str = "https://join.fips.network/";
-
-/// The nodes join.fips.network recommends, as of 2026-10-04 (read out of its
-/// bundle, `x1` in `assets/index-*.js`), less its `next` entry
-/// (`test-us03-next`) — see [`is_next_node`]. Shipped so the recommendation
-/// works with no internet beyond the advert relays; refreshed at runtime.
+/// The nodes join.fips.network recommends, as of 2026-10-04, less its `next`
+/// entry (`test-us03-next`). Only a highlight: a node here is starred and
+/// eligible for the preselection once its advert is found, never dialled
+/// without one. Updated by hand when the site's list changes.
 pub const SHIPPED_RECOMMENDED: &[(&str, &str)] = &[
     (
         "test-us01",
@@ -171,36 +166,35 @@ const DIAL_BACKOFF_BACKGROUND_MS: u64 = 5 * 60 * 1000;
 /// A dial younger than this that has not shown up connected yet is still in
 /// flight, and counts toward [`TARGET_LINKS`].
 const DIAL_IN_FLIGHT_MS: u64 = 30 * 1000;
-/// Recommended-list refresh: at most daily on success, hourly on failure.
-const RECOMMENDED_REFRESH_MS: u64 = 24 * 3600 * 1000;
-const RECOMMENDED_RETRY_MS: u64 = 3600 * 1000;
-/// Bounds on what is downloaded from join.fips.network.
-const JOIN_INDEX_MAX_BYTES: usize = 256 * 1024;
-const JOIN_BUNDLE_MAX_BYTES: usize = 4 * 1024 * 1024;
-/// Recommended entries taken from one refresh, at most.
-const MAX_RECOMMENDED: usize = 32;
 
 // ---------------------------------------------------------------------------
 // Persisted choices
 // ---------------------------------------------------------------------------
 
 /// One recommended node: a human name and its npub.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recommended {
     pub name: String,
     pub npub: String,
 }
 
-/// Whether a recommended entry is a fips `next` node (`test-us03-next`). Those
-/// speak a protocol this build cannot, so they are never shown, selected or
-/// dialled — whether they come from the shipped list, a refresh, or an older
-/// saved list.
-fn is_next_node(name: &str) -> bool {
-    name.to_ascii_lowercase().ends_with("-next")
+/// The recommended list: [`SHIPPED_RECOMMENDED`], in the site's order.
+pub fn recommended() -> Vec<Recommended> {
+    SHIPPED_RECOMMENDED
+        .iter()
+        .map(|(name, npub)| Recommended {
+            name: name.to_string(),
+            npub: npub.to_string(),
+        })
+        .collect()
 }
 
-/// What the user chose, persisted in `settings.json`.
+/// The file the choices live in, next to `settings.json` but apart from it:
+/// the driver task writes it off the reducer thread, and sharing a file with
+/// the reducer's own load-modify-save would race.
+const CHOICES_FILE: &str = "public_nodes.json";
+
+/// What the user chose, persisted in [`CHOICES_FILE`].
 ///
 /// Selection is Myco's **preselection** — at most [`PRESELECT_MAX`] advertising
 /// recommended nodes, picked at random once and kept — plus the user's own
@@ -219,11 +213,6 @@ pub struct PublicNodeSettings {
     /// ms since the epoch. A node unseen for [`PRESELECT_REPLACE_AFTER_MS`] is
     /// replaced by another random one.
     pub preselected: std::collections::BTreeMap<String, u64>,
-    /// The recommended list as last refreshed from join.fips.network; `None`
-    /// means never refreshed, and [`SHIPPED_RECOMMENDED`] applies.
-    pub recommended: Option<Vec<Recommended>>,
-    /// When `recommended` was refreshed, ms since the epoch.
-    pub recommended_at_ms: u64,
 }
 
 /// How many recommended nodes Myco preselects. Random rather than the first
@@ -235,22 +224,26 @@ const PRESELECT_REPLACE_AFTER_MS: u64 = 24 * 3600 * 1000;
 const PRESELECT_STAMP_GRANULARITY_MS: u64 = 3600 * 1000;
 
 impl PublicNodeSettings {
-    /// The recommended list in effect: the refreshed one, or the shipped one,
-    /// without `next` nodes.
-    pub fn recommended(&self) -> Vec<Recommended> {
-        let list: Vec<Recommended> = match &self.recommended {
-            Some(list) if !list.is_empty() => list.clone(),
-            _ => SHIPPED_RECOMMENDED
-                .iter()
-                .map(|(name, npub)| Recommended {
-                    name: name.to_string(),
-                    npub: npub.to_string(),
-                })
-                .collect(),
-        };
-        list.into_iter()
-            .filter(|r| !is_next_node(&r.name))
-            .collect()
+    /// Read the choices, falling back to defaults (off) on anything
+    /// unreadable, like `settings_store::load`.
+    pub fn load(data_dir: &std::path::Path) -> Self {
+        match std::fs::read(data_dir.join(CHOICES_FILE)) {
+            Ok(raw) => serde_json::from_slice(&raw).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "public nodes: ignoring a corrupt {CHOICES_FILE}");
+                Self::default()
+            }),
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Write the choices atomically (temp + rename). Callers serialise writes
+    /// ([`PublicNodes::save`]); this does not lock.
+    fn store(&self, data_dir: &std::path::Path) -> anyhow::Result<()> {
+        let path = data_dir.join(CHOICES_FILE);
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
     }
 
     /// Whether `npub` is one to dial: added by the user, or preselected and
@@ -310,8 +303,7 @@ impl PublicNodeSettings {
             .keys()
             .filter(|n| !self.removed.contains(*n))
             .count();
-        let mut pool: Vec<String> = self
-            .recommended()
+        let mut pool: Vec<String> = recommended()
             .into_iter()
             .map(|r| r.npub)
             .filter(|n| advertising.contains(n))
@@ -510,76 +502,6 @@ fn is_public_v4(v4: Ipv4Addr) -> bool {
         || o[0] >= 240) // reserved
 }
 
-/// Pull the recommended nodes out of join.fips.network's bundle.
-///
-/// The site compiles its list into the JavaScript as object literals,
-/// `{name:"test-us01",npub:"npub1…"}`, which a minifier leaves intact. This
-/// matches exactly that shape and validates each hit: a name of at most 32
-/// plain characters and an npub that decodes. Anything else in a 250 KB bundle
-/// — npubs in other contexts included — is ignored. An empty result means the
-/// site changed shape, and the caller keeps the list it had. `next` nodes are
-/// dropped here too ([`is_next_node`]).
-pub fn parse_join_bundle(js: &str) -> Vec<Recommended> {
-    const OPEN: &str = "{name:\"";
-    const MID: &str = "\",npub:\"";
-    let mut out: Vec<Recommended> = Vec::new();
-    let mut rest = js;
-    while let Some(at) = rest.find(OPEN) {
-        rest = &rest[at + OPEN.len()..];
-        let Some(name_end) = rest.find('"') else {
-            break;
-        };
-        let name = &rest[..name_end];
-        let after_name = &rest[name_end..];
-        let Some(npub_part) = after_name.strip_prefix(MID) else {
-            continue;
-        };
-        let Some(npub_end) = npub_part.find('"') else {
-            break;
-        };
-        let npub = &npub_part[..npub_end];
-        if !npub_part[npub_end..].starts_with("\"}") {
-            continue;
-        }
-        let name_ok = !name.is_empty()
-            && name.len() <= 32
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-        if name_ok
-            && !is_next_node(name)
-            && PublicKey::from_bech32(npub).is_ok()
-            && !out.iter().any(|r| r.npub == npub)
-        {
-            out.push(Recommended {
-                name: name.to_string(),
-                npub: npub.to_string(),
-            });
-            if out.len() >= MAX_RECOMMENDED {
-                break;
-            }
-        }
-    }
-    out
-}
-
-/// The bundle path in join.fips.network's `index.html`:
-/// `src="./assets/index-XXXX.js"` → `assets/index-XXXX.js`. Only a plain file
-/// name under `assets/` is accepted, so the page cannot send us elsewhere.
-pub fn join_bundle_path(index_html: &str) -> Option<String> {
-    let start = index_html.find("src=\"./assets/")? + "src=\"./".len();
-    let rest = &index_html[start..];
-    let end = rest.find('"')?;
-    let path = &rest[..end];
-    let file = path.strip_prefix("assets/")?;
-    let plain = !file.is_empty()
-        && file.ends_with(".js")
-        && file
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    plain.then(|| path.to_string())
-}
-
 // ---------------------------------------------------------------------------
 // The state machine
 // ---------------------------------------------------------------------------
@@ -601,11 +523,10 @@ pub struct Gate {
 pub struct TickPlan {
     /// Read the advert relays.
     pub fetch: bool,
-    /// Refresh the recommended list from join.fips.network.
-    pub refresh_recommended: bool,
     /// `(npub, address)` to dial over the internet lane.
     pub connect: Vec<(String, String)>,
-    /// Npubs to disconnect: public nodes the user no longer wants.
+    /// Npubs to disconnect: public nodes this module dialled that the user
+    /// no longer wants.
     pub disconnect: Vec<String>,
 }
 
@@ -632,7 +553,6 @@ struct Inner {
     foreground: bool,
     fetch: FetchStatus,
     fetch_requested: bool,
-    recommended_attempt_ms: u64,
 }
 
 /// The process's public-node state: the user's choices, the nodes heard of,
@@ -641,6 +561,9 @@ struct Inner {
 pub struct PublicNodes {
     data_dir: PathBuf,
     inner: Mutex<Inner>,
+    /// Held across a whole save, so the reducer and the driver task never
+    /// write the file at once, and the last write carries the newest choices.
+    save_lock: Mutex<()>,
     wake: tokio::sync::Notify,
 }
 
@@ -650,11 +573,13 @@ impl PublicNodes {
             data_dir: data_dir.into(),
             inner: Mutex::new(Inner {
                 settings,
-                // Until Kotlin says otherwise: the app is starting, so it is
-                // most likely on screen.
-                foreground: true,
+                // Off screen until Kotlin reports a start: a process brought
+                // up in the background (always-on VPN, a restart after a
+                // kill) gets no lifecycle callback until the app is shown.
+                foreground: false,
                 ..Inner::default()
             }),
+            save_lock: Mutex::new(()),
             wake: tokio::sync::Notify::new(),
         }
     }
@@ -663,28 +588,28 @@ impl PublicNodes {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Persist the choices: read-modify-write, because the settings file is
-    /// shared and writing it from a stale struct would clear the rest.
-    fn save(&self, choices: &PublicNodeSettings) -> anyhow::Result<()> {
-        let mut settings = crate::settings_store::load(&self.data_dir);
-        settings.public_nodes = choices.clone();
-        crate::settings_store::save(&self.data_dir, &settings)
+    /// Persist the choices as they are now. The snapshot is taken under the
+    /// save lock, so a save that started earlier can never land after, and
+    /// overwrite, a newer one.
+    fn save(&self) -> anyhow::Result<()> {
+        let _saving = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let choices = self.lock().settings.clone();
+        choices.store(&self.data_dir)
     }
 
     /// The opt-in. Turning it on asks for an advert read at once; turning it
     /// off has the driver drop the links on its next pass, which it is woken
     /// for now.
     pub fn set_enabled(&self, enabled: bool) -> anyhow::Result<()> {
-        let choices = {
+        {
             let mut inner = self.lock();
             inner.settings.enabled = enabled;
             if enabled {
                 inner.fetch_requested = true;
             }
-            inner.settings.clone()
-        };
+        }
         self.wake.notify_one();
-        self.save(&choices)
+        self.save()
     }
 
     /// Select or deselect one node.
@@ -692,13 +617,9 @@ impl PublicNodes {
         if PublicKey::from_bech32(npub).is_err() {
             anyhow::bail!("not an npub: {npub}");
         }
-        let choices = {
-            let mut inner = self.lock();
-            inner.settings.set_selected(npub, selected);
-            inner.settings.clone()
-        };
+        self.lock().settings.set_selected(npub, selected);
         self.wake.notify_one();
-        self.save(&choices)
+        self.save()
     }
 
     /// Read the advert relays on the next pass, even with the feature off —
@@ -737,12 +658,7 @@ impl PublicNodes {
         }
         inner.directory.retain(|_, n| n.valid_until > now_secs);
         if inner.directory.len() > MAX_DIRECTORY {
-            let recommended: HashSet<String> = inner
-                .settings
-                .recommended()
-                .into_iter()
-                .map(|r| r.npub)
-                .collect();
+            let recommended: HashSet<String> = recommended().into_iter().map(|r| r.npub).collect();
             let mut by_age: Vec<(String, u64)> = inner
                 .directory
                 .values()
@@ -758,25 +674,21 @@ impl PublicNodes {
     }
 
     /// Bring the random preselection up to date with what is advertising now
-    /// ([`PublicNodeSettings::maintain_preselection`]). Returns the choices to
-    /// save when something changed.
-    fn maintain_preselection(
-        &self,
-        now_ms: u64,
-        pick: &mut dyn FnMut(usize) -> usize,
-    ) -> Option<PublicNodeSettings> {
+    /// ([`PublicNodeSettings::maintain_preselection`]). Only nodes with an
+    /// address this phone can dial count as advertising, so an IPv6-only node
+    /// never takes a slot. Returns whether something changed and wants saving.
+    fn maintain_preselection(&self, now_ms: u64, pick: &mut dyn FnMut(usize) -> usize) -> bool {
         let mut inner = self.lock();
         let now_secs = now_ms / 1000;
         let advertising: HashSet<String> = inner
             .directory
             .values()
-            .filter(|n| n.valid_until > now_secs)
+            .filter(|n| n.valid_until > now_secs && n.dial_addr().is_some())
             .map(|n| n.npub.clone())
             .collect();
         inner
             .settings
             .maintain_preselection(&advertising, now_ms, pick)
-            .then(|| inner.settings.clone())
     }
 
     /// Decide what this tick does. Pure over the held state, the clock and
@@ -784,7 +696,9 @@ impl PublicNodes {
     ///
     /// `connected` is the npubs fips reports connected; `circle` the user's
     /// Circle, whose members are never disconnected from here even if one of
-    /// them happens to run a public node.
+    /// them happens to run a public node. Only links this module dialled are
+    /// ever disconnected: a peer that also advertises publicly but reached us
+    /// another way (a LAN daemon, a radio) is not ours to drop.
     pub fn plan(
         &self,
         now_ms: u64,
@@ -795,7 +709,7 @@ impl PublicNodes {
         let mut inner = self.lock();
         let inner = &mut *inner;
         let now_secs = now_ms / 1000;
-        let recommended = inner.settings.recommended();
+        let recommended = recommended();
         let known: HashSet<&str> = inner
             .directory
             .keys()
@@ -825,6 +739,7 @@ impl PublicNodes {
         if gate.node_live {
             plan.disconnect = public_connected
                 .iter()
+                .filter(|n| inner.dials.contains_key(n.as_str()))
                 .filter(|n| !circle.contains(n.as_str()))
                 .filter(|n| !enabled || !inner.settings.is_selected(n))
                 .map(|n| (*n).clone())
@@ -849,15 +764,6 @@ impl PublicNodes {
 
         if !enabled {
             return plan;
-        }
-
-        let recommended_stale =
-            now_ms.saturating_sub(inner.settings.recommended_at_ms) >= RECOMMENDED_REFRESH_MS;
-        let attempt_stale =
-            now_ms.saturating_sub(inner.recommended_attempt_ms) >= RECOMMENDED_RETRY_MS;
-        if recommended_stale && attempt_stale {
-            plan.refresh_recommended = true;
-            inner.recommended_attempt_ms = now_ms;
         }
 
         if !gate.node_live {
@@ -926,6 +832,12 @@ impl PublicNodes {
         plan
     }
 
+    /// Forget a node's dial after its link was dropped on purpose, so a later
+    /// link to it that Myco did not make is left alone.
+    fn forget_dial(&self, npub: &str) {
+        self.lock().dials.remove(npub);
+    }
+
     /// Note a dial the control socket refused outright.
     fn record_dial_error(&self, npub: &str, error: &str) {
         if let Some(dial) = self.lock().dials.get_mut(npub) {
@@ -937,7 +849,7 @@ impl PublicNodes {
     pub fn view(&self, peers: &[PeerView], gate: Gate, now_ms: u64) -> PublicNodesView {
         let inner = self.lock();
         let now_secs = now_ms / 1000;
-        let recommended = inner.settings.recommended();
+        let recommended = recommended();
         let peer_by_npub: HashMap<&str, &PeerView> =
             peers.iter().map(|p| (p.npub.as_str(), p)).collect();
 
@@ -1018,8 +930,6 @@ impl PublicNodes {
             relays_answered: inner.fetch.relays_answered,
             relays_asked: ADVERT_RELAYS.len() as u8,
             fetch_error: inner.fetch.error.clone(),
-            recommended_source: RECOMMENDED_SOURCE_URL.to_string(),
-            recommended_updated_ms: inner.settings.recommended_at_ms,
             target_links: TARGET_LINKS as u8,
             nodes,
         }
@@ -1056,9 +966,6 @@ impl PublicNodes {
             let circle: HashSet<String> = content.circle_npubs().into_iter().collect();
 
             let plan = self.plan(now_ms(), gate, &connected, &circle);
-            if plan.refresh_recommended {
-                self.refresh_recommended().await;
-            }
             if plan.fetch {
                 self.fetch_adverts().await;
                 // A fresh read changes what can be dialled: go round again at
@@ -1072,7 +979,10 @@ impl PublicNodes {
                     .request("disconnect", Some(serde_json::json!({ "npub": npub })))
                     .await
                 {
-                    Ok(_) => tracing::info!(npub, "public node: disconnected"),
+                    Ok(_) => {
+                        tracing::info!(npub, "public node: disconnected");
+                        self.forget_dial(npub);
+                    }
                     Err(e) => tracing::debug!(npub, error = %e, "public node: disconnect failed"),
                 }
             }
@@ -1091,11 +1001,8 @@ impl PublicNodes {
     /// Read the advert relays and take what verifies.
     async fn fetch_adverts(&self) {
         let recommended_hex: Vec<String> = {
-            let mut inner = self.lock();
-            inner.fetch.running = true;
-            inner
-                .settings
-                .recommended()
+            self.lock().fetch.running = true;
+            recommended()
                 .iter()
                 .filter_map(|r| PublicKey::from_bech32(&r.npub).ok())
                 .map(|pk| pk.to_hex())
@@ -1103,9 +1010,10 @@ impl PublicNodes {
         };
         let now = now_ms() / 1000;
         let d = fips::nostr::ADVERT_IDENTIFIER;
-        // Two filters: the recent adverts of everyone (bounded), and the
-        // recommended nodes by author, so hundreds of browser nodes crowding
-        // the first one's limit cannot hide the ones we want most.
+        // fips's own advert filter (kind + `#d`, see `nostr/runtime.rs`), twice:
+        // the recent adverts of everyone (bounded), and the recommended nodes
+        // by author, as fips looks a node up, so hundreds of browser nodes
+        // crowding the first one's limit cannot hide the ones we want most.
         let filters = vec![
             serde_json::json!({
                 "kinds": [fips::nostr::ADVERT_KIND],
@@ -1157,8 +1065,8 @@ impl PublicNodes {
         self.observe(nodes, now);
         // The first read with adverts picks the preselection; later ones keep
         // it current. Persisted, so it does not reshuffle per launch.
-        if let Some(choices) = self.maintain_preselection(now_ms(), &mut os_seeded_picker()) {
-            if let Err(e) = self.save(&choices) {
+        if self.maintain_preselection(now_ms(), &mut os_seeded_picker()) {
+            if let Err(e) = self.save() {
                 tracing::warn!(error = %e, "public nodes: could not save the preselection");
             }
         }
@@ -1179,65 +1087,6 @@ impl PublicNodes {
             "public nodes: adverts read"
         );
     }
-
-    /// Refresh the recommended list from join.fips.network. Best effort: any
-    /// failure keeps the list in hand.
-    async fn refresh_recommended(&self) {
-        match fetch_join_recommended().await {
-            Ok(list) if !list.is_empty() => {
-                let choices = {
-                    let mut inner = self.lock();
-                    inner.settings.recommended = Some(list.clone());
-                    inner.settings.recommended_at_ms = now_ms();
-                    inner.settings.clone()
-                };
-                tracing::info!(
-                    count = list.len(),
-                    "public nodes: recommended list refreshed"
-                );
-                if let Err(e) = self.save(&choices) {
-                    tracing::warn!(error = %e, "public nodes: could not save the recommended list");
-                }
-            }
-            Ok(_) => tracing::warn!(
-                "public nodes: join.fips.network listed no nodes; keeping the current list"
-            ),
-            Err(e) => tracing::debug!(error = %e, "public nodes: recommended refresh failed"),
-        }
-    }
-}
-
-/// Fetch join.fips.network's page, then its bundle, and parse the list.
-async fn fetch_join_recommended() -> anyhow::Result<Vec<Recommended>> {
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()?;
-    let index = get_capped(&http, RECOMMENDED_SOURCE_URL, JOIN_INDEX_MAX_BYTES).await?;
-    let path = join_bundle_path(&index)
-        .ok_or_else(|| anyhow::anyhow!("no bundle referenced from the page"))?;
-    let bundle = get_capped(
-        &http,
-        &format!("{RECOMMENDED_SOURCE_URL}{path}"),
-        JOIN_BUNDLE_MAX_BYTES,
-    )
-    .await?;
-    Ok(parse_join_bundle(&bundle))
-}
-
-/// GET a text body, refusing anything past `cap` bytes.
-async fn get_capped(http: &reqwest::Client, url: &str, cap: usize) -> anyhow::Result<String> {
-    let mut response = http.get(url).send().await?.error_for_status()?;
-    if response.content_length().is_some_and(|n| n as usize > cap) {
-        anyhow::bail!("{url} is larger than {cap} bytes");
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        body.extend_from_slice(&chunk);
-        if body.len() > cap {
-            anyhow::bail!("{url} is larger than {cap} bytes");
-        }
-    }
-    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// Redial delay for one node: doubling from the minimum per failure, capped,
@@ -1292,10 +1141,6 @@ pub struct PublicNodesView {
     pub relays_asked: u8,
     /// Why the last read got nothing; empty otherwise.
     pub fetch_error: String,
-    /// Where the recommendation comes from.
-    pub recommended_source: String,
-    /// When the recommended list was last refreshed; 0 means the shipped list.
-    pub recommended_updated_ms: u64,
     /// How many links Myco holds at once.
     pub target_links: u8,
     /// Recommended nodes first, in their published order; then the other
@@ -1499,46 +1344,6 @@ mod tests {
         assert_eq!(parse_advert(&wrong_kind, NOW), Err(Reject::WrongKind));
     }
 
-    /// The list is read out of the bundle's object literals, validated, and
-    /// nothing else in the bundle leaks in.
-    #[test]
-    fn the_join_bundle_list_is_extracted() {
-        let us01 = SHIPPED_RECOMMENDED[0].1;
-        let de01 = SHIPPED_RECOMMENDED[4].1;
-        let next = NEXT_NPUB;
-        let js = format!(
-            r#"var a="npub1qqqq";x1=[{{name:"test-us01",npub:"{us01}"}},{{name:"test-us03-next",npub:"{next}"}},{{name:"test-de01",npub:"{de01}"}},{{name:"bad name!",npub:"{us01}"}},{{name:"dup",npub:"{us01}"}},{{name:"junk",npub:"npub1notreal"}}],E1={{class:"hero"}}"#
-        );
-        let list = parse_join_bundle(&js);
-        assert_eq!(
-            list,
-            vec![
-                Recommended {
-                    name: "test-us01".into(),
-                    npub: us01.into()
-                },
-                Recommended {
-                    name: "test-de01".into(),
-                    npub: de01.into()
-                },
-            ]
-        );
-        assert!(parse_join_bundle("console.log('redesigned')").is_empty());
-    }
-
-    #[test]
-    fn the_bundle_path_must_be_a_plain_asset() {
-        let html =
-            r#"<script type="module" crossorigin src="./assets/index-Bd8vi-UD.js"></script>"#;
-        assert_eq!(
-            join_bundle_path(html).as_deref(),
-            Some("assets/index-Bd8vi-UD.js")
-        );
-        assert_eq!(join_bundle_path(r#"src="./assets/../../evil.js""#), None);
-        assert_eq!(join_bundle_path(r#"src="./assets/x.css""#), None);
-        assert_eq!(join_bundle_path("<html></html>"), None);
-    }
-
     /// test-us03-next, as join.fips.network lists it.
     const NEXT_NPUB: &str = "npub15m6c4ghuegx4pcde6tra8f7smn8vfv2wundyxwhkjynuerkrzmgsy09sh3";
 
@@ -1548,30 +1353,9 @@ mod tests {
     fn the_shipped_list_is_valid() {
         for (name, npub) in SHIPPED_RECOMMENDED {
             assert!(PublicKey::from_bech32(npub).is_ok(), "{name}");
-            assert!(!is_next_node(name), "{name} is a next node");
+            assert!(!name.ends_with("-next"), "{name} is a next node");
             assert_ne!(*npub, NEXT_NPUB);
         }
-    }
-
-    /// A `next` entry saved by an older build, or slipped into a refresh, is
-    /// never recommended.
-    #[test]
-    fn next_nodes_are_never_recommended() {
-        let s = PublicNodeSettings {
-            recommended: Some(vec![
-                Recommended {
-                    name: "test-us03-next".into(),
-                    npub: NEXT_NPUB.into(),
-                },
-                Recommended {
-                    name: "test-us01".into(),
-                    npub: SHIPPED_RECOMMENDED[0].1.into(),
-                },
-            ]),
-            ..Default::default()
-        };
-        let names: Vec<String> = s.recommended().into_iter().map(|r| r.name).collect();
-        assert_eq!(names, vec!["test-us01".to_string()]);
     }
 
     /// A deterministic picker for tests: a fixed sequence of draws.
@@ -1689,11 +1473,11 @@ mod tests {
             dir.path(),
             PublicNodeSettings {
                 enabled: true,
-                recommended_at_ms: NOW * 1000, // no refresh in these tests
                 ..Default::default()
             },
         );
-        let rec = nodes.lock().settings.recommended();
+        nodes.set_foreground(true);
+        let rec = recommended();
         let picked: Vec<String> = rec.iter().take(n).map(|r| r.npub.clone()).collect();
         // Preselected in list order here, so the plan tests read plainly; the
         // random draw has its own tests.
@@ -1715,6 +1499,17 @@ mod tests {
         );
         nodes.lock().fetch.last_ms = NOW * 1000;
         (dir, nodes, picked)
+    }
+
+    /// Record that the driver dialled `npub`, as `plan` does for its dials.
+    fn dialled(nodes: &PublicNodes, npub: &str) {
+        nodes.lock().dials.insert(
+            npub.to_string(),
+            DialState {
+                last_attempt_ms: NOW * 1000 - 60_000,
+                ..Default::default()
+            },
+        );
     }
 
     fn open_gate() -> Gate {
@@ -1764,6 +1559,7 @@ mod tests {
         let (_d, nodes, picked) = dir_with(3);
         let none = HashSet::new();
         let up: HashSet<String> = [picked[0].clone()].into();
+        dialled(&nodes, &picked[0]);
 
         let offline = Gate {
             offline_only: true,
@@ -1798,6 +1594,9 @@ mod tests {
     fn switching_off_drops_public_links_but_never_a_circle_member() {
         let (_d, nodes, picked) = dir_with(3);
         nodes.lock().settings.enabled = false;
+        for npub in &picked {
+            dialled(&nodes, npub);
+        }
         let up: HashSet<String> = picked.iter().cloned().collect();
         let circle: HashSet<String> = [picked[1].clone()].into();
         let plan = nodes.plan(NOW * 1000, open_gate(), &up, &circle);
@@ -1810,9 +1609,8 @@ mod tests {
     #[test]
     fn a_deselected_node_is_dropped_and_not_redialled() {
         let (_d, nodes, picked) = dir_with(3);
-        {
-            nodes.lock().settings.set_selected(&picked[0], false);
-        }
+        nodes.lock().settings.set_selected(&picked[0], false);
+        dialled(&nodes, &picked[0]);
         let up: HashSet<String> = [picked[0].clone()].into();
         let plan = nodes.plan(NOW * 1000, open_gate(), &up, &HashSet::new());
         assert_eq!(plan.disconnect, vec![picked[0].clone()]);
@@ -1831,7 +1629,67 @@ mod tests {
         );
         nodes.request_refresh();
         let plan = nodes.plan(NOW * 1000, open_gate(), &none, &none);
-        assert!(plan.fetch && plan.connect.is_empty() && !plan.refresh_recommended);
+        assert!(plan.fetch && plan.connect.is_empty());
+    }
+
+    /// A peer that advertises publicly but reached this phone some other way
+    /// (a LAN daemon, a radio) is never dropped from here, on or off; once a
+    /// dial's link has been dropped on purpose, a later link is not ours either.
+    #[test]
+    fn only_links_it_dialled_are_ever_dropped() {
+        let (_d, nodes, picked) = dir_with(3);
+        let up: HashSet<String> = picked.iter().cloned().collect();
+        let none = HashSet::new();
+
+        nodes.lock().settings.enabled = false;
+        assert!(nodes
+            .plan(NOW * 1000, open_gate(), &up, &none)
+            .disconnect
+            .is_empty());
+
+        nodes.lock().settings.enabled = true;
+        nodes.lock().settings.set_selected(&picked[0], false);
+        assert!(nodes
+            .plan(NOW * 1000, open_gate(), &up, &none)
+            .disconnect
+            .is_empty());
+
+        dialled(&nodes, &picked[0]);
+        let plan = nodes.plan(NOW * 1000, open_gate(), &up, &none);
+        assert_eq!(plan.disconnect, vec![picked[0].clone()]);
+        nodes.forget_dial(&picked[0]);
+        assert!(nodes
+            .plan(NOW * 1000, open_gate(), &up, &none)
+            .disconnect
+            .is_empty());
+    }
+
+    /// A recommended node advertising only IPv6, which this phone does not
+    /// dial, is never preselected.
+    #[test]
+    fn an_ipv6_only_node_is_not_preselected() {
+        let (_d, nodes, _) = dir_with(0);
+        let rec = recommended();
+        nodes.observe(
+            [PublicNode {
+                npub: rec[0].npub.clone(),
+                udp: vec!["[2a01:4f8::1]:2121".parse().unwrap()],
+                created_at: NOW - 60,
+                valid_until: NOW + 3000,
+            }],
+            NOW,
+        );
+        assert!(!nodes.maintain_preselection(NOW * 1000, &mut picker(&[0])));
+        assert!(nodes.lock().settings.preselected.is_empty());
+    }
+
+    /// A process that starts off screen paces itself as off screen until
+    /// Kotlin reports a start.
+    #[test]
+    fn it_starts_off_screen() {
+        let dir = tempdir::Dir::new();
+        let nodes = PublicNodes::new(dir.path(), PublicNodeSettings::default());
+        assert!(!nodes.lock().foreground);
     }
 
     #[test]
@@ -1903,10 +1761,12 @@ mod tests {
         let (dir, nodes, picked) = dir_with(1);
         nodes.set_enabled(true).unwrap();
         nodes.set_selected(&picked[0], false).unwrap();
-        let saved = crate::settings_store::load(dir.path()).public_nodes;
+        let saved = PublicNodeSettings::load(dir.path());
         assert!(saved.enabled);
         assert!(saved.removed.contains(&picked[0]));
         assert!(nodes.set_selected("not-an-npub", true).is_err());
+        // Apart from settings.json, which the reducer rewrites on its own.
+        assert!(!dir.path().join("settings.json").exists());
     }
 
     /// A throwaway directory, removed on drop.

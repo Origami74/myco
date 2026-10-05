@@ -23,9 +23,10 @@ import androidx.lifecycle.ProcessLifecycleOwner
  *   an outbound-only UDP socket for public nodes (instance `internet`). Myco
  *   is subject to its own VPN, and with the SOCKS exit on that VPN claims all
  *   public IPv4 — an unpinned socket would send the mesh's own traffic into the
- *   tunnel it is supposed to carry. Pinning it to the best validated non-VPN
- *   network keeps it on the real uplink, and follows that uplink from Wi-Fi to
- *   cellular and back.
+ *   tunnel it is supposed to carry. Pinning it to the network the system picks
+ *   for an internet, non-VPN request (`VALIDATED` cannot be requested, only
+ *   listened for) keeps it on the real uplink, and follows that uplink from
+ *   Wi-Fi to cellular and back.
  *
  * Runs for the life of the process. With the feature off the socket is pinned
  * but carries nothing, which costs nothing; a request for an *existing*

@@ -458,7 +458,7 @@ impl AppRuntime {
         let node_live = Arc::new(AtomicBool::new(false));
         let public_nodes = Arc::new(crate::public_nodes::PublicNodes::new(
             data_dir,
-            settings.public_nodes.clone(),
+            crate::public_nodes::PublicNodeSettings::load(Path::new(data_dir)),
         ));
 
         // Serve the relay + Blossom over the mesh so paired peers can pull this

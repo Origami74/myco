@@ -20,6 +20,23 @@ Off by default. The Settings page says, next to the switch:
   above it, and a public node is not a Circle member: the Circle gate on
   the relay, Blossom and pairing services is unchanged.
 
+It also reaches **past this phone**. fips is one mesh: once this phone links
+to a public node, the phones it is linked to over BLE, Aware or the LAN join
+the same global network through it, whether or not they switched this on.
+
+- They become **routable from the internet** via this phone, and their mesh
+  addresses spread in the global bloom filters. Anyone who knows one of their
+  npubs can tell it is reachable. The Circle gate still keeps their relay,
+  Blossom and pairing closed.
+- The local spanning tree **joins the global one**. Its root becomes the
+  global smallest `node_addr`, and every time this phone's uplink drops or
+  returns, the local segment re-converges.
+- This phone may **carry transit traffic** over its public links.
+
+fips's `leaf_only` is node-wide, so it cannot fence one lane; that would need a
+generic per-transport option in fips. The Settings page says that nearby
+phones become reachable too.
+
 Mesh-only (Settings › Developer) overrides the switch: nothing is fetched
 and nothing is dialled while it is on, and turning it on drops existing
 public links.
@@ -47,9 +64,10 @@ Public fips nodes announce themselves as **kind 37195** events
 fips `next` advertise `fips-overlay-v1-next`; Myco ignores them, since it
 cannot speak their protocol.
 
-Myco reads the three relays with two filters: recent adverts from anyone
-(`since` two hours ago, `limit` 500), and the recommended nodes by author,
-so hundreds of browser nodes cannot crowd them out of the first.
+Myco reads the three relays with fips's own advert filter (kind 37195,
+`#d` = `fips-overlay-v1`), twice: recent adverts from anyone (`since` two
+hours ago, `limit` 500), and the recommended nodes by author (as fips looks up
+one node), so hundreds of browser nodes cannot crowd them out of the first.
 
 ### Validation
 
@@ -78,23 +96,13 @@ nodes (`test-us01`, `test-de01`, …). Myco recommends the same ones: listed
 first and starred.
 
 `next` nodes are excluded everywhere. Their adverts carry
-`d=fips-overlay-v1-next` and are refused, and recommended entries named
-`*-next` (`test-us03-next`) are dropped from the shipped list, from a
-refresh and from a list saved by an older build. They are never shown,
-selected or dialled.
+`d=fips-overlay-v1-next` and are refused, and the shipped list leaves out
+`test-us03-next`.
 
-The site publishes no machine-readable list. It is a single-page app with
-the npubs compiled into its bundle as `{name:"…",npub:"…"}` literals. So:
-
-- **Shipped**: Myco carries a copy (`SHIPPED_RECOMMENDED`).
-- **Refreshed**: while the feature is on and the internet is up, Myco reads
-  the site's `index.html`, follows its one `assets/index-*.js`, and pulls
-  the literals out — at most daily, hourly after a failure, with size caps.
-- **Kept on failure**: a refresh that finds nothing keeps the list in hand.
-  A redesign of the site costs freshness, never the feature.
-
-The refreshed list is stored in `settings.json`. To update the shipped copy,
-read the same literals out of the current bundle.
+The list is a **highlight only**. Myco ships it (`SHIPPED_RECOMMENDED`) and
+never fetches the site: nodes are found only through their adverts, and a
+recommended node is starred and eligible for the preselection once its advert
+is read. To update the list, copy the site's current entries by hand.
 
 ## Choosing and dialling
 
@@ -112,8 +120,10 @@ ones in the list.
 
 - **When**: on the first advert read that finds recommended nodes
   advertising. Only those are eligible.
-- **Stable**: the pick is saved in `settings.json` (npub → last seen
-  advertising) and kept across launches and refreshes.
+- **Stable**: the pick is saved in `public_nodes.json` (npub → last seen
+  advertising) and kept across launches and advert reads.
+- **Dialable only**: a node advertising only IPv6, which Myco does not dial,
+  is never picked.
 - **Replaced when gone**: a picked node not seen advertising for a day is
   dropped, and another advertising recommended node is drawn in its place.
 - **No top-up with strangers**: with fewer than three recommended nodes
@@ -145,8 +155,9 @@ use — with transport `udp/internet`. That is a dedicated fips UDP instance:
   NAT is never dialled from the internet anyway.
 - **Bound at node start**, like every other instance, so the switch never
   restarts the node. With the feature off it carries nothing.
-- **Pinned by Kotlin** to the best validated non-VPN network
-  (`requestNetwork` with `INTERNET` + `NOT_VPN`). Myco is subject to its own
+- **Pinned by Kotlin** to the network the system picks for
+  `requestNetwork` with `INTERNET` + `NOT_VPN` (`VALIDATED` cannot be
+  requested). Myco is subject to its own
   VPN, and with the SOCKS exit on that VPN claims all public IPv4. An
   unpinned socket would send the mesh's own traffic into the tunnel it
   carries.
@@ -161,9 +172,12 @@ dial younger than 30 s counts toward the two links.
 
 ### When it stops
 
-- **Switch off, or mesh-only on**: every connected public node that is not a
-  Circle member is disconnected (`disconnect` over the control socket). A
-  Circle member who happens to run a public node keeps their link.
+- **Switch off, or mesh-only on**: every public node Myco dialled that is
+  not a Circle member is disconnected (`disconnect` over the control socket).
+  A Circle member who happens to run a public node keeps their link.
+- **Only Myco's own dials** are ever dropped. A peer that also advertises
+  publicly but reached the phone another way (a LAN daemon, a radio) is left
+  alone, on or off.
 - **A node deselected**: that link is dropped.
 - **Internet breaker tripped** (`Content::internet_looks_down`): no reads, no
   dials; existing links are left to fips's own liveness.
@@ -201,7 +215,7 @@ in the peer list like any other direct peer.
 ## Testing
 
 Host: `cargo test -p myco-core public_node` covers parsing and validation,
-the join.fips.network extraction, selection deltas, the dial plan (target,
+selection deltas, the dial plan (target,
 backoff, background, mesh-only, breaker, switch-off, deselection, Circle
 exemption) and persistence.
 
@@ -216,3 +230,7 @@ Bluetooth off on both):
 4. Switch the option off on one phone. Its public links drop from the Dev
    tab, and the other phone goes unreachable.
 5. Turn on mesh-only with the option on: links drop and are not redialled.
+6. Bridging: a third phone, option **off**, linked to phone A over BLE only.
+   Check it is reachable from phone B through the public nodes, then toggle
+   A's Wi-Fi off and on and check the BLE link between A and the third phone
+   holds while the tree re-converges.

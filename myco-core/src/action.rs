@@ -212,13 +212,14 @@ pub enum NativeAppAction {
     /// mesh-only is on, whatever this says.
     SetPublicNodesEnabled { enabled: bool },
     /// Select or deselect one public node for dialling. Persisted as a delta
-    /// against join.fips.network's recommended list. `npub` must decode.
+    /// against Myco's random preselection. `npub` must decode.
     SetPublicNodeSelected { npub: String, selected: bool },
     /// Read the advert relays now, even with the feature off, so Settings can
     /// list the nodes before the user opts in. Mesh-only still forbids it.
     RefreshPublicNodes,
-    /// Whether Myco is on screen (`ProcessLifecycleOwner` start/stop). Off
-    /// screen, public-node refreshes and redials slow down.
+    /// Whether Myco is on screen (`ProcessLifecycleOwner` start/stop). Today
+    /// it only paces the public-node lane: off screen, advert reads and
+    /// redials slow down.
     SetAppForeground { foreground: bool },
 
     /// Point the event store at a **custom relay**, or back at the built-in one

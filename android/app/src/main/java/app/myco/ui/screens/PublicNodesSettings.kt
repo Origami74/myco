@@ -30,8 +30,6 @@ import app.myco.core.PublicNode
 import app.myco.ui.GroupLabel
 import app.myco.ui.SectionCard
 import app.myco.ui.theme.StatusConnected
-import java.text.DateFormat
-import java.util.Date
 
 /**
  * Settings › Internet: peer with public FIPS nodes over the internet, so the
@@ -91,7 +89,8 @@ internal fun PublicNodesSettings(state: AppState, client: AppCoreClient, onBack:
             "A public node can see this phone's IP address and which mesh " +
                 "addresses it talks to. It can't see what you send — that stays " +
                 "encrypted end to end. Nodes you don't know are run by people you " +
-                "don't know.",
+                "don't know. Phones linked to this one nearby also become reachable " +
+                "through these nodes, even if they have this switched off.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -113,11 +112,7 @@ internal fun PublicNodesSettings(state: AppState, client: AppCoreClient, onBack:
             }
         }
         Text(
-            "★ Recommended by join.fips.network · " + if (pub.recommendedUpdatedMs > 0) {
-                "list updated ${DateFormat.getDateInstance().format(Date(pub.recommendedUpdatedMs))}"
-            } else {
-                "list shipped with Myco"
-            },
+            "★ Recommended by join.fips.network",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
