@@ -162,7 +162,7 @@ internal fun PermissionsSettings(
             icon = { PhonesIcon(it, Modifier.size(22.dp)) },
             title = "Nearby phones",
             status = when {
-                s.nearbyGranted -> "Allowed — Bluetooth and Wi-Fi can find phones nearby"
+                s.nearbyGranted -> "Allowed — Bluetooth and Wi-Fi can find nearby mesh devices"
                 !s.nearbyAsked -> "Not asked yet"
                 else -> "Not allowed — Myco can’t look for phones nearby"
             },

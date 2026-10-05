@@ -34,7 +34,7 @@ import app.myco.ui.theme.AmoledAccent
  */
 class SetupSnackbarVisuals(val notice: SetupNotice) : SnackbarVisuals {
     override val message: String = when (notice) {
-        SetupNotice.AllSet -> "You’re set up — Myco will find phones nearby on its own."
+        SetupNotice.AllSet -> "You’re set up — Myco will find nearby mesh devices on its own."
         SetupNotice.NearbyMissing ->
             "Mesh is on, but Myco can’t look for phones nearby — fix it in Settings › Permissions."
         SetupNotice.MeshOff -> "Mesh is off — fix it in Settings › Permissions."
