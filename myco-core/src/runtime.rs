@@ -837,6 +837,15 @@ impl AppRuntime {
                     ..Default::default()
                 });
         }
+        // A USB transport, so a desktop (or another phone) that switches this
+        // phone into accessory mode links with the node over the cable. The
+        // phone is always the accessory here: the host role is the desktop's.
+        // Nothing to configure — links arrive when a cable does.
+        #[cfg(target_os = "android")]
+        {
+            config.transports.usb =
+                fips::config::TransportInstances::Single(fips::config::UsbConfig::default());
+        }
         // One UDP transport for the LAN/AP lane and a pool of them for Wi-Fi
         // Aware — see the instance constants at the top of this file for why
         // one socket cannot serve two lanes, nor two concurrent NDPs. UDP is
@@ -2447,6 +2456,9 @@ impl AppRuntime {
             // one), so the bridge installs whatever it is holding into the new
             // slot rather than waiting to be handed a radio.
             crate::ble_bridge_jni::set_radio_slot(node.enable_app_owned_ble_radio());
+            // USB accessories opened before this node existed are handed to
+            // it now, and later ones go straight to it.
+            crate::usb_bridge::install(node.enable_app_owned_usb());
         }
         // The rx loop serves until this fires, then drains in place. Dropping
         // the sender resolves the receiver too, so a runtime torn down without a

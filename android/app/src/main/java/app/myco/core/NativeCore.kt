@@ -214,6 +214,13 @@ internal object NativeCore {
      *  the version even if the kernel reuses the fd number. */
     external fun nextUdpTransportFd(lane: String, sinceVersion: Long, timeoutMs: Int): Long
 
+    // --- USB accessory bridge ---
+    /** Hand an opened Android Open Accessory to the node's USB transport. `fd`
+     *  is a descriptor from `ParcelFileDescriptor.detachFd()`: ownership passes
+     *  to the core, which closes it when the link ends — never close it here.
+     *  Accessories opened before the node runs are held until it does. */
+    external fun usbAttachAccessory(fd: Int): Boolean
+
     // --- TUN packet bridge (the app-owned TUN; the VpnService pumps these) ---
     /** Kotlin → Rust: route an IPv6 packet read from the TUN fd into the mesh. */
     external fun tunSendPacket(packet: ByteArray, len: Int): Boolean

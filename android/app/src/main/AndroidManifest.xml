@@ -53,6 +53,7 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <!-- Wi-Fi Aware is the bulk lane, not the baseline: optional, degrades to BLE. -->
     <uses-feature android:name="android.hardware.wifi.aware" android:required="false" />
+    <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
 
     <!-- NIP-55: see and call a signer app (Amber) for login and signing. -->
     <queries>
@@ -155,12 +156,34 @@
             android:taskAffinity=""
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <!-- A USB host (a desktop fips node, or another phone) switched this
+             phone into Android Open Accessory mode as FIPS/fips-link. Opens
+             the accessory, hands it to the node, and leaves at once. -->
+        <activity
+            android:name=".usb.UsbAccessoryActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
+                android:resource="@xml/accessory_filter" />
+        </activity>
+
         <!-- Portrait-locked QR scanner (the zxing default opens sideways). -->
         <activity
             android:name=".PortraitCaptureActivity"
             android:exported="false"
             android:screenOrientation="portrait"
             android:stateNotNeeded="true" />
+
+        <service
+            android:name=".usb.UsbService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <service
             android:name=".ble.BleService"
