@@ -1879,7 +1879,7 @@ pub(crate) fn relay_list_lanes(list: &Event, direction: Direction) -> Vec<RelayL
 /// before dialling it.
 pub(crate) fn relay_list_urls(list: &Event, direction: Direction) -> Vec<&str> {
     let wanted = match direction {
-        Direction::Read => "write",
+        Direction::Read | Direction::Publish => "write",
         Direction::Write => "read",
     };
     list.tags
@@ -2548,6 +2548,58 @@ mod tests {
             vec![RelayLane::Local],
             "offline only: nothing to fall back to"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Publishing goes to every write relay the user lists; a read of the same
+    /// author settles for two. Narrowing a publish the way a read is narrowed
+    /// left the user's own notes missing from most of their outbox relays.
+    #[tokio::test]
+    async fn a_publish_plan_keeps_every_write_relay() {
+        let dir = std::env::temp_dir().join(format!("myco-outbox-pub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let store = content.relay();
+        let svc = OutboxService::new(
+            store.clone(),
+            Arc::new(Mutex::new(None)),
+            content.clone(),
+            "npub1me".to_string(),
+        );
+
+        let me = Keys::generate();
+        let writes = [
+            "wss://one.example",
+            "wss://two.example",
+            "wss://three.example",
+            "wss://four.example",
+        ];
+        let mut tags: Vec<Tag> = writes
+            .iter()
+            .map(|u| Tag::parse(["r", u, "write"]).unwrap())
+            .collect();
+        tags.push(Tag::parse(["r", "wss://inbox-only.example", "read"]).unwrap());
+        let list = EventBuilder::new(Kind::RelayList, "")
+            .tags(tags)
+            .sign_with_keys(&me)
+            .unwrap();
+        store.publish(list).await.unwrap();
+
+        let read = svc.plan(Direction::Read, &[me.public_key()]).await;
+        assert_eq!(remote_lanes(read.lanes).len(), RELAYS_PER_AUTHOR);
+
+        let publish = svc.plan(Direction::Publish, &[me.public_key()]).await;
+        assert_eq!(publish.source, PlanSource::Nip65);
+        let mut urls: Vec<String> = publish
+            .lanes
+            .iter()
+            .filter_map(|l| l.url().map(str::to_string))
+            .collect();
+        urls.sort();
+        let mut want: Vec<String> = writes.iter().map(|u| u.to_string()).collect();
+        want.sort();
+        assert_eq!(urls, want, "every write relay, and no read-only one");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

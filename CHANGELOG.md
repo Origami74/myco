@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Napplet posts reach all your outbox relays.** A note a napplet posted
+  through NAP-OUTBOX went to only two of your NIP-65 write relays, picked
+  the way a read picks them; the rest never got it, so people reading from
+  those relays didn't see it. It now goes to every write relay you list.
+
 ## [0.10.0] - 2026-10-05
 
 ### Added

@@ -162,6 +162,11 @@ pub enum Direction {
     Read,
     /// Where events *for* an author should be sent (their NIP-65 read relays).
     Write,
+    /// Where an author's own events are sent when they publish: their NIP-65
+    /// write relays, like [`Direction::Read`], but every one of them. A read
+    /// may settle for two relays per author; a publish that skipped the rest
+    /// would leave the event missing from relays readers are told to use.
+    Publish,
 }
 
 /// Where a relay plan came from — NAP-OUTBOX's `OutboxRelayPlan.source`.

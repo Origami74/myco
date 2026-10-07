@@ -325,8 +325,9 @@ async fn publish(
         let Ok(user) = ctx.signer.public_key().await else {
             return failed(message, "there is no user key on this device yet");
         };
-        // The user's own outbox is where their events are read from.
-        lanes.extend(ctx.outbox.plan(Direction::Read, &[user]).await.lanes);
+        // The user's own outbox is where their events are read from: every
+        // write relay they list, not the two a read would settle for.
+        lanes.extend(ctx.outbox.plan(Direction::Publish, &[user]).await.lanes);
     }
     if !inboxes.is_empty() {
         let plan = ctx.outbox.plan(Direction::Write, &inboxes).await;
@@ -903,7 +904,7 @@ mod tests {
         let (ctx, fx, signer) = test_context_with_outbox();
         fx.set_plan(
             signer.public_key(),
-            Direction::Read,
+            Direction::Publish,
             &["wss://mine.example"],
             PlanSource::Nip65,
         );
@@ -991,7 +992,7 @@ mod tests {
         let (ctx, fx, signer) = test_context_with_outbox();
         fx.set_plan(
             signer.public_key(),
-            Direction::Read,
+            Direction::Publish,
             &["wss://mine.example"],
             PlanSource::Nip65,
         );
@@ -1028,7 +1029,7 @@ mod tests {
         let (ctx, fx, signer) = test_context_with_outbox();
         fx.set_plan(
             signer.public_key(),
-            Direction::Read,
+            Direction::Publish,
             &["wss://mine.example"],
             PlanSource::Nip65,
         );
