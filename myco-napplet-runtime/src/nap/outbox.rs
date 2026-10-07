@@ -56,8 +56,11 @@ const PUBLISH_TIMEOUT: Duration = Duration::from_secs(8);
 /// than a single server — or, for a mesh lane, handed to more than one
 /// Circle member's connection.
 ///
-/// Not for `toInboxes`: NAP-OUTBOX makes an inbox a required target whose
-/// failure must be reported, so a publish naming inboxes waits for every lane.
+/// The same with `toInboxes`. NAP-OUTBOX makes an inbox a required target
+/// whose failure must be reported; Myco reports what it knows when the
+/// quorum is in and keeps delivering to the inboxes behind the answer. A
+/// publish naming a dozen people's inboxes used to hold "Published" for the
+/// full timeout on the slowest of them.
 const PUBLISH_QUORUM: usize = 2;
 /// Bounds on a napplet-supplied `timeoutMs`: below the floor a relay across
 /// the mesh cannot answer, above the ceiling the session loop is hostage.
@@ -344,13 +347,7 @@ async fn publish(
         Err(e) => return failed(message, e),
     };
 
-    // Required targets must be reported, so they are waited for.
-    let quorum = if inboxes.is_empty() {
-        PUBLISH_QUORUM
-    } else {
-        usize::MAX
-    };
-    let (stored, relays) = publish_to_quorum(ctx, lanes, &signed, quorum).await;
+    let (stored, relays) = publish_to_quorum(ctx, lanes, &signed, PUBLISH_QUORUM).await;
     if !stored {
         return failed(message, "could not store the event");
     }
@@ -931,7 +928,8 @@ mod tests {
         assert_eq!(r["type"], "outbox.publish.result");
         assert_eq!(r["ok"], true);
         assert_eq!(r["event"]["pubkey"], signer.public_key().to_hex());
-        // An inbox is a required target: its refusal is always reported.
+        // This fixture's transport waits for every lane, so the inbox's
+        // refusal is in the answer; Myco's answers at the quorum.
         assert_eq!(
             r["relays"],
             json!({
