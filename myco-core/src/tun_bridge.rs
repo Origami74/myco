@@ -118,6 +118,10 @@ pub fn next_packet(timeout: Duration) -> Option<Vec<u8>> {
     to_tun().1.lock().ok()?.recv_timeout(timeout).ok()
 }
 
+/// Serialises the tests that install the process-global bridge.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +140,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_send_next_roundtrip() {
+        let _serial = TEST_LOCK.lock().await;
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
         let (in_tx, in_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         install(out_tx, in_rx, 1143);

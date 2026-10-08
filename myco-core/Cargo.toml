@@ -37,6 +37,8 @@ futures-util = { workspace = true }
 # IPV6_V6ONLY via socket2 so `[::]:4870` does not collide with the loopback bind.
 axum = { workspace = true }
 socket2 = { workspace = true }
+# poll/read/write on the VpnService TUN fd (tun_pump).
+libc = "0.2"
 # `dns_intercept` synthesises the AAAA query it sends to the node's built-in
 # `.fips` responder for route warming. Matches fips's pin.
 simple-dns = "0.11.2"

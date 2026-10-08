@@ -11,16 +11,10 @@ import android.net.NetworkCapabilities
 import android.net.ProxyInfo
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
-import android.system.ErrnoException
-import android.system.Os
-import android.system.OsConstants
-import android.system.StructPollfd
 import android.util.Log
 import app.myco.MainActivity
 import app.myco.R
 import app.myco.core.NativeCore
-import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -29,9 +23,9 @@ import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * The **app-owned TUN**: a [VpnService] that owns the TUN fd and pumps IPv6 packet
- * bytes between it and the FIPS node over the JNI bridge ([NativeCore.tunSendPacket]
- * / [NativeCore.tunNextPacket]). It routes **only `fd00::/8`** (the mesh ULA), so
+ * The **app-owned TUN**: a [VpnService] that owns the TUN fd and hands a duplicate
+ * of it to the core's native pump ([NativeCore.tunStartPump]), which moves IPv6
+ * packets between it and the FIPS node. It routes **only `fd00::/8`** (the mesh ULA), so
  * normal internet traffic is untouched — this is not a full-tunnel VPN.
  *
  * The node installs the bridge channels when it starts (BLE on); this service just
@@ -64,8 +58,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 class MycoVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private val running = AtomicBoolean(false)
-    @Volatile private var readerThread: Thread? = null
-    @Volatile private var writerThread: Thread? = null
     @Volatile private var relay: ExitRelay? = null
 
     // Live config; a start intent carrying a different one re-establishes.
@@ -141,8 +133,8 @@ class MycoVpnService : VpnService() {
             -1
         }
 
-        // The fd stays non-blocking (establish()'s default): readLoop waits on
-        // it with poll() and a timeout. See readLoop for why neither a spin
+        // The fd stays non-blocking (establish()'s default): the native pump waits
+        // on it with poll() and a timeout. See myco-core's tun_pump for why neither a spin
         // nor a blocking read will do.
         val builder = Builder()
             .setSession("Myco mesh")
@@ -252,8 +244,12 @@ class MycoVpnService : VpnService() {
         running.set(true)
         tunnelUp = true
         watchUnderlyingNetworks()
-        readerThread = Thread({ readLoop(pfd) }, "myco-tun-read").apply { start() }
-        writerThread = Thread({ writeLoop(pfd) }, "myco-tun-write").apply { start() }
+        // The core pumps a duplicate; `tun` stays ours, and closing it is what
+        // takes the interface down.
+        val pumping = runCatching { NativeCore.tunStartPump(pfd.dup().detachFd()) }
+            .onFailure { Log.e(TAG, "could not start the native TUN pump", it) }
+            .getOrDefault(false)
+        if (!pumping) Log.e(TAG, "native TUN pump not running; mesh traffic will not flow")
         Log.i(
             TAG,
             "mesh TUN up at $ula (route fd00::/8, dns $DNS_SENTINEL" +
@@ -374,69 +370,10 @@ class MycoVpnService : VpnService() {
         }
     }
 
-    /** TUN fd → mesh: read IPv6 packets and hand them to FIPS. */
-    /**
-     * TUN fd → mesh. Waits for a packet with poll() and a timeout, then reads.
-     *
-     * Neither simpler shape works. A plain read on the non-blocking fd
-     * returns 0 at once (EAGAIN) and spun a whole core while the tunnel was
-     * up. A blocking fd fixed that, but a thread blocked in read() is not
-     * woken by interrupt() or by closing the fd on a tunnel restart, so the
-     * old reader could hang holding the old tunnel, and the new tunnel's
-     * packets went unread: the mesh link stayed up while no connection over
-     * it could complete. With poll() the thread sleeps until there is a
-     * packet and looks at [running] at least every [READ_POLL_MS], so a
-     * restart always lets it go.
-     */
-    private fun readLoop(pfd: ParcelFileDescriptor) {
-        val input = FileInputStream(pfd.fileDescriptor)
-        val buf = ByteArray(2048)
-        val poll = StructPollfd().apply {
-            fd = pfd.fileDescriptor
-            events = OsConstants.POLLIN.toShort()
-        }
-        while (running.get()) {
-            val ready = try {
-                Os.poll(arrayOf(poll), READ_POLL_MS)
-            } catch (e: ErrnoException) {
-                if (e.errno == OsConstants.EINTR) continue
-                break
-            }
-            if (ready == 0) continue // timed out: look at running again
-            if (poll.revents.toInt() and (OsConstants.POLLERR or OsConstants.POLLHUP or OsConstants.POLLNVAL) != 0) {
-                break
-            }
-            val n = try {
-                input.read(buf)
-            } catch (_: Exception) {
-                break
-            }
-            if (n < 0) break
-            if (n > 0) NativeCore.tunSendPacket(buf, n)
-        }
-    }
-
-    /** mesh → TUN fd: pull IPv6 packets from FIPS and write them. */
-    private fun writeLoop(pfd: ParcelFileDescriptor) {
-        val output = FileOutputStream(pfd.fileDescriptor)
-        val buf = ByteArray(2048)
-        while (running.get()) {
-            val n = NativeCore.tunNextPacket(buf, 1000)
-            if (n > 0) {
-                try {
-                    output.write(buf, 0, n)
-                } catch (_: Exception) {
-                    break
-                }
-            }
-        }
-    }
-
     /** Tear the tun + relay down without stopping the service (used on reconfig). */
     private fun teardown() {
         running.set(false)
-        readerThread?.interrupt()
-        writerThread?.interrupt()
+        NativeCore.tunStopPump()
         try {
             tun?.close()
         } catch (_: Exception) {
@@ -586,8 +523,6 @@ class MycoVpnService : VpnService() {
     }
 
     companion object {
-        /** How long readLoop waits for a packet before looking at `running`. */
-        private const val READ_POLL_MS = 1000
 
         const val EXTRA_ULA = "app.myco.extra.ULA"
         const val EXTRA_MTU = "app.myco.extra.MTU"

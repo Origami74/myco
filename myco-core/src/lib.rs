@@ -116,6 +116,10 @@ mod update_gate;
 // installed only on Android, so its fns read as dead on the host build.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod tun_bridge;
+// Reads and writes the VpnService's TUN fd natively, feeding `tun_bridge`.
+// Started by the Android VpnService (via tun_bridge_jni).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod tun_pump;
 // System-wide `.fips` DNS interception; driven by the TUN pump on Android.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod dns_intercept;
