@@ -149,6 +149,11 @@ pub(crate) fn aware_udp_slots(reported: Option<u8>) -> u8 {
         .clamp(1, AWARE_UDP_INSTANCES.len() as u8)
 }
 
+/// How often the peer view is refreshed from the node. With the UI's own
+/// one-second poll of the core, a peer appears or vanishes within ~2 s.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const PEER_REFRESH: Duration = Duration::from_secs(1);
+
 /// Consecutive failed `show_peers` queries before the peer feed is reported as
 /// broken in [`AppState::error`].
 ///
@@ -657,59 +662,87 @@ impl AppRuntime {
                 node_live.clone(),
             ));
 
+            // Peer state, every second. fips's control socket has no push, so
+            // this is a poll — but `show_peers` is answered from a published
+            // snapshot, off the node's rx loop, so it is cheap. It used to ride
+            // the 8 s keepwarm tick, and a peer took up to 8 s to appear in or
+            // vanish from the UI after fips already knew.
             {
                 let content = content.clone();
                 let peer_cache = peer_cache.clone();
                 let peer_feed = peer_feed.clone();
+                let node_live = node_live.clone();
+                let control = control.clone();
+                rt.spawn(async move {
+                    let mut tick = tokio::time::interval(PEER_REFRESH);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    let mut known: Vec<String> = Vec::new();
+                    loop {
+                        tick.tick().await;
+                        // Nothing binds the socket until the node's rx loop is
+                        // up; querying before then would only manufacture
+                        // failures for the health counter to shout about.
+                        if !node_live.load(Ordering::Relaxed) {
+                            continue;
+                        }
+                        match control.show_peers().await {
+                            Ok(peers) => {
+                                let connected: Vec<String> = peers
+                                    .iter()
+                                    .filter(|p| p.connected && !p.npub.is_empty())
+                                    .map(|p| p.npub.clone())
+                                    .collect();
+                                *peer_cache.lock().unwrap() = peers;
+                                {
+                                    let mut health = peer_feed.lock().unwrap();
+                                    health.consecutive_failures = 0;
+                                    health.last_error.clear();
+                                }
+                                let arrived = connected.iter().any(|n| !known.contains(n));
+                                content.set_connected_peers(connected.clone());
+                                known = connected;
+                                // A peer that just connected is a reconnect
+                                // edge (`set_connected_peers` forgot its dial
+                                // backoff): dial the Circle now rather than at
+                                // the next keepwarm tick, up to 8 s away.
+                                if arrived {
+                                    content.keepwarm_tick();
+                                }
+                            }
+                            Err(e) => {
+                                // The last snapshot is deliberately kept:
+                                // stale peer rows plus a visible error beat
+                                // an empty list that reads as a quiet room.
+                                let mut health = peer_feed.lock().unwrap();
+                                health.consecutive_failures =
+                                    health.consecutive_failures.saturating_add(1);
+                                health.last_error = e.clone();
+                                let n = health.consecutive_failures;
+                                drop(health);
+                                tracing::warn!(
+                                    error = %e,
+                                    consecutive_failures = n,
+                                    "peer state query failed"
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Keepwarm and library retries, on their own slower cadence.
+            {
+                let content = content.clone();
                 let node_live = node_live.clone();
                 rt.spawn(async move {
                     let mut tick = tokio::time::interval(std::time::Duration::from_secs(8));
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     loop {
                         tick.tick().await;
-                        // Nothing binds the socket until the node's rx loop is
-                        // up; querying before then would only manufacture
-                        // failures for the health counter to shout about.
-                        if node_live.load(Ordering::Relaxed) {
-                            match control.show_peers().await {
-                                Ok(peers) => {
-                                    let connected: Vec<String> = peers
-                                        .iter()
-                                        .filter(|p| p.connected && !p.npub.is_empty())
-                                        .map(|p| p.npub.clone())
-                                        .collect();
-                                    *peer_cache.lock().unwrap() = peers;
-                                    {
-                                        let mut health = peer_feed.lock().unwrap();
-                                        health.consecutive_failures = 0;
-                                        health.last_error.clear();
-                                    }
-                                    content.set_connected_peers(connected);
-                                    if !content.circle_npubs().is_empty() {
-                                        for addr in content.retriable_library_addrs() {
-                                            let content = content.clone();
-                                            tokio::spawn(async move {
-                                                content.open_site(addr, None).await
-                                            });
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    // The last snapshot is deliberately kept:
-                                    // stale peer rows plus a visible error beat
-                                    // an empty list that reads as a quiet room.
-                                    let mut health = peer_feed.lock().unwrap();
-                                    health.consecutive_failures =
-                                        health.consecutive_failures.saturating_add(1);
-                                    health.last_error = e.clone();
-                                    let n = health.consecutive_failures;
-                                    drop(health);
-                                    tracing::warn!(
-                                        error = %e,
-                                        consecutive_failures = n,
-                                        "peer state query failed"
-                                    );
-                                }
+                        if node_live.load(Ordering::Relaxed) && !content.circle_npubs().is_empty() {
+                            for addr in content.retriable_library_addrs() {
+                                let content = content.clone();
+                                tokio::spawn(async move { content.open_site(addr, None).await });
                             }
                         }
                         content.keepwarm_tick();
