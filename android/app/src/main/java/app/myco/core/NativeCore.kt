@@ -221,6 +221,13 @@ internal object NativeCore {
      *  Accessories opened before the node runs are held until it does. */
     external fun usbAttachAccessory(fd: Int): Boolean
 
+    /** Hand a USB device this phone is host of to the node: `fd` is a detached
+     *  duplicate of `UsbDeviceConnection.getFileDescriptor()`, owned by the core
+     *  from here. The node switches it into accessory mode — it then comes back
+     *  as a new device, handed over again — or links with it if it already is
+     *  an accessory. */
+    external fun usbAttachHostDevice(fd: Int): Boolean
+
     // --- TUN packet bridge (the app-owned TUN; the VpnService pumps these) ---
     /** Kotlin → Rust: route an IPv6 packet read from the TUN fd into the mesh. */
     external fun tunSendPacket(packet: ByteArray, len: Int): Boolean

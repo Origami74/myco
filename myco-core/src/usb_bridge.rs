@@ -1,17 +1,27 @@
-//! Hands Android Open Accessory links to the fips node's USB transport.
+//! Hands USB links to the fips node's USB transport.
 //!
-//! When a USB host (a desktop fips node, or another phone) switches this phone
-//! into accessory mode, Android starts `UsbAccessoryActivity`, which opens the
-//! accessory and passes its descriptor here. The node owns it from then on
-//! ([`fips::transport::usb::UsbAttach::accessory`]): the USB transport runs
-//! the link hello and the node dials the peer it names.
+//! Two ways a cable reaches the node, one per side of it:
 //!
-//! The descriptor can arrive before there is a node to give it to. Plugging
-//! in is what *starts* the app when it is not running, and the node comes up
+//! - **Accessory.** A USB host (a desktop fips node, or another phone) switched
+//!   this phone into accessory mode; Android starts `UsbAccessoryActivity`,
+//!   which opens the accessory and passes its descriptor here
+//!   ([`attach_accessory`]).
+//! - **Host.** This phone holds the cable's host role and another phone is
+//!   plugged in; Android starts `UsbDeviceActivity`, which opens the device and
+//!   passes its descriptor here ([`attach_host_device`]). The node switches it
+//!   into accessory mode; it comes back as a new device and is handed over
+//!   again, and that time the node links with it.
+//!
+//! Either way the node owns the descriptor from then on
+//! ([`fips::transport::usb::UsbAttach`]): the USB transport runs the link
+//! hello and the node dials the peer it names.
+//!
+//! A descriptor can arrive before there is a node to give it to. Plugging in
+//! is what *starts* the app when it is not running, and the node comes up
 //! after that, from the `UsbService` the activity starts. So a descriptor that
-//! finds no node is held and handed over by [`install`] when `start_node`
-//! arms the next one. Process-global, like the other bridges: the JNI call
-//! must not take the reducer lock.
+//! finds no node is held and handed over by [`install`] when `start_node` arms
+//! the next one. Process-global, like the other bridges: the JNI call must not
+//! take the reducer lock.
 
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,11 +29,17 @@ use std::sync::Mutex;
 
 use fips::transport::usb::UsbAttach;
 
+/// A descriptor from Kotlin, waiting for a node.
+enum Handed {
+    Accessory(OwnedFd),
+    HostDevice(OwnedFd),
+}
+
 struct Bridge {
     /// The running node's USB handle, once `start_node` has armed one.
     attach: Option<UsbAttach>,
-    /// Accessories opened before any node was armed.
-    pending: Vec<OwnedFd>,
+    /// Descriptors opened before any node was armed.
+    pending: Vec<Handed>,
 }
 
 static BRIDGE: Mutex<Bridge> = Mutex::new(Bridge {
@@ -31,40 +47,59 @@ static BRIDGE: Mutex<Bridge> = Mutex::new(Bridge {
     pending: Vec::new(),
 });
 
-/// Labels for accessory links, unique for the life of the process.
+/// Labels for links, unique for the life of the process.
 static NEXT_LINK: AtomicU64 = AtomicU64::new(0);
 
 fn lock() -> std::sync::MutexGuard<'static, Bridge> {
     BRIDGE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn hand_over(attach: &UsbAttach, fd: OwnedFd) {
-    let label = format!("accessory{}", NEXT_LINK.fetch_add(1, Ordering::Relaxed));
-    tracing::info!(link = %label, "USB accessory handed to the node");
-    attach.accessory(fd, label);
+fn hand_over(attach: &UsbAttach, handed: Handed) {
+    let n = NEXT_LINK.fetch_add(1, Ordering::Relaxed);
+    match handed {
+        Handed::Accessory(fd) => {
+            let label = format!("accessory{n}");
+            tracing::info!(link = %label, "USB accessory handed to the node");
+            attach.accessory(fd, label);
+        }
+        Handed::HostDevice(fd) => {
+            let label = format!("device{n}");
+            tracing::info!(link = %label, "USB device handed to the node");
+            attach.host_device(fd, label);
+        }
+    }
 }
 
-/// A freshly started node's USB handle. Accessories that were waiting for a
+/// A freshly started node's USB handle. Descriptors that were waiting for a
 /// node go to it now; later ones go straight to it. Replaces the handle of a
 /// node that has since been stopped.
 pub(crate) fn install(attach: UsbAttach) {
     let mut bridge = lock();
-    for fd in std::mem::take(&mut bridge.pending) {
-        hand_over(&attach, fd);
+    for handed in std::mem::take(&mut bridge.pending) {
+        hand_over(&attach, handed);
     }
     bridge.attach = Some(attach);
 }
 
-/// An opened accessory, from Kotlin.
-pub(crate) fn attach_accessory(fd: OwnedFd) {
+fn handed(handed: Handed) {
     let mut bridge = lock();
     match &bridge.attach {
-        Some(attach) => hand_over(attach, fd),
+        Some(attach) => hand_over(attach, handed),
         None => {
-            tracing::info!("USB accessory opened before the node; holding it");
-            bridge.pending.push(fd);
+            tracing::info!("USB descriptor arrived before the node; holding it");
+            bridge.pending.push(handed);
         }
     }
+}
+
+/// An opened accessory, from Kotlin.
+pub(crate) fn attach_accessory(fd: OwnedFd) {
+    handed(Handed::Accessory(fd));
+}
+
+/// A USB device this phone is host of, opened by Kotlin.
+pub(crate) fn attach_host_device(fd: OwnedFd) {
+    handed(Handed::HostDevice(fd));
 }
 
 #[cfg(test)]
@@ -74,11 +109,13 @@ mod tests {
 
     /// The bridge is process-global, so its tests run as one.
     #[tokio::test]
-    async fn an_accessory_waits_for_the_node_and_later_ones_go_straight_to_it() {
-        // No node yet: held.
+    async fn descriptors_wait_for_the_node_and_later_ones_go_straight_to_it() {
+        // No node yet: held, whichever side of the cable they came from.
         let (early, _far_early) = UnixStream::pair().unwrap();
         attach_accessory(early.into());
-        assert_eq!(lock().pending.len(), 1);
+        let (device, _far_device) = UnixStream::pair().unwrap();
+        attach_host_device(device.into());
+        assert_eq!(lock().pending.len(), 2);
 
         // A `UsbAttach` comes only from a node: arm one and give the bridge
         // its handle, as `start_node` does.

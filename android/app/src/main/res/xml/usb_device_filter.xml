@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Devices Myco offers to handle when this phone holds a USB cable's host
+     role: another phone, recognised by an interface every Android phone
+     exposes in every USB mode, and a phone already switched into Android
+     Open Accessory mode. Matching is per interface as well as per device. -->
+<resources>
+    <!-- MTP / PTP (still image class) -->
+    <usb-device class="6" />
+    <!-- Android's vendor-class MTP interface (protocol 0; a serial adapter's
+         vendor interface uses protocol 255 and does not match) -->
+    <usb-device class="255" subclass="255" protocol="0" />
+    <!-- adb -->
+    <usb-device class="255" subclass="66" />
+    <!-- Android Open Accessory: Google 0x18d1, products 0x2d00-0x2d05 -->
+    <usb-device vendor-id="6353" product-id="11520" />
+    <usb-device vendor-id="6353" product-id="11521" />
+    <usb-device vendor-id="6353" product-id="11522" />
+    <usb-device vendor-id="6353" product-id="11523" />
+    <usb-device vendor-id="6353" product-id="11524" />
+    <usb-device vendor-id="6353" product-id="11525" />
+</resources>

@@ -24,9 +24,9 @@ import app.myco.core.NativeActions
  * while a cable connects this phone to another fips node, and starts the mesh
  * node when the cable is what started the app.
  *
- * The link itself lives in the core — the accessory descriptor was handed over
- * by [UsbAccessoryActivity] — so all this does is hold the process up and leave
- * when the accessory goes away. Like the radio services, it follows the mesh
+ * The link itself lives in the core — the descriptor was handed over by
+ * [UsbAccessoryActivity] or [UsbDeviceActivity] — so all this does is hold the
+ * process up and leave when the cable goes away. Like the radio services, it follows the mesh
  * master switch: with mesh off it starts no node, and a node is never bounced
  * to adopt the link.
  */
@@ -47,10 +47,9 @@ class UsbService : Service() {
             client.dispatch(NativeActions.startNode())
         }
 
-        // The accessory may already be gone by the time this runs.
-        val usb = getSystemService(Context.USB_SERVICE) as UsbManager
-        if (usb.accessoryList.isNullOrEmpty()) {
-            Log.i(TAG, "no accessory attached; stopping")
+        // The cable may already be out by the time this runs.
+        if (!cableIn()) {
+            Log.i(TAG, "no USB peer attached; stopping")
             stopSelf()
         }
         return START_NOT_STICKY
@@ -62,16 +61,28 @@ class UsbService : Service() {
         super.onDestroy()
     }
 
-    /** Leave when the cable is pulled; the core sees the link end on its own. */
+    /** Whether a USB peer is attached on either side of a cable: an accessory
+     *  (this phone is the accessory) or a device (this phone is host). */
+    private fun cableIn(): Boolean {
+        val usb = getSystemService(Context.USB_SERVICE) as UsbManager
+        return !usb.accessoryList.isNullOrEmpty() || usb.deviceList.isNotEmpty()
+    }
+
+    /** Leave when the cable is pulled; the core sees the link end on its own.
+     *  A host-role switch detaches the device it switched, so a detach only
+     *  stops the service once nothing is attached at all. */
     private fun watchDetach() {
         if (detachWatch != null) return
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
-                Log.i(TAG, "USB accessory detached")
+                if (cableIn()) return
+                Log.i(TAG, "USB peer detached")
                 stopSelf()
             }
         }
-        val filter = IntentFilter(UsbManager.ACTION_USB_ACCESSORY_DETACHED)
+        val filter = IntentFilter(UsbManager.ACTION_USB_ACCESSORY_DETACHED).apply {
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
