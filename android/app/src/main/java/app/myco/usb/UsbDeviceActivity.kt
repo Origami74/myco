@@ -47,6 +47,10 @@ class UsbDeviceActivity : Activity() {
          *  The connection itself is closed again: the duplicate stays valid,
          *  and the core claims what it needs through it. */
         fun attach(context: Context, device: UsbDevice): Boolean {
+            if (!UsbHandoff.claim(device)) {
+                Log.i(TAG, "${device.deviceName} already handed to the core")
+                return false
+            }
             val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
             if (!usb.hasPermission(device)) {
                 Log.w(TAG, "no permission for ${device.deviceName}")

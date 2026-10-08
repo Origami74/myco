@@ -114,6 +114,9 @@ class BleService : Service() {
     private fun startBle() {
         if (radio != null) return
         startForegroundCompat()
+        // The mesh can run with no activity ever opened (a boot, a restart);
+        // keep the USB host watcher up for that process too.
+        app.myco.usb.UsbHostWatcher.ensureStarted(this)
 
         val client = MycoCore.client(this)
         val r = BleRadio(this)
