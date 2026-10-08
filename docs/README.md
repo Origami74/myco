@@ -133,7 +133,7 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 | [wifi-aware-interop.md](./design/fips/wifi-aware-interop.md) | Wi-Fi Aware as a bulk lane: Kotlin raises the data path, fips's UDP transport dials it. |
 | [ap-lane.md](./design/fips/ap-lane.md) | The LAN lane: same-network peers over ordinary UDP, found by mDNS. |
 | [public-mesh-nodes.md](./design/fips/public-mesh-nodes.md) | The internet lane: public fips nodes found on Nostr, join.fips.network's recommended first, opt-in. |
-| [usb-transport.md](./design/fips/usb-transport.md) | Proposed, not started: USB/AOA for seeding large sites. |
+| [usb-transport.md](./design/fips/usb-transport.md) | The USB lane: Android Open Accessory between a phone and a desktop or two phones. |
 
 #### Shared assets
 
@@ -159,6 +159,7 @@ and the `VpnService`. Start with [concepts.md](./design/core/concepts.md), then
 | [run-two-device-demo.md](./how-to/run-two-device-demo.md) | Two phones, airplane mode: pair, share an app, browse it offline. |
 | [publish.md](./how-to/publish.md) | Release to GitHub Releases and Zapstore. |
 | [exit-node-demo.md](./how-to/exit-node-demo.md) | Experimental: a BLE-only phone browsing the internet through a mesh exit node. |
+| [connect-over-usb.md](./how-to/connect-over-usb.md) | Link a phone to a desktop running fips, or two phones, over a USB cable. |
 
 ---
 
