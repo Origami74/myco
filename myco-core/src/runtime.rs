@@ -698,14 +698,19 @@ impl AppRuntime {
                                     health.consecutive_failures = 0;
                                     health.last_error.clear();
                                 }
-                                let arrived = connected.iter().any(|n| !known.contains(n));
+                                let changed = connected.len() != known.len()
+                                    || connected.iter().any(|n| !known.contains(n));
                                 content.set_connected_peers(connected.clone());
                                 known = connected;
-                                // A peer that just connected is a reconnect
-                                // edge (`set_connected_peers` forgot its dial
-                                // backoff): dial the Circle now rather than at
-                                // the next keepwarm tick, up to 8 s away.
-                                if arrived {
+                                // Who is directly linked changed, so routes to
+                                // Circle members — most of them reached through
+                                // a direct peer, not as one — may have changed
+                                // too. Forget every dial backoff and dial the
+                                // Circle now, rather than at the next keepwarm
+                                // tick (8 s) behind a backoff armed while the
+                                // route was missing (up to 180 s).
+                                if changed {
+                                    content.peer_relays().reset_all_backoff();
                                     content.keepwarm_tick();
                                 }
                             }
