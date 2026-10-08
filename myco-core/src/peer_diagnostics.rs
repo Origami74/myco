@@ -34,10 +34,10 @@ fn peer_state_rank(state: &str) -> u8 {
 }
 
 /// Fixed D-04 display order for `also_reachable_via` — never snapshot order.
-const TRANSPORT_ORDER: [&str; 4] = ["ble", "aware", "udp", "tcp"];
+const TRANSPORT_ORDER: [&str; 5] = ["ble", "aware", "usb", "udp", "tcp"];
 
 /// Sort a set of transport names into the fixed D-04 order. Unknown transport
-/// names sort after the four known ones, stably by their original order.
+/// names sort after the known ones, stably by their original order.
 fn order_transports(mut transports: Vec<String>) -> Vec<String> {
     transports.sort_by_key(|t| {
         TRANSPORT_ORDER
@@ -1009,15 +1009,16 @@ mod tests {
     }
 
     #[test]
-    fn also_reachable_via_orders_ble_aware_udp_tcp_regardless_of_input_order() {
+    fn also_reachable_via_orders_ble_aware_usb_udp_tcp_regardless_of_input_order() {
         let shuffled = vec![
             "tcp".to_string(),
             "ble".to_string(),
             "udp".to_string(),
+            "usb".to_string(),
             "aware".to_string(),
         ];
         let ordered = order_transports(shuffled);
-        assert_eq!(ordered, vec!["ble", "aware", "udp", "tcp"]);
+        assert_eq!(ordered, vec!["ble", "aware", "usb", "udp", "tcp"]);
     }
 
     fn path(lane: &str, state: &str, active: bool) -> crate::control_client::PeerPath {

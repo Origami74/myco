@@ -494,7 +494,7 @@ private fun PeersOverviewCard(state: AppState, firstReadLanded: Boolean) {
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            "aware = Wi-Fi Aware · udp = LAN/AP lane · ble = Bluetooth",
+            "aware = Wi-Fi Aware · udp = LAN/AP lane · ble = Bluetooth · usb = USB cable",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp),
