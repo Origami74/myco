@@ -52,7 +52,10 @@ mod napplet;
 // the user. Spec: napplet/naps PR #33; Myco's choices in
 // `docs/design/napplet/NAP-UPLOAD.md`.
 mod blossom_upload;
+// NAP-RESOURCE's `https:`: a napplet's GET to the open web, with the
+// private-address check made where the name is dialled.
 mod outbox;
+mod resource_https;
 // The user key a napplet publishes as — separate from the mesh device key (D3).
 mod user_key;
 // The account behind the Settings header: login, logout, the guest profile.

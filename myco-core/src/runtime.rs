@@ -2227,6 +2227,10 @@ impl AppRuntime {
                     // `resource.keep` writes here: the configured Blossom.
                     kept_blobs: content.blobs(),
                     fetcher: Arc::new(crate::napplet::BlossomFetcher::new(content.clone())),
+                    // NAP-RESOURCE's `https:`: the open web, under offline-only
+                    // and the private-address check at the dial.
+                    https: Arc::new(crate::resource_https::NappletHttps::new(content.clone())),
+                    https_memory: Arc::default(),
                     // NAP-INTENT's catalog: the Library, and the user's
                     // defaults.
                     intents: Arc::new(crate::intent::LibraryIntents::new(

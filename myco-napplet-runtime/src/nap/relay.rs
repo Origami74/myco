@@ -1081,6 +1081,8 @@ mod tests {
             blobs: base.blobs.clone(),
             kept_blobs: base.kept_blobs.clone(),
             fetcher: base.fetcher.clone(),
+            https: base.https.clone(),
+            https_memory: base.https_memory.clone(),
             intents: base.intents.clone(),
             uploads: base.uploads.clone(),
         };
@@ -1118,6 +1120,8 @@ mod tests {
             blobs: base.blobs.clone(),
             kept_blobs: base.kept_blobs.clone(),
             fetcher: base.fetcher.clone(),
+            https: base.https.clone(),
+            https_memory: base.https_memory.clone(),
             intents: base.intents.clone(),
             uploads: base.uploads.clone(),
         };
@@ -1190,6 +1194,8 @@ mod tests {
             blobs: base.blobs.clone(),
             kept_blobs: base.kept_blobs.clone(),
             fetcher: base.fetcher.clone(),
+            https: base.https.clone(),
+            https_memory: base.https_memory.clone(),
             intents: base.intents.clone(),
             uploads: base.uploads.clone(),
         };

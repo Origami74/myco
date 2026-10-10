@@ -238,6 +238,8 @@ mod tests {
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
+            https: Arc::new(crate::seams::NoHttps),
+            https_memory: Arc::default(),
             intents: Arc::new(crate::nap::intent::NoIntents),
             uploads: Arc::new(crate::seams::NoUploads),
         };
@@ -332,6 +334,8 @@ mod tests {
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
+            https: Arc::new(crate::seams::NoHttps),
+            https_memory: Arc::default(),
             intents: Arc::new(crate::nap::intent::NoIntents),
             uploads: Arc::new(crate::seams::NoUploads),
         };
@@ -362,6 +366,8 @@ mod tests {
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
+            https: Arc::new(crate::seams::NoHttps),
+            https_memory: Arc::default(),
             intents: Arc::new(crate::nap::intent::NoIntents),
             uploads: Arc::new(crate::seams::NoUploads),
         };
@@ -429,6 +435,8 @@ mod tests {
             blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             kept_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             fetcher: Arc::new(crate::seams::NoFetcher),
+            https: Arc::new(crate::seams::NoHttps),
+            https_memory: Arc::default(),
             intents: Arc::new(crate::nap::intent::NoIntents),
             uploads: Arc::new(crate::seams::NoUploads),
         };

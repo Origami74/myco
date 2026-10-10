@@ -2049,6 +2049,8 @@ mod tests {
             lanes: test_outbox(),
             blobs: blobs.clone(),
             fetcher: Arc::new(myco_napplet_runtime::seams::NoFetcher),
+            https: Arc::new(myco_napplet_runtime::seams::NoHttps),
+            https_memory: Arc::default(),
             kept_blobs: blobs,
             intents: Arc::new(myco_napplet_runtime::NoIntents),
             uploads: Arc::new(myco_napplet_runtime::NoUploads),
