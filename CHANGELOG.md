@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Napplets can ask which files the phones around you hold (`mesh.blobs`).**
+  A napplet with the mesh grant can ask, for up to 64 files at a time, how
+  many reachable Circle phones have each one. Myco asks each phone's blob
+  store with a `HEAD` over the mesh — never the internet, never downloading
+  the file — a few at a time, and remembers the answers for a minute. The
+  App Store uses it so "Around you" lists only apps a nearby phone can
+  actually serve.
+
 ### Fixed
 
 - **Napplet posts reach all your outbox relays.** A note a napplet posted

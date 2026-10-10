@@ -29,6 +29,7 @@ This interface is for napplets whose data is local by nature — a doorbell, a r
 | `info` | none | `MeshInfo` | `mesh.info` / `mesh.info.result` |
 | `publish` | `template` (`EventTemplate`), optional `options` (`MeshPublishOptions`) | `MeshPublishResult` | `mesh.publish` / `mesh.publish.result` |
 | `subscribe` | `filters` (`NostrFilter` or list), optional `options` (`MeshSubscribeOptions`) | `MeshSubscription` handle | `mesh.subscribe` plus push messages |
+| `blobs` | `hashes` (list of sha256 hex, at most 64) | `MeshBlobsResult` | `mesh.blobs` / `mesh.blobs.result` |
 
 ### Schemas
 
@@ -78,6 +79,13 @@ Primitive references:
 |-------|----------|------|-------|
 | `ttl` | no | integer | Hops the backlog request may travel beyond this device. `0` asks nobody. Omitted means the user's cap. |
 
+`MeshBlobsResult` fields:
+
+| Field | Required | Type | Notes |
+|-------|----------|------|-------|
+| `peers` | yes | integer | Mesh peers that were asked: everyone reachable right now. |
+| `blobs` | yes | object | Each asked hash (lowercase) → how many of those peers hold it. `0` when none do. |
+
 `MeshSubscription` members:
 
 | Member | Type | Required | Notes |
@@ -92,6 +100,8 @@ Primitive references:
 **`publish(template, options?)`** — Signs `template` as the user under NAP-RELAY's rules (the shell owns `pubkey`, `created_at`, `id` and `sig`; the napplet owns `kind`, `content` and `tags`), stores the event on the device's own relay, and floods it to mesh peers with `min(options.ttl, limits.publishTtl)` hops of budget. Each peer that receives it stores it, delivers it to its own live subscriptions, and forwards it with one hop less until the budget is spent. The result carries the budget that was actually used.
 
 **`subscribe(filters, options?)`** — Opens a live subscription. The shell registers the filters, answers with matching events already stored on this device, asks peers up to `min(options.ttl, limits.subscribeTtl)` hops out for theirs, and sends `mesh.eose`. `mesh.eose` marks the end of **this device's** backlog: peers' backlog streams in afterwards as `mesh.event`, as it arrives. Every later matching event — published here or carried in from a peer — is delivered the same way until the napplet closes the subscription or the shell does.
+
+**`blobs(hashes)`** — Asks the mesh peers in reach whether they hold each blob, and answers with a count per blob. It is for a napplet that wants to know what the room can serve — an app store showing only apps whose files a nearby phone has. It asks only: the shell sends each peer's blob store a `HEAD` for each hash and downloads nothing. It asks only the mesh: never the internet, never a public server. A peer that does not answer in time counts as not holding the blob.
 
 ## Wire Protocol
 
@@ -108,6 +118,8 @@ Primitive references:
 | `mesh.eose` | shell -> napplet | `subId`, `ttl` |
 | `mesh.close` | napplet -> shell | `subId` |
 | `mesh.closed` | shell -> napplet | `subId`, `reason?` |
+| `mesh.blobs` | napplet -> shell | `id`, `hashes` |
+| `mesh.blobs.result` | shell -> napplet | `id`, `peers`, `blobs`, `error?` |
 
 Key design notes:
 - Request/result pairs use `id` for correlation.
@@ -146,6 +158,12 @@ Key design notes:
 <- { "type": "mesh.info.result", "id": "i1", "online": true, "peers": 4, "limits": { "publishTtl": 3, "subscribeTtl": 2 } }
 ```
 
+**Who can serve two files:**
+```
+-> { "type": "mesh.blobs", "id": "b1", "hashes": ["b167…f553", "0000…0001"] }
+<- { "type": "mesh.blobs.result", "id": "b1", "peers": 3, "blobs": { "b167…f553": 2, "0000…0001": 0 } }
+```
+
 ### Error Handling
 
 `mesh.publish.result` carries `ok: false` and `error` when the template could not be signed or the event could not be stored. Per the registry's error model, every other result field is then undefined.
@@ -155,6 +173,8 @@ Key design notes:
 A `ttl` that is not a whole number from 0 to 255 is an error, not a zero: a napplet that asked for reach and silently got none would have no way to tell. A `ttl` above the cap is **not** an error; it is clamped and the effective value reported.
 
 `mesh.info.result` carries `error` only when the mesh cannot be queried at all; an offline mesh is `online: false`, not an error.
+
+`mesh.blobs.result` carries `error` when `hashes` is missing, holds something that is not a sha256 in hex, or holds more than 64. Too many is refused whole, not cut short: a napplet that got answers for the first 64 of 100 would read the rest as "nobody has it". An offline mesh is `peers: 0` with every count `0`, not an error.
 
 ## Shell Behavior
 
@@ -168,16 +188,19 @@ A `ttl` that is not a whole number from 0 to 255 is an error, not a zero: a napp
 - The shell MUST send `mesh.eose` once per subscription, after the local backlog and without waiting for peers.
 - The shell SHOULD deduplicate by event id so a copy arriving by a second path is delivered at most once per subscription; a napplet MUST still tolerate a duplicate.
 - The shell MAY keep separate caps for publish and subscribe. A flooded read costs more than a flooded write — every hop answers as well as forwards — so a lower subscribe cap is the expected default.
+- The shell MUST answer `mesh.blobs` from the mesh alone, with requests that fetch no body (Myco: BUD-01 `HEAD /<sha256>` to each peer's Blossom). It MUST NOT ask the internet or follow a peer's redirect off the mesh.
+- The shell MUST bound `mesh.blobs` itself, whatever the napplet's call rate. Myco: six requests at a time, 4 s each, 12 s per call; a peer that fails is skipped for the rest of the call; each (peer, blob) answer is remembered — a hit for 60 s, a miss for 20 s — so a repeat call inside that asks nobody.
 - The shell MAY enforce ACL checks on `mesh` capabilities, and MAY revoke the grant at any time; revocation takes effect on the next call and the next delivery.
 
 ## Security Considerations
 
 - **Amplification.** The hop budget is the only per-message cost control a napplet holds, and it is bounded by a cap the napplet cannot change. The shell's forwarding clamp for peers' events is a separate, shell-owned number; nothing in this interface reaches it.
 - **Acting as the user.** A `mesh` grant lets a napplet publish as the user to everyone nearby, repeatedly, with no per-event prompt. Runtimes SHOULD say so in words at grant time, as for `relay`.
-- **What the mesh reveals.** `mesh.info.peers` is a count. This interface exposes no peer identities, addresses, transports or signal data; a napplet learns that people are nearby, not who or where. A separate NAP would be needed for presence and is deliberately not this one.
+- **What the mesh reveals.** `mesh.info.peers` is a count, and so is each `mesh.blobs` answer. This interface exposes no peer identities, addresses, transports or signal data; a napplet learns that people are nearby, not who or where. A separate NAP would be needed for presence and is deliberately not this one.
 - **Untrusted filters and templates.** Filters and templates arrive from untrusted code. The shell parses them fully and refuses anything unreadable rather than guessing; a napplet that asked for something specific and got everything, or nothing, would have no way to tell.
+- **Asking is not free.** Every hash in `mesh.blobs` costs one request per peer, often over BLE. The cap of 64, the shell's own bounds and its memory of recent answers keep a napplet polling on a timer from turning the room's radios into its cache check.
 - **Loop safety** is the shell's, by event id, not the budget's: re-broadcasting a signed event is idempotent, so a shell forwards each id at most once and a flood terminates whatever budget it carried.
 
 ## Implementations
 
-- Myco (Android) — `myco-napplet-runtime/src/nap/mesh.rs` over the FIPS mesh; hop carriage per `docs/design/core/event-gossip.md`.
+- Myco (Android) — `myco-napplet-runtime/src/nap/mesh.rs` over the FIPS mesh; hop carriage per `docs/design/core/event-gossip.md`. `mesh.blobs`: `myco-core/src/mesh_blobs.rs`.

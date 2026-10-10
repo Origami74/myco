@@ -1520,6 +1520,9 @@ pub struct NappletMeshSink {
     content: Arc<crate::content::Content>,
     limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
     node_live: Arc<std::sync::atomic::AtomicBool>,
+    /// `mesh.blobs`, with its memory of what each peer holds — shared by
+    /// every napplet window, as the peers are.
+    blobs: crate::mesh_blobs::MeshBlobs,
 }
 
 impl NappletMeshSink {
@@ -1529,11 +1532,15 @@ impl NappletMeshSink {
         limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
         node_live: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
+        let blobs = crate::mesh_blobs::MeshBlobs::new(Arc::new(crate::mesh_blobs::HttpProbe::new(
+            content.clone(),
+        )));
         Self {
             hub,
             content,
             limits,
             node_live,
+            blobs,
         }
     }
 }
@@ -1625,6 +1632,18 @@ impl myco_napplet_runtime::seams::MeshSink for NappletMeshSink {
             tracing::debug!(ttl, fresh, "napplet mesh pull finished");
         });
         Ok(())
+    }
+
+    /// Over the mesh only, `HEAD` only; see [`crate::mesh_blobs`]. With the
+    /// node down there is nobody to ask, and the answer says so (`peers` 0).
+    async fn blob_holders(&self, hashes: &[String]) -> Option<myco_napplet_runtime::BlobReach> {
+        if !self.node_live.load(std::sync::atomic::Ordering::Relaxed) {
+            return Some(myco_napplet_runtime::BlobReach {
+                peers: 0,
+                holders: hashes.iter().map(|h| (h.clone(), 0)).collect(),
+            });
+        }
+        Some(self.blobs.ask(hashes).await)
     }
 }
 

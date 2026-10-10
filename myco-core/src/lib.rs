@@ -48,6 +48,9 @@ mod mesh_relay;
 // holds one session per open napplet window. See
 // `docs/design/napplet/napplet-runtime.md`.
 mod napplet;
+// NAP-MESH `mesh.blobs`: which blobs the Circle's Blossom stores hold, asked
+// with a bounded, remembered `HEAD` per peer over the mesh.
+mod mesh_blobs;
 // NAP-UPLOAD: a napplet's bytes onto the user's Blossom servers, signed as
 // the user. Spec: napplet/naps PR #33; Myco's choices in
 // `docs/design/napplet/NAP-UPLOAD.md`.

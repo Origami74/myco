@@ -885,6 +885,36 @@ pub trait MeshSink: Send + Sync {
     /// by the implementation, which is what delivers it to the napplet's live
     /// subscription — the same path a freshly published event takes.
     async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<()>;
+
+    /// How many reachable mesh peers hold each blob in `hashes` — the seam
+    /// behind `mesh.blobs`. `hashes` are already checked: lowercase sha256
+    /// hex, no duplicates, at most [`MAX_BLOB_HASHES`].
+    ///
+    /// Mesh only, and asking only: an implementation sends each peer's
+    /// Blossom a `HEAD` and nothing else. It never asks the internet or a
+    /// public server, and never downloads a body. It bounds the asking
+    /// itself (how many at once, how long each, a short memory per peer and
+    /// blob), because a napplet may call this on a timer.
+    ///
+    /// `None` means this shell cannot ask, and `mesh.blobs` says so. The
+    /// default.
+    async fn blob_holders(&self, _hashes: &[String]) -> Option<BlobReach> {
+        None
+    }
+}
+
+/// The most blobs one `mesh.blobs` call may ask about. Every hash costs one
+/// `HEAD` per peer, over BLE as often as not.
+pub const MAX_BLOB_HASHES: usize = 64;
+
+/// What [`MeshSink::blob_holders`] reports.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BlobReach {
+    /// The mesh peers that were asked: every reachable Circle member.
+    pub peers: usize,
+    /// For each asked hash, how many of those peers hold it. A peer that did
+    /// not answer in time counts as not holding it.
+    pub holders: std::collections::BTreeMap<String, usize>,
 }
 
 /// What [`MeshSink::reach`] reports.
