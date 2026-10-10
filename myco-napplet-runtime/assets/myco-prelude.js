@@ -253,6 +253,14 @@ var MycoPrelude = (function () {
       }, SIGNING_TIMEOUT_MS);
     }
 
+    // How many reachable peers hold each blob: `{ peers, blobs: { <sha256>: n } }`.
+    // Rejects with the shell's reason (too many hashes, not granted).
+    function blobs(hashes) {
+      return request({ type: "mesh.blobs", hashes: Array.isArray(hashes) ? hashes.slice() : [] }, function (msg) {
+        return { peers: msg.peers | 0, blobs: msg.blobs || {} };
+      });
+    }
+
     function subscribe(filters, options) {
       var subId = crypto.randomUUID();
       var handlers = { event: new Set(), eose: new Set(), closed: new Set() };
@@ -297,7 +305,7 @@ var MycoPrelude = (function () {
     }
 
     Object.defineProperty(napplet, "mesh", {
-      value: Object.freeze({ info: info, publish: publish, subscribe: subscribe }),
+      value: Object.freeze({ info: info, publish: publish, subscribe: subscribe, blobs: blobs }),
       enumerable: true, configurable: false, writable: false
     });
   }

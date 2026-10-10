@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again after every redirect and on the address actually dialled. SVG is
   refused, as for Blossom. The server you load from sees your IP address
   and which link was opened. Nothing is fetched with offline-only on.
+- **Napplets can ask which files the phones around you hold (`mesh.blobs`).**
+  A napplet with the mesh grant can ask, for up to 64 files at a time, how
+  many reachable Circle phones have each one. Myco asks each phone's blob
+  store with a `HEAD` over the mesh — never the internet, never downloading
+  the file — a few at a time, and remembers the answers for a minute. The
+  App Store uses it so "Around you" lists only apps a nearby phone can
+  actually serve.
 
 ### Fixed
 

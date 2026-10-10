@@ -167,7 +167,13 @@ mod tests {
         assert!(SUPPLEMENT_IIFE.contains("installShell("));
         assert!(SUPPLEMENT_IIFE.contains("installMesh("));
         assert!(SUPPLEMENT_IIFE.contains(r#"domains.has("mesh")"#));
-        for wire in ["mesh.info", "mesh.publish", "mesh.subscribe", "mesh.close"] {
+        for wire in [
+            "mesh.info",
+            "mesh.publish",
+            "mesh.subscribe",
+            "mesh.close",
+            "mesh.blobs",
+        ] {
             assert!(
                 SUPPLEMENT_IIFE.contains(&format!(r#"type: "{wire}""#)),
                 "the supplement never sends {wire}"
