@@ -23,10 +23,19 @@
 //! in seconds, not milliseconds, and a napplet's other calls must not queue
 //! behind that. The mesh is asynchronous; the wire says so rather than hiding
 //! it behind a long wait.
+//!
+//! ## Why `blobs` answers with counts
+//!
+//! `mesh.blobs` tells a napplet whether the phones around it can serve a
+//! file — an app store showing only apps that would actually load here. It
+//! answers "how many peers hold it", never which ones: `mesh.info` exposes no
+//! peer identity, and this does not start. It only asks (a `HEAD` per peer),
+//! only over the mesh, and the asking is bounded by the shell, not by how
+//! often the napplet calls.
 
 use crate::dispatch::NapContext;
 use crate::nap::relay::{event_json, filters_from, signed_or_template};
-use crate::seams::Envelope;
+use crate::seams::{Envelope, MAX_BLOB_HASHES};
 use crate::session::Session;
 
 /// Handle an inbound `mesh.*` message.
@@ -35,6 +44,7 @@ pub async fn handle(ctx: &NapContext, session: &mut Session, message: &Envelope)
         "info" => vec![info(ctx, message).await],
         "publish" => vec![publish(ctx, session, message).await],
         "subscribe" => subscribe(ctx, session, message).await,
+        "blobs" => vec![blobs(ctx, message).await],
         "close" => {
             if let Some(sub_id) = message.field("subId").and_then(|v| v.as_str()) {
                 session.unsubscribe_in("mesh", sub_id);
@@ -153,6 +163,54 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
     }
 
     out
+}
+
+/// `mesh.blobs` — how many reachable mesh peers hold each named blob.
+///
+/// The hashes are checked here, before anything is asked: each a sha256 in
+/// hex (read case-blind, answered lowercase), at most [`MAX_BLOB_HASHES`] of
+/// them. Too many is refused rather than cut short — a napplet that silently
+/// got answers for the first 64 of 100 would read the rest as "nobody has
+/// it".
+async fn blobs(ctx: &NapContext, message: &Envelope) -> Envelope {
+    let hashes = match hashes_from(message) {
+        Ok(hashes) => hashes,
+        Err(e) => return message.to_error(e),
+    };
+    let Some(reach) = ctx.mesh.blob_holders(&hashes).await else {
+        return message.to_error("this shell cannot ask the mesh for blobs");
+    };
+    let mut blobs = serde_json::Map::new();
+    for hash in &hashes {
+        let held = reach.holders.get(hash).copied().unwrap_or(0);
+        blobs.insert(hash.clone(), held.into());
+    }
+    message
+        .to_result()
+        .with_field("peers", reach.peers)
+        .with_field("blobs", serde_json::Value::Object(blobs))
+}
+
+/// The `hashes` field: a list of sha256 hex strings, deduplicated in order.
+fn hashes_from(message: &Envelope) -> Result<Vec<String>, String> {
+    let Some(serde_json::Value::Array(items)) = message.field("hashes") else {
+        return Err("blobs needs a list of sha256 hashes".to_string());
+    };
+    if items.len() > MAX_BLOB_HASHES {
+        return Err(format!("at most {MAX_BLOB_HASHES} hashes per call"));
+    }
+    let mut hashes: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        let hash = item
+            .as_str()
+            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| format!("not a sha256 hash: {item}"))?
+            .to_ascii_lowercase();
+        if !hashes.contains(&hash) {
+            hashes.push(hash);
+        }
+    }
+    Ok(hashes)
 }
 
 /// The `mesh.event` frames a session should receive for an arriving event.
@@ -612,5 +670,149 @@ mod tests {
         assert_eq!(r["type"], "mesh.publish.result");
         assert!(r["error"].as_str().unwrap().contains("not granted"));
         assert!(mesh.published().is_empty());
+    }
+
+    const HELD: &str = "b1674191a88ec5cdd733e4240a81803105dc412d6c6708d53ab94fc248f4f553";
+    const MISSING: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    fn blobs_call(hashes: serde_json::Value) -> Envelope {
+        Envelope::new("mesh.blobs")
+            .with_id("b1")
+            .with_field("hashes", hashes)
+    }
+
+    fn blobs_ctx() -> (NapContext, std::sync::Arc<crate::testing::MemMesh>) {
+        let (ctx, mesh, _signer) = test_context_with_mesh(MeshLimits {
+            publish_ttl: 3,
+            subscribe_ttl: 2,
+        });
+        mesh.set_blob_holders(3, &[(HELD, 2)]);
+        (ctx, mesh)
+    }
+
+    /// A blob two of three peers hold is counted, one nobody holds is zero,
+    /// and the hash is answered as asked — lowercase, under its own key.
+    #[tokio::test]
+    async fn blobs_counts_the_peers_that_hold_each_hash() {
+        let (ctx, mesh) = blobs_ctx();
+        let mut s = granted();
+        let out = call(
+            &ctx,
+            &mut s,
+            blobs_call(json!([HELD.to_uppercase(), MISSING, HELD])),
+        )
+        .await;
+        assert_eq!(
+            serde_json::to_value(&out[0]).unwrap(),
+            json!({
+                "type": "mesh.blobs.result",
+                "id": "b1",
+                "peers": 3,
+                "blobs": {HELD: 2, MISSING: 0},
+            })
+        );
+        // Deduplicated before the seam: each blob is asked about once.
+        assert_eq!(
+            mesh.blob_asks(),
+            vec![vec![HELD.to_string(), MISSING.to_string()]]
+        );
+    }
+
+    /// A miss is a zero, not an error and not a missing key.
+    #[tokio::test]
+    async fn blobs_reports_a_miss_as_zero() {
+        let (ctx, _mesh) = blobs_ctx();
+        let mut s = granted();
+        let out = call(&ctx, &mut s, blobs_call(json!([MISSING]))).await;
+        let r = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(r["blobs"], json!({MISSING: 0}));
+        assert!(r.get("error").is_none());
+    }
+
+    /// More than the cap is refused whole, before any peer is asked.
+    #[tokio::test]
+    async fn blobs_refuses_more_than_the_cap() {
+        let (ctx, mesh) = blobs_ctx();
+        let mut s = granted();
+        let many: Vec<String> = (0..=MAX_BLOB_HASHES).map(|i| format!("{i:064x}")).collect();
+        let out = call(&ctx, &mut s, blobs_call(json!(many))).await;
+        let r = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(r["type"], "mesh.blobs.result");
+        assert!(r["error"].as_str().unwrap().contains("at most 64"));
+
+        let at_cap: Vec<String> = (0..MAX_BLOB_HASHES).map(|i| format!("{i:064x}")).collect();
+        let out = call(&ctx, &mut s, blobs_call(json!(at_cap))).await;
+        let r = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(r["blobs"].as_object().unwrap().len(), MAX_BLOB_HASHES);
+        assert_eq!(
+            mesh.blob_asks().len(),
+            1,
+            "the refused call reached the seam"
+        );
+    }
+
+    /// Anything that is not a list of sha256 hashes is refused, not guessed at.
+    #[tokio::test]
+    async fn blobs_refuses_what_is_not_a_hash() {
+        let (ctx, mesh) = blobs_ctx();
+        let mut s = granted();
+        for bad in [
+            json!(HELD),
+            json!(["abc"]),
+            json!([format!("{}zz", &HELD[..62])]),
+            json!([7]),
+            json!(["https://blossom.example/".to_string() + HELD]),
+        ] {
+            let out = call(&ctx, &mut s, blobs_call(bad.clone())).await;
+            let r = serde_json::to_value(&out[0]).unwrap();
+            assert!(r["error"].is_string(), "accepted {bad}");
+        }
+        let out = call(&ctx, &mut s, Envelope::new("mesh.blobs").with_id("b1")).await;
+        assert!(serde_json::to_value(&out[0]).unwrap()["error"].is_string());
+        assert!(mesh.blob_asks().is_empty());
+    }
+
+    /// Same grant as every other NAP-MESH call: without `mesh`, refused, and
+    /// nobody is asked.
+    #[tokio::test]
+    async fn blobs_needs_the_mesh_grant() {
+        let (ctx, mesh) = blobs_ctx();
+        let mut s = Session::new(NappletIdentity::new("store", "aggregate"), ["relay"]);
+        s.on_ready();
+        let out = call(&ctx, &mut s, blobs_call(json!([HELD]))).await;
+        let r = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(r["type"], "mesh.blobs.result");
+        assert!(r["error"].as_str().unwrap().contains("not granted"));
+        assert!(mesh.blob_asks().is_empty());
+    }
+
+    /// Asking who holds a blob is not fetching it: the blob fetcher (the path
+    /// that reaches the internet) is never asked, and nothing is stored.
+    #[tokio::test]
+    async fn blobs_fetches_nothing() {
+        let (mut ctx, _mesh) = blobs_ctx();
+        let fetcher = std::sync::Arc::new(crate::testing::MemFetcher::default());
+        fetcher.hold(b"index.html bytes");
+        ctx.fetcher = fetcher.clone();
+        let mut s = granted();
+        let out = call(&ctx, &mut s, blobs_call(json!([HELD, MISSING]))).await;
+        assert!(serde_json::to_value(&out[0]).unwrap()["error"].is_null());
+        assert!(fetcher.asked().is_empty(), "mesh.blobs fetched a body");
+        assert!(!ctx.blobs.has(HELD).await);
+        assert!(!ctx.blobs.has(MISSING).await);
+    }
+
+    /// A shell that cannot ask says so, rather than answering "nobody".
+    #[tokio::test]
+    async fn blobs_without_a_prober_is_an_error_not_zero() {
+        let (ctx, _mesh, _signer) = test_context_with_mesh(MeshLimits {
+            publish_ttl: 3,
+            subscribe_ttl: 2,
+        });
+        let mut s = granted();
+        let out = call(&ctx, &mut s, blobs_call(json!([HELD]))).await;
+        let r = serde_json::to_value(&out[0]).unwrap();
+        assert!(r["error"].is_string());
+        assert!(r.get("blobs").is_none());
     }
 }

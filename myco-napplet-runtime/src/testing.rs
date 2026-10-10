@@ -772,7 +772,9 @@ impl crate::seams::LaneTransport for OutboxFixture {
 
 /// A [`MeshSink`](crate::seams::MeshSink) with no mesh behind it: stores a
 /// publish locally and records the hop budget it came with, records every
-/// pull, and reports whatever reach a test sets.
+/// pull, and reports whatever reach a test sets. It answers `mesh.blobs` from
+/// a table a test sets with [`MemMesh::set_blob_holders`], and not at all
+/// until then.
 pub struct MemMesh {
     store: std::sync::Arc<dyn crate::seams::RelayBackend>,
     limits: std::sync::Mutex<crate::seams::MeshLimits>,
@@ -780,6 +782,8 @@ pub struct MemMesh {
     published: std::sync::Mutex<Vec<(Event, u8)>>,
     rebroadcast: std::sync::Mutex<Vec<(Event, u8)>>,
     pulled: std::sync::Mutex<Vec<(Vec<serde_json::Value>, u8)>>,
+    blob_holders: std::sync::Mutex<Option<crate::seams::BlobReach>>,
+    blob_asks: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
 impl MemMesh {
@@ -794,7 +798,23 @@ impl MemMesh {
             published: std::sync::Mutex::new(Vec::new()),
             rebroadcast: std::sync::Mutex::new(Vec::new()),
             pulled: std::sync::Mutex::new(Vec::new()),
+            blob_holders: std::sync::Mutex::new(None),
+            blob_asks: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Answer `mesh.blobs` as if `peers` peers were asked and `held` lists
+    /// how many of them hold each hash; any other hash is held by none.
+    pub fn set_blob_holders(&self, peers: usize, held: &[(&str, usize)]) {
+        *self.blob_holders.lock().unwrap() = Some(crate::seams::BlobReach {
+            peers,
+            holders: held.iter().map(|(h, n)| (h.to_string(), *n)).collect(),
+        });
+    }
+
+    /// Every `mesh.blobs` ask that reached the seam, with its hashes.
+    pub fn blob_asks(&self) -> Vec<Vec<String>> {
+        self.blob_asks.lock().unwrap().clone()
     }
 
     /// Every event passed on as it is ([`MeshSink::rebroadcast`]), with its
@@ -851,6 +871,18 @@ impl crate::seams::MeshSink for MemMesh {
     async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<()> {
         self.pulled.lock().unwrap().push((filters, ttl));
         Ok(())
+    }
+
+    async fn blob_holders(&self, hashes: &[String]) -> Option<crate::seams::BlobReach> {
+        let table = self.blob_holders.lock().unwrap().clone()?;
+        self.blob_asks.lock().unwrap().push(hashes.to_vec());
+        Some(crate::seams::BlobReach {
+            peers: table.peers,
+            holders: hashes
+                .iter()
+                .map(|h| (h.clone(), table.holders.get(h).copied().unwrap_or(0)))
+                .collect(),
+        })
     }
 }
 

@@ -851,8 +851,8 @@ backlog pull default 2, the mesh's own `EVENT_TTL` / `MAX_REQ_TTL`). `mesh.info`
 only a peer *count*; presence, transports and circle membership stay behind the seam and
 would be a separate NAP.
 
-Runtime: `MeshSink` seam (`limits` / `reach` / `publish` / `pull`), `nap/mesh.rs`,
-domain-scoped session subscriptions. Core: `NappletMeshSink` over the relay hub and the
+Runtime: `MeshSink` seam (`limits` / `reach` / `publish` / `pull` / `blob_holders`),
+`nap/mesh.rs`, domain-scoped session subscriptions. Core: `NappletMeshSink` over the relay hub and the
 Circle pool; `RelayHub::accept_local_with_ttl` and `accept_pulled`. Web projection: the
 vendored `@napplet/shim` filters unknown domains, so `assets/myco-prelude.js` installs
 `window.napplet.mesh` — and `window.napplet.shell`, which the vendored build also lacks —
