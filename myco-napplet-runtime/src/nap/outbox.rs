@@ -55,10 +55,15 @@ const PUBLISH_TIMEOUT: Duration = Duration::from_secs(8);
 /// timeout. Two, not one, so a success means the event is findable from more
 /// than a single server — or, for a mesh lane, handed to more than one
 /// Circle member's connection.
-///
-/// Not for `toInboxes`: NAP-OUTBOX makes an inbox a required target whose
-/// failure must be reported, so a publish naming inboxes waits for every lane.
 const PUBLISH_QUORUM: usize = 2;
+/// How long the answer waits for the `toInboxes` relays. NAP-OUTBOX makes
+/// each a required target whose failure must be reported, so the answer
+/// waits for every one of them — but only this long: one that has not
+/// answered by then is reported as not accepted, and delivery to it carries
+/// on behind the answer. A publish naming a dozen people's inboxes used to
+/// hold "Published" for the full [`PUBLISH_TIMEOUT`] on the slowest of them,
+/// and for every one of the user's own outbox relays too.
+const INBOX_WAIT: Duration = Duration::from_secs(3);
 /// Bounds on a napplet-supplied `timeoutMs`: below the floor a relay across
 /// the mesh cannot answer, above the ceiling the session loop is hostage.
 const MIN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -325,14 +330,18 @@ async fn publish(
         let Ok(user) = ctx.signer.public_key().await else {
             return failed(message, "there is no user key on this device yet");
         };
-        // The user's own outbox is where their events are read from.
-        lanes.extend(ctx.outbox.plan(Direction::Read, &[user]).await.lanes);
+        // The user's own outbox is where their events are read from: every
+        // write relay they list, not the two a read would settle for.
+        lanes.extend(ctx.outbox.plan(Direction::Publish, &[user]).await.lanes);
     }
+    // The recipients' inbox relays: required targets, each reported.
+    let mut required: Vec<RelayLane> = Vec::new();
     if !inboxes.is_empty() {
         let plan = ctx.outbox.plan(Direction::Write, &inboxes).await;
         if !plan.missing_authors.is_empty() {
             return failed(message, "relay list unavailable");
         }
+        required.extend(plan.lanes.iter().filter(|l| l.url().is_some()).cloned());
         lanes.extend(plan.lanes);
     }
     lanes.extend(explicit);
@@ -343,13 +352,7 @@ async fn publish(
         Err(e) => return failed(message, e),
     };
 
-    // Required targets must be reported, so they are waited for.
-    let quorum = if inboxes.is_empty() {
-        PUBLISH_QUORUM
-    } else {
-        usize::MAX
-    };
-    let (stored, relays) = publish_to_quorum(ctx, lanes, &signed, quorum).await;
+    let (stored, relays) = publish_to_quorum(ctx, lanes, &signed, &required).await;
     if !stored {
         return failed(message, "could not store the event");
     }
@@ -372,11 +375,18 @@ async fn publish_to_quorum(
     ctx: &NapContext,
     lanes: Vec<RelayLane>,
     event: &Event,
-    quorum: usize,
+    required: &[RelayLane],
 ) -> (bool, serde_json::Map<String, serde_json::Value>) {
     let outcomes = ctx
         .lanes
-        .publish_quorum(&lanes, event, PUBLISH_TIMEOUT, quorum)
+        .publish_quorum(
+            &lanes,
+            event,
+            PUBLISH_TIMEOUT,
+            PUBLISH_QUORUM,
+            required,
+            INBOX_WAIT,
+        )
         .await;
     let mut relays = serde_json::Map::new();
     let mut stored = false;
@@ -903,7 +913,7 @@ mod tests {
         let (ctx, fx, signer) = test_context_with_outbox();
         fx.set_plan(
             signer.public_key(),
-            Direction::Read,
+            Direction::Publish,
             &["wss://mine.example"],
             PlanSource::Nip65,
         );
@@ -991,7 +1001,7 @@ mod tests {
         let (ctx, fx, signer) = test_context_with_outbox();
         fx.set_plan(
             signer.public_key(),
-            Direction::Read,
+            Direction::Publish,
             &["wss://mine.example"],
             PlanSource::Nip65,
         );
@@ -1028,7 +1038,7 @@ mod tests {
         let (ctx, fx, signer) = test_context_with_outbox();
         fx.set_plan(
             signer.public_key(),
-            Direction::Read,
+            Direction::Publish,
             &["wss://mine.example"],
             PlanSource::Nip65,
         );

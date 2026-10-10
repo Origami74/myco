@@ -162,6 +162,11 @@ pub enum Direction {
     Read,
     /// Where events *for* an author should be sent (their NIP-65 read relays).
     Write,
+    /// Where an author's own events are sent when they publish: their NIP-65
+    /// write relays, like [`Direction::Read`], but every one of them. A read
+    /// may settle for two relays per author; a publish that skipped the rest
+    /// would leave the event missing from relays readers are told to use.
+    Publish,
 }
 
 /// Where a relay plan came from — NAP-OUTBOX's `OutboxRelayPlan.source`.
@@ -313,18 +318,24 @@ pub trait LaneTransport: Send + Sync {
     ) -> Vec<(RelayLane, bool)>;
 
     /// As [`LaneTransport::publish`], but may answer early: once the local
-    /// lane has answered and `quorum` of the other lanes (or all of them, if
-    /// there are fewer) have accepted. Lanes still going keep going and are
-    /// left out of the answer. The default waits for every lane — right for
-    /// a transport that cannot leave work running.
+    /// lane has answered, `quorum` of the other lanes (or all of them, if
+    /// there are fewer) have accepted, and every lane in `required` has
+    /// answered either way. Lanes still going keep going and are left out of
+    /// the answer — except a `required` lane, which is never left out: one
+    /// that has not answered `required_wait` after the start is reported as
+    /// not accepted, so a required target's failure always reaches the
+    /// caller. The default waits for every lane — right for a transport that
+    /// cannot leave work running.
     async fn publish_quorum(
         &self,
         lanes: &[RelayLane],
         event: &Event,
         timeout: std::time::Duration,
         quorum: usize,
+        required: &[RelayLane],
+        required_wait: std::time::Duration,
     ) -> Vec<(RelayLane, bool)> {
-        let _ = quorum;
+        let _ = (quorum, required, required_wait);
         self.publish(lanes, event, timeout).await
     }
 

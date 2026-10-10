@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Napplet posts reach all your outbox relays.** A note a napplet posted
+  through NAP-OUTBOX went to only two of your NIP-65 write relays, picked
+  the way a read picks them; the rest never got it, so people reading from
+  those relays didn't see it. It now goes to every write relay you list.
+- **Posting waits less for everyone's inbox.** A napplet post that tagged
+  people waited for every relay it went to — up to 8 seconds — before
+  saying it was out. It now waits for this phone, two relays and the
+  people's inbox relays, and for an inbox relay at most 3 seconds: one that
+  is slower is reported as not reached yet, and delivery to it and to the
+  rest carries on in the background.
+
 ## [0.10.0] - 2026-10-05
 
 ### Added

@@ -1750,8 +1750,18 @@ impl LaneTransport for OutboxService {
         event: &Event,
         timeout: Duration,
         quorum: usize,
+        required: &[RelayLane],
+        required_wait: Duration,
     ) -> Vec<(RelayLane, bool)> {
         let remote_total = lanes.iter().filter(|l| l.url().is_some()).count();
+        // Required lanes that are actually being published to and have not
+        // answered yet.
+        let mut pending: Vec<RelayLane> = required
+            .iter()
+            .filter(|r| r.url().is_some() && lanes.contains(r))
+            .cloned()
+            .collect();
+        pending.dedup();
         let enough = quorum.min(remote_total);
         let has_local = lanes.iter().any(|l| l.url().is_none());
 
@@ -1788,24 +1798,42 @@ impl LaneTransport for OutboxService {
 
         let mut out = Vec::new();
         let (mut local_done, mut accepted, mut remote_done) = (!has_local, 0, 0);
-        while let Some((lane, ok)) = rx.recv().await {
+        let required_deadline = tokio::time::sleep(required_wait);
+        tokio::pin!(required_deadline);
+        let mut required_expired = false;
+        loop {
+            let quorum_in = local_done && (accepted >= enough || remote_done == remote_total);
+            if quorum_in && (pending.is_empty() || required_expired) {
+                break;
+            }
+            let (lane, ok) = tokio::select! {
+                got = rx.recv() => match got {
+                    Some(got) => got,
+                    None => break,
+                },
+                () = &mut required_deadline, if !required_expired && !pending.is_empty() => {
+                    required_expired = true;
+                    continue;
+                }
+            };
+            pending.retain(|r| r != &lane);
             if lane.url().is_none() {
                 local_done = true;
                 if !ok {
                     // Not stored here: the publish has failed, whatever
                     // the relays say.
                     out.push((lane, ok));
-                    break;
+                    return out;
                 }
             } else {
                 remote_done += 1;
                 accepted += usize::from(ok);
             }
             out.push((lane, ok));
-            if local_done && (accepted >= enough || remote_done == remote_total) {
-                break;
-            }
         }
+        // A required target that has not answered is reported, not left out:
+        // as far as this answer knows, it does not have the event.
+        out.extend(pending.into_iter().map(|lane| (lane, false)));
         out
     }
 
@@ -1879,7 +1907,7 @@ pub(crate) fn relay_list_lanes(list: &Event, direction: Direction) -> Vec<RelayL
 /// before dialling it.
 pub(crate) fn relay_list_urls(list: &Event, direction: Direction) -> Vec<&str> {
     let wanted = match direction {
-        Direction::Read => "write",
+        Direction::Read | Direction::Publish => "write",
         Direction::Write => "read",
     };
     list.tags
@@ -2359,7 +2387,14 @@ mod tests {
 
         let started = std::time::Instant::now();
         let out = svc
-            .publish_quorum(&lanes, &event, Duration::from_secs(5), 2)
+            .publish_quorum(
+                &lanes,
+                &event,
+                Duration::from_secs(5),
+                2,
+                &[],
+                Duration::ZERO,
+            )
             .await;
         assert!(
             started.elapsed() < Duration::from_secs(3),
@@ -2420,7 +2455,14 @@ mod tests {
             },
         ];
         let out = svc
-            .publish_quorum(&lanes, &event, Duration::from_secs(5), 2)
+            .publish_quorum(
+                &lanes,
+                &event,
+                Duration::from_secs(5),
+                2,
+                &[],
+                Duration::ZERO,
+            )
             .await;
         assert!(out.contains(&(RelayLane::Local, true)));
         assert!(
@@ -2428,6 +2470,129 @@ mod tests {
             "answered before the only relay did: {out:?}"
         );
         assert_eq!(remote.count(), 1);
+    }
+
+    /// A required lane (a `toInboxes` relay) is waited for even when the
+    /// quorum is already in, and its answer is in the result.
+    #[tokio::test]
+    async fn a_quorum_publish_waits_for_a_required_relay() {
+        use myco_napplet_runtime::seams::LaneTransport;
+
+        let (a, url_a) = mock_relay().await;
+        let (b, url_b) = mock_relay().await;
+        // The inbox: answers, but only after the two others have.
+        let (inbox, inbox_target) = mock_relay().await;
+        let slow = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let slow_url = format!("ws://{}", slow.local_addr().unwrap());
+        let target = inbox_target.trim_start_matches("ws://").to_string();
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = slow.accept().await {
+                let target = target.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    if let Ok(mut outbound) = tokio::net::TcpStream::connect(target).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    }
+                });
+            }
+        });
+
+        let content = scratch_content("quorum-required");
+        let svc = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content,
+            "npub1me".to_string(),
+        )
+        .allowing_private_dials();
+        let event = EventBuilder::text_note("gg")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let inbox_lane = RelayLane::Internet {
+            url: slow_url.clone(),
+        };
+        let lanes = vec![
+            RelayLane::Local,
+            RelayLane::Internet { url: url_a },
+            RelayLane::Internet { url: url_b },
+            inbox_lane.clone(),
+        ];
+        let out = svc
+            .publish_quorum(
+                &lanes,
+                &event,
+                Duration::from_secs(5),
+                2,
+                std::slice::from_ref(&inbox_lane),
+                Duration::from_secs(4),
+            )
+            .await;
+        assert!(
+            out.contains(&(inbox_lane, true)),
+            "answered before the required relay did: {out:?}"
+        );
+        assert_eq!((a.count(), b.count(), inbox.count()), (1, 1, 1));
+    }
+
+    /// A required lane that never answers holds the answer only until
+    /// `required_wait`, and is then reported as not accepted rather than left
+    /// out: NAP-OUTBOX says a required target's failure must be reported.
+    #[tokio::test]
+    async fn a_silent_required_relay_is_reported_not_accepted() {
+        use myco_napplet_runtime::seams::LaneTransport;
+
+        let (_a, url_a) = mock_relay().await;
+        let (_b, url_b) = mock_relay().await;
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_url = format!("ws://{}", silent.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = silent.accept().await {
+                held.push(sock);
+            }
+        });
+
+        let content = scratch_content("quorum-required-silent");
+        let svc = OutboxService::new(
+            content.relay(),
+            Arc::new(Mutex::new(None)),
+            content,
+            "npub1me".to_string(),
+        )
+        .allowing_private_dials();
+        let event = EventBuilder::text_note("gg")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let inbox_lane = RelayLane::Internet { url: silent_url };
+        let lanes = vec![
+            RelayLane::Local,
+            RelayLane::Internet { url: url_a },
+            RelayLane::Internet { url: url_b },
+            inbox_lane.clone(),
+        ];
+        let started = std::time::Instant::now();
+        let out = svc
+            .publish_quorum(
+                &lanes,
+                &event,
+                Duration::from_secs(10),
+                2,
+                std::slice::from_ref(&inbox_lane),
+                Duration::from_millis(500),
+            )
+            .await;
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(450) && waited < Duration::from_secs(3),
+            "required_wait not honoured: {waited:?}"
+        );
+        assert!(out.contains(&(inbox_lane, false)), "{out:?}");
+        assert_eq!(
+            out.iter()
+                .filter(|(l, ok)| l.url().is_some() && *ok)
+                .count(),
+            2
+        );
     }
 
     /// The internet half of the pool: the event reaches a configured relay
@@ -2548,6 +2713,58 @@ mod tests {
             vec![RelayLane::Local],
             "offline only: nothing to fall back to"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Publishing goes to every write relay the user lists; a read of the same
+    /// author settles for two. Narrowing a publish the way a read is narrowed
+    /// left the user's own notes missing from most of their outbox relays.
+    #[tokio::test]
+    async fn a_publish_plan_keeps_every_write_relay() {
+        let dir = std::env::temp_dir().join(format!("myco-outbox-pub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let store = content.relay();
+        let svc = OutboxService::new(
+            store.clone(),
+            Arc::new(Mutex::new(None)),
+            content.clone(),
+            "npub1me".to_string(),
+        );
+
+        let me = Keys::generate();
+        let writes = [
+            "wss://one.example",
+            "wss://two.example",
+            "wss://three.example",
+            "wss://four.example",
+        ];
+        let mut tags: Vec<Tag> = writes
+            .iter()
+            .map(|u| Tag::parse(["r", u, "write"]).unwrap())
+            .collect();
+        tags.push(Tag::parse(["r", "wss://inbox-only.example", "read"]).unwrap());
+        let list = EventBuilder::new(Kind::RelayList, "")
+            .tags(tags)
+            .sign_with_keys(&me)
+            .unwrap();
+        store.publish(list).await.unwrap();
+
+        let read = svc.plan(Direction::Read, &[me.public_key()]).await;
+        assert_eq!(remote_lanes(read.lanes).len(), RELAYS_PER_AUTHOR);
+
+        let publish = svc.plan(Direction::Publish, &[me.public_key()]).await;
+        assert_eq!(publish.source, PlanSource::Nip65);
+        let mut urls: Vec<String> = publish
+            .lanes
+            .iter()
+            .filter_map(|l| l.url().map(str::to_string))
+            .collect();
+        urls.sort();
+        let mut want: Vec<String> = writes.iter().map(|u| u.to_string()).collect();
+        want.sort();
+        assert_eq!(urls, want, "every write relay, and no read-only one");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
