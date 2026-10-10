@@ -2229,8 +2229,9 @@ impl AppRuntime {
                     kept_blobs: content.blobs(),
                     fetcher: Arc::new(crate::napplet::BlossomFetcher::new(content.clone())),
                     // NAP-RESOURCE's `https:`: the open web, under offline-only
-                    // and the private-address check at the dial.
-                    https: Arc::new(crate::resource_https::NappletHttps::new(content.clone())),
+                    // and the private-address check at the dial. The account's
+                    // fetcher, so the device has one in-flight limit, not two.
+                    https: account.https(),
                     https_memory: Arc::default(),
                     // NAP-INTENT's catalog: the Library, and the user's
                     // defaults.

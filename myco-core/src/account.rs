@@ -128,6 +128,12 @@ impl Account {
         self.bridge.clone()
     }
 
+    /// The device's `https:` fetcher, for NAP-RESOURCE to share: one set of
+    /// in-flight slots and one single-flight map for the whole device.
+    pub fn https(&self) -> Arc<dyn myco_napplet_runtime::seams::HttpsFetcher> {
+        self.ctx.https.clone()
+    }
+
     pub fn view(&self) -> AccountView {
         self.lock().view.clone()
     }

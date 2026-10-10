@@ -70,7 +70,7 @@ type Flight = Shared<BoxFuture<'static, Result<Arc<Vec<u8>>, HttpsError>>>;
 pub struct NappletHttps {
     inner: Arc<Inner>,
     /// Fetches running now, by URL and cap.
-    flights: Mutex<HashMap<(String, usize), Flight>>,
+    flights: Arc<Mutex<HashMap<(String, usize), Flight>>>,
 }
 
 struct Inner {
@@ -118,7 +118,7 @@ impl NappletHttps {
                 slots: tokio::sync::Semaphore::new(MAX_IN_FLIGHT),
                 guard,
             }),
-            flights: Mutex::new(HashMap::new()),
+            flights: Arc::default(),
         }
     }
 
@@ -150,30 +150,38 @@ impl HttpsFetcher for NappletHttps {
         let key = (url.to_string(), max_bytes);
         let flight = {
             let mut flights = self.flights.lock().unwrap();
-            flights
-                .entry(key.clone())
-                .or_insert_with(|| {
-                    let inner = self.inner.clone();
-                    let url = url.to_string();
-                    async move { inner.fetch(url, max_bytes).await.map(Arc::new) }
-                        .boxed()
-                        .shared()
-                })
-                .clone()
-        };
-        let result = flight.clone().await;
-        // Whoever finishes first clears it — only if it is still this flight,
-        // not a newer one for the same URL.
-        {
-            let mut flights = self.flights.lock().unwrap();
-            if flights
-                .get(&key)
-                .is_some_and(|f| Shared::ptr_eq(f, &flight))
-            {
-                flights.remove(&key);
+            if let Some(flight) = flights.get(&key) {
+                flight.clone()
+            } else {
+                let inner = self.inner.clone();
+                let url = url.to_string();
+                let flight = async move { inner.fetch(url, max_bytes).await.map(Arc::new) }
+                    .boxed()
+                    .shared();
+                flights.insert(key.clone(), flight.clone());
+                // Driven by its own task, not by whoever asked: an asker
+                // dropped mid-fetch would otherwise leave the flight in the
+                // map unpolled, holding its slot with its timeout stopped.
+                // The task clears it when done — only if it is still this
+                // flight, not a newer one for the same URL.
+                let driver = flight.clone();
+                let flights = self.flights.clone();
+                tokio::spawn(async move {
+                    let _ = driver.clone().await;
+                    let mut flights = flights.lock().unwrap();
+                    if flights
+                        .get(&key)
+                        .is_some_and(|f| Shared::ptr_eq(f, &driver))
+                    {
+                        flights.remove(&key);
+                    }
+                });
+                flight
             }
-        }
-        result.map(|bytes| Arc::try_unwrap(bytes).unwrap_or_else(|shared| (*shared).clone()))
+        };
+        flight
+            .await
+            .map(|bytes| Arc::try_unwrap(bytes).unwrap_or_else(|shared| (*shared).clone()))
     }
 }
 
@@ -612,9 +620,53 @@ mod tests {
             1,
             "one URL was fetched more than once"
         );
-        assert!(
-            https.flights.lock().unwrap().is_empty(),
-            "a finished flight stayed"
+        settled(&https).await;
+    }
+
+    /// An asker dropped mid-fetch does not strand the flight: it still runs
+    /// to the end, gives its slot back and leaves the map.
+    #[tokio::test]
+    async fn a_dropped_asker_does_not_strand_its_flight() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let count = hits.clone();
+        let base = server(axum::Router::new().route(
+            "/slow",
+            axum::routing::get(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+                async {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    "slow"
+                }
+            }),
+        ))
+        .await;
+        let https = Arc::new(NappletHttps::for_test(open()));
+        let url = format!("{base}/slow");
+        let asker = {
+            let (https, url) = (https.clone(), url.clone());
+            tokio::spawn(async move { https.get(&url, 1 << 20).await })
+        };
+        while hits.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        asker.abort();
+        settled(&https).await;
+        assert_eq!(
+            https.inner.slots.available_permits(),
+            MAX_IN_FLIGHT,
+            "a dropped asker kept its slot"
         );
+        assert_eq!(https.get(&url, 1 << 20).await.unwrap(), b"slow");
+    }
+
+    /// Waits for the flights' own tasks to clear the map.
+    async fn settled(https: &NappletHttps) {
+        for _ in 0..200 {
+            if https.flights.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("a finished flight stayed");
     }
 }
