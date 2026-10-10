@@ -436,6 +436,7 @@ impl AppRuntime {
                     let content = content.clone();
                     Arc::new(move || content.is_offline_only())
                 },
+                https: Arc::new(crate::resource_https::NappletHttps::new(content.clone())),
                 // The defaults, plus the indexers, which are where other
                 // clients look up a profile and its relay lists.
                 relays: {
@@ -2227,6 +2228,11 @@ impl AppRuntime {
                     // `resource.keep` writes here: the configured Blossom.
                     kept_blobs: content.blobs(),
                     fetcher: Arc::new(crate::napplet::BlossomFetcher::new(content.clone())),
+                    // NAP-RESOURCE's `https:`: the open web, under offline-only
+                    // and the private-address check at the dial. The account's
+                    // fetcher, so the device has one in-flight limit, not two.
+                    https: account.https(),
+                    https_memory: Arc::default(),
                     // NAP-INTENT's catalog: the Library, and the user's
                     // defaults.
                     intents: Arc::new(crate::intent::LibraryIntents::new(

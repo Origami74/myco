@@ -65,9 +65,10 @@ pub use prelude::{
 pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
     is_mesh_relay_url, BlobFetcher, BlobHints, BlobStore, Direction, EarlyAnswer, Envelope,
-    EventSink, LaneTransport, MeshLimits, MeshReach, MeshSink, NapTransport, NoFetcher, NoUploads,
-    OutboxResolver, PlanSource, RelayBackend, RelayLane, RelayPlan, ScopeOwner, Signer,
-    StoreOnlySink, UploadBlob, UploadError, UploadErrorCode, UploadSink, Uploaded, WorkScope,
+    EventSink, HttpsError, HttpsErrorCode, HttpsFetcher, LaneTransport, MeshLimits, MeshReach,
+    MeshSink, NapTransport, NoFetcher, NoHttps, NoUploads, OutboxResolver, PlanSource,
+    RelayBackend, RelayLane, RelayPlan, ScopeOwner, Signer, StoreOnlySink, UploadBlob, UploadError,
+    UploadErrorCode, UploadSink, Uploaded, WorkScope,
 };
 pub use session::{
     Appearance, NappletIdentity, Session, Streamer, SubscriptionHandle, IMPLEMENTED_DOMAINS,

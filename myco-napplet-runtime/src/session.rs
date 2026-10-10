@@ -123,7 +123,7 @@ pub enum Appearance {
 ///
 /// Assigned at creation and never negotiated. `d_tag` is empty for root and
 /// snapshot manifests, which have none.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NappletIdentity {
     pub d_tag: String,
     pub aggregate: String,

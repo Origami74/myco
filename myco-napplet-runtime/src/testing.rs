@@ -368,6 +368,8 @@ pub fn test_context_with_mesh(
         blobs: blobs.clone(),
         kept_blobs: blobs,
         fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
+        https: std::sync::Arc::new(crate::seams::NoHttps),
+        https_memory: std::sync::Arc::default(),
         intents: std::sync::Arc::new(crate::nap::intent::NoIntents),
         uploads: std::sync::Arc::new(crate::seams::NoUploads),
     };
@@ -404,6 +406,8 @@ pub fn test_context_with_outbox() -> (
         blobs: blobs.clone(),
         kept_blobs: blobs,
         fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
+        https: std::sync::Arc::new(crate::seams::NoHttps),
+        https_memory: std::sync::Arc::default(),
         intents: std::sync::Arc::new(crate::nap::intent::NoIntents),
         uploads: std::sync::Arc::new(crate::seams::NoUploads),
     };
@@ -898,5 +902,67 @@ impl crate::seams::EventSink for RecordingSink {
     async fn rebroadcast(&self, event: Event) -> anyhow::Result<()> {
         self.record("rebroadcast", event);
         Ok(())
+    }
+}
+
+/// As [`test_context`], with a [`MemHttps`] behind NAP-RESOURCE's `https:`,
+/// handed back so a test can stage what servers answer and assert what was
+/// asked.
+pub fn test_context_with_https() -> (crate::dispatch::NapContext, std::sync::Arc<MemHttps>) {
+    let (mut ctx, _signer) = test_context();
+    let https = std::sync::Arc::new(MemHttps::default());
+    ctx.https = https.clone();
+    (ctx, https)
+}
+
+/// An [`HttpsFetcher`](crate::seams::HttpsFetcher) over a map: what each URL
+/// answers — bytes or a failure — and every URL it was asked for. An
+/// unstaged URL is `not-found`; a staged body over the caller's cap is
+/// `too-large`, as a real fetcher enforcing it while downloading would say.
+#[derive(Default)]
+pub struct MemHttps {
+    answers: std::sync::Mutex<
+        std::collections::HashMap<String, Result<Vec<u8>, crate::seams::HttpsErrorCode>>,
+    >,
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl MemHttps {
+    /// Answer `url` with `bytes`.
+    pub fn serve(&self, url: &str, bytes: &[u8]) {
+        self.answers
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), Ok(bytes.to_vec()));
+    }
+
+    /// Answer `url` with a failure.
+    pub fn fail(&self, url: &str, code: crate::seams::HttpsErrorCode) {
+        self.answers
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), Err(code));
+    }
+
+    /// Every URL handed to `get`, in order, as it was handed.
+    pub fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::seams::HttpsFetcher for MemHttps {
+    async fn get(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, crate::seams::HttpsError> {
+        use crate::seams::{HttpsError, HttpsErrorCode};
+        self.asked.lock().unwrap().push(url.to_string());
+        match self.answers.lock().unwrap().get(url).cloned() {
+            Some(Ok(bytes)) if bytes.len() > max_bytes => Err(HttpsError::new(
+                HttpsErrorCode::TooLarge,
+                format!("{} bytes, cap is {max_bytes}", bytes.len()),
+            )),
+            Some(Ok(bytes)) => Ok(bytes),
+            Some(Err(code)) => Err(HttpsError::new(code, "staged failure")),
+            None => Err(HttpsError::new(HttpsErrorCode::NotFound, "404")),
+        }
     }
 }

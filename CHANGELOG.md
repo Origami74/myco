@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Napplets can load pictures and files from the web (`https:`).** A napplet
+  with the resource permission can now ask for an `https://` link — a
+  profile picture on someone's server, say — not only a Blossom hash. Myco
+  fetches it for the napplet: plain GET, no cookies or logins, at most five
+  redirects, 30 seconds and 64 MiB, ten at a time, sixty a minute per app.
+  It never reaches this phone, your Wi-Fi network or a mesh name, checked
+  again after every redirect and on the address actually dialled. SVG is
+  refused, as for Blossom. The server you load from sees your IP address
+  and which link was opened. Nothing is fetched with offline-only on.
+
 ### Fixed
 
 - **Napplet posts reach all your outbox relays.** A note a napplet posted
@@ -19,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   people's inbox relays, and for an inbox relay at most 3 seconds: one that
   is slower is reported as not reached yet, and delivery to it and to the
   rest carries on in the background.
+- **AVIF and HEIC pictures show in napplets.** Myco took any file starting
+  with an ISO media header for an MP4 video, so an AVIF or HEIC avatar or
+  photo was handed to napplets as a video and shown as a broken picture.
+- **Your profile picture in Settings is fetched safely.** It used a plain
+  web request; it now goes through the same fetcher as napplet pictures:
+  public addresses only, every redirect checked, a size cap while
+  downloading, and nothing with offline-only on.
 
 ## [0.10.0] - 2026-10-05
 

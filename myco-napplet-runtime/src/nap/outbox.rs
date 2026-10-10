@@ -578,7 +578,7 @@ pub fn validate_relay_url(url: &str) -> Result<RelayLane, String> {
 
 /// A hostname that names this device or its LAN by convention rather than
 /// by address: `localhost`, anything under it, and mDNS `.local`.
-fn is_private_name(host: &str) -> bool {
+pub(crate) fn is_private_name(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
     lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local")
 }

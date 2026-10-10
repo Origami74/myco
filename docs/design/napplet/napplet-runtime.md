@@ -21,7 +21,7 @@ reuse), [../circle/circle.md](../circle/circle.md) (what "everyone nearby" means
 [../reference/nostr-kinds.md](../../reference/nostr-kinds.md) (event kinds).
 
 > Status: built through S2, S3's `NAP-OUTBOX`, `NAP-RESOURCE` (`blossom:`
-> only), `NAP-LINK`, `NAP-THEME` (default themes, no picker) and `NAP-UPLOAD`
+> and `https:`), `NAP-LINK`, `NAP-THEME` (default themes, no picker) and `NAP-UPLOAD`
 > (Blossom only; see [NAP-UPLOAD.md](NAP-UPLOAD.md)), S5, and the
 > in-app half of S2b (`NAP-INTENT`, and the subscribe side of `NAP-INC`; see
 > [NAP-INTENT.md](NAP-INTENT.md)). Each stage below says what shipped. Not
@@ -441,8 +441,8 @@ The user key is generated as a guest on first launch and persisted beside the de
 never a bare pubkey and every event they publish carries an invitation.
 
 `NAP-RESOURCE`, `NAP-RELAY` (`subscribe`, `publish`, `query`) and a read-only
-`NAP-IDENTITY` come up. `NAP-RESOURCE` is `blossom:` only for now (`nap/resource.rs`):
-every ask reads this device's Blossom store first; a miss goes through the `BlobFetcher`
+`NAP-IDENTITY` come up. `NAP-RESOURCE` serves `blossom:` and `https:` (`nap/resource.rs`).
+For `blossom:`, every ask reads this device's Blossom store first; a miss goes through the `BlobFetcher`
 seam — the Circle's stores over the mesh and, unless offline-only, the internet, asked
 **at once** with the first bytes winning. The internet side asks the servers a BUD-10 URL
 names (`blossom:<sha>.<ext>?xs=<domain>&as=<pubkey>`: `xs` servers, then the `as`
@@ -456,7 +456,33 @@ first kilobyte alone. Bytes never cross the JSON channel: a result carries `blob
 sha256), and the shell fetches `/_blob/<token>/<sha256>` from its own origin, where the
 window host serves the stored bytes — only on the per-window token the load command gave
 the shell, only while `resource` is granted, only for a blob delivered to that napplet —
-and builds the `Blob` the vendored shim expects, with `blobRef` removed. `https:`, `htree:` and `nostr:` report `unsupported-scheme`. Signing is mediated: the napplet asks, Rust signs, no napplet ever
+and builds the `Blob` the vendored shim expects, with `blobRef` removed.
+
+`https:` follows the spec's Default Resource Policy, split between two places:
+
+- **The runtime** (`validate_https_url`) judges the URL before anything is dialled:
+  `https` only (`http:` stays `unsupported-scheme`), parsed by the `url` crate the
+  HTTP client uses, no userinfo, no private, loopback, link-local, unique-local or
+  CGNAT address literal (`127.1` and other shorthands are normalised first), no
+  `localhost`, `.local`, `.lan`, `.internal`, `.home.arpa` or dotless name, no `.fips`
+  mesh name, at most 2048 bytes. It also caps each napplet at 60 fetches a minute
+  and remembers, per napplet, the `blobRef` each URL answered for five minutes (256
+  entries), so a feed does not refetch one avatar.
+- **The `HttpsFetcher` seam** (`myco-core/src/resource_https.rs`) dials. GET only, no
+  cookies, credentials, referer or proxy, a plain `Myco/<version>` User-Agent. The
+  client's DNS resolver refuses a name if any answer is a private address, so the
+  check is made on the addresses actually connected to — no second lookup for a
+  rebinding name to answer differently. Redirects are followed by hand, at most five,
+  each hop judged by `validate_https_url` again and dialled through the same
+  resolver. 30 s for the whole fetch, the 64 MiB cap enforced while downloading, at
+  most ten fetches in flight on the device, one fetch per URL however many ask at
+  once. Offline-only refuses (`blocked-by-policy`); a tripped internet breaker is a
+  `network-error` at once.
+
+The body is sniffed (raw SVG refused, as for `blossom:`), put in the shell cache and
+delivered by `blobRef` like any blob. It is never asked of the mesh — the URL names one
+server — and never kept unless the napplet calls `resource.keep`. `htree:` and
+`nostr:` report `unsupported-scheme`. Signing is mediated: the napplet asks, Rust signs, no napplet ever
 sees a key. A `relay` grant accepted at install covers publishing, with no per-event
 prompt (D8) — which means a granted napplet can publish as you at will, so the review
 screen has to say so in words a person understands, and revoking a grant has to be
@@ -1204,6 +1230,17 @@ fallback path, and (3) worth doing regardless, since it closes the serve-side le
 content the user never chose to host. Until decided, `BlossomFetcher` stays as shipped and
 this section is the warning label. See also NAP-RESOURCE's own note that sidecar prefetch
 "can leak user interest to resource hosts": the mesh makes the hosts your friends.
+
+**`https:` tells the host, by design.** An `https:` resource is fetched from the one
+server its URL names, so that server — and whoever resolves its name — learns this
+phone's IP address, the time, and exactly which URL a napplet opened for you. A URL
+can be made unique to one reader, so a napplet showing you someone's post can tell
+that post's author you read it. This is the scheme's price and is not hidden: the
+fetch is made only when a napplet with the `resource` grant asks, carries nothing of
+yours (no cookies, no credentials, no referer), is never routed through the mesh, and
+never happens with offline-only on. Nothing is prefetched. Napplets that can name a
+`blossom:` URL instead should: a hash reveals nothing a URL's path does not, and it can
+be served from the room.
 
 ---
 

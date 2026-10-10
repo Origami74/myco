@@ -1,23 +1,51 @@
-//! NAP-RESOURCE — byte resources through the runtime. `blossom:` only, for now.
+//! NAP-RESOURCE — byte resources through the runtime: `blossom:` and `https:`.
 //!
 //! A sandboxed napplet has no network; it names a resource and the runtime
-//! fetches, checks and classifies it. What this build offers is the scheme
-//! Myco already speaks everywhere else: `blossom:sha256:<hex>`, content
-//! addressed, verified by hash before it is delivered.
+//! fetches, checks and classifies it. Two schemes are offered. `blossom:`
+//! (`blossom:sha256:<hex>`) is the one Myco speaks everywhere else: content
+//! addressed, verified by hash before it is delivered. `https:` is the open
+//! web — a profile picture on someone's CDN — under the spec's Default
+//! Resource Policy. Everything else, `http:` included, is
+//! `unsupported-scheme`.
 //!
 //! ## Local first, and everything fetched is kept
 //!
-//! Every ask goes to this device's Blossom store before anywhere else. A miss
-//! goes through the [`BlobFetcher`](crate::seams::BlobFetcher) — the Circle's
-//! stores over the mesh, the public servers when reachable — and what comes
-//! back is **stored** before it is handed over. The second ask, from this or
-//! any napplet, is local; and a picture one phone fetched is a picture the
-//! whole room can now get over the mesh.
+//! Every `blossom:` ask goes to this device's Blossom store before anywhere
+//! else. A miss goes through the [`BlobFetcher`](crate::seams::BlobFetcher) —
+//! the Circle's stores over the mesh, the public servers when reachable — and
+//! what comes back is **stored** before it is handed over. The second ask,
+//! from this or any napplet, is local; and a picture one phone fetched is a
+//! picture the whole room can now get over the mesh.
 //!
 //! That last sentence is also a privacy question, and an open one: the ask
 //! tells every Circle member what you are looking at, and the keep makes you
 //! a host of it. See `docs/design/napplet/napplet-runtime.md` §7.11 before
 //! changing the fetch order or the keep rule.
+//!
+//! ## `https:` — the internet, under policy
+//!
+//! An `https:` URL never goes to the mesh: it names one server, and only
+//! that server can answer it. The fetch reveals the user's interest to that
+//! server (and, through DNS, to whoever resolves its name), which is the
+//! price of the scheme; offline-only refuses it outright. The policy is split
+//! between the two places that can enforce it:
+//!
+//! - **Here**, before anything is dialled: [`validate_https_url`] — `https`
+//!   only, parsed by the same `url` parser the HTTP client uses, no userinfo,
+//!   no private, loopback or link-local address literal (shorthands like
+//!   `127.1` are normalised before they are judged), no `localhost`, `.local`,
+//!   `.fips` or dotless LAN name, at most [`MAX_URL_LEN`] bytes. Then the
+//!   per-napplet rate ([`MAX_HTTPS_PER_MINUTE`]) and the recent-URL memory
+//!   ([`HttpsMemory`]).
+//! - **At the dial**, behind the [`HttpsFetcher`](crate::seams::HttpsFetcher)
+//!   seam: what a name resolves to, every redirect hop judged again by
+//!   [`validate_https_url`], GET only with no cookies or credentials, the size
+//!   cap enforced while downloading, a bound on time, and offline-only.
+//!
+//! What comes back is hashed and put in the same store a `blossom:` fetch
+//! lands in, so it is delivered exactly as one is: by `blobRef`. It is cached,
+//! not kept — the device does not become a host of the open web's pictures
+//! unless the napplet asks `resource.keep`.
 //!
 //! ## Bytes on this wire
 //!
@@ -34,11 +62,15 @@
 //! or comment long enough to push it past the first kilobyte does not
 //! smuggle it through as XML.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use nsite_deck::sync::sha256_hex;
 
 use crate::dispatch::NapContext;
 use crate::seams::Envelope;
-use crate::session::Session;
+use crate::session::{NappletIdentity, Session};
 
 /// The most one resource may be: 64 MiB, the largest body this device's own
 /// Blossom accepts. Above the spec's recommended 10 MiB because a short video
@@ -49,6 +81,20 @@ use crate::session::Session;
 pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 /// The spec's recommended bulk cap.
 pub const MAX_URLS: usize = 100;
+/// The longest `https:` URL fetched. Far past any real media link; a URL
+/// longer than this is a payload, not an address.
+pub const MAX_URL_LEN: usize = 2048;
+/// The most `https:` fetches one napplet may start in a minute — the spec's
+/// recommended rate. Counted per URL that reaches the network: a `bytesMany`
+/// of ten is ten, and a URL answered from [`HttpsMemory`] is none.
+pub const MAX_HTTPS_PER_MINUTE: usize = 60;
+/// How long an `https:` URL's answer is reused without asking the server
+/// again. Short: the URL names a server's *current* bytes, not fixed ones, so
+/// this is a session's worth of not refetching an avatar, not a cache that
+/// outlives an edit.
+pub const HTTPS_REMEMBERED: Duration = Duration::from_secs(5 * 60);
+/// The most `https:` answers remembered, across every napplet.
+pub const MAX_HTTPS_REMEMBERED: usize = 256;
 /// The most one `bytesMany` may return in total — one resource's worth. A
 /// hundred blobs at the per-blob cap would be gigabytes handed to one
 /// napplet at once; past this the remaining URLs are answered `too-large`
@@ -70,8 +116,9 @@ pub async fn handle(ctx: &NapContext, session: &Session, message: &Envelope) -> 
 }
 
 /// `resource.info` — what this build will say about itself. Advisory: a
-/// napplet that skips it and asks for `https:` gets `unsupported-scheme` on
-/// that request, as the spec requires.
+/// napplet that skips it and asks for `nostr:` gets `unsupported-scheme` on
+/// that request, as the spec requires — and one that asks for `https:` with
+/// the internet off gets `blocked-by-policy`, whatever this said.
 fn info(message: &Envelope) -> Envelope {
     message.to_result().with_field(
         "info",
@@ -79,7 +126,7 @@ fn info(message: &Envelope) -> Envelope {
             "schemes": [
                 { "scheme": "blossom", "enabled": true },
                 { "scheme": "data", "enabled": false },
-                { "scheme": "https", "enabled": false },
+                { "scheme": "https", "enabled": true },
                 { "scheme": "htree", "enabled": false },
                 { "scheme": "nostr", "enabled": false },
             ],
@@ -95,7 +142,7 @@ async fn bytes(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
     let Some(url) = message.field("url").and_then(|v| v.as_str()) else {
         return error_for(message, "invalid-request", Some("bytes needs a url"));
     };
-    match fetch(ctx, url).await {
+    match fetch(ctx, session.identity(), url).await {
         Ok(Fetched { mime, sha, .. }) => {
             record(session, &sha);
             message
@@ -149,7 +196,7 @@ async fn bytes_many(ctx: &NapContext, session: &Session, message: &Envelope) -> 
             }));
             continue;
         }
-        let item = match fetch(ctx, &url).await {
+        let item = match fetch(ctx, session.identity(), &url).await {
             Ok(Fetched { mime, len, sha }) => {
                 record(session, &sha);
                 total += len;
@@ -263,8 +310,18 @@ impl Failure {
     }
 }
 
-/// Resolve one URL: parse, local store, fetcher, verify, store, classify.
-async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
+/// Resolve one URL, by its scheme.
+async fn fetch(ctx: &NapContext, napplet: &NappletIdentity, url: &str) -> Result<Fetched, Failure> {
+    if scheme_of(url).eq_ignore_ascii_case("https") {
+        fetch_https(ctx, napplet, url).await
+    } else {
+        fetch_blossom(ctx, url).await
+    }
+}
+
+/// Resolve one `blossom:` URL: parse, local store, fetcher, verify, store,
+/// classify.
+async fn fetch_blossom(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
     let (sha, hints) = parse_blossom_url(url)?;
 
     // Size before read: the local store may hold an nsite asset far over the
@@ -344,6 +401,285 @@ async fn fetch(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
     })
 }
 
+/// Resolve one `https:` URL: judge it, answer from memory if this napplet
+/// was just delivered it, else fetch through the seam, then sniff, store and
+/// remember.
+async fn fetch_https(
+    ctx: &NapContext,
+    napplet: &NappletIdentity,
+    url: &str,
+) -> Result<Fetched, Failure> {
+    let parsed = validate_https_url(url)
+        .map_err(|refusal| Failure::new(refusal.code(), refusal.reason()))?;
+
+    // Keyed by the string the napplet wrote, as the spec has cache keys —
+    // and answered only while the store still holds the bytes, since the
+    // store is what the shell serves them from.
+    if let Some(known) = ctx.https_memory.recall(napplet, url) {
+        if ctx.blobs.has(&known.sha).await {
+            return Ok(known);
+        }
+    }
+    if !ctx.https_memory.admit(napplet) {
+        return Err(Failure::new(
+            "blocked-by-policy",
+            format!("at most {MAX_HTTPS_PER_MINUTE} https: fetches a minute"),
+        ));
+    }
+
+    // The parser's spelling goes to the dialler, not the napplet's: the host
+    // judged above is then the host dialled. The fragment is the page's, not
+    // the server's.
+    let mut target = parsed;
+    target.set_fragment(None);
+    let body = ctx
+        .https
+        .get(target.as_str(), MAX_BYTES)
+        .await
+        .map_err(|e| Failure::new(e.code.as_str(), e.detail))?;
+    // Checked here whatever the seam did: the cap is the spec's promise, and
+    // the seam is someone else's code.
+    if body.len() > MAX_BYTES {
+        return Err(Failure::new(
+            "too-large",
+            format!("{} bytes, cap is {MAX_BYTES}", body.len()),
+        ));
+    }
+    // Sniffed **before** the store: an SVG is refused, so there is nothing
+    // to keep it for.
+    let mime = sniff_mime(&body);
+    if mime == "image/svg+xml" {
+        return Err(Failure::new(
+            "blocked-by-policy",
+            "SVG is not delivered raw by this runtime",
+        ));
+    }
+    // Unlike a `blossom:` fetch, a failed store is a failed delivery: the
+    // store is the only place the shell can fetch these bytes from.
+    let sha = ctx
+        .blobs
+        .put(&body)
+        .await
+        .map_err(|e| Failure::new("network-error", format!("local store: {e}")))?;
+    let fetched = Fetched {
+        mime: mime.to_string(),
+        len: body.len(),
+        sha,
+    };
+    ctx.https_memory.remember(napplet, url, &fetched);
+    Ok(fetched)
+}
+
+/// Why [`validate_https_url`] refused a URL, as the spec's two codes for it:
+/// a string that is no `https:` URL at all is the napplet's mistake
+/// (`invalid-request`); one that is, but points somewhere this device will
+/// not go, is the policy's (`blocked-by-policy`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpsUrlRefusal {
+    /// Not a URL this scheme can carry.
+    Invalid(String),
+    /// A URL the policy will not fetch.
+    Blocked(String),
+}
+
+impl HttpsUrlRefusal {
+    /// The spec's error code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Invalid(_) => "invalid-request",
+            Self::Blocked(_) => "blocked-by-policy",
+        }
+    }
+
+    /// What was wrong, for the log and the error's `message`.
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Invalid(reason) | Self::Blocked(reason) => reason,
+        }
+    }
+}
+
+impl std::fmt::Display for HttpsUrlRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code(), self.reason())
+    }
+}
+
+/// Whether `url` is an `https:` URL this device will fetch for a napplet, and
+/// the parsed form to fetch if so. The runtime's half of the private-address
+/// policy; the dialler's half — what a name resolves to — is the
+/// [`HttpsFetcher`](crate::seams::HttpsFetcher)'s, which also runs this
+/// again on every redirect hop.
+///
+/// Parsed by the `url` crate, as [`validate_relay_url`] is and for the same
+/// reason: it is the parser the HTTP client uses, so the host judged here is
+/// the host dialled, and it normalises `127.1`, `2130706433` and
+/// `0x7f000001` to `127.0.0.1` before anyone looks. Refused:
+///
+/// - anything but `https` (`http:` is not canonical, and the spec forbids
+///   enabling it by default);
+/// - userinfo — a credential the napplet would be making this device send,
+///   and the classic way to make a URL read as one host and dial another;
+/// - an address literal [`is_private_ip`] calls private: loopback (this
+///   device's own relay and Blossom), RFC 1918, link-local (and so the
+///   `169.254.169.254` metadata address), unique-local, CGNAT;
+/// - a name for this device or the LAN: `localhost`, `.local`, a dotless
+///   name a LAN's DNS answers, `.internal`, `.lan`, `.home.arpa`;
+/// - a `.fips` mesh name, which reaches a peer by its key and is NAP-MESH's
+///   and `blossom:`'s, not the open web's;
+/// - over [`MAX_URL_LEN`] bytes.
+///
+/// [`validate_relay_url`]: crate::nap::outbox::validate_relay_url
+/// [`is_private_ip`]: crate::nap::outbox::is_private_ip
+pub fn validate_https_url(url: &str) -> Result<nostr::Url, HttpsUrlRefusal> {
+    use nostr::types::url::Host;
+    if url.len() > MAX_URL_LEN {
+        return Err(HttpsUrlRefusal::Invalid(format!(
+            "URL is over {MAX_URL_LEN} bytes"
+        )));
+    }
+    let parsed =
+        nostr::Url::parse(url).map_err(|e| HttpsUrlRefusal::Invalid(format!("not a URL ({e})")))?;
+    if parsed.scheme() != "https" {
+        return Err(HttpsUrlRefusal::Invalid(format!(
+            "only https: is fetched, not {}:",
+            parsed.scheme()
+        )));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(HttpsUrlRefusal::Blocked(
+            "a URL with userinfo is not fetched".into(),
+        ));
+    }
+    let blocked = |what: &str| HttpsUrlRefusal::Blocked(format!("{what} is not fetched"));
+    match parsed.host() {
+        None => return Err(HttpsUrlRefusal::Invalid("URL has no host".into())),
+        Some(Host::Ipv4(v4)) => {
+            if crate::nap::outbox::is_private_ip(std::net::IpAddr::V4(v4)) {
+                return Err(blocked("a private address"));
+            }
+        }
+        Some(Host::Ipv6(v6)) => {
+            if crate::nap::outbox::is_private_ip(std::net::IpAddr::V6(v6)) {
+                return Err(blocked("a private address"));
+            }
+        }
+        Some(Host::Domain(domain)) => {
+            // The parser lowercases a domain; a trailing dot is the same name
+            // to a resolver, so it must be the same name here.
+            let name = domain.trim_end_matches('.');
+            if name.ends_with(".fips") || name == "fips" {
+                return Err(blocked("a mesh name"));
+            }
+            if crate::nap::outbox::is_private_name(name)
+                || !name.contains('.')
+                || [".internal", ".lan", ".home.arpa"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+            {
+                return Err(blocked("a local name"));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+/// What `https:` URLs each napplet was recently delivered, and how many
+/// fetches it has started in the last minute — the runtime's memory for the
+/// `https:` scheme. One per device, shared by every session, keyed by
+/// napplet identity inside.
+///
+/// Per napplet, not per device, on purpose: the spec scopes a resource cache
+/// to the napplet, and a shared one would let a napplet learn — by how fast
+/// an answer came — what another napplet's user had been looking at.
+///
+/// The memory holds a hash, never bytes: an answer is the `blobRef` and type
+/// of what the store already holds, and is only used while it still does.
+/// Bounded by [`MAX_HTTPS_REMEMBERED`] and [`HTTPS_REMEMBERED`].
+///
+/// Not single-flight: two asks for one URL racing each other both reach the
+/// seam, which is where that belongs — it is the side with an async runtime
+/// to wait on, and the one that knows when two dials are the same.
+#[derive(Default)]
+pub struct HttpsMemory {
+    inner: Mutex<MemoryInner>,
+}
+
+#[derive(Default)]
+struct MemoryInner {
+    recent: HashMap<(NappletIdentity, String), Remembered>,
+    started: HashMap<NappletIdentity, VecDeque<Instant>>,
+}
+
+struct Remembered {
+    sha: String,
+    mime: String,
+    len: usize,
+    at: Instant,
+}
+
+impl HttpsMemory {
+    /// What `napplet` was delivered for `url` within [`HTTPS_REMEMBERED`].
+    fn recall(&self, napplet: &NappletIdentity, url: &str) -> Option<Fetched> {
+        let inner = self.inner.lock().unwrap();
+        let known = inner.recent.get(&(napplet.clone(), url.to_string()))?;
+        (known.at.elapsed() < HTTPS_REMEMBERED).then(|| Fetched {
+            mime: known.mime.clone(),
+            len: known.len,
+            sha: known.sha.clone(),
+        })
+    }
+
+    fn remember(&self, napplet: &NappletIdentity, url: &str, fetched: &Fetched) {
+        let mut inner = self.inner.lock().unwrap();
+        let recent = &mut inner.recent;
+        if recent.len() >= MAX_HTTPS_REMEMBERED {
+            recent.retain(|_, known| known.at.elapsed() < HTTPS_REMEMBERED);
+        }
+        if recent.len() >= MAX_HTTPS_REMEMBERED {
+            if let Some(oldest) = recent
+                .iter()
+                .min_by_key(|(_, known)| known.at)
+                .map(|(key, _)| key.clone())
+            {
+                recent.remove(&oldest);
+            }
+        }
+        recent.insert(
+            (napplet.clone(), url.to_string()),
+            Remembered {
+                sha: fetched.sha.clone(),
+                mime: fetched.mime.clone(),
+                len: fetched.len,
+                at: Instant::now(),
+            },
+        );
+    }
+
+    /// Count one fetch for `napplet`, or say no if it has started
+    /// [`MAX_HTTPS_PER_MINUTE`] in the last minute.
+    fn admit(&self, napplet: &NappletIdentity) -> bool {
+        const WINDOW: Duration = Duration::from_secs(60);
+        let mut inner = self.inner.lock().unwrap();
+        // A napplet that went quiet leaves an empty queue behind; sweep them
+        // before the map grows past what the recent memory may hold.
+        if inner.started.len() > MAX_HTTPS_REMEMBERED {
+            inner
+                .started
+                .retain(|_, at| at.back().is_some_and(|t| t.elapsed() < WINDOW));
+        }
+        let started = inner.started.entry(napplet.clone()).or_default();
+        while started.front().is_some_and(|t| t.elapsed() >= WINDOW) {
+            started.pop_front();
+        }
+        if started.len() >= MAX_HTTPS_PER_MINUTE {
+            return false;
+        }
+        started.push_back(Instant::now());
+        true
+    }
+}
+
 /// The sha256 named by a `blossom:` URL, and where it says to look. Accepted:
 ///
 /// - `blossom:sha256:<hex>`, this runtime's canonical form;
@@ -361,7 +697,10 @@ fn parse_blossom_url(url: &str) -> Result<(String, crate::seams::BlobHints), Fai
     let Some(rest) = url.strip_prefix("blossom:") else {
         return Err(Failure::new(
             "unsupported-scheme",
-            format!("only blossom: is supported, not {}", scheme_of(url)),
+            format!(
+                "only blossom: and https: are supported, not {}",
+                scheme_of(url)
+            ),
         ));
     };
     let rest = rest.strip_prefix("sha256:").unwrap_or(rest);
@@ -510,7 +849,13 @@ pub fn sniff_mime(bytes: &[u8]) -> &'static str {
         return "audio/flac";
     }
     if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
-        return "video/mp4";
+        // AVIF and HEIC pictures are ISO-BMFF too: the major brand after
+        // `ftyp` tells a picture from a video.
+        return match &bytes[8..12] {
+            b"avif" | b"avis" => "image/avif",
+            b"heic" | b"heix" | b"heim" | b"heis" | b"mif1" | b"msf1" => "image/heic",
+            _ => "video/mp4",
+        };
     }
     if starts(bytes, b"\x1a\x45\xdf\xa3") {
         return "video/webm";
@@ -802,7 +1147,7 @@ mod tests {
     async fn other_schemes_are_unsupported_and_bad_urls_invalid() {
         let (ctx, _fetcher) = test_context_with_fetcher();
         for (url, code) in [
-            ("https://example.com/a.png", "unsupported-scheme"),
+            ("http://example.com/a.png", "unsupported-scheme"),
             ("nostr:npub1abc", "unsupported-scheme"),
             ("htree://x", "unsupported-scheme"),
             ("blossom:sha256:nothex", "invalid-request"),
@@ -1024,7 +1369,7 @@ mod tests {
                     json!([
                         format!("blossom:sha256:{png}"),
                         format!("blossom:sha256:{missing}"),
-                        "https://example.com/x",
+                        "http://example.com/x",
                         format!("blossom:sha256:{text}"),
                     ]),
                 ),
@@ -1066,7 +1411,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn info_says_blossom_only() {
+    async fn info_says_blossom_and_https() {
         let (ctx, _fetcher) = test_context_with_fetcher();
         let r = call(&ctx, Envelope::new("resource.info").with_id("i1")).await;
         assert_eq!(r["type"], "resource.info.result");
@@ -1076,8 +1421,245 @@ mod tests {
             .filter(|s| s["enabled"] == true)
             .map(|s| s["scheme"].as_str().unwrap())
             .collect();
-        assert_eq!(enabled, vec!["blossom"]);
+        assert_eq!(enabled, vec!["blossom", "https"]);
         assert_eq!(r["info"]["maxBytes"], MAX_BYTES);
+    }
+
+    /// The URL gate: public `https:` passes; every way of pointing the shell
+    /// at itself, its LAN or the mesh does not — shorthands included, since
+    /// the parser normalises them before they are judged.
+    #[test]
+    fn https_urls_are_judged_before_anything_is_dialled() {
+        for url in [
+            "https://example.com/a.png",
+            "https://cdn.example.com:8443/p/a.jpg?w=64#top",
+            "https://93.184.215.14/a.png",
+            "https://[2606:4700::1]/a.png",
+            "HTTPS://Example.COM/a.png",
+        ] {
+            assert!(validate_https_url(url).is_ok(), "{url} was refused");
+        }
+        for (url, code) in [
+            ("http://example.com/a.png", "invalid-request"),
+            ("ftp://example.com/a.png", "invalid-request"),
+            ("https://", "invalid-request"),
+            ("not a url", "invalid-request"),
+            ("https://user:pw@example.com/a.png", "blocked-by-policy"),
+            ("https://user@example.com/a.png", "blocked-by-policy"),
+            ("https://127.0.0.1/a.png", "blocked-by-policy"),
+            ("https://127.1/a.png", "blocked-by-policy"),
+            ("https://2130706433/a.png", "blocked-by-policy"),
+            ("https://0x7f000001/a.png", "blocked-by-policy"),
+            ("https://10.0.0.8/a.png", "blocked-by-policy"),
+            ("https://192.168.1.1/a.png", "blocked-by-policy"),
+            (
+                "https://169.254.169.254/latest/meta-data",
+                "blocked-by-policy",
+            ),
+            ("https://100.64.0.1/a.png", "blocked-by-policy"),
+            ("https://0.0.0.0/a.png", "blocked-by-policy"),
+            ("https://[::1]/a.png", "blocked-by-policy"),
+            ("https://[fe80::1]/a.png", "blocked-by-policy"),
+            ("https://[fd00::1]/a.png", "blocked-by-policy"),
+            ("https://[::ffff:127.0.0.1]/a.png", "blocked-by-policy"),
+            ("https://localhost/a.png", "blocked-by-policy"),
+            ("https://LOCALHOST./a.png", "blocked-by-policy"),
+            ("https://shell.localhost/a.png", "blocked-by-policy"),
+            ("https://printer.local/a.png", "blocked-by-policy"),
+            ("https://router/a.png", "blocked-by-policy"),
+            ("https://nas.lan/a.png", "blocked-by-policy"),
+            ("https://npub1peer.fips/a.png", "blocked-by-policy"),
+            ("https://npub1peer.fips:24243/a.png", "blocked-by-policy"),
+        ] {
+            match validate_https_url(url) {
+                Ok(_) => panic!("{url} was accepted"),
+                Err(refusal) => assert_eq!(refusal.code(), code, "{url}: {refusal}"),
+            }
+        }
+        let long = format!("https://example.com/{}", "a".repeat(MAX_URL_LEN));
+        assert_eq!(
+            validate_https_url(&long).unwrap_err().code(),
+            "invalid-request"
+        );
+    }
+
+    /// A public `https:` URL is fetched through the seam, stored, and
+    /// delivered by `blobRef` with a sniffed type — never the bytes.
+    #[tokio::test]
+    async fn an_https_url_is_fetched_stored_and_delivered_by_ref() {
+        let (ctx, https) = crate::testing::test_context_with_https();
+        let url = "https://cdn.example.com/avatar.png#frag";
+        https.serve("https://cdn.example.com/avatar.png", PNG);
+        let r = call(
+            &ctx,
+            Envelope::new("resource.bytes")
+                .with_id("h1")
+                .with_field("url", url),
+        )
+        .await;
+        assert_eq!(r["type"], "resource.bytes.result", "{r}");
+        let sha = sha256_hex(PNG);
+        assert_eq!(r["blobRef"], sha);
+        assert_eq!(r["mime"], "image/png");
+        assert!(r.get("blob").is_none(), "bytes crossed the JSON channel");
+        assert!(ctx.blobs.has(&sha).await, "the shell has nothing to serve");
+        // The fragment is the page's, not the server's.
+        assert_eq!(https.asked(), vec!["https://cdn.example.com/avatar.png"]);
+    }
+
+    /// The same URL asked again by the same napplet is answered from memory;
+    /// another napplet asking it goes to the server itself.
+    #[tokio::test]
+    async fn a_repeated_https_url_is_not_refetched_for_the_same_napplet() {
+        let (ctx, https) = crate::testing::test_context_with_https();
+        let url = "https://cdn.example.com/a.png";
+        https.serve(url, PNG);
+        let ask = |id: &str| {
+            Envelope::new("resource.bytes")
+                .with_id(id)
+                .with_field("url", url)
+        };
+        let mut pics = granted();
+        for id in ["h1", "h2"] {
+            let r = dispatch(&ctx, &mut pics, &ask(id)).await;
+            assert_eq!(r.envelopes()[0].msg_type, "resource.bytes.result");
+        }
+        assert_eq!(https.asked().len(), 1, "the second ask was refetched");
+
+        let mut other = Session::new(NappletIdentity::new("other", "agg2"), ["resource"]);
+        other.on_ready();
+        let r = dispatch(&ctx, &mut other, &ask("h3")).await;
+        assert_eq!(r.envelopes()[0].msg_type, "resource.bytes.result");
+        assert_eq!(
+            https.asked().len(),
+            2,
+            "one napplet's memory answered another"
+        );
+
+        // Bytes gone from the store are fetched again, memory or not.
+        ctx.blobs.wipe().await.unwrap();
+        let r = dispatch(&ctx, &mut pics, &ask("h4")).await;
+        assert_eq!(r.envelopes()[0].msg_type, "resource.bytes.result");
+        assert_eq!(https.asked().len(), 3);
+    }
+
+    /// The seam's failures reach the napplet as the spec's codes; a private
+    /// host never reaches the seam at all.
+    #[tokio::test]
+    async fn https_failures_carry_the_spec_codes() {
+        use crate::seams::HttpsErrorCode;
+        let (ctx, https) = crate::testing::test_context_with_https();
+        https.serve("https://big.example.com/x", &vec![0u8; MAX_BYTES + 1]);
+        https.fail("https://slow.example.com/x", HttpsErrorCode::Timeout);
+        https.fail("https://down.example.com/x", HttpsErrorCode::NetworkError);
+        https.fail("https://off.example.com/x", HttpsErrorCode::BlockedByPolicy);
+        for (url, code) in [
+            ("https://gone.example.com/x", "not-found"),
+            ("https://big.example.com/x", "too-large"),
+            ("https://slow.example.com/x", "timeout"),
+            ("https://down.example.com/x", "network-error"),
+            ("https://off.example.com/x", "blocked-by-policy"),
+            ("https://127.0.0.1/x", "blocked-by-policy"),
+            ("https://u@example.com/x", "blocked-by-policy"),
+        ] {
+            let r = call(
+                &ctx,
+                Envelope::new("resource.bytes")
+                    .with_id("h1")
+                    .with_field("url", url),
+            )
+            .await;
+            assert_eq!(r["type"], "resource.bytes.error", "{url}");
+            assert_eq!(r["error"], code, "{url}");
+        }
+        assert!(
+            !https
+                .asked()
+                .iter()
+                .any(|u| u.contains("127.0.0.1") || u.contains('@')),
+            "a refused URL reached the seam: {:?}",
+            https.asked()
+        );
+        assert!(!ctx.blobs.has(&sha256_hex(&vec![0u8; MAX_BYTES + 1])).await);
+    }
+
+    /// An SVG from the web is refused like one from Blossom — and not kept.
+    #[tokio::test]
+    async fn an_https_svg_is_blocked_and_not_stored() {
+        let (ctx, https) = crate::testing::test_context_with_https();
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>1</script></svg>";
+        https.serve("https://example.com/logo.png", svg);
+        let r = call(
+            &ctx,
+            Envelope::new("resource.bytes")
+                .with_id("h1")
+                .with_field("url", "https://example.com/logo.png"),
+        )
+        .await;
+        assert_eq!(r["error"], "blocked-by-policy");
+        assert!(!ctx.blobs.has(&sha256_hex(svg)).await);
+    }
+
+    /// `bytesMany` mixes schemes, item by item; the rate counts each URL
+    /// that reaches the network.
+    #[tokio::test]
+    async fn bytes_many_mixes_schemes_and_the_rate_counts_per_url() {
+        let (ctx, https) = crate::testing::test_context_with_https();
+        let local = ctx.blobs.put(PNG).await.unwrap();
+        https.serve("https://example.com/a.txt", b"hello");
+        let r = call(
+            &ctx,
+            Envelope::new("resource.bytesMany")
+                .with_id("m1")
+                .with_field(
+                    "urls",
+                    json!([
+                        format!("blossom:sha256:{local}"),
+                        "https://example.com/a.txt",
+                        "https://10.0.0.1/a.txt",
+                    ]),
+                ),
+        )
+        .await;
+        let items = r["items"].as_array().unwrap();
+        assert_eq!(items[0]["mime"], "image/png");
+        assert_eq!(items[1]["mime"], "text/plain");
+        assert_eq!(items[1]["blobRef"], sha256_hex(b"hello"));
+        assert_eq!(items[2]["error"], "blocked-by-policy");
+
+        // One fetch spent above; the rest of the minute's budget, then no.
+        let urls: Vec<String> = (0..MAX_HTTPS_PER_MINUTE)
+            .map(|i| format!("https://example.com/{i}"))
+            .collect();
+        let r = call(
+            &ctx,
+            Envelope::new("resource.bytesMany")
+                .with_id("m2")
+                .with_field("urls", urls),
+        )
+        .await;
+        let items = r["items"].as_array().unwrap();
+        assert_eq!(items[MAX_HTTPS_PER_MINUTE - 2]["error"], "not-found");
+        assert_eq!(
+            items[MAX_HTTPS_PER_MINUTE - 1]["error"],
+            "blocked-by-policy"
+        );
+        assert_eq!(https.asked().len(), MAX_HTTPS_PER_MINUTE);
+    }
+
+    /// With nothing wired behind the seam, `https:` is a policy refusal, not
+    /// a scheme this build lacks.
+    #[tokio::test]
+    async fn no_https_behind_the_seam_is_blocked_by_policy() {
+        let (ctx, _fetcher) = test_context_with_fetcher();
+        let r = call(
+            &ctx,
+            Envelope::new("resource.bytes")
+                .with_id("h1")
+                .with_field("url", "https://example.com/a.png"),
+        )
+        .await;
+        assert_eq!(r["error"], "blocked-by-policy");
     }
 
     #[test]
@@ -1086,6 +1668,18 @@ mod tests {
         assert_eq!(sniff_mime(b"\xff\xd8\xff\xe0JFIF"), "image/jpeg");
         assert_eq!(sniff_mime(b"GIF89a"), "image/gif");
         assert_eq!(sniff_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp");
+        assert_eq!(
+            sniff_mime(b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00"),
+            "image/avif"
+        );
+        assert_eq!(
+            sniff_mime(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00"),
+            "image/heic"
+        );
+        assert_eq!(
+            sniff_mime(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00"),
+            "video/mp4"
+        );
         assert_eq!(sniff_mime(b"%PDF-1.7"), "application/pdf");
         assert_eq!(sniff_mime(b"{\"a\": 1}"), "application/json");
         assert_eq!(sniff_mime(b"just words"), "text/plain");

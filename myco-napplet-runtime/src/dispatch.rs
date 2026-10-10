@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use crate::nap;
 use crate::seams::{
-    BlobFetcher, BlobStore, Envelope, EventSink, LaneTransport, MeshSink, OutboxResolver,
-    RelayBackend, Signer, UploadSink,
+    BlobFetcher, BlobStore, Envelope, EventSink, HttpsFetcher, LaneTransport, MeshSink,
+    OutboxResolver, RelayBackend, Signer, UploadSink,
 };
 use crate::session::Session;
 
@@ -53,6 +53,13 @@ pub struct NapContext {
     pub blobs: Arc<dyn BlobStore>,
     /// Where a blob the store lacks is fetched from. See [`BlobFetcher`].
     pub fetcher: Arc<dyn BlobFetcher>,
+    /// Where an NAP-RESOURCE `https:` URL is fetched. See [`HttpsFetcher`].
+    pub https: Arc<dyn HttpsFetcher>,
+    /// What `https:` URLs each napplet was recently delivered, and how fast
+    /// it is asking — the runtime's half of the `https:` policy. One per
+    /// device, like the seams; keyed by napplet inside. See
+    /// [`nap::resource::HttpsMemory`].
+    pub https_memory: Arc<nap::resource::HttpsMemory>,
     /// Where `resource.keep` puts a blob: this device's own Blossom, which
     /// nothing evicts. On a device `blobs` reads it too but writes fetches to
     /// the shell cache; with no cache the two are the same store.

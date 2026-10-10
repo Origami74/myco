@@ -19,6 +19,8 @@
 //!   hands over an event and a hop budget, and asks for backlog with one.
 //! - [`UploadSink`] — puts bytes on the user's Blossom servers, behind
 //!   NAP-UPLOAD. The runtime never sees a server or the authorization.
+//! - [`HttpsFetcher`] — GETs an `https:` URL behind NAP-RESOURCE, with the
+//!   half of the private-address policy only a dialler can enforce.
 //! - [`NapTransport`] — the shell ↔ Rust channel. A seam so that dispatch,
 //!   policy and capabilities never learn whether they are talking over
 //!   `addWebMessageListener`, a `WebMessagePort`, or the desktop harness's
@@ -643,6 +645,106 @@ impl BlobFetcher for NoFetcher {
         _hints: &BlobHints,
     ) -> anyhow::Result<Option<Vec<u8>>> {
         Ok(None)
+    }
+}
+
+/// GETs an `https:` URL on a napplet's behalf — the seam behind NAP-RESOURCE's
+/// `https:` scheme.
+///
+/// The handler has already judged the URL (`https` only, no userinfo, no
+/// private, loopback, link-local or mesh host — see
+/// [`validate_https_url`](crate::nap::resource::validate_https_url)) and
+/// looked in its recent-URL memory. What is left is the part that touches the
+/// world, and the half of the policy only the dialler can enforce:
+///
+/// - **GET only**, with no cookies, no credentials and nothing of the user's
+///   in the request — a plain User-Agent and the URL.
+/// - **What a name resolves to is checked where it is dialled**, and refused
+///   if any answer is a private address. The handler cannot do this: it has
+///   no resolver, and a check made before the dial is a check a rebinding
+///   name can answer differently the second time.
+/// - **Redirects are followed by hand**, at most five, each hop judged by
+///   `validate_https_url` again and its name checked again at its own dial.
+/// - **`max_bytes` is enforced while downloading**, not on the finished body,
+///   and the whole fetch is bounded in time.
+/// - **Offline-only refuses** with [`HttpsErrorCode::BlockedByPolicy`].
+///
+/// The bytes come back unjudged: the handler hashes, stores and sniffs them.
+/// An upstream `Content-Type` is never asked for — the spec has the type
+/// sniffed, never taken from the server.
+#[async_trait]
+pub trait HttpsFetcher: Send + Sync {
+    /// The body `url` answered with, at most `max_bytes` of it, or why not.
+    async fn get(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, HttpsError>;
+}
+
+/// Why an `https:` fetch delivered nothing, in NAP-RESOURCE's error
+/// vocabulary — each variant is one of the spec's codes, so the handler
+/// passes it to the napplet unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpsErrorCode {
+    /// The server answered 404 or 410.
+    NotFound,
+    /// The body was over the cap (said so up front, or ran past it).
+    TooLarge,
+    /// The fetch outlived its bound.
+    Timeout,
+    /// DNS, TCP, TLS or an upstream status that is not a "not found".
+    NetworkError,
+    /// This device will not make the request: offline-only, a private
+    /// address behind a public name, too many redirects, a redirect to
+    /// somewhere the URL could not have named, too many requests at once.
+    BlockedByPolicy,
+}
+
+impl HttpsErrorCode {
+    /// The spec's spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not-found",
+            Self::TooLarge => "too-large",
+            Self::Timeout => "timeout",
+            Self::NetworkError => "network-error",
+            Self::BlockedByPolicy => "blocked-by-policy",
+        }
+    }
+}
+
+/// A failed `https:` fetch: the code the napplet is shown, and the detail
+/// that goes to the log and the error's `message`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpsError {
+    pub code: HttpsErrorCode,
+    pub detail: String,
+}
+
+impl HttpsError {
+    pub fn new(code: HttpsErrorCode, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for HttpsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.detail)
+    }
+}
+
+/// An [`HttpsFetcher`] that fetches nothing — the honest default for a
+/// runtime with no internet behind it, and what tests use when `https:` is
+/// not the point. Every ask is `blocked-by-policy`.
+pub struct NoHttps;
+
+#[async_trait]
+impl HttpsFetcher for NoHttps {
+    async fn get(&self, _url: &str, _max_bytes: usize) -> Result<Vec<u8>, HttpsError> {
+        Err(HttpsError::new(
+            HttpsErrorCode::BlockedByPolicy,
+            "this device fetches no https: resources",
+        ))
     }
 }
 
