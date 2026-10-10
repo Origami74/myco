@@ -584,7 +584,9 @@ What the specs allow shapes how:
   deterministic. Unchanged: the local lane, mesh lanes, fallback relays for authors with
   no list, and the napplet's own `options.relays`. One-shot reads and subscriptions plan
   the same way. A write plan (`toInboxes`) is not narrowed: inbox delivery must reach
-  every relay. Each read plan logs `plan: N authors -> M relays (from K candidates)` at
+  every relay. Nor is the plan for the user's own outbox when they publish
+  (`Direction::Publish`): every write relay they list gets the event, not the two a read
+  of them would settle for. Each read plan logs `plan: N authors -> M relays (from K candidates)` at
   debug level.
 
 #### Relays that keep failing are skipped
@@ -719,8 +721,10 @@ when one was not heard from. A publish
 answers at a quorum (`LaneTransport::publish_quorum`): once the event is stored here and two
 other lanes — or the only one — have taken it; the rest finish in the background and are
 absent from the result's `relays` map, which lists what answered in time. A publish naming
-`toInboxes` waits for every lane, since the spec makes an inbox a required target whose
-failure must be reported. A
+`toInboxes` also waits for every inbox relay, since the spec makes an inbox a required
+target whose failure must be reported — but for at most 3 s (`INBOX_WAIT`): an inbox relay
+that has not answered by then is in the map as `false`, and delivery to it carries on
+behind the answer. The user's own extra outbox relays are never waited for. A
 subscribe answers the local backlog and pulls the remote lanes *into* the local relay, lane
 by lane as each answers, which is what delivers them live (the spec has no `outbox.eose`,
 and this is why). Napplet-supplied

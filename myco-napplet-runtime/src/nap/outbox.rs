@@ -55,13 +55,15 @@ const PUBLISH_TIMEOUT: Duration = Duration::from_secs(8);
 /// timeout. Two, not one, so a success means the event is findable from more
 /// than a single server — or, for a mesh lane, handed to more than one
 /// Circle member's connection.
-///
-/// The same with `toInboxes`. NAP-OUTBOX makes an inbox a required target
-/// whose failure must be reported; Myco reports what it knows when the
-/// quorum is in and keeps delivering to the inboxes behind the answer. A
-/// publish naming a dozen people's inboxes used to hold "Published" for the
-/// full timeout on the slowest of them.
 const PUBLISH_QUORUM: usize = 2;
+/// How long the answer waits for the `toInboxes` relays. NAP-OUTBOX makes
+/// each a required target whose failure must be reported, so the answer
+/// waits for every one of them — but only this long: one that has not
+/// answered by then is reported as not accepted, and delivery to it carries
+/// on behind the answer. A publish naming a dozen people's inboxes used to
+/// hold "Published" for the full [`PUBLISH_TIMEOUT`] on the slowest of them,
+/// and for every one of the user's own outbox relays too.
+const INBOX_WAIT: Duration = Duration::from_secs(3);
 /// Bounds on a napplet-supplied `timeoutMs`: below the floor a relay across
 /// the mesh cannot answer, above the ceiling the session loop is hostage.
 const MIN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -332,11 +334,14 @@ async fn publish(
         // write relay they list, not the two a read would settle for.
         lanes.extend(ctx.outbox.plan(Direction::Publish, &[user]).await.lanes);
     }
+    // The recipients' inbox relays: required targets, each reported.
+    let mut required: Vec<RelayLane> = Vec::new();
     if !inboxes.is_empty() {
         let plan = ctx.outbox.plan(Direction::Write, &inboxes).await;
         if !plan.missing_authors.is_empty() {
             return failed(message, "relay list unavailable");
         }
+        required.extend(plan.lanes.iter().filter(|l| l.url().is_some()).cloned());
         lanes.extend(plan.lanes);
     }
     lanes.extend(explicit);
@@ -347,7 +352,7 @@ async fn publish(
         Err(e) => return failed(message, e),
     };
 
-    let (stored, relays) = publish_to_quorum(ctx, lanes, &signed, PUBLISH_QUORUM).await;
+    let (stored, relays) = publish_to_quorum(ctx, lanes, &signed, &required).await;
     if !stored {
         return failed(message, "could not store the event");
     }
@@ -370,11 +375,18 @@ async fn publish_to_quorum(
     ctx: &NapContext,
     lanes: Vec<RelayLane>,
     event: &Event,
-    quorum: usize,
+    required: &[RelayLane],
 ) -> (bool, serde_json::Map<String, serde_json::Value>) {
     let outcomes = ctx
         .lanes
-        .publish_quorum(&lanes, event, PUBLISH_TIMEOUT, quorum)
+        .publish_quorum(
+            &lanes,
+            event,
+            PUBLISH_TIMEOUT,
+            PUBLISH_QUORUM,
+            required,
+            INBOX_WAIT,
+        )
         .await;
     let mut relays = serde_json::Map::new();
     let mut stored = false;
@@ -928,8 +940,7 @@ mod tests {
         assert_eq!(r["type"], "outbox.publish.result");
         assert_eq!(r["ok"], true);
         assert_eq!(r["event"]["pubkey"], signer.public_key().to_hex());
-        // This fixture's transport waits for every lane, so the inbox's
-        // refusal is in the answer; Myco's answers at the quorum.
+        // An inbox is a required target: its refusal is always reported.
         assert_eq!(
             r["relays"],
             json!({
