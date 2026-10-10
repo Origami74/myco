@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **AVIF and HEIC pictures show in napplets.** Myco took any file starting
   with an ISO media header for an MP4 video, so an AVIF or HEIC avatar or
   photo was handed to napplets as a video and shown as a broken picture.
+- **Your profile picture in Settings is fetched safely.** It used a plain
+  web request; it now goes through the same fetcher as napplet pictures:
+  public addresses only, every redirect checked, a size cap while
+  downloading, and nothing with offline-only on.
 
 ## [0.10.0] - 2026-10-05
 

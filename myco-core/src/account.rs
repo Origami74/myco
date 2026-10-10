@@ -60,6 +60,11 @@ pub struct AccountContext {
     /// Read before every internet attempt, so flipping "offline only" takes
     /// effect on the next retry.
     pub offline_only: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// How a profile picture is fetched from the web: NAP-RESOURCE's
+    /// `https:` fetcher, so the Settings header follows the same policy as a
+    /// napplet's avatar (public addresses only, every redirect judged,
+    /// offline-only, size cap while downloading).
+    pub https: Arc<dyn myco_napplet_runtime::seams::HttpsFetcher>,
     pub relays: Vec<String>,
     pub avatar_servers: Vec<String>,
 }
@@ -554,10 +559,22 @@ impl Account {
                 return Some(bytes);
             }
         }
-        if (self.ctx.offline_only)() || !url.starts_with("https://") {
+        if (self.ctx.offline_only)() {
             return None;
         }
-        let bytes = download(url).await?;
+        // Judged as NAP-RESOURCE judges a napplet's `https:` URL before the
+        // fetcher dials it; the fetcher judges every redirect the same way.
+        if let Err(e) = myco_napplet_runtime::nap::resource::validate_https_url(url) {
+            tracing::debug!(url, "profile picture URL refused: {e:?}");
+            return None;
+        }
+        let bytes = match self.ctx.https.get(url, MAX_AVATAR_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::debug!(url, "profile picture fetch failed: {e:?}");
+                return None;
+            }
+        };
         if let Some(sha) = &sha {
             if sha256_hex(&bytes) != *sha {
                 tracing::debug!(url, "a profile picture did not match its hash");
@@ -818,25 +835,6 @@ fn profile_answers<'a>(
         .collect()
 }
 
-async fn download(url: &str) -> Option<Vec<u8>> {
-    let http = reqwest::Client::builder()
-        .timeout(NET_TIMEOUT)
-        .build()
-        .ok()?;
-    let mut response = http.get(url).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.ok()? {
-        body.extend_from_slice(&chunk);
-        if body.len() > MAX_AVATAR_BYTES {
-            return None;
-        }
-    }
-    Some(body)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,6 +861,7 @@ mod tests {
             relay,
             blobs,
             offline_only: Arc::new(|| true),
+            https: Arc::new(myco_napplet_runtime::seams::NoHttps),
             relays: Vec::new(),
             avatar_servers: default_avatar_servers(),
         }

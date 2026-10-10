@@ -436,6 +436,7 @@ impl AppRuntime {
                     let content = content.clone();
                     Arc::new(move || content.is_offline_only())
                 },
+                https: Arc::new(crate::resource_https::NappletHttps::new(content.clone())),
                 // The defaults, plus the indexers, which are where other
                 // clients look up a profile and its relay lists.
                 relays: {
