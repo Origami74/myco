@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use fips::upper::tcp_mss::recalculate_l4_checksum;
+use fips::ipv6tun::tcp_mss::recalculate_l4_checksum;
 
 /// Where the node's built-in `.fips` responder is listening, or `None` when it
 /// is not running.

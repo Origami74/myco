@@ -98,7 +98,7 @@ pub fn send_packet(mut packet: Vec<u8>) -> bool {
         crate::socks_exit::offer(packet);
         return true; // consumed = carried or dropped
     }
-    fips::upper::tcp_mss::clamp_tcp_mss(&mut packet, MAX_MSS.load(Ordering::Relaxed));
+    fips::ipv6tun::tcp_mss::clamp_tcp_mss(&mut packet, MAX_MSS.load(Ordering::Relaxed));
     match outbound().lock().unwrap().as_ref() {
         Some(tx) => tx.try_send(packet).is_ok(),
         None => false,
