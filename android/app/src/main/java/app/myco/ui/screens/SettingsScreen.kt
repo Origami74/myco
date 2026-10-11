@@ -74,6 +74,8 @@ import app.myco.core.AppState
 import app.myco.core.NativeActions
 import app.myco.onboarding.SystemAsk
 import app.myco.share.DeviceName
+import app.myco.update.SoftwareUpdates
+import app.myco.update.SoftwareUpdateSettings
 import app.myco.ui.GroupLabel
 import app.myco.ui.NameSuggestions
 import app.myco.ui.applyDeviceName
@@ -123,6 +125,7 @@ private const val DEFAULT_BLOB_CACHE_MB = 1536L
  */
 @Composable
 fun SettingsScreen(
+    softwareUpdates: SoftwareUpdates,
     state: AppState,
     client: AppCoreClient,
     onBleToggle: (Boolean) -> Unit,
@@ -160,6 +163,7 @@ fun SettingsScreen(
 
     when (page) {
         SettingsPage.Root -> RootSettings(
+            softwareUpdates = softwareUpdates,
             state = state,
             onBleToggle = onBleToggle,
             wifiAwareSupported = wifiAwareSupported,
@@ -212,6 +216,7 @@ fun SettingsScreen(
 
 @Composable
 private fun RootSettings(
+    softwareUpdates: SoftwareUpdates,
     state: AppState,
     onBleToggle: (Boolean) -> Unit,
     wifiAwareSupported: Boolean,
@@ -454,6 +459,9 @@ private fun RootSettings(
                 )
             }
         }
+
+        Spacer(Modifier.height(8.dp))
+        SectionCard { SoftwareUpdateSettings(softwareUpdates, state.offlineOnly) }
 
         if (state.error.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))

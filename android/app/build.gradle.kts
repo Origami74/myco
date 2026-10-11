@@ -100,7 +100,15 @@ android {
         // so each store release gets a unique, increasing versionCode; local
         // builds fall back to the committed defaults.
         versionCode = System.getenv("MYCO_VERSION_CODE")?.toIntOrNull() ?: 1
-        versionName = System.getenv("MYCO_VERSION_NAME") ?: "0.0.1"
+        versionName = System.getenv("MYCO_VERSION_NAME") ?: runCatching {
+            // A local build must not mistake the current release for an update
+            // just because it still carries the original 0.0.1 placeholder.
+            val process = ProcessBuilder("git", "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", "--exclude", "*-*", "--exclude", "*+*")
+                .directory(repoRoot.asFile).redirectErrorStream(true).start()
+            val tag = process.inputStream.bufferedReader().readText().trim()
+            if (process.waitFor() == 0 && Regex("v[0-9]+\\.[0-9]+\\.[0-9]+").matches(tag))
+                tag.removePrefix("v") else "0.0.1"
+        }.getOrDefault("0.0.1")
         ndk { abiFilters += "arm64-v8a" }             // arm64 only
         buildConfigField("String", "GIT_REV", "\"${gitRev()}\"")
     }
@@ -171,5 +179,6 @@ dependencies {
     // …and an in-app camera scanner to read one back.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

@@ -94,6 +94,8 @@ import app.myco.ui.screens.AppsScreen
 import app.myco.ui.screens.CircleScreen
 import app.myco.ui.screens.DevScreen
 import app.myco.ui.screens.QrScreen
+import app.myco.update.rememberSoftwareUpdates
+import app.myco.update.SoftwareUpdateBanner
 import app.myco.ui.screens.SettingsScreen
 
 import app.myco.ui.theme.StatusAlone
@@ -174,6 +176,8 @@ fun MycoApp(
     onOpenReceivedFile: (FileTransfer, Uri) -> Unit = { _, _ -> },
 ) {
     var state by remember { mutableStateOf(client.state()) }
+    val softwareUpdates = rememberSoftwareUpdates(state.offlineOnly)
+    val softwareUpdateState by softwareUpdates.state.collectAsState()
     // The 1 Hz loop below outlives any one value of the switch.
     val currentMeshEnabled by rememberUpdatedState(meshEnabled)
     // Developer mode gates the Dev tab; hoisted so toggling it rebuilds the nav bar.
@@ -312,6 +316,7 @@ fun MycoApp(
             LocalMeshControl provides MeshControl(meshEnabled, onMeshToggle),
         ) {
     Scaffold(
+        topBar = { SoftwareUpdateBanner(softwareUpdates) },
         snackbarHost = { SnackbarHost(snackbars) { SetupSnackbar(it) } },
         bottomBar = {
             val current by nav.currentBackStackEntryAsState()
@@ -334,7 +339,7 @@ fun MycoApp(
                             icon = {
                                 val badged = (
                                     tab.route == "settings" &&
-                                        (bleExhausted || radioAlert || backendErrors(state).isNotEmpty())
+                                        (bleExhausted || radioAlert || backendErrors(state).isNotEmpty() || softwareUpdateState.availableTag != null)
                                     ) ||
                                     (tab.route == "circle" && state.pendingPairRequests.isNotEmpty())
                                 if (badged) {
@@ -385,6 +390,7 @@ fun MycoApp(
                 }
                 composable("settings") {
                     SettingsScreen(
+                        softwareUpdates = softwareUpdates,
                         state = state,
                         client = client,
                         onBleToggle = onBleToggle,

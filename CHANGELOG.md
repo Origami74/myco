@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Myco tells you when a newer stable release is available.** It checks
+  GitHub at most daily while the app is open, with an in-app notice and
+  one Android notification per version when notifications are allowed.
+  Settings has a manual check and an automatic-check switch. Mesh-only mode
+  pauses checks; opening the release page leaves installation to Android.
+  Local builds use the nearest stable Git tag for their version, and debug
+  builds start with automatic checks off.
+
 - **Napplets can load pictures and files from the web (`https:`).** A napplet
   with the resource permission can now ask for an `https://` link — a
   profile picture on someone's server, say — not only a Blossom hash. Myco
