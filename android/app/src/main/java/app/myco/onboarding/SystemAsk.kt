@@ -93,7 +93,7 @@ enum class SystemAsk(
         Explanation(
             title = "Notifications",
             body = "Next, Android asks to allow notifications.",
-            note = "Myco tells you when someone sends you a file.",
+            note = "Myco tells you when someone sends you a file or a new Myco release is available.",
         ),
     ),
 
