@@ -64,11 +64,11 @@ pub use prelude::{
 };
 pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
-    is_mesh_relay_url, BlobFetcher, BlobHints, BlobStore, Direction, EarlyAnswer, Envelope,
-    EventSink, HttpsError, HttpsErrorCode, HttpsFetcher, LaneTransport, MeshLimits, MeshReach,
-    MeshSink, NapTransport, NoFetcher, NoHttps, NoUploads, OutboxResolver, PlanSource,
+    is_mesh_relay_url, BlobFetcher, BlobHints, BlobReach, BlobStore, Direction, EarlyAnswer,
+    Envelope, EventSink, HttpsError, HttpsErrorCode, HttpsFetcher, LaneTransport, MeshLimits,
+    MeshReach, MeshSink, NapTransport, NoFetcher, NoHttps, NoUploads, OutboxResolver, PlanSource,
     RelayBackend, RelayLane, RelayPlan, ScopeOwner, Signer, StoreOnlySink, UploadBlob, UploadError,
-    UploadErrorCode, UploadSink, Uploaded, WorkScope,
+    UploadErrorCode, UploadSink, Uploaded, WorkScope, MAX_BLOB_HASHES,
 };
 pub use session::{
     Appearance, NappletIdentity, Session, Streamer, SubscriptionHandle, IMPLEMENTED_DOMAINS,
