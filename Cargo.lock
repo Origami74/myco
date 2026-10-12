@@ -2267,6 +2267,7 @@ dependencies = [
  "fips",
  "futures-util",
  "hex",
+ "if-addrs",
  "ipstack",
  "jni",
  "jpeg-encoder",

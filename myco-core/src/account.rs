@@ -703,18 +703,18 @@ async fn upload_everywhere(
             return Vec::new();
         }
     };
-    let http = reqwest::Client::builder()
-        .timeout(NET_TIMEOUT)
-        .build()
-        .unwrap_or_default();
+    let http = crate::http::HttpClient::internet(reqwest::Client::builder().timeout(NET_TIMEOUT));
     let results = futures_util::future::join_all(servers.iter().map(|server| {
         let http = http.clone();
         let auth = auth.clone();
         let body = bytes.to_vec();
         async move {
             let url = format!("{}/upload", server.trim_end_matches('/'));
-            let response = http
-                .put(&url)
+            let Ok(request) = http.put(&url) else {
+                tracing::debug!(server, "Blossom server refused by the guard");
+                return false;
+            };
+            let response = request
                 .header("Authorization", auth)
                 .header("Content-Type", crate::guest_avatar::MIME)
                 .body(body)

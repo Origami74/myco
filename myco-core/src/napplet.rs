@@ -1294,15 +1294,10 @@ pub struct BlossomFetcher {
     content: Arc<crate::content::Content>,
     /// The public Blossom servers. The defaults, unless a test says otherwise.
     public_servers: Vec<String>,
-    /// One client for every internet fetch, so its connections are reused.
-    http: reqwest::Client,
-    /// Its twin for servers the napplet or an author named (`xs` hints, kind
-    /// 10063): public addresses only, every redirect judged — a napplet
-    /// must not make this phone probe its own LAN.
-    hint_http: Option<crate::resource_https::PublicOnlyClient>,
-    /// Dial named servers on loopback: tests only.
-    #[cfg(test)]
-    trust_hints: bool,
+    /// One client for every internet fetch, so its connections are reused:
+    /// the public internet only, whoever named the server — a napplet must
+    /// not make this phone probe its own LAN. See [`crate::http`].
+    http: crate::http::HttpClient,
     /// Blobs nobody had, by sha256, with when that was found.
     misses: Mutex<HashMap<String, std::time::Instant>>,
 }
@@ -1331,22 +1326,16 @@ impl BlossomFetcher {
         Self {
             content,
             public_servers: crate::ip_source::default_blossom_servers(),
-            http: reqwest::Client::builder()
-                .connect_timeout(INTERNET_CONNECT_TIMEOUT)
-                .timeout(INTERNET_BLOB_TIMEOUT)
-                .read_timeout(INTERNET_READ_TIMEOUT)
-                .build()
-                .unwrap_or_default(),
-            hint_http: crate::resource_https::public_only_client(
-                reqwest::Client::builder()
-                    .connect_timeout(INTERNET_CONNECT_TIMEOUT)
-                    .timeout(INTERNET_BLOB_TIMEOUT)
-                    .read_timeout(INTERNET_READ_TIMEOUT),
-            ),
-            #[cfg(test)]
-            trust_hints: false,
+            http: crate::http::HttpClient::internet(Self::client_builder()),
             misses: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn client_builder() -> reqwest::ClientBuilder {
+        reqwest::Client::builder()
+            .connect_timeout(INTERNET_CONNECT_TIMEOUT)
+            .timeout(INTERNET_BLOB_TIMEOUT)
+            .read_timeout(INTERNET_READ_TIMEOUT)
     }
 
     fn recently_missed(&self, sha256_hex: &str) -> bool {
@@ -1453,14 +1442,7 @@ impl BlossomFetcher {
         }
         let public = crate::ip_source::IpPeerSource::new(Vec::new(), self.public_servers.clone())
             .with_http_client(self.http.clone())
-            .with_hint_http_client(self.hint_http.clone())
             .with_max_blob_bytes(max_bytes);
-        #[cfg(test)]
-        let public = if self.trust_hints {
-            public.trusting_hints()
-        } else {
-            public
-        };
         Some(
             match tokio::time::timeout(
                 INTERNET_BLOB_TIMEOUT,
@@ -1482,11 +1464,15 @@ impl BlossomFetcher {
         self
     }
 
-    /// Dial named servers (`xs` hints, kind 10063) on loopback — for tests,
-    /// whose "public" servers are local.
+    /// Refuse loopback as a device does — for the tests of the guard; other
+    /// tests' "internet" is on loopback.
     #[cfg(test)]
-    pub fn trusting_hints(mut self) -> Self {
-        self.trust_hints = true;
+    pub fn strict(mut self) -> Self {
+        self.http = crate::http::HttpClient::strict(
+            crate::http::Reach::Internet,
+            crate::http::Redirects::Judged,
+            Self::client_builder(),
+        );
         self
     }
 }
@@ -4161,15 +4147,15 @@ mod tests {
             servers: vec![server],
             authors: Vec::new(),
         };
-        let guarded = BlossomFetcher::new(content.clone()).with_public_servers(Vec::new());
+        let guarded = BlossomFetcher::new(content.clone())
+            .with_public_servers(Vec::new())
+            .strict();
         assert_eq!(
             guarded.fetch(&sha, 1 << 20, &hints).await.unwrap(),
             None,
             "a loopback hint was dialled"
         );
-        let fetcher = BlossomFetcher::new(content.clone())
-            .with_public_servers(Vec::new())
-            .trusting_hints();
+        let fetcher = BlossomFetcher::new(content.clone()).with_public_servers(Vec::new());
         assert_eq!(
             fetcher.fetch(&sha, 1 << 20, &hints).await.unwrap(),
             Some(bytes)
