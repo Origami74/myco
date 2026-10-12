@@ -32,6 +32,8 @@ mod control_client;
 // the host it is exercised only by its own tests, so it reads as dead there.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod gossip;
+// Every HTTP client, held to where it may connect.
+mod http;
 mod identity_store;
 mod intent;
 mod ip_source;

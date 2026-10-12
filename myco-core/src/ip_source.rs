@@ -440,7 +440,11 @@ pub fn default_blossom_servers() -> Vec<String> {
 pub struct IpPeerSource {
     relays: Vec<String>,
     blossom_servers: Vec<String>,
-    http: reqwest::Client,
+    /// Every blob fetch goes through it, whoever named the server: the
+    /// public internet only, unless this is a mesh source
+    /// ([`IpPeerSource::on_mesh`]), which reaches Circle peers only. See
+    /// [`crate::http`].
+    http: crate::http::HttpClient,
     timeout: Duration,
     /// When true, blob fetches ignore the manifest's `["server", …]` hints and
     /// use only `blossom_servers` — so a **mesh** source never reaches out to
@@ -478,11 +482,7 @@ impl IpPeerSource {
             hints: Vec::new(),
             author_outbox: None,
             blossom_servers,
-            http: reqwest::Client::builder()
-                // Generous: a blob can be MBs over a slow BLE mesh link.
-                .timeout(Duration::from_secs(60))
-                .build()
-                .unwrap_or_default(),
+            http: crate::http::shared_internet(),
             timeout: Duration::from_secs(8),
             ignore_manifest_servers: false,
             peer_relay: None,
@@ -507,8 +507,17 @@ impl IpPeerSource {
     /// Use `http` rather than a client of this source's own, so repeated
     /// fetches share its connection pool — one TLS handshake per server, not
     /// one per blob.
-    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+    pub(crate) fn with_http_client(mut self, http: crate::http::HttpClient) -> Self {
         self.http = http;
+        self
+    }
+
+    /// A source that reaches Circle peers over the mesh, and nothing else:
+    /// its blob client is [`crate::http::shared_mesh`], and it never asks a
+    /// manifest's public `server` hints.
+    pub fn on_mesh(mut self) -> Self {
+        self.http = crate::http::shared_mesh();
+        self.ignore_manifest_servers = true;
         self
     }
 
@@ -866,14 +875,16 @@ pub(crate) async fn post_pair_event(
     event: &nostr::Event,
     timeout: Duration,
 ) -> PairDelivery {
-    let Ok(client) = reqwest::Client::builder().timeout(timeout).build() else {
-        return PairDelivery::Unreachable;
-    };
+    // A peer's auth service, over the mesh: the client reaches nothing else.
+    let client = crate::http::HttpClient::mesh(reqwest::Client::builder().timeout(timeout));
     let body = match serde_json::to_string(event) {
         Ok(b) => b,
         Err(_) => return PairDelivery::Unreachable,
     };
-    match client.post(url).body(body).send().await {
+    let Ok(request) = client.post(url) else {
+        return PairDelivery::Unreachable;
+    };
+    match request.body(body).send().await {
         Ok(resp) if resp.status().is_success() => PairDelivery::Accepted("paired"),
         Ok(resp) if resp.status() == reqwest::StatusCode::ACCEPTED => {
             PairDelivery::Accepted("pending")
@@ -904,7 +915,7 @@ pub fn mesh_source_for(
         vec![mesh_blossom_url(holder_npub)],
     )
     .with_timeout(Duration::from_secs(20))
-    .ignoring_manifest_servers()
+    .on_mesh()
     .over_peer_relay(pool, holder_npub))
 }
 
@@ -1072,20 +1083,21 @@ pub async fn speedtest_peer(
     fips::PeerIdentity::from_npub(npub)
         .map_err(|e| anyhow::anyhow!("invalid peer npub {npub}: {e}"))?;
     let host = format!("{npub}.fips");
-    let client = reqwest::Client::builder()
-        // A short connect timeout so an unroutable/unreachable peer fails fast
-        // instead of burning the whole `timeout` budget; the total still bounds the
-        // (potentially slow over BLE) transfer.
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(timeout)
-        .build()?;
+    let client = crate::http::HttpClient::mesh(
+        reqwest::Client::builder()
+            // A short connect timeout so an unroutable/unreachable peer fails fast
+            // instead of burning the whole `timeout` budget; the total still bounds the
+            // (potentially slow over BLE) transfer.
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(timeout),
+    );
     speedtest_blossom(&client, &format!("http://{host}:24243"), bytes).await
 }
 
 /// The Blossom round-trip itself, against an already-built `client` + `base` URL —
 /// split out so it can be exercised against a local server in tests.
 async fn speedtest_blossom(
-    client: &reqwest::Client,
+    client: &crate::http::HttpClient,
     base: &str,
     bytes: usize,
 ) -> anyhow::Result<(f64, f64)> {
@@ -1095,7 +1107,7 @@ async fn speedtest_blossom(
 
     let t_up = Instant::now();
     let resp = client
-        .put(format!("{base}/upload"))
+        .put(&format!("{base}/upload"))?
         .body(payload)
         .send()
         .await?;
@@ -1117,7 +1129,7 @@ async fn speedtest_blossom(
         .to_string();
 
     let t_down = Instant::now();
-    let got = client.get(format!("{base}/{hash}")).send().await?;
+    let got = client.get(&format!("{base}/{hash}"))?.send().await?;
     if !got.status().is_success() {
         anyhow::bail!("download rejected ({})", got.status());
     }
@@ -1307,6 +1319,8 @@ impl PeerSource for IpPeerSource {
     ) -> anyhow::Result<Option<Vec<u8>>> {
         // Manifest hints first, then this source's own servers (deduped). A mesh
         // source skips the manifest's public hints entirely (stay on the mesh).
+        // Whoever named a server, it is dialled through this source's client,
+        // which refuses anything outside its reach (`crate::http`).
         let mut candidates: Vec<String> = if self.ignore_manifest_servers {
             Vec::new()
         } else {
@@ -1319,24 +1333,29 @@ impl PeerSource for IpPeerSource {
         }
 
         for server in candidates {
+            let url = format!("{}/{}", server.trim_end_matches('/'), sha256_hex_want);
+            let request = match self.http.get(&url) {
+                Ok(request) => request,
+                Err(why) => {
+                    tracing::debug!("blob server {server}: {why}");
+                    continue;
+                }
+            };
             // A server that failed a moment ago (5xx; TLS, DNS or a refused
             // connection while online) is not asked again until its skip is
             // up. A 404 is an answer — "not here" — and never held against it.
             if crate::relay_health::is_skipped(&server) {
                 continue;
             }
-            let url = format!("{}/{}", server.trim_end_matches('/'), sha256_hex_want);
             let sent = match self.stall_timeout {
-                Some(stall) => {
-                    match tokio::time::timeout(stall, self.http.get(&url).send()).await {
-                        Ok(sent) => sent,
-                        Err(_) => {
-                            tracing::debug!("{server}: no response in {stall:?}");
-                            continue;
-                        }
+                Some(stall) => match tokio::time::timeout(stall, request.send()).await {
+                    Ok(sent) => sent,
+                    Err(_) => {
+                        tracing::debug!("{server}: no response in {stall:?}");
+                        continue;
                     }
-                }
-                None => self.http.get(&url).send().await,
+                },
+                None => request.send().await,
             };
             let resp = match sent {
                 Ok(r) => {
@@ -1355,6 +1374,11 @@ impl PeerSource for IpPeerSource {
                         continue;
                     }
                     r
+                }
+                Err(e) if crate::http::refused_by_guard(&e) => {
+                    // The guard's refusal says nothing of the server's health.
+                    tracing::debug!("blob server {server} refused: {e}");
+                    continue;
                 }
                 Err(e) => {
                     crate::relay_health::record_http_error(&server, &e);
@@ -1438,7 +1462,7 @@ pub(crate) mod tests {
         tokio::spawn(myco_blossom::server::serve_on(store, listener));
 
         let base = format!("http://{addr}");
-        let client = reqwest::Client::new();
+        let client = crate::http::HttpClient::mesh(reqwest::Client::builder());
         let (up, down) = speedtest_blossom(&client, &base, 64 * 1024).await.unwrap();
         // Loopback: both legs move bytes and yield a finite, positive rate.
         assert!(up > 0.0 && up.is_finite(), "up_mbps = {up}");
@@ -2105,5 +2129,65 @@ pub(crate) mod tests {
         assert_eq!(resp.body, b"hello from the internet");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A blob server that counts the requests it was sent, serving `bytes`
+    /// at any path.
+    async fn counting_blossom(hits: Arc<std::sync::atomic::AtomicUsize>, bytes: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new().fallback(move || {
+            hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let bytes = bytes.clone();
+            async move { bytes }
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// Whoever named a server — a manifest's `server` tag, a BUD-10 `xs`
+    /// hint, a kind 10063 entry, or the source's own list — a public source
+    /// never dials this phone's own network: its client refuses it. A mesh
+    /// source never dials the public internet.
+    #[tokio::test]
+    async fn a_source_never_dials_outside_its_reach() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let bytes = b"only on the lan".to_vec();
+        let hash = sha256_hex(&bytes);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server = counting_blossom(hits.clone(), bytes.clone()).await;
+        let by_name = server.replace("127.0.0.1", "localhost");
+        let strict = |reach| {
+            crate::http::HttpClient::strict(
+                reach,
+                crate::http::Redirects::Judged,
+                reqwest::Client::builder(),
+            )
+        };
+
+        // Named, and the source's own: refused either way.
+        let source = IpPeerSource::new(Vec::new(), vec![server.clone()])
+            .with_http_client(strict(crate::http::Reach::Internet));
+        assert_eq!(
+            source
+                .fetch_blob(&hash, &[server.clone(), by_name])
+                .await
+                .unwrap(),
+            None
+        );
+        let mesh = IpPeerSource::new(Vec::new(), vec!["https://example.com".into()])
+            .on_mesh()
+            .with_http_client(strict(crate::http::Reach::Mesh));
+        assert_eq!(mesh.fetch_blob(&hash, &[]).await.unwrap(), None);
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            0,
+            "a source dialled outside its reach"
+        );
+
+        // The host tests' loopback "internet" still works.
+        let own = IpPeerSource::new(Vec::new(), vec![server]);
+        assert_eq!(own.fetch_blob(&hash, &[]).await.unwrap(), Some(bytes));
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
     }
 }

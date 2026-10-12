@@ -447,7 +447,15 @@ seam — the Circle's stores over the mesh and, unless offline-only, the interne
 **at once** with the first bytes winning. The internet side asks the servers a BUD-10 URL
 names (`blossom:<sha>.<ext>?xs=<domain>&as=<pubkey>`: `xs` servers, then the `as`
 author's kind 10063 servers as held here, https only, four of each at most), then the
-public defaults, over one shared HTTP client. A blob the internet confirmed nobody has is
+public defaults, over one shared HTTP client. Where a server came from does not decide
+where the phone will connect: every HTTP client `myco-core` builds is held to one reach
+at the dial (`myco-core/src/http.rs`) — the public internet only (no private, loopback,
+link-local, mesh, CGNAT or NAT64-wrapped private address, nothing on this phone's own
+interfaces or in the `/64` of its global IPv6 address), or the mesh only (`.fips` names,
+`fd00::/8`). Address literals are judged when the request is made, names by the client's
+resolver on the addresses it then connects to, and every redirect hop again; there is no
+proxy. A napplet cannot make the phone probe its own LAN, however it gets a URL in. The one
+exception is a server the user configured themselves (a custom Blossom store). A blob the internet confirmed nobody has is
 not asked for again for ten minutes. What comes back is verified by hash, **stored**, and only then delivered, so the second ask from any
 napplet is local and the room can serve it over the mesh. `mime` is sniffed from the
 bytes, never a header; raw SVG is refused (`blocked-by-policy`) for want of a sandboxed

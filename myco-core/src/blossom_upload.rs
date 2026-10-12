@@ -85,7 +85,8 @@ pub struct BlossomUploader {
     outbox: Arc<dyn OutboxResolver>,
     lanes: Arc<dyn LaneTransport>,
     defaults: Vec<String>,
-    http: reqwest::Client,
+    /// The public internet only, redirects not followed. See [`crate::http`].
+    http: crate::http::HttpClient,
     /// Only `https://` servers whose names resolve to public addresses. Off
     /// only in tests, whose "Blossom" is on `127.0.0.1` over plain HTTP.
     guard: bool,
@@ -140,17 +141,15 @@ impl BlossomUploader {
             outbox,
             lanes,
             defaults: DEFAULT_SERVERS.iter().map(|s| s.to_string()).collect(),
-            http: reqwest::Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .read_timeout(READ_TIMEOUT)
-                // Never follow a redirect: the public-address check in `put`
-                // covers the URL it was given, and a redirect could send the
-                // signed upload somewhere it never looked — this phone's own
-                // relay or Blossom on loopback, say. A 3xx is that server's
-                // refusal, and the next server is tried.
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default(),
+            http: crate::http::HttpClient::internet_unredirected(
+                reqwest::Client::builder()
+                    .connect_timeout(CONNECT_TIMEOUT)
+                    .read_timeout(READ_TIMEOUT), // Never follow a redirect: the public-address check in `put`
+                                                 // covers the URL it was given, and a redirect could send the
+                                                 // signed upload somewhere it never looked — this phone's own
+                                                 // relay or Blossom on loopback, say. A 3xx is that server's
+                                                 // refusal, and the next server is tried.
+            ),
             guard: true,
             one_at_a_time: tokio::sync::Semaphore::new(1),
         }
@@ -238,7 +237,8 @@ impl BlossomUploader {
         }
         let mut response = self
             .http
-            .put(format!("{server}/upload"))
+            .put(&format!("{server}/upload"))
+            .map_err(|r| PutFailure::Failed(r.to_string()))?
             .header(reqwest::header::AUTHORIZATION, auth)
             .header(reqwest::header::CONTENT_TYPE, &blob.mime)
             .body(blob.bytes.clone())

@@ -532,7 +532,6 @@ impl std::fmt::Display for HttpsUrlRefusal {
 /// [`validate_relay_url`]: crate::nap::outbox::validate_relay_url
 /// [`is_private_ip`]: crate::nap::outbox::is_private_ip
 pub fn validate_https_url(url: &str) -> Result<nostr::Url, HttpsUrlRefusal> {
-    use nostr::types::url::Host;
     if url.len() > MAX_URL_LEN {
         return Err(HttpsUrlRefusal::Invalid(format!(
             "URL is over {MAX_URL_LEN} bytes"
@@ -546,6 +545,17 @@ pub fn validate_https_url(url: &str) -> Result<nostr::Url, HttpsUrlRefusal> {
             parsed.scheme()
         )));
     }
+    judge_public_host(&parsed)?;
+    Ok(parsed)
+}
+
+/// Whether a parsed URL points at the public internet: no userinfo, no
+/// private address literal, no local or `.fips` name — the host half of
+/// [`validate_https_url`], without its scheme rule. Also what a Blossom
+/// server named by someone else (a manifest's `server` tag, a BUD-10 `xs`
+/// hint, a kind 10063 list) is judged by before it is dialled.
+pub fn judge_public_host(parsed: &nostr::Url) -> Result<(), HttpsUrlRefusal> {
+    use nostr::types::url::Host;
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(HttpsUrlRefusal::Blocked(
             "a URL with userinfo is not fetched".into(),
@@ -581,7 +591,7 @@ pub fn validate_https_url(url: &str) -> Result<nostr::Url, HttpsUrlRefusal> {
             }
         }
     }
-    Ok(parsed)
+    Ok(())
 }
 
 /// What `https:` URLs each napplet was recently delivered, and how many
@@ -1435,6 +1445,7 @@ mod tests {
             "https://cdn.example.com:8443/p/a.jpg?w=64#top",
             "https://93.184.215.14/a.png",
             "https://[2606:4700::1]/a.png",
+            "https://[64:ff9b::5db8:d70e]/a.png",
             "HTTPS://Example.COM/a.png",
         ] {
             assert!(validate_https_url(url).is_ok(), "{url} was refused");
@@ -1462,6 +1473,9 @@ mod tests {
             ("https://[fe80::1]/a.png", "blocked-by-policy"),
             ("https://[fd00::1]/a.png", "blocked-by-policy"),
             ("https://[::ffff:127.0.0.1]/a.png", "blocked-by-policy"),
+            ("https://[64:ff9b::c0a8:101]/a.png", "blocked-by-policy"),
+            ("https://[64:ff9b::7f00:1]/a.png", "blocked-by-policy"),
+            ("https://[64:ff9b:1::5db8:d70e]/a.png", "blocked-by-policy"),
             ("https://localhost/a.png", "blocked-by-policy"),
             ("https://LOCALHOST./a.png", "blocked-by-policy"),
             ("https://shell.localhost/a.png", "blocked-by-policy"),

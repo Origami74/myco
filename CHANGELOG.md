@@ -28,6 +28,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Napplets and app manifests can no longer point Myco at your own network.**
+  A Blossom server named in a napplet's `blossom:` link, an author's server
+  list or an app manifest was dialled wherever it pointed, including this
+  phone and your Wi-Fi network. Such servers are now used only when they are
+  on the public internet. The check is on the connection itself, not on
+  where the link came from: every web request Myco makes is held to the
+  public internet (or, for Circle peers, to the mesh) on the address
+  actually dialled and after every redirect, so a link that slips in some
+  other way is refused too. This phone's own addresses and its IPv6
+  neighbours count as your network. A Blossom server on your own network
+  named in your server list or an app you publish is no longer used; a
+  custom Blossom store you set in Settings still is. The same check now sees
+  through NAT64 addresses (`64:ff9b::`), for relays too.
 - **Napplet posts reach all your outbox relays.** A note a napplet posted
   through NAP-OUTBOX went to only two of your NIP-65 write relays, picked
   the way a read picks them; the rest never got it, so people reading from

@@ -3200,10 +3200,12 @@ impl Content {
         idle: Duration,
         still_wanted: &(dyn Fn() -> bool + Sync),
     ) -> anyhow::Result<Vec<u8>> {
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .build()?;
-        let mut response = tokio::time::timeout(idle, client.get(url).send())
+        // A Circle peer's Blossom: the client reaches the mesh and nothing
+        // else, whatever URL the offer carried.
+        let client = crate::http::HttpClient::mesh(
+            reqwest::Client::builder().connect_timeout(Duration::from_secs(15)),
+        );
+        let mut response = tokio::time::timeout(idle, client.get(url)?.send())
             .await
             .map_err(|_| anyhow::anyhow!("peer Blossom did not answer"))??;
         if !response.status().is_success() {
@@ -4277,7 +4279,7 @@ impl Content {
                 vec![format!("ws://[{ip}]:4870")],
                 vec![format!("http://[{ip}]:24243")],
             )
-            .ignoring_manifest_servers())));
+            .on_mesh())));
         }
         if !self.is_offline_only() {
             sources.push(Arc::new(cap(crate::ip_source::IpPeerSource::new(

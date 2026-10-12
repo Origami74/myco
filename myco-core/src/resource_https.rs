@@ -5,14 +5,11 @@
 //! no userinfo, no private literal, no local or `.fips` name) by the time it
 //! gets here. This is the half of the policy only the dialler can enforce:
 //!
-//! - **What a name resolves to.** The client's resolver is
-//!   [`PublicOnlyResolver`], which refuses a name if **any** of its answers is
-//!   [`is_private_ip`] — the same predicate and the same any-answer rule as
-//!   `outbox::dials_public`, but applied by the client itself, on the
-//!   addresses it then connects to. `dials_public` resolves once to check and
-//!   lets the client resolve again to dial (its documented TOCTOU gap); a
-//!   rebinding name answers the two differently. Here there is one
-//!   resolution, and it is the one dialled.
+//! - **What a name resolves to.** The client is [`crate::http`]'s internet
+//!   client, whose resolver refuses a name if **any** of its answers is
+//!   private or this device's own network — on the addresses it then
+//!   connects to, so there is no second lookup for a rebinding name to
+//!   answer differently.
 //! - **Every redirect hop.** Redirects are never followed by the client: each
 //!   `Location` is joined to the URL it came from, judged by
 //!   `validate_https_url` again, and dialled through the same resolver — at
@@ -37,12 +34,10 @@
 //! stores them.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::future::{BoxFuture, FutureExt as _, Shared};
-use myco_napplet_runtime::nap::outbox::is_private_ip;
 use myco_napplet_runtime::nap::resource::validate_https_url;
 use myco_napplet_runtime::seams::{HttpsError, HttpsErrorCode, HttpsFetcher};
 
@@ -74,7 +69,9 @@ pub struct NappletHttps {
 }
 
 struct Inner {
-    http: reqwest::Client,
+    /// Public internet only, redirects not followed: they are followed by
+    /// hand below, under `https:`'s stricter rule. See [`crate::http`].
+    http: crate::http::HttpClient,
     /// The user switched the internet off (`Content::is_offline_only`).
     offline_only: Gate,
     /// The internet looks down right now (`Content::internet_looks_down`).
@@ -98,18 +95,25 @@ impl NappletHttps {
     }
 
     fn with_gates(offline_only: Gate, internet_down: Gate, guard: bool) -> Self {
-        let http = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(FETCH_TIMEOUT)
-            // Followed by hand, so every hop is judged; see the module docs.
-            .redirect(reqwest::redirect::Policy::none())
-            // A proxy would resolve the name itself, out of the resolver's
-            // sight.
-            .no_proxy()
-            .dns_resolver(Arc::new(PublicOnlyResolver { guard }))
-            .build()
-            .unwrap_or_default();
+            .timeout(FETCH_TIMEOUT);
+        // Off only in tests, whose "internet" is on loopback: there the
+        // guarded client is the strict one, so the tests of the guard see
+        // what a device does.
+        #[cfg(test)]
+        let http = if guard {
+            crate::http::HttpClient::strict(
+                crate::http::Reach::Internet,
+                crate::http::Redirects::None,
+                builder,
+            )
+        } else {
+            crate::http::HttpClient::internet_unredirected(builder)
+        };
+        #[cfg(not(test))]
+        let http = crate::http::HttpClient::internet_unredirected(builder);
         Self {
             inner: Arc::new(Inner {
                 http,
@@ -206,7 +210,8 @@ impl Inner {
         loop {
             let response = self
                 .http
-                .get(current.clone())
+                .get(current.as_str())
+                .map_err(|r| HttpsError::new(HttpsErrorCode::BlockedByPolicy, r.to_string()))?
                 .send()
                 .await
                 .map_err(|e| classify(&e))?;
@@ -314,61 +319,16 @@ async fn read_capped(
 }
 
 /// A reqwest failure as the spec's code: a name refused by
-/// [`PublicOnlyResolver`] is the policy's, a timeout is `timeout`, and the
+/// the guard ([`crate::http`]) is the policy's, a timeout is `timeout`, and the
 /// rest — DNS, TCP, TLS — `network-error`.
 fn classify(e: &reqwest::Error) -> HttpsError {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(e);
-    while let Some(err) = source {
-        if err.downcast_ref::<PrivateAddress>().is_some() {
-            return HttpsError::new(HttpsErrorCode::BlockedByPolicy, err.to_string());
-        }
-        source = err.source();
+    if crate::http::refused_by_guard(e) {
+        return HttpsError::new(HttpsErrorCode::BlockedByPolicy, e.to_string());
     }
     if e.is_timeout() {
         return HttpsError::new(HttpsErrorCode::Timeout, e.to_string());
     }
     HttpsError::new(HttpsErrorCode::NetworkError, e.to_string())
-}
-
-/// A name refused because it resolved to a private address.
-#[derive(Debug)]
-struct PrivateAddress(String);
-
-impl std::fmt::Display for PrivateAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} resolves to a private address", self.0)
-    }
-}
-
-impl std::error::Error for PrivateAddress {}
-
-/// The client's resolver: the system's answers, unless **any** of them is
-/// private, in which case the name is refused and nothing is dialled. The
-/// addresses returned are the ones connected to, so there is no second
-/// lookup for a rebinding name to answer differently.
-///
-/// Address literals never reach a resolver; the runtime's
-/// `validate_https_url` judges those, on the first URL and on every hop.
-struct PublicOnlyResolver {
-    /// Off only in tests, whose servers are on loopback.
-    guard: bool,
-}
-
-impl reqwest::dns::Resolve for PublicOnlyResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let guard = self.guard;
-        let host = name.as_str().to_string();
-        Box::pin(async move {
-            let addrs: Vec<SocketAddr> =
-                tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
-            if guard && addrs.iter().any(|a| is_private_ip(a.ip())) {
-                return Err(
-                    Box::new(PrivateAddress(host)) as Box<dyn std::error::Error + Send + Sync>
-                );
-            }
-            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
-        })
-    }
 }
 
 #[cfg(test)]
@@ -424,40 +384,6 @@ mod tests {
         );
     }
 
-    /// A name that resolves to a private address is refused at the dial —
-    /// the check the runtime cannot make. `localhost` stands in for a public
-    /// name rebound to loopback: the guarded client never connects to the
-    /// server listening there.
-    #[tokio::test]
-    async fn a_name_resolving_to_a_private_address_is_refused_at_the_dial() {
-        let hits = Arc::new(AtomicUsize::new(0));
-        let count = hits.clone();
-        let base = server(axum::Router::new().route(
-            "/x",
-            axum::routing::get(move || {
-                count.fetch_add(1, Ordering::Relaxed);
-                async { "secret" }
-            }),
-        ))
-        .await;
-        let port = base.rsplit(':').next().unwrap();
-        let guarded = NappletHttps::with_gates(open(), open(), true);
-        let e = guarded
-            .inner
-            .http
-            .get(format!("http://localhost:{port}/x"))
-            .send()
-            .await
-            .unwrap_err();
-        assert_eq!(classify(&e).code, HttpsErrorCode::BlockedByPolicy, "{e}");
-        assert_eq!(
-            hits.load(Ordering::Relaxed),
-            0,
-            "the private server was dialled"
-        );
-    }
-
-    /// The body comes back; a 404 is `not-found`, a 500 `network-error`.
     #[tokio::test]
     async fn statuses_map_to_the_spec_codes() {
         use axum::http::StatusCode;
