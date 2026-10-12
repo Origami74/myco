@@ -452,13 +452,15 @@ author's list not held here looked up — on the write relays of the author's re
 as held here, and the indexers, for at most 3 s, done as soon as every list is in — kept,
 and the servers it adds asked: a picture its hint serves never waits on an indexer. One
 lookup per author at a time, at most 60 authors a minute on the device, and an author no
-relay had is not asked about again for ten minutes. The named servers are someone else's word
-for where to dial, so they go out as `https:` does: each judged first (no userinfo, no
-private literal, no local or `.fips` name), through a resolver that refuses a name
-answering with a private address, every redirect judged again — a napplet cannot make
-the phone probe its own LAN. The same holds for a manifest's `server` tags when an app's
-files are fetched (`IpPeerSource`); the defaults and a mesh peer's Blossom are the
-device's own configuration and are dialled as they are. A blob the internet confirmed nobody has is
+relay had is not asked about again for ten minutes. Where a server came from does not
+decide where the phone will connect: every HTTP client `myco-core` builds is held to one reach
+at the dial (`myco-core/src/http.rs`) — the public internet only (no private, loopback,
+link-local, mesh, CGNAT or NAT64-wrapped private address, nothing on this phone's own
+interfaces or in the `/64` of its global IPv6 address), or the mesh only (`.fips` names,
+`fd00::/8`). Address literals are judged when the request is made, names by the client's
+resolver on the addresses it then connects to, and every redirect hop again; there is no
+proxy. A napplet cannot make the phone probe its own LAN, however it gets a URL in. The one
+exception is a server the user configured themselves (a custom Blossom store). A blob the internet confirmed nobody has is
 not asked for again for ten minutes. What comes back is verified by hash, **stored**, and only then delivered, so the second ask from any
 napplet is local and the room can serve it over the mesh. `mime` is sniffed from the
 bytes, never a header; raw SVG is refused (`blocked-by-policy`) for want of a sandboxed

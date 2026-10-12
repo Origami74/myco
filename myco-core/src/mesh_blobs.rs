@@ -222,7 +222,7 @@ pub fn head_url(npub: &str, sha256_hex: &str) -> anyhow::Result<String> {
 /// The real probe: the Circle members in reach, asked over the mesh.
 pub struct HttpProbe {
     content: Arc<crate::content::Content>,
-    http: reqwest::Client,
+    http: crate::http::HttpClient,
 }
 
 impl HttpProbe {
@@ -234,21 +234,16 @@ impl HttpProbe {
     }
 }
 
-/// The client every probe goes out on: no redirects (a peer cannot send the
-/// probe off the mesh), no proxy, and a short timeout of its own.
-fn probe_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .timeout(HEAD_TIMEOUT)
-        .build()
-        .unwrap_or_default()
+/// The client every probe goes out on: the mesh only, no redirects (a peer
+/// cannot send the probe anywhere), and a short timeout of its own.
+fn probe_client() -> crate::http::HttpClient {
+    crate::http::HttpClient::mesh_unredirected(reqwest::Client::builder().timeout(HEAD_TIMEOUT))
 }
 
 /// One `HEAD`: 2xx is held; 404, and the 401/403 a peer gives a stranger,
 /// are a clear "no"; anything else is no answer.
-async fn head_status(http: &reqwest::Client, url: &str) -> anyhow::Result<bool> {
-    let status = http.head(url).send().await?.status();
+async fn head_status(http: &crate::http::HttpClient, url: &str) -> anyhow::Result<bool> {
+    let status = http.head(url)?.send().await?.status();
     if status.is_success() {
         return Ok(true);
     }

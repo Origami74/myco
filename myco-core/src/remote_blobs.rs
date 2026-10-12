@@ -42,7 +42,9 @@ const KIND_BLOSSOM_AUTH: u16 = 24242;
 /// A Blossom server we do not own, used as the blob store.
 pub struct RemoteBlobStore {
     base: String,
-    http: reqwest::Client,
+    /// A server the user configured: [`crate::http::Reach::Configured`], the
+    /// one reach allowed onto their own network.
+    http: crate::http::HttpClient,
     /// The device key, shared with [`crate::content::Content`] because it is set
     /// after construction — the store is built before the identity is loaded.
     keys: Arc<Mutex<Option<Keys>>>,
@@ -54,10 +56,9 @@ impl RemoteBlobStore {
     pub fn new(base: impl Into<String>, keys: Arc<Mutex<Option<Keys>>>) -> Self {
         Self {
             base: base.into().trim_end_matches('/').to_string(),
-            http: reqwest::Client::builder()
-                .timeout(HTTP_TIMEOUT)
-                .build()
-                .unwrap_or_default(),
+            http: crate::http::HttpClient::configured(
+                reqwest::Client::builder().timeout(HTTP_TIMEOUT),
+            ),
             keys,
             last_error: Arc::new(Mutex::new(None)),
         }
@@ -110,7 +111,14 @@ impl RemoteBlobStore {
 #[async_trait]
 impl BlobStore for RemoteBlobStore {
     async fn has(&self, want_hex: &str) -> bool {
-        match self.http.head(self.url_for(want_hex)).send().await {
+        let request = match self.http.head(&self.url_for(want_hex)) {
+            Ok(request) => request,
+            Err(e) => {
+                self.note(Some(format!("Could not reach {}: {e}", self.base)));
+                return false;
+            }
+        };
+        match request.send().await {
             Ok(r) => {
                 self.note(None);
                 r.status().is_success()
@@ -129,7 +137,7 @@ impl BlobStore for RemoteBlobStore {
 
     async fn get(&self, want_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
         let want = want_hex.to_ascii_lowercase();
-        let resp = match self.http.get(self.url_for(&want)).send().await {
+        let resp = match self.http.get(&self.url_for(&want))?.send().await {
             Ok(r) => r,
             Err(e) => {
                 self.note(Some(format!("Could not reach {}: {e}", self.base)));
@@ -163,7 +171,7 @@ impl BlobStore for RemoteBlobStore {
         let hash = sha256_hex(bytes);
         let mut req = self
             .http
-            .put(format!("{}/upload", self.base))
+            .put(&format!("{}/upload", self.base))?
             .body(bytes.to_vec());
         if let Some(auth) = self.upload_auth(&hash) {
             req = req.header("Authorization", auth);
