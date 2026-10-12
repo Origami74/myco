@@ -35,7 +35,7 @@ async fn a_verified_napplet_reaches_the_shell_and_completes_the_handshake() {
     // --- the session, keyed by the identity computed from those bytes ---
     let identity = NappletIdentity::from(&resolved);
     assert_eq!(identity.d_tag, "fixture");
-    assert_eq!(identity.aggregate, resolved.aggregate);
+    assert_eq!(identity.identity_hash, resolved.identity_hash);
     let mut session = Session::new(identity.clone(), ["shell"]);
     let (ctx, _signer) = test_context();
 

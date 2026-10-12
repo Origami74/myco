@@ -254,6 +254,40 @@ pub extern "system" fn Java_app_myco_core_NativeCore_accountAvatar(
         .unwrap_or(std::ptr::null_mut())
 }
 
+/// An installed napplet's icon bytes, or `null` for generic artwork: no icon
+/// on the served manifest, not downloaded, or not the bytes it signed. Read
+/// from this phone's store only — never a fetch. The caller still decodes
+/// them as the declared image type before showing anything (NIP-5D §Icon).
+/// Background thread only.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletIcon(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    pointer: JString,
+) -> jbyteArray {
+    use nostr::nips::nip19::ToBech32;
+    let pointer = get_string(&mut env, &pointer);
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.gateway_context()
+        }
+        None => None,
+    };
+    let icon = match (ctx, crate::napplet::NappletAddr::parse(&pointer)) {
+        (Some((content, rt_handle)), Ok(addr)) => {
+            let npub = addr.author.to_bech32().unwrap_or_default();
+            rt_handle.block_on(content.napplet_icon(&npub, addr.d_tag.as_deref()))
+        }
+        _ => None,
+    };
+    match icon.and_then(|(bytes, _mime)| env.byte_array_from_slice(&bytes).ok()) {
+        Some(array) => array.into_raw(),
+        None => std::ptr::null_mut(),
+    }
+}
+
 // --- external signer (NIP-55) ------------------------------------------------
 //
 // Kotlin long-polls the queue, carries each request to the signer app, and

@@ -1,5 +1,5 @@
-//! The S0 gate: a fixture napplet's aggregate recomputes and matches
-//! off-device, and every way of getting it wrong is refused.
+//! The S0 gate: a fixture napplet's artifact hash verifies off-device and
+//! becomes its identity, and every way of getting it wrong is refused.
 //!
 //! Each test breaks exactly one thing and asserts the *code*, not the message —
 //! a napplet that fails must fail for the reason we think it does, or a later
@@ -12,7 +12,6 @@ use myco_napplet_runtime::resolve::resolve;
 use myco_napplet_runtime::testing::{
     build_test_napplet, FixtureAggregate, NappletBuilder, TestNapplet, FIXTURE_INDEX_HTML,
 };
-use nsite_deck::aggregate::{compute_aggregate_hash, PathEntry};
 use nsite_deck::seams::BlobStore;
 use nsite_deck::sync::sha256_hex;
 use nsite_deck::testing::MemBlobs;
@@ -35,58 +34,18 @@ async fn expect_rejection(napplet: TestNapplet, code: NappletErrorCode) {
 }
 
 /// The gate itself: the fixture resolves, and the identity the runtime assigns
-/// it is the aggregate recomputed from the bytes — not anything the manifest
-/// asserted.
+/// it is the sha256 of the bytes it fetched and verified.
 #[tokio::test]
-async fn the_fixture_resolves_and_its_aggregate_recomputes() {
+async fn the_fixture_resolves_and_its_identity_is_the_artifact_hash() {
     let napplet = build_test_napplet();
     let blobs = store_for(&napplet).await;
 
-    let expected = compute_aggregate_hash(&[PathEntry {
-        path: "/index.html".into(),
-        sha256: sha256_hex(FIXTURE_INDEX_HTML.as_bytes()),
-    }]);
+    let expected = sha256_hex(FIXTURE_INDEX_HTML.as_bytes());
 
     let resolved = resolve(napplet.manifest, &blobs).await.unwrap();
     assert_eq!(resolved.identity(), ("fixture", expected.as_str()));
     assert_eq!(resolved.index_html, FIXTURE_INDEX_HTML);
     assert_eq!(resolved.manifest.requires, vec!["shell", "relay"]);
-}
-
-/// The same fixture, pinned to the hex the **reference JS runtime** computes
-/// for it. Recomputing the expected value with the same code that produced it
-/// (as the test above does) proves self-consistency, not interoperability —
-/// this constant is what proves a napplet built for kehto resolves here.
-///
-/// Cross-checked against `@kehto/nip/5a`'s `computeAggregateHash` over
-/// `FIXTURE_INDEX_HTML`. If it ever fails, the algorithm diverged from the
-/// reference and every published napplet stops loading — do not "fix" it by
-/// updating the constant.
-#[tokio::test]
-async fn the_fixture_aggregate_matches_the_reference_implementation() {
-    let manifest = NappletManifest::from_event(build_test_napplet().manifest).unwrap();
-    assert_eq!(
-        manifest.aggregate,
-        "ae61a6e95ad666d2294f88e69769961148aa933ca1fdf59a7f31cf0d2c97c1cb"
-    );
-
-    // And a second, two-file vector, so the sort-then-concatenate step is
-    // pinned too and not just the single-line case where sorting is a no-op.
-    // Computed directly: a two-file *napplet* is refused at parse, but the
-    // aggregate algorithm underneath it still has to match the reference.
-    assert_eq!(
-        compute_aggregate_hash(&[
-            PathEntry {
-                path: "/index.html".into(),
-                sha256: sha256_hex(FIXTURE_INDEX_HTML.as_bytes()),
-            },
-            PathEntry {
-                path: "/app.js".into(),
-                sha256: sha256_hex(b"console.log('hi')"),
-            },
-        ]),
-        "d33c30b3f7ad101e27f2ed4fae460edc51139e41454d66d8c08760d0f561f168"
-    );
 }
 
 #[tokio::test]
@@ -133,76 +92,27 @@ impl BlobStore for LyingStore {
     }
 }
 
+/// An `x` naming bytes nobody has: no source can serve it, and the bytes that
+/// are there are not fetched in its place.
 #[tokio::test]
-async fn rejects_an_aggregate_mismatch() {
+async fn an_x_naming_other_bytes_does_not_resolve() {
     expect_rejection(
         NappletBuilder::new()
             .aggregate(FixtureAggregate::Corrupt)
             .build(),
-        NappletErrorCode::AggregateMismatch,
+        NappletErrorCode::BlobUnavailable,
     )
     .await;
 }
 
-/// The `x` tag is corroboration, not the source. NIP-5D Identity step 3 says
-/// the runtime recomputes the aggregate from the `path` tags and that the tag,
-/// *if carried*, must match — so a napplet without one still has an identity,
-/// and it is the same one it would have had with the tag present.
+/// NIP-5D Identity step 2: a manifest without exactly one `x` tag is rejected.
 #[tokio::test]
-async fn a_missing_aggregate_tag_still_resolves_to_the_same_identity() {
-    let declared = build_test_napplet();
-    let undeclared = NappletBuilder::new()
-        .aggregate(FixtureAggregate::Omitted)
-        .build();
-
-    let blobs = store_for(&undeclared).await;
-    let resolved = resolve(undeclared.manifest, &blobs).await.unwrap();
-
-    let with_tag = NappletManifest::from_event(declared.manifest).unwrap();
-    assert_eq!(resolved.aggregate, with_tag.aggregate);
-}
-
-/// NIP-5D: "A napplet is a single self-contained /index.html". A manifest
-/// listing more than one file is not a napplet, so it is refused at parse —
-/// before any blob is fetched, and never inlined, which would assemble bytes
-/// the author never signed as a unit.
-#[tokio::test]
-async fn rejects_a_multi_file_bundle() {
-    let napplet = NappletBuilder::new()
-        .file("/app.js", b"console.log('hi')")
-        .build();
-    let blobs = store_for(&napplet).await;
-    let err = resolve(napplet.manifest.clone(), &blobs).await.unwrap_err();
-    assert_eq!(err.code, NappletErrorCode::MultiFile);
-
-    // Rejected by the manifest layer, not by the resolve pipeline — so the same
-    // refusal happens everywhere a manifest is parsed, not only on the load path.
-    let parsed = NappletManifest::from_event(napplet.manifest).unwrap_err();
-    assert_eq!(parsed.code, NappletErrorCode::MultiFile);
-
-    // The error names the offending files, and cites the rule rather than
-    // restating a Myco preference.
-    assert!(err.message.contains("/app.js"), "unhelpful error: {err}");
-    assert!(
-        err.message.contains("single self-contained"),
-        "unhelpful error: {err}"
-    );
-    // Myco loads napplets, it never builds them. The person who sees this did
-    // not publish the napplet and cannot rebuild it, so the message says what
-    // the publisher did — it does not hand out build instructions.
-    assert!(
-        !err.message.to_lowercase().contains("rebuild"),
-        "error tells our user to rebuild someone else's napplet: {err}"
-    );
-}
-
-#[tokio::test]
-async fn rejects_a_manifest_with_no_index() {
+async fn rejects_a_manifest_with_no_x() {
     expect_rejection(
         NappletBuilder::new()
-            .files(&[("/main.html", b"<h1>wrong name</h1>")])
+            .aggregate(FixtureAggregate::Omitted)
             .build(),
-        NappletErrorCode::MissingIndex,
+        NappletErrorCode::InvalidManifest,
     )
     .await;
 }

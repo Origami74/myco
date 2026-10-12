@@ -1966,7 +1966,7 @@ impl Content {
         let mut fresh = HashMap::new();
         for item in napplets {
             let ready = match self.napplet_keep_set(&item).await {
-                Some((event, index)) => {
+                Some((event, index, _icon)) => {
                     let here = self.blobs.has(&index).await;
                     // A napplet installed before pinning existed has no pin,
                     // so it serves the store's newest — and a newer manifest
@@ -4618,9 +4618,10 @@ impl Content {
             // stays and the app behind it is gone — which is what happened the
             // first time "Clear local database" met an installed napplet.
             if item.kind == LibraryKind::Napplet {
-                if let Some((event, index_hash)) = self.napplet_keep_set(item).await {
+                if let Some((event, index_hash, icon)) = self.napplet_keep_set(item).await {
                     keep_events.insert(event.id.to_bytes());
                     keep_blobs.insert(index_hash);
+                    keep_blobs.extend(icon);
                     keep_active.insert(manifest_key(
                         event.kind.as_u16(),
                         &event.pubkey,
@@ -4717,27 +4718,52 @@ impl Content {
         Ok(())
     }
 
-    /// The manifest event and index-blob hash an installed napplet is served
-    /// from, for the keep-sets: the active manifest when one is pinned, else
-    /// the newest in the slot.
-    async fn napplet_keep_set(&self, item: &LibraryItem) -> Option<(Event, String)> {
+    /// The manifest event, artifact hash and icon hash (when it has one) an
+    /// installed napplet is served from, for the keep-sets: the active
+    /// manifest when one is pinned, else the newest in the slot.
+    async fn napplet_keep_set(
+        &self,
+        item: &LibraryItem,
+    ) -> Option<(Event, String, Option<String>)> {
+        let (event, manifest) = self
+            .served_napplet(&item.author_npub, item.d_tag.as_deref())
+            .await?;
+        let icon = manifest.icon.map(|i| i.sha256);
+        Some((event, manifest.artifact, icon))
+    }
+
+    /// An installed napplet's verified icon bytes and declared MIME type, from
+    /// the local store only — `None` for no icon, an icon not here, or bytes
+    /// that are not what the manifest signed. The caller shows generic artwork
+    /// then; an icon never stands between a person and the napplet.
+    pub async fn napplet_icon(
+        &self,
+        author_npub: &str,
+        d_tag: Option<&str>,
+    ) -> Option<(Vec<u8>, String)> {
+        let (_, manifest) = self.served_napplet(author_npub, d_tag).await?;
+        let icon = manifest.icon?;
+        let bytes = self.blobs.get(&icon.sha256).await.ok()??;
+        crate::napplet::verified_icon(&icon, &bytes).then_some((bytes, icon.mime))
+    }
+
+    /// The manifest an installed napplet is served from, parsed.
+    async fn served_napplet(
+        &self,
+        author_npub: &str,
+        d_tag: Option<&str>,
+    ) -> Option<(Event, myco_napplet_runtime::NappletManifest)> {
         use nostr::nips::nip19::FromBech32;
-        let author = nostr::PublicKey::from_bech32(&item.author_npub).ok()?;
-        let kind = match item.d_tag {
+        let author = nostr::PublicKey::from_bech32(author_npub).ok()?;
+        let kind = match d_tag {
             Some(_) => myco_napplet_runtime::KIND_NAMED,
             None => myco_napplet_runtime::KIND_ROOT,
         };
-        let event = nsite_deck::seams::newest_in_slot(
-            &self.active_backend(),
-            kind,
-            &author,
-            item.d_tag.as_deref(),
-        )
-        .await
-        .ok()??;
+        let event = nsite_deck::seams::newest_in_slot(&self.active_backend(), kind, &author, d_tag)
+            .await
+            .ok()??;
         let manifest = myco_napplet_runtime::NappletManifest::from_event(event.clone()).ok()?;
-        let index = manifest.index_entry()?.sha256.clone();
-        Some((event, index))
+        Some((event, manifest))
     }
 
     // --- snapshots for state() ---

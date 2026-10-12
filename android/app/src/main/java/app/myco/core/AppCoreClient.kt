@@ -98,8 +98,13 @@ data class NappletReview(
     val alreadyInstalled: Boolean = false,
     val title: String,
     val description: String,
-    /** What it declared it needs — a statement of intent, not what it gets. */
+    /** Every domain it declared, required then optional — a statement of
+     *  intent, not what it gets. */
     val requires: List<String>,
+    /** The subset of [requires] it can do without (NIP-5D `O` tags). */
+    val optional: List<String> = emptyList(),
+    /** Required domains this build can't provide: it may not fully work. */
+    val unsupported: List<String> = emptyList(),
     /** What installing it would actually grant, defaults included. */
     val grants: List<String>,
     /** Non-empty when the fetch failed; show this instead of asking. */
@@ -124,6 +129,12 @@ data class NappletReview(
             title = json.optString("title"),
             description = json.optString("description"),
             requires = json.optJSONArray("requires")?.let { r ->
+                (0 until r.length()).map { r.optString(it) }
+            }.orEmpty(),
+            optional = json.optJSONArray("optional")?.let { r ->
+                (0 until r.length()).map { r.optString(it) }
+            }.orEmpty(),
+            unsupported = json.optJSONArray("unsupported")?.let { r ->
                 (0 until r.length()).map { r.optString(it) }
             }.orEmpty(),
             grants = json.optJSONArray("grants")?.let { g ->
@@ -959,6 +970,10 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
     /** The account's avatar bytes, or null. */
     fun accountAvatar(): ByteArray? =
         NativeCore.accountAvatar(requireHandle()).takeIf { it.isNotEmpty() }
+
+    /** An installed napplet's verified icon bytes, or null. See [app.myco.NappletIcons]. */
+    fun nappletIcon(pointer: String): ByteArray? =
+        NativeCore.nappletIcon(requireHandle(), pointer)?.takeIf { it.isNotEmpty() }
 
     /**
      * Serve one nsite request through the in-process gateway (for the WebView's

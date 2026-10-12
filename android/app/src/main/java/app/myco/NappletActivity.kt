@@ -867,11 +867,16 @@ class NappletActivity : ComponentActivity() {
         setContentView(root)
         ChromelessChrome.applyInsets(root) { pageOptedIntoFullHeight }
 
-        ChromelessChrome.applyTaskDescription(
-            this,
-            intent.getStringExtra(EXTRA_TITLE).orEmpty().ifEmpty { "napplet" },
-            null,
-        )
+        val taskLabel = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifEmpty { "napplet" }
+        ChromelessChrome.applyTaskDescription(this, taskLabel, null)
+        // The manifest's icon on the Recents card, once read off the UI thread.
+        val iconPointer = intent.getStringExtra(EXTRA_POINTER).orEmpty()
+        Thread {
+            val icon = NappletIcons.fetch(client, iconPointer) ?: return@Thread
+            runOnUiThread {
+                if (!isDestroyed) ChromelessChrome.applyTaskDescription(this, taskLabel, icon)
+            }
+        }.start()
 
         // Back is offered to the napplet first, as Escape. See [onBack]. Added
         // after the splash-time callback in onCreate, so this one wins.

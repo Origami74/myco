@@ -203,7 +203,7 @@ fn new_blob_token() -> String {
 struct OpenedVersion {
     addr: NappletAddr,
     created_at: nostr::Timestamp,
-    aggregate: String,
+    identity_hash: String,
 }
 
 /// What the Activity needs to put a napplet on screen.
@@ -222,6 +222,8 @@ pub struct OpenedNapplet {
     /// What the served manifest declares with `requires` — the list a review
     /// sheet for this version would show.
     pub requires: Vec<String>,
+    /// The optional (`O`) subset of `requires`.
+    pub optional: Vec<String>,
     /// Declared domains this build implements that the user has never seen:
     /// not on the reviewed list, not granted, not denied. Never granted here;
     /// the caller routes a non-empty list back through the review sheet.
@@ -557,7 +559,9 @@ impl NappletHost {
         // are stored apart. Nothing undeclared is added, nothing is added to a
         // napplet that was never installed, and the long-press sheet shows
         // the result.
-        let requires = resolved.manifest.requires.clone();
+        // `R` and `O` alike: an optional integration is still one the user
+        // reviews before it is granted. Declaring is never granting.
+        let requires = resolved.manifest.declared_domains();
         let mut unreviewed: Vec<String> = Vec::new();
         let grants = match grants {
             None => crate::content::NappletGrants::default(),
@@ -648,7 +652,7 @@ impl NappletHost {
                 opened: OpenedVersion {
                     addr: addr.clone(),
                     created_at: event.created_at,
-                    aggregate: resolved.aggregate.clone(),
+                    identity_hash: resolved.identity_hash.clone(),
                 },
                 blob_token: new_blob_token(),
             },
@@ -663,6 +667,7 @@ impl NappletHost {
             title,
             grants,
             requires,
+            optional: resolved.manifest.optional.clone(),
             unreviewed,
         })
     }
@@ -955,7 +960,7 @@ impl NappletHost {
         out
     }
 
-    /// The aggregate of the version now served for this window's napplet, when
+    /// The identity hash of the version now served for this window's napplet, when
     /// it is newer than the one the window opened — or `None` while the window
     /// is current, and for a session that is not open.
     ///
@@ -967,17 +972,17 @@ impl NappletHost {
     /// answers "yes" for opens the new version, offline or not.
     ///
     /// Newer means a later-or-equal `created_at` **and** a different
-    /// aggregate: a re-signed manifest over the same bytes is not an update
+    /// identity hash: a re-signed manifest over the same bytes is not an update
     /// worth restarting for, and a pin never moves back, so an older served
     /// version is not expected — and would not be offered if it were.
     pub async fn newer_version(&self, session_id: &str) -> Option<String> {
-        let (addr, created_at, aggregate) = {
+        let (addr, created_at, identity_hash) = {
             let sessions = self.sessions.lock().unwrap();
             let opened = &sessions.get(session_id)?.opened;
             (
                 opened.addr.clone(),
                 opened.created_at,
-                opened.aggregate.clone(),
+                opened.identity_hash.clone(),
             )
         };
         let served = self
@@ -990,7 +995,7 @@ impl NappletHost {
             return None;
         }
         let served = myco_napplet_runtime::manifest::NappletManifest::from_event(served).ok()?;
-        (served.aggregate != aggregate).then_some(served.aggregate)
+        (served.identity_hash != identity_hash).then_some(served.identity_hash)
     }
 
     /// Drop a window's session. Every later frame for it is ignored.
@@ -1070,14 +1075,7 @@ pub async fn fetch_manifest(
         m.d_tag.as_deref() == addr.d_tag.as_deref(),
         "the manifest is for a different napplet"
     );
-    let found = IngestedNapplet {
-        requires: m.requires,
-        title: m.title,
-        description: m.description,
-        d_tag: m.d_tag.unwrap_or_default(),
-        aggregate: m.aggregate,
-    };
-    Ok((event, found))
+    Ok((event, IngestedNapplet::of_manifest(&m)))
 }
 
 /// The same untrusted-source, verify-before-keep path as
@@ -1136,16 +1134,34 @@ pub async fn ingest_event_into(
     // re-encoding it is the original blob, and the source — a peer over
     // BLE, often — is not asked for it twice.
     blobs.put(resolved.index_html.as_bytes()).await?;
+    // The icon is best-effort and never holds the napplet back: fetched from
+    // the same untrusted view, kept only when it hashes to the manifest's
+    // `icon` and starts like the image type it declares (NIP-5D §Icon).
+    if let Some(icon) = &resolved.manifest.icon {
+        if !blobs.has(&icon.sha256).await {
+            match view.get(&icon.sha256).await {
+                Ok(Some(bytes)) if verified_icon(icon, &bytes) => {
+                    if let Err(e) = blobs.put(&bytes).await {
+                        tracing::debug!("napplet icon {} not kept: {e}", icon.sha256);
+                    }
+                }
+                Ok(_) => tracing::debug!("napplet icon {} unavailable or invalid", icon.sha256),
+                Err(e) => tracing::debug!("napplet icon {} fetch failed: {e}", icon.sha256),
+            }
+        }
+    }
     relay.publish(event.clone()).await?;
     manifests.pin(&event);
 
-    Ok(IngestedNapplet {
-        requires: resolved.manifest.requires.clone(),
-        title: resolved.manifest.title.clone(),
-        description: resolved.manifest.description.clone(),
-        d_tag: resolved.d_tag.clone(),
-        aggregate: resolved.aggregate.clone(),
-    })
+    Ok(IngestedNapplet::of_manifest(&resolved.manifest))
+}
+
+/// Whether `bytes` are the icon `icon` names: the sha256 the manifest signed,
+/// and the leading bytes of the format it declares. The platform decoder is
+/// the last gate, at display.
+pub fn verified_icon(icon: &myco_napplet_runtime::ManifestIcon, bytes: &[u8]) -> bool {
+    nsite_deck::sync::sha256_hex(bytes).eq_ignore_ascii_case(&icon.sha256)
+        && myco_napplet_runtime::icon_bytes_match(&icon.mime, bytes)
 }
 
 impl NappletHost {
@@ -1771,9 +1787,17 @@ pub struct NappletReview {
     pub loading: bool,
     pub title: String,
     pub description: String,
-    /// The capability domains it declared with `requires` tags — a statement of
-    /// what it needs, not what it gets.
+    /// Every capability domain it declared — `R` (needed) then `O` (optional)
+    /// — a statement of what it would use, not what it gets.
     pub requires: Vec<String>,
+    /// The subset of [`Self::requires`] it declared optional (`O`): it works
+    /// without them.
+    #[serde(default)]
+    pub optional: Vec<String>,
+    /// Required (`R`) domains this build cannot provide. NIP-5D: the shell
+    /// warns that full functionality is unavailable.
+    #[serde(default)]
+    pub unsupported: Vec<String>,
     /// What installing it would actually grant: its declared `requires`
     /// together with the defaults every napplet receives, narrowed to what this
     /// build implements.
@@ -1871,7 +1895,7 @@ impl ReviewStanding {
 
 /// Whether `fetched` is a newer version than `served`, the manifest this
 /// phone serves for the same napplet: a later `created_at` **and** different
-/// bytes (aggregate). A re-signed manifest over the same bytes is not an
+/// bytes (identity hash). A re-signed manifest over the same bytes is not an
 /// update; nothing served means nothing to compare against.
 pub fn is_newer_version(fetched: &nostr::Event, served: Option<&nostr::Event>) -> bool {
     let Some(served) = served else {
@@ -1880,12 +1904,12 @@ pub fn is_newer_version(fetched: &nostr::Event, served: Option<&nostr::Event>) -
     if fetched.created_at <= served.created_at {
         return false;
     }
-    let aggregate = |e: &nostr::Event| {
+    let identity = |e: &nostr::Event| {
         myco_napplet_runtime::manifest::NappletManifest::from_event(e.clone())
             .ok()
-            .map(|m| m.aggregate)
+            .map(|m| m.identity_hash)
     };
-    aggregate(fetched) != aggregate(served)
+    identity(fetched) != identity(served)
 }
 
 /// [`ReviewStanding`] for a fetched manifest `fetched` declaring `requires`.
@@ -2008,11 +2032,41 @@ pub fn unreviewed_domains(
 /// grant, and a granted `relay` covers publishing with no per-event prompt.
 #[derive(Debug, Clone)]
 pub struct IngestedNapplet {
+    /// Every declared domain, required (`R`) then optional (`O`).
     pub requires: Vec<String>,
+    /// The optional (`O`) subset of `requires`.
+    pub optional: Vec<String>,
+    /// Required domains this build does not implement.
+    pub unsupported: Vec<String>,
     pub title: Option<String>,
     pub description: Option<String>,
     pub d_tag: String,
-    pub aggregate: String,
+    /// The artifact hash, or a legacy manifest's aggregate.
+    pub identity_hash: String,
+}
+
+impl IngestedNapplet {
+    pub fn of_manifest(m: &myco_napplet_runtime::NappletManifest) -> Self {
+        use myco_napplet_runtime::session::{IMPLEMENTED_DOMAINS, MANDATORY_DOMAINS};
+        let unsupported = m
+            .requires
+            .iter()
+            .filter(|d| {
+                !IMPLEMENTED_DOMAINS.contains(&d.as_str())
+                    && !MANDATORY_DOMAINS.contains(&d.as_str())
+            })
+            .cloned()
+            .collect();
+        Self {
+            requires: m.declared_domains(),
+            optional: m.optional.clone(),
+            unsupported,
+            title: m.title.clone(),
+            description: m.description.clone(),
+            d_tag: m.d_tag.clone().unwrap_or_default(),
+            identity_hash: m.identity_hash.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2390,6 +2444,8 @@ mod tests {
             title: String::new(),
             description: String::new(),
             requires: Vec::new(),
+            optional: Vec::new(),
+            unsupported: Vec::new(),
             grants: Vec::new(),
             installing: false,
             added: false,
@@ -2424,6 +2480,8 @@ mod tests {
             title: "Chat".into(),
             description: String::new(),
             requires: Vec::new(),
+            optional: Vec::new(),
+            unsupported: Vec::new(),
             grants: Vec::new(),
             installing: false,
             added: true,
@@ -2499,6 +2557,8 @@ mod tests {
             title: "Update".into(),
             description: String::new(),
             requires: vec!["outbox".into()],
+            optional: Vec::new(),
+            unsupported: Vec::new(),
             grants: vec!["outbox".into()],
             installing: false,
             added: false,
@@ -3763,13 +3823,13 @@ mod tests {
 
         let (outcome, _) = push(&phone, &v2, mesh(2), &[holder_of(&v2).await]).await;
         assert_eq!(outcome, crate::content::NappletPush::Updated);
-        let v2_aggregate =
+        let v2_identity =
             myco_napplet_runtime::manifest::NappletManifest::from_event(v2.manifest.clone())
                 .unwrap()
-                .aggregate;
+                .identity_hash;
         assert_eq!(
             phone.host.newer_version(&old.session_id).await,
-            Some(v2_aggregate)
+            Some(v2_identity)
         );
 
         let fresh = phone.host.open(&addr_of(&v2), None).await.unwrap();

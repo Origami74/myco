@@ -116,8 +116,9 @@ pub enum Appearance {
     Dark,
 }
 
-/// A napplet's identity: the `(dTag, aggregateHash)` tuple NIP-5D defines,
-/// computed by the runtime from verified bytes — plus the author who signed
+/// A napplet's identity: the `(dTag, artifactHash)` tuple NIP-5D defines (the
+/// aggregate in its place for a legacy manifest), computed by the runtime from
+/// verified bytes — plus the author who signed
 /// the manifest, so a host can tell two authors' napplets apart when they
 /// chose the same `d`.
 ///
@@ -126,17 +127,18 @@ pub enum Appearance {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NappletIdentity {
     pub d_tag: String,
-    pub aggregate: String,
+    /// The artifact hash, or a legacy manifest's aggregate.
+    pub identity_hash: String,
     /// The manifest author's public key, lowercase hex. Empty for a session
     /// built without a manifest (tests).
     pub author: String,
 }
 
 impl NappletIdentity {
-    pub fn new(d_tag: impl Into<String>, aggregate: impl Into<String>) -> Self {
+    pub fn new(d_tag: impl Into<String>, identity_hash: impl Into<String>) -> Self {
         Self {
             d_tag: d_tag.into(),
-            aggregate: aggregate.into(),
+            identity_hash: identity_hash.into(),
             author: String::new(),
         }
     }
@@ -149,7 +151,7 @@ impl NappletIdentity {
 
 impl From<&crate::resolve::ResolvedNapplet> for NappletIdentity {
     fn from(resolved: &crate::resolve::ResolvedNapplet) -> Self {
-        Self::new(resolved.d_tag.clone(), resolved.aggregate.clone())
+        Self::new(resolved.d_tag.clone(), resolved.identity_hash.clone())
             .with_author(&resolved.manifest.author)
     }
 }

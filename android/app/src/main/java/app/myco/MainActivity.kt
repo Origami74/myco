@@ -1031,6 +1031,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        Thread { runCatching { refreshPinnedNappletIcons() } }.start()
         // A napplet or nsite opened from here finds the WebView renderer up.
         // Re-armed on every return: it is let go while Myco is out of sight.
         WebViewWarmer.warmWhenIdle(this)
@@ -1297,10 +1298,11 @@ class MainActivity : ComponentActivity() {
     /**
      * Pin a napplet to the home screen.
      *
-     * The icon is drawn rather than fetched: a napplet is a single self-contained
-     * file with no `/favicon.ico` to pull, so the launcher gets the same mark the
-     * Apps grid shows — its colour and its initial — instead of a generic Myco
-     * icon that would make every napplet look identical on the home screen.
+     * The icon is the manifest's own (`["icon", …]`, verified — see
+     * [NappletIcons]) when it has one, composed full-bleed like an nsite's
+     * favicon. Without one it is drawn: the same mark the Apps grid shows —
+     * its colour and its initial — rather than a generic Myco icon that would
+     * make every napplet look identical on the home screen.
      */
     private fun pinNappletToHomeScreen(pointer: String, title: String) {
         val sm = getSystemService(ShortcutManager::class.java)
@@ -1308,14 +1310,46 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Home-screen pinning isn't supported here", Toast.LENGTH_SHORT).show()
             return
         }
+        Thread {
+            val shortcut = nappletShortcut(pointer, title)
+            runOnUiThread { sm.requestPinShortcut(shortcut, null) }
+        }.start()
+    }
+
+    /** A napplet's home-screen shortcut. Blocking — reads the icon. */
+    private fun nappletShortcut(pointer: String, title: String): ShortcutInfo {
         val label = title.ifEmpty { "napplet" }
-        val shortcut = ShortcutInfo.Builder(this, "napplet:$pointer")
+        val icon = NappletIcons.fetch(MycoCore.client(this), pointer)
+            ?.let { adaptiveShortcutIcon(it) }
+            ?: nappletShortcutIcon(pointer, label)
+        return ShortcutInfo.Builder(this, "napplet:$pointer")
             .setShortLabel(label)
             .setLongLabel(label)
-            .setIcon(Icon.createWithAdaptiveBitmap(nappletShortcutIcon(pointer, label)))
+            .setIcon(Icon.createWithAdaptiveBitmap(icon))
             .setIntent(nappletIntent(pointer, title))
             .build()
-        sm.requestPinShortcut(shortcut, null)
+    }
+
+    /**
+     * Give napplet shortcuts already on the home screen the manifest's icon —
+     * those pinned before Myco read icons, or before an update brought one.
+     * A launcher keeps a pinned shortcut's icon until it is updated, and an
+     * update by the same id is all it takes. Background thread only.
+     */
+    private fun refreshPinnedNappletIcons() {
+        val sm = getSystemService(ShortcutManager::class.java) ?: return
+        val client = MycoCore.client(this)
+        val pinned = runCatching { sm.pinnedShortcuts }.getOrDefault(emptyList())
+            .filter { it.id.startsWith("napplet:") }
+        val updated = pinned.mapNotNull { old ->
+            val pointer = old.id.removePrefix("napplet:")
+            val bmp = NappletIcons.fetch(client, pointer) ?: return@mapNotNull null
+            ShortcutInfo.Builder(this, old.id)
+                .setShortLabel(old.shortLabel ?: "napplet")
+                .setIcon(Icon.createWithAdaptiveBitmap(adaptiveShortcutIcon(bmp)))
+                .build()
+        }
+        if (updated.isNotEmpty()) runCatching { sm.updateShortcuts(updated) }
     }
 
     /**
