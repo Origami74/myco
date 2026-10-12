@@ -235,4 +235,81 @@ mod tests {
         assert_eq!(resp.status, 404);
         assert!(String::from_utf8_lossy(&resp.body).contains("Not in your Library"));
     }
+
+    /// A sync asks for each blob with the manifest's `server` hints and then
+    /// the servers the source says the author lists (BUD-03): an app hosted
+    /// only on its author's own Blossom is reachable.
+    #[tokio::test]
+    async fn sync_offers_the_authors_servers_after_the_manifests() {
+        use std::sync::Mutex;
+        struct Recording {
+            manifest: nostr::Event,
+            blobs: Vec<(String, Vec<u8>)>,
+            asked_with: Mutex<Vec<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl PeerSource for Recording {
+            async fn fetch_manifest(
+                &self,
+                _author: &nostr::PublicKey,
+                _d_tag: Option<&str>,
+            ) -> anyhow::Result<Option<nostr::Event>> {
+                Ok(Some(self.manifest.clone()))
+            }
+            async fn fetch_blob(
+                &self,
+                sha256_hex: &str,
+                servers: &[String],
+            ) -> anyhow::Result<Option<Vec<u8>>> {
+                self.asked_with.lock().unwrap().push(servers.to_vec());
+                Ok(self
+                    .blobs
+                    .iter()
+                    .find(|(h, _)| h == sha256_hex)
+                    .map(|(_, b)| b.clone()))
+            }
+            async fn author_servers(&self, author: &nostr::PublicKey) -> Vec<String> {
+                assert_eq!(*author, self.manifest.pubkey);
+                vec![
+                    "https://author.example".into(),
+                    "https://shared.example".into(),
+                ]
+            }
+        }
+        // A manifest naming one server the author lists too.
+        let keys = nostr::Keys::generate();
+        let site = super::testing::build_test_site_with_keys(
+            &keys,
+            &[("/index.html", b"<h1>mine</h1>")],
+            None,
+            None,
+        );
+        let mut tags: Vec<nostr::Tag> = site.manifest.tags.iter().cloned().collect();
+        tags.push(nostr::Tag::parse(["server", "https://shared.example"]).unwrap());
+        let manifest = nostr::EventBuilder::new(site.manifest.kind, "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+        let source = Recording {
+            manifest,
+            blobs: site.blobs.clone(),
+            asked_with: Mutex::new(Vec::new()),
+        };
+        let (relay, blobs) = (MemRelay::new(), MemBlobs::new());
+        let addr = SiteAddr {
+            author: site.author,
+            d_tag: None,
+        };
+        let outcome = sync_site(&relay, &blobs, &source, &addr, &|_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(outcome, SyncOutcome::Ready);
+        assert_eq!(
+            source.asked_with.lock().unwrap()[0],
+            vec![
+                "https://shared.example".to_string(),
+                "https://author.example".to_string()
+            ]
+        );
+    }
 }

@@ -34,7 +34,7 @@ cited inline.
 | `35129` | napplet named manifest | Param-replaceable (`d`) | napplet | **Used** |
 | `0` | profile metadata | Replaceable | napplet identity | **Published** — the user key's guest profile, on first launch (local relay, then the public relays) |
 | `10002` | NIP-65 relay list | Replaceable | napplet routing | **Published and read** — the user's own (the configured relays) on first launch; other authors' lists drive NAP-OUTBOX plans, fetched and cached when missing |
-| `10063` | BUD-03 user Blossom servers | Replaceable | discovery hint | Not read yet |
+| `10063` | BUD-03 user Blossom servers | Replaceable | discovery hint | **Read** — an app author's list rides along with its manifest lookup, a `blossom:` URL's `as=` author's is fetched when missing; kept in the local relay, tried after a manifest's `server` tags and before the defaults. The user's own drives NAP-UPLOAD |
 | `9101` / `9102` / `9103` | pair request / accept / remove | Regular | pairing (layer 2) | **Published and read** — signed by the device key, delivered to the peer's auth service `:4873`, never stored in the relay |
 | `14` in `13` in `1059` | NIP-17 rumor, NIP-59 seal and gift wrap | Regular | file sharing (layer 2) | **Published and read** — file offers and control messages between Circle members, gift-wrapped to the device key |
 | `24242` | Blossom auth | Regular | blob store | **Published** — authorises uploads to a custom Blossom server |

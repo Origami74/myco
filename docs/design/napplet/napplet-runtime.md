@@ -447,8 +447,13 @@ seam — the Circle's stores over the mesh and, unless offline-only, the interne
 **at once** with the first bytes winning. The internet side asks the servers a BUD-10 URL
 names (`blossom:<sha>.<ext>?xs=<domain>&as=<pubkey>`: `xs` servers, then the `as`
 author's kind 10063 servers as held here, https only, four of each at most), then the
-public defaults, over one shared HTTP client. Where a server came from does not decide
-where the phone will connect: every HTTP client `myco-core` builds is held to one reach
+public defaults, over one shared HTTP client. Only when all of those miss is an `as`
+author's list not held here looked up — on the write relays of the author's relay list
+as held here, and the indexers, for at most 3 s, done as soon as every list is in — kept,
+and the servers it adds asked: a picture its hint serves never waits on an indexer. One
+lookup per author at a time, at most 60 authors a minute on the device, and an author no
+relay had is not asked about again for ten minutes. Where a server came from does not
+decide where the phone will connect: every HTTP client `myco-core` builds is held to one reach
 at the dial (`myco-core/src/http.rs`) — the public internet only (no private, loopback,
 link-local, mesh, CGNAT or NAT64-wrapped private address, nothing on this phone's own
 interfaces or in the `/64` of its global IPv6 address), or the mesh only (`.fips` names,

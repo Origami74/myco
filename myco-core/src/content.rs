@@ -3888,6 +3888,13 @@ impl Content {
             "kinds": [Kind::RelayList.as_u16()],
             "authors": authors,
         });
+        // The authors' Blossom server lists ride along on every online ask,
+        // so an update's files are looked for where the author keeps them
+        // now, not where they did at install.
+        let server_list_filter = serde_json::json!({
+            "kinds": [crate::ip_source::SERVER_LIST_KIND],
+            "authors": authors,
+        });
         if mesh_peers.is_empty() && online.is_empty() {
             return NsiteCheck::Done("No peers or relays to check".to_string());
         }
@@ -3929,9 +3936,13 @@ impl Content {
                 .iter()
                 .any(|d| crate::ip_source::same_relay(d, &url));
             let filters = if from_list {
-                vec![online_filter.clone()]
+                vec![online_filter.clone(), server_list_filter.clone()]
             } else {
-                vec![online_filter.clone(), list_filter.clone()]
+                vec![
+                    online_filter.clone(),
+                    list_filter.clone(),
+                    server_list_filter.clone(),
+                ]
             };
             let outbox = &outbox;
             async move {
@@ -3955,8 +3966,13 @@ impl Content {
         let (mesh_res, online_res, ()) =
             futures_util::future::join3(join_all(mesh_q), join_all(online_q), fetch_missing).await;
         for ev in online_res.iter().flatten() {
-            if ev.kind == Kind::RelayList && pubkeys.contains(&ev.pubkey) {
+            if !pubkeys.contains(&ev.pubkey) {
+                continue;
+            }
+            if ev.kind == Kind::RelayList {
                 outbox.remember(ev.clone()).await;
+            } else if ev.kind.as_u16() == crate::ip_source::SERVER_LIST_KIND {
+                outbox.remember_server_list(ev.clone()).await;
             }
         }
 
@@ -4098,10 +4114,13 @@ impl Content {
             }
         }
         if !self.is_offline_only() {
-            sources.push(Arc::new(crate::ip_source::IpPeerSource::new(
-                crate::ip_source::default_relays(),
-                crate::ip_source::default_blossom_servers(),
-            )));
+            sources.push(Arc::new(
+                crate::ip_source::IpPeerSource::new(
+                    crate::ip_source::default_relays(),
+                    crate::ip_source::default_blossom_servers(),
+                )
+                .with_author_servers(Arc::new(crate::ip_source::AuthorOutbox::new(self.relay()))),
+            ));
         }
         // Activation stores the manifest in the relay (so peers REQ-ing us see it)
         // and then propagates it over the mesh.
@@ -4285,7 +4304,10 @@ impl Content {
             sources.push(Arc::new(cap(crate::ip_source::IpPeerSource::new(
                 crate::ip_source::default_relays(),
                 crate::ip_source::default_blossom_servers(),
-            ))));
+            )
+            .with_author_servers(Arc::new(crate::ip_source::AuthorOutbox::new(
+                self.relay(),
+            ))))));
         }
         sources
     }

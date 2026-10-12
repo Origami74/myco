@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Apps hosted on their author's own file servers install and update.** Myco
+  now reads the Blossom server list an author publishes (BUD-03) and looks
+  there after the servers an app names itself and before the public
+  defaults — for installing, syncing and updating apps, and for napplet
+  pictures that name their author. The list is fetched along with the app,
+  kept on the phone and shared with your Circle like other lists.
 - **Napplets can load pictures and files from the web (`https:`).** A napplet
   with the resource permission can now ask for an `https://` link — a
   profile picture on someone's server, say — not only a Blossom hash. Myco

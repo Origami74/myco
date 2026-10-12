@@ -410,14 +410,10 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Peer permissions UI.** The per-peer record exists (`relay_write`,
   `relay_read_multihop`, …) with defaults for everyone; a switch per Circle
   member — [nsite-permissions.md](./design/nsite/nsite-permissions.md) §2.
-- **Relay and Blossom server discovery (BUD-03, NIP-65, hints).** A
-  `blossom:sha256:` URI names no server, and Myco resolves it against a fixed
-  list of public replicas — and ignores the `servers` hint a napplet passes.
-  Read the kind 10063 server lists of the authors a napplet has been reading
-  from (cached in the local relay like 10002), honour NAP-RESOURCE hints and
-  the manifest's `server` tags, before the defaults —
-  [#67](https://github.com/Origami74/myco/issues/67),
-  [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
+- **Your own profile from your own relays.** The Settings profile is fetched
+  from the default relays and the indexers, not the user's NIP-65 write
+  relays — the last open part of
+  [#67](https://github.com/Origami74/myco/issues/67).
 - **Blob privacy over the mesh.** Whether a napplet's `blossom:` miss should
   ask every Circle member, or only the peer whose event referenced it —
   [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
