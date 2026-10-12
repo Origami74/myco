@@ -1798,6 +1798,11 @@ pub struct NappletReview {
     /// warns that full functionality is unavailable.
     #[serde(default)]
     pub unsupported: Vec<String>,
+    /// The manifest's icon, when its verified bytes are on this phone for the
+    /// sheet to show (fetched with the manifest, kept as cache). `None`:
+    /// generic artwork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<ReviewIcon>,
     /// What installing it would actually grant: its declared `requires`
     /// together with the defaults every napplet receives, narrowed to what this
     /// build implements.
@@ -2025,6 +2030,34 @@ pub fn unreviewed_domains(
         .collect()
 }
 
+/// A napplet icon the sheet can read by hash: `sha256` names the verified
+/// blob, `mime` the format it must decode as.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReviewIcon {
+    pub sha256: String,
+    pub mime: String,
+}
+
+/// Fetch a manifest's icon from `source` — the manifest's `server` hints, then
+/// its author's — for install review. `None` when it has none, or when the
+/// bytes are not what it signed; an icon never holds review up for long.
+pub async fn fetch_icon(event: &nostr::Event, source: &dyn PeerSource) -> Option<Vec<u8>> {
+    let manifest = myco_napplet_runtime::NappletManifest::from_event(event.clone()).ok()?;
+    let icon = manifest.icon?;
+    let mut servers = servers_from(event);
+    for server in source.author_servers(&event.pubkey).await {
+        if !servers.contains(&server) {
+            servers.push(server);
+        }
+    }
+    let fetch = source.fetch_blob(&icon.sha256, &servers);
+    let bytes = tokio::time::timeout(std::time::Duration::from_secs(8), fetch)
+        .await
+        .ok()?
+        .ok()??;
+    verified_icon(&icon, &bytes).then_some(bytes)
+}
+
 /// What a fetched, verified napplet declares — the input to install review.
 ///
 /// [`IngestedNapplet::requires`] is what the review screen must show, in words a
@@ -2038,6 +2071,8 @@ pub struct IngestedNapplet {
     pub optional: Vec<String>,
     /// Required domains this build does not implement.
     pub unsupported: Vec<String>,
+    /// The manifest's icon, if it declares a usable one.
+    pub icon: Option<ReviewIcon>,
     pub title: Option<String>,
     pub description: Option<String>,
     pub d_tag: String,
@@ -2061,6 +2096,10 @@ impl IngestedNapplet {
             requires: m.declared_domains(),
             optional: m.optional.clone(),
             unsupported,
+            icon: m.icon.as_ref().map(|i| ReviewIcon {
+                sha256: i.sha256.clone(),
+                mime: i.mime.clone(),
+            }),
             title: m.title.clone(),
             description: m.description.clone(),
             d_tag: m.d_tag.clone().unwrap_or_default(),
@@ -2446,6 +2485,7 @@ mod tests {
             requires: Vec::new(),
             optional: Vec::new(),
             unsupported: Vec::new(),
+            icon: None,
             grants: Vec::new(),
             installing: false,
             added: false,
@@ -2482,6 +2522,7 @@ mod tests {
             requires: Vec::new(),
             optional: Vec::new(),
             unsupported: Vec::new(),
+            icon: None,
             grants: Vec::new(),
             installing: false,
             added: true,
@@ -2559,6 +2600,7 @@ mod tests {
             requires: vec!["outbox".into()],
             optional: Vec::new(),
             unsupported: Vec::new(),
+            icon: None,
             grants: vec!["outbox".into()],
             installing: false,
             added: false,

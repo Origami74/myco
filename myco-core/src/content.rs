@@ -4747,6 +4747,18 @@ impl Content {
         crate::napplet::verified_icon(&icon, &bytes).then_some((bytes, icon.mime))
     }
 
+    /// A napplet icon by hash, from either store tier — for an install sheet
+    /// previewing a napplet not installed yet. Only bytes that hash to
+    /// `sha256` and start like `mime`; `None` otherwise.
+    pub async fn icon_blob(&self, sha256: &str, mime: &str) -> Option<Vec<u8>> {
+        let icon = myco_napplet_runtime::ManifestIcon {
+            sha256: sha256.to_ascii_lowercase(),
+            mime: mime.to_string(),
+        };
+        let bytes = self.cache_blobs.get(&icon.sha256).await.ok()??;
+        crate::napplet::verified_icon(&icon, &bytes).then_some(bytes)
+    }
+
     /// The manifest an installed napplet is served from, parsed.
     async fn served_napplet(
         &self,

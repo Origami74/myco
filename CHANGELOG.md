@@ -18,8 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later. The install sheet marks optional capabilities and warns when an app
   needs one Myco can't provide.
 - **Napplet icons.** A napplet's own icon (`icon` tag, PNG / JPEG / WebP)
-  shows in the Apps grid, on its sheet, on the Recents card and on
-  home-screen shortcuts — including shortcuts pinned earlier. The icon is
+  shows in the install sheet, the Apps grid, on its sheet, on the Recents
+  card and on home-screen shortcuts — including shortcuts pinned earlier. The icon is
   checked against its hash and decoded before it is shown; without a valid
   one you see the coloured initial as before.
 

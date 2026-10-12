@@ -105,6 +105,9 @@ data class NappletReview(
     val optional: List<String> = emptyList(),
     /** Required domains this build can't provide: it may not fully work. */
     val unsupported: List<String> = emptyList(),
+    /** The manifest's icon, fetched with it for this sheet: `(sha256, mime)`. */
+    val iconSha256: String = "",
+    val iconMime: String = "",
     /** What installing it would actually grant, defaults included. */
     val grants: List<String>,
     /** Non-empty when the fetch failed; show this instead of asking. */
@@ -137,6 +140,8 @@ data class NappletReview(
             unsupported = json.optJSONArray("unsupported")?.let { r ->
                 (0 until r.length()).map { r.optString(it) }
             }.orEmpty(),
+            iconSha256 = json.optJSONObject("icon")?.optString("sha256").orEmpty(),
+            iconMime = json.optJSONObject("icon")?.optString("mime").orEmpty(),
             grants = json.optJSONArray("grants")?.let { g ->
                 (0 until g.length()).map { g.optString(it) }
             }.orEmpty(),
@@ -974,6 +979,10 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
     /** An installed napplet's verified icon bytes, or null. See [app.myco.NappletIcons]. */
     fun nappletIcon(pointer: String): ByteArray? =
         NativeCore.nappletIcon(requireHandle(), pointer)?.takeIf { it.isNotEmpty() }
+
+    /** A verified icon by hash, for an install sheet. See [app.myco.NappletIcons]. */
+    fun iconBlob(sha256: String, mime: String): ByteArray? =
+        NativeCore.iconBlob(requireHandle(), sha256, mime)?.takeIf { it.isNotEmpty() }
 
     /**
      * Serve one nsite request through the in-process gateway (for the WebView's

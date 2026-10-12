@@ -71,6 +71,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -82,6 +83,7 @@ import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.LibraryItem
 import app.myco.core.LibraryKind
+import app.myco.core.MycoCore
 import app.myco.core.NappletAddress
 import app.myco.core.NappletReview
 import app.myco.core.NativeActions
@@ -1139,20 +1141,42 @@ internal fun reviewAnswer(review: NappletReview): ReviewAnswer = when {
 /** The app's mark on the review sheet, with a check once it has been added. */
 @Composable
 private fun NappletMark(review: NappletReview, added: Boolean) {
+    // The manifest's icon: fetched with it for this sheet (by hash), or the
+    // installed one for an update. Letter on colour until then, or without.
+    val context = LocalContext.current
+    var icon by remember(review.pointer, review.iconSha256) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(review.pointer, review.iconSha256) {
+        icon = withContext(Dispatchers.IO) {
+            val client = MycoCore.client(context)
+            review.iconSha256.takeIf { it.isNotEmpty() }
+                ?.let { NappletIcons.fetchByHash(client, it, review.iconMime) }
+                ?: NappletIcons.fetch(client, review.pointer)
+        }
+    }
     Box {
+        val bmp = icon
         Box(
             modifier = Modifier
                 .size(84.dp)
                 .clip(RoundedCornerShape(22.dp))
-                .background(tileColorFor(review.pointer)),
+                .background(if (bmp == null) tileColorFor(review.pointer) else Color.White),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                review.title.take(1).uppercase().ifEmpty { "N" },
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                style = MaterialTheme.typography.headlineMedium,
-            )
+            if (bmp != null) {
+                Image(
+                    bmp.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Text(
+                    review.title.take(1).uppercase().ifEmpty { "N" },
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.headlineMedium,
+                )
+            }
         }
         if (added) {
             Icon(

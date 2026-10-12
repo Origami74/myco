@@ -40,6 +40,9 @@ internal object NativeCore {
     /** An installed napplet's verified icon bytes, or null for generic artwork. */
     external fun nappletIcon(handle: Long, pointer: String): ByteArray?
 
+    /** A verified napplet icon by hash (an install sheet's preview), or null. */
+    external fun iconBlob(handle: Long, sha256: String, mime: String): ByteArray?
+
     // --- external signer (NIP-55) -----------------------------------------
 
     /** The next signer request as JSON, or "" when [timeoutMs] passed. **Blocks.** */

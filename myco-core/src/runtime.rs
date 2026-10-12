@@ -1707,6 +1707,7 @@ impl AppRuntime {
                 requires: Vec::new(),
                 optional: Vec::new(),
                 unsupported: Vec::new(),
+                icon: None,
                 error: message,
                 holder: holder_for_retry.clone(),
                 manifest: None,
@@ -1790,6 +1791,7 @@ impl AppRuntime {
             requires: Vec::new(),
             optional: Vec::new(),
             unsupported: Vec::new(),
+            icon: None,
             grants: Vec::new(),
             error: String::new(),
             holder: holder.clone(),
@@ -1810,12 +1812,20 @@ impl AppRuntime {
             } else {
                 "no source had this napplet"
             }));
-            // The manifest only: review needs nothing else, and nothing is
-            // downloaded before the user says yes.
+            // The manifest only — and its icon, for the sheet to show. The
+            // app itself is not downloaded before the user says yes.
+            let mut icon = None;
             for source in &sources {
                 found = crate::napplet::fetch_manifest(&addr, source.as_ref()).await;
-                if found.is_ok() {
+                if let Ok((event, _)) = &found {
+                    icon = crate::napplet::fetch_icon(event, source.as_ref()).await;
                     break;
+                }
+            }
+            // Verified bytes, kept as cache: a preview, not an install.
+            if let Some(bytes) = &icon {
+                if let Err(e) = content.cache_blobs().put(bytes).await {
+                    tracing::debug!("napplet icon not cached: {e}");
                 }
             }
 
@@ -1855,6 +1865,7 @@ impl AppRuntime {
                         requires: found.requires,
                         optional: found.optional,
                         unsupported: found.unsupported,
+                        icon: icon.and(found.icon),
                         grants,
                         error: String::new(),
                         holder: holder.clone(),
@@ -1881,6 +1892,7 @@ impl AppRuntime {
                         requires: Vec::new(),
                         optional: Vec::new(),
                         unsupported: Vec::new(),
+                        icon: None,
                         grants: Vec::new(),
                         error: e.to_string(),
                         holder: holder.clone(),
@@ -3444,6 +3456,7 @@ fn update_review(
         requires: opened.requires.clone(),
         optional: opened.optional.clone(),
         unsupported: Vec::new(),
+        icon: None,
         grants,
         error: String::new(),
         holder: None,
@@ -4166,6 +4179,7 @@ mod tests {
             requires: requires.clone(),
             optional: Vec::new(),
             unsupported: Vec::new(),
+            icon: None,
             error: String::new(),
             holder: None,
             manifest: None,
@@ -5052,6 +5066,7 @@ mod tests {
             requires: Vec::new(),
             optional: Vec::new(),
             unsupported: Vec::new(),
+            icon: None,
             grants: Vec::new(),
             error: String::new(),
             holder: None,
