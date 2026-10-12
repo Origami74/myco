@@ -1445,6 +1445,7 @@ mod tests {
             "https://cdn.example.com:8443/p/a.jpg?w=64#top",
             "https://93.184.215.14/a.png",
             "https://[2606:4700::1]/a.png",
+            "https://[64:ff9b::5db8:d70e]/a.png",
             "HTTPS://Example.COM/a.png",
         ] {
             assert!(validate_https_url(url).is_ok(), "{url} was refused");
@@ -1472,6 +1473,9 @@ mod tests {
             ("https://[fe80::1]/a.png", "blocked-by-policy"),
             ("https://[fd00::1]/a.png", "blocked-by-policy"),
             ("https://[::ffff:127.0.0.1]/a.png", "blocked-by-policy"),
+            ("https://[64:ff9b::c0a8:101]/a.png", "blocked-by-policy"),
+            ("https://[64:ff9b::7f00:1]/a.png", "blocked-by-policy"),
+            ("https://[64:ff9b:1::5db8:d70e]/a.png", "blocked-by-policy"),
             ("https://localhost/a.png", "blocked-by-policy"),
             ("https://LOCALHOST./a.png", "blocked-by-policy"),
             ("https://shell.localhost/a.png", "blocked-by-policy"),

@@ -444,8 +444,9 @@ pub struct IpPeerSource {
     /// The client for servers someone else named — the `servers` a blob
     /// fetch is handed (a manifest's `server` tags, a BUD-10 `xs` hint, an
     /// author's kind 10063 list): public addresses only, every redirect
-    /// judged. See [`crate::resource_https::public_only`].
-    hint_http: reqwest::Client,
+    /// judged. `None` when it could not be built: named servers are then
+    /// skipped. See [`crate::resource_https::public_only_client`].
+    hint_http: Option<crate::resource_https::PublicOnlyClient>,
     /// Judge a named server before dialling it. Off only in host tests,
     /// whose "public" servers are on 127.0.0.1.
     guard_hints: bool,
@@ -491,11 +492,7 @@ impl IpPeerSource {
                 .timeout(Duration::from_secs(60))
                 .build()
                 .unwrap_or_default(),
-            hint_http: crate::resource_https::public_only(
-                reqwest::Client::builder().timeout(Duration::from_secs(60)),
-            )
-            .build()
-            .unwrap_or_default(),
+            hint_http: crate::resource_https::shared_public_only_client(),
             guard_hints: true,
             timeout: Duration::from_secs(8),
             ignore_manifest_servers: false,
@@ -526,10 +523,12 @@ impl IpPeerSource {
         self
     }
 
-    /// Use `http` for servers someone else named, in place of this source's
-    /// own guarded client — shared like [`IpPeerSource::with_http_client`].
-    /// It must be built with [`crate::resource_https::public_only`].
-    pub fn with_hint_http_client(mut self, http: reqwest::Client) -> Self {
+    /// Use `http` for servers someone else named, in place of the process's
+    /// shared one — for a caller with timeouts of its own.
+    pub(crate) fn with_hint_http_client(
+        mut self,
+        http: Option<crate::resource_https::PublicOnlyClient>,
+    ) -> Self {
         self.hint_http = http;
         self
     }
@@ -539,7 +538,9 @@ impl IpPeerSource {
     #[cfg(test)]
     pub fn trusting_hints(mut self) -> Self {
         self.guard_hints = false;
-        self.hint_http = self.http.clone();
+        self.hint_http = Some(crate::resource_https::PublicOnlyClient::trusting(
+            self.http.clone(),
+        ));
         self
     }
 
@@ -1344,7 +1345,12 @@ impl PeerSource for IpPeerSource {
         let mut candidates: Vec<(String, bool)> = if self.ignore_manifest_servers {
             Vec::new()
         } else {
-            servers.iter().map(|s| (s.clone(), true)).collect()
+            // A server that is also one of this source's own is
+            // configuration, however else it was named.
+            servers
+                .iter()
+                .map(|s| (s.clone(), !self.blossom_servers.contains(s)))
+                .collect()
         };
         for s in &self.blossom_servers {
             if !candidates.iter().any(|(c, _)| c == s) {
@@ -1362,7 +1368,11 @@ impl PeerSource for IpPeerSource {
                     continue;
                 }
             }
-            let http = if named { &self.hint_http } else { &self.http };
+            let http = match (named, &self.hint_http) {
+                (false, _) => &self.http,
+                (true, Some(guarded)) => guarded.client(),
+                (true, None) => continue,
+            };
             // A server that failed a moment ago (5xx; TLS, DNS or a refused
             // connection while online) is not asked again until its skip is
             // up. A 404 is an answer — "not here" — and never held against it.
@@ -1397,6 +1407,11 @@ impl PeerSource for IpPeerSource {
                         continue;
                     }
                     r
+                }
+                Err(e) if named && crate::resource_https::refused_as_private(&e) => {
+                    // The guard's refusal says nothing of the server's health.
+                    tracing::debug!("blob server {server} refused: {e}");
+                    continue;
                 }
                 Err(e) => {
                     crate::relay_health::record_http_error(&server, &e);
@@ -2206,9 +2221,15 @@ pub(crate) mod tests {
             "a named private server was dialled"
         );
 
-        let own = IpPeerSource::new(Vec::new(), vec![server]);
-        assert_eq!(own.fetch_blob(&hash, &[]).await.unwrap(), Some(bytes));
+        let own = IpPeerSource::new(Vec::new(), vec![server.clone()]);
+        assert_eq!(
+            own.fetch_blob(&hash, &[]).await.unwrap(),
+            Some(bytes.clone())
+        );
         assert_eq!(hits.load(Ordering::Relaxed), 1);
+        // Named as well as configured: still configuration.
+        assert_eq!(own.fetch_blob(&hash, &[server]).await.unwrap(), Some(bytes));
+        assert_eq!(hits.load(Ordering::Relaxed), 2);
     }
 
     /// A public server cannot bounce a fetch into this phone's own network:
@@ -2219,9 +2240,10 @@ pub(crate) mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let hits = Arc::new(AtomicUsize::new(0));
         let server = counting_blossom(hits.clone(), b"secret".to_vec()).await;
-        let client = crate::resource_https::public_only(reqwest::Client::builder())
-            .build()
-            .unwrap();
+        let client = crate::resource_https::public_only_client(reqwest::Client::builder())
+            .unwrap()
+            .client()
+            .clone();
         for path in ["/to-loopback", "/to-localhost"] {
             let e = client
                 .get(format!("{server}{path}"))

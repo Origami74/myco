@@ -74,7 +74,9 @@ pub struct NappletHttps {
 }
 
 struct Inner {
-    http: reqwest::Client,
+    /// `None` when the client could not be built: then nothing is fetched,
+    /// rather than falling back to a client without the guards.
+    http: Option<reqwest::Client>,
     /// The user switched the internet off (`Content::is_offline_only`).
     offline_only: Gate,
     /// The internet looks down right now (`Content::internet_looks_down`).
@@ -109,7 +111,8 @@ impl NappletHttps {
             .no_proxy()
             .dns_resolver(Arc::new(PublicOnlyResolver { guard }))
             .build()
-            .unwrap_or_default();
+            .inspect_err(|e| tracing::warn!(error = %e, "no https: client; https: is off"))
+            .ok();
         Self {
             inner: Arc::new(Inner {
                 http,
@@ -201,11 +204,16 @@ impl Inner {
         let _slot = self.slots.acquire().await.map_err(|_| {
             HttpsError::new(HttpsErrorCode::NetworkError, "the fetcher is shutting down")
         })?;
+        let Some(http) = &self.http else {
+            return Err(HttpsError::new(
+                HttpsErrorCode::BlockedByPolicy,
+                "this device has no https: client",
+            ));
+        };
         let mut current = first_hop(url, self.guard)?;
         let mut hops = 0usize;
         loop {
-            let response = self
-                .http
+            let response = http
                 .get(current.clone())
                 .send()
                 .await
@@ -317,12 +325,8 @@ async fn read_capped(
 /// [`PublicOnlyResolver`] is the policy's, a timeout is `timeout`, and the
 /// rest — DNS, TCP, TLS — `network-error`.
 fn classify(e: &reqwest::Error) -> HttpsError {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(e);
-    while let Some(err) = source {
-        if err.downcast_ref::<PrivateAddress>().is_some() {
-            return HttpsError::new(HttpsErrorCode::BlockedByPolicy, err.to_string());
-        }
-        source = err.source();
+    if refused_as_private(e) {
+        return HttpsError::new(HttpsErrorCode::BlockedByPolicy, e.to_string());
     }
     if e.is_timeout() {
         return HttpsError::new(HttpsErrorCode::Timeout, e.to_string());
@@ -353,7 +357,7 @@ impl std::error::Error for PrivateAddress {}
 ///
 /// The first URL is the caller's to judge with [`public_server_url`]; a
 /// literal in it never reaches the resolver either.
-pub(crate) fn public_only(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+fn public_only(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     builder
         .no_proxy()
         .dns_resolver(Arc::new(PublicOnlyResolver { guard: true }))
@@ -366,6 +370,68 @@ pub(crate) fn public_only(builder: reqwest::ClientBuilder) -> reqwest::ClientBui
                 Err(why) => attempt.error(format!("redirect refused: {why}")),
             }
         }))
+}
+
+/// A client built by [`public_only`] — the only way to make one, so a
+/// field of this type cannot hold a client without the guards.
+#[derive(Clone)]
+pub(crate) struct PublicOnlyClient(reqwest::Client);
+
+impl PublicOnlyClient {
+    /// The guarded client.
+    pub(crate) fn client(&self) -> &reqwest::Client {
+        &self.0
+    }
+
+    /// Any client, unguarded — for host tests, whose "public" servers are
+    /// on loopback.
+    #[cfg(test)]
+    pub(crate) fn trusting(client: reqwest::Client) -> Self {
+        Self(client)
+    }
+}
+
+/// `builder` made public-only and built — or `None`, logged, when it cannot
+/// be: a caller then dials no named server at all, never one through a
+/// client without the guards.
+pub(crate) fn public_only_client(builder: reqwest::ClientBuilder) -> Option<PublicOnlyClient> {
+    match public_only(builder).build() {
+        Ok(client) => Some(PublicOnlyClient(client)),
+        Err(e) => {
+            tracing::warn!(error = %e, "no public-only client; named servers are not dialled");
+            None
+        }
+    }
+}
+
+/// One public-only client for the process, built on first use: a source is
+/// made per fetch, and a client per source would read the TLS roots each
+/// time and share no connections.
+pub(crate) fn shared_public_only_client() -> Option<PublicOnlyClient> {
+    static CLIENT: std::sync::OnceLock<Option<PublicOnlyClient>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            public_only_client(
+                reqwest::Client::builder()
+                    .connect_timeout(CONNECT_TIMEOUT)
+                    // Generous, as for any blob: MBs on a slow mobile link.
+                    .timeout(Duration::from_secs(60)),
+            )
+        })
+        .clone()
+}
+
+/// Whether a request failed because [`PublicOnlyResolver`] refused its name
+/// — the guard's answer, not the server's health.
+pub(crate) fn refused_as_private(e: &reqwest::Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = source {
+        if err.downcast_ref::<PrivateAddress>().is_some() {
+            return true;
+        }
+        source = err.source();
+    }
+    false
 }
 
 /// Whether a server URL someone else named may be dialled: `http` or
@@ -482,6 +548,8 @@ mod tests {
         let e = guarded
             .inner
             .http
+            .as_ref()
+            .unwrap()
             .get(format!("http://localhost:{port}/x"))
             .send()
             .await
