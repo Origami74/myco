@@ -446,9 +446,13 @@ For `blossom:`, every ask reads this device's Blossom store first; a miss goes t
 seam — the Circle's stores over the mesh and, unless offline-only, the internet, asked
 **at once** with the first bytes winning. The internet side asks the servers a BUD-10 URL
 names (`blossom:<sha>.<ext>?xs=<domain>&as=<pubkey>`: `xs` servers, then the `as`
-author's kind 10063 servers, https only, four of each at most — a list not held here is
-looked up on the author's relays and the indexers first, for at most 3 s, and kept), then the
-public defaults, over one shared HTTP client. The named servers are someone else's word
+author's kind 10063 servers as held here, https only, four of each at most), then the
+public defaults, over one shared HTTP client. Only when all of those miss is an `as`
+author's list not held here looked up — on the write relays of the author's relay list
+as held here, and the indexers, for at most 3 s, done as soon as every list is in — kept,
+and the servers it adds asked: a picture its hint serves never waits on an indexer. One
+lookup per author at a time, at most 60 authors a minute on the device, and an author no
+relay had is not asked about again for ten minutes. The named servers are someone else's word
 for where to dial, so they go out as `https:` does: each judged first (no userinfo, no
 private literal, no local or `.fips` name), through a resolver that refuses a name
 answering with a private address, every redirect judged again — a napplet cannot make

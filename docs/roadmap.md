@@ -410,6 +410,10 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Peer permissions UI.** The per-peer record exists (`relay_write`,
   `relay_read_multihop`, …) with defaults for everyone; a switch per Circle
   member — [nsite-permissions.md](./design/nsite/nsite-permissions.md) §2.
+- **Your own profile from your own relays.** The Settings profile is fetched
+  from the default relays and the indexers, not the user's NIP-65 write
+  relays — the last open part of
+  [#67](https://github.com/Origami74/myco/issues/67).
 - **Blob privacy over the mesh.** Whether a napplet's `blossom:` miss should
   ask every Circle member, or only the peer whose event referenced it —
   [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.

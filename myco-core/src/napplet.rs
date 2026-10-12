@@ -1411,20 +1411,18 @@ impl BlossomFetcher {
         None
     }
 
-    /// The servers the authors named in their kind 10063 lists. A list not
-    /// held here is looked for first — on the author's relays and the
-    /// indexers, for at most [`crate::ip_source::SERVER_LIST_LOOKUP`], once a
-    /// while per author — so a blob only its author's server holds is found
-    /// on the first ask, not after the miss is forgotten.
-    async fn author_servers(&self, authors: &[String]) -> Vec<String> {
-        let authors: Vec<PublicKey> = authors
+    /// The authors a fetch's `as=` named, as keys — at most
+    /// [`MAX_HINT_AUTHORS`].
+    fn hinted_authors(authors: &[String]) -> Vec<PublicKey> {
+        authors
             .iter()
             .take(MAX_HINT_AUTHORS)
             .filter_map(|a| PublicKey::from_hex(a).ok())
-            .collect();
-        if authors.is_empty() {
-            return Vec::new();
-        }
+            .collect()
+    }
+
+    /// Where those authors' server lists are kept and looked up.
+    fn server_lists(&self) -> crate::ip_source::AuthorOutbox {
         let lists = crate::ip_source::AuthorOutbox::new(self.content.relay());
         #[cfg(test)]
         let lists = match &self.list_indexers {
@@ -1433,15 +1431,39 @@ impl BlossomFetcher {
                 .allowing_private_dials(),
             None => lists,
         };
-        if !self.content.is_offline_only() {
-            lists
-                .fetch_server_lists(&authors, crate::ip_source::SERVER_LIST_LOOKUP)
-                .await;
-        }
-        lists.stored_servers(&authors).await
+        lists
+    }
+
+    /// One internet round: `servers`, then `public` unless told not to.
+    async fn ask_servers(
+        &self,
+        sha256_hex: &str,
+        max_bytes: usize,
+        servers: &[String],
+        public: Vec<String>,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        let source = crate::ip_source::IpPeerSource::new(Vec::new(), public)
+            .with_http_client(self.http.clone())
+            .with_hint_http_client(self.hint_http.clone())
+            .with_max_blob_bytes(max_bytes);
+        #[cfg(test)]
+        let source = if self.trust_hints {
+            source.trusting_hints()
+        } else {
+            source
+        };
+        source.fetch_blob(sha256_hex, servers).await
     }
 
     /// The internet's answer: `None` when it was not asked (it looks down).
+    ///
+    /// The servers the URL named, the `as=` authors' servers as held here,
+    /// then the public defaults — at once, with nothing looked up first. Only
+    /// when all of them miss are the authors' server lists not held here
+    /// looked up (once a while per author, see
+    /// [`crate::ip_source::AuthorOutbox::fetch_server_lists`]) and the
+    /// servers they add asked: a picture its hint already serves never
+    /// waits on an indexer.
     async fn ask_internet(
         &self,
         sha256_hex: &str,
@@ -1451,29 +1473,38 @@ impl BlossomFetcher {
         if self.content.internet_looks_down() {
             return None;
         }
-        let mut servers = hints.servers.clone();
-        for server in self.author_servers(&hints.authors).await {
-            if !servers.contains(&server) {
-                servers.push(server);
+        let authors = Self::hinted_authors(&hints.authors);
+        let lists = self.server_lists();
+        let round = async {
+            let mut servers = hints.servers.clone();
+            for server in lists.stored_servers(&authors).await {
+                if !servers.contains(&server) {
+                    servers.push(server);
+                }
             }
-        }
-        let public = crate::ip_source::IpPeerSource::new(Vec::new(), self.public_servers.clone())
-            .with_http_client(self.http.clone())
-            .with_hint_http_client(self.hint_http.clone())
-            .with_max_blob_bytes(max_bytes);
-        #[cfg(test)]
-        let public = if self.trust_hints {
-            public.trusting_hints()
-        } else {
-            public
+            let first = self
+                .ask_servers(sha256_hex, max_bytes, &servers, self.public_servers.clone())
+                .await;
+            if !matches!(first, Ok(None)) || authors.is_empty() || self.content.is_offline_only() {
+                return first;
+            }
+            lists
+                .fetch_server_lists(&authors, crate::ip_source::SERVER_LIST_LOOKUP)
+                .await;
+            let more: Vec<String> = lists
+                .stored_servers(&authors)
+                .await
+                .into_iter()
+                .filter(|s| !servers.contains(s) && !self.public_servers.contains(s))
+                .collect();
+            if more.is_empty() {
+                return first;
+            }
+            self.ask_servers(sha256_hex, max_bytes, &more, Vec::new())
+                .await
         };
         Some(
-            match tokio::time::timeout(
-                INTERNET_BLOB_TIMEOUT,
-                public.fetch_blob(sha256_hex, &servers),
-            )
-            .await
-            {
+            match tokio::time::timeout(INTERNET_BLOB_TIMEOUT, round).await {
                 Ok(result) => result,
                 Err(_) => Ok(None),
             },
@@ -4191,31 +4222,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An author named by `as=` whose server list is not held here has it
-    /// looked up — once: it is kept, and the next ask reads it locally.
+    /// An `as=` author's server list is looked up only when every server
+    /// already known misses — a picture its hint serves never waits on an
+    /// indexer — and then once: kept, and not asked for again.
     #[tokio::test]
-    async fn the_blossom_fetcher_looks_up_a_missing_server_list_once() {
+    async fn the_blossom_fetcher_looks_up_a_server_list_only_after_a_miss() {
+        use myco_napplet_runtime::seams::BlobFetcher as _;
         let dir = std::env::temp_dir().join(format!("myco-fetcher-list-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(crate::content::Content::open(&dir).unwrap());
         let keys = nostr::Keys::generate();
         let list = nostr::EventBuilder::new(nostr::Kind::from(10_063u16), "")
-            .tags([
-                nostr::Tag::parse(["server", "https://cdn.author.example/"]).unwrap(),
-                nostr::Tag::parse(["server", "http://plain.example"]).unwrap(),
-            ])
+            .tags([nostr::Tag::parse(["server", "https://cdn.author.example/"]).unwrap()])
             .sign_with_keys(&keys)
             .unwrap();
         let (indexer, asked) = crate::ip_source::tests::mock_relay_holding(vec![list]).await;
-        let fetcher = BlossomFetcher::new(content.clone()).with_list_indexers(vec![indexer]);
+        let bytes = b"on the hinted server".to_vec();
+        let sha = nsite_deck::sync::sha256_hex(&bytes);
+        let server =
+            crate::ip_source::tests::mock_blossom(vec![(sha.clone(), bytes.clone())]).await;
+        let fetcher = BlossomFetcher::new(content.clone())
+            .with_public_servers(Vec::new())
+            .trusting_hints()
+            .with_list_indexers(vec![indexer]);
         let author = vec![keys.public_key().to_hex()];
-        for _ in 0..2 {
+        let hinted = myco_napplet_runtime::BlobHints {
+            servers: vec![server],
+            authors: author.clone(),
+        };
+        assert_eq!(
+            fetcher.fetch(&sha, 1 << 20, &hinted).await.unwrap(),
+            Some(bytes)
+        );
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let unhinted = myco_napplet_runtime::BlobHints {
+            servers: Vec::new(),
+            authors: author,
+        };
+        for missing in ["01", "02"] {
             assert_eq!(
-                fetcher.author_servers(&author).await,
-                vec!["https://cdn.author.example".to_string()]
+                fetcher
+                    .fetch(&missing.repeat(32), 1 << 20, &unhinted)
+                    .await
+                    .unwrap(),
+                None
             );
         }
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            fetcher
+                .server_lists()
+                .stored_servers(&[keys.public_key()])
+                .await,
+            vec!["https://cdn.author.example".to_string()]
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

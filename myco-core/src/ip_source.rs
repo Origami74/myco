@@ -95,6 +95,41 @@ pub const MAX_AUTHOR_SERVERS: usize = 4;
 /// How long a server-list lookup made while a blob waits may take.
 pub const SERVER_LIST_LOOKUP: Duration = Duration::from_secs(3);
 
+/// The most authors whose server list is looked up in a minute, process-wide.
+pub const MAX_SERVER_LIST_LOOKUPS_PER_MINUTE: usize = 60;
+/// The most server-list misses remembered; past it the expired go, then all.
+const MAX_SERVER_LIST_MISSES: usize = 4096;
+
+/// A server-list lookup running for some authors, shared by everyone
+/// waiting on it.
+type ServerListLookup = futures_util::future::Shared<futures_util::future::BoxFuture<'static, ()>>;
+
+/// The server-list lookups running now, by author.
+fn server_list_lookups(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PublicKey, ServerListLookup>> {
+    static RUNNING: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PublicKey, ServerListLookup>>,
+    > = std::sync::OnceLock::new();
+    RUNNING.get_or_init(Default::default)
+}
+
+/// Count one author's lookup against the minute's budget, or say no.
+fn admit_server_list_lookup() -> bool {
+    const WINDOW: Duration = Duration::from_secs(60);
+    static STARTED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    let mut started = STARTED.get_or_init(Default::default).lock().unwrap();
+    while started.front().is_some_and(|t| t.elapsed() >= WINDOW) {
+        started.pop_front();
+    }
+    if started.len() >= MAX_SERVER_LIST_LOOKUPS_PER_MINUTE {
+        return false;
+    }
+    started.push_back(std::time::Instant::now());
+    true
+}
+
 /// Authors whose server list was looked for and not found, with until when
 /// that holds. Kept apart from [`list_misses`]: an author with a relay list
 /// may have no server list, and the other way round.
@@ -210,6 +245,7 @@ pub fn lookup_relays(hints: &[String], author: &[String], defaults: &[String]) -
 /// userinfo and private hosts — at most [`MAX_AUTHOR_RELAYS`] of them, and
 /// each is resolved and refused if its name points at a private address
 /// before it is dialled (`outbox::dials_public`).
+#[derive(Clone)]
 pub struct AuthorOutbox {
     store: std::sync::Arc<dyn nsite_deck::seams::RelayBackend>,
     indexers: Vec<String>,
@@ -313,12 +349,20 @@ impl AuthorOutbox {
 
     /// Look for the server lists of those `authors` that have none stored
     /// here and were not looked for in vain lately: on each one's write
-    /// relays (its stored relay list, each resolved and refused if private)
-    /// and the indexers, at once, for at most `bound`. What is found is
-    /// stored; an author no relay had is not asked for again for
-    /// [`LIST_MISS_REMEMBERED_FOR`] — or [`LIST_SOFT_MISS_FOR`] when the
-    /// round was cut short.
+    /// relays (its relay list as stored here, each resolved and refused if
+    /// private) and the indexers, at once, for at most `bound` — done as
+    /// soon as every list is in. What is found is stored; an author no relay
+    /// had is not asked for again for [`LIST_MISS_REMEMBERED_FOR`] — or
+    /// [`LIST_SOFT_MISS_FOR`] when the round was cut short.
+    ///
+    /// One lookup per author at a time, process-wide: a caller asking for an
+    /// author already being looked up waits for that lookup instead of
+    /// starting another (fifty pictures by one author are one lookup). And
+    /// at most [`MAX_SERVER_LIST_LOOKUPS_PER_MINUTE`] authors a minute are
+    /// looked up at all — a napplet names these authors, and must not turn
+    /// the phone into a stream of queries to the indexers.
     pub async fn fetch_server_lists(&self, authors: &[PublicKey], bound: Duration) {
+        use futures_util::future::FutureExt as _;
         let stored = self.stored_servers_by_author(authors).await;
         let wanted: Vec<PublicKey> = authors
             .iter()
@@ -328,11 +372,56 @@ impl AuthorOutbox {
         if wanted.is_empty() {
             return;
         }
+        let waits = {
+            let mut running = server_list_lookups().lock().unwrap();
+            let mut waits: Vec<ServerListLookup> = Vec::new();
+            let mut mine: Vec<PublicKey> = Vec::new();
+            for author in &wanted {
+                match running.get(author) {
+                    Some(lookup) => {
+                        if !waits.iter().any(|w| w.ptr_eq(lookup)) {
+                            waits.push(lookup.clone());
+                        }
+                    }
+                    None if admit_server_list_lookup() => mine.push(*author),
+                    None => {}
+                }
+            }
+            if !mine.is_empty() {
+                // Run by its own task, so a caller dropped mid-lookup does
+                // not strand the others waiting on it; the task clears its
+                // authors from the map when done.
+                let (this, authors) = (self.clone(), mine.clone());
+                let task = tokio::spawn(async move {
+                    this.look_up_server_lists(&authors, bound).await;
+                    let mut running = server_list_lookups().lock().unwrap();
+                    for author in &authors {
+                        running.remove(author);
+                    }
+                });
+                let lookup = async move {
+                    let _ = task.await;
+                }
+                .boxed()
+                .shared();
+                for author in mine {
+                    running.insert(author, lookup.clone());
+                }
+                waits.push(lookup);
+            }
+            waits
+        };
+        join_all(waits).await;
+    }
+
+    /// The round behind [`AuthorOutbox::fetch_server_lists`], for authors no
+    /// other lookup is running for.
+    async fn look_up_server_lists(&self, wanted: &[PublicKey], bound: Duration) {
         let filter = serde_json::json!({
             "kinds": [SERVER_LIST_KIND],
             "authors": wanted.iter().map(|a| a.to_hex()).collect::<Vec<_>>(),
         });
-        let lists = self.stored_lists_for(&wanted).await;
+        let lists = self.stored_lists_for(wanted).await;
         let mut relays: Vec<(String, bool)> = Vec::new();
         for list in lists.values() {
             for url in self.write_relays(list) {
@@ -363,18 +452,34 @@ impl AuthorOutbox {
             }
         }));
         drop(found);
+        // Done when every relay has answered, or as soon as every list is
+        // in: a dead relay must not hold up a list another relay sent.
+        let all_in = tokio::sync::Notify::new();
         let remember = async {
+            let mut got: Vec<PublicKey> = Vec::new();
             while let Some(ev) = arriving.recv().await {
                 if ev.kind.as_u16() == SERVER_LIST_KIND && wanted.contains(&ev.pubkey) {
+                    if !got.contains(&ev.pubkey) {
+                        got.push(ev.pubkey);
+                    }
                     self.remember_server_list(ev).await;
+                    if got.len() == wanted.len() {
+                        all_in.notify_one();
+                    }
                 }
             }
         };
-        let finished = tokio::time::timeout(bound, futures_util::future::join(asked, remember))
-            .await
-            .map(|(answered, ())| answered.into_iter().all(|ok| ok))
-            .unwrap_or(false);
-        let now_stored = self.stored_servers_by_author(&wanted).await;
+        let finished = tokio::time::timeout(bound, async {
+            tokio::select! {
+                (answered, ()) = futures_util::future::join(asked, remember) => {
+                    answered.into_iter().all(|ok| ok)
+                }
+                () = all_in.notified() => true,
+            }
+        })
+        .await
+        .unwrap_or(false);
+        let now_stored = self.stored_servers_by_author(wanted).await;
         let how_long = if finished {
             LIST_MISS_REMEMBERED_FOR
         } else {
@@ -382,6 +487,13 @@ impl AuthorOutbox {
         };
         let until = std::time::Instant::now() + how_long;
         let mut misses = server_list_misses().lock().unwrap();
+        if misses.len() >= MAX_SERVER_LIST_MISSES {
+            let now = std::time::Instant::now();
+            misses.retain(|_, held| *held > now);
+            if misses.len() >= MAX_SERVER_LIST_MISSES {
+                misses.clear();
+            }
+        }
         for author in wanted.iter().filter(|a| !now_stored.contains(a)) {
             let held = misses.entry(*author).or_insert(until);
             *held = (*held).max(until);
@@ -403,11 +515,6 @@ impl AuthorOutbox {
             .into_iter()
             .map(|e| e.pubkey)
             .collect()
-    }
-
-    /// The store lists are kept in — for a source reading them.
-    pub fn store(&self) -> std::sync::Arc<dyn nsite_deck::seams::RelayBackend> {
-        self.store.clone()
     }
 
     /// Whether `author` was looked for recently and had no list anywhere.
@@ -669,10 +776,10 @@ pub struct IpPeerSource {
     /// Look up the author's NIP-65 relays too. See
     /// [`IpPeerSource::with_author_outbox`].
     author_outbox: Option<std::sync::Arc<AuthorOutbox>>,
-    /// Where the authors' Blossom server lists are kept, for
+    /// Where the authors' Blossom server lists are kept and looked up, for
     /// [`PeerSource::author_servers`]. See
     /// [`IpPeerSource::with_author_servers`].
-    author_lists: Option<std::sync::Arc<dyn nsite_deck::seams::RelayBackend>>,
+    author_lists: Option<std::sync::Arc<AuthorOutbox>>,
     /// Give up on a blob when nothing arrives for this long. See
     /// [`IpPeerSource::with_stall_timeout`].
     stall_timeout: Option<Duration>,
@@ -849,19 +956,17 @@ impl IpPeerSource {
     ///
     /// A mesh source (`over_peer_relay`) ignores this: it asks one peer.
     pub fn with_author_outbox(mut self, outbox: std::sync::Arc<AuthorOutbox>) -> Self {
-        self.author_lists = Some(outbox.store());
+        self.author_lists = Some(outbox.clone());
         self.author_outbox = Some(outbox);
         self
     }
 
-    /// Offer the Blossom servers authors list in `store` (kind 10063) to a
-    /// blob fetch — for a source that fetches no manifests, only an app's
-    /// files. [`IpPeerSource::with_author_outbox`] does this too.
-    pub fn with_author_servers(
-        mut self,
-        store: std::sync::Arc<dyn nsite_deck::seams::RelayBackend>,
-    ) -> Self {
-        self.author_lists = Some(store);
+    /// Offer the Blossom servers authors list (kind 10063) to a blob fetch,
+    /// as `lists` keeps and looks them up — for a source that fetches no
+    /// manifests, only an app's files. [`IpPeerSource::with_author_outbox`]
+    /// does this too.
+    pub fn with_author_servers(mut self, lists: std::sync::Arc<AuthorOutbox>) -> Self {
+        self.author_lists = Some(lists);
         self
     }
 
@@ -1676,12 +1781,19 @@ impl PeerSource for IpPeerSource {
 
     async fn author_servers(&self, author: &PublicKey) -> Vec<String> {
         // A mesh source stays on the mesh; its fetches ignore them anyway.
-        match &self.author_lists {
-            Some(store) if !self.ignore_manifest_servers => {
-                stored_author_servers(store.as_ref(), std::slice::from_ref(author)).await
-            }
-            _ => Vec::new(),
-        }
+        let Some(lists) = self
+            .author_lists
+            .as_ref()
+            .filter(|_| !self.ignore_manifest_servers)
+        else {
+            return Vec::new();
+        };
+        // Usually stored already (it rides along with the manifest); when
+        // not — an update, a pushed manifest, an app installed before
+        // lists were read — looked up, once a while per author.
+        let author = std::slice::from_ref(author);
+        lists.fetch_server_lists(author, SERVER_LIST_LOOKUP).await;
+        lists.stored_servers(author).await
     }
 }
 
@@ -2571,26 +2683,29 @@ pub(crate) mod tests {
             .publish(relay_list(&keys, &[&["r", &author_relay]]))
             .await
             .unwrap();
-        let source = IpPeerSource::new(vec![default_relay], Vec::new())
-            .with_author_outbox(outbox_over(store.clone(), Vec::new()));
+        let outbox = outbox_over(store.clone(), Vec::new());
+        let source =
+            IpPeerSource::new(vec![default_relay], Vec::new()).with_author_outbox(outbox.clone());
 
-        assert!(source.author_servers(&site.author).await.is_empty());
+        assert!(outbox.stored_servers(&[site.author]).await.is_empty());
         let got = source.fetch_manifest(&site.author, None).await.unwrap();
         assert_eq!(
             got.map(|e| e.id),
             Some(site.manifest.id),
             "the list was taken for the manifest"
         );
+        // Kept by the manifest round itself, before anything looked it up.
+        assert_eq!(outbox.stored_servers(&[site.author]).await.len(), 1);
         assert_eq!(
             source.author_servers(&site.author).await,
             vec!["https://cdn.author.example".to_string()]
         );
         // A source that fetches no manifests reads the same store.
-        let blobs_only =
-            IpPeerSource::new(Vec::new(), Vec::new()).with_author_servers(store.clone());
+        let blobs_only = IpPeerSource::new(Vec::new(), Vec::new())
+            .with_author_servers(outbox_over(store.clone(), Vec::new()));
         assert_eq!(blobs_only.author_servers(&site.author).await.len(), 1);
         let mesh = IpPeerSource::new(Vec::new(), Vec::new())
-            .with_author_servers(store)
+            .with_author_servers(outbox_over(store, Vec::new()))
             .ignoring_manifest_servers();
         assert!(mesh.author_servers(&site.author).await.is_empty());
     }
@@ -2629,5 +2744,91 @@ pub(crate) mod tests {
             (1, 1),
             "a kept list or a fresh miss was asked for again"
         );
+    }
+
+    /// Concurrent asks for one author's server list are one lookup.
+    #[tokio::test]
+    async fn concurrent_server_list_lookups_for_one_author_are_one() {
+        let keys = nostr::Keys::generate();
+        let list = server_list(&keys, &["https://cdn.one.example"]);
+        let (indexer, asked) = mock_relay_delayed(vec![list], Duration::from_millis(300)).await;
+        let outbox = outbox_over(
+            Arc::new(nsite_deck::testing::MemRelay::new()),
+            vec![indexer],
+        );
+        let author = [keys.public_key()];
+        let asks: Vec<_> = (0..5)
+            .map(|_| {
+                let outbox = outbox.clone();
+                tokio::spawn(async move {
+                    outbox
+                        .fetch_server_lists(&author, Duration::from_secs(5))
+                        .await;
+                    outbox.stored_servers(&author).await
+                })
+            })
+            .collect();
+        for ask in asks {
+            assert_eq!(
+                ask.await.unwrap(),
+                vec!["https://cdn.one.example".to_string()]
+            );
+        }
+        assert_eq!(hits(&asked), 1, "one author was looked up more than once");
+    }
+
+    /// A lookup is done as soon as every list is in: a relay that never
+    /// answers does not hold it to the bound.
+    #[tokio::test]
+    async fn a_server_list_lookup_ends_when_every_list_is_in() {
+        let keys = nostr::Keys::generate();
+        let list = server_list(&keys, &["https://cdn.fast.example"]);
+        let (indexer, _) = mock_relay_holding(vec![list]).await;
+        let (silent, _) = mock_relay_delayed(Vec::new(), Duration::from_secs(30)).await;
+        let store = Arc::new(nsite_deck::testing::MemRelay::new());
+        store
+            .publish(relay_list(&keys, &[&["r", &silent]]))
+            .await
+            .unwrap();
+        let outbox = outbox_over(store, vec![indexer]);
+        let started = std::time::Instant::now();
+        outbox
+            .fetch_server_lists(&[keys.public_key()], Duration::from_secs(10))
+            .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(outbox.stored_servers(&[keys.public_key()]).await.len(), 1);
+    }
+
+    /// A server list arriving with the manifest is not taken for an answer:
+    /// it does not start the grace that ends the round, so a manifest from
+    /// a slower relay is still found.
+    #[tokio::test]
+    async fn a_server_list_does_not_start_the_manifest_grace() {
+        let keys = nostr::Keys::generate();
+        let site = nsite_deck::testing::build_test_site_with_keys(
+            &keys,
+            &[("/index.html", b"<h1>late</h1>")],
+            None,
+            None,
+        );
+        let list = server_list(&keys, &["https://cdn.early.example"]);
+        let (author_relay, _) =
+            mock_relay_delayed(vec![site.manifest.clone()], Duration::from_millis(300)).await;
+        let (default_relay, _) = mock_relay_holding(vec![list]).await;
+        let store = Arc::new(nsite_deck::testing::MemRelay::new());
+        store
+            .publish(relay_list(&keys, &[&["r", &author_relay]]))
+            .await
+            .unwrap();
+        let source = IpPeerSource::new(vec![default_relay], Vec::new())
+            .with_author_outbox(outbox_over(store, Vec::new()))
+            .with_first_answer_grace(Duration::from_millis(50));
+        let got = source.fetch_manifest(&site.author, None).await.unwrap();
+        assert_eq!(got.map(|e| e.id), Some(site.manifest.id));
+        assert_eq!(source.author_servers(&site.author).await.len(), 1);
     }
 }
