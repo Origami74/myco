@@ -3686,8 +3686,8 @@ mod tests {
     }
 
     /// A manifest that fails the napplet's own checks — a forged signature,
-    /// an aggregate that does not cover its files — is stopped here, however
-    /// new it claims to be.
+    /// no artifact `x`, a legacy aggregate that does not cover its files — is
+    /// stopped here, however new it claims to be.
     #[tokio::test]
     async fn an_invalid_napplet_manifest_goes_no_further() {
         let phone = phone("invalid");
@@ -3695,9 +3695,16 @@ mod tests {
         let v1 = version(&keys, 1_000, "Version one", &["relay"]);
         install(&phone, &v1, &["relay"]).await;
 
-        let corrupt = NappletBuilder::new()
+        let no_artifact = NappletBuilder::new()
             .keys(keys.clone())
             .created_at(2_000)
+            .aggregate(myco_napplet_runtime::testing::FixtureAggregate::Omitted)
+            .build();
+        // LEGACY NIP-5D (path/aggregate): remove after 2026-12-31
+        let corrupt = NappletBuilder::new()
+            .keys(keys.clone())
+            .created_at(2_500)
+            .legacy()
             .aggregate(myco_napplet_runtime::testing::FixtureAggregate::Corrupt)
             .build();
         let forged = NappletBuilder::new()
@@ -3705,7 +3712,7 @@ mod tests {
             .created_at(3_000)
             .break_signature()
             .build();
-        for bad in [&corrupt, &forged] {
+        for bad in [&no_artifact, &corrupt, &forged] {
             let (outcome, forwarded) = push(&phone, bad, mesh(2), &[holder_of(bad).await]).await;
             assert_eq!(outcome, crate::content::NappletPush::Dropped);
             assert!(forwarded.is_empty(), "an invalid manifest was passed on");
