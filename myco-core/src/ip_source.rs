@@ -88,6 +88,87 @@ fn list_misses(
     MISSES.get_or_init(Default::default)
 }
 
+/// BUD-03: the kind an author lists their Blossom servers under.
+pub const SERVER_LIST_KIND: u16 = 10_063;
+/// The most servers taken from one author's server list.
+pub const MAX_AUTHOR_SERVERS: usize = 4;
+/// How long a server-list lookup made while a blob waits may take.
+pub const SERVER_LIST_LOOKUP: Duration = Duration::from_secs(3);
+
+/// Authors whose server list was looked for and not found, with until when
+/// that holds. Kept apart from [`list_misses`]: an author with a relay list
+/// may have no server list, and the other way round.
+fn server_list_misses(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PublicKey, std::time::Instant>> {
+    static MISSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PublicKey, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    MISSES.get_or_init(Default::default)
+}
+
+/// The Blossom servers an author's server list (kind 10063) names, in its
+/// order: `https` only, at most [`MAX_AUTHOR_SERVERS`], deduplicated. Not
+/// judged here: they are someone else's word for where to dial, so
+/// [`IpPeerSource::fetch_blob`] judges each before dialling it.
+pub fn server_list_urls(list: &Event) -> Vec<String> {
+    let mut servers: Vec<String> = Vec::new();
+    for tag in list.tags.iter() {
+        if servers.len() >= MAX_AUTHOR_SERVERS {
+            break;
+        }
+        let tag = tag.as_slice();
+        if tag.first().map(String::as_str) != Some("server") {
+            continue;
+        }
+        if let Some(url) = tag.get(1).filter(|u| u.starts_with("https://")) {
+            let url = url.trim_end_matches('/').to_string();
+            if !servers.contains(&url) {
+                servers.push(url);
+            }
+        }
+    }
+    servers
+}
+
+/// The servers each of `authors` lists in the newest server list stored
+/// here, in `authors` order, deduplicated. Never touches the network.
+pub async fn stored_author_servers(
+    store: &dyn nsite_deck::seams::RelayBackend,
+    authors: &[PublicKey],
+) -> Vec<String> {
+    if authors.is_empty() {
+        return Vec::new();
+    }
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::from(SERVER_LIST_KIND))
+        .authors(authors.iter().copied());
+    let Ok(found) = store.query(&[filter]).await else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for author in authors {
+        let newest = found
+            .iter()
+            .filter(|e| e.pubkey == *author && e.kind.as_u16() == SERVER_LIST_KIND)
+            .max_by_key(|e| e.created_at);
+        for url in newest.map(server_list_urls).unwrap_or_default() {
+            if !out.contains(&url) {
+                out.push(url);
+            }
+        }
+    }
+    out
+}
+
+/// Whether `author` was looked for recently and had no server list anywhere.
+fn server_list_recently_missed(author: &PublicKey) -> bool {
+    server_list_misses()
+        .lock()
+        .unwrap()
+        .get(author)
+        .is_some_and(|until| std::time::Instant::now() < *until)
+}
+
 /// Whether two relay URLs name the same relay: equal but for a trailing
 /// slash, which relay lists spell both ways.
 pub fn same_relay(a: &str, b: &str) -> bool {
@@ -213,6 +294,120 @@ impl AuthorOutbox {
         if let Err(e) = self.store.publish(list).await {
             tracing::debug!(error = %e, "could not store an author's relay list");
         }
+    }
+
+    /// Keep a server list (kind 10063) fetched from the network — kept like
+    /// a relay list, so it travels over the mesh and serves offline.
+    pub async fn remember_server_list(&self, list: Event) {
+        server_list_misses().lock().unwrap().remove(&list.pubkey);
+        if let Err(e) = self.store.publish(list).await {
+            tracing::debug!(error = %e, "could not store an author's server list");
+        }
+    }
+
+    /// The servers `authors` list, as stored here — see
+    /// [`stored_author_servers`].
+    pub async fn stored_servers(&self, authors: &[PublicKey]) -> Vec<String> {
+        stored_author_servers(self.store.as_ref(), authors).await
+    }
+
+    /// Look for the server lists of those `authors` that have none stored
+    /// here and were not looked for in vain lately: on each one's write
+    /// relays (its stored relay list, each resolved and refused if private)
+    /// and the indexers, at once, for at most `bound`. What is found is
+    /// stored; an author no relay had is not asked for again for
+    /// [`LIST_MISS_REMEMBERED_FOR`] — or [`LIST_SOFT_MISS_FOR`] when the
+    /// round was cut short.
+    pub async fn fetch_server_lists(&self, authors: &[PublicKey], bound: Duration) {
+        let stored = self.stored_servers_by_author(authors).await;
+        let wanted: Vec<PublicKey> = authors
+            .iter()
+            .filter(|a| !stored.contains(a) && !server_list_recently_missed(a))
+            .copied()
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let filter = serde_json::json!({
+            "kinds": [SERVER_LIST_KIND],
+            "authors": wanted.iter().map(|a| a.to_hex()).collect::<Vec<_>>(),
+        });
+        let lists = self.stored_lists_for(&wanted).await;
+        let mut relays: Vec<(String, bool)> = Vec::new();
+        for list in lists.values() {
+            for url in self.write_relays(list) {
+                if !relays.iter().any(|(r, _)| same_relay(r, &url)) {
+                    relays.push((url, true));
+                }
+            }
+        }
+        for url in &self.indexers {
+            if !relays.iter().any(|(r, _)| same_relay(r, url)) {
+                relays.push((url.clone(), false));
+            }
+        }
+        let (found, mut arriving) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let asked = join_all(relays.iter().map(|(url, named)| {
+            let (filter, found) = (filter.clone(), found.clone());
+            async move {
+                if *named && !self.may_dial(url).await {
+                    return true;
+                }
+                matches!(
+                    query_relay_each(url, vec![filter], |ev| {
+                        let _ = found.send(ev);
+                    })
+                    .await,
+                    Ok(())
+                )
+            }
+        }));
+        drop(found);
+        let remember = async {
+            while let Some(ev) = arriving.recv().await {
+                if ev.kind.as_u16() == SERVER_LIST_KIND && wanted.contains(&ev.pubkey) {
+                    self.remember_server_list(ev).await;
+                }
+            }
+        };
+        let finished = tokio::time::timeout(bound, futures_util::future::join(asked, remember))
+            .await
+            .map(|(answered, ())| answered.into_iter().all(|ok| ok))
+            .unwrap_or(false);
+        let now_stored = self.stored_servers_by_author(&wanted).await;
+        let how_long = if finished {
+            LIST_MISS_REMEMBERED_FOR
+        } else {
+            LIST_SOFT_MISS_FOR
+        };
+        let until = std::time::Instant::now() + how_long;
+        let mut misses = server_list_misses().lock().unwrap();
+        for author in wanted.iter().filter(|a| !now_stored.contains(a)) {
+            let held = misses.entry(*author).or_insert(until);
+            *held = (*held).max(until);
+        }
+    }
+
+    /// Which of `authors` have a server list stored here.
+    async fn stored_servers_by_author(&self, authors: &[PublicKey]) -> Vec<PublicKey> {
+        if authors.is_empty() {
+            return Vec::new();
+        }
+        let filter = nostr::Filter::new()
+            .kind(nostr::Kind::from(SERVER_LIST_KIND))
+            .authors(authors.iter().copied());
+        self.store
+            .query(&[filter])
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.pubkey)
+            .collect()
+    }
+
+    /// The store lists are kept in — for a source reading them.
+    pub fn store(&self) -> std::sync::Arc<dyn nsite_deck::seams::RelayBackend> {
+        self.store.clone()
     }
 
     /// Whether `author` was looked for recently and had no list anywhere.
@@ -418,12 +613,11 @@ impl AuthorOutbox {
 /// Default public Blossom servers, tried after a manifest's own `["server",…]`
 /// hints.
 pub fn default_blossom_servers() -> Vec<String> {
-    // A fixed list is not a resolution policy — a `blossom:sha256:` URI names
-    // no server, and BUD-03 (kind 10063) is how an author says where their
-    // blobs live; reading it is roadmap. Until then the list has to cover the
-    // large public replicas napplets are actually published to: `blssm.us`
-    // and `blossom.ditto.pub` hold the letsmap release set, which none of the
-    // first three do.
+    // The last resort, after the manifest's `server` tags and the author's
+    // own BUD-03 list (kind 10063; `PeerSource::author_servers`). It still
+    // has to cover the large public replicas napplets are actually published
+    // to: `blssm.us` and `blossom.ditto.pub` hold the letsmap release set,
+    // which none of the first three do.
     [
         "https://blossom.primal.net",
         "https://cdn.satellite.earth",
@@ -474,6 +668,10 @@ pub struct IpPeerSource {
     /// Look up the author's NIP-65 relays too. See
     /// [`IpPeerSource::with_author_outbox`].
     author_outbox: Option<std::sync::Arc<AuthorOutbox>>,
+    /// Where the authors' Blossom server lists are kept, for
+    /// [`PeerSource::author_servers`]. See
+    /// [`IpPeerSource::with_author_servers`].
+    author_lists: Option<std::sync::Arc<dyn nsite_deck::seams::RelayBackend>>,
     /// Give up on a blob when nothing arrives for this long. See
     /// [`IpPeerSource::with_stall_timeout`].
     stall_timeout: Option<Duration>,
@@ -485,6 +683,7 @@ impl IpPeerSource {
             relays,
             hints: Vec::new(),
             author_outbox: None,
+            author_lists: None,
             blossom_servers,
             http: reqwest::Client::builder()
                 // Generous: a blob can be MBs over a slow BLE mesh link.
@@ -649,7 +848,19 @@ impl IpPeerSource {
     ///
     /// A mesh source (`over_peer_relay`) ignores this: it asks one peer.
     pub fn with_author_outbox(mut self, outbox: std::sync::Arc<AuthorOutbox>) -> Self {
+        self.author_lists = Some(outbox.store());
         self.author_outbox = Some(outbox);
+        self
+    }
+
+    /// Offer the Blossom servers authors list in `store` (kind 10063) to a
+    /// blob fetch — for a source that fetches no manifests, only an app's
+    /// files. [`IpPeerSource::with_author_outbox`] does this too.
+    pub fn with_author_servers(
+        mut self,
+        store: std::sync::Arc<dyn nsite_deck::seams::RelayBackend>,
+    ) -> Self {
+        self.author_lists = Some(store);
         self
     }
 
@@ -667,6 +878,15 @@ impl IpPeerSource {
 
         let list_filter = serde_json::json!({
             "kinds": [nostr::Kind::RelayList.as_u16()],
+            "authors": [author.to_hex()],
+            "limit": 1,
+        });
+        // The author's Blossom server list rides along with every manifest
+        // ask: the relays that hold the app are the likeliest to hold where
+        // its files are, and it costs no round trip. Kept when it arrives;
+        // the blob fetch that follows reads it (`PeerSource::author_servers`).
+        let server_list_filter = serde_json::json!({
+            "kinds": [SERVER_LIST_KIND],
             "authors": [author.to_hex()],
             "limit": 1,
         });
@@ -721,10 +941,14 @@ impl IpPeerSource {
         for url in lookup_relays(&self.hints, &author_relays, &self.relays) {
             let filters = if is_ours(&url) {
                 // The list rides along: it refreshes a stored one for free.
-                vec![manifest_filter.clone(), list_filter.clone()]
+                vec![
+                    manifest_filter.clone(),
+                    list_filter.clone(),
+                    server_list_filter.clone(),
+                ]
             } else {
                 from_list += 1;
-                vec![manifest_filter.clone()]
+                vec![manifest_filter.clone(), server_list_filter.clone()]
             };
             pending.push(ask(url.clone(), filters, !is_ours(&url)));
             asked.push(url);
@@ -779,11 +1003,18 @@ impl IpPeerSource {
                             }
                             from_list += 1;
                             tracing::debug!(url, "manifest lookup: asking the author's relay");
-                            pending.push(ask(url.clone(), vec![manifest_filter.clone()], true));
+                            pending.push(ask(
+                                url.clone(),
+                                vec![manifest_filter.clone(), server_list_filter.clone()],
+                                true,
+                            ));
                             asked.push(url);
                         }
                         newest_list = Some(ev);
                     }
+                } else if ev.kind.as_u16() == SERVER_LIST_KIND {
+                    // The store keeps the newest of a replaceable kind.
+                    outbox.remember_server_list(ev).await;
                 } else {
                     answered = true;
                     manifests.push(ev);
@@ -1075,6 +1306,18 @@ impl PeerSource for FirstOf {
             }
         }
         Ok(None)
+    }
+
+    async fn author_servers(&self, author: &PublicKey) -> Vec<String> {
+        let mut out = Vec::new();
+        for source in &self.sources {
+            for server in source.author_servers(author).await {
+                if !out.contains(&server) {
+                    out.push(server);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -1414,6 +1657,16 @@ impl PeerSource for IpPeerSource {
             }
         }
         Ok(None)
+    }
+
+    async fn author_servers(&self, author: &PublicKey) -> Vec<String> {
+        // A mesh source stays on the mesh; its fetches ignore them anyway.
+        match &self.author_lists {
+            Some(store) if !self.ignore_manifest_servers => {
+                stored_author_servers(store.as_ref(), std::slice::from_ref(author)).await
+            }
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -2234,6 +2487,125 @@ pub(crate) mod tests {
             hits.load(Ordering::Relaxed),
             0,
             "a redirect reached the LAN"
+        );
+    }
+
+    fn server_list(keys: &nostr::Keys, servers: &[&str]) -> Event {
+        nostr::EventBuilder::new(nostr::Kind::from(SERVER_LIST_KIND), "")
+            .tags(
+                servers
+                    .iter()
+                    .map(|s| nostr::Tag::parse(["server", s]).unwrap()),
+            )
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    /// A server list is read in order: `https` only, deduplicated (a
+    /// trailing slash is the same server), at most [`MAX_AUTHOR_SERVERS`].
+    #[test]
+    fn a_server_list_is_https_only_deduplicated_and_capped() {
+        let keys = nostr::Keys::generate();
+        let list = server_list(
+            &keys,
+            &[
+                "https://a.example/",
+                "http://plain.example",
+                "https://a.example",
+                "https://b.example",
+                "https://c.example",
+                "https://d.example",
+                "https://e.example",
+            ],
+        );
+        assert_eq!(
+            server_list_urls(&list),
+            vec![
+                "https://a.example",
+                "https://b.example",
+                "https://c.example",
+                "https://d.example"
+            ]
+        );
+    }
+
+    /// The author's server list rides along with the manifest lookup, is
+    /// kept, and the source then offers its servers to the blob fetch. A
+    /// mesh source offers none.
+    #[tokio::test]
+    async fn the_server_list_rides_along_with_the_manifest_and_is_offered() {
+        let keys = nostr::Keys::generate();
+        let site = nsite_deck::testing::build_test_site_with_keys(
+            &keys,
+            &[("/index.html", b"<h1>own cdn</h1>")],
+            None,
+            None,
+        );
+        let list = server_list(&keys, &["https://cdn.author.example"]);
+        let (author_relay, _) = mock_relay_holding(vec![site.manifest.clone(), list.clone()]).await;
+        let (default_relay, _) = mock_relay_holding(Vec::new()).await;
+        let store = Arc::new(nsite_deck::testing::MemRelay::new());
+        store
+            .publish(relay_list(&keys, &[&["r", &author_relay]]))
+            .await
+            .unwrap();
+        let source = IpPeerSource::new(vec![default_relay], Vec::new())
+            .with_author_outbox(outbox_over(store.clone(), Vec::new()));
+
+        assert!(source.author_servers(&site.author).await.is_empty());
+        let got = source.fetch_manifest(&site.author, None).await.unwrap();
+        assert_eq!(
+            got.map(|e| e.id),
+            Some(site.manifest.id),
+            "the list was taken for the manifest"
+        );
+        assert_eq!(
+            source.author_servers(&site.author).await,
+            vec!["https://cdn.author.example".to_string()]
+        );
+        // A source that fetches no manifests reads the same store.
+        let blobs_only =
+            IpPeerSource::new(Vec::new(), Vec::new()).with_author_servers(store.clone());
+        assert_eq!(blobs_only.author_servers(&site.author).await.len(), 1);
+        let mesh = IpPeerSource::new(Vec::new(), Vec::new())
+            .with_author_servers(store)
+            .ignoring_manifest_servers();
+        assert!(mesh.author_servers(&site.author).await.is_empty());
+    }
+
+    /// A missing server list is looked for on the author's write relays and
+    /// the indexers, and kept; an author nobody has a list for is not asked
+    /// about again at once.
+    #[tokio::test]
+    async fn missing_server_lists_are_fetched_kept_and_misses_remembered() {
+        let (found, absent) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let list = server_list(&found, &["https://cdn.found.example"]);
+        let (author_relay, author_asked) = mock_relay_holding(vec![list]).await;
+        let (indexer, indexer_asked) = mock_relay_holding(Vec::new()).await;
+        let store = Arc::new(nsite_deck::testing::MemRelay::new());
+        store
+            .publish(relay_list(&found, &[&["r", &author_relay]]))
+            .await
+            .unwrap();
+        let outbox = outbox_over(store, vec![indexer]);
+        let authors = [found.public_key(), absent.public_key()];
+
+        outbox
+            .fetch_server_lists(&authors, Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            outbox.stored_servers(&authors).await,
+            vec!["https://cdn.found.example".to_string()]
+        );
+        assert_eq!((hits(&author_asked), hits(&indexer_asked)), (1, 1));
+
+        outbox
+            .fetch_server_lists(&authors, Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            (hits(&author_asked), hits(&indexer_asked)),
+            (1, 1),
+            "a kept list or a fresh miss was asked for again"
         );
     }
 }

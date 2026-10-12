@@ -649,10 +649,13 @@ the `10002` as a second filter in the same `REQ`, the indexer relays
 (`purplepag.es`, `index.hzrd149.com`, `indexer.coracle.social`,
 `user.kindpag.es`) are asked for the list alone, and the
 author's relays join the round as soon as a list arrives. The list is stored
-locally for next time (`ip_source::AuthorOutbox`). Blobs still come from the
-manifest's `server` tags, then `default_blossom_servers()`; the author's BUD-03
-`10063` is not read yet
-([#67](https://github.com/Origami74/myco/issues/67)).
+locally for next time (`ip_source::AuthorOutbox`). The author's BUD-03 `10063`
+Blossom server list rides along as a third filter on every manifest ask and is
+stored the same way. Blobs come from the manifest's `server` tags, then the
+servers that list names (`https` only, four at most; `PeerSource::author_servers`,
+read from the local relay, so an update or a pushed manifest uses a list stored
+at install), then `default_blossom_servers()`. Servers someone else named are
+dialled only on the public internet (`resource_https::public_only`).
 
 ### 5.1 Reaching the holder's services over `.fips`
 

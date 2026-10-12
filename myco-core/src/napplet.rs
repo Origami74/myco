@@ -1116,10 +1116,14 @@ pub async fn ingest_event_into(
 ) -> anyhow::Result<IngestedNapplet> {
     // Resolving against a view onto the *source* means the bytes are
     // verified where they arrive, before anything is written here.
-    let view = SourceBlobs {
-        source,
-        servers: servers_from(&event),
-    };
+    // The manifest's own `server` hints, then the ones its author lists.
+    let mut servers = servers_from(&event);
+    for server in source.author_servers(&event.pubkey).await {
+        if !servers.contains(&server) {
+            servers.push(server);
+        }
+    }
+    let view = SourceBlobs { source, servers };
     let resolved = resolve(event.clone(), &view)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1303,6 +1307,10 @@ pub struct BlossomFetcher {
     /// Dial named servers on loopback: tests only.
     #[cfg(test)]
     trust_hints: bool,
+    /// Where server lists are looked for in place of the indexers: tests
+    /// only, which must never reach the internet.
+    #[cfg(test)]
+    list_indexers: Option<Vec<String>>,
     /// Blobs nobody had, by sha256, with when that was found.
     misses: Mutex<HashMap<String, std::time::Instant>>,
 }
@@ -1347,6 +1355,8 @@ impl BlossomFetcher {
             .unwrap_or_default(),
             #[cfg(test)]
             trust_hints: false,
+            #[cfg(test)]
+            list_indexers: None,
             misses: Mutex::new(HashMap::new()),
         }
     }
@@ -1403,8 +1413,11 @@ impl BlossomFetcher {
         None
     }
 
-    /// The servers the authors named in their kind 10063 lists, as held
-    /// here. Nothing is fetched for this: a list not held costs no wait.
+    /// The servers the authors named in their kind 10063 lists. A list not
+    /// held here is looked for first — on the author's relays and the
+    /// indexers, for at most [`crate::ip_source::SERVER_LIST_LOOKUP`], once a
+    /// while per author — so a blob only its author's server holds is found
+    /// on the first ask, not after the miss is forgotten.
     async fn author_servers(&self, authors: &[String]) -> Vec<String> {
         let authors: Vec<PublicKey> = authors
             .iter()
@@ -1414,27 +1427,20 @@ impl BlossomFetcher {
         if authors.is_empty() {
             return Vec::new();
         }
-        let filter = nostr::Filter::new()
-            .kind(nostr::Kind::from(10_063u16))
-            .authors(authors);
-        let Ok(lists) = self.content.relay().query(&[filter]).await else {
-            return Vec::new();
+        let lists = crate::ip_source::AuthorOutbox::new(self.content.relay());
+        #[cfg(test)]
+        let lists = match &self.list_indexers {
+            Some(indexers) => lists
+                .with_indexers(indexers.clone())
+                .allowing_private_dials(),
+            None => lists,
         };
-        let mut servers = Vec::new();
-        for list in &lists {
-            for tag in list.tags.iter() {
-                let tag = tag.as_slice();
-                if tag.first().map(String::as_str) == Some("server") {
-                    if let Some(url) = tag.get(1).filter(|u| u.starts_with("https://")) {
-                        let url = url.trim_end_matches('/').to_string();
-                        if !servers.contains(&url) {
-                            servers.push(url);
-                        }
-                    }
-                }
-            }
+        if !self.content.is_offline_only() {
+            lists
+                .fetch_server_lists(&authors, crate::ip_source::SERVER_LIST_LOOKUP)
+                .await;
         }
-        servers
+        lists.stored_servers(&authors).await
     }
 
     /// The internet's answer: `None` when it was not asked (it looks down).
@@ -1489,6 +1495,13 @@ impl BlossomFetcher {
     #[cfg(test)]
     pub fn trusting_hints(mut self) -> Self {
         self.trust_hints = true;
+        self
+    }
+
+    /// Look for server lists on `indexers` — for tests.
+    #[cfg(test)]
+    pub fn with_list_indexers(mut self, indexers: Vec<String>) -> Self {
+        self.list_indexers = Some(indexers);
         self
     }
 }
@@ -4176,6 +4189,35 @@ mod tests {
             fetcher.fetch(&sha, 1 << 20, &hints).await.unwrap(),
             Some(bytes)
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An author named by `as=` whose server list is not held here has it
+    /// looked up — once: it is kept, and the next ask reads it locally.
+    #[tokio::test]
+    async fn the_blossom_fetcher_looks_up_a_missing_server_list_once() {
+        let dir = std::env::temp_dir().join(format!("myco-fetcher-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(crate::content::Content::open(&dir).unwrap());
+        let keys = nostr::Keys::generate();
+        let list = nostr::EventBuilder::new(nostr::Kind::from(10_063u16), "")
+            .tags([
+                nostr::Tag::parse(["server", "https://cdn.author.example/"]).unwrap(),
+                nostr::Tag::parse(["server", "http://plain.example"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let (indexer, asked) = crate::ip_source::tests::mock_relay_holding(vec![list]).await;
+        let fetcher = BlossomFetcher::new(content.clone()).with_list_indexers(vec![indexer]);
+        let author = vec![keys.public_key().to_hex()];
+        for _ in 0..2 {
+            assert_eq!(
+                fetcher.author_servers(&author).await,
+                vec!["https://cdn.author.example".to_string()]
+            );
+        }
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

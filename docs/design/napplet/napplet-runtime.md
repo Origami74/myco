@@ -446,7 +446,8 @@ For `blossom:`, every ask reads this device's Blossom store first; a miss goes t
 seam — the Circle's stores over the mesh and, unless offline-only, the internet, asked
 **at once** with the first bytes winning. The internet side asks the servers a BUD-10 URL
 names (`blossom:<sha>.<ext>?xs=<domain>&as=<pubkey>`: `xs` servers, then the `as`
-author's kind 10063 servers as held here, https only, four of each at most), then the
+author's kind 10063 servers, https only, four of each at most — a list not held here is
+looked up on the author's relays and the indexers first, for at most 3 s, and kept), then the
 public defaults, over one shared HTTP client. The named servers are someone else's word
 for where to dial, so they go out as `https:` does: each judged first (no userinfo, no
 private literal, no local or `.fips` name), through a resolver that refuses a name

@@ -4096,10 +4096,13 @@ impl Content {
             }
         }
         if !self.is_offline_only() {
-            sources.push(Arc::new(crate::ip_source::IpPeerSource::new(
-                crate::ip_source::default_relays(),
-                crate::ip_source::default_blossom_servers(),
-            )));
+            sources.push(Arc::new(
+                crate::ip_source::IpPeerSource::new(
+                    crate::ip_source::default_relays(),
+                    crate::ip_source::default_blossom_servers(),
+                )
+                .with_author_servers(self.relay()),
+            ));
         }
         // Activation stores the manifest in the relay (so peers REQ-ing us see it)
         // and then propagates it over the mesh.
@@ -4283,7 +4286,8 @@ impl Content {
             sources.push(Arc::new(cap(crate::ip_source::IpPeerSource::new(
                 crate::ip_source::default_relays(),
                 crate::ip_source::default_blossom_servers(),
-            ))));
+            )
+            .with_author_servers(self.relay()))));
         }
         sources
     }
