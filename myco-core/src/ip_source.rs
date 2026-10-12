@@ -441,6 +441,14 @@ pub struct IpPeerSource {
     relays: Vec<String>,
     blossom_servers: Vec<String>,
     http: reqwest::Client,
+    /// The client for servers someone else named — the `servers` a blob
+    /// fetch is handed (a manifest's `server` tags, a BUD-10 `xs` hint, an
+    /// author's kind 10063 list): public addresses only, every redirect
+    /// judged. See [`crate::resource_https::public_only`].
+    hint_http: reqwest::Client,
+    /// Judge a named server before dialling it. Off only in host tests,
+    /// whose "public" servers are on 127.0.0.1.
+    guard_hints: bool,
     timeout: Duration,
     /// When true, blob fetches ignore the manifest's `["server", …]` hints and
     /// use only `blossom_servers` — so a **mesh** source never reaches out to
@@ -483,6 +491,12 @@ impl IpPeerSource {
                 .timeout(Duration::from_secs(60))
                 .build()
                 .unwrap_or_default(),
+            hint_http: crate::resource_https::public_only(
+                reqwest::Client::builder().timeout(Duration::from_secs(60)),
+            )
+            .build()
+            .unwrap_or_default(),
+            guard_hints: true,
             timeout: Duration::from_secs(8),
             ignore_manifest_servers: false,
             peer_relay: None,
@@ -509,6 +523,23 @@ impl IpPeerSource {
     /// one per blob.
     pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
         self.http = http;
+        self
+    }
+
+    /// Use `http` for servers someone else named, in place of this source's
+    /// own guarded client — shared like [`IpPeerSource::with_http_client`].
+    /// It must be built with [`crate::resource_https::public_only`].
+    pub fn with_hint_http_client(mut self, http: reqwest::Client) -> Self {
+        self.hint_http = http;
+        self
+    }
+
+    /// Dial named servers on loopback — for host tests, whose "public"
+    /// servers are local.
+    #[cfg(test)]
+    pub fn trusting_hints(mut self) -> Self {
+        self.guard_hints = false;
+        self.hint_http = self.http.clone();
         self
     }
 
@@ -1307,18 +1338,31 @@ impl PeerSource for IpPeerSource {
     ) -> anyhow::Result<Option<Vec<u8>>> {
         // Manifest hints first, then this source's own servers (deduped). A mesh
         // source skips the manifest's public hints entirely (stay on the mesh).
-        let mut candidates: Vec<String> = if self.ignore_manifest_servers {
+        // A hint is someone else's word for where to dial, so it goes through
+        // the public-only client, and is judged first: an address literal
+        // never reaches that client's resolver.
+        let mut candidates: Vec<(String, bool)> = if self.ignore_manifest_servers {
             Vec::new()
         } else {
-            servers.to_vec()
+            servers.iter().map(|s| (s.clone(), true)).collect()
         };
         for s in &self.blossom_servers {
-            if !candidates.contains(s) {
-                candidates.push(s.clone());
+            if !candidates.iter().any(|(c, _)| c == s) {
+                candidates.push((s.clone(), false));
             }
         }
 
-        for server in candidates {
+        for (server, named) in candidates {
+            if named && self.guard_hints {
+                let judged = reqwest::Url::parse(&server)
+                    .map_err(|e| e.to_string())
+                    .and_then(|url| crate::resource_https::public_server_url(&url));
+                if let Err(why) = judged {
+                    tracing::debug!("blob server {server} refused: {why}");
+                    continue;
+                }
+            }
+            let http = if named { &self.hint_http } else { &self.http };
             // A server that failed a moment ago (5xx; TLS, DNS or a refused
             // connection while online) is not asked again until its skip is
             // up. A 404 is an answer — "not here" — and never held against it.
@@ -1327,16 +1371,14 @@ impl PeerSource for IpPeerSource {
             }
             let url = format!("{}/{}", server.trim_end_matches('/'), sha256_hex_want);
             let sent = match self.stall_timeout {
-                Some(stall) => {
-                    match tokio::time::timeout(stall, self.http.get(&url).send()).await {
-                        Ok(sent) => sent,
-                        Err(_) => {
-                            tracing::debug!("{server}: no response in {stall:?}");
-                            continue;
-                        }
+                Some(stall) => match tokio::time::timeout(stall, http.get(&url).send()).await {
+                    Ok(sent) => sent,
+                    Err(_) => {
+                        tracing::debug!("{server}: no response in {stall:?}");
+                        continue;
                     }
-                }
-                None => self.http.get(&url).send().await,
+                },
+                None => http.get(&url).send().await,
             };
             let resp = match sent {
                 Ok(r) => {
@@ -2105,5 +2147,93 @@ pub(crate) mod tests {
         assert_eq!(resp.body, b"hello from the internet");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A blob server that counts the requests it was sent, serving `bytes`
+    /// at any path, plus `/to-loopback` and `/to-localhost`, which redirect
+    /// back to it by address literal and by name.
+    async fn counting_blossom(hits: Arc<std::sync::atomic::AtomicUsize>, bytes: Vec<u8>) -> String {
+        use axum::response::{IntoResponse as _, Redirect};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new()
+            .route(
+                "/to-loopback",
+                axum::routing::get(move || async move {
+                    Redirect::temporary(&format!("http://127.0.0.1:{port}/x")).into_response()
+                }),
+            )
+            .route(
+                "/to-localhost",
+                axum::routing::get(move || async move {
+                    Redirect::temporary(&format!("http://localhost:{port}/x")).into_response()
+                }),
+            )
+            .fallback(move || {
+                hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let bytes = bytes.clone();
+                async move { bytes }
+            });
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// A server someone else named — a manifest's `server` tag, a BUD-10 `xs`
+    /// hint, a kind 10063 entry — is dialled only if it is public: one on
+    /// this phone's loopback (or LAN, or the mesh) is skipped without a
+    /// connection. The source's own servers are configuration — the
+    /// defaults, a mesh peer's Blossom — and are asked as before.
+    #[tokio::test]
+    async fn a_named_server_on_a_private_address_is_never_dialled() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let bytes = b"only on the lan".to_vec();
+        let hash = sha256_hex(&bytes);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server = counting_blossom(hits.clone(), bytes.clone()).await;
+        let by_name = server.replace("127.0.0.1", "localhost");
+
+        let source = IpPeerSource::new(Vec::new(), Vec::new());
+        assert_eq!(
+            source
+                .fetch_blob(&hash, &[server.clone(), by_name])
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            0,
+            "a named private server was dialled"
+        );
+
+        let own = IpPeerSource::new(Vec::new(), vec![server]);
+        assert_eq!(own.fetch_blob(&hash, &[]).await.unwrap(), Some(bytes));
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+    }
+
+    /// A public server cannot bounce a fetch into this phone's own network:
+    /// the public-only client judges every redirect hop before following it,
+    /// by address literal and by name.
+    #[tokio::test]
+    async fn the_public_only_client_refuses_a_redirect_to_a_private_host() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server = counting_blossom(hits.clone(), b"secret".to_vec()).await;
+        let client = crate::resource_https::public_only(reqwest::Client::builder())
+            .build()
+            .unwrap();
+        for path in ["/to-loopback", "/to-localhost"] {
+            let e = client
+                .get(format!("{server}{path}"))
+                .send()
+                .await
+                .unwrap_err();
+            assert!(e.is_redirect(), "{path}: {e}");
+        }
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            0,
+            "a redirect reached the LAN"
+        );
     }
 }

@@ -532,7 +532,6 @@ impl std::fmt::Display for HttpsUrlRefusal {
 /// [`validate_relay_url`]: crate::nap::outbox::validate_relay_url
 /// [`is_private_ip`]: crate::nap::outbox::is_private_ip
 pub fn validate_https_url(url: &str) -> Result<nostr::Url, HttpsUrlRefusal> {
-    use nostr::types::url::Host;
     if url.len() > MAX_URL_LEN {
         return Err(HttpsUrlRefusal::Invalid(format!(
             "URL is over {MAX_URL_LEN} bytes"
@@ -546,6 +545,17 @@ pub fn validate_https_url(url: &str) -> Result<nostr::Url, HttpsUrlRefusal> {
             parsed.scheme()
         )));
     }
+    judge_public_host(&parsed)?;
+    Ok(parsed)
+}
+
+/// Whether a parsed URL points at the public internet: no userinfo, no
+/// private address literal, no local or `.fips` name — the host half of
+/// [`validate_https_url`], without its scheme rule. Also what a Blossom
+/// server named by someone else (a manifest's `server` tag, a BUD-10 `xs`
+/// hint, a kind 10063 list) is judged by before it is dialled.
+pub fn judge_public_host(parsed: &nostr::Url) -> Result<(), HttpsUrlRefusal> {
+    use nostr::types::url::Host;
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(HttpsUrlRefusal::Blocked(
             "a URL with userinfo is not fetched".into(),
@@ -581,7 +591,7 @@ pub fn validate_https_url(url: &str) -> Result<nostr::Url, HttpsUrlRefusal> {
             }
         }
     }
-    Ok(parsed)
+    Ok(())
 }
 
 /// What `https:` URLs each napplet was recently delivered, and how many

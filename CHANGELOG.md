@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Napplets and app manifests can no longer point Myco at your own network.**
+  A Blossom server named in a napplet's `blossom:` link, an author's server
+  list or an app manifest was dialled wherever it pointed, including this
+  phone and your Wi-Fi network. Such servers are now used only when they are
+  on the public internet, checked again on the address actually dialled and
+  after every redirect, as for `https:` links.
 - **Napplet posts reach all your outbox relays.** A note a napplet posted
   through NAP-OUTBOX went to only two of your NIP-65 write relays, picked
   the way a read picks them; the rest never got it, so people reading from

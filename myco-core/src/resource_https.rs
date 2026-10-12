@@ -342,6 +342,43 @@ impl std::fmt::Display for PrivateAddress {
 
 impl std::error::Error for PrivateAddress {}
 
+/// `builder` made to dial the public internet only — for a client that
+/// fetches from servers someone else named: a manifest's `server` tags, a
+/// BUD-10 `xs` hint, an author's kind 10063 list. The same two guards as
+/// [`NappletHttps`]: [`PublicOnlyResolver`] refuses a name that resolves to a
+/// private address, and every redirect hop is judged by
+/// [`public_server_url`] (at most [`MAX_REDIRECTS`]) before it is followed,
+/// since a hop to an address literal never reaches a resolver. No proxy, for
+/// the resolver's sake.
+///
+/// The first URL is the caller's to judge with [`public_server_url`]; a
+/// literal in it never reaches the resolver either.
+pub(crate) fn public_only(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    builder
+        .no_proxy()
+        .dns_resolver(Arc::new(PublicOnlyResolver { guard: true }))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > MAX_REDIRECTS {
+                return attempt.error(format!("more than {MAX_REDIRECTS} redirects"));
+            }
+            match public_server_url(attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(why) => attempt.error(format!("redirect refused: {why}")),
+            }
+        }))
+}
+
+/// Whether a server URL someone else named may be dialled: `http` or
+/// `https`, and a public host by the runtime's own
+/// [`judge_public_host`](myco_napplet_runtime::nap::resource::judge_public_host)
+/// — no userinfo, no private address literal, no local or `.fips` name.
+pub(crate) fn public_server_url(url: &reqwest::Url) -> Result<(), String> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("{}: is not fetched", url.scheme()));
+    }
+    myco_napplet_runtime::nap::resource::judge_public_host(url).map_err(|r| r.reason().to_string())
+}
+
 /// The client's resolver: the system's answers, unless **any** of them is
 /// private, in which case the name is refused and nothing is dialled. The
 /// addresses returned are the ones connected to, so there is no second

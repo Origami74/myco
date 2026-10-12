@@ -447,7 +447,13 @@ seam — the Circle's stores over the mesh and, unless offline-only, the interne
 **at once** with the first bytes winning. The internet side asks the servers a BUD-10 URL
 names (`blossom:<sha>.<ext>?xs=<domain>&as=<pubkey>`: `xs` servers, then the `as`
 author's kind 10063 servers as held here, https only, four of each at most), then the
-public defaults, over one shared HTTP client. A blob the internet confirmed nobody has is
+public defaults, over one shared HTTP client. The named servers are someone else's word
+for where to dial, so they go out as `https:` does: each judged first (no userinfo, no
+private literal, no local or `.fips` name), through a resolver that refuses a name
+answering with a private address, every redirect judged again — a napplet cannot make
+the phone probe its own LAN. The same holds for a manifest's `server` tags when an app's
+files are fetched (`IpPeerSource`); the defaults and a mesh peer's Blossom are the
+device's own configuration and are dialled as they are. A blob the internet confirmed nobody has is
 not asked for again for ten minutes. What comes back is verified by hash, **stored**, and only then delivered, so the second ask from any
 napplet is local and the room can serve it over the mesh. `mime` is sniffed from the
 bytes, never a header; raw SVG is refused (`blocked-by-policy`) for want of a sandboxed
