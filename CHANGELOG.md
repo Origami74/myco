@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Napplets in the current NIP-5D format install and open.** Napplets
+  published since 2026-10-07 — every app on napplet.soy — name their single
+  file by hash (`x`), describe themselves in the event text, and list
+  required (`R`) and optional (`O`) capabilities and roles and intents
+  (`z` / `i`). Myco reads that format first; napplets in the old
+  path/aggregate format still open through a fallback that will be removed
+  later. The install sheet marks optional capabilities and warns when an app
+  needs one Myco can't provide.
+- **Napplet icons.** A napplet's own icon (`icon` tag, PNG / JPEG / WebP)
+  shows in the Apps grid, on its sheet, on the Recents card and on
+  home-screen shortcuts — including shortcuts pinned earlier. The icon is
+  checked against its hash and decoded before it is shown; without a valid
+  one you see the coloured initial as before.
+
 - **Apps hosted on their author's own file servers install and update.** Myco
   now reads the Blossom server list an author publishes (BUD-03) and looks
   there after the servers an app names itself and before the public
@@ -64,6 +78,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   web request; it now goes through the same fetcher as napplet pictures:
   public addresses only, every redirect checked, a size cap while
   downloading, and nothing with offline-only on.
+
+### Changed
+
+- **A napplet republished in the new format counts as a new version.** Its
+  identity is now the hash of its file rather than the old aggregate hash,
+  so "Check for updates" offers it even when the file is unchanged, and the
+  install sheet may ask again about capabilities you never reviewed. Your
+  grants and the app's saved data are kept.
 
 ## [0.10.0] - 2026-10-05
 
