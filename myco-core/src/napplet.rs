@@ -1303,7 +1303,7 @@ pub struct BlossomFetcher {
     /// Its twin for servers the napplet or an author named (`xs` hints, kind
     /// 10063): public addresses only, every redirect judged — a napplet
     /// must not make this phone probe its own LAN.
-    hint_http: reqwest::Client,
+    hint_http: Option<crate::resource_https::PublicOnlyClient>,
     /// Dial named servers on loopback: tests only.
     #[cfg(test)]
     trust_hints: bool,
@@ -1345,14 +1345,12 @@ impl BlossomFetcher {
                 .read_timeout(INTERNET_READ_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
-            hint_http: crate::resource_https::public_only(
+            hint_http: crate::resource_https::public_only_client(
                 reqwest::Client::builder()
                     .connect_timeout(INTERNET_CONNECT_TIMEOUT)
                     .timeout(INTERNET_BLOB_TIMEOUT)
                     .read_timeout(INTERNET_READ_TIMEOUT),
-            )
-            .build()
-            .unwrap_or_default(),
+            ),
             #[cfg(test)]
             trust_hints: false,
             #[cfg(test)]

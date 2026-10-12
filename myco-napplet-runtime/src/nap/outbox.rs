@@ -591,7 +591,9 @@ pub(crate) fn is_private_name(host: &str) -> bool {
 /// is not stable). v6: loopback, unspecified, unique-local, link-local,
 /// multicast, and a v4-mapped address is judged as its v4 —
 /// `::ffff:192.168.1.2` is `192.168.1.2` to the socket. Not `to_ipv4()`, which
-/// also maps `::1` to `0.0.0.1` and would misjudge the v6 loopback.
+/// also maps `::1` to `0.0.0.1` and would misjudge the v6 loopback. A NAT64
+/// address under the well-known prefix `64:ff9b::/96` is judged as the v4 it
+/// carries; the local-use NAT64 prefix `64:ff9b:1::/48` is private.
 ///
 /// Also the predicate the dial site applies to what a public name resolves to.
 pub fn is_private_ip(ip: std::net::IpAddr) -> bool {
@@ -610,6 +612,19 @@ pub fn is_private_ip(ip: std::net::IpAddr) -> bool {
         std::net::IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_private_ip(std::net::IpAddr::V4(v4));
+            }
+            let s = v6.segments();
+            // NAT64's well-known prefix (RFC 6052) carries an IPv4 address in
+            // its last 32 bits, and a network's NAT64 gateway forwards it
+            // there — judged as that address. The local-use prefix
+            // (RFC 8215) is the network's own: private.
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [a, b] = s[6].to_be_bytes();
+                let [c, d] = s[7].to_be_bytes();
+                return is_private_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d)));
+            }
+            if s[..3] == [0x64, 0xff9b, 1] {
+                return true;
             }
             v6.is_loopback()
                 || v6.is_unspecified()

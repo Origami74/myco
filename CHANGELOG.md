@@ -39,7 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list or an app manifest was dialled wherever it pointed, including this
   phone and your Wi-Fi network. Such servers are now used only when they are
   on the public internet, checked again on the address actually dialled and
-  after every redirect, as for `https:` links.
+  after every redirect, as for `https:` links. A Blossom server on your own
+  network named this way (in your server list or an app you publish) is no
+  longer used from Myco; the servers Myco is configured with are unchanged.
+  The same check now sees through NAT64 addresses (`64:ff9b::`), for
+  `https:` links and relays too.
 - **Napplet posts reach all your outbox relays.** A note a napplet posted
   through NAP-OUTBOX went to only two of your NIP-65 write relays, picked
   the way a read picks them; the rest never got it, so people reading from
