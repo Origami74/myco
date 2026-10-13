@@ -229,10 +229,11 @@ internal object NativeCore {
     external fun usbAttachHostDevice(fd: Int): Boolean
 
     // --- TUN packet bridge (the app-owned TUN; the VpnService pumps these) ---
-    /** Kotlin → Rust: route an IPv6 packet read from the TUN fd into the mesh. */
-    external fun tunSendPacket(packet: ByteArray, len: Int): Boolean
+    /** Hand the native pump a TUN descriptor (`ParcelFileDescriptor.dup().detachFd()`):
+     *  ownership passes to the core, which moves every packet between it and the
+     *  mesh itself. Replaces any pump already running. */
+    external fun tunStartPump(fd: Int): Boolean
 
-    /** Rust → Kotlin: pull the next IPv6 packet for the TUN fd, blocking up to
-     *  timeoutMs. Returns bytes written into `out`, or 0 on timeout. */
-    external fun tunNextPacket(out: ByteArray, timeoutMs: Int): Int
+    /** Stop the native TUN pump; it closes its descriptor within a quarter second. */
+    external fun tunStopPump()
 }
