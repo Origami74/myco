@@ -158,7 +158,9 @@ impl NappletManifest {
     ///
     /// Does **not** verify the event's signature — [`crate::resolve`] does that
     /// first. The current schema is the primary path; the legacy one is tried
-    /// only for an event with no artifact `x` tag and with `path` tags.
+    /// for an event with `path` tags and no artifact `x` — where a bare
+    /// `["x", <aggregate>]` (older tooling's, with no marker) that equals the
+    /// aggregate of those `path` tags is not taken for an artifact.
     pub fn from_event(event: Event) -> Result<Self> {
         let kind = event.kind.as_u16();
         if !is_napplet_kind(kind) {
@@ -182,7 +184,7 @@ impl NappletManifest {
             .collect();
 
         // LEGACY NIP-5D (path/aggregate): remove after 2026-12-31
-        if artifacts.is_empty() && legacy::has_path_tags(&event) {
+        if legacy::has_path_tags(&event) && legacy::is_unmarked_aggregate(&event, &artifacts) {
             return legacy::parse(event, kind);
         }
 
@@ -324,8 +326,9 @@ impl NappletManifest {
 /// Only the addressable kind is named, and it must be.
 fn check_kind_and_d(kind: u16, d_tag: Option<&str>) -> Result<()> {
     match (kind, d_tag) {
-        (KIND_NAMED, None) => Err(NappletError::invalid_manifest(
-            "kind 35129 requires a d tag",
+        // An empty `d` would share the unnamed slot's identity.
+        (KIND_NAMED, None | Some("")) => Err(NappletError::invalid_manifest(
+            "kind 35129 requires a non-empty d tag",
         )),
         (KIND_SNAPSHOT | KIND_ROOT, Some(_)) => Err(NappletError::invalid_manifest(
             "only a named manifest (35129) may carry a d tag",

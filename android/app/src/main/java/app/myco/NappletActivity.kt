@@ -874,7 +874,9 @@ class NappletActivity : ComponentActivity() {
         Thread {
             val icon = NappletIcons.fetch(client, iconPointer) ?: return@Thread
             runOnUiThread {
-                if (!isDestroyed) ChromelessChrome.applyTaskDescription(this, taskLabel, icon)
+                if (!isDestroyed) {
+                    runCatching { ChromelessChrome.applyTaskDescription(this, taskLabel, icon) }
+                }
             }
         }.start()
 

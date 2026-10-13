@@ -1283,8 +1283,20 @@ class MainActivity : ComponentActivity() {
                 .setIcon(icon)
                 .setIntent(nsiteIntent(hostLabel, title))
                 .build()
-            runOnUiThread { sm.requestPinShortcut(shortcut, null) }
+            runOnUiThread { requestPin(sm, shortcut) }
         }.start()
+    }
+
+    /**
+     * Ask the launcher to pin [shortcut], from the UI thread once its icon is
+     * read. By then Myco may be in the background, where the launcher refuses
+     * with an exception; the user tapped "Add to home screen" and is told.
+     */
+    private fun requestPin(sm: ShortcutManager, shortcut: ShortcutInfo) {
+        if (isFinishing || isDestroyed) return
+        runCatching { sm.requestPinShortcut(shortcut, null) }.onFailure {
+            Toast.makeText(this, "Couldn't add to the home screen", Toast.LENGTH_SHORT).show()
+        }
     }
 
     /**
@@ -1311,8 +1323,8 @@ class MainActivity : ComponentActivity() {
             return
         }
         Thread {
-            val shortcut = nappletShortcut(pointer, title)
-            runOnUiThread { sm.requestPinShortcut(shortcut, null) }
+            val shortcut = runCatching { nappletShortcut(pointer, title) }.getOrNull() ?: return@Thread
+            runOnUiThread { requestPin(sm, shortcut) }
         }.start()
     }
 
@@ -1335,21 +1347,30 @@ class MainActivity : ComponentActivity() {
      * those pinned before Myco read icons, or before an update brought one.
      * A launcher keeps a pinned shortcut's icon until it is updated, and an
      * update by the same id is all it takes. Background thread only.
+     *
+     * Each shortcut is rewritten only when its icon differs from the one this
+     * process last gave it, so a resume with nothing new costs a hash per
+     * shortcut and pushes nothing to the launcher.
      */
     private fun refreshPinnedNappletIcons() {
         val sm = getSystemService(ShortcutManager::class.java) ?: return
         val client = MycoCore.client(this)
         val pinned = runCatching { sm.pinnedShortcuts }.getOrDefault(emptyList())
             .filter { it.id.startsWith("napplet:") }
+        val applied = mutableListOf<Pair<String, String>>()
         val updated = pinned.mapNotNull { old ->
             val pointer = old.id.removePrefix("napplet:")
-            val bmp = NappletIcons.fetch(client, pointer) ?: return@mapNotNull null
+            val icon = NappletIcons.fetchKeyed(client, pointer) ?: return@mapNotNull null
+            if (shortcutIconHashes[old.id] == icon.sha256) return@mapNotNull null
+            applied += old.id to icon.sha256
             ShortcutInfo.Builder(this, old.id)
                 .setShortLabel(old.shortLabel ?: "napplet")
-                .setIcon(Icon.createWithAdaptiveBitmap(adaptiveShortcutIcon(bmp)))
+                .setIcon(Icon.createWithAdaptiveBitmap(adaptiveShortcutIcon(icon.bitmap)))
                 .build()
         }
-        if (updated.isNotEmpty()) runCatching { sm.updateShortcuts(updated) }
+        if (updated.isNotEmpty() && runCatching { sm.updateShortcuts(updated) }.isSuccess) {
+            shortcutIconHashes.putAll(applied)
+        }
     }
 
     /**
@@ -1688,6 +1709,12 @@ class MainActivity : ComponentActivity() {
 
         /** How often the setup popup looks at the tunnel while it waits for it. */
         private const val TUNNEL_POLL_MS = 250L
+
+        /**
+         * The icon hash each pinned napplet shortcut was last given, by
+         * shortcut id — for this process, so a resume rewrites only what changed.
+         */
+        private val shortcutIconHashes = java.util.concurrent.ConcurrentHashMap<String, String>()
 
         /**
          * Set once the setup popup has run to the end (any end), or launch

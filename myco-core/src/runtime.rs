@@ -1818,7 +1818,12 @@ impl AppRuntime {
             for source in &sources {
                 found = crate::napplet::fetch_manifest(&addr, source.as_ref()).await;
                 if let Ok((event, _)) = &found {
-                    icon = crate::napplet::fetch_icon(event, source.as_ref()).await;
+                    icon = crate::napplet::fetch_icon(
+                        event,
+                        source.as_ref(),
+                        content.cache_blobs().as_ref(),
+                    )
+                    .await;
                     break;
                 }
             }
@@ -3452,11 +3457,11 @@ fn update_review(
         update_available: false,
         already_installed: false,
         title: opened.title.clone().unwrap_or_default(),
-        description: String::new(),
+        description: opened.description.clone().unwrap_or_default(),
         requires: opened.requires.clone(),
         optional: opened.optional.clone(),
-        unsupported: Vec::new(),
-        icon: None,
+        unsupported: opened.unsupported.clone(),
+        icon: opened.icon.clone(),
         grants,
         error: String::new(),
         holder: None,

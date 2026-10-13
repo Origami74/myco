@@ -266,7 +266,6 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletIcon(
     handle: jlong,
     pointer: JString,
 ) -> jbyteArray {
-    use nostr::nips::nip19::ToBech32;
     let pointer = get_string(&mut env, &pointer);
     let ctx = match unsafe { handle_ref(handle) } {
         Some(h) => {
@@ -277,8 +276,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletIcon(
     };
     let icon = match (ctx, crate::napplet::NappletAddr::parse(&pointer)) {
         (Some((content, rt_handle)), Ok(addr)) => {
-            let npub = addr.author.to_bech32().unwrap_or_default();
-            rt_handle.block_on(content.napplet_icon(&npub, addr.d_tag.as_deref()))
+            rt_handle.block_on(content.napplet_icon(&addr.author, addr.d_tag.as_deref()))
         }
         _ => None,
     };

@@ -692,9 +692,11 @@ private fun NappletTile(
 ) {
     val ready = status?.ready ?: true
     // The manifest's icon, once its verified bytes are on the phone. Re-read
-    // when readiness flips: an install or update lands the icon with the app.
+    // when readiness flips — an install lands the icon with the app — and
+    // when the served version's icon hash changes, as an update can.
+    val iconHash = status?.icon.orEmpty()
     var icon by remember(item.nappletPointer) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(item.nappletPointer, ready) {
+    LaunchedEffect(item.nappletPointer, ready, iconHash) {
         icon = withContext(Dispatchers.IO) { NappletIcons.fetch(client, item.nappletPointer) }
     }
     Column(

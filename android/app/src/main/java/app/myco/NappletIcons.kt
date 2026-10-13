@@ -2,7 +2,9 @@ package app.myco
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.LruCache
 import app.myco.core.AppCoreClient
+import java.security.MessageDigest
 
 /**
  * An installed napplet's icon: the manifest's `["icon", <sha256>, <mime>]`
@@ -17,13 +19,37 @@ import app.myco.core.AppCoreClient
 object NappletIcons {
     private val SUPPORTED = setOf("image/png", "image/jpeg", "image/webp")
 
-    /** Blocking — call off the UI thread. */
-    fun fetch(client: AppCoreClient, pointer: String): Bitmap? =
-        client.nappletIcon(pointer)?.let(::decode)
+    /** An icon and the sha256 of its bytes — what a caller can tell it apart by. */
+    class Keyed(val sha256: String, val bitmap: Bitmap)
+
+    /**
+     * Decoded icons by the sha256 of their bytes. Content addressed, so never
+     * stale; the grid, the sheet, Recents and the shortcuts share one decode.
+     */
+    private val decoded = LruCache<String, Bitmap>(32)
+
+    /**
+     * Blocking — call off the UI thread. Never throws: a closed core or a
+     * failed read is generic artwork, as no icon is.
+     */
+    fun fetch(client: AppCoreClient, pointer: String): Bitmap? = fetchKeyed(client, pointer)?.bitmap
+
+    /** [fetch], with the bytes' hash. Blocking — call off the UI thread. */
+    fun fetchKeyed(client: AppCoreClient, pointer: String): Keyed? =
+        runCatching { client.nappletIcon(pointer) }.getOrNull()?.let(::decodeKeyed)
 
     /** An install sheet's preview, by hash. Blocking — call off the UI thread. */
     fun fetchByHash(client: AppCoreClient, sha256: String, mime: String): Bitmap? =
-        client.iconBlob(sha256, mime)?.let(::decode)
+        runCatching { client.iconBlob(sha256, mime) }.getOrNull()?.let(::decodeKeyed)?.bitmap
+
+    private fun decodeKeyed(bytes: ByteArray): Keyed? {
+        val sha256 = MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        decoded.get(sha256)?.let { return Keyed(sha256, it) }
+        val bitmap = decode(bytes) ?: return null
+        decoded.put(sha256, bitmap)
+        return Keyed(sha256, bitmap)
+    }
 
     private fun decode(bytes: ByteArray): Bitmap? = runCatching {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }

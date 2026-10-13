@@ -184,3 +184,23 @@ fn rejects_a_config_schema_that_is_not_a_json_object() {
         assert_eq!(err.code, NappletErrorCode::InvalidManifest, "{schema:?}");
     }
 }
+
+/// Older tooling wrote the aggregate as a bare `["x", <aggregate>]`, with no
+/// marker. The `path` tags make it legacy; the bare `x` is not mistaken for
+/// an artifact hash.
+#[tokio::test]
+async fn a_legacy_manifest_with_an_unmarked_aggregate_stays_legacy() {
+    let aggregate = compute_aggregate_hash(&[PathEntry {
+        path: "/index.html".into(),
+        sha256: sha256_hex(FIXTURE_INDEX_HTML.as_bytes()),
+    }]);
+    let napplet = legacy()
+        .aggregate(FixtureAggregate::Omitted)
+        .tag(&["x", &aggregate])
+        .build();
+    let blobs = store_for(&napplet).await;
+    let resolved = resolve(napplet.manifest, &blobs).await.unwrap();
+    assert_eq!(resolved.manifest.format, ManifestFormat::Legacy);
+    assert_eq!(resolved.identity_hash, aggregate);
+    assert_eq!(resolved.index_html, FIXTURE_INDEX_HTML);
+}

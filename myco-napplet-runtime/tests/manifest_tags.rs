@@ -271,6 +271,13 @@ fn rejects_a_named_manifest_without_d() {
     assert_eq!(err.code, NappletErrorCode::InvalidManifest);
 }
 
+/// An empty `d` would share the identity of the unnamed slot.
+#[test]
+fn rejects_a_named_manifest_with_an_empty_d() {
+    let err = parse(NappletBuilder::new().d_tag(Some(""))).unwrap_err();
+    assert_eq!(err.code, NappletErrorCode::InvalidManifest);
+}
+
 /// A bad `config` is a Myco extension gone wrong, not a reason to refuse the
 /// napplet: it is dropped.
 #[test]

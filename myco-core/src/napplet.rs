@@ -228,6 +228,12 @@ pub struct OpenedNapplet {
     /// not on the reviewed list, not granted, not denied. Never granted here;
     /// the caller routes a non-empty list back through the review sheet.
     pub unreviewed: Vec<String>,
+    /// Required (`R`) domains this build cannot provide — the warning an
+    /// update's review shows, as a first install's does.
+    pub unsupported: Vec<String>,
+    pub description: Option<String>,
+    /// The served manifest's icon; its bytes were kept when it was installed.
+    pub icon: Option<ReviewIcon>,
 }
 
 impl OpenedNapplet {
@@ -634,7 +640,7 @@ impl NappletHost {
 
         let shell_host =
             myco_napplet_runtime::host::shell_host(&addr.author.to_bytes(), addr.d_tag.as_deref());
-        let title = resolved.manifest.title.clone();
+        let declared = IngestedNapplet::of_manifest(&resolved.manifest);
 
         let session_id = {
             let mut next = self.next_id.lock().unwrap();
@@ -664,11 +670,14 @@ impl NappletHost {
         Ok(OpenedNapplet {
             session_id,
             shell_host,
-            title,
+            title: declared.title,
             grants,
             requires,
-            optional: resolved.manifest.optional.clone(),
+            optional: declared.optional,
             unreviewed,
+            unsupported: declared.unsupported,
+            description: declared.description,
+            icon: declared.icon,
         })
     }
 
@@ -1137,17 +1146,22 @@ pub async fn ingest_event_into(
     // The icon is best-effort and never holds the napplet back: fetched from
     // the same untrusted view, kept only when it hashes to the manifest's
     // `icon` and starts like the image type it declares (NIP-5D §Icon).
+    // A copy already here — often only in the cache, where the install
+    // review put it — is re-put rather than skipped: on the kept tier that
+    // moves it out of the cache, which would otherwise evict it.
     if let Some(icon) = &resolved.manifest.icon {
-        if !blobs.has(&icon.sha256).await {
-            match view.get(&icon.sha256).await {
-                Ok(Some(bytes)) if verified_icon(icon, &bytes) => {
-                    if let Err(e) = blobs.put(&bytes).await {
-                        tracing::debug!("napplet icon {} not kept: {e}", icon.sha256);
-                    }
+        let local = match blobs.get(&icon.sha256).await {
+            Ok(Some(bytes)) if verified_icon(icon, &bytes) => Ok(Some(bytes)),
+            _ => view.get(&icon.sha256).await,
+        };
+        match local {
+            Ok(Some(bytes)) if verified_icon(icon, &bytes) => {
+                if let Err(e) = blobs.put(&bytes).await {
+                    tracing::debug!("napplet icon {} not kept: {e}", icon.sha256);
                 }
-                Ok(_) => tracing::debug!("napplet icon {} unavailable or invalid", icon.sha256),
-                Err(e) => tracing::debug!("napplet icon {} fetch failed: {e}", icon.sha256),
             }
+            Ok(_) => tracing::debug!("napplet icon {} unavailable or invalid", icon.sha256),
+            Err(e) => tracing::debug!("napplet icon {} fetch failed: {e}", icon.sha256),
         }
     }
     relay.publish(event.clone()).await?;
@@ -2038,19 +2052,32 @@ pub struct ReviewIcon {
     pub mime: String,
 }
 
-/// Fetch a manifest's icon from `source` — the manifest's `server` hints, then
-/// its author's — for install review. `None` when it has none, or when the
-/// bytes are not what it signed; an icon never holds review up for long.
-pub async fn fetch_icon(event: &nostr::Event, source: &dyn PeerSource) -> Option<Vec<u8>> {
+/// Fetch a manifest's icon for install review: from `local` when a verified
+/// copy is already here, else from `source` — the manifest's `server` hints,
+/// then its author's. `None` when it has none, or when the bytes are not what
+/// it signed. The whole lookup, author server list included, is bounded: an
+/// icon never holds review up for long.
+pub async fn fetch_icon(
+    event: &nostr::Event,
+    source: &dyn PeerSource,
+    local: &dyn BlobStore,
+) -> Option<Vec<u8>> {
     let manifest = myco_napplet_runtime::NappletManifest::from_event(event.clone()).ok()?;
     let icon = manifest.icon?;
-    let mut servers = servers_from(event);
-    for server in source.author_servers(&event.pubkey).await {
-        if !servers.contains(&server) {
-            servers.push(server);
+    if let Ok(Some(bytes)) = local.get(&icon.sha256).await {
+        if verified_icon(&icon, &bytes) {
+            return Some(bytes);
         }
     }
-    let fetch = source.fetch_blob(&icon.sha256, &servers);
+    let fetch = async {
+        let mut servers = servers_from(event);
+        for server in source.author_servers(&event.pubkey).await {
+            if !servers.contains(&server) {
+                servers.push(server);
+            }
+        }
+        source.fetch_blob(&icon.sha256, &servers).await
+    };
     let bytes = tokio::time::timeout(std::time::Duration::from_secs(8), fetch)
         .await
         .ok()?

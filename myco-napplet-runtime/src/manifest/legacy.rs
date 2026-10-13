@@ -32,6 +32,18 @@ pub(super) fn has_path_tags(event: &Event) -> bool {
         .any(|t| t.as_slice().first().map(String::as_str) == Some("path"))
 }
 
+/// Whether the `x` tags a current-schema read took for artifacts are none, or
+/// one bare `["x", <aggregate>]` naming the aggregate of `event`'s `path`
+/// tags: older tooling wrote the aggregate with no `"aggregate"` marker.
+pub(super) fn is_unmarked_aggregate(event: &Event, artifacts: &[&String]) -> bool {
+    match artifacts {
+        [] => true,
+        [one] => nsite_deck::aggregate::compute_aggregate_hash(&path_entries_of(event))
+            .eq_ignore_ascii_case(one),
+        _ => false,
+    }
+}
+
 /// Parse and validate a legacy manifest. The rules are the pre-2026-10-07 ones,
 /// unchanged: single file, strict `requires` / `archetype` / `config` shapes,
 /// and an aggregate `x` that, when present, must match the `path` tags.

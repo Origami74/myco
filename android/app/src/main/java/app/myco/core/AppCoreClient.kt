@@ -21,7 +21,8 @@ data class BleAdvert(
 
 /** Per-site sync/readiness for an `OpenNsite` (keyed by the `<host>` label). */
 /** Whether an installed napplet can open: `ready`, or `missing` with a reason. */
-data class NappletStatus(val state: String, val message: String) {
+/** [icon]: the served manifest's icon hash, empty without one. */
+data class NappletStatus(val state: String, val message: String, val icon: String = "") {
     val ready: Boolean get() = state == "ready"
 }
 
@@ -822,7 +823,7 @@ data class AppState(
                             val st = arr.optJSONObject(i) ?: continue
                             val host = st.optString("host")
                             if (host.isNotEmpty()) {
-                                put(host, NappletStatus(st.optString("state"), st.optString("message")))
+                                put(host, NappletStatus(st.optString("state"), st.optString("message"), st.optString("icon")))
                             }
                         }
                     }
