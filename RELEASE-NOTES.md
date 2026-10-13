@@ -2,9 +2,12 @@
 
 **Released**: 2026-10-13
 
-v0.11.0 opens **napplets in the new NIP-5D format**, shows **their own
-icons**, and lets napplets load **pictures from the web**.
+v0.11.0 links phones **over a USB cable**, opens **napplets in the new
+NIP-5D format** with **their own icons**, and lets napplets load **pictures
+from the web**.
 
+- A USB-C cable links two phones, or a phone and a desktop running fips, with
+  no network at all: the fastest lane Myco has.
 - Every app on napplet.soy, published in the format NIP-5D adopted on
   2026-10-07, installs and opens. Older napplets still open.
 - A napplet's own icon shows in the install sheet, the Apps grid, Recents and
@@ -22,6 +25,15 @@ them.
 
 ## At a glance
 
+- **Link over a USB cable.** Plug two phones together with a USB-C to USB-C
+  cable, or a phone into a desktop running fips. It works with no network at
+  all and carries over 100 Mbps, where Bluetooth manages tens of kB/s.
+  - Tap "Open Myco" once; after that Myco starts by itself when you plug in,
+    even with the screen locked.
+  - Between two phones, the one that becomes USB host asks once to use the
+    other. Both need Myco running.
+  - The peer shows under a **USB** block in the mesh status sheet.
+  - [How to connect over USB](docs/how-to/connect-over-usb.md).
 - **Napplets in the current NIP-5D format.** A napplet now names its single
   file by hash (`x`), describes itself in the event text, and lists required
   (`R`) and optional (`O`) capabilities.
@@ -54,6 +66,16 @@ them.
 
 ## Also
 
+- **Names resolve with a roaming SIM on Wi-Fi.** With the mesh on, a phone
+  whose roaming SIM's DNS servers don't answer over Wi-Fi could resolve no
+  names at all, so napplet updates and icons never arrived. Myco now asks
+  every DNS server at once.
+- **A faster mesh on every lane.** Myco now moves packets between apps and the
+  mesh in its native core, without the per-packet hop through Java that capped
+  throughput.
+- **Peers show up within a second,** not up to 8 seconds, and your Circle is
+  redialled as soon as a direct link comes or goes, such as a cable plugged
+  back in.
 - **Napplet posts reach all your outbox relays.** A note posted through
   NAP-OUTBOX went to only two of your write relays. It now goes to every one
   you list.
@@ -70,6 +92,11 @@ them.
 
 ## Known issues
 
+- **A pulled USB cable can linger in the status sheet.** If the other phone
+  is still reachable another way, it can stay listed under **USB** after the
+  cable is pulled. The link itself is gone.
+- **USB and adb share the cable.** While the USB lane holds the port, adb
+  over that cable drops. Use wireless debugging to install builds.
 - **Mesh over the internet is new.** It hasn't yet been tested with two
   phones on different networks reaching each other through a public node.
   It is off by default.

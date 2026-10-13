@@ -13,7 +13,7 @@ map, the [index](./README.md).
 
 ## Status — 2026-10-13
 
-**Shipped** (v0.11.0 — napplets in the current NIP-5D format and their icons, `https:` resources, `mesh.blobs`, authors' Blossom server lists; v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
+**Shipped** (v0.11.0 — the USB lane (phone to phone and phone to desktop over a cable), a native TUN pump, napplets in the current NIP-5D format and their icons, `https:` resources, `mesh.blobs`, authors' Blossom server lists; v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
 reads over a shared relay pool, Chronofeed and Simple Profile; v0.8.1 —
 local-first napplet reads, author relay lookup, relay skip list and selection; v0.8.0 — accounts, the AppStore napplet, updates over
 the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
