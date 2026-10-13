@@ -11,9 +11,9 @@ map, the [index](./README.md).
 
 ---
 
-## Status — 2026-10-05
+## Status — 2026-10-13
 
-**Shipped** (v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
+**Shipped** (v0.11.0 — napplets in the current NIP-5D format and their icons, `https:` resources, `mesh.blobs`, authors' Blossom server lists; v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
 reads over a shared relay pool, Chronofeed and Simple Profile; v0.8.1 —
 local-first napplet reads, author relay lookup, relay skip list and selection; v0.8.0 — accounts, the AppStore napplet, updates over
 the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
@@ -39,8 +39,9 @@ the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
   Escape. NAPs: `shell`, `identity`, `relay` (pool reads, relay-pool publish),
   `outbox` (NIP-65 plans over local/mesh/internet lanes), `mesh` (hop-limited
   publish/subscribe, user-capped — Myco's own, [NAP-MESH](./design/napplet/NAP-MESH.md)),
-  `resource` (`blossom:` only, local store first, fetched blobs kept, up to
-  64 MiB, delivered as bytes), `link`, `theme`, `local` (keep and pass on what
+  `resource` (`blossom:`, local store first, fetched blobs kept, and public
+  `https:`; up to 64 MiB, delivered as bytes), `mesh.blobs` (which Circle
+  phones in reach hold a file), `link`, `theme`, `local` (keep and pass on what
   a napplet was shown, [NAP-LOCAL](./design/napplet/NAP-LOCAL.md)), `inc`
   (topic subscriptions), `intent` (open by role —
   [NAP-INTENT](./design/napplet/NAP-INTENT.md)) and `upload` (to the user's
@@ -443,7 +444,7 @@ Each its own milestone with its own design pass. Roughly in order of pull.
   recorded when an app's served version moves —
   [#69](https://github.com/Origami74/myco/issues/69).
 - **More NAPs.** `storage` (per-napplet key-value), `config`; `resource`
-  beyond `blossom:` (`https:`, `nostr:`, SVG rasterization — and HTML with
+  beyond `blossom:` and `https:` (`nostr:`, SVG rasterization — and HTML with
   inline SVG, which the sniffer misreads as SVG today). `intent` + `inc` are
   N7; `link` and `theme` shipped in v0.8.0 —
   [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2b–S4.
