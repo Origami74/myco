@@ -254,6 +254,68 @@ pub extern "system" fn Java_app_myco_core_NativeCore_accountAvatar(
         .unwrap_or(std::ptr::null_mut())
 }
 
+/// An installed napplet's icon bytes, or `null` for generic artwork: no icon
+/// on the served manifest, not downloaded, or not the bytes it signed. Read
+/// from this phone's store only — never a fetch. The caller still decodes
+/// them as the declared image type before showing anything (NIP-5D §Icon).
+/// Background thread only.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletIcon(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    pointer: JString,
+) -> jbyteArray {
+    let pointer = get_string(&mut env, &pointer);
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.gateway_context()
+        }
+        None => None,
+    };
+    let icon = match (ctx, crate::napplet::NappletAddr::parse(&pointer)) {
+        (Some((content, rt_handle)), Ok(addr)) => {
+            rt_handle.block_on(content.napplet_icon(&addr.author, addr.d_tag.as_deref()))
+        }
+        _ => None,
+    };
+    match icon.and_then(|(bytes, _mime)| env.byte_array_from_slice(&bytes).ok()) {
+        Some(array) => array.into_raw(),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// A napplet icon by hash for an install sheet: the review's `icon`, read
+/// from this phone's stores and checked against `sha256` and `mime`. `null`
+/// for generic artwork. Background thread only.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_iconBlob(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    sha256: JString,
+    mime: JString,
+) -> jbyteArray {
+    let sha256 = get_string(&mut env, &sha256);
+    let mime = get_string(&mut env, &mime);
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.gateway_context()
+        }
+        None => None,
+    };
+    let bytes = match ctx {
+        Some((content, rt_handle)) => rt_handle.block_on(content.icon_blob(&sha256, &mime)),
+        None => None,
+    };
+    match bytes.and_then(|b| env.byte_array_from_slice(&b).ok()) {
+        Some(array) => array.into_raw(),
+        None => std::ptr::null_mut(),
+    }
+}
+
 // --- external signer (NIP-55) ------------------------------------------------
 //
 // Kotlin long-polls the queue, carries each request to the signer app, and

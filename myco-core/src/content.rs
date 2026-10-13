@@ -239,6 +239,10 @@ pub struct NappletStatusView {
     /// `missing` when either is not.
     pub state: String,
     pub message: String,
+    /// The served manifest's icon hash, if it declares one: what a tile keys
+    /// its icon on, so an update that changes the icon redraws it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 impl NappletGrants {
@@ -693,6 +697,11 @@ pub struct Content {
     /// Rebuilt at startup, after a cache wipe, and whenever a version is
     /// pinned — the napplet counterpart of `sites` for nsites.
     napplet_status: Mutex<HashMap<String, NappletStatusView>>,
+    /// Verified napplet icon bytes by sha256, read once: the Apps grid, the
+    /// sheet and the Recents card ask for the same few icons over and over,
+    /// and the store behind them may be a custom Blossom server. Content
+    /// addressed, so an entry is never stale; one per installed icon.
+    icon_memo: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     /// Keeps profiles, relay lists and manifests seen from outside in the
     /// embedded store. `None` with a custom relay: browsing is not written to
     /// someone else's relay, where "Clear local database" could not clear it.
@@ -1012,6 +1021,7 @@ impl Content {
             active_manifests: Arc::new(Mutex::new(active_manifests)),
             active_path,
             napplet_status: Mutex::new(HashMap::new()),
+            icon_memo: Mutex::new(HashMap::new()),
             keep_seen,
             remembering: Arc::new(tokio::sync::Semaphore::new(REMEMBER_IN_FLIGHT)),
         })
@@ -1965,8 +1975,10 @@ impl Content {
             .collect();
         let mut fresh = HashMap::new();
         for item in napplets {
+            let mut icon_hash = None;
             let ready = match self.napplet_keep_set(&item).await {
-                Some((event, index)) => {
+                Some((event, index, icon)) => {
+                    icon_hash = icon;
                     let here = self.blobs.has(&index).await;
                     // A napplet installed before pinning existed has no pin,
                     // so it serves the store's newest — and a newer manifest
@@ -1998,6 +2010,7 @@ impl Content {
                     host: item.url_host.clone(),
                     state: state.to_string(),
                     message: message.to_string(),
+                    icon: icon_hash,
                 },
             );
         }
@@ -4618,9 +4631,10 @@ impl Content {
             // stays and the app behind it is gone — which is what happened the
             // first time "Clear local database" met an installed napplet.
             if item.kind == LibraryKind::Napplet {
-                if let Some((event, index_hash)) = self.napplet_keep_set(item).await {
+                if let Some((event, index_hash, icon)) = self.napplet_keep_set(item).await {
                     keep_events.insert(event.id.to_bytes());
                     keep_blobs.insert(index_hash);
+                    keep_blobs.extend(icon);
                     keep_active.insert(manifest_key(
                         event.kind.as_u16(),
                         &event.pubkey,
@@ -4717,27 +4731,76 @@ impl Content {
         Ok(())
     }
 
-    /// The manifest event and index-blob hash an installed napplet is served
-    /// from, for the keep-sets: the active manifest when one is pinned, else
-    /// the newest in the slot.
-    async fn napplet_keep_set(&self, item: &LibraryItem) -> Option<(Event, String)> {
+    /// The manifest event, artifact hash and icon hash (when it has one) an
+    /// installed napplet is served from, for the keep-sets: the active
+    /// manifest when one is pinned, else the newest in the slot.
+    async fn napplet_keep_set(
+        &self,
+        item: &LibraryItem,
+    ) -> Option<(Event, String, Option<String>)> {
         use nostr::nips::nip19::FromBech32;
-        let author = nostr::PublicKey::from_bech32(&item.author_npub).ok()?;
-        let kind = match item.d_tag {
+        let author = PublicKey::from_bech32(&item.author_npub).ok()?;
+        let (event, manifest) = self.served_napplet(&author, item.d_tag.as_deref()).await?;
+        let icon = manifest.icon.map(|i| i.sha256);
+        Some((event, manifest.artifact, icon))
+    }
+
+    /// An installed napplet's verified icon bytes and declared MIME type, from
+    /// this phone's stores only — `None` for no icon, an icon not here, or
+    /// bytes that are not what the manifest signed. The caller shows generic
+    /// artwork then; an icon never stands between a person and the napplet.
+    pub async fn napplet_icon(
+        &self,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+    ) -> Option<(Arc<Vec<u8>>, String)> {
+        let (_, manifest) = self.served_napplet(author, d_tag).await?;
+        let icon = manifest.icon?;
+        let sha256 = icon.sha256.to_ascii_lowercase();
+        if let Some(bytes) = self.icon_memo.lock().unwrap().get(&sha256).cloned() {
+            return Some((bytes, icon.mime));
+        }
+        let bytes = self.cache_blobs.get(&sha256).await.ok()??;
+        if !crate::napplet::verified_icon(&icon, &bytes) {
+            return None;
+        }
+        let bytes = Arc::new(bytes);
+        self.icon_memo.lock().unwrap().insert(sha256, bytes.clone());
+        Some((bytes, icon.mime))
+    }
+
+    /// A napplet icon by hash, from either store tier — for an install sheet
+    /// previewing a napplet not installed yet. Only bytes that hash to
+    /// `sha256` and start like `mime`; `None` otherwise.
+    pub async fn icon_blob(&self, sha256: &str, mime: &str) -> Option<Vec<u8>> {
+        let icon = myco_napplet_runtime::ManifestIcon {
+            sha256: sha256.to_ascii_lowercase(),
+            mime: mime.to_string(),
+        };
+        let bytes = self.cache_blobs.get(&icon.sha256).await.ok()??;
+        crate::napplet::verified_icon(&icon, &bytes).then_some(bytes)
+    }
+
+    /// The manifest an installed napplet is served from, parsed: its pin,
+    /// held in memory, when it has one — an installed napplet always does —
+    /// else the newest the slot returns.
+    async fn served_napplet(
+        &self,
+        author: &PublicKey,
+        d_tag: Option<&str>,
+    ) -> Option<(Event, myco_napplet_runtime::NappletManifest)> {
+        let kind = match d_tag {
             Some(_) => myco_napplet_runtime::KIND_NAMED,
             None => myco_napplet_runtime::KIND_ROOT,
         };
-        let event = nsite_deck::seams::newest_in_slot(
-            &self.active_backend(),
-            kind,
-            &author,
-            item.d_tag.as_deref(),
-        )
-        .await
-        .ok()??;
+        let event = match self.pinned_manifest(kind, author, d_tag) {
+            Some(pinned) => pinned,
+            None => nsite_deck::seams::newest_in_slot(&self.active_backend(), kind, author, d_tag)
+                .await
+                .ok()??,
+        };
         let manifest = myco_napplet_runtime::NappletManifest::from_event(event.clone()).ok()?;
-        let index = manifest.index_entry()?.sha256.clone();
-        Some((event, index))
+        Some((event, manifest))
     }
 
     // --- snapshots for state() ---

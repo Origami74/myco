@@ -4,7 +4,7 @@
 //! NIP-5D requires the namespace exist before any napplet script runs, and the
 //! shell cannot script into an opaque origin from outside — so the prelude
 //! rides into the `srcdoc` bytes alongside the CSP, injected by
-//! [`crate::artifact`] after verification and outside the aggregate.
+//! [`crate::artifact`] after verification and outside the artifact hash.
 //!
 //! The prelude itself is upstream's, vendored verbatim (see
 //! `assets/vendor/README.md`). Upstream owns the domain surface, so tracking

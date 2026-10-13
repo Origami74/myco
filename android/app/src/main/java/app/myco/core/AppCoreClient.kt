@@ -21,7 +21,8 @@ data class BleAdvert(
 
 /** Per-site sync/readiness for an `OpenNsite` (keyed by the `<host>` label). */
 /** Whether an installed napplet can open: `ready`, or `missing` with a reason. */
-data class NappletStatus(val state: String, val message: String) {
+/** [icon]: the served manifest's icon hash, empty without one. */
+data class NappletStatus(val state: String, val message: String, val icon: String = "") {
     val ready: Boolean get() = state == "ready"
 }
 
@@ -98,8 +99,16 @@ data class NappletReview(
     val alreadyInstalled: Boolean = false,
     val title: String,
     val description: String,
-    /** What it declared it needs — a statement of intent, not what it gets. */
+    /** Every domain it declared, required then optional — a statement of
+     *  intent, not what it gets. */
     val requires: List<String>,
+    /** The subset of [requires] it can do without (NIP-5D `O` tags). */
+    val optional: List<String> = emptyList(),
+    /** Required domains this build can't provide: it may not fully work. */
+    val unsupported: List<String> = emptyList(),
+    /** The manifest's icon, fetched with it for this sheet: `(sha256, mime)`. */
+    val iconSha256: String = "",
+    val iconMime: String = "",
     /** What installing it would actually grant, defaults included. */
     val grants: List<String>,
     /** Non-empty when the fetch failed; show this instead of asking. */
@@ -126,6 +135,14 @@ data class NappletReview(
             requires = json.optJSONArray("requires")?.let { r ->
                 (0 until r.length()).map { r.optString(it) }
             }.orEmpty(),
+            optional = json.optJSONArray("optional")?.let { r ->
+                (0 until r.length()).map { r.optString(it) }
+            }.orEmpty(),
+            unsupported = json.optJSONArray("unsupported")?.let { r ->
+                (0 until r.length()).map { r.optString(it) }
+            }.orEmpty(),
+            iconSha256 = json.optJSONObject("icon")?.optString("sha256").orEmpty(),
+            iconMime = json.optJSONObject("icon")?.optString("mime").orEmpty(),
             grants = json.optJSONArray("grants")?.let { g ->
                 (0 until g.length()).map { g.optString(it) }
             }.orEmpty(),
@@ -806,7 +823,7 @@ data class AppState(
                             val st = arr.optJSONObject(i) ?: continue
                             val host = st.optString("host")
                             if (host.isNotEmpty()) {
-                                put(host, NappletStatus(st.optString("state"), st.optString("message")))
+                                put(host, NappletStatus(st.optString("state"), st.optString("message"), st.optString("icon")))
                             }
                         }
                     }
@@ -959,6 +976,14 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
     /** The account's avatar bytes, or null. */
     fun accountAvatar(): ByteArray? =
         NativeCore.accountAvatar(requireHandle()).takeIf { it.isNotEmpty() }
+
+    /** An installed napplet's verified icon bytes, or null. See [app.myco.NappletIcons]. */
+    fun nappletIcon(pointer: String): ByteArray? =
+        NativeCore.nappletIcon(requireHandle(), pointer)?.takeIf { it.isNotEmpty() }
+
+    /** A verified icon by hash, for an install sheet. See [app.myco.NappletIcons]. */
+    fun iconBlob(sha256: String, mime: String): ByteArray? =
+        NativeCore.iconBlob(requireHandle(), sha256, mime)?.takeIf { it.isNotEmpty() }
 
     /**
      * Serve one nsite request through the in-process gateway (for the WebView's

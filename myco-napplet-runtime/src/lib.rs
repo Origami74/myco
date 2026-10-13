@@ -13,13 +13,14 @@
 //! relay, the blob store, the mesh and the signing key all sit behind the seams
 //! in [`seams`], which the napplet asks through rather than reaches around.
 //!
-//! A napplet is distributed exactly like an nsite: a signed manifest whose
-//! `path` tags map paths to sha256 hashes, with the bytes in Blossom. NIP-5D is
-//! [NIP-5A]'s manifest shape at kinds `5129` / `15129` / `35129`, plus
-//! `requires` / `archetype` / `config` tags, and with the aggregate hash
-//! promoted from an integrity check to the napplet's **identity**. The shared
-//! NIP-5A primitives therefore live in `nsite-deck`, not here; this crate is
-//! what is genuinely napplet-only.
+//! A napplet is a single self-contained `/index.html` in Blossom, named by a
+//! signed manifest at kinds `5129` / `15129` / `35129` whose `x` tag is the
+//! artifact's sha256. That hash, with the `d` identifier, is the napplet's
+//! **identity**. The manifest also advertises required and optional NAP
+//! domains (`R` / `O`), archetypes and intents (`z` / `i`), and an optional
+//! icon. Napplets published before 2026-10-07 used NIP-5A's path/aggregate
+//! shape instead; that still parses, through an isolated legacy fallback in
+//! [`manifest`].
 //!
 //! ```text
 //! manifest.rs  the NIP-5D kinds and the tags they add
@@ -55,7 +56,8 @@ pub use dispatch::{dispatch, needs_session, NapContext, Outcome};
 pub use error::{NappletError, NappletErrorCode, Result};
 pub use host::{is_shell_host, shell_host, shell_label, shell_origin, SHELL_SUFFIX};
 pub use manifest::{
-    is_napplet_kind, Archetype, NappletManifest, KINDS, KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT,
+    icon_bytes_match, is_napplet_kind, AppListing, Archetype, IntentAdvert, ManifestFormat,
+    ManifestIcon, NappletManifest, ICON_MIME_TYPES, KINDS, KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT,
 };
 pub use nap::deliveries_for;
 pub use nap::intent::{IntentCatalog, IntentCatalogSnapshot, IntentHandler, NoIntents};
