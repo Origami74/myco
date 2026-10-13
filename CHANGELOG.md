@@ -58,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Your Circle is redialled as soon as a direct link changes.** A Circle
+  phone reached through another peer — two phones cabled to one laptop, say —
+  never got its own reconnect, so its dial backoff kept growing after a
+  re-plug and the redial came long after the route was back. Any change in
+  which phones are directly linked now resets the backoff and dials at once.
 - **Names resolve with a roaming SIM on Wi-Fi.** With the mesh on, Myco
   answers the phone's DNS and passes ordinary names on to the networks'
   resolvers, one at a time with a 4-second wait each. A roaming SIM's carrier
@@ -98,6 +103,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A faster mesh on every lane.** Packets between apps and the mesh are now
+  moved by two native threads in the core, not by Kotlin threads calling in
+  once per packet and copying every byte; on a Pixel 7 Pro over USB that hop
+  had capped throughput near 90 Mbps.
+- **Peers show up within a second.** The peer list is refreshed every second
+  instead of on the 8-second keep-warm tick, and a newly linked peer dials
+  your Circle at once.
 - **A napplet republished in the new format counts as a new version.** Its
   identity is now the hash of its file rather than the old aggregate hash,
   so "Check for updates" offers it even when the file is unchanged, and the
