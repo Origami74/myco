@@ -48,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Names resolve with a roaming SIM on Wi-Fi.** With the mesh on, Myco
+  answers the phone's DNS and passes ordinary names on to the networks'
+  resolvers, one at a time with a 4-second wait each. A roaming SIM's carrier
+  resolvers don't answer over Wi-Fi, so every lookup waited them out and the
+  phone gave up first: no app could resolve a name, and napplet updates and
+  icons never arrived. Myco now asks every resolver at once and takes the
+  first answer, starting with the network the phone is actually using.
 - **Napplets and app manifests can no longer point Myco at your own network.**
   A Blossom server named in a napplet's `blossom:` link, an author's server
   list or an app manifest was dialled wherever it pointed, including this

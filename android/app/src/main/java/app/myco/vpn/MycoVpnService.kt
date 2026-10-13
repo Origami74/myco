@@ -315,7 +315,10 @@ class MycoVpnService : VpnService() {
     private fun underlyingDnsServers(claimIpv6: Boolean): List<InetAddress> {
         val cm = getSystemService(ConnectivityManager::class.java) ?: return emptyList()
         return try {
-            cm.allNetworks.asSequence()
+            // The network traffic actually leaves by first: another one's
+            // resolvers (a roaming SIM's, with Wi-Fi up) may not answer from here.
+            val active = cm.activeNetwork
+            cm.allNetworks.sortedByDescending { it == active }.asSequence()
                 .filter { n ->
                     val caps = cm.getNetworkCapabilities(n)
                     caps != null &&
