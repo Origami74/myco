@@ -17,8 +17,12 @@ env:
   # yet: it lives on the `feat/multi-path-switchover` branch, which is what
   # the multi-path peer view and v0.7.0 build against. Back to master once
   # it merges.
+  #
+  # The USB lane needs fips's USB transport, which lives on
+  # `feat/usb-transport` (stacked on `feat/multi-path-switchover`) until it
+  # lands. Back to `feat/multi-path-switchover` then.
   FIPS_REPO: https://github.com/jmcorgan/fips.git
-  FIPS_REF: feat/multi-path-switchover
+  FIPS_REF: feat/usb-transport
   NDK_VERSION: 26.1.10909125
   CARGO_TERM_COLOR: always
 

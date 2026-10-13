@@ -459,8 +459,6 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Linux interop.** An Android phone and a Linux `BluerIo` node as a tested
   BLE pair; the per-peer PSM patch already makes it possible —
   [ble-interop.md](./design/fips/ble-interop.md).
-- **USB transport** for seeding large sites —
-  [usb-transport.md](./design/fips/usb-transport.md) (not started).
 - **Multi-persona.** More than one device key per phone —
   [identity-pairing.md](./design/core/identity-pairing.md) §3.
 - **Public-node peering** over the internet via FIPS discovery kinds —

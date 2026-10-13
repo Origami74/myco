@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the file — a few at a time, and remembers the answers for a minute. The
   App Store uses it so "Around you" lists only apps a nearby phone can
   actually serve.
+- **Link over a USB cable.** A USB cable now links a phone to a desktop
+  running fips, or two phones to each other, with no network at all — the
+  fastest lane Myco has, over 100 Mbps where Bluetooth manages tens of kB/s.
+  Plug in and tap "Open Myco" once; it starts Myco by itself, with the screen
+  locked too. Between two phones, the one that becomes USB host asks to use
+  the other once (it needs Myco running). The peer shows under a **USB**
+  block in the mesh status sheet, and pulling the cable drops it at once.
+  [How to](docs/how-to/connect-over-usb.md).
 
 ### Fixed
 

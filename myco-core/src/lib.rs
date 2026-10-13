@@ -128,6 +128,10 @@ mod socks_exit;
 // the AP/LAN lane). Android-only consumer.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod udp_fd_bridge;
+// Holds USB accessory descriptors from Kotlin until a node is armed to take
+// them. Android-only consumer.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod usb_bridge;
 
 #[cfg(target_os = "android")]
 mod jni_abi;
@@ -140,6 +144,9 @@ mod aware_bridge_jni;
 
 #[cfg(target_os = "android")]
 mod tun_bridge_jni;
+
+#[cfg(target_os = "android")]
+mod usb_bridge_jni;
 
 pub use action::NativeAppAction;
 pub use runtime::AppRuntime;

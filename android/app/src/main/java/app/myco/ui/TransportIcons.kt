@@ -43,6 +43,7 @@ fun TransportIcon(
             MaterialTheme.colorScheme.onSurface,
             "Wi-Fi Aware",
         )
+        "usb" -> Triple(R.drawable.ic_transport_usb, MaterialTheme.colorScheme.onSurface, "USB")
         "" -> Triple(0, MaterialTheme.colorScheme.onSurfaceVariant, "")
         // udp, tcp and anything else routed: it reached us over IP.
         else -> Triple(R.drawable.ic_transport_network, TransportNetwork, "Network")
@@ -72,7 +73,7 @@ private const val STANDBY_ALPHA = 0.3f
  *
  * Dead paths are left out: they are history fips keeps for a fast return,
  * not a transport we have. Lanes are drawn in the fixed order Bluetooth,
- * Aware, Network so the row does not reshuffle as paths come and go.
+ * Aware, USB, Network so the row does not reshuffle as paths come and go.
  */
 @Composable
 fun PathIcons(peer: PeerDiagnostic?, size: Int = 18) {
@@ -84,7 +85,7 @@ fun PathIcons(peer: PeerDiagnostic?, size: Int = 18) {
 }
 
 /** Fixed display order for lanes; `tcp` and anything else routed sort last. */
-private val LANE_ORDER = listOf("ble", "aware", "udp")
+private val LANE_ORDER = listOf("ble", "aware", "usb", "udp")
 
 /**
  * The lanes a peer has a non-dead path on, in [LANE_ORDER], each with whether

@@ -342,6 +342,9 @@ class MainActivity : ComponentActivity() {
         // Activity recreation. The Wi-Fi watch always runs; the browse and
         // advert follow the Settings "Network" switch.
         ApRadio.ensureStarted(this, enabled = prefs.getBoolean(PREF_LAN, true))
+        // Phones plugged in while this phone is USB host: stock Android
+        // offers an MTP device to no app, so Myco listens for it itself.
+        app.myco.usb.UsbHostWatcher.ensureStarted(this)
 
         // BLE and Wi-Fi Aware are ON by default (Aware only where the hardware
         // supports it), and remembered thereafter.
