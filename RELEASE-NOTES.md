@@ -1,100 +1,118 @@
-# Myco v0.10.0
+# Myco v0.11.0
 
-**Released**: 2026-10-05
+**Released**: 2026-10-13
 
-v0.10.0 lets apps **post pictures**, **explains every permission** before
-Android asks, and can reach your Circle **over the internet**.
+v0.11.0 links phones **over a USB cable**, opens **napplets in the new
+NIP-5D format** with **their own icons**, and lets napplets load **pictures
+from the web**.
 
-- Apps can upload a file, such as a picture to post, to your Blossom servers.
-  They can do this only if you allow it.
-- First launch walks you through the mesh setup, one card per Android prompt.
-- Opt-in: link to public mesh nodes when you're online, so your Circle can
-  reach you when you're not in the same room.
-- An app shared as a link installs from phones nearby, even with no internet.
-- Wi-Fi and Wi-Fi Aware come back after the mesh restarts, and phones on the
-  same Wi-Fi keep finding each other.
+- A USB-C cable links two phones, or a phone and a desktop running fips, with
+  no network at all: the fastest lane Myco has.
+- Every app on napplet.soy, published in the format NIP-5D adopted on
+  2026-10-07, installs and opens. Older napplets still open.
+- A napplet's own icon shows in the install sheet, the Apps grid, Recents and
+  on home-screen shortcuts.
+- Napplets can load `https:` pictures and files, such as profile pictures on
+  someone's server, through Myco and only from the public internet.
+- Apps hosted on their author's own Blossom servers install and update.
+- The App Store shows "Around you" apps only when a phone nearby can serve
+  them.
 
-**No wire-format change from v0.9.1.** v0.10.0 and v0.9.x phones pair and
-exchange apps and messages as before. Everything upgrades in place.
+**No wire-format change from v0.10.0.** v0.11.0 and v0.10.x phones pair and
+exchange messages as before, and everything upgrades in place. A v0.10.x
+phone can't open napplets in the new format, so update both phones to share
+them.
 
 ## At a glance
 
-- **Apps can upload files.** An app that asks for it, and that you allow on
-  the install sheet ("Upload files"), can put a file on your Blossom servers,
-  signed as you. Doodle Duo uses it: after a round it uploads the score
-  picture and opens Composer with the link in the note.
-  - Myco uses your own server list. Only if you have none does it use public
-    servers (Primal, hzrd149). If your list can't be found, nothing is
-    uploaded.
-  - With a signer app (Amber), you approve each upload there.
-  - Up to 16 MiB, one at a time. Nothing is uploaded with offline-only on.
-  - Apps you installed before that want it ask you again.
-- **A setup popup on first launch.** "Enable mesh?", then a card before each
-  Android prompt (nearby devices, then the VPN) saying what it is for, then
-  your name. Android asks nothing until you tap the card's button.
-  - Until you choose a name, Bluetooth advertises a generated one, not the
-    phone's own.
-  - A refused step gets a card saying what won't work and how to retry,
-    including when another app's VPN is set to always on.
-  - Upgrading with a working mesh: no popup.
-- **Settings › Permissions.** Nearby devices, the mesh connection,
-  notifications and (optional) keeping Myco running in the background, each
-  with its state and a Fix or Allow. Notifications are no longer asked for at
-  launch; the camera is asked for only when you tap "Allow camera".
-- **Mesh over the internet (opt-in).** Settings › Mesh › Internet links this
-  phone to up to two public FIPS nodes while it is online. A public node sees
-  this phone's IP address and which mesh addresses it talks to, not what you
-  send. It never dials with offline-only on.
-- **App links work offline.** Opening a napplet link with no internet used to
-  fail even with the app on a paired phone next to you. Myco now asks the
-  sharer and every Circle phone in reach first, all at once, and takes the
-  files from the quickest.
-- **Apps open with less black screen.** About 570 ms instead of 670–780 ms for
-  a fresh Noris open on a mid-range tablet.
-- **Full-tunnel exit (experimental).** Set the exit node as
-  `socks5://<exit-npub>.fips:1080` to send all of the phone's TCP traffic, and
-  DNS, through the exit, not only apps that honour the HTTP proxy. UDP is
-  dropped, so apps fall back to TCP.
+- **Link over a USB cable.** Plug two phones together with a USB-C to USB-C
+  cable, or a phone into a desktop running fips. It works with no network at
+  all and carries over 100 Mbps, where Bluetooth manages tens of kB/s.
+  - Tap "Open Myco" once; after that Myco starts by itself when you plug in,
+    even with the screen locked.
+  - Between two phones, the one that becomes USB host asks once to use the
+    other. Both need Myco running.
+  - The peer shows under a **USB** block in the mesh status sheet.
+  - [How to connect over USB](docs/how-to/connect-over-usb.md).
+- **Napplets in the current NIP-5D format.** A napplet now names its single
+  file by hash (`x`), describes itself in the event text, and lists required
+  (`R`) and optional (`O`) capabilities.
+  - The install sheet marks optional capabilities, and warns when an app needs
+    one Myco can't provide. An update that adds one warns the same way.
+  - Napplets in the old format still open, through a fallback that will be
+    removed after 2026.
+  - A napplet republished in the new format counts as a new version: "Check
+    for updates" offers it, and the sheet may ask about capabilities you never
+    reviewed. Your grants and the app's saved data are kept.
+- **Napplet icons.** PNG, JPEG or WebP, checked against the hash the
+  manifest signs and decoded before it is shown. Without a valid icon you see
+  the coloured initial as before.
+  - Shortcuts pinned before this release get the icon too.
+  - The icon is kept with the app, so clearing the cache doesn't lose it.
+- **Pictures from the web in napplets (`https:`).** A napplet with the
+  resource permission can ask for an `https://` link. Myco fetches it: plain
+  GET, no cookies or logins, at most five redirects, 30 seconds and 64 MiB.
+  - Only public addresses: never this phone, your Wi-Fi network or a mesh
+    name, checked again after every redirect.
+  - The server sees your IP address and which link was opened.
+  - Nothing is fetched with offline-only on. SVG is refused.
+- **Authors' own file servers.** Myco reads the Blossom server list an author
+  publishes (BUD-03) and looks there after the servers an app names, and
+  before the public defaults.
+- **Which nearby phones hold a file (`mesh.blobs`).** A napplet with the mesh
+  grant can ask how many Circle phones in reach have each of up to 64 files.
+  Myco asks over the mesh only, without downloading anything. The App Store
+  uses it for "Around you".
 
 ## Also
 
-- **Wi-Fi Aware on Android 12.** It can now be allowed: Android 12 ignores a
-  request for precise location alone, and Myco now asks for approximate too.
-
-- **Wi-Fi and Wi-Fi Aware after a mesh restart.** A phone could come back
-  connected over Bluetooth only until Myco was force-stopped. Both lanes now
-  come back.
-- **Phones on the same Wi-Fi keep finding each other.** A phone leaving the
-  network at the wrong moment could stop new connections over that Wi-Fi
-  until Myco was restarted.
+- **Names resolve with a roaming SIM on Wi-Fi.** With the mesh on, a phone
+  whose roaming SIM's DNS servers don't answer over Wi-Fi could resolve no
+  names at all, so napplet updates and icons never arrived. Myco now asks
+  every DNS server at once.
+- **A faster mesh on every lane.** Myco now moves packets between apps and the
+  mesh in its native core, without the per-packet hop through Java that capped
+  throughput.
+- **Peers show up within a second,** not up to 8 seconds, and your Circle is
+  redialled as soon as a direct link comes or goes, such as a cable plugged
+  back in.
+- **Napplet posts reach all your outbox relays.** A note posted through
+  NAP-OUTBOX went to only two of your write relays. It now goes to every one
+  you list.
+- **Posting waits less.** A post that tags people now waits for this phone,
+  two relays and the people's inbox relays, and at most 3 seconds for an
+  inbox relay. Slower ones are delivered in the background.
+- **AVIF and HEIC pictures show in napplets.** They were taken for videos and
+  shown as broken pictures.
+- **No more dialling your own network.** A Blossom server named in a link, an
+  author's list or an app manifest is used only when it is on the public
+  internet. A custom Blossom store you set in Settings still works.
+- **Your profile picture in Settings** goes through the same safe fetcher as
+  napplet pictures.
 
 ## Known issues
 
+- **A pulled USB cable can linger in the status sheet.** If the other phone
+  is still reachable another way, it can stay listed under **USB** after the
+  cable is pulled. The link itself is gone.
+- **USB and adb share the cable.** While the USB lane holds the port, adb
+  over that cable drops. Use wireless debugging to install builds.
 - **Mesh over the internet is new.** It hasn't yet been tested with two
   phones on different networks reaching each other through a public node.
   It is off by default.
-- **Web pictures in apps.** Napplets load files by their hash (`blossom:`).
-  Plain web images, including many profile pictures, show a placeholder (🥀 in
-  Chronofeed). `https:` image support is still to come;
-  [#67](https://github.com/Origami74/myco/issues/67) covers Blossom server
-  discovery.
+- **`https:` pictures aren't kept across restarts.** Myco remembers a web
+  link for five minutes; after that, or a restart, it fetches it again.
 - **Uploads: no per-upload prompt, no progress.** The install-sheet grant is
   the consent; without a signer app, an allowed app uploads without asking
-  each time. Files go up as the app sent them (EXIF and other metadata are
-  not stripped). There is no progress bar and no cancel.
+  each time. EXIF and other metadata are not stripped. There is no progress
+  bar and no cancel.
 - **Composer can't attach a picture itself yet.** An app that uploads one,
-  such as Doodle Duo, can hand Composer the link; pasting a Blossom link also
-  works.
+  such as Doodle Duo, can hand Composer the link.
 - **Few apps declare a role yet.** Opening "a profile", "an article" or "a
   composer" needs an app whose manifest declares that archetype, such as
-  Simple Profile, Noris or Composer; other napplets don't yet. `article`,
-  `highlight` and the `composer` convention are ours, not yet in the NAAT
-  registry. Messages between apps other than opening by role (`inc.emit`)
-  aren't routed yet.
-- **Reading positions in Noris stay on the phone.** Boris publishes them as
-  public events; Noris keeps them on the device instead, because Myco can't
-  encrypt for an app yet (`relay.publishEncrypted`). Without app storage they
-  last for the session.
+  Simple Profile, Noris or Composer.
+- **Reading positions in Noris stay on the phone.** Myco can't encrypt for an
+  app yet (`relay.publishEncrypted`).
 - **A custom relay is read, not streamed.** With a custom relay set, reads wait
   for it rather than streaming as they arrive.
 - **Big files are held in memory** while they load (up to 64 MB each).
