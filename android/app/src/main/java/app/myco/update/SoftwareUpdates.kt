@@ -21,16 +21,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 
-private const val RELEASE_PAGE = "https://github.com/Origami74/myco/releases/latest"
-private const val RELEASE_API = "https://api.github.com/repos/Origami74/myco/releases/latest"
+private const val RELEASE_PAGE = "https://zapstore.dev/apps/app.myco"
 private const val DAY_MS = 24 * 60 * 60 * 1000L
 private const val RETRY_MS = 60 * 60 * 1000L
 private const val CHANNEL = "software_updates"
 private const val NOTIFICATION_ID = 4001
+private val checkMutex = Mutex()
 
 data class SoftwareUpdateState(
     val automatic: Boolean,
@@ -40,14 +37,14 @@ data class SoftwareUpdateState(
     val dismissedTag: String? = null,
 )
 
-/** Foreground-only checks. No APK downloads, credentials, or installation authority. */
+/** Release checks shared by the UI and persistent background work. */
 class SoftwareUpdates(context: Context) {
     private val context = context.applicationContext
-    private val prefs = this.context.getSharedPreferences("software_updates", Context.MODE_PRIVATE)
-    private val mutex = Mutex()
+    private val prefs = this.context.getSharedPreferences("signed_software_updates", Context.MODE_PRIVATE)
+    private val mutex = checkMutex
     private val mutableState = MutableStateFlow(
         SoftwareUpdateState(
-            // Development builds use a placeholder version; avoid unsolicited notices.
+            // Keep development builds quiet unless explicitly enabled.
             automatic = prefs.getBoolean("automatic", !BuildConfig.DEBUG),
             availableTag = prefs.getString("available_tag", null)?.takeIf {
                 isNewerRelease(BuildConfig.VERSION_NAME, it)
@@ -57,9 +54,15 @@ class SoftwareUpdates(context: Context) {
     )
     val state = mutableState.asStateFlow()
 
+    fun configureBackground(offlineOnly: Boolean) {
+        prefs.edit().putBoolean("offline_only", offlineOnly).commit()
+        SoftwareUpdateWorker.schedule(context, mutableState.value.automatic && !offlineOnly)
+    }
+
     fun setAutomatic(enabled: Boolean) {
         prefs.edit().putBoolean("automatic", enabled).apply()
         mutableState.value = mutableState.value.copy(automatic = enabled)
+        SoftwareUpdateWorker.schedule(context, enabled && !prefs.getBoolean("offline_only", true))
     }
 
     fun dismissBanner() {
@@ -84,7 +87,13 @@ class SoftwareUpdates(context: Context) {
                 if (force) mutableState.value = mutableState.value.copy(message = "Turn off mesh-only mode to check online")
                 return
             }
-            if (!force && !mutableState.value.automatic) return
+            if (!force && (!prefs.getBoolean("automatic", !BuildConfig.DEBUG) ||
+                    prefs.getBoolean("offline_only", true))) return
+            val cached = prefs.getString("available_tag", null)?.takeIf {
+                isNewerRelease(BuildConfig.VERSION_NAME, it)
+            }
+            mutableState.value = mutableState.value.copy(availableTag = cached)
+            if (cached != null) notifyOnce(cached)
             val now = System.currentTimeMillis()
             val interval = if (prefs.getBoolean("last_success", false)) DAY_MS else RETRY_MS
             if (!force && !updateCheckDue(now, prefs.getLong("last_attempt", 0), interval)) return
@@ -103,6 +112,9 @@ class SoftwareUpdates(context: Context) {
             mutableState.value = mutableState.value.copy(checking = true, message = null)
             prefs.edit().putLong("last_attempt", now).putBoolean("last_success", false).apply()
             val tag = withContext(Dispatchers.IO) { fetchReleaseTag() }
+            // A setting may have changed while the relay query was in flight.
+            if (prefs.getBoolean("offline_only", true) ||
+                (!force && !prefs.getBoolean("automatic", !BuildConfig.DEBUG))) return
             val available = tag.takeIf { isNewerRelease(BuildConfig.VERSION_NAME, it) }
             prefs.edit().putString("available_tag", available).putBoolean("last_success", true).apply()
             mutableState.value = mutableState.value.copy(
@@ -122,32 +134,7 @@ class SoftwareUpdates(context: Context) {
         }
     }
 
-    private fun fetchReleaseTag(): String {
-        val connection = URL(RELEASE_API).openConnection() as HttpURLConnection
-        try {
-            connection.connectTimeout = 10_000
-            connection.readTimeout = 10_000
-            connection.instanceFollowRedirects = false
-            connection.setRequestProperty("Accept", "application/vnd.github+json")
-            connection.setRequestProperty("User-Agent", "Myco/${BuildConfig.VERSION_NAME}")
-            check(connection.responseCode == 200) { "Release API returned ${connection.responseCode}" }
-            val bytes = connection.inputStream.use { input ->
-                val output = java.io.ByteArrayOutputStream()
-                val buffer = ByteArray(8192)
-                while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    check(output.size() + count <= 256 * 1024) { "Release response too large" }
-                    output.write(buffer, 0, count)
-                }
-                output.toByteArray()
-            }
-            check(bytes.size <= 256 * 1024) { "Release response too large" }
-            return stableReleaseTag(JSONObject(String(bytes, Charsets.UTF_8)))
-        } finally {
-            connection.disconnect()
-        }
-    }
+    private fun fetchReleaseTag(): String = ZapstoreRelease.fetch()
 
     private fun notifyOnce(tag: String) {
         if (prefs.getString("notified_tag", null) == tag) return
@@ -175,16 +162,4 @@ class SoftwareUpdates(context: Context) {
             Log.w("SoftwareUpdates", "Notification permission changed", error)
         }
     }
-}
-
-internal fun stableReleaseTag(release: JSONObject): String {
-    require(!release.getBoolean("draft") && !release.getBoolean("prerelease")) { "Not a stable release" }
-    val tag = release.getString("tag_name")
-    require(ReleaseVersion.parse(tag) != null) { "Invalid release version" }
-    val assets = release.getJSONArray("assets")
-    require((0 until assets.length()).any {
-        val asset = assets.getJSONObject(it)
-        asset.optString("name").endsWith(".apk") && asset.optString("state") == "uploaded"
-    }) { "Release has no APK" }
-    return tag
 }

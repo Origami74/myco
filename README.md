@@ -249,11 +249,11 @@ Read on:
 - **Download:** the APK from the
   [latest release](https://github.com/Origami74/myco/releases/latest), or
   through [Zapstore](https://zapstore.dev/apps/app.myco).
-- **Updates:** Myco checks the official GitHub release daily while open and
+- **Updates:** Myco verifies publisher-signed Zapstore releases daily, including in the background, and
   announces newer stable versions in the app and, if allowed, in Android
   notifications. Settings → Software updates has **Check now** and an
   automatic-check switch. Checks pause in mesh-only mode. **View update** opens
-  the official release page; you choose whether to download and install.
+  the official Zapstore listing; you choose whether to download and install.
 - **Installing the APK:** Android asks whether your browser (or file app) may
   install apps. Allow it, install Myco, and you can turn it off again.
 - **Needs:** Android 10 or newer, on a 64-bit ARM phone. NFC is optional; QR
