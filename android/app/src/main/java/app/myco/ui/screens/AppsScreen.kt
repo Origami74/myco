@@ -74,6 +74,13 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -408,31 +415,54 @@ fun AppsScreen(
 @Composable
 private fun SearchField(query: String, onChange: (String) -> Unit) {
     val focusManager = LocalFocusManager.current
+    // A remote or keyboard moves focus through the field on its way to the
+    // grid; it must not pop the keyboard (or start a cursor blinking) just
+    // for passing by. In that mode the field is read-only until OK/Enter.
+    val keys = LocalInputModeManager.current.inputMode == InputMode.Keyboard
+    var editing by remember { mutableStateOf(false) }
     var focused by remember { mutableStateOf(false) }
-    // Set once the keyboard has been up for this field, so focus is dropped
-    // only when it closes, not in the moment between focus and keyboard.
+    // Set once the keyboard has been up for this field, so its closing is
+    // told apart from the moment between focus and keyboard.
     var keyboardShown by remember { mutableStateOf(false) }
     val imeVisible = WindowInsets.isImeVisible
+    // A focused, editable field blinks its cursor (two frames a second,
+    // forever) — so once typing is over, stop editing: a touch user loses
+    // focus, a remote keeps it here so Down still reaches the grid.
+    val doneTyping = {
+        keyboardShown = false
+        editing = false
+        if (!keys) focusManager.clearFocus()
+    }
     LaunchedEffect(focused, imeVisible) {
         when {
-            !focused -> keyboardShown = false
+            !focused -> { keyboardShown = false; editing = false }
             imeVisible -> keyboardShown = true
-            keyboardShown -> {
-                keyboardShown = false
-                focusManager.clearFocus()
-            }
+            keyboardShown -> doneTyping()
         }
     }
     OutlinedTextField(
         value = query,
         onValueChange = onChange,
         singleLine = true,
+        readOnly = keys && !editing,
         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
         placeholder = { Text("Search apps") },
         shape = RoundedCornerShape(16.dp),
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-        keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
-        modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused },
+        keyboardActions = KeyboardActions(onSearch = { doneTyping() }),
+        modifier = Modifier
+            .fillMaxWidth()
+            .onFocusChanged { focused = it.isFocused }
+            .onPreviewKeyEvent {
+                val ok = it.key == Key.DirectionCenter || it.key == Key.Enter ||
+                    it.key == Key.NumPadEnter
+                if (keys && !editing && ok) {
+                    if (it.type == KeyEventType.KeyUp) editing = true
+                    true
+                } else {
+                    false
+                }
+            },
     )
 }
 
