@@ -4831,12 +4831,21 @@ impl Content {
         // Always the embedded store's own figures — that is what takes up space
         // here. Nothing external is configurable yet, so neither flag is set;
         // they follow the configured backend once that lands.
+        //
+        // Called from `AppRuntime::state()` under the reducer lock, every
+        // second: the blob figures must not touch the disk. Until the store's
+        // first background walk lands they read as 0.
+        let blobs = self
+            .blobs_local
+            .as_ref()
+            .and_then(|b| b.try_stats())
+            .unwrap_or_default();
         CacheView {
             // The embedded store's own count, or nothing to count when a custom
             // relay has taken over — which the flag tells the screen to say.
             relay_events: self.relay_store.as_ref().map_or(0, |s| s.count() as u64),
-            blob_count: self.blobs_local.as_ref().map_or(0, |b| b.count() as u64),
-            used_bytes: self.blobs_local.as_ref().map_or(0, |b| b.total_bytes()),
+            blob_count: blobs.count as u64,
+            used_bytes: blobs.bytes,
             event_cache: self.event_cache.stats(),
             blob_cache: self.blob_cache.stats(),
             external_relay: self.relay_store.is_none(),
@@ -5213,6 +5222,14 @@ mod tests {
     use super::*;
     use nostr::nips::nip19::ToBech32;
     use nsite_deck::testing::build_test_site;
+
+    /// `cache_view` reads the blob figures without touching the disk, so they
+    /// read 0 until the store's first walk lands; wait for it here.
+    fn settle_blob_stats(content: &Content) {
+        if let Some(blobs) = &content.blobs_local {
+            blobs.stats();
+        }
+    }
 
     /// Removing a site that nobody has — stuck on "can't reach anyone" —
     /// makes its tile go away and keeps it away: a sync still in flight, or
@@ -6152,6 +6169,7 @@ mod tests {
         assert_eq!(js.content_type, "text/javascript; charset=utf-8");
 
         assert_eq!(content.cache_view().relay_events, 1);
+        settle_blob_stats(&content);
         assert_eq!(content.cache_view().blob_count, 2);
 
         // Framed response round-trips: header len → header JSON → body.
@@ -6192,6 +6210,7 @@ mod tests {
             );
         }
         assert_eq!(content.cache_view().relay_events, 2);
+        settle_blob_stats(&content);
         assert_eq!(content.cache_view().blob_count, 2);
 
         // Unpin the second site (no longer a kept app), then drop the cache.
