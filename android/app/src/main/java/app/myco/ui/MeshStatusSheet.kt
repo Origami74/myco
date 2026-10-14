@@ -59,12 +59,15 @@ import kotlinx.coroutines.delay
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MeshStatusSheet(state: AppState, meshEnabled: Boolean, onDismiss: () -> Unit) {
+fun MeshStatusSheet(meshEnabled: Boolean, onDismiss: () -> Unit) {
     val context = LocalContext.current
+    // The full snapshot, not the shell's projection: ping, up and seen are the
+    // very diagnostics the projection blanks.
+    val state by LocalLiveState.current
     val apWifi by ApRadio.wifi.collectAsState()
     val awareSupported = remember { AwareRadio.isSupported(context) }
 
-    // The shell's poll replaces `state` once a second, but two equal snapshots
+    // The shell's poll replaces the live state once a second, but two equal snapshots
     // don't recompose — and the ages on this panel are derived from the wall
     // clock, not from the snapshot, so they would freeze on a quiet mesh. This
     // ticker is what keeps "seen 4s" counting while nothing else changes.

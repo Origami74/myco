@@ -80,6 +80,7 @@ import app.myco.core.AppState
 import app.myco.core.CircleContact
 import app.myco.core.FileTransfer
 import app.myco.core.NativeActions
+import app.myco.core.forShell
 import app.myco.hotspot.TransferGate
 import app.myco.nfc.PairPresent
 import app.myco.onboarding.SetupNotice
@@ -108,7 +109,8 @@ import kotlinx.coroutines.withContext
  * The consumer shell: a bottom-nav app over four surfaces — **Apps** (the nsite
  * launcher), **Circle** (paired peers), **Settings**, and **Dev** (diagnostics).
  * The Rust `AppState` is polled once a second here and handed down to every tab,
- * so all screens share one read.
+ * so all screens share one read: the tabs get its [forShell] projection, and
+ * the diagnostics screens the full snapshot through [LocalLiveState].
  */
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
 
@@ -173,7 +175,20 @@ fun MycoApp(
     onDismissReceivedFile: () -> Unit = {},
     onOpenReceivedFile: (FileTransfer, Uri) -> Unit = { _, _ -> },
 ) {
-    var state by remember { mutableStateOf(client.state()) }
+    // Two views of one poll. `live` is the full latest snapshot, provided as
+    // [LocalLiveState] to the screens that draw per-second diagnostics. `state`
+    // is its [forShell] projection, handed to every screen: assigning an equal
+    // projection is a no-op under mutableStateOf's structural policy, so polls
+    // that only moved RTTs and counters recompose nothing but those readers.
+    // Seeded from one plain read, not from `live.value`: reading that here
+    // would subscribe this whole composable to every poll.
+    val initial = remember { client.state() }
+    val live = remember { mutableStateOf(initial) }
+    var state by remember { mutableStateOf(initial.forShell()) }
+    fun publish(full: AppState) {
+        live.value = full
+        state = full.forShell()
+    }
     // The 1 Hz loop below outlives any one value of the switch.
     val currentMeshEnabled by rememberUpdatedState(meshEnabled)
     // Developer mode gates the Dev tab; hoisted so toggling it rebuilds the nav bar.
@@ -195,8 +210,9 @@ fun MycoApp(
     // Circle members we already knew about — anything new means a fresh pairing.
     val knownCircle = remember { mutableStateOf(state.circle.map { it.npub }.toSet()) }
     val context = LocalContext.current
-    // Re-poll the native state each second off the main thread (it crosses JNI
-    // into the Rust core). Pure read — does not bump `rev`. Gated on STARTED:
+    // Re-poll the native state each second (every two on a low-RAM device) off
+    // the main thread (it crosses JNI into the Rust core). Pure read — does not
+    // bump `rev`. Gated on STARTED:
     // with the app backgrounded the UI can't show the result anyway, and the
     // 1Hz JNI wakeup was a measurable battery cost. repeatOnLifecycle cancels
     // the loop on onStop and restarts it (immediate first poll) on onStart.
@@ -204,15 +220,17 @@ fun MycoApp(
     // enabled transport) — drives the red dot on the Settings tab.
     var radioAlert by remember { mutableStateOf(false) }
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    val pollMs = remember { shellPollMs(context) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         lifecycleOwner.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
-                state = withContext(Dispatchers.IO) { client.state() }
+                val full = withContext(Dispatchers.IO) { client.state() }
+                publish(full)
                 bleExhausted = BleHealth.advertiserExhausted
                 radioAlert = withContext(Dispatchers.IO) {
-                    radioWarnings(context, state, currentMeshEnabled).isNotEmpty()
+                    radioWarnings(context, full, currentMeshEnabled).isNotEmpty()
                 }
-                delay(1000)
+                delay(pollMs)
             }
         }
     }
@@ -226,7 +244,7 @@ fun MycoApp(
         if (!PairPresent.presenting || PairPresent.hotspotActive) return@LaunchedEffect
         for (req in state.pendingPairRequests) {
             if (PairSecrets.consume(context, req.secret)) {
-                state = client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name))
+                publish(client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name)))
                 PairPresent.rotate(context, state.ownNpub, DeviceName.current(context, state.ownNpub))
             }
         }
@@ -310,6 +328,7 @@ fun MycoApp(
     Box(Modifier.fillMaxSize()) {
         androidx.compose.runtime.CompositionLocalProvider(
             LocalMeshControl provides MeshControl(meshEnabled, onMeshToggle),
+            LocalLiveState provides live,
         ) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbars) { SetupSnackbar(it) } },
@@ -407,7 +426,7 @@ fun MycoApp(
                         onReplayIntro = onReplayIntro,
                     )
                 }
-                composable("dev") { DevScreen(state, client) }
+                composable("dev") { DevScreen(client) }
                 composable("qr") {
                     QrScreen(
                         state = state,
@@ -431,11 +450,11 @@ fun MycoApp(
             },
             onAccept = {
                 dismissedFileOffers = dismissedFileOffers + it.id
-                state = client.dispatch(NativeActions.acceptFileTransfer(it.id))
+                publish(client.dispatch(NativeActions.acceptFileTransfer(it.id)))
             },
             onDeny = {
                 dismissedFileOffers = dismissedFileOffers + it.id
-                state = client.dispatch(NativeActions.declineFileTransfer(it.id))
+                publish(client.dispatch(NativeActions.declineFileTransfer(it.id)))
             },
         )
 
@@ -546,14 +565,14 @@ fun MycoApp(
                 state.fileTransfers
                     .filter { it.status == "cancelled" || it.status == "denied" }
                     .forEach { client.dispatch(NativeActions.forgetFileTransfer(it.id)) }
-                state = client.state()
+                publish(client.state())
                 pickedShareUris = emptyList()
                 sendFileNpub = null
                 onExternalShareDismissed()
             },
             onShare = { peer -> onShareToPeer(shareUris, peer) },
             onCancelTransfer = {
-                state = client.dispatch(NativeActions.cancelFileTransfer(it.id))
+                publish(client.dispatch(NativeActions.cancelFileTransfer(it.id)))
             },
         )
     }
@@ -565,8 +584,8 @@ fun MycoApp(
         state.pendingPairRequests.firstOrNull()?.let { req ->
             IncomingRequestDialog(
                 name = req.name.ifEmpty { "A nearby device" },
-                onAccept = { state = client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name)) },
-                onIgnore = { state = client.dispatch(NativeActions.declinePairRequest(req.npub)) },
+                onAccept = { publish(client.dispatch(NativeActions.acceptPairRequest(req.npub, req.name))) },
+                onIgnore = { publish(client.dispatch(NativeActions.declinePairRequest(req.npub))) },
             )
         }
     }
@@ -635,7 +654,7 @@ fun PeersPill(state: AppState) {
     var sheetOpen by remember { mutableStateOf(false) }
 
     if (sheetOpen) {
-        MeshStatusSheet(state, meshEnabled = mesh.enabled, onDismiss = { sheetOpen = false })
+        MeshStatusSheet(meshEnabled = mesh.enabled, onDismiss = { sheetOpen = false })
     }
 
     Surface(

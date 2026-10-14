@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The app no longer redraws every second while a phone is linked.** Ping,
+  last-heard and storage counters change on nearly every once-a-second
+  refresh, and every visible screen and app tile used to redraw with them.
+  Now only the screens that show those numbers update: the Dev tab, the mesh
+  status panel, and Settings › Storage and › Internet. On a slow TV box with
+  an accessibility service on, this was a stall of several seconds. Low-RAM
+  devices also refresh every two seconds instead of every one, and the Dev tab
+  no longer runs a second refresh of its own.
+
 ## [0.11.0] - 2026-10-13
 
 ### Added
