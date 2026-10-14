@@ -8,8 +8,8 @@
 //!
 //! The order matters, and it is NIP-5D's. Signature first, because an unsigned
 //! manifest's tags are whatever an attacker wrote. Then the manifest's own
-//! conformance, including the aggregate — free, and it decides identity. Blobs
-//! last, because they are the expensive part.
+//! conformance — free, and it decides identity. The artifact last, because it
+//! is the expensive part: fetched by its `x` hash and re-hashed here.
 
 use nsite_deck::sync::sha256_hex;
 
@@ -22,8 +22,9 @@ use crate::seams::BlobStore;
 pub struct ResolvedNapplet {
     /// The `d` identifier, or `""` for root and snapshot manifests.
     pub d_tag: String,
-    /// The verified aggregate — with `d_tag`, the napplet's identity.
-    pub aggregate: String,
+    /// The identity hash — the verified artifact hash, or a legacy manifest's
+    /// aggregate. With `d_tag`, the napplet's identity.
+    pub identity_hash: String,
     /// The verified `/index.html`, decoded as UTF-8.
     pub index_html: String,
     /// The parsed manifest the bytes came from.
@@ -31,9 +32,9 @@ pub struct ResolvedNapplet {
 }
 
 impl ResolvedNapplet {
-    /// The `(dTag, aggregateHash)` tuple, computed from verified bytes.
+    /// The `(dTag, identityHash)` tuple, computed from verified bytes.
     pub fn identity(&self) -> (&str, &str) {
-        (&self.d_tag, &self.aggregate)
+        (&self.d_tag, &self.identity_hash)
     }
 }
 
@@ -50,42 +51,34 @@ pub async fn resolve(event: nostr::Event, blobs: &dyn BlobStore) -> Result<Resol
         )
     })?;
 
-    // Parses and validates the manifest against NIP-5D: the kind, the
-    // single-file rule, the added tags, and the aggregate. Nothing that fails
+    // Parses and validates the manifest against NIP-5D: the kind, the `x`
+    // artifact tag, the `d` invariant and the description. Nothing that fails
     // there gets as far as a fetch.
     let manifest = NappletManifest::from_event(event)?;
-
-    let index = manifest.index_entry().ok_or_else(|| {
-        NappletError::new(
-            NappletErrorCode::MissingIndex,
-            "manifest lists no /index.html",
-        )
-    })?;
+    let artifact = manifest.artifact.clone();
 
     let bytes = blobs
-        .get(&index.sha256)
+        .get(&artifact)
         .await
         .map_err(|e| {
             NappletError::new(
                 NappletErrorCode::BlobUnavailable,
-                format!("fetching blob {} failed: {e}", index.sha256),
+                format!("fetching artifact {artifact} failed: {e}"),
             )
         })?
         .ok_or_else(|| {
             NappletError::new(
                 NappletErrorCode::BlobUnavailable,
-                format!("no source served blob {}", index.sha256),
+                format!("no source served artifact {artifact}"),
             )
         })?;
 
+    // NIP-5D Identity, step 3: sha256(blob) must equal the `x` value.
     let got = sha256_hex(&bytes);
-    if !got.eq_ignore_ascii_case(&index.sha256) {
+    if !got.eq_ignore_ascii_case(&artifact) {
         return Err(NappletError::new(
             NappletErrorCode::BlobHashMismatch,
-            format!(
-                "blob for {} hashes to {got}, manifest says {}",
-                index.path, index.sha256
-            ),
+            format!("artifact hashes to {got}, manifest says {artifact}"),
         ));
     }
 
@@ -97,11 +90,11 @@ pub async fn resolve(event: nostr::Event, blobs: &dyn BlobStore) -> Result<Resol
         )
     })?;
 
-    let (d_tag, aggregate) = manifest.identity();
-    let (d_tag, aggregate) = (d_tag.to_string(), aggregate.to_string());
+    let (d_tag, identity_hash) = manifest.identity();
+    let (d_tag, identity_hash) = (d_tag.to_string(), identity_hash.to_string());
     Ok(ResolvedNapplet {
         d_tag,
-        aggregate,
+        identity_hash,
         index_html,
         manifest,
     })

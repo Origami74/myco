@@ -32,6 +32,8 @@ mod control_client;
 // the host it is exercised only by its own tests, so it reads as dead there.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod gossip;
+// Every HTTP client, held to where it may connect.
+mod http;
 mod identity_store;
 mod intent;
 mod ip_source;
@@ -48,6 +50,9 @@ mod mesh_relay;
 // holds one session per open napplet window. See
 // `docs/design/napplet/napplet-runtime.md`.
 mod napplet;
+// NAP-MESH `mesh.blobs`: which blobs the Circle's Blossom stores hold, asked
+// with a bounded, remembered `HEAD` per peer over the mesh.
+mod mesh_blobs;
 // NAP-UPLOAD: a napplet's bytes onto the user's Blossom servers, signed as
 // the user. Spec: napplet/naps PR #33; Myco's choices in
 // `docs/design/napplet/NAP-UPLOAD.md`.
@@ -111,6 +116,10 @@ mod update_gate;
 // installed only on Android, so its fns read as dead on the host build.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod tun_bridge;
+// Reads and writes the VpnService's TUN fd natively, feeding `tun_bridge`.
+// Started by the Android VpnService (via tun_bridge_jni).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod tun_pump;
 // System-wide `.fips` DNS interception; driven by the TUN pump on Android.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod dns_intercept;
@@ -123,6 +132,10 @@ mod socks_exit;
 // the AP/LAN lane). Android-only consumer.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod udp_fd_bridge;
+// Holds USB accessory descriptors from Kotlin until a node is armed to take
+// them. Android-only consumer.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod usb_bridge;
 
 #[cfg(target_os = "android")]
 mod jni_abi;
@@ -135,6 +148,9 @@ mod aware_bridge_jni;
 
 #[cfg(target_os = "android")]
 mod tun_bridge_jni;
+
+#[cfg(target_os = "android")]
+mod usb_bridge_jni;
 
 pub use action::NativeAppAction;
 pub use runtime::AppRuntime;

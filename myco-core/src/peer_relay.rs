@@ -201,6 +201,16 @@ impl PeerRelayPool {
         self.dial_backoff.lock().unwrap().remove(npub);
     }
 
+    /// Forget every peer's dial backoff — called when the set of direct mesh
+    /// peers changes. A Circle member is often reached *through* a direct
+    /// peer rather than as one, so its own reconnect edge never fires; a
+    /// change in who is directly linked is the signal that routes to it may
+    /// have appeared, and a backoff armed while they were missing (up to
+    /// [`BACKOFF_CAP`]) would otherwise hold the redial back long after.
+    pub fn reset_all_backoff(&self) {
+        self.dial_backoff.lock().unwrap().clear();
+    }
+
     /// Ensure `npub` has a running actor (which lazily connects) at `url`, without
     /// sending anything. The runtime's keepwarm loop calls this for every Circle
     /// member so a dropped connection is respawned promptly — not lazily on the next
@@ -729,6 +739,21 @@ mod tests {
             );
         }
         pool.reset_backoff("peerB");
+        assert!(pool.dial_backoff.lock().unwrap().is_empty());
+    }
+
+    /// A change in direct mesh peers clears every peer's backoff, not just the
+    /// one that reconnected: Circle members reached through a direct peer
+    /// have no reconnect edge of their own.
+    #[test]
+    fn reset_all_backoff_clears_every_peer() {
+        let pool = PeerRelayPool::new();
+        for _ in 0..5 {
+            record_dial_failure(&pool.dial_backoff, "peerB");
+            record_dial_failure(&pool.dial_backoff, "peerC");
+        }
+        assert_eq!(pool.dial_backoff.lock().unwrap().len(), 2);
+        pool.reset_all_backoff();
         assert!(pool.dial_backoff.lock().unwrap().is_empty());
     }
 

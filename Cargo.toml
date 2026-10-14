@@ -61,6 +61,9 @@ thiserror = "2"
 # IP online-fallback sync (P2 M3): query public relays (WS) + pull blobs from
 # public Blossom (HTTPS) to side-load a pasted nsite link over normal internet.
 # rustls (not native-tls) so it cross-compiles cleanly for Android.
+# Already in the tree through fips (mdns-sd); read for this device's own
+# interface addresses (`myco-core/src/http.rs`).
+if-addrs = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 # The internet relay pool: one shared, multiplexed connection per relay.

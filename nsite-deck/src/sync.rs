@@ -172,6 +172,15 @@ async fn fetch_blobs(
     let mut present = 0usize;
     progress(present, total);
 
+    // Where to look online: the manifest's own hints, then the servers the
+    // author lists — an app published only to its author's Blossom is found.
+    let mut servers = manifest.servers.clone();
+    for server in source.author_servers(&manifest.author).await {
+        if !servers.contains(&server) {
+            servers.push(server);
+        }
+    }
+
     for hash in &needed {
         if blobs.has(hash).await {
             present += 1;
@@ -183,7 +192,7 @@ async fn fetch_blobs(
         // "incomplete" mid-download.
         let mut fetched: Option<Vec<u8>> = None;
         for _ in 0..BLOB_FETCH_RETRIES {
-            match source.fetch_blob(hash, &manifest.servers).await {
+            match source.fetch_blob(hash, &servers).await {
                 // Self-authenticating: only accept bytes that hash to the name.
                 Ok(Some(bytes)) if sha256_hex(&bytes) == *hash => {
                     fetched = Some(bytes);

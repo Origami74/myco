@@ -1,7 +1,7 @@
 //! A signed fixture napplet, and the knobs to break it one way at a time.
 //!
 //! Hand-rolled in Rust rather than produced by `@napplet/vite-plugin`: the
-//! aggregate has to match either way, and a fixture that needs a JS toolchain to
+//! hashes have to match either way, and a fixture that needs a JS toolchain to
 //! regenerate is a fixture that rots. The plugin's real output gets checked
 //! against this when the render path lands — that is a conformance question, not
 //! a verification one.
@@ -49,32 +49,40 @@ impl TestNapplet {
     }
 }
 
-/// What aggregate `x` tag the generated manifest carries.
+/// What hash tag the generated manifest carries: the artifact `x` for a
+/// current manifest, the aggregate `x` for a [legacy](NappletBuilder::legacy)
+/// one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FixtureAggregate {
-    /// The correct aggregate over the manifest's `path` tags.
+    /// The correct hash over the manifest's file.
     #[default]
     Valid,
-    /// A well-formed aggregate over a different file set.
+    /// A well-formed hash over different bytes.
     Corrupt,
-    /// No aggregate tag. Fatal for a napplet — the aggregate is its identity.
+    /// No hash tag. Fatal for a current manifest (its `x` is the identity);
+    /// a legacy one recomputes its aggregate from the `path` tags.
     Omitted,
 }
 
-/// Builds signed NIP-5D fixtures. Defaults to a valid, single-file, named
-/// napplet; each method breaks exactly one thing, so a test that rejects proves
-/// *which* guard rejected.
+/// Builds signed NIP-5D fixtures. Defaults to a valid, current-schema, named
+/// napplet; each method breaks exactly one thing, so a test that rejects
+/// proves *which* guard rejected.
 pub struct NappletBuilder {
     keys: Keys,
     files: Vec<(String, Vec<u8>)>,
     kind: u16,
     d_tag: Option<String>,
     title: Option<String>,
+    description: String,
     requires: Vec<String>,
+    optional: Vec<String>,
     archetypes: Vec<(String, String)>,
+    icon: Option<(String, String)>,
+    extra_tags: Vec<Vec<String>>,
     config: Option<String>,
     servers: Vec<String>,
     aggregate: FixtureAggregate,
+    legacy: bool,
     break_signature: bool,
     created_at: Option<u64>,
 }
@@ -87,11 +95,16 @@ impl Default for NappletBuilder {
             kind: KIND_NAMED,
             d_tag: Some("fixture".into()),
             title: Some("Fixture Napplet".into()),
+            description: "A fixture napplet for tests.".into(),
             requires: vec!["shell".into(), "relay".into()],
+            optional: Vec::new(),
             archetypes: Vec::new(),
+            icon: None,
+            extra_tags: Vec::new(),
             config: None,
             servers: Vec::new(),
             aggregate: FixtureAggregate::Valid,
+            legacy: false,
             break_signature: false,
             created_at: None,
         }
@@ -118,9 +131,16 @@ impl NappletBuilder {
         self
     }
 
-    /// Add a file — the way to build the multi-file bundle a napplet may not be.
+    /// Add a file — the way to build the multi-file bundle a napplet may not
+    /// be. Only a legacy manifest can say so; a current one names one file.
     pub fn file(mut self, path: &str, bytes: &[u8]) -> Self {
         self.files.push((path.to_string(), bytes.to_vec()));
+        self
+    }
+
+    /// Publish in the legacy path/aggregate schema instead of the current one.
+    pub fn legacy(mut self) -> Self {
+        self.legacy = true;
         self
     }
 
@@ -139,14 +159,42 @@ impl NappletBuilder {
         self
     }
 
+    /// Required domains: `R` tags, or `requires` on a legacy manifest.
     pub fn requires(mut self, domains: &[&str]) -> Self {
         self.requires = domains.iter().map(|d| (*d).to_string()).collect();
         self
     }
 
+    /// Optional domains: `O` tags. A legacy manifest cannot say this.
+    pub fn optional(mut self, domains: &[&str]) -> Self {
+        self.optional = domains.iter().map(|d| (*d).to_string()).collect();
+        self
+    }
+
+    /// A role and a convention it accepts: `z` + `i` tags, or one combined
+    /// `archetype` tag on a legacy manifest.
     pub fn archetype(mut self, slug: &str, convention: &str) -> Self {
         self.archetypes
             .push((slug.to_string(), convention.to_string()));
+        self
+    }
+
+    /// An `["icon", <sha256>, <mime>]` tag.
+    pub fn icon(mut self, sha256: &str, mime: &str) -> Self {
+        self.icon = Some((sha256.to_string(), mime.to_string()));
+        self
+    }
+
+    /// Any further tag, verbatim — unknown tags, malformed ones.
+    pub fn tag(mut self, tag: &[&str]) -> Self {
+        self.extra_tags
+            .push(tag.iter().map(|s| (*s).to_string()).collect());
+        self
+    }
+
+    /// The event content — the description of a current manifest.
+    pub fn description(mut self, text: &str) -> Self {
+        self.description = text.to_string();
         self
     }
 
@@ -166,8 +214,6 @@ impl NappletBuilder {
         self
     }
 
-    /// Tamper with the event after signing, so its id and signature no longer
-    /// cover its contents.
     /// Sign with this `created_at` instead of now — for two versions of one
     /// napplet that must order deterministically.
     pub fn created_at(mut self, secs: u64) -> Self {
@@ -180,6 +226,8 @@ impl NappletBuilder {
         self
     }
 
+    /// Tamper with the event after signing, so its id and signature no longer
+    /// cover its contents.
     pub fn break_signature(mut self) -> Self {
         self.break_signature = true;
         self
@@ -191,24 +239,20 @@ impl NappletBuilder {
             tags.push(Tag::identifier(d.clone()));
         }
 
-        let mut blobs = Vec::new();
-        let mut entries = Vec::new();
-        for (path, bytes) in &self.files {
-            let hash = sha256_hex(bytes);
-            tags.push(Tag::parse(["path", path, hash.as_str()]).expect("path tag"));
-            entries.push(PathEntry {
-                path: path.clone(),
-                sha256: hash.clone(),
-            });
-            blobs.push((hash, bytes.clone()));
-        }
+        let blobs: Vec<(String, Vec<u8>)> = self
+            .files
+            .iter()
+            .map(|(_, bytes)| (sha256_hex(bytes), bytes.clone()))
+            .collect();
 
-        for domain in &self.requires {
-            tags.push(Tag::parse(["requires", domain]).expect("requires tag"));
-        }
-        for (slug, convention) in &self.archetypes {
-            tags.push(Tag::parse(["archetype", slug, convention]).expect("archetype tag"));
-        }
+        let content = if self.legacy {
+            self.legacy_tags(&mut tags);
+            String::new()
+        } else {
+            self.current_tags(&mut tags, &blobs);
+            self.description.clone()
+        };
+
         if let Some(schema) = &self.config {
             tags.push(Tag::parse(["config", schema]).expect("config tag"));
         }
@@ -218,7 +262,82 @@ impl NappletBuilder {
         if let Some(title) = &self.title {
             tags.push(Tag::parse(["title", title]).expect("title tag"));
         }
+        for tag in &self.extra_tags {
+            tags.push(Tag::parse(tag.clone()).expect("extra tag"));
+        }
 
+        let mut builder = EventBuilder::new(Kind::from(self.kind), content).tags(tags);
+        if let Some(at) = self.created_at {
+            builder = builder.custom_created_at(nostr::Timestamp::from(at));
+        }
+        let manifest = builder.sign_with_keys(&self.keys).expect("sign manifest");
+
+        let manifest = if self.break_signature {
+            tamper(&manifest)
+        } else {
+            manifest
+        };
+
+        TestNapplet {
+            author: self.keys.public_key(),
+            manifest,
+            blobs,
+        }
+    }
+}
+
+impl NappletBuilder {
+    fn current_tags(&self, tags: &mut Vec<Tag>, blobs: &[(String, Vec<u8>)]) {
+        // The artifact is the one file; a fixture with several names the
+        // first, which is all a current manifest can express.
+        let artifact = blobs.first().map(|(h, _)| h.clone()).unwrap_or_default();
+        match self.aggregate {
+            FixtureAggregate::Omitted => {}
+            FixtureAggregate::Valid => {
+                tags.push(Tag::parse(["x", artifact.as_str()]).expect("x tag"))
+            }
+            FixtureAggregate::Corrupt => {
+                let other = sha256_hex(b"bytes the manifest does not describe");
+                tags.push(Tag::parse(["x", other.as_str()]).expect("x tag"));
+            }
+        }
+        for domain in &self.requires {
+            tags.push(Tag::parse(["R", domain]).expect("R tag"));
+        }
+        for domain in &self.optional {
+            tags.push(Tag::parse(["O", domain]).expect("O tag"));
+        }
+        let mut roles: Vec<&str> = Vec::new();
+        for (slug, convention) in &self.archetypes {
+            if !roles.contains(&slug.as_str()) {
+                roles.push(slug);
+                tags.push(Tag::parse(["z", slug]).expect("z tag"));
+            }
+            tags.push(Tag::parse(["i", convention]).expect("i tag"));
+        }
+        if let Some((sha, mime)) = &self.icon {
+            tags.push(Tag::parse(["icon", sha, mime]).expect("icon tag"));
+        }
+    }
+
+    // LEGACY NIP-5D (path/aggregate): remove after 2026-12-31
+    fn legacy_tags(&self, tags: &mut Vec<Tag>) {
+        let mut entries = Vec::new();
+        for (path, bytes) in &self.files {
+            let hash = sha256_hex(bytes);
+            tags.push(Tag::parse(["path", path, hash.as_str()]).expect("path tag"));
+            entries.push(PathEntry {
+                path: path.clone(),
+                sha256: hash,
+            });
+        }
+        for domain in self.requires.iter().chain(&self.optional) {
+            tags.push(Tag::parse(["requires", domain]).expect("requires tag"));
+        }
+        for (slug, convention) in &self.archetypes {
+            tags.push(Tag::parse(["archetype", slug, convention]).expect("archetype tag"));
+        }
+        tags.push(Tag::parse(["description", self.description.as_str()]).expect("description"));
         match self.aggregate {
             FixtureAggregate::Omitted => {}
             FixtureAggregate::Valid => {
@@ -236,24 +355,6 @@ impl NappletBuilder {
                 let hash = compute_aggregate_hash(&other);
                 tags.push(Tag::parse(["x", hash.as_str(), "aggregate"]).expect("aggregate tag"));
             }
-        }
-
-        let mut builder = EventBuilder::new(Kind::from(self.kind), "").tags(tags);
-        if let Some(at) = self.created_at {
-            builder = builder.custom_created_at(nostr::Timestamp::from(at));
-        }
-        let manifest = builder.sign_with_keys(&self.keys).expect("sign manifest");
-
-        let manifest = if self.break_signature {
-            tamper(&manifest)
-        } else {
-            manifest
-        };
-
-        TestNapplet {
-            author: self.keys.public_key(),
-            manifest,
-            blobs,
         }
     }
 }
@@ -776,7 +877,9 @@ impl crate::seams::LaneTransport for OutboxFixture {
 
 /// A [`MeshSink`](crate::seams::MeshSink) with no mesh behind it: stores a
 /// publish locally and records the hop budget it came with, records every
-/// pull, and reports whatever reach a test sets.
+/// pull, and reports whatever reach a test sets. It answers `mesh.blobs` from
+/// a table a test sets with [`MemMesh::set_blob_holders`], and not at all
+/// until then.
 pub struct MemMesh {
     store: std::sync::Arc<dyn crate::seams::RelayBackend>,
     limits: std::sync::Mutex<crate::seams::MeshLimits>,
@@ -784,6 +887,8 @@ pub struct MemMesh {
     published: std::sync::Mutex<Vec<(Event, u8)>>,
     rebroadcast: std::sync::Mutex<Vec<(Event, u8)>>,
     pulled: std::sync::Mutex<Vec<(Vec<serde_json::Value>, u8)>>,
+    blob_holders: std::sync::Mutex<Option<crate::seams::BlobReach>>,
+    blob_asks: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
 impl MemMesh {
@@ -798,7 +903,23 @@ impl MemMesh {
             published: std::sync::Mutex::new(Vec::new()),
             rebroadcast: std::sync::Mutex::new(Vec::new()),
             pulled: std::sync::Mutex::new(Vec::new()),
+            blob_holders: std::sync::Mutex::new(None),
+            blob_asks: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Answer `mesh.blobs` as if `peers` peers were asked and `held` lists
+    /// how many of them hold each hash; any other hash is held by none.
+    pub fn set_blob_holders(&self, peers: usize, held: &[(&str, usize)]) {
+        *self.blob_holders.lock().unwrap() = Some(crate::seams::BlobReach {
+            peers,
+            holders: held.iter().map(|(h, n)| (h.to_string(), *n)).collect(),
+        });
+    }
+
+    /// Every `mesh.blobs` ask that reached the seam, with its hashes.
+    pub fn blob_asks(&self) -> Vec<Vec<String>> {
+        self.blob_asks.lock().unwrap().clone()
     }
 
     /// Every event passed on as it is ([`MeshSink::rebroadcast`]), with its
@@ -855,6 +976,18 @@ impl crate::seams::MeshSink for MemMesh {
     async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<()> {
         self.pulled.lock().unwrap().push((filters, ttl));
         Ok(())
+    }
+
+    async fn blob_holders(&self, hashes: &[String]) -> Option<crate::seams::BlobReach> {
+        let table = self.blob_holders.lock().unwrap().clone()?;
+        self.blob_asks.lock().unwrap().push(hashes.to_vec());
+        Some(crate::seams::BlobReach {
+            peers: table.peers,
+            holders: hashes
+                .iter()
+                .map(|h| (h.clone(), table.holders.get(h).copied().unwrap_or(0)))
+                .collect(),
+        })
     }
 }
 

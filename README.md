@@ -28,6 +28,8 @@ with no signal. Once you have it, you can hand it on to the next person.
   home-screen icon.
 - **Pass it on.** The phone that received it can share it with someone else,
   even when you have left.
+- **Link over a USB cable**, phone to phone or phone to a desktop running
+  fips, for the fastest transfer ([how](docs/how-to/connect-over-usb.md)).
 
 All of this is tested with every phone in airplane mode and Bluetooth on
 ([the runbook](docs/how-to/run-two-device-demo.md)).
@@ -221,8 +223,8 @@ as a picture to post, to your Blossom servers, signed as you.
 Every phone runs its own Nostr relay and Blossom file store, and keeps the
 signed files of every app it holds. That is why a phone that got an app can
 hand it on. Phones connect over a [FIPS](https://github.com/jmcorgan/fips)
-mesh: Bluetooth (L2CAP), Wi-Fi Aware, the local network, or the internet when
-there is one. Links are encrypted. The Circle — the people you paired with —
+mesh: Bluetooth (L2CAP), Wi-Fi Aware, a USB cable, the local network, or the
+internet when there is one. Links are encrypted. The Circle — the people you paired with —
 decides who may pull from your phone.
 
 The reusable content layer (relay, Blossom, gateway, sync) is the

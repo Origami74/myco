@@ -342,6 +342,9 @@ class MainActivity : ComponentActivity() {
         // Activity recreation. The Wi-Fi watch always runs; the browse and
         // advert follow the Settings "Network" switch.
         ApRadio.ensureStarted(this, enabled = prefs.getBoolean(PREF_LAN, true))
+        // Phones plugged in while this phone is USB host: stock Android
+        // offers an MTP device to no app, so Myco listens for it itself.
+        app.myco.usb.UsbHostWatcher.ensureStarted(this)
 
         // BLE and Wi-Fi Aware are ON by default (Aware only where the hardware
         // supports it), and remembered thereafter.
@@ -1031,6 +1034,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        Thread { runCatching { refreshPinnedNappletIcons() } }.start()
         // A napplet or nsite opened from here finds the WebView renderer up.
         // Re-armed on every return: it is let go while Myco is out of sight.
         WebViewWarmer.warmWhenIdle(this)
@@ -1282,8 +1286,20 @@ class MainActivity : ComponentActivity() {
                 .setIcon(icon)
                 .setIntent(nsiteIntent(hostLabel, title))
                 .build()
-            runOnUiThread { sm.requestPinShortcut(shortcut, null) }
+            runOnUiThread { requestPin(sm, shortcut) }
         }.start()
+    }
+
+    /**
+     * Ask the launcher to pin [shortcut], from the UI thread once its icon is
+     * read. By then Myco may be in the background, where the launcher refuses
+     * with an exception; the user tapped "Add to home screen" and is told.
+     */
+    private fun requestPin(sm: ShortcutManager, shortcut: ShortcutInfo) {
+        if (isFinishing || isDestroyed) return
+        runCatching { sm.requestPinShortcut(shortcut, null) }.onFailure {
+            Toast.makeText(this, "Couldn't add to the home screen", Toast.LENGTH_SHORT).show()
+        }
     }
 
     /**
@@ -1297,10 +1313,11 @@ class MainActivity : ComponentActivity() {
     /**
      * Pin a napplet to the home screen.
      *
-     * The icon is drawn rather than fetched: a napplet is a single self-contained
-     * file with no `/favicon.ico` to pull, so the launcher gets the same mark the
-     * Apps grid shows — its colour and its initial — instead of a generic Myco
-     * icon that would make every napplet look identical on the home screen.
+     * The icon is the manifest's own (`["icon", …]`, verified — see
+     * [NappletIcons]) when it has one, composed full-bleed like an nsite's
+     * favicon. Without one it is drawn: the same mark the Apps grid shows —
+     * its colour and its initial — rather than a generic Myco icon that would
+     * make every napplet look identical on the home screen.
      */
     private fun pinNappletToHomeScreen(pointer: String, title: String) {
         val sm = getSystemService(ShortcutManager::class.java)
@@ -1308,14 +1325,55 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Home-screen pinning isn't supported here", Toast.LENGTH_SHORT).show()
             return
         }
+        Thread {
+            val shortcut = runCatching { nappletShortcut(pointer, title) }.getOrNull() ?: return@Thread
+            runOnUiThread { requestPin(sm, shortcut) }
+        }.start()
+    }
+
+    /** A napplet's home-screen shortcut. Blocking — reads the icon. */
+    private fun nappletShortcut(pointer: String, title: String): ShortcutInfo {
         val label = title.ifEmpty { "napplet" }
-        val shortcut = ShortcutInfo.Builder(this, "napplet:$pointer")
+        val icon = NappletIcons.fetch(MycoCore.client(this), pointer)
+            ?.let { adaptiveShortcutIcon(it) }
+            ?: nappletShortcutIcon(pointer, label)
+        return ShortcutInfo.Builder(this, "napplet:$pointer")
             .setShortLabel(label)
             .setLongLabel(label)
-            .setIcon(Icon.createWithAdaptiveBitmap(nappletShortcutIcon(pointer, label)))
+            .setIcon(Icon.createWithAdaptiveBitmap(icon))
             .setIntent(nappletIntent(pointer, title))
             .build()
-        sm.requestPinShortcut(shortcut, null)
+    }
+
+    /**
+     * Give napplet shortcuts already on the home screen the manifest's icon —
+     * those pinned before Myco read icons, or before an update brought one.
+     * A launcher keeps a pinned shortcut's icon until it is updated, and an
+     * update by the same id is all it takes. Background thread only.
+     *
+     * Each shortcut is rewritten only when its icon differs from the one this
+     * process last gave it, so a resume with nothing new costs a hash per
+     * shortcut and pushes nothing to the launcher.
+     */
+    private fun refreshPinnedNappletIcons() {
+        val sm = getSystemService(ShortcutManager::class.java) ?: return
+        val client = MycoCore.client(this)
+        val pinned = runCatching { sm.pinnedShortcuts }.getOrDefault(emptyList())
+            .filter { it.id.startsWith("napplet:") }
+        val applied = mutableListOf<Pair<String, String>>()
+        val updated = pinned.mapNotNull { old ->
+            val pointer = old.id.removePrefix("napplet:")
+            val icon = NappletIcons.fetchKeyed(client, pointer) ?: return@mapNotNull null
+            if (shortcutIconHashes[old.id] == icon.sha256) return@mapNotNull null
+            applied += old.id to icon.sha256
+            ShortcutInfo.Builder(this, old.id)
+                .setShortLabel(old.shortLabel ?: "napplet")
+                .setIcon(Icon.createWithAdaptiveBitmap(adaptiveShortcutIcon(icon.bitmap)))
+                .build()
+        }
+        if (updated.isNotEmpty() && runCatching { sm.updateShortcuts(updated) }.isSuccess) {
+            shortcutIconHashes.putAll(applied)
+        }
     }
 
     /**
@@ -1654,6 +1712,12 @@ class MainActivity : ComponentActivity() {
 
         /** How often the setup popup looks at the tunnel while it waits for it. */
         private const val TUNNEL_POLL_MS = 250L
+
+        /**
+         * The icon hash each pinned napplet shortcut was last given, by
+         * shortcut id — for this process, so a resume rewrites only what changed.
+         */
+        private val shortcutIconHashes = java.util.concurrent.ConcurrentHashMap<String, String>()
 
         /**
          * Set once the setup popup has run to the end (any end), or launch

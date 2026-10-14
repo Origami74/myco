@@ -71,16 +71,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.myco.NappletIcons
 import app.myco.NsiteIcons
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.LibraryItem
 import app.myco.core.LibraryKind
+import app.myco.core.MycoCore
 import app.myco.core.NappletAddress
 import app.myco.core.NappletReview
 import app.myco.core.NativeActions
@@ -179,6 +182,7 @@ fun AppsScreen(
                     onLongClick = { sheetFor = entry.site },
                 )
                 is AppEntry.Napplet -> NappletTile(
+                    client = client,
                     item = entry.item,
                     // Unknown counts as ready: the status is computed a moment
                     // after startup, and a tile that dims for that moment reads
@@ -273,6 +277,7 @@ fun AppsScreen(
         val item = state.library.firstOrNull { it.nappletPointer == picked.nappletPointer } ?: picked
         ModalBottomSheet(onDismissRequest = { nappletSheetFor = null }) {
             NappletSheet(
+                client = client,
                 item = item,
                 onManagePermissions = {
                     nappletSheetFor = null
@@ -557,6 +562,7 @@ private sealed interface AppEntry {
  */
 @Composable
 private fun NappletSheet(
+    client: AppCoreClient,
     item: LibraryItem,
     onManagePermissions: () -> Unit,
     onOpen: () -> Unit,
@@ -566,20 +572,34 @@ private fun NappletSheet(
     onReload: () -> Unit,
     onRemove: () -> Unit,
 ) {
+    var icon by remember(item.nappletPointer) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(item.nappletPointer) {
+        icon = withContext(Dispatchers.IO) { NappletIcons.fetch(client, item.nappletPointer) }
+    }
     Column(modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            val bmp = icon
             Box(
                 modifier = Modifier
                     .size(44.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(tileColorFor(item.nappletPointer)),
+                    .background(if (bmp == null) tileColorFor(item.nappletPointer) else Color.White),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    item.title.take(1).uppercase().ifEmpty { "N" },
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                )
+                if (bmp != null) {
+                    Image(
+                        bmp.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Text(
+                        item.title.take(1).uppercase().ifEmpty { "N" },
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
             Spacer(Modifier.size(12.dp))
             Column {
@@ -663,6 +683,7 @@ private fun PermissionsSheet(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun NappletTile(
+    client: AppCoreClient,
     item: LibraryItem,
     status: app.myco.core.NappletStatus?,
     modifier: Modifier = Modifier,
@@ -670,22 +691,43 @@ private fun NappletTile(
     onLongClick: () -> Unit,
 ) {
     val ready = status?.ready ?: true
+    // The manifest's icon, once its verified bytes are on the phone. Re-read
+    // when readiness flips — an install lands the icon with the app — and
+    // when the served version's icon hash changes, as an update can.
+    val iconHash = status?.icon.orEmpty()
+    var icon by remember(item.nappletPointer) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(item.nappletPointer, ready, iconHash) {
+        icon = withContext(Dispatchers.IO) { NappletIcons.fetch(client, item.nappletPointer) }
+    }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
+        val bmp = icon
         LauncherIcon(
-            background = tileColorFor(item.nappletPointer),
+            // An icon fills the disc edge to edge, as an adaptive launcher
+            // icon does; without one, the letter on the pointer's colour.
+            background = if (bmp == null) tileColorFor(item.nappletPointer) else Color.White,
+            outlined = bmp != null,
             // Dimmed like an nsite that is not downloaded: the app is in the
             // Library but not on the phone — after a cache wipe, say.
             alpha = if (ready) 1f else 0.35f,
             content = {
-                Text(
-                    item.title.take(1).uppercase().ifEmpty { "N" },
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 20.sp,
-                )
+                if (bmp != null) {
+                    Image(
+                        bmp.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Text(
+                        item.title.take(1).uppercase().ifEmpty { "N" },
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 20.sp,
+                    )
+                }
             },
         )
         Spacer(Modifier.height(6.dp))
@@ -971,6 +1013,19 @@ internal fun NappletReviewSheet(
 
                 Spacer(Modifier.height(20.dp))
 
+                // NIP-5D: a required domain the shell can't expose means the
+                // app may not fully work. Say so; installing is still the
+                // person's call.
+                if (review.unsupported.isNotEmpty()) {
+                    Text(
+                        "Myco can't give this app everything it needs " +
+                            "(${review.unsupported.joinToString(", ")}), so parts of it may not work.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
+
                 // What is listed is what is granted — including the defaults every
                 // app gets. A default that was not shown would be a grant nobody
                 // made, and one of them lets an app post as you.
@@ -993,7 +1048,7 @@ internal fun NappletReviewSheet(
                     )
                     Spacer(Modifier.height(10.dp))
                     review.grants.forEach { domain ->
-                        CapabilityRow(domain)
+                        CapabilityRow(domain, optional = domain in review.optional)
                         Spacer(Modifier.height(10.dp))
                     }
                     Spacer(Modifier.height(8.dp))
@@ -1088,20 +1143,42 @@ internal fun reviewAnswer(review: NappletReview): ReviewAnswer = when {
 /** The app's mark on the review sheet, with a check once it has been added. */
 @Composable
 private fun NappletMark(review: NappletReview, added: Boolean) {
+    // The manifest's icon: fetched with it for this sheet (by hash), or the
+    // installed one for an update. Letter on colour until then, or without.
+    val context = LocalContext.current
+    var icon by remember(review.pointer, review.iconSha256) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(review.pointer, review.iconSha256) {
+        icon = withContext(Dispatchers.IO) {
+            val client = MycoCore.client(context)
+            review.iconSha256.takeIf { it.isNotEmpty() }
+                ?.let { NappletIcons.fetchByHash(client, it, review.iconMime) }
+                ?: NappletIcons.fetch(client, review.pointer)
+        }
+    }
     Box {
+        val bmp = icon
         Box(
             modifier = Modifier
                 .size(84.dp)
                 .clip(RoundedCornerShape(22.dp))
-                .background(tileColorFor(review.pointer)),
+                .background(if (bmp == null) tileColorFor(review.pointer) else Color.White),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                review.title.take(1).uppercase().ifEmpty { "N" },
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                style = MaterialTheme.typography.headlineMedium,
-            )
+            if (bmp != null) {
+                Image(
+                    bmp.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Text(
+                    review.title.take(1).uppercase().ifEmpty { "N" },
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.headlineMedium,
+                )
+            }
         }
         if (added) {
             Icon(
@@ -1166,11 +1243,17 @@ private fun capabilityWording(domain: String): Capability = when (domain) {
 
 /** One capability, as a title with its meaning underneath. */
 @Composable
-private fun CapabilityRow(domain: String, dimmed: Boolean = false, modifier: Modifier = Modifier) {
+private fun CapabilityRow(
+    domain: String,
+    dimmed: Boolean = false,
+    optional: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
     val c = capabilityWording(domain)
     Column(modifier = modifier) {
         Text(
-            c.title,
+            // The app declared it can do without this one (NIP-5D `O`).
+            if (optional) "${c.title} (optional)" else c.title,
             style = MaterialTheme.typography.bodyLarge,
             fontWeight = FontWeight.SemiBold,
             color = if (dimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,

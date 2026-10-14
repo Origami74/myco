@@ -178,6 +178,13 @@ pub trait PeerSource: Send + Sync {
         sha256_hex: &str,
         servers: &[String],
     ) -> anyhow::Result<Option<Vec<u8>>>;
+
+    /// Blob servers `author` itself says it uses (BUD-03's kind 10063), as
+    /// this source knows them — asked after the manifest's own `["server",…]`
+    /// hints. The default knows none; a FIPS source has no use for them.
+    async fn author_servers(&self, _author: &PublicKey) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Push an accepted manifest to connected peers (the propagator's fanout). The

@@ -37,6 +37,12 @@ internal object NativeCore {
     /** The account's avatar bytes; empty while there is none. */
     external fun accountAvatar(handle: Long): ByteArray
 
+    /** An installed napplet's verified icon bytes, or null for generic artwork. */
+    external fun nappletIcon(handle: Long, pointer: String): ByteArray?
+
+    /** A verified napplet icon by hash (an install sheet's preview), or null. */
+    external fun iconBlob(handle: Long, sha256: String, mime: String): ByteArray?
+
     // --- external signer (NIP-55) -----------------------------------------
 
     /** The next signer request as JSON, or "" when [timeoutMs] passed. **Blocks.** */
@@ -208,11 +214,26 @@ internal object NativeCore {
      *  the version even if the kernel reuses the fd number. */
     external fun nextUdpTransportFd(lane: String, sinceVersion: Long, timeoutMs: Int): Long
 
-    // --- TUN packet bridge (the app-owned TUN; the VpnService pumps these) ---
-    /** Kotlin → Rust: route an IPv6 packet read from the TUN fd into the mesh. */
-    external fun tunSendPacket(packet: ByteArray, len: Int): Boolean
+    // --- USB accessory bridge ---
+    /** Hand an opened Android Open Accessory to the node's USB transport. `fd`
+     *  is a descriptor from `ParcelFileDescriptor.detachFd()`: ownership passes
+     *  to the core, which closes it when the link ends — never close it here.
+     *  Accessories opened before the node runs are held until it does. */
+    external fun usbAttachAccessory(fd: Int): Boolean
 
-    /** Rust → Kotlin: pull the next IPv6 packet for the TUN fd, blocking up to
-     *  timeoutMs. Returns bytes written into `out`, or 0 on timeout. */
-    external fun tunNextPacket(out: ByteArray, timeoutMs: Int): Int
+    /** Hand a USB device this phone is host of to the node: `fd` is a detached
+     *  duplicate of `UsbDeviceConnection.getFileDescriptor()`, owned by the core
+     *  from here. The node switches it into accessory mode — it then comes back
+     *  as a new device, handed over again — or links with it if it already is
+     *  an accessory. */
+    external fun usbAttachHostDevice(fd: Int): Boolean
+
+    // --- TUN packet bridge (the app-owned TUN; the VpnService pumps these) ---
+    /** Hand the native pump a TUN descriptor (`ParcelFileDescriptor.dup().detachFd()`):
+     *  ownership passes to the core, which moves every packet between it and the
+     *  mesh itself. Replaces any pump already running. */
+    external fun tunStartPump(fd: Int): Boolean
+
+    /** Stop the native TUN pump; it closes its descriptor within a quarter second. */
+    external fun tunStopPump()
 }

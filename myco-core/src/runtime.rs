@@ -149,6 +149,11 @@ pub(crate) fn aware_udp_slots(reported: Option<u8>) -> u8 {
         .clamp(1, AWARE_UDP_INSTANCES.len() as u8)
 }
 
+/// How often the peer view is refreshed from the node. With the UI's own
+/// one-second poll of the core, a peer appears or vanishes within ~2 s.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const PEER_REFRESH: Duration = Duration::from_secs(1);
+
 /// Consecutive failed `show_peers` queries before the peer feed is reported as
 /// broken in [`AppState::error`].
 ///
@@ -657,59 +662,92 @@ impl AppRuntime {
                 node_live.clone(),
             ));
 
+            // Peer state, every second. fips's control socket has no push, so
+            // this is a poll — but `show_peers` is answered from a published
+            // snapshot, off the node's rx loop, so it is cheap. It used to ride
+            // the 8 s keepwarm tick, and a peer took up to 8 s to appear in or
+            // vanish from the UI after fips already knew.
             {
                 let content = content.clone();
                 let peer_cache = peer_cache.clone();
                 let peer_feed = peer_feed.clone();
+                let node_live = node_live.clone();
+                let control = control.clone();
+                rt.spawn(async move {
+                    let mut tick = tokio::time::interval(PEER_REFRESH);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    let mut known: Vec<String> = Vec::new();
+                    loop {
+                        tick.tick().await;
+                        // Nothing binds the socket until the node's rx loop is
+                        // up; querying before then would only manufacture
+                        // failures for the health counter to shout about.
+                        if !node_live.load(Ordering::Relaxed) {
+                            continue;
+                        }
+                        match control.show_peers().await {
+                            Ok(peers) => {
+                                let connected: Vec<String> = peers
+                                    .iter()
+                                    .filter(|p| p.connected && !p.npub.is_empty())
+                                    .map(|p| p.npub.clone())
+                                    .collect();
+                                *peer_cache.lock().unwrap() = peers;
+                                {
+                                    let mut health = peer_feed.lock().unwrap();
+                                    health.consecutive_failures = 0;
+                                    health.last_error.clear();
+                                }
+                                let changed = connected.len() != known.len()
+                                    || connected.iter().any(|n| !known.contains(n));
+                                content.set_connected_peers(connected.clone());
+                                known = connected;
+                                // Who is directly linked changed, so routes to
+                                // Circle members — most of them reached through
+                                // a direct peer, not as one — may have changed
+                                // too. Forget every dial backoff and dial the
+                                // Circle now, rather than at the next keepwarm
+                                // tick (8 s) behind a backoff armed while the
+                                // route was missing (up to 180 s).
+                                if changed {
+                                    content.peer_relays().reset_all_backoff();
+                                    content.keepwarm_tick();
+                                }
+                            }
+                            Err(e) => {
+                                // The last snapshot is deliberately kept:
+                                // stale peer rows plus a visible error beat
+                                // an empty list that reads as a quiet room.
+                                let mut health = peer_feed.lock().unwrap();
+                                health.consecutive_failures =
+                                    health.consecutive_failures.saturating_add(1);
+                                health.last_error = e.clone();
+                                let n = health.consecutive_failures;
+                                drop(health);
+                                tracing::warn!(
+                                    error = %e,
+                                    consecutive_failures = n,
+                                    "peer state query failed"
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Keepwarm and library retries, on their own slower cadence.
+            {
+                let content = content.clone();
                 let node_live = node_live.clone();
                 rt.spawn(async move {
                     let mut tick = tokio::time::interval(std::time::Duration::from_secs(8));
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     loop {
                         tick.tick().await;
-                        // Nothing binds the socket until the node's rx loop is
-                        // up; querying before then would only manufacture
-                        // failures for the health counter to shout about.
-                        if node_live.load(Ordering::Relaxed) {
-                            match control.show_peers().await {
-                                Ok(peers) => {
-                                    let connected: Vec<String> = peers
-                                        .iter()
-                                        .filter(|p| p.connected && !p.npub.is_empty())
-                                        .map(|p| p.npub.clone())
-                                        .collect();
-                                    *peer_cache.lock().unwrap() = peers;
-                                    {
-                                        let mut health = peer_feed.lock().unwrap();
-                                        health.consecutive_failures = 0;
-                                        health.last_error.clear();
-                                    }
-                                    content.set_connected_peers(connected);
-                                    if !content.circle_npubs().is_empty() {
-                                        for addr in content.retriable_library_addrs() {
-                                            let content = content.clone();
-                                            tokio::spawn(async move {
-                                                content.open_site(addr, None).await
-                                            });
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    // The last snapshot is deliberately kept:
-                                    // stale peer rows plus a visible error beat
-                                    // an empty list that reads as a quiet room.
-                                    let mut health = peer_feed.lock().unwrap();
-                                    health.consecutive_failures =
-                                        health.consecutive_failures.saturating_add(1);
-                                    health.last_error = e.clone();
-                                    let n = health.consecutive_failures;
-                                    drop(health);
-                                    tracing::warn!(
-                                        error = %e,
-                                        consecutive_failures = n,
-                                        "peer state query failed"
-                                    );
-                                }
+                        if node_live.load(Ordering::Relaxed) && !content.circle_npubs().is_empty() {
+                            for addr in content.retriable_library_addrs() {
+                                let content = content.clone();
+                                tokio::spawn(async move { content.open_site(addr, None).await });
                             }
                         }
                         content.keepwarm_tick();
@@ -836,6 +874,15 @@ impl AppRuntime {
                     role: Some(fips::config::TransportRole::Backup),
                     ..Default::default()
                 });
+        }
+        // A USB transport, so a desktop (or another phone) that switches this
+        // phone into accessory mode links with the node over the cable. The
+        // phone is always the accessory here: the host role is the desktop's.
+        // Nothing to configure — links arrive when a cable does.
+        #[cfg(target_os = "android")]
+        {
+            config.transports.usb =
+                fips::config::TransportInstances::Single(fips::config::UsbConfig::default());
         }
         // One UDP transport for the LAN/AP lane and a pool of them for Wi-Fi
         // Aware — see the instance constants at the top of this file for why
@@ -1705,6 +1752,9 @@ impl AppRuntime {
                 title: String::new(),
                 description: String::new(),
                 requires: Vec::new(),
+                optional: Vec::new(),
+                unsupported: Vec::new(),
+                icon: None,
                 error: message,
                 holder: holder_for_retry.clone(),
                 manifest: None,
@@ -1786,6 +1836,9 @@ impl AppRuntime {
             title: String::new(),
             description: String::new(),
             requires: Vec::new(),
+            optional: Vec::new(),
+            unsupported: Vec::new(),
+            icon: None,
             grants: Vec::new(),
             error: String::new(),
             holder: holder.clone(),
@@ -1806,12 +1859,25 @@ impl AppRuntime {
             } else {
                 "no source had this napplet"
             }));
-            // The manifest only: review needs nothing else, and nothing is
-            // downloaded before the user says yes.
+            // The manifest only — and its icon, for the sheet to show. The
+            // app itself is not downloaded before the user says yes.
+            let mut icon = None;
             for source in &sources {
                 found = crate::napplet::fetch_manifest(&addr, source.as_ref()).await;
-                if found.is_ok() {
+                if let Ok((event, _)) = &found {
+                    icon = crate::napplet::fetch_icon(
+                        event,
+                        source.as_ref(),
+                        content.cache_blobs().as_ref(),
+                    )
+                    .await;
                     break;
+                }
+            }
+            // Verified bytes, kept as cache: a preview, not an install.
+            if let Some(bytes) = &icon {
+                if let Err(e) = content.cache_blobs().put(bytes).await {
+                    tracing::debug!("napplet icon not cached: {e}");
                 }
             }
 
@@ -1849,6 +1915,9 @@ impl AppRuntime {
                         title: found.title.unwrap_or_default(),
                         description: found.description.unwrap_or_default(),
                         requires: found.requires,
+                        optional: found.optional,
+                        unsupported: found.unsupported,
+                        icon: icon.and(found.icon),
                         grants,
                         error: String::new(),
                         holder: holder.clone(),
@@ -1873,6 +1942,9 @@ impl AppRuntime {
                         title: library_title,
                         description: String::new(),
                         requires: Vec::new(),
+                        optional: Vec::new(),
+                        unsupported: Vec::new(),
+                        icon: None,
                         grants: Vec::new(),
                         error: e.to_string(),
                         holder: holder.clone(),
@@ -2422,6 +2494,9 @@ impl AppRuntime {
             // one), so the bridge installs whatever it is holding into the new
             // slot rather than waiting to be handed a radio.
             crate::ble_bridge_jni::set_radio_slot(node.enable_app_owned_ble_radio());
+            // USB accessories opened before this node existed are handed to
+            // it now, and later ones go straight to it.
+            crate::usb_bridge::install(node.enable_app_owned_usb());
         }
         // The rx loop serves until this fires, then drains in place. Dropping
         // the sender resolves the receiver too, so a runtime torn down without a
@@ -3432,8 +3507,11 @@ fn update_review(
         update_available: false,
         already_installed: false,
         title: opened.title.clone().unwrap_or_default(),
-        description: String::new(),
+        description: opened.description.clone().unwrap_or_default(),
         requires: opened.requires.clone(),
+        optional: opened.optional.clone(),
+        unsupported: opened.unsupported.clone(),
+        icon: opened.icon.clone(),
         grants,
         error: String::new(),
         holder: None,
@@ -4154,6 +4232,9 @@ mod tests {
                 .filter(|d| d != "mesh")
                 .collect(),
             requires: requires.clone(),
+            optional: Vec::new(),
+            unsupported: Vec::new(),
+            icon: None,
             error: String::new(),
             holder: None,
             manifest: None,
@@ -5038,6 +5119,9 @@ mod tests {
             title: String::new(),
             description: String::new(),
             requires: Vec::new(),
+            optional: Vec::new(),
+            unsupported: Vec::new(),
+            icon: None,
             grants: Vec::new(),
             error: String::new(),
             holder: None,

@@ -22,9 +22,9 @@
 //! Two things have to reach the napplet's document that are **not** the
 //! napplet's own bytes: a Content-Security-Policy, and the `window.napplet`
 //! prelude. Both are injected here, after verification, and neither is part of
-//! the aggregate — NIP-5D is explicit that the injected policy "MUST remain
-//! outside the bytes used to compute `aggregateHash`, just like the injected
-//! `window.napplet` namespace". Assembling *after* the hash check is what keeps
+//! the artifact hash — the injected policy and the `window.napplet` namespace
+//! must remain outside the bytes the identity is computed from. Assembling
+//! *after* the hash check is what keeps
 //! that true by construction: [`crate::resolve`] hands over verified bytes and
 //! nothing here feeds back into identity.
 //!

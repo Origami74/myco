@@ -39,18 +39,29 @@ tabs — the runtime composes them, they do not compose themselves.
 A napplet is distributed exactly like an nsite: a signed manifest event whose `path` tags
 map file paths to sha256 hashes, with the bytes themselves in Blossom. That is not a
 coincidence. **NIP-5A** ("Pubkey Static Websites", kinds `15128` / `35128`) is the nsite
-spec Myco already implements. **NIP-5D** is that same manifest shape at kinds `5129` /
-`15129` / `35129`, plus three tags:
+spec Myco already implements. **NIP-5D** started as that same manifest shape at kinds
+`5129` / `15129` / `35129`. Since 2026-10-07 its manifest names the one artifact
+directly:
 
 | Tag | Meaning |
 |-----|---------|
-| `["requires", "<domain>"]` | A capability the napplet needs from its runtime |
-| `["archetype", "<slug>", "<convention>"]` | A role it can be invoked as by other napplets |
-| `["config", "<json-schema>"]` | Declarative per-napplet configuration |
+| `["x", "<sha256>"]` | The `/index.html` artifact — exactly one; with `d`, the **identity** |
+| `["R", "<domain>"]` / `["O", "<domain>"]` | A NAP domain it needs / can do without |
+| `["z", "<role>"]` | An archetype it advertises |
+| `["i", "<convention>", "<param>"…]` | An intent it accepts, with parameter names |
+| `["icon", "<sha256>", "<mime>"]` | Optional PNG / JPEG / WebP icon blob |
+| `["server", "<url>"]` | Blossom hints for the artifact and icon |
+| `["title", "…"]`, `["source", "…"]`, `["app", "32267:…", "<relay>"]` | Presentation |
 
-and one promotion: the NIP-5A aggregate hash — `["x", "<hex>", "aggregate"]`, computed
-over the `path` tags alone — becomes the napplet's **identity**, not merely an integrity
-check.
+The event `content` is the description: required, non-empty, plain text — shown with
+text APIs only. `R` / `O` / `z` / `i` advertise; none of them grants anything. Myco also
+reads its own `["config", "<json-schema>"]` tag.
+
+**Legacy manifests** (before 2026-10-07) carry one `["path", "/index.html", <sha256>]`,
+an aggregate `["x", <hex>, "aggregate"]`, a `description` tag, and `requires` /
+`archetype` tags. They still open through a fallback kept in one file,
+`myco-napplet-runtime/src/manifest/legacy.rs`, chosen only when a manifest has no artifact
+`x` and does have `path` tags. Their identity stays the aggregate.
 
 The capability seam itself is specified separately, in the
 [NAP registry](https://github.com/napplet/naps). A NAP is one capability contract:
@@ -113,15 +124,13 @@ not a gateway, not a host, and least of all the napplet.
 
 1. Resolve the signed manifest event (`35129` named, `15129` root, `5129` snapshot) and
    verify its signature.
-2. Fetch each `path` tag's blob from Blossom by sha256, and verify that
-   `sha256(blob)` equals the tag's hash.
-3. Recompute the NIP-5A aggregate over the `path` tags alone. Only `path` tags feed it —
-   `config`, `requires` and `archetype` do not. The `["x", "<hex>", "aggregate"]` tag is
-   *corroboration, not the source*: NIP-5D says the runtime recomputes the aggregate and
-   that the tag, **if carried**, must match. A napplet without one still has an identity,
-   and it is the same identity it would have had with the tag present. Requiring the tag
-   would reject conformant napplets for nothing — the author's signature already covers
-   the `path` tags, and every blob is hash-checked against them.
+2. Read the artifact hash from the manifest's single `x` tag. A manifest with no `x`, more
+   than one, or a malformed one is rejected — as is a named manifest without `d`, or an
+   empty description. Nothing else rejects: a bad `R` / `O` / `z` / `i` / `icon` is
+   dropped, and unknown tags are ignored.
+3. Fetch the artifact from Blossom by that hash and verify `sha256(blob)` equals it.
+   (Legacy: fetch the `/index.html` path blob, verify it, and recompute the aggregate over
+   the `path` tags — the `x … aggregate` tag, if carried, must match.)
 4. Assemble the verified `/index.html` and inject it as `iframe.srcdoc`, carrying the
    `connect-src` policy as a `<meta http-equiv="Content-Security-Policy">` so it survives
    into the iframe's opaque origin. The policy is Myco's, not protocol — NIP-5D sets
@@ -129,8 +138,13 @@ not a gateway, not a host, and least of all the napplet.
    already in the page) and lets it run what it bundles: inline script, a `blob:`
    worker, and WebAssembly (`'wasm-unsafe-eval'`, never JS `eval`).
 
-The napplet's identity is the `(dTag, aggregateHash)` tuple **computed** from those
-verified bytes. The runtime assigns it; the napplet never asserts it. Any verification
+The napplet's identity is the `(dTag, artifactHash)` tuple **computed** from those
+verified bytes (`(dTag, aggregateHash)` for a legacy manifest). The two hashes differ
+even over the same bytes, so a napplet republished in the current schema is a new
+identity: "Check for updates" offers it as an update, and the install sheet asks again
+only for domains it declares that were never reviewed. Nothing Myco stores is keyed on
+the hash — grants, storage and the Library are keyed on the `(author, d)` address — so
+existing installs keep their grants and data across the change. The runtime assigns it; the napplet never asserts it. Any verification
 failure rejects the load outright — no iframe is ever created from unverified bytes.
 
 **Napplets are single-file.** Not a Myco restriction — NIP-5D's Manifest section says it
@@ -140,7 +154,18 @@ mode inlines everything into one `index.html`. A manifest describing a multi-fil
 therefore not a napplet, and is rejected where the manifest is parsed — before a blob is
 fetched, with an error naming the offending files. The runtime does not inline at load time
 to compensate: that would mean assembling bytes the author never signed as a unit, with the
-aggregate attesting to a file set nobody ever ran.
+aggregate attesting to a file set nobody ever ran. A current manifest cannot express more
+than one file at all.
+
+**Icons.** The `icon` blob is fetched with the artifact at install or update, from the
+same untrusted source, and kept only when it hashes to the signed `icon` value and starts
+like the declared type. The Apps grid, the app's sheet, the Recents card and home-screen
+shortcuts show it after Android also decodes it as PNG, JPEG or WebP; anything less falls
+back to the coloured initial. Shortcuts already pinned pick the icon up on the next
+return to Myco. An icon never blocks a load and is not part of the identity.
+
+**Capabilities.** The install sheet lists `R` and `O` domains together, marks the
+optional ones, and warns when a required domain is one this build cannot provide.
 
 ### 4.1 Aggregate verification for nsites too
 
@@ -323,7 +348,7 @@ scoped to a shell origin (§5.3), so the nsite WebView client must refuse to ser
 shell origin, and the napplet client must refuse nsite hosts. Otherwise an nsite could
 navigate itself into a shell origin and inherit the channel.
 
-Sessions are keyed by `(dTag, aggregateHash, windowId)`. Composing several napplets into
+Sessions are keyed by `(dTag, identityHash, windowId)`. Composing several napplets into
 one window is deferred, but hosting the napplet inside a shell page keeps it reachable.
 
 #### The back gesture
@@ -447,7 +472,20 @@ seam — the Circle's stores over the mesh and, unless offline-only, the interne
 **at once** with the first bytes winning. The internet side asks the servers a BUD-10 URL
 names (`blossom:<sha>.<ext>?xs=<domain>&as=<pubkey>`: `xs` servers, then the `as`
 author's kind 10063 servers as held here, https only, four of each at most), then the
-public defaults, over one shared HTTP client. A blob the internet confirmed nobody has is
+public defaults, over one shared HTTP client. Only when all of those miss is an `as`
+author's list not held here looked up — on the write relays of the author's relay list
+as held here, and the indexers, for at most 3 s, done as soon as every list is in — kept,
+and the servers it adds asked: a picture its hint serves never waits on an indexer. One
+lookup per author at a time, at most 60 authors a minute on the device, and an author no
+relay had is not asked about again for ten minutes. Where a server came from does not
+decide where the phone will connect: every HTTP client `myco-core` builds is held to one reach
+at the dial (`myco-core/src/http.rs`) — the public internet only (no private, loopback,
+link-local, mesh, CGNAT or NAT64-wrapped private address, nothing on this phone's own
+interfaces or in the `/64` of its global IPv6 address), or the mesh only (`.fips` names,
+`fd00::/8`). Address literals are judged when the request is made, names by the client's
+resolver on the addresses it then connects to, and every redirect hop again; there is no
+proxy. A napplet cannot make the phone probe its own LAN, however it gets a URL in. The one
+exception is a server the user configured themselves (a custom Blossom store). A blob the internet confirmed nobody has is
 not asked for again for ten minutes. What comes back is verified by hash, **stored**, and only then delivered, so the second ask from any
 napplet is local and the room can serve it over the mesh. `mime` is sniffed from the
 bytes, never a header; raw SVG is refused (`blocked-by-policy`) for want of a sandboxed
@@ -877,8 +915,8 @@ backlog pull default 2, the mesh's own `EVENT_TTL` / `MAX_REQ_TTL`). `mesh.info`
 only a peer *count*; presence, transports and circle membership stay behind the seam and
 would be a separate NAP.
 
-Runtime: `MeshSink` seam (`limits` / `reach` / `publish` / `pull`), `nap/mesh.rs`,
-domain-scoped session subscriptions. Core: `NappletMeshSink` over the relay hub and the
+Runtime: `MeshSink` seam (`limits` / `reach` / `publish` / `pull` / `blob_holders`),
+`nap/mesh.rs`, domain-scoped session subscriptions. Core: `NappletMeshSink` over the relay hub and the
 Circle pool; `RelayHub::accept_local_with_ttl` and `accept_pulled`. Web projection: the
 vendored `@napplet/shim` filters unknown domains, so `assets/myco-prelude.js` installs
 `window.napplet.mesh` — and `window.napplet.shell`, which the vendored build also lacks —
@@ -971,7 +1009,7 @@ included — the link is a default, not a watermark.
 
 ### 7.2 Update semantics versus content addressing
 
-A napplet's identity *is* its aggregate hash, so every build is a different identity, while
+A napplet's identity *is* its artifact hash, so every build is a different identity, while
 the library row tracks an addressable `(pubkey, dTag)` pointer.
 
 Settled the way nsites settle it (`nsite-updates.md` §1): the version **served** is the
@@ -987,12 +1025,12 @@ reports `ready` or `missing` from the same pin. The same check also runs on its 
 foreground and every 6 h, through the throttle in `nsite-updates.md` §3.1; under
 offline-only the napplet half is skipped (counted as checked, none updated). An open
 window keeps its session — it
-pinned the aggregate at open — and sees the new version at its next launch. The task
+pinned the identity hash at open — and sees the new version at its next launch. The task
 outlives a trip to the background, so re-opening the napplet from Apps or Recents
 brings back that same window, still on the old version. So when the window returns to
 the foreground, `NappletActivity` asks the core whether the served version has moved
 past the one its session opened (`NappletHost::newer_version`: a later-or-equal
-`created_at` with a different aggregate; the pinned version, so its bytes are here).
+`created_at` with a different identity hash; the pinned version, so its bytes are here).
 If it has, a dialog offers "Restart" — the same relaunch a grant change uses, a new
 session on the new version — or "I'll restart later". It is offered once per napplet
 and version: shown, the version is recorded in the app's preferences
@@ -1012,7 +1050,7 @@ instead of plain-flooding them. It is the nsite policy
 and multihop clamp — with the napplet's checks in front:
 
 - **Checked first, on every phone.** The manifest must be signed and parse as NIP-5D
-  (one `index.html`, an aggregate over its paths). One that does not, or that is older
+  (one artifact `x`, or a legacy single `path` with a matching aggregate). One that does not, or that is older
   than the version the relay already keeps for its slot, stops here.
 - **Not installed here** (no Library entry for that author and `d` tag): passed on at
   once and nothing is fetched — a pure relay, as for an nsite we don't run. Holding no

@@ -11,13 +11,14 @@ pub enum NappletErrorCode {
     InvalidSignature,
     /// The event is not a NIP-5D manifest, or its tags are malformed.
     InvalidManifest,
-    /// The declared aggregate disagrees with the manifest's own `path` tags.
+    /// A legacy manifest's declared aggregate disagrees with its own `path`
+    /// tags.
     AggregateMismatch,
-    /// A blob's bytes do not hash to the sha256 its `path` tag claims.
+    /// The artifact's bytes do not hash to the sha256 the manifest names.
     BlobHashMismatch,
     /// No source served a blob the manifest references.
     BlobUnavailable,
-    /// The manifest lists no `/index.html`.
+    /// A legacy manifest lists no `/index.html`.
     MissingIndex,
     /// The manifest describes more than one file. NIP-5D: "A napplet is a
     /// single self-contained `/index.html`" — see [`crate::manifest`].

@@ -4,7 +4,7 @@
 //! NIP-5D requires the namespace exist before any napplet script runs, and the
 //! shell cannot script into an opaque origin from outside — so the prelude
 //! rides into the `srcdoc` bytes alongside the CSP, injected by
-//! [`crate::artifact`] after verification and outside the aggregate.
+//! [`crate::artifact`] after verification and outside the artifact hash.
 //!
 //! The prelude itself is upstream's, vendored verbatim (see
 //! `assets/vendor/README.md`). Upstream owns the domain surface, so tracking
@@ -167,7 +167,13 @@ mod tests {
         assert!(SUPPLEMENT_IIFE.contains("installShell("));
         assert!(SUPPLEMENT_IIFE.contains("installMesh("));
         assert!(SUPPLEMENT_IIFE.contains(r#"domains.has("mesh")"#));
-        for wire in ["mesh.info", "mesh.publish", "mesh.subscribe", "mesh.close"] {
+        for wire in [
+            "mesh.info",
+            "mesh.publish",
+            "mesh.subscribe",
+            "mesh.close",
+            "mesh.blobs",
+        ] {
             assert!(
                 SUPPLEMENT_IIFE.contains(&format!(r#"type: "{wire}""#)),
                 "the supplement never sends {wire}"

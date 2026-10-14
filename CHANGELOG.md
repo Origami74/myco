@@ -17,6 +17,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Local builds use the nearest stable Git tag for their version, and debug
   builds start with automatic checks off.
 
+
+## [0.11.0] - 2026-10-13
+
+### Added
+
+- **Napplets in the current NIP-5D format install and open.** Napplets
+  published since 2026-10-07 — every app on napplet.soy — name their single
+  file by hash (`x`), describe themselves in the event text, and list
+  required (`R`) and optional (`O`) capabilities and roles and intents
+  (`z` / `i`). Myco reads that format first; napplets in the old
+  path/aggregate format still open through a fallback that will be removed
+  later. The install sheet marks optional capabilities and warns when an app
+  needs one Myco can't provide.
+- **Napplet icons.** A napplet's own icon (`icon` tag, PNG / JPEG / WebP)
+  shows in the install sheet, the Apps grid, on its sheet, on the Recents
+  card and on home-screen shortcuts — including shortcuts pinned earlier. The icon is
+  checked against its hash and decoded before it is shown; without a valid
+  one you see the coloured initial as before.
+
+- **Apps hosted on their author's own file servers install and update.** Myco
+  now reads the Blossom server list an author publishes (BUD-03) and looks
+  there after the servers an app names itself and before the public
+  defaults — for installing, syncing and updating apps, and for napplet
+  pictures that name their author. The list is fetched along with the app,
+  kept on the phone and shared with your Circle like other lists.
 - **Napplets can load pictures and files from the web (`https:`).** A napplet
   with the resource permission can now ask for an `https://` link — a
   profile picture on someone's server, say — not only a Blossom hash. Myco
@@ -26,9 +51,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again after every redirect and on the address actually dialled. SVG is
   refused, as for Blossom. The server you load from sees your IP address
   and which link was opened. Nothing is fetched with offline-only on.
+- **Napplets can ask which files the phones around you hold (`mesh.blobs`).**
+  A napplet with the mesh grant can ask, for up to 64 files at a time, how
+  many reachable Circle phones have each one. Myco asks each phone's blob
+  store with a `HEAD` over the mesh — never the internet, never downloading
+  the file — a few at a time, and remembers the answers for a minute. The
+  App Store uses it so "Around you" lists only apps a nearby phone can
+  actually serve.
+- **Link over a USB cable.** A USB cable now links a phone to a desktop
+  running fips, or two phones to each other, with no network at all — the
+  fastest lane Myco has, over 100 Mbps where Bluetooth manages tens of kB/s.
+  Plug in and tap "Open Myco" once; it starts Myco by itself, with the screen
+  locked too. Between two phones, the one that becomes USB host asks to use
+  the other once (it needs Myco running). The peer shows under a **USB**
+  block in the mesh status sheet, and pulling the cable drops it at once.
+  [How to](docs/how-to/connect-over-usb.md).
 
 ### Fixed
 
+- **Your Circle is redialled as soon as a direct link changes.** A Circle
+  phone reached through another peer — two phones cabled to one laptop, say —
+  never got its own reconnect, so its dial backoff kept growing after a
+  re-plug and the redial came long after the route was back. Any change in
+  which phones are directly linked now resets the backoff and dials at once.
+- **Names resolve with a roaming SIM on Wi-Fi.** With the mesh on, Myco
+  answers the phone's DNS and passes ordinary names on to the networks'
+  resolvers, one at a time with a 4-second wait each. A roaming SIM's carrier
+  resolvers don't answer over Wi-Fi, so every lookup waited them out and the
+  phone gave up first: no app could resolve a name, and napplet updates and
+  icons never arrived. Myco now asks every resolver at once and takes the
+  first answer, starting with the network the phone is actually using.
+- **Napplets and app manifests can no longer point Myco at your own network.**
+  A Blossom server named in a napplet's `blossom:` link, an author's server
+  list or an app manifest was dialled wherever it pointed, including this
+  phone and your Wi-Fi network. Such servers are now used only when they are
+  on the public internet. The check is on the connection itself, not on
+  where the link came from: every web request Myco makes is held to the
+  public internet (or, for Circle peers, to the mesh) on the address
+  actually dialled and after every redirect, so a link that slips in some
+  other way is refused too. This phone's own addresses and its IPv6
+  neighbours count as your network. A Blossom server on your own network
+  named in your server list or an app you publish is no longer used; a
+  custom Blossom store you set in Settings still is. The same check now sees
+  through NAT64 addresses (`64:ff9b::`), for relays too.
 - **Napplet posts reach all your outbox relays.** A note a napplet posted
   through NAP-OUTBOX went to only two of your NIP-65 write relays, picked
   the way a read picks them; the rest never got it, so people reading from
@@ -46,6 +111,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   web request; it now goes through the same fetcher as napplet pictures:
   public addresses only, every redirect checked, a size cap while
   downloading, and nothing with offline-only on.
+
+### Changed
+
+- **A faster mesh on every lane.** Packets between apps and the mesh are now
+  moved by two native threads in the core, not by Kotlin threads calling in
+  once per packet and copying every byte; on a Pixel 7 Pro over USB that hop
+  had capped throughput near 90 Mbps.
+- **Peers show up within a second.** The peer list is refreshed every second
+  instead of on the 8-second keep-warm tick, and a newly linked peer dials
+  your Circle at once.
+- **A napplet republished in the new format counts as a new version.** Its
+  identity is now the hash of its file rather than the old aggregate hash,
+  so "Check for updates" offers it even when the file is unchanged, and the
+  install sheet may ask again about capabilities you never reviewed. Your
+  grants and the app's saved data are kept.
 
 ## [0.10.0] - 2026-10-05
 

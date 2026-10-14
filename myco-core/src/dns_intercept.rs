@@ -316,26 +316,42 @@ fn forward_upstream(src_addr: &[u8], src_port: u16, dns_query: &[u8]) {
     }
     let query = dns_query.to_vec();
 
+    // Every server at once, first answer wins. Asked in turn, one resolver
+    // that never answers — a roaming SIM's carrier DNS, unreachable over the
+    // Wi-Fi the query leaves by — cost the full timeout before the next was
+    // tried, and two of them outlasted the OS resolver: every name on the
+    // phone failed to resolve.
     std::thread::spawn(move || {
         let Ok(sock) = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) else {
             return;
         };
-        if sock.set_read_timeout(Some(UPSTREAM_TIMEOUT)).is_err() {
+        let sent: Vec<SocketAddr> = servers
+            .into_iter()
+            .filter(|server| sock.send_to(&query, server).is_ok())
+            .collect();
+        if sent.is_empty() {
             return;
         }
-        for server in servers {
-            if sock.send_to(&query, server).is_err() {
-                continue;
+        let deadline = std::time::Instant::now() + UPSTREAM_TIMEOUT;
+        let mut buf = [0u8; 1500];
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() || sock.set_read_timeout(Some(left)).is_err() {
+                return;
             }
-            let mut buf = [0u8; 1500];
             match sock.recv_from(&mut buf) {
-                // Only accept a reply from the server we just asked, and only
-                // if the transaction id matches the query we sent.
-                Ok((n, from)) if from.ip() == server.ip() && n >= 2 && buf[..2] == query[..2] => {
+                // Only a reply from a server we asked, with the query's
+                // transaction id.
+                Ok((n, from))
+                    if sent.iter().any(|s| s.ip() == from.ip())
+                        && n >= 2
+                        && buf[..2] == query[..2] =>
+                {
                     crate::tun_bridge::push_local(build_reply(&querier, src_port, &buf[..n]));
                     return;
                 }
-                _ => continue,
+                Ok(_) => continue,
+                Err(_) => return,
             }
         }
     });

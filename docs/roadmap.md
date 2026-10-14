@@ -11,9 +11,9 @@ map, the [index](./README.md).
 
 ---
 
-## Status — 2026-10-05
+## Status — 2026-10-13
 
-**Shipped** (v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
+**Shipped** (v0.11.0 — the USB lane (phone to phone and phone to desktop over a cable), a native TUN pump, napplets in the current NIP-5D format and their icons, `https:` resources, `mesh.blobs`, authors' Blossom server lists; v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
 reads over a shared relay pool, Chronofeed and Simple Profile; v0.8.1 —
 local-first napplet reads, author relay lookup, relay skip list and selection; v0.8.0 — accounts, the AppStore napplet, updates over
 the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
@@ -39,8 +39,9 @@ the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
   Escape. NAPs: `shell`, `identity`, `relay` (pool reads, relay-pool publish),
   `outbox` (NIP-65 plans over local/mesh/internet lanes), `mesh` (hop-limited
   publish/subscribe, user-capped — Myco's own, [NAP-MESH](./design/napplet/NAP-MESH.md)),
-  `resource` (`blossom:` only, local store first, fetched blobs kept, up to
-  64 MiB, delivered as bytes), `link`, `theme`, `local` (keep and pass on what
+  `resource` (`blossom:`, local store first, fetched blobs kept, and public
+  `https:`; up to 64 MiB, delivered as bytes), `mesh.blobs` (which Circle
+  phones in reach hold a file), `link`, `theme`, `local` (keep and pass on what
   a napplet was shown, [NAP-LOCAL](./design/napplet/NAP-LOCAL.md)), `inc`
   (topic subscriptions), `intent` (open by role —
   [NAP-INTENT](./design/napplet/NAP-INTENT.md)) and `upload` (to the user's
@@ -410,14 +411,10 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Peer permissions UI.** The per-peer record exists (`relay_write`,
   `relay_read_multihop`, …) with defaults for everyone; a switch per Circle
   member — [nsite-permissions.md](./design/nsite/nsite-permissions.md) §2.
-- **Relay and Blossom server discovery (BUD-03, NIP-65, hints).** A
-  `blossom:sha256:` URI names no server, and Myco resolves it against a fixed
-  list of public replicas — and ignores the `servers` hint a napplet passes.
-  Read the kind 10063 server lists of the authors a napplet has been reading
-  from (cached in the local relay like 10002), honour NAP-RESOURCE hints and
-  the manifest's `server` tags, before the defaults —
-  [#67](https://github.com/Origami74/myco/issues/67),
-  [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
+- **Your own profile from your own relays.** The Settings profile is fetched
+  from the default relays and the indexers, not the user's NIP-65 write
+  relays — the last open part of
+  [#67](https://github.com/Origami74/myco/issues/67).
 - **Blob privacy over the mesh.** Whether a napplet's `blossom:` miss should
   ask every Circle member, or only the peer whose event referenced it —
   [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
@@ -447,7 +444,7 @@ Each its own milestone with its own design pass. Roughly in order of pull.
   recorded when an app's served version moves —
   [#69](https://github.com/Origami74/myco/issues/69).
 - **More NAPs.** `storage` (per-napplet key-value), `config`; `resource`
-  beyond `blossom:` (`https:`, `nostr:`, SVG rasterization — and HTML with
+  beyond `blossom:` and `https:` (`nostr:`, SVG rasterization — and HTML with
   inline SVG, which the sniffer misreads as SVG today). `intent` + `inc` are
   N7; `link` and `theme` shipped in v0.8.0 —
   [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2b–S4.
@@ -463,8 +460,6 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Linux interop.** An Android phone and a Linux `BluerIo` node as a tested
   BLE pair; the per-peer PSM patch already makes it possible —
   [ble-interop.md](./design/fips/ble-interop.md).
-- **USB transport** for seeding large sites —
-  [usb-transport.md](./design/fips/usb-transport.md) (not started).
 - **Multi-persona.** More than one device key per phone —
   [identity-pairing.md](./design/core/identity-pairing.md) §3.
 - **Public-node peering** over the internet via FIPS discovery kinds —

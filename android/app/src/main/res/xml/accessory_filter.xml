@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The identity every fips USB host announces when it switches this phone
+     into Android Open Accessory mode (fips `transport::usb::host`). -->
+<resources>
+    <usb-accessory manufacturer="FIPS" model="fips-link" />
+</resources>

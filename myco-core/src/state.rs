@@ -131,10 +131,10 @@ pub struct PeerDiagnosticView {
     /// `paired-offline`, `unreachable`.
     pub state: String,
     /// Transport currently carrying this row, when connected (`ble`, `aware`,
-    /// `udp`, `tcp`); empty when not connected.
+    /// `usb`, `udp`, `tcp`); empty when not connected.
     pub transport: String,
     /// Other transports this peer is also reachable over, in the fixed order
-    /// `ble`, `aware`, `udp`, `tcp`: the lanes of every non-dead path in
+    /// `ble`, `aware`, `usb`, `udp`, `tcp`: the lanes of every non-dead path in
     /// [`paths`](Self::paths) other than the active one.
     pub also_reachable_via: Vec<String>,
     /// Every path fips holds to this peer, in fips's own order. Empty when
@@ -239,7 +239,7 @@ pub struct NappletMeshReachView {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerPathView {
-    /// `ble`, `aware`, `udp` (the LAN/AP lane) or `tcp`.
+    /// `ble`, `aware`, `usb`, `udp` (the LAN/AP lane) or `tcp`.
     pub lane: String,
     /// `probing`, `live`, `suspect` or `dead`.
     pub state: String,

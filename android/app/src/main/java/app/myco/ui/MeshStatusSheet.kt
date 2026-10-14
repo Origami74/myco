@@ -253,6 +253,22 @@ private fun MeshSection(
                 nowMs = nowMs,
             )
         }
+        // A cable is not a radio that is on or off: the lane exists while a
+        // cable carries a peer, so it gets a block only then.
+        val usbPeers = connected.filter { it.onLane("usb") }
+        if (usbPeers.isNotEmpty()) {
+            Divider()
+            LaneBlock(
+                state = state,
+                transport = "usb",
+                label = "USB",
+                scanning = null,
+                off = false,
+                peers = usbPeers,
+                nowMs = nowMs,
+                status = "linked",
+            )
+        }
         Divider()
         LaneBlock(
             state = state,
@@ -280,8 +296,12 @@ private fun LaneBlock(
     peers: List<PeerDiagnostic>,
     nowMs: Long,
     offLabel: String = "off",
+    /** A fixed status in place of the scan state, for a lane that does not
+     *  scan (USB: present only while a cable carries a peer). */
+    status: String? = null,
 ) {
     val (word, color) = when {
+        status != null -> status to StatusConnected
         off -> offLabel to MaterialTheme.colorScheme.onSurfaceVariant
         scanning == null -> "unknown" to MaterialTheme.colorScheme.onSurfaceVariant
         scanning -> "scanning" to StatusConnected
@@ -461,11 +481,11 @@ private fun PeerDiagnostic.onLane(lane: String): Boolean =
     peerLanes(this).any { (l, _) -> l == lane }
 
 /** Anything IP-routed: udp (the LAN/AP lane), tcp, and whatever else is not a
- *  short-range radio. */
+ *  direct link — a short-range radio or a USB cable. */
 private fun PeerDiagnostic.onRoutedLane(): Boolean =
     peerLanes(this).any { (l, _) -> l.isRouted() }
 
-private fun String.isRouted(): Boolean = this !in setOf("ble", "aware", "")
+private fun String.isRouted(): Boolean = this !in setOf("ble", "aware", "usb", "")
 
 /** A row on a lane that is not carrying the peer: present, but clearly not
  *  the one doing the work. */
