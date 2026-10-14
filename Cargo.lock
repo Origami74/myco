@@ -2358,6 +2358,7 @@ dependencies = [
  "ipstack",
  "jni",
  "jpeg-encoder",
+ "libc",
  "myco-blossom",
  "myco-cache",
  "myco-napplet-runtime",

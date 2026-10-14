@@ -34,6 +34,7 @@ fun rememberSoftwareUpdates(offlineOnly: Boolean): SoftwareUpdates {
     val state by updates.state.collectAsState()
     val owner = LocalLifecycleOwner.current
     LaunchedEffect(updates, owner, offlineOnly, state.automatic) {
+        updates.configureBackground(offlineOnly)
         owner.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
                 updates.check(offlineOnly)
@@ -70,7 +71,7 @@ fun SoftwareUpdateSettings(updates: SoftwareUpdates, offlineOnly: Boolean) {
         Row(Modifier.fillMaxWidth()) {
             Column(Modifier.weight(1f)) {
                 Text("Automatic update checks")
-                Text("Check GitHub daily while Myco is open. Requires internet.",
+                Text("Check signed Zapstore releases daily, including in the background. Requires internet.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }

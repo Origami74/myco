@@ -125,6 +125,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Opt-in isolated package for notification tests against real releases.
+            if (System.getenv("MYCO_UPDATE_TEST_BUILD") == "1")
+                applicationIdSuffix = ".updatetest"
+        }
         release {
             // R8 drops unused Kotlin/Java code and resources; without it the
             // dex alone was ~43 MB (mostly material-icons-extended). The keep
@@ -152,6 +157,8 @@ android {
 }
 
 dependencies {
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.work:work-runtime-ktx:2.10.1")
     implementation("androidx.core:core-ktx:1.13.1")
     // System splash (Android 12+ API, backported to minSdk via the library): a
     // black window with the Myco mark while the activity warms up.
