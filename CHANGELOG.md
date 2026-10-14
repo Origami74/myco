@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The red "no peers" dot no longer redraws the whole header.** Its pulse
+  now only repaints the dot instead of rebuilding the screen header 60 times
+  a second, which made slow devices stutter and cost battery. On low-memory
+  phones and on TVs the dot doesn't pulse at all; it stays solid red.
+
 ## [0.11.0] - 2026-10-13
 
 ### Added

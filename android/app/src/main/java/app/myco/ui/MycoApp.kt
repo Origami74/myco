@@ -1,5 +1,8 @@
 package app.myco.ui
 
+import android.app.ActivityManager
+import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -61,6 +64,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -818,6 +822,10 @@ fun StatusDot(color: Color, size: Int = 9) {
  * Only the zero case animates. A pulse is an attention-getter, so spending it
  * on the states you can't act on would train people to ignore it — one peer is
  * a working mesh, just a fragile one, and it says that in colour alone.
+ *
+ * The pulse is read only in the draw phase (`graphicsLayer`), so it redraws the
+ * dot each frame without recomposing the header. Low-RAM devices and TVs don't
+ * pulse at all: they show the static fault colour.
  */
 @Composable
 fun PeerCountDot(peers: Int) {
@@ -826,12 +834,14 @@ fun PeerCountDot(peers: Int) {
         peers == 1 -> StatusThin
         else -> StatusConnected
     }
-    if (peers > 0) {
+    val context = LocalContext.current
+    val canPulse = remember(context) { pulseAllowed(context) }
+    if (peers > 0 || !canPulse) {
         StatusDot(color)
         return
     }
     val pulse = rememberInfiniteTransition(label = "no-peers")
-    val alpha by pulse.animateFloat(
+    val alpha = pulse.animateFloat(
         initialValue = 1f,
         targetValue = 0.25f,
         animationSpec = infiniteRepeatable(
@@ -840,7 +850,19 @@ fun PeerCountDot(peers: Int) {
         ),
         label = "alpha",
     )
-    StatusDot(color.copy(alpha = alpha))
+    Box(
+        modifier = Modifier
+            .size(9.dp)
+            .graphicsLayer { this.alpha = alpha.value }
+            .background(color, CircleShape),
+    )
+}
+
+/** False on low-RAM devices and TVs, where a never-ending animation costs too much. */
+private fun pulseAllowed(context: Context): Boolean {
+    val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+    if (am?.isLowRamDevice == true) return false
+    return !context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
 }
 
 /** A monospace label: value row (dev diagnostics). */
