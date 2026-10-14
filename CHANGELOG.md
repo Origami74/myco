@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Less logging by default.** The Rust core now logs at INFO instead of
+  DEBUG, which saves CPU on weak devices and battery on phones. Turn debug
+  logs back on with `adb shell setprop debug.myco.log debug` and restart the
+  app; see `docs/how-to/build.md` §6.
+
 ## [0.11.0] - 2026-10-13
 
 ### Added
