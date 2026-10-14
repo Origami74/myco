@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Apps tab stops redrawing twice a second after a search.** The search
+  box kept focus after the keyboard closed, and its blinking cursor redrew
+  the screen every 500 ms for as long as the tab stayed open. It now lets go
+  of focus when the keyboard closes or Search is pressed.
+
 ## [0.11.0] - 2026-10-13
 
 ### Added

@@ -9,6 +9,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -387,8 +395,34 @@ fun AppsScreen(
     }
 }
 
+/**
+ * The Apps search box. It lets go of focus once the keyboard closes.
+ *
+ * A focused text field blinks its cursor every 500 ms for as long as it holds
+ * focus, and every blink is a frame. Nothing else on this screen takes focus
+ * from it (tapping the grid doesn't), so after one search, or one pass of a TV
+ * remote over the field, the Apps tab redrew twice a second for good. The
+ * query stays; only the cursor goes.
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SearchField(query: String, onChange: (String) -> Unit) {
+    val focusManager = LocalFocusManager.current
+    var focused by remember { mutableStateOf(false) }
+    // Set once the keyboard has been up for this field, so focus is dropped
+    // only when it closes, not in the moment between focus and keyboard.
+    var keyboardShown by remember { mutableStateOf(false) }
+    val imeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(focused, imeVisible) {
+        when {
+            !focused -> keyboardShown = false
+            imeVisible -> keyboardShown = true
+            keyboardShown -> {
+                keyboardShown = false
+                focusManager.clearFocus()
+            }
+        }
+    }
     OutlinedTextField(
         value = query,
         onValueChange = onChange,
@@ -396,7 +430,9 @@ private fun SearchField(query: String, onChange: (String) -> Unit) {
         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
         placeholder = { Text("Search apps") },
         shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth(),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
+        modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused },
     )
 }
 
