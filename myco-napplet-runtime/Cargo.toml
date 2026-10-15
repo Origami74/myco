@@ -18,6 +18,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
 tracing = { workspace = true }
+# `Stream`, for what a mesh pull brings back without naming an async runtime.
+futures-util = { workspace = true }
 
 [features]
 # A throwaway-key signed-napplet generator for host tests. Off by default.

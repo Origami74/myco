@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A napplet's mesh subscription gets everything nearby phones send back.**
+  When `mesh.subscribe` asks Circle peers for their backlog, an event this
+  phone had seen once and since let go of (evicted from the cache, or an
+  ephemeral kind) used to come back from a peer and reach nobody. Each peer
+  answer now goes straight to the subscription that asked, once, and only if
+  it matches what the napplet asked for.
+
 - **A napplet refused permission to publish is told `ok: false`.** A
   `relay.publish`, `outbox.publish`, `mesh.publish` or `local.publish` from a
   napplet without that grant now answers with `ok: false` beside the reason,

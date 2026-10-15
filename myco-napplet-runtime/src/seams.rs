@@ -984,9 +984,14 @@ pub trait MeshSink: Send + Sync {
     /// Returns once the request is *under way*, not once peers have answered:
     /// a peer two hops out may take seconds, and a napplet's other calls must
     /// not queue behind it. What comes back is accepted into the local relay
-    /// by the implementation, which is what delivers it to the napplet's live
-    /// subscription — the same path a freshly published event takes.
-    async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<()>;
+    /// by the implementation, and also handed to the caller on the returned
+    /// stream as each peer sends it; the stream ends when the pull is over.
+    ///
+    /// The stream is what reaches the subscription that asked. The local
+    /// relay's live stream carries only first sightings, so an event this
+    /// device saw once and has since let go of (evicted from the cache, or
+    /// never kept) would otherwise come back from a peer and reach nobody.
+    async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<PulledEvents>;
 
     /// How many reachable mesh peers hold each blob in `hashes` — the seam
     /// behind `mesh.blobs`. `hashes` are already checked: lowercase sha256
@@ -1008,6 +1013,11 @@ pub trait MeshSink: Send + Sync {
 /// The most blobs one `mesh.blobs` call may ask about. Every hash costs one
 /// `HEAD` per peer, over BLE as often as not.
 pub const MAX_BLOB_HASHES: usize = 64;
+
+/// The events a [`MeshSink::pull`] brings back, as peers send them. Ends when
+/// the pull is over. A stream rather than a channel so this crate names no
+/// async runtime.
+pub type PulledEvents = futures_util::stream::BoxStream<'static, Event>;
 
 /// What [`MeshSink::blob_holders`] reports.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

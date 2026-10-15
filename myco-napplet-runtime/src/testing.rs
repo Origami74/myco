@@ -877,7 +877,8 @@ impl crate::seams::LaneTransport for OutboxFixture {
 
 /// A [`MeshSink`](crate::seams::MeshSink) with no mesh behind it: stores a
 /// publish locally and records the hop budget it came with, records every
-/// pull, and reports whatever reach a test sets. It answers `mesh.blobs` from
+/// pull and answers it with what [`MemMesh::answer_pulls_with`] staged, and
+/// reports whatever reach a test sets. It answers `mesh.blobs` from
 /// a table a test sets with [`MemMesh::set_blob_holders`], and not at all
 /// until then.
 pub struct MemMesh {
@@ -887,6 +888,7 @@ pub struct MemMesh {
     published: std::sync::Mutex<Vec<(Event, u8)>>,
     rebroadcast: std::sync::Mutex<Vec<(Event, u8)>>,
     pulled: std::sync::Mutex<Vec<(Vec<serde_json::Value>, u8)>>,
+    pull_answers: std::sync::Mutex<Vec<Event>>,
     blob_holders: std::sync::Mutex<Option<crate::seams::BlobReach>>,
     blob_asks: std::sync::Mutex<Vec<Vec<String>>>,
 }
@@ -903,6 +905,7 @@ impl MemMesh {
             published: std::sync::Mutex::new(Vec::new()),
             rebroadcast: std::sync::Mutex::new(Vec::new()),
             pulled: std::sync::Mutex::new(Vec::new()),
+            pull_answers: std::sync::Mutex::new(Vec::new()),
             blob_holders: std::sync::Mutex::new(None),
             blob_asks: std::sync::Mutex::new(Vec::new()),
         }
@@ -941,6 +944,11 @@ impl MemMesh {
         self.pulled.lock().unwrap().clone()
     }
 
+    /// What peers answer every later pull with, in order.
+    pub fn answer_pulls_with(&self, events: Vec<Event>) {
+        *self.pull_answers.lock().unwrap() = events;
+    }
+
     /// Change the caps under a running context, as a settings change would.
     pub fn set_limits(&self, limits: crate::seams::MeshLimits) {
         *self.limits.lock().unwrap() = limits;
@@ -973,9 +981,14 @@ impl crate::seams::MeshSink for MemMesh {
         Ok(())
     }
 
-    async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<()> {
+    async fn pull(
+        &self,
+        filters: Vec<serde_json::Value>,
+        ttl: u8,
+    ) -> anyhow::Result<crate::seams::PulledEvents> {
         self.pulled.lock().unwrap().push((filters, ttl));
-        Ok(())
+        let answers = self.pull_answers.lock().unwrap().clone();
+        Ok(Box::pin(futures_util::stream::iter(answers)))
     }
 
     async fn blob_holders(&self, hashes: &[String]) -> Option<crate::seams::BlobReach> {
