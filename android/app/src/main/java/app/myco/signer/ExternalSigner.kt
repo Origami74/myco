@@ -21,6 +21,9 @@ import java.util.concurrent.TimeUnit
  * to the signer's approval screen through [SignerActivity]. Requests are
  * handled one at a time: a signer shows one approval at once.
  *
+ * Three NIP-55 methods are carried: `sign_event`, and `nip44_encrypt` /
+ * `nip44_decrypt` for the private data napplets keep encrypted to the user.
+ *
  * Nothing here is trusted by the core: the signed event it hands back is
  * checked against the request before anyone sees it.
  */
@@ -91,6 +94,8 @@ object ExternalSigner {
                 "permissions",
                 JSONArray()
                     .put(JSONObject().put("type", "sign_event"))
+                    .put(JSONObject().put("type", "nip44_encrypt"))
+                    .put(JSONObject().put("type", "nip44_decrypt"))
                     .toString(),
             )
         }
@@ -102,11 +107,11 @@ object ExternalSigner {
     }.getOrDefault(pkg)
 
     private fun handle(context: Context, req: Request): Result<String> {
-        if (req.type != "sign_event") {
+        if (req.type !in SUPPORTED) {
             return Result.failure(IllegalArgumentException("unsupported signer request ${req.type}"))
         }
         // Background first: no screen when the user already said "remember".
-        when (val quiet = ContentResolverSigner.signEvent(context, req)) {
+        when (val quiet = ContentResolverSigner.ask(context, req)) {
             is ContentResolverSigner.Answer.Signed -> return Result.success(quiet.value)
             is ContentResolverSigner.Answer.Rejected ->
                 // NIP-55: an "always reject" is final — no approval screen.
@@ -130,6 +135,9 @@ object ExternalSigner {
         }
     }
 
+    /** The NIP-55 methods carried, by their `type`. */
+    private val SUPPORTED = setOf("sign_event", "nip44_encrypt", "nip44_decrypt")
+
     /** [SignerActivity]'s answer to request [id]. */
     internal fun complete(id: String, result: Result<String>) {
         approvals[id]?.complete(result)
@@ -139,6 +147,8 @@ object ExternalSigner {
         val id: String,
         val type: String,
         val payload: String,
+        /** The other party for `nip44_*`, hex; empty for `sign_event`. */
+        val peer: String,
         val currentUser: String,
         val pkg: String,
     ) {
@@ -149,6 +159,7 @@ object ExternalSigner {
                     id = o.getString("id"),
                     type = o.getString("type"),
                     payload = o.getString("payload"),
+                    peer = o.optString("peer"),
                     currentUser = o.getString("currentUser"),
                     pkg = o.getString("package"),
                 )
@@ -157,7 +168,10 @@ object ExternalSigner {
     }
 }
 
-/** NIP-55's background path: `content://<package>.SIGN_EVENT`. */
+/**
+ * NIP-55's background path: `content://<package>.<METHOD>`, with the payload,
+ * the other party (`nip44_*` only) and the current user as the projection.
+ */
 internal object ContentResolverSigner {
     sealed interface Answer {
         data class Signed(val value: String) : Answer
@@ -166,11 +180,11 @@ internal object ContentResolverSigner {
         data object NotRemembered : Answer
     }
 
-    fun signEvent(context: Context, req: ExternalSigner.Request): Answer {
+    fun ask(context: Context, req: ExternalSigner.Request): Answer {
         val cursor = runCatching {
             context.contentResolver.query(
-                Uri.parse("content://${req.pkg}.SIGN_EVENT"),
-                arrayOf(req.payload, "", req.currentUser),
+                Uri.parse("content://${req.pkg}.${req.type.uppercase()}"),
+                arrayOf(req.payload, req.peer, req.currentUser),
                 null,
                 null,
                 null,
@@ -179,8 +193,9 @@ internal object ContentResolverSigner {
         cursor.use { c ->
             if (c.getColumnIndex("rejected") > -1) return Answer.Rejected
             if (!c.moveToFirst()) return Answer.NotRemembered
-            // The signed event when the signer sends one, else the signature;
-            // the core accepts either and checks both.
+            // For `sign_event`, the signed event when the signer sends one,
+            // else the signature; the core accepts either and checks both.
+            // For `nip44_*`, `result` is the ciphertext or plaintext.
             val event = c.getColumnIndex("event").takeIf { it > -1 }?.let { c.getString(it) }
             val result = c.getColumnIndex("result").takeIf { it > -1 }?.let { c.getString(it) }
             val value = event?.takeIf { it.isNotBlank() } ?: result?.takeIf { it.isNotBlank() }

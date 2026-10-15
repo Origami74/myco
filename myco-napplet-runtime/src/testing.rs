@@ -417,6 +417,21 @@ impl crate::seams::Signer for TestSigner {
             .sign_with_keys(&self.keys)
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
+
+    async fn nip44_encrypt(&self, peer: &PublicKey, plaintext: &str) -> anyhow::Result<String> {
+        nostr::nips::nip44::encrypt(
+            self.keys.secret_key(),
+            peer,
+            plaintext,
+            nostr::nips::nip44::Version::V2,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    async fn nip44_decrypt(&self, peer: &PublicKey, ciphertext: &str) -> anyhow::Result<String> {
+        nostr::nips::nip44::decrypt(self.keys.secret_key(), peer, ciphertext)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
 }
 
 /// A [`Signer`](crate::seams::Signer) with no key behind it — what a device

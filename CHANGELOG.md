@@ -44,6 +44,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`-Pmyco.abis=armeabi-v7a`), with smaller storage maps and cache defaults
   there, and a `tv` build type gives release-speed builds for testing.
 
+- **Napplets can keep private data.** `relay.publishEncrypted` now works: a
+  napplet hands over plaintext, and Myco encrypts it to your own key (NIP-44),
+  signs and publishes it. Relays and other people see only ciphertext. Your
+  napplets that can read events (relays, outbox or mesh) get your own
+  encrypted events in plaintext, whichever app wrote them; the install sheet
+  says so. Logged in with Amber, it asks Amber to encrypt and decrypt: if you
+  logged in before this version, log in again so Amber is asked for those
+  permissions.
+
 ### Fixed
 
 - **A napplet already on this phone installs without the internet.** An

@@ -1290,9 +1290,9 @@ internal fun nappletLaunchTarget(review: NappletReview, library: List<LibraryIte
 private data class Capability(val title: String, val detail: String)
 
 private fun capabilityWording(domain: String): Capability = when (domain) {
-    "relay" -> Capability("Relays", "Read and post as you on your relays, without asking each time")
-    "outbox" -> Capability("Outbox", "Post as you to your relays and to other people's, and read from theirs")
-    "mesh" -> Capability("Mesh", "Post as you to phones nearby, and read what they share, without asking each time")
+    "relay" -> Capability("Relays", "Read and post as you on your relays, without asking each time. It can also read the private data your apps keep encrypted there")
+    "outbox" -> Capability("Outbox", "Post as you to your relays and to other people's, and read from theirs. It can also read the private data your apps keep encrypted there")
+    "mesh" -> Capability("Mesh", "Post as you to phones nearby, and read what they share, without asking each time. It can also read the private data your apps keep encrypted on this phone")
     "local" -> Capability("Keep on this phone", "Keep notes, and things it showed you, on this phone")
     "identity" -> Capability("Identity", "See your name and profile")
     "resource" -> Capability("Pictures & files", "Load pictures and files by their content hash")
