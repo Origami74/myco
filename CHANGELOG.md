@@ -29,7 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshots through `window.napplet.gamepad`, with a reviewed per-app permission.
   The trusted shell reads controllers; apps outside focus receive neutral input.
   Android lifecycle and window focus stop live input when the app is covered.
-  Compatibility with `navigator.getGamepads()` is a separate follow-up.
+  Games using `navigator.getGamepads()` receive the same mediated snapshots,
+  browser-style controller objects and connection events through a compatibility shim.
 
 ### Changed
 

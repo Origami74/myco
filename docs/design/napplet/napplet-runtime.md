@@ -1440,8 +1440,8 @@ refuses (a template held in a reactive Proxy) as a JSON snapshot.
 
 The shell denies native controller access to the sandboxed napplet with
 `allow="gamepad 'none'"`. This is Permissions Policy, not CSP. The runtime
-implements NAP-GAMEPAD's `window.napplet.gamepad` binding; the optional
-`navigator.getGamepads()` compatibility projection is deferred.
+implements NAP-GAMEPAD's `window.napplet.gamepad` binding and the optional
+`navigator.getGamepads()` compatibility projection.
 
 The draft contract is pinned to [napplet/naps at
 `19de5ce1cea40cd4c76089cdd8126e9f87648049`](https://github.com/napplet/naps/blob/19de5ce1cea40cd4c76089cdd8126e9f87648049/naps/NAP-GAMEPAD.md).
@@ -1485,6 +1485,24 @@ snapshots and poll results are copied so consumers cannot mutate cached state.
 Games must ignore unfocused input as actions, and should not treat a button
 already held on focus regain as a new press.
 
+The prelude probes the original `Navigator.prototype.getGamepads` before any
+app scripts run. Only `SecurityError` activates the compatibility projection;
+allowed, missing or otherwise failing native APIs remain untouched. The
+replacement preserves property attributes, function name and arity, and rejects
+invalid receivers. Each snapshot projects immutable axes/buttons and read-only
+fields onto the native `Gamepad` and `GamepadButton` prototypes. Polls return a
+new slot array with stable pad objects until the next snapshot. Empty slots
+retain their positions and the host's slot count once the first snapshot arrives;
+before that first snapshot the shim returns an empty array. Haptics remain absent.
+
+Connection changes dispatch ordinary events with `GamepadEvent`'s prototype and
+an own `gamepad` field, reaching both listeners and native `ongamepadconnected` /
+`ongamepaddisconnected` handlers. Focus changes do not create connection events.
+`blocked` state makes native-style polls throw `SecurityError`; `unavailable`
+state returns empty slots. The shim subscribes automatically after the handshake,
+so games that wait for a connection event before polling also receive input.
+The standard napplet API remains available independently of native replacement.
+
 A debug-only `GamepadProbeActivity` loads the actual embedded shell HTML through
 an Android debug asset source set. Its fake runtime channel loads a diagnostic
 iframe using the production shell's load path and source checks. It exposes no
@@ -1521,6 +1539,8 @@ The adjacent `tests/browser/gamepad.mjs` exercises the actual shell, vendored
 prelude and supplement with a deterministic fake native reader and authorized
 control channel: handshake, slots, clamping, focus neutralization, deduplication,
 connection changes, failures, handler close, unsubscribe and control isolation.
+It also checks native descriptors, receiver validation, prototypes, connection
+events, native-only startup and preserving allowed/missing native APIs.
 Run it with the same Playwright module argument. Rust `nap/gamepad.rs` tests
 cover the capability gate, wire refusals, malformed messages and churn limits;
 the core host test covers subscription/revocation FIFO ordering. It does not
