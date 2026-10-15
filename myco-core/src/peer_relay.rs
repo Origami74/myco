@@ -385,7 +385,7 @@ async fn dial(
 > {
     // Dial the mesh address itself: a `<npub>.fips` name left to the system
     // resolver can be answered by a DNS server outside the mesh.
-    let target = crate::dns_intercept::mesh_literal_url(url);
+    let target = crate::dns_intercept::mesh_literal_url(url).await;
     for attempt in 0..2 {
         match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&target)).await
         {
