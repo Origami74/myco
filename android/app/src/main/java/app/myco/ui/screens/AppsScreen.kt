@@ -513,7 +513,7 @@ private fun NsiteTile(
             content = {
                 if (bmp != null) {
                     Image(
-                        bmp.asImageBitmap(),
+                        remember(bmp) { bmp.asImageBitmap() },
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize().padding(9.dp).alpha(iconAlpha),
@@ -654,7 +654,7 @@ private fun NappletSheet(
             ) {
                 if (bmp != null) {
                     Image(
-                        bmp.asImageBitmap(),
+                        remember(bmp) { bmp.asImageBitmap() },
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
@@ -781,7 +781,7 @@ private fun NappletTile(
             content = {
                 if (bmp != null) {
                     Image(
-                        bmp.asImageBitmap(),
+                        remember(bmp) { bmp.asImageBitmap() },
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
@@ -1232,7 +1232,7 @@ private fun NappletMark(review: NappletReview, added: Boolean) {
         ) {
             if (bmp != null) {
                 Image(
-                    bmp.asImageBitmap(),
+                    remember(bmp) { bmp.asImageBitmap() },
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
