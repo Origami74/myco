@@ -322,7 +322,7 @@ pub struct IdentityView {
 impl IdentityView {
     pub fn from_identity(id: &fips::Identity) -> Self {
         let npub = id.npub();
-        let fips_ipv6 = fips::FipsAddress::from_node_addr(id.node_addr())
+        let fips_ipv6 = fips::Ipv6Address::from_node_addr(id.node_addr())
             .to_ipv6()
             .to_string();
         Self {
