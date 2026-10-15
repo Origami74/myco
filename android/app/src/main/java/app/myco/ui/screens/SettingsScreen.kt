@@ -55,6 +55,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -75,6 +76,7 @@ import app.myco.core.NativeActions
 import app.myco.onboarding.SystemAsk
 import app.myco.share.DeviceName
 import app.myco.ui.GroupLabel
+import app.myco.ui.LocalLiveState
 import app.myco.ui.NameSuggestions
 import app.myco.ui.applyDeviceName
 import app.myco.ui.RadioAction
@@ -191,7 +193,7 @@ fun SettingsScreen(
             onBack = { page = SettingsPage.Root },
         )
         SettingsPage.DefaultApps -> DefaultAppsSettings(state, client, onBack = { page = SettingsPage.Root })
-        SettingsPage.Internet -> PublicNodesSettings(state, client, onBack = { page = SettingsPage.Root })
+        SettingsPage.Internet -> PublicNodesSettings(client, onBack = { page = SettingsPage.Root })
         SettingsPage.Account -> AccountSettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Identity -> IdentitySettings(state, client, onBack = { page = SettingsPage.Root })
         SettingsPage.Storage -> StorageSettings(state, client, onBack = { page = SettingsPage.Root })
@@ -237,6 +239,16 @@ private fun RootSettings(
     val context = LocalContext.current
     val deviceName = DeviceName.current(context, state.ownNpub)
     val backendErrors = backendErrors(state)
+    // Storage counts move with every event and blob, so they come from the live
+    // snapshot (the shell's `state` blanks them), through derivedStateOf so the
+    // root recomposes only when the line it shows actually changes.
+    val liveState = LocalLiveState.current
+    val storageSubtitle by remember(liveState) {
+        derivedStateOf {
+            val cache = liveState.value.cache
+            "${cacheBytes(cache.cacheBytes)} cached · ${humanBytes(cache.usedBytes)} of files kept"
+        }
+    }
 
     SettingsColumn {
         ScreenHeader("Settings", state)
@@ -260,8 +272,7 @@ private fun RootSettings(
             SettingRow(
                 icon = Icons.Filled.Storage,
                 title = "Storage",
-                subtitle = "${cacheBytes(state.cache.cacheBytes)} cached · " +
-                    "${humanBytes(state.cache.usedBytes)} of files kept",
+                subtitle = storageSubtitle,
                 alert = backendErrors.isNotEmpty(),
                 onClick = onOpenStorage,
             )
@@ -540,7 +551,9 @@ private fun StorageSettings(state: AppState, client: AppCoreClient, onBack: () -
     // lie about a destructive action, which is the one place it matters most.
     val external = state.cache.externalRelay || state.cache.externalBlobs
 
-    val cache = state.cache
+    // The counts are live; the shell's `state` carries them blanked.
+    val live by LocalLiveState.current
+    val cache = live.cache
     val fraction = if (cache.cacheLimit > 0) {
         (cache.cacheBytes.toDouble() / cache.cacheLimit).coerceIn(0.0, 1.0).toFloat()
     } else {
