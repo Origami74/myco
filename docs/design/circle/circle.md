@@ -72,7 +72,7 @@ enumerating the physical mesh. Design of the handshake:
 | **Gossip** | An accepted event is fanned out to Circle members with a hop budget; backlog is pulled from them; a member who reappears gets your open subscriptions replayed. All edges are Circle edges. |
 | **Napplets** | NAP-MESH's "everyone nearby" is the Circle, `ttl` hops out. NAP-OUTBOX's mesh lane reaches a member's relay directly; a stranger's `.fips` URL in a relay list is dropped. A `blossom:` miss is asked of reachable members. |
 | **Files** | Native encrypted file sharing is offered to, and accepted from, Circle members only. |
-| **Per-member permissions** | Each contact carries `relay_read`, `relay_read_multihop`, `relay_write`, `blossom_write` — what *they* may do to *this* phone. Stored per member, defaults for everyone, no UI yet ([../nsite/nsite-permissions.md](../nsite/nsite-permissions.md) §2). |
+| **Per-member permissions** | Each contact carries `relay_read`, `relay_read_multihop`, `relay_write`, `relay_write_multihop`, `blossom_write` — what *they* may do to *this* phone. Stored per member, defaults for everyone, no UI yet ([../nsite/nsite-permissions.md](../nsite/nsite-permissions.md) §2). |
 
 Everything in the table is checked by npub or by the mesh address derived from
 it. A phone's FIPS peer table is never consulted for any of them.

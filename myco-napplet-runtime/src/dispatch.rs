@@ -144,6 +144,24 @@ fn refusal(message: &Envelope, why: &str) -> Envelope {
     if message.domain() == "upload" {
         return message.to_error(nap::upload::POLICY_DENIED);
     }
+    // A publish result's `ok` is required (NAP-RELAY, NAP-OUTBOX): a refused
+    // publish is `ok: false` beside the reason, the same shape as any other
+    // failed publish, so the napplet branches on one field either way.
+    // NAP-OUTBOX names its refusal too: "policy denied".
+    if matches!(
+        (message.domain(), message.action()),
+        ("relay" | "outbox" | "mesh" | "local", "publish") | ("relay", "publishEncrypted")
+    ) {
+        let error = if message.domain() == "outbox" {
+            nap::upload::POLICY_DENIED
+        } else {
+            why
+        };
+        return message
+            .to_result()
+            .with_field("ok", false)
+            .with_field("error", error);
+    }
     message.to_error(why)
 }
 
@@ -249,6 +267,61 @@ mod tests {
         let out = dispatch(&ctx, &mut s, &Envelope::new("mesh.info").with_id("i1")).await;
         let r = serde_json::to_value(&out.envelopes()[0]).unwrap();
         assert_eq!(r["type"], "mesh.info.result");
+        assert!(r["error"].is_string());
+    }
+
+    /// A refused publish is a failed publish: `ok: false` beside the reason,
+    /// as NAP-RELAY and NAP-OUTBOX require of every publish result — both
+    /// before `shell.ready` and when the domain was not granted.
+    #[tokio::test]
+    async fn a_refused_publish_carries_ok_false() {
+        let (ctx, _signer) = test_context();
+        let template = json!({"kind": 1, "content": "x"});
+        for t in [
+            "relay.publish",
+            "relay.publishEncrypted",
+            "outbox.publish",
+            "mesh.publish",
+            "local.publish",
+        ] {
+            for established in [false, true] {
+                let mut s = Session::new(NappletIdentity::new("chat", "aggregate"), ["theme"]);
+                if established {
+                    s.on_ready();
+                }
+                let out = dispatch(
+                    &ctx,
+                    &mut s,
+                    &Envelope::new(t)
+                        .with_id("p1")
+                        .with_field("event", template.clone()),
+                )
+                .await;
+                let r = serde_json::to_value(&out.envelopes()[0]).unwrap();
+                assert_eq!(r["type"], format!("{t}.result"));
+                assert_eq!(r["id"], "p1");
+                assert_eq!(r["ok"], false, "{t} refusal without ok: false");
+                assert!(r["error"].is_string(), "{t} refusal without error");
+            }
+        }
+
+        let mut s = Session::new(NappletIdentity::new("chat", "aggregate"), ["theme"]);
+        s.on_ready();
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &Envelope::new("outbox.publish")
+                .with_id("p1")
+                .with_field("event", template),
+        )
+        .await;
+        let r = serde_json::to_value(&out.envelopes()[0]).unwrap();
+        assert_eq!(r["error"], "policy denied");
+
+        // A refused non-publish keeps the registry's error-only shape.
+        let out = dispatch(&ctx, &mut s, &Envelope::new("mesh.info").with_id("i1")).await;
+        let r = serde_json::to_value(&out.envelopes()[0]).unwrap();
+        assert!(r.get("ok").is_none());
         assert!(r["error"].is_string());
     }
 
@@ -395,8 +468,10 @@ mod tests {
         assert_eq!(sent.len(), 1);
         let error = sent[0].field("error").unwrap().as_str().unwrap();
         assert!(error.contains("relay"), "unhelpful error: {error}");
-        // The error model: a result carrying `error` carries nothing else.
-        assert_eq!(sent[0].fields.len(), 1);
+        // The error model: a result carrying `error` carries nothing else —
+        // except a publish's required `ok`, which is false (NAP-RELAY).
+        assert_eq!(sent[0].field("ok"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(sent[0].fields.len(), 2);
 
         // And the napplet was told the API exists, so this is a refusal it can
         // act on rather than a runtime that cannot do relay at all.

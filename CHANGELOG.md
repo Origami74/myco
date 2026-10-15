@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer now goes straight to the subscription that asked, once, and only if
   it matches what the napplet asked for.
 
+- **A napplet refused permission to publish is told `ok: false`.** A
+  `relay.publish`, `outbox.publish`, `mesh.publish` or `local.publish` from a
+  napplet without that grant now answers with `ok: false` beside the reason,
+  as NAP-RELAY and NAP-OUTBOX require, rather than the reason alone. An
+  outbox refusal says `"policy denied"`, NAP-OUTBOX's word for it.
+
 - **The Apps tab stops redrawing twice a second after a search.** The search
   box kept focus after the keyboard closed, and its blinking cursor redrew
   the screen every 500 ms for as long as the tab stayed open. It now lets go
