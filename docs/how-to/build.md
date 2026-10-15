@@ -209,6 +209,21 @@ adb -s <serial> logcat | grep -E "myco|Napplet|Ble"
 The Rust core logs through `paranoid-android` under the `myco` tag; the Dev tab
 in the app shows the same peer diagnostics the logs do.
 
+### Debug logs
+
+The Rust core logs at INFO by default. For DEBUG, set the `debug.myco.log`
+system property and restart the app — it is read once, at startup:
+
+```sh
+adb -s <serial> shell setprop debug.myco.log debug
+adb -s <serial> shell am force-stop app.myco
+```
+
+The value is a `tracing` `EnvFilter` directive, so it can target one crate or
+module, e.g. `info,fips=debug,myco_core::peer_relay=debug` (92 bytes max).
+Clear it with `setprop debug.myco.log ""`. The property does not survive a
+reboot.
+
 ---
 
 ## 7. Release
