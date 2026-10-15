@@ -168,6 +168,5 @@ fun MycoTheme(
     MaterialTheme(
         colorScheme = mycoColorScheme(darkTheme),
         typography = MycoTypography,
-        content = content,
-    )
+    ) { ProvideTvFocus(content) }
 }

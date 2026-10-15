@@ -50,7 +50,12 @@
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <uses-feature android:name="android.hardware.nfc.hce" android:required="false" />
 
-    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <!-- BLE is the baseline radio on phones, but some Android TVs ship with
+         Bluetooth disabled in firmware; those still peer over LAN/USB. -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <!-- Android TV: no touchscreen, launched from the leanback home row. -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.software.leanback" android:required="false" />
     <!-- Wi-Fi Aware is the bulk lane, not the baseline: optional, degrades to BLE. -->
     <uses-feature android:name="android.hardware.wifi.aware" android:required="false" />
     <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
@@ -67,6 +72,7 @@
 
     <application
         android:allowBackup="false"
+        android:banner="@drawable/tv_banner"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -83,6 +89,7 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
             <!-- Receive a photo from Android's system Sharesheet, then let the
                  user choose one of Myco's already-paired Circle peers. -->

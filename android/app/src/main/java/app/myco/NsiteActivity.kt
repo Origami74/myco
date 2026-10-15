@@ -39,6 +39,22 @@ import java.io.ByteArrayInputStream
 class NsiteActivity : ComponentActivity() {
     private lateinit var client: AppCoreClient
     private lateinit var webView: WebView
+
+    private val onTv by lazy {
+        packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+    }
+
+    // A TV has no task manager to put a backgrounded app to sleep: pause the
+    // page (hidden, no frames) while the window is off screen, as for napplets.
+    override fun onStop() {
+        super.onStop()
+        if (onTv && ::webView.isInitialized) webView.onPause()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (onTv && ::webView.isInitialized) webView.onResume()
+    }
     private lateinit var root: FrameLayout
 
     /** The nsite this task belongs to; a re-delivered intent for anything else is

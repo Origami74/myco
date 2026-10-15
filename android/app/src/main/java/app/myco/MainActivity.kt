@@ -6,6 +6,8 @@ import android.content.Intent
 import android.provider.Settings
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
+import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
 import android.graphics.Bitmap
@@ -161,6 +163,11 @@ class MainActivity : ComponentActivity() {
         // installed before super.onCreate so the system hands the window over.
         installSplashScreen()
         super.onCreate(savedInstanceState)
+        // The manifest locks phones to portrait; a TV has one fixed landscape
+        // screen, where a portrait lock only letterboxes the app.
+        if (packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)) {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
         // Draw edge-to-edge with transparent system bars on every API level. The
         // default auto style follows Android's light/dark configuration, keeping
         // system icons legible when the AMOLED scheme is active.
@@ -1210,7 +1217,7 @@ class MainActivity : ComponentActivity() {
      *  without leaving Myco. */
     private fun openWifiPanel() {
         runCatching { startActivity(Intent(Settings.Panel.ACTION_WIFI)) }
-            .onFailure { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
+            .recoverCatching { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
     }
 
     private fun awarePermsGranted(): Boolean = SystemAsk.granted(this, SystemAsk.wifiNearby())

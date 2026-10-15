@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import app.myco.ui.theme.remoteLongClick
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -623,7 +624,7 @@ private fun PersonBubble(
             .width(58.dp)
             .then(
                 if (onClick != null || onLongClick != null) {
-                    Modifier.combinedClickable(onClick = { onClick?.invoke() }, onLongClick = onLongClick)
+                    Modifier.remoteLongClick(onLongClick).combinedClickable(onClick = { onClick?.invoke() }, onLongClick = onLongClick)
                 } else {
                     Modifier
                 }

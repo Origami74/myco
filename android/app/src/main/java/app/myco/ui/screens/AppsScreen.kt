@@ -8,6 +8,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
+import app.myco.ui.theme.remoteLongClick
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
@@ -501,7 +502,7 @@ private fun NsiteTile(
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        modifier = modifier.remoteLongClick(onLongClick).combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
         val bmp = icon
         LauncherIcon(
@@ -767,7 +768,7 @@ private fun NappletTile(
     }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        modifier = modifier.remoteLongClick(onLongClick).combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
         val bmp = icon
         LauncherIcon(

@@ -69,7 +69,7 @@ export MYCO_FIPS_REPO_PATH="$PWD/reference/fips"         # §4
 ```
 fips-pop/
   android/                    Kotlin / Compose app, WebViews, radios, VpnService
-    app/build.gradle.kts      arm64 abiFilter, minSdk 29, the buildRustArm64 task
+    app/build.gradle.kts      ABI list (myco.abis), minSdk 29, the buildRust task
     app/src/main/jniLibs/arm64-v8a/libmyco_core.so     (build output, gitignored)
   myco-core/                  the app crate and only cdylib: wiring, identity, node, JNI
   myco-napplet-runtime/       the napplet host (Android-free)
@@ -114,7 +114,7 @@ just install      # build + adb -d install -r
 ```
 
 `assembleDebug`'s `mergeDebugNativeLibs` depends on the Gradle task
-**`buildRustArm64`**, which runs
+**`buildRust`**, which runs
 
 ```sh
 cargo ndk --target arm64-v8a --platform 29 --output-dir <jniLibs> \
@@ -182,18 +182,36 @@ CoreBluetooth `BleIo`, for an Android↔Mac test pair. Not needed for the phone.
 
 ---
 
-## 5. arm64-only and minSdk 29
+## 5. ABIs and minSdk 29
 
-Both are locked and enforced in two places:
+`minSdk = 29` is locked (`android/app/build.gradle.kts`); the `buildRust`
+task passes `--platform 29` to cargo-ndk.
 
-- `android/app/build.gradle.kts`: `minSdk = 29`, `ndk { abiFilters += "arm64-v8a" }`.
-- `buildRustArm64`: `--target arm64-v8a --platform 29`.
-
-An APK built here carries exactly one ABI:
+APKs are `arm64-v8a` by default. Many Android TV boxes run a 32-bit userspace
+on a 64-bit chip, so the ABI list is a property — `-Pmyco.abis=…` or
+`MYCO_ABIS`, comma-separated — that drives both cargo-ndk and `abiFilters`:
 
 ```sh
+./gradlew assembleDebug                                  # arm64-v8a
+./gradlew assembleDebug -Pmyco.abis=armeabi-v7a          # a 32-bit TV
+./gradlew assembleDebug -Pmyco.abis=arm64-v8a,armeabi-v7a
 unzip -l android/app/build/outputs/apk/debug/app-debug.apk | grep '\.so$'
-# expect only lib/arm64-v8a/libmyco_core.so
+```
+
+A 32-bit build needs a fips checkout that compiles for `armeabi-v7a`
+([jmcorgan/fips#191](https://github.com/jmcorgan/fips/pull/191)).
+
+### The `tv` build type
+
+Debug Compose is several times slower than release, which on a weak TV is the
+difference between usable and not. `assembleTv` builds release code (R8, not
+debuggable) signed with the debug key, so it installs over a debug build on a
+test device:
+
+```sh
+./gradlew assembleTv -Pmyco.abis=armeabi-v7a
+adb install -r app/build/outputs/apk/tv/app-tv.apk
+adb shell cmd package compile -m speed -f app.myco
 ```
 
 ---
