@@ -174,6 +174,9 @@ android {
         }
     }
 
+    // The controller probe exercises the exact trusted shell shipped by Rust.
+    sourceSets.getByName("debug").assets.srcDir("../../myco-napplet-runtime/assets")
+
     buildFeatures { compose = true; buildConfig = true }
 
     compileOptions {

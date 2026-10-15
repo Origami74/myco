@@ -45,11 +45,12 @@ mod tests {
     }
 
     /// A napplet's "Copy" works: the cross-origin frame is delegated clipboard
-    /// *write*, and nothing else — reading the clipboard stays denied.
+    /// *write*, and nothing else — reading the clipboard stays denied, and
+    /// controllers stay with the shell.
     #[test]
     fn the_page_delegates_clipboard_write_only() {
         let page = shell_page();
-        assert!(page.contains("frame.setAttribute('allow', 'clipboard-write')"));
+        assert!(page.contains("frame.setAttribute('allow', \"clipboard-write; gamepad 'none'\")"));
         assert!(!page.contains("clipboard-read"));
     }
 

@@ -30,7 +30,7 @@ use crate::seams::{ScopeOwner, WorkScope};
 /// a branch that cannot work.
 pub const IMPLEMENTED_DOMAINS: &[&str] = &[
     "shell", "identity", "relay", "mesh", "outbox", "local", "resource", "link", "theme", "inc",
-    "intent", "upload", "fs",
+    "intent", "upload", "fs", "gamepad",
 ];
 
 /// Domains every napplet gets, grant or no grant.
@@ -264,6 +264,8 @@ impl SubscriptionHandle {
 /// A napplet's live session.
 #[derive(Debug, Clone)]
 pub struct Session {
+    /// Controller subscription policy; native snapshots remain in the shell.
+    pub(crate) gamepad: crate::nap::gamepad::GamepadSubscription,
     identity: NappletIdentity,
     /// Domains the user granted at install review. Kept separate from what is
     /// offered so a grant survives a build that has not implemented it yet.
@@ -340,6 +342,7 @@ impl Session {
         implemented: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self {
+            gamepad: Default::default(),
             identity,
             granted: granted.into_iter().map(Into::into).collect(),
             implemented: implemented.into_iter().map(Into::into).collect(),
@@ -565,6 +568,9 @@ impl Session {
     /// because both check the grant then rather than at handshake.
     pub fn set_granted(&mut self, granted: impl IntoIterator<Item = impl Into<String>>) {
         self.granted = granted.into_iter().map(Into::into).collect();
+        if !self.is_granted("gamepad") {
+            self.gamepad.active = false;
+        }
     }
 
     /// The grants as they stand, sorted.
@@ -578,6 +584,11 @@ impl Session {
     /// enforced — on the call, not on the namespace.
     pub fn is_granted(&self, domain: &str) -> bool {
         MANDATORY_DOMAINS.contains(&domain) || self.granted.contains(domain)
+    }
+
+    /// Whether this window currently owns a controller subscription.
+    pub fn gamepad_subscribed(&self) -> bool {
+        self.gamepad.active
     }
 
     /// Whether a call in `domain` may be serviced right now: the handshake has

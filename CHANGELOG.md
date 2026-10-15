@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Android share menu (Quick Share, Bluetooth, a messenger). The file-share
   hotspot page from the Circle tab offers Myco too.
 
+- **Controller input for napplet games.** NAP-GAMEPAD exposes cached controller
+  snapshots through `window.napplet.gamepad`, with a reviewed per-app permission.
+  The trusted shell reads controllers; apps outside focus receive neutral input.
+  Android lifecycle and window focus stop live input when the app is covered.
+  Compatibility with `navigator.getGamepads()` is a separate follow-up.
+
 ### Changed
 
 - **No VPN needed.** Myco no longer takes Android's VPN slot to reach the mesh,
@@ -46,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Apps survive rotation.** Turning the phone, or resizing the window, no
   longer restarts an open app: it keeps its place (a game stays mid-game)
   and lays itself out for the new size.
+
+- Deny direct gamepad access inside napplet frames as the prerequisite for
+  shell-mediated controller input. A debug-only controller probe exercises the
+  production shell.
 
 ## [0.12.1] - 2026-10-23
 

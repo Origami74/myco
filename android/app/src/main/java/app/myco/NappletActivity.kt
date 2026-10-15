@@ -313,6 +313,35 @@ class NappletActivity : ComponentActivity() {
         packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
     }
 
+    /** A browser document can keep focus while its Android window is covered. */
+    private var gamepadResumed = false
+
+    private fun syncGamepadFocus() {
+        if (!::webView.isInitialized) return
+        val active = gamepadResumed && hasWindowFocus()
+        webView.evaluateJavascript(
+            "window.dispatchEvent(new CustomEvent('myco-host-focus', {detail: $active}))",
+            null,
+        )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        gamepadResumed = true
+        syncGamepadFocus()
+    }
+
+    override fun onPause() {
+        gamepadResumed = false
+        syncGamepadFocus()
+        super.onPause()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        syncGamepadFocus()
+    }
+
     private val restartPrompt by lazy { RestartPrompt.persisted(applicationContext) }
 
     override fun onStop() {
@@ -885,7 +914,7 @@ class NappletActivity : ComponentActivity() {
                 client = client,
                 shellHostOf = { shellHost },
                 sessionId = { synchronized(sessionLock) { sessionId } },
-                onContentVisible = { syncChrome() },
+                onContentVisible = { syncChrome(); syncGamepadFocus() },
                 onRendererGone = { finish() },
                 onUnhandledEscape = ::backEscapeUnhandled,
             )
@@ -959,6 +988,12 @@ class NappletActivity : ComponentActivity() {
             var established = false
             for (frame in inbound) {
                 if (established) {
+                    // Subscription control must keep arrival order, independent
+                    // of slow network capability calls and their semaphores.
+                    if (relayedType(frame)?.startsWith("gamepad.") == true) {
+                        relay(frame)
+                        continue
+                    }
                     val slots = if (isResourceCall(frame)) resourceInFlight else inFlight
                     launch { slots.withPermit { relay(frame) } }
                 } else {

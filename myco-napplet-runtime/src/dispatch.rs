@@ -78,6 +78,9 @@ pub struct NapContext {
 /// What to do with an inbound message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
+    /// Authorize or stop the trusted shell's controller subscription. Values
+    /// stay in the WebView instead of crossing JSON/JNI on every display frame.
+    Gamepad { enabled: bool },
     /// Send these back to the napplet. Empty for a handled message with no
     /// reply, such as a duplicate `shell.ready`.
     Reply(Vec<Envelope>),
@@ -109,7 +112,11 @@ impl Outcome {
     pub fn envelopes(&self) -> &[Envelope] {
         match self {
             Self::Reply(envelopes) => envelopes,
-            Self::Ignore | Self::Link(_) | Self::Intent(_) | Self::FsPick(_) => &[],
+            Self::Ignore
+            | Self::Link(_)
+            | Self::Intent(_)
+            | Self::FsPick(_)
+            | Self::Gamepad { .. } => &[],
         }
     }
 }
@@ -130,6 +137,7 @@ pub fn needs_session(message: &Envelope) -> bool {
         ("shell", _)
             | ("relay" | "mesh" | "outbox", "subscribe" | "close")
             | ("inc", "subscribe" | "unsubscribe")
+            | ("gamepad", _)
     )
 }
 
@@ -141,6 +149,9 @@ pub fn needs_session(message: &Envelope) -> bool {
 /// napplet `undefined` where it expects bytes — and the napplet would fall
 /// over on `blob.arrayBuffer()` with no idea it had been refused.
 fn refusal(message: &Envelope, why: &str) -> Envelope {
+    if message.domain() == "gamepad" {
+        return nap::gamepad::blocked();
+    }
     if message.domain() == "resource" {
         let mut out = Envelope::new(format!("{}.error", message.msg_type))
             .with_field("error", "blocked-by-policy")
@@ -191,6 +202,12 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
     if !session.implements(domain) {
         return Outcome::Ignore;
     }
+    if domain == "gamepad" && !nap::gamepad::recognized(message) {
+        return Outcome::Ignore;
+    }
+    if domain == "gamepad" && message.action() == "unsubscribe" {
+        return nap::gamepad::handle(session, message);
+    }
 
     // NAP-SHELL is the handshake, so it is reachable before the session is
     // established — it is what establishes it. Everything else is not.
@@ -225,6 +242,7 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
 
     let outcome = match domain {
         "shell" => Outcome::Reply(nap::shell::handle(session, message)),
+        "gamepad" => nap::gamepad::handle(session, message),
         "identity" => Outcome::Reply(nap::identity::handle(ctx, message).await),
         "relay" => Outcome::Reply(nap::relay::handle(ctx, session, message).await),
         "mesh" => Outcome::Reply(nap::mesh::handle(ctx, session, message).await),

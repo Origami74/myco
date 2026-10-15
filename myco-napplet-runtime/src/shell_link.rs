@@ -56,6 +56,9 @@ pub enum ShellAction {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "channel", rename_all = "lowercase")]
 pub enum ToShell {
+    /// Trusted shell control, never exposed as a napplet message. Only the
+    /// Rust capability dispatcher can authorize controller sampling.
+    Gamepad { enabled: bool },
     /// Create the iframe with these bytes and this sandbox.
     Shell {
         action: String,
@@ -313,6 +316,8 @@ mod tests {
     fn frames_round_trip_through_json() {
         let artifact = assemble("<p>hi</p>", &Injection::default());
         for frame in [
+            ToShell::Gamepad { enabled: true },
+            ToShell::Gamepad { enabled: false },
             ToShell::load(&artifact, "/_blob/t/"),
             ToShell::to_napplet(Envelope::new("shell.init")),
             ToShell::Relaunch,
