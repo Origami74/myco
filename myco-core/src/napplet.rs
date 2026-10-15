@@ -1199,7 +1199,11 @@ pub async fn ingest_event_into(
             servers.push(server);
         }
     }
-    let view = SourceBlobs { source, servers };
+    let view = SourceBlobs {
+        local: blobs,
+        source,
+        servers,
+    };
     let resolved = resolve(event.clone(), &view)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1341,6 +1345,15 @@ fn servers_from(event: &nostr::Event) -> Vec<String> {
 /// Writes are refused rather than silently dropped: nothing should be trying to
 /// write into a remote source, and a no-op `put` would hide the mistake.
 struct SourceBlobs<'a> {
+    /// This device's own store, asked first. A napplet whose bytes are
+    /// already here — published to this phone's Blossom, kept by an earlier
+    /// install, or carried over by a peer — installs offline, without a
+    /// round trip to bytes it holds. A local copy is used only when it
+    /// hashes to the name asked for: a damaged one (disk corruption, a torn
+    /// write) falls through to `source`, so Download again, updates and
+    /// Circle pushes can repair it instead of meeting the same bad bytes.
+    /// `resolve` re-hashes whatever comes back as well.
+    local: &'a dyn BlobStore,
     source: &'a dyn PeerSource,
     servers: Vec<String>,
 }
@@ -1352,6 +1365,12 @@ impl BlobStore for SourceBlobs<'_> {
     }
 
     async fn get(&self, sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        if let Ok(Some(bytes)) = self.local.get(sha256_hex).await {
+            if nsite_deck::sync::sha256_hex(&bytes).eq_ignore_ascii_case(sha256_hex) {
+                return Ok(Some(bytes));
+            }
+            tracing::debug!("local napplet blob {sha256_hex} is damaged; fetching it again");
+        }
         self.source.fetch_blob(sha256_hex, &self.servers).await
     }
 
@@ -4586,6 +4605,108 @@ mod tests {
         // Now local: opens with no source in reach.
         let opened = host.open(&addr, Some(vec!["relay".into()])).await.unwrap();
         assert!(opened.shell_host.ends_with(".napplet.localhost"));
+    }
+
+    /// Bytes already on this device install the napplet with no source
+    /// serving them: published straight to this phone's Blossom, the
+    /// manifest found but its bytes nowhere else.
+    #[tokio::test]
+    async fn bytes_already_here_install_without_a_source() {
+        let napplet = NappletBuilder::new().build();
+        let source = FakeSource {
+            relay: MemRelay::new(),
+            blobs: MemBlobs::new(),
+            kind: KIND_NAMED,
+        };
+        source
+            .relay
+            .publish(napplet.manifest.clone())
+            .await
+            .unwrap();
+
+        let local_blobs = Arc::new(MemBlobs::new());
+        for (_, bytes) in &napplet.blobs {
+            local_blobs.put(bytes).await.unwrap();
+        }
+        let host = NappletHost::new(test_ctx(Arc::new(MemRelay::new()), local_blobs));
+        let addr = NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
+        };
+
+        host.ingest(&addr, &source).await.unwrap();
+        assert!(host.open(&addr, None).await.is_ok());
+    }
+
+    /// A store whose copy of some blobs is damaged: `get` answers wrong
+    /// bytes under the right name (disk corruption, a torn write) until the
+    /// blob is put again.
+    struct RottenBlobs {
+        inner: MemBlobs,
+        rotten: Mutex<std::collections::HashSet<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlobStore for RottenBlobs {
+        async fn has(&self, sha256_hex: &str) -> bool {
+            self.inner.has(sha256_hex).await
+        }
+
+        async fn get(&self, sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
+            if self.rotten.lock().unwrap().contains(sha256_hex) {
+                return Ok(Some(b"not the bytes you named".to_vec()));
+            }
+            self.inner.get(sha256_hex).await
+        }
+
+        async fn put(&self, bytes: &[u8]) -> anyhow::Result<String> {
+            let sha = self.inner.put(bytes).await?;
+            self.rotten.lock().unwrap().remove(&sha);
+            Ok(sha)
+        }
+
+        async fn wipe(&self) -> anyhow::Result<()> {
+            self.inner.wipe().await
+        }
+    }
+
+    /// A damaged local copy does not block the install: it fails its hash,
+    /// the source is asked instead, and the good bytes replace it.
+    #[tokio::test]
+    async fn a_damaged_local_copy_is_fetched_again() {
+        let napplet = NappletBuilder::new().build();
+        let source = FakeSource {
+            relay: MemRelay::new(),
+            blobs: MemBlobs::new(),
+            kind: KIND_NAMED,
+        };
+        for (_, bytes) in &napplet.blobs {
+            source.blobs.put(bytes).await.unwrap();
+        }
+        source
+            .relay
+            .publish(napplet.manifest.clone())
+            .await
+            .unwrap();
+
+        let local_blobs = Arc::new(RottenBlobs {
+            inner: MemBlobs::new(),
+            rotten: Mutex::default(),
+        });
+        for (_, bytes) in &napplet.blobs {
+            let sha = local_blobs.inner.put(bytes).await.unwrap();
+            local_blobs.rotten.lock().unwrap().insert(sha);
+        }
+        let host = NappletHost::new(test_ctx(Arc::new(MemRelay::new()), local_blobs.clone()));
+        let addr = NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
+        };
+
+        host.ingest(&addr, &source).await.unwrap();
+        assert!(host.open(&addr, None).await.is_ok());
     }
 
     /// Review runs on the manifest alone: finding a napplet fetches no bytes

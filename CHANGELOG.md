@@ -36,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A napplet already on this phone installs without the internet.** An
+  install used to ask only nearby phones and public Blossom servers for the
+  app's files, never this phone's own store, so a napplet published straight
+  to the phone's Blossom, or kept from an earlier install, failed offline
+  with "no source served artifact". Myco now looks on the phone first. A
+  local copy that turns out damaged is not used: it is fetched again from
+  nearby phones or the internet.
+
 - **A napplet's file field opens the file picker.** Tapping an
   `<input type="file">` in a napplet used to do nothing. It now opens
   Android's file picker, and the picker shows every kind of file the field
