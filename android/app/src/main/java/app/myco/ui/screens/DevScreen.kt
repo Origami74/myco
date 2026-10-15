@@ -57,6 +57,8 @@ import app.myco.ui.PathIcons
 import app.myco.ui.TransportIcon
 import app.myco.ui.peerLanes
 import app.myco.ui.locationServicesEnabled
+import app.myco.ui.LocalLiveState
+import app.myco.ui.shellPollMs
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
 import app.myco.ui.theme.StatusReachable
@@ -73,7 +75,7 @@ import kotlin.math.pow
  * the BLE radio, connected peers, scan adverts, and cache counts. Read-only.
  */
 @Composable
-fun DevScreen(state: AppState, client: AppCoreClient) {
+fun DevScreen(client: AppCoreClient) {
     val context = LocalContext.current
     val awareSupported = AwareRadio.isSupported(context)
     val awareAvailable = AwareRadio.isAvailable(context)
@@ -81,17 +83,19 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
     val apWifi by ApRadio.wifi.collectAsState()
     val apNodes by ApRadio.nodes.collectAsState()
 
-    // This screen refreshes faster than the rest of the app, because the peer
-    // list is only useful if it converges visibly while you watch it (D-16), and
-    // last-seen counts in exact seconds (D-18). It drives that itself rather
-    // than raising the shell's cadence: `state()` takes many core locks, and
-    // CONCERNS.md records that making every tab pay for this rate is not free.
+    // The peer list is only useful if it converges visibly while you watch it
+    // (D-16), and last-seen counts in exact seconds (D-18), so this screen reads
+    // the shell's full live snapshot rather than the projection the other tabs
+    // get, which blanks exactly those numbers. One poll serves both: `state()`
+    // takes many core locks, and a second loop here doubled that cost.
     //
-    // Seeded from the hoisted `state` so the first frame is real content — no
-    // spinner, no skeleton. The lifecycle gate is the shell's, so leaving the
-    // tab disposes the effect and backgrounding suspends it; the core keeps
-    // recording either way, so history is complete when the screen returns.
-    var devState by remember { mutableStateOf(state) }
+    // The live snapshot is real from the first frame — no spinner, no
+    // skeleton. The lifecycle gate is the shell's, so backgrounding suspends
+    // the poll; the core keeps recording either way, so history is complete
+    // when the screen returns.
+    val devState by LocalLiveState.current
+    // "No peers" asserts absence, so it waits until a poll has landed since
+    // this screen opened: one poll interval.
     var firstReadLanded by remember { mutableStateOf(false) }
     // Re-read on the same tick as the core state rather than once at
     // composition: this is the row you watch while flipping the setting in
@@ -99,12 +103,12 @@ fun DevScreen(state: AppState, client: AppCoreClient) {
     var locationOn by remember { mutableStateOf(locationServicesEnabled(context)) }
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(Unit) {
+        val pollMs = shellPollMs(context)
         lifecycleOwner.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
-                devState = withContext(Dispatchers.IO) { client.state() }
                 locationOn = withContext(Dispatchers.IO) { locationServicesEnabled(context) }
+                delay(pollMs)
                 firstReadLanded = true
-                delay(1000)
             }
         }
     }

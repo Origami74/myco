@@ -18,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -28,6 +29,7 @@ import app.myco.core.AppState
 import app.myco.core.NativeActions
 import app.myco.core.PublicNode
 import app.myco.ui.GroupLabel
+import app.myco.ui.LocalLiveState
 import app.myco.ui.SectionCard
 import app.myco.ui.theme.StatusConnected
 
@@ -42,7 +44,9 @@ import app.myco.ui.theme.StatusConnected
  * Myco ticks up to three recommended ones at random; the user can change that.
  */
 @Composable
-internal fun PublicNodesSettings(state: AppState, client: AppCoreClient, onBack: () -> Unit) {
+internal fun PublicNodesSettings(client: AppCoreClient, onBack: () -> Unit) {
+    // The live snapshot: each node's ping is blanked in the shell's projection.
+    val state by LocalLiveState.current
     val pub = state.publicNodes
     // Read the adverts on open, so the list is there to look at before the
     // user opts in. The core still refuses while mesh-only is on.
