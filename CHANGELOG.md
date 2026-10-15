@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an accessibility service on, this was a stall of several seconds. Low-RAM
   devices also refresh every two seconds instead of every one, and the Dev tab
   no longer runs a second refresh of its own.
+- **The red "no peers" dot no longer redraws the whole header.** Its pulse
+  now only repaints the dot instead of rebuilding the screen header 60 times
+  a second, which made slow devices stutter and cost battery. On low-memory
+  phones and on TVs the dot doesn't pulse at all; it stays solid red.
 
 ## [0.11.0] - 2026-10-13
 
