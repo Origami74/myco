@@ -1,4 +1,5 @@
-//! NAP-UPLOAD — put a napplet's bytes on the user's Blossom servers.
+//! NAP-UPLOAD — keep a napplet's file on this device, then put it on the
+//! user's Blossom servers.
 //!
 //! The spec is the upstream draft, napplet/naps PR #33
 //! (<https://github.com/napplet/naps/pull/33>, `naps/NAP-UPLOAD.md`). Myco's
@@ -8,6 +9,15 @@
 //! servers, signs the Blossom (BUD-02) authorization as the user, uploads, and
 //! answers with the URL and NIP-94 tags. The napplet never names a server,
 //! never sees the authorization, and never opens a socket.
+//!
+//! **This device first.** Before any server is tried, the file is stripped
+//! of its metadata ([`strip`]) and kept in this device's own Blossom store,
+//! which nothing evicts and Circle peers read over the mesh. So an upload
+//! works with no internet, with offline-only on, and with no server at all:
+//! the answer is then `complete` with a `blossom:sha256:<hex>` URL (which
+//! NAP-RESOURCE resolves) and `localOnly: true`, a Myco addition, beside
+//! `remoteError` saying why no server has it. Only a napplet without the
+//! grant, a bad request, or a user who said no to signing gets a refusal.
 //!
 //! - `upload.info` — advisory: Blossom, the size cap. Never a preflight.
 //! - `upload.upload` — answered once finished (`complete`, `failed` or
@@ -55,6 +65,12 @@ const FILE_TOO_LARGE: &str = "file too large";
 /// Not one of the spec's (its list is "common errors", not closed): the
 /// request carried no bytes, or bytes that did not decode.
 const INVALID_REQUEST: &str = "invalid request";
+/// Not one of the spec's either: a file of a type Myco strips ([`strip`])
+/// that does not parse as one. Refused rather than sent with whatever
+/// metadata it carries.
+const MALFORMED_FILE: &str = "malformed file";
+
+mod strip;
 
 /// Handle an inbound `upload.*` message.
 pub async fn handle(ctx: &NapContext, session: &Session, message: &Envelope) -> Vec<Envelope> {
@@ -67,19 +83,24 @@ pub async fn handle(ctx: &NapContext, session: &Session, message: &Envelope) -> 
     }
 }
 
-/// `upload.info` — advisory: Blossom (disabled while the user has the
-/// internet off), its `https` URLs, and the cap. Every type is accepted, so
-/// no `mimeTypes`.
+/// `upload.info` — advisory: Blossom, always enabled (this device's own
+/// store takes every upload), and the URLs it may answer with: `blossom:`
+/// always, `https` too while the servers can be reached. Every type is
+/// accepted, so no `mimeTypes`.
 async fn info(ctx: &NapContext, message: &Envelope) -> Envelope {
-    let enabled = ctx.uploads.available().await;
+    let returns = if ctx.uploads.available().await {
+        json!(["https", "blossom"])
+    } else {
+        json!(["blossom"])
+    };
     message.to_result().with_field(
         "info",
         json!({
             "rails": [
                 {
                     "rail": RAIL_BLOSSOM,
-                    "enabled": enabled,
-                    "returns": ["https"],
+                    "enabled": true,
+                    "returns": returns,
                 },
             ],
             "maxBytes": MAX_BYTES,
@@ -90,8 +111,11 @@ async fn info(ctx: &NapContext, message: &Envelope) -> Envelope {
 /// A request read off the wire, before anything leaves the device.
 #[derive(Debug, PartialEq)]
 struct Parsed {
+    /// The stripped bytes, their hash and type.
     blob: UploadBlob,
     caption: Option<String>,
+    /// The hash of what the napplet sent, when stripping changed it.
+    original_sha256: Option<String>,
 }
 
 /// Read and check an `upload.upload` request. `Err` is the spec's error
@@ -117,13 +141,23 @@ fn parse(message: &Envelope) -> Result<Parsed, &'static str> {
     if bytes.is_empty() {
         return Err(INVALID_REQUEST);
     }
-    let sha256 = nsite_deck::sync::sha256_hex(&bytes);
     let mime = [request.get("mimeType"), request.get("dataType")]
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
         .find_map(clean_mime)
         .unwrap_or_else(|| crate::nap::resource::sniff_mime(&bytes).to_string());
+    // Stripped before it is hashed, kept or sent: everything after this
+    // sees only the clean file.
+    let (bytes, original_sha256) = match strip::strip(&bytes, &mime) {
+        Ok(Some(clean)) if clean != bytes => (clean, Some(nsite_deck::sync::sha256_hex(&bytes))),
+        Ok(_) => (bytes, None),
+        Err(e) => {
+            tracing::info!(error = %e, "napplet upload refused");
+            return Err(MALFORMED_FILE);
+        }
+    };
+    let sha256 = nsite_deck::sync::sha256_hex(&bytes);
     Ok(Parsed {
         blob: UploadBlob {
             bytes,
@@ -132,6 +166,7 @@ fn parse(message: &Envelope) -> Result<Parsed, &'static str> {
             filename: short_text(request.get("filename"), 200),
         },
         caption: short_text(request.get("caption"), 1000),
+        original_sha256,
     })
 }
 
@@ -179,33 +214,39 @@ fn short_text(value: Option<&Value>, max: usize) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-/// `upload.upload` — upload, and answer once it is done.
+/// `upload.upload` — keep it here, upload it, and answer once both are done.
 async fn upload(ctx: &NapContext, session: &Session, message: &Envelope) -> Envelope {
-    let Parsed { blob, caption } = match parse(message) {
+    let Parsed {
+        blob,
+        caption,
+        original_sha256,
+    } = match parse(message) {
         Ok(parsed) => parsed,
         Err(e) => return message.to_error(e),
     };
-    // The user switched the internet off: refused before an upload exists,
-    // so nothing is signed and no id is spent.
-    if !ctx.uploads.available().await {
-        return message.to_error(POLICY_DENIED);
-    }
     let upload_id = new_upload_id(&blob.sha256);
     tracing::info!(
         napplet = %session.identity().d_tag,
         size = blob.bytes.len(),
         mime = %blob.mime,
         sha256 = %blob.sha256,
+        stripped = original_sha256.is_some(),
         "napplet upload"
     );
+    // This device first: kept, so it is never evicted, and readable by
+    // Circle peers. Whatever the servers do next, the file exists here.
+    let kept = match ctx.kept_blobs.put(&blob.bytes).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "uploaded blob not kept on this device");
+            false
+        }
+    };
+    // What the napplet handed over, for `originalSha256`.
+    let sent_sha256 = original_sha256.as_deref().unwrap_or(&blob.sha256);
+    let dimensions = dimensions(&blob.bytes);
     let result = match ctx.uploads.upload(&blob).await {
         Ok(done) => {
-            // Kept here too, so phones nearby can fetch it by hash. Best
-            // effort: the upload already succeeded, and that is the answer.
-            if let Err(e) = ctx.kept_blobs.put(&blob.bytes).await {
-                tracing::debug!(error = %e, "uploaded blob not kept on this device");
-            }
-            let dimensions = dimensions(&blob.bytes);
             let mime = done.mime.clone().unwrap_or_else(|| blob.mime.clone());
             let mut result = json!({
                 "ok": true,
@@ -219,18 +260,24 @@ async fn upload(ctx: &NapContext, session: &Session, message: &Envelope) -> Enve
                 "mimeType": mime,
                 "nip94": nip94(&done, &blob.sha256, &mime, dimensions, caption.as_deref()),
             });
-            // The server stored other bytes than were sent — a transform.
-            // The spec has both hashes reported: `x` what is at the URL, `ox`
-            // what the napplet handed over. Dimensions read from the
+            if done.sha256 != sent_sha256 {
+                result["originalSha256"] = json!(sent_sha256);
+            }
+            // A server that stored other bytes than were sent transformed
+            // them. The spec has both hashes reported: `x` what is at the
+            // URL, `ox` what was handed over. Dimensions read from the
             // original are then not claimed for the stored file.
-            if done.sha256 != blob.sha256 {
-                result["originalSha256"] = json!(blob.sha256);
-            } else if let Some((width, height)) = dimensions {
-                result["dimensions"] = json!({ "width": width, "height": height });
+            if done.sha256 == blob.sha256 {
+                if let Some((width, height)) = dimensions {
+                    result["dimensions"] = json!({ "width": width, "height": height });
+                }
             }
             result
         }
-        Err(e) => {
+        // The user said no to signing: that is an answer about this upload,
+        // not a server failing, so it is not turned into a local success.
+        // The copy kept here stays, as any kept blob does.
+        Err(e) if e.code == UploadErrorCode::UserCancelled || !kept => {
             tracing::info!(error = %e, "napplet upload failed");
             let state = if e.code == UploadErrorCode::UserCancelled {
                 "cancelled"
@@ -244,6 +291,40 @@ async fn upload(ctx: &NapContext, session: &Session, message: &Envelope) -> Enve
                 "rail": RAIL_BLOSSOM,
                 "error": e.code.as_str(),
             })
+        }
+        // No server took it — offline-only, no internet, no server, or every
+        // one refused — but this device has it. That is a complete upload
+        // to this device's Blossom, said plainly.
+        Err(e) => {
+            tracing::info!(error = %e, "napplet upload kept on this device only");
+            let url = format!("blossom:sha256:{}", blob.sha256);
+            let local = crate::seams::Uploaded {
+                url: url.clone(),
+                fallback_urls: Vec::new(),
+                sha256: blob.sha256.clone(),
+                size: blob.bytes.len() as u64,
+                mime: None,
+            };
+            let mut result = json!({
+                "ok": true,
+                "uploadId": upload_id,
+                "status": "complete",
+                "rail": RAIL_BLOSSOM,
+                "url": url,
+                "sha256": blob.sha256,
+                "size": blob.bytes.len(),
+                "mimeType": blob.mime,
+                "nip94": nip94(&local, &blob.sha256, &blob.mime, dimensions, caption.as_deref()),
+                "localOnly": true,
+                "remoteError": e.code.as_str(),
+            });
+            if let Some(original) = &original_sha256 {
+                result["originalSha256"] = json!(original);
+            }
+            if let Some((width, height)) = dimensions {
+                result["dimensions"] = json!({ "width": width, "height": height });
+            }
+            result
         }
     };
     let mut status = result.clone();
@@ -332,8 +413,28 @@ mod tests {
     use crate::testing::{test_context_with_uploads, MemUploads};
     use std::sync::Arc;
 
-    /// A 3x2 PNG header — enough for the sniffer and `dimensions`.
-    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x03\x00\x00\x00\x02\x08\x06\x00\x00\x00";
+    /// A whole 3x2 PNG, CRCs and all, with nothing to strip — or with the
+    /// given chunks after its header.
+    fn png_with(extra: &[Vec<u8>]) -> Vec<u8> {
+        let mut p = b"\x89PNG\r\n\x1a\n".to_vec();
+        p.extend(strip::tests::chunk(
+            b"IHDR",
+            b"\0\0\0\x03\0\0\0\x02\x08\x06\0\0\0",
+        ));
+        for c in extra {
+            p.extend_from_slice(c);
+        }
+        p.extend(strip::tests::chunk(
+            b"IDAT",
+            b"\x78\x9c\x63\x60\0\0\0\x02\0\x01",
+        ));
+        p.extend(strip::tests::chunk(b"IEND", b""));
+        p
+    }
+
+    fn png() -> Vec<u8> {
+        png_with(&[])
+    }
 
     fn session(granted: &[&str]) -> Session {
         let mut s = Session::new(NappletIdentity::new("doodle", "agg"), granted.to_vec());
@@ -365,7 +466,7 @@ mod tests {
         let r = call(
             &ctx,
             &mut s,
-            upload_msg(json!({"dataBase64": b64(PNG), "mimeType": "image/png"})),
+            upload_msg(json!({"dataBase64": b64(&png()), "mimeType": "image/png"})),
         )
         .await;
         assert_eq!(r["type"], "upload.upload.result");
@@ -386,7 +487,7 @@ mod tests {
             &ctx,
             &mut s,
             upload_msg(json!({
-                "dataBase64": b64(PNG),
+                "dataBase64": b64(&png()),
                 "dataType": "image/png",
                 "filename": "doodleduo-7.png",
                 "caption": "we scored 7",
@@ -396,12 +497,12 @@ mod tests {
         assert_eq!(r["type"], "upload.upload.result");
         assert_eq!(r["id"], "u1");
         let result = &r["result"];
-        let sha = nsite_deck::sync::sha256_hex(PNG);
+        let sha = nsite_deck::sync::sha256_hex(&png());
         assert_eq!(result["ok"], true);
         assert_eq!(result["status"], "complete");
         assert_eq!(result["rail"], "blossom");
         assert_eq!(result["sha256"], sha);
-        assert_eq!(result["size"], PNG.len());
+        assert_eq!(result["size"], png().len());
         assert_eq!(result["mimeType"], "image/png");
         assert_eq!(result["url"], format!("https://blossom.test/{sha}.png"));
         assert_eq!(
@@ -415,7 +516,7 @@ mod tests {
                 ["url", format!("https://blossom.test/{sha}.png")],
                 ["m", "image/png"],
                 ["x", sha],
-                ["size", PNG.len().to_string()],
+                ["size", png().len().to_string()],
                 ["dim", "3x2"],
                 ["fallback", format!("https://mirror.test/{sha}.png")],
                 ["alt", "we scored 7"],
@@ -424,7 +525,7 @@ mod tests {
 
         let sent = uploads.uploaded();
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].bytes, PNG);
+        assert_eq!(sent[0].bytes, png());
         assert_eq!(sent[0].sha256, sha);
         assert_eq!(sent[0].filename.as_deref(), Some("doodleduo-7.png"));
         assert!(ctx.kept_blobs.has(&sha).await, "not kept on this device");
@@ -453,47 +554,170 @@ mod tests {
         assert_eq!(unknown["error"], "unknown upload");
     }
 
-    /// A failure past validation is still an upload: a result with
-    /// `ok: false`, `status: "failed"` and the spec's error string — or
-    /// `cancelled` when the user said no to signing.
+    /// No server took it — offline-only, no internet, no server, every one
+    /// refusing: still `complete`, on this device, with a `blossom:` URL the
+    /// napplet can resolve and `localOnly` saying so.
     #[tokio::test]
-    async fn a_failed_upload_is_a_failed_result() {
+    async fn an_upload_no_server_took_is_kept_here_and_complete() {
         let mut s = session(&["upload"]);
-        for (code, state) in [
-            (UploadErrorCode::ServerRejected, "failed"),
-            (UploadErrorCode::UploadFailed, "failed"),
-            (UploadErrorCode::UserCancelled, "cancelled"),
+        let sha = nsite_deck::sync::sha256_hex(&png());
+        for code in [
+            UploadErrorCode::PolicyDenied,
+            UploadErrorCode::NoServerConfigured,
+            UploadErrorCode::ServerRejected,
+            UploadErrorCode::UploadFailed,
         ] {
             let (mut ctx, _uploads) = test_context_with_uploads();
             ctx.uploads = Arc::new(MemUploads::failing(code));
-            let r = call(&ctx, &mut s, upload_msg(json!({"dataBase64": b64(b"hi")}))).await;
-            assert_eq!(r["id"], "u1");
-            assert!(r.get("error").is_none());
-            assert_eq!(r["result"]["ok"], false);
-            assert_eq!(r["result"]["status"], state);
-            assert_eq!(r["result"]["error"], code.as_str());
-            assert!(r["result"].get("url").is_none());
+            let r = call(
+                &ctx,
+                &mut s,
+                upload_msg(json!({"dataBase64": b64(&png()), "caption": "offline"})),
+            )
+            .await;
+            assert!(r.get("error").is_none(), "{r}");
+            let result = &r["result"];
+            assert_eq!(result["ok"], true);
+            assert_eq!(result["status"], "complete");
+            assert_eq!(result["rail"], "blossom");
+            assert_eq!(result["localOnly"], true);
+            assert_eq!(result["remoteError"], code.as_str());
+            assert_eq!(result["url"], format!("blossom:sha256:{sha}"));
+            assert_eq!(result["sha256"], sha);
+            assert_eq!(result["size"], png().len());
+            assert_eq!(result["mimeType"], "image/png");
+            assert_eq!(result["dimensions"], json!({"width": 3, "height": 2}));
+            assert!(result.get("fallbackUrls").is_none());
+            assert_eq!(
+                result["nip94"],
+                json!([
+                    ["url", format!("blossom:sha256:{sha}")],
+                    ["m", "image/png"],
+                    ["x", sha],
+                    ["size", png().len().to_string()],
+                    ["dim", "3x2"],
+                    ["alt", "offline"],
+                ])
+            );
+            assert!(ctx.kept_blobs.has(&sha).await, "not kept on this device");
             let st = call(
                 &ctx,
                 &mut s,
                 Envelope::new("upload.status")
                     .with_id("s")
-                    .with_field("uploadId", r["result"]["uploadId"].clone()),
+                    .with_field("uploadId", result["uploadId"].clone()),
             )
             .await;
-            assert_eq!(st["status"]["status"], state);
+            assert_eq!(st["status"]["localOnly"], true);
         }
     }
 
-    /// Internet switched off by the user: refused before an upload exists.
+    /// The user said no to signing: `cancelled`, not a local success.
     #[tokio::test]
-    async fn offline_only_is_policy_denied() {
+    async fn a_signer_no_is_cancelled() {
         let (mut ctx, _uploads) = test_context_with_uploads();
-        ctx.uploads = Arc::new(MemUploads::failing(UploadErrorCode::PolicyDenied));
+        ctx.uploads = Arc::new(MemUploads::failing(UploadErrorCode::UserCancelled));
         let mut s = session(&["upload"]);
         let r = call(&ctx, &mut s, upload_msg(json!({"dataBase64": b64(b"hi")}))).await;
-        assert_eq!(r["error"], "policy denied");
-        assert!(r.get("result").is_none());
+        assert!(r.get("error").is_none());
+        assert_eq!(r["result"]["ok"], false);
+        assert_eq!(r["result"]["status"], "cancelled");
+        assert_eq!(r["result"]["error"], "user cancelled");
+        assert!(r["result"].get("url").is_none());
+    }
+
+    /// A store that takes nothing, as a full disk would.
+    struct FullDisk;
+
+    #[async_trait::async_trait]
+    impl nsite_deck::BlobStore for FullDisk {
+        async fn has(&self, _: &str) -> bool {
+            false
+        }
+        async fn get(&self, _: &str) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn put(&self, _: &[u8]) -> anyhow::Result<String> {
+            anyhow::bail!("no space left")
+        }
+        async fn wipe(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Neither here nor on a server: a result with `ok: false`,
+    /// `status: "failed"` and the server's error string. A server alone is
+    /// still enough.
+    #[tokio::test]
+    async fn an_upload_kept_nowhere_is_a_failed_result() {
+        let mut s = session(&["upload"]);
+        let (mut ctx, _uploads) = test_context_with_uploads();
+        ctx.kept_blobs = Arc::new(FullDisk);
+        ctx.uploads = Arc::new(MemUploads::failing(UploadErrorCode::UploadFailed));
+        let r = call(&ctx, &mut s, upload_msg(json!({"dataBase64": b64(b"hi")}))).await;
+        assert!(r.get("error").is_none());
+        assert_eq!(r["result"]["ok"], false);
+        assert_eq!(r["result"]["status"], "failed");
+        assert_eq!(r["result"]["error"], "upload failed");
+
+        let (mut ctx, _uploads) = test_context_with_uploads();
+        ctx.kept_blobs = Arc::new(FullDisk);
+        let r = call(&ctx, &mut s, upload_msg(json!({"dataBase64": b64(b"hi")}))).await;
+        assert_eq!(r["result"]["ok"], true);
+        assert!(r["result"].get("localOnly").is_none());
+    }
+
+    /// Metadata goes before anything is kept or sent: the server and this
+    /// device get the clean file, the napplet learns its hash, and
+    /// `originalSha256` names what it handed over.
+    #[tokio::test]
+    async fn an_upload_is_stripped_before_it_is_kept_or_sent() {
+        let (ctx, uploads) = test_context_with_uploads();
+        let mut s = session(&["upload"]);
+        let tagged = png_with(&[strip::tests::chunk(b"tEXt", b"GPS\x0052.37N 4.89E")]);
+        let r = call(
+            &ctx,
+            &mut s,
+            upload_msg(json!({"dataBase64": b64(&tagged)})),
+        )
+        .await;
+        let result = &r["result"];
+        let clean = nsite_deck::sync::sha256_hex(&png());
+        assert_eq!(result["sha256"], clean);
+        assert_eq!(
+            result["originalSha256"],
+            nsite_deck::sync::sha256_hex(&tagged)
+        );
+        assert_eq!(result["size"], png().len());
+        assert_eq!(result["dimensions"], json!({"width": 3, "height": 2}));
+        let tags = result["nip94"].as_array().unwrap();
+        assert!(tags.contains(&json!(["x", clean])));
+        assert!(
+            !tags.iter().any(|t| t[0] == "ox"),
+            "the original's hash is not published"
+        );
+        assert_eq!(uploads.uploaded()[0].bytes, png());
+        assert_eq!(uploads.uploaded()[0].sha256, clean);
+        assert_eq!(ctx.kept_blobs.get(&clean).await.unwrap(), Some(png()));
+    }
+
+    /// A file of a stripped type that does not parse is refused, not sent
+    /// with its metadata — and not kept either.
+    #[tokio::test]
+    async fn a_malformed_picture_is_refused() {
+        let (ctx, uploads) = test_context_with_uploads();
+        let mut s = session(&["upload"]);
+        let mut cut = png_with(&[strip::tests::chunk(b"eXIf", b"MM\0*")]);
+        cut.truncate(cut.len() - 12);
+        for request in [
+            json!({"dataBase64": b64(&cut)}),
+            json!({"dataBase64": b64(b"not really"), "mimeType": "image/jpeg"}),
+        ] {
+            let r = call(&ctx, &mut s, upload_msg(request)).await;
+            assert_eq!(r["error"], "malformed file", "{r}");
+            assert!(r.get("result").is_none());
+        }
+        assert!(uploads.uploaded().is_empty());
     }
 
     /// A server that transformed the file: both hashes reported, `x` the
@@ -504,9 +728,9 @@ mod tests {
         let stored = "ee".repeat(32);
         ctx.uploads = Arc::new(MemUploads::transforming(&stored));
         let mut s = session(&["upload"]);
-        let r = call(&ctx, &mut s, upload_msg(json!({"dataBase64": b64(PNG)}))).await;
+        let r = call(&ctx, &mut s, upload_msg(json!({"dataBase64": b64(&png())}))).await;
         let result = &r["result"];
-        let sha = nsite_deck::sync::sha256_hex(PNG);
+        let sha = nsite_deck::sync::sha256_hex(&png());
         assert_eq!(result["sha256"], stored);
         assert_eq!(result["originalSha256"], sha);
         assert!(result.get("dimensions").is_none());
@@ -525,7 +749,7 @@ mod tests {
             let r = call(
                 &ctx,
                 &mut s,
-                upload_msg(json!({"rail": rail, "dataBase64": b64(PNG)})),
+                upload_msg(json!({"rail": rail, "dataBase64": b64(&png())})),
             )
             .await;
             assert_eq!(r["error"], "unsupported rail", "{rail}: {r}");
@@ -534,7 +758,7 @@ mod tests {
         let ok = call(
             &ctx,
             &mut s,
-            upload_msg(json!({"rail": "blossom", "dataBase64": b64(PNG)})),
+            upload_msg(json!({"rail": "blossom", "dataBase64": b64(&png())})),
         )
         .await;
         assert_eq!(ok["result"]["status"], "complete");
@@ -571,17 +795,17 @@ mod tests {
     fn the_mime_type_is_said_or_sniffed() {
         let parsed = |request: Value| parse(&upload_msg(request)).unwrap().blob.mime;
         assert_eq!(
-            parsed(json!({"dataBase64": b64(PNG), "mimeType": "Image/PNG; q=1"})),
+            parsed(json!({"dataBase64": b64(&png()), "mimeType": "Image/PNG; q=1"})),
             "image/png"
         );
         assert_eq!(
             parsed(
-                json!({"dataBase64": b64(PNG), "mimeType": "nonsense", "dataType": "image/x-doodle"})
+                json!({"dataBase64": b64(&png()), "mimeType": "nonsense", "dataType": "image/x-doodle"})
             ),
             "image/x-doodle"
         );
         assert_eq!(
-            parsed(json!({"dataBase64": b64(PNG), "dataType": ""})),
+            parsed(json!({"dataBase64": b64(&png()), "dataType": ""})),
             "image/png"
         );
         assert_eq!(
@@ -598,7 +822,10 @@ mod tests {
         let r = call(&ctx, &mut s, Envelope::new("upload.info").with_id("i")).await;
         assert_eq!(r["info"]["rails"][0]["rail"], "blossom");
         assert_eq!(r["info"]["rails"][0]["enabled"], true);
-        assert_eq!(r["info"]["rails"][0]["returns"], json!(["https"]));
+        assert_eq!(
+            r["info"]["rails"][0]["returns"],
+            json!(["https", "blossom"])
+        );
         assert_eq!(r["info"]["rails"].as_array().unwrap().len(), 1);
         assert_eq!(r["info"]["maxBytes"], MAX_BYTES);
     }
@@ -615,7 +842,7 @@ mod tests {
 
     #[test]
     fn dimensions_come_from_png_and_gif_headers() {
-        assert_eq!(dimensions(PNG), Some((3, 2)));
+        assert_eq!(dimensions(&png()), Some((3, 2)));
         assert_eq!(dimensions(b"GIF89a\x0a\x00\x05\x00"), Some((10, 5)));
         assert_eq!(dimensions(b"\xff\xd8\xff\xe0"), None);
     }

@@ -756,15 +756,20 @@ impl HttpsFetcher for NoHttps {
 /// NAP-UPLOAD (napplet/naps PR #33).
 ///
 /// The handler has already checked the grant, decoded and capped the bytes,
-/// settled the MIME type and hashed them. What is left is the part that
-/// touches the world: choosing servers, signing the BUD-02 authorization as
-/// the user, and the HTTP upload. A napplet never names a server and never
-/// sees the authorization.
+/// stripped their metadata, settled the MIME type, hashed them, and kept
+/// them in this device's Blossom. What is left is the part that touches the
+/// world: choosing servers, signing the BUD-02 authorization as the user,
+/// and the HTTP upload. A napplet never names a server and never sees the
+/// authorization.
+///
+/// Best effort: an `Err` other than `user cancelled` still answers the
+/// napplet with the copy kept on this device (`localOnly`).
 #[async_trait]
 pub trait UploadSink: Send + Sync {
-    /// Whether an upload could go anywhere right now. `false` when the user
-    /// switched the internet off (offline-only), or there is no uploader.
-    /// Advisory: `upload.info` reports it, and an upload can still fail.
+    /// Whether an upload could reach a server right now. `false` when the
+    /// user switched the internet off (offline-only), or there is no
+    /// uploader. Advisory: `upload.info` drops `https` from what it may
+    /// return, and an upload can still fail.
     async fn available(&self) -> bool;
 
     /// Upload `blob` and say where it landed. `Err` says why, as one of the

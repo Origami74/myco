@@ -17,24 +17,101 @@ Upload a File to the User's Blossom Servers
 > built. The spec is a **draft in an open PR, not merged**: re-audit this page
 > and the code whenever it changes.
 > Implementation: `myco-napplet-runtime/src/nap/upload.rs`,
-> `assets/shell.html`, `assets/myco-prelude.js`;
+> `nap/upload/strip.rs`, `assets/shell.html`, `assets/myco-prelude.js`;
 > `myco-core/src/blossom_upload.rs`.
 
 ## What it does
 
-A napplet hands Myco a file. Myco puts it on the user's Blossom servers,
+A napplet hands Myco a file. Myco strips its metadata, keeps it in this
+device's own Blossom store, then puts it on the user's Blossom servers,
 signed as the user, and answers with the URL and NIP-94 tags. Doodle Duo uses
 it to post its score picture in a note.
+
+An upload always works at least on this device. When no server takes it, the
+answer still says `complete`, with a local URL (see Results).
 
 API, schemas, wire and error strings: see the spec.
 
 ## Rails
 
-- **Blossom only.** `info` lists one rail, `blossom`, returning `https` URLs.
+- **Blossom only.** `info` lists one rail, `blossom`, always enabled: this
+  device's own Blossom takes every upload.
+- `returns` is `["https", "blossom"]`, or just `["blossom"]` while
+  offline-only is on.
 - A request naming any other rail (`nip96` included) gets `unsupported rail`.
   No rail means Blossom.
-- `info` is advisory. It says Blossom is disabled while offline-only is on;
-  nothing requires calling it first.
+- `info` is advisory; nothing requires calling it first.
+
+## This device first
+
+Every upload is kept in this device's Blossom before any server is tried
+(`NapContext::kept_blobs`, the store `resource.keep` writes to). Kept means
+not cache: nothing evicts it.
+
+- It is the stripped file (see Metadata), so the hash is the same here and on
+  the servers.
+- Circle peers can fetch it by hash over the mesh, from `:24243`, the
+  paired-only Blossom server. `mesh.blobs` on their side counts this phone
+  among those that hold it. That server answers from the kept store and the
+  cache together.
+- With a custom blob store set in Settings, "this device's Blossom" is that
+  store, and the phone runs no mesh Blossom server. Peers then cannot fetch
+  it from this phone.
+- If keeping fails (a full disk), the servers are still tried. Only when
+  both fail is the upload `failed`.
+
+## Metadata
+
+Stripped by the shell, in Rust, before anything is kept or sent
+(`nap/upload/strip.rs`). Segments and chunks are dropped; nothing is decoded
+or re-encoded. The spec allows it ("The shell MAY strip or rewrite metadata").
+
+- **JPEG:** every `APPn` but `APP0` JFIF, `APP2` ICC profile and `APP14`
+  Adobe (needed to decode CMYK), and every `COM`. Also anything after the
+  end-of-image marker (a "motion photo" hides a video there).
+- **PNG:** every ancillary chunk but `iCCP`, `gAMA`, `cHRM`, `sRGB`, `pHYs`,
+  `tRNS`, `sBIT`, `bKGD`, `cICP`, `mDCV`, `cLLI` and the APNG chunks. So
+  `tEXt`, `zTXt`, `iTXt`, `tIME` and unknown chunks go. Anything after
+  `IEND` goes too.
+- **WebP:** every chunk but `VP8X`, `VP8 `, `VP8L`, `ALPH`, `ANIM`, `ANMF`,
+  `ICCP`. So `XMP ` goes; the `VP8X` flags are made to match and the RIFF
+  size rewritten.
+- **GLB** (`model/gltf-binary`): `asset.generator`, every `extras`, and the
+  `KHR_xmp_json_ld` extension, anywhere in the JSON. `asset.version` and
+  `asset.copyright` stay. Pictures embedded in the binary chunk are stripped
+  as above, and the chunk is laid out again with each buffer view's offset
+  and length rewritten (alignment kept).
+  - Not for meshopt-compressed files, or ones whose buffer views overlap:
+    their embedded pictures go as they are. A napplet that cares strips its
+    textures itself (lightertrek re-encodes them anyway).
+  - Pictures in `data:` URIs or separate files are not touched.
+
+### Orientation is kept
+
+A phone stores a portrait photo's pixels landscape and says "rotate 90°" in
+the EXIF Orientation tag. Dropping it would show the photo on its side.
+
+- The first EXIF block (JPEG `APP1` Exif, PNG `eXIf`, WebP `EXIF`) is read,
+  both byte orders, every read bounds-checked.
+- If IFD0 has an Orientation (tag `0x0112`, SHORT) of 2–8, a new EXIF block
+  replaces it: a TIFF header in the original byte order, IFD0 with that one
+  entry, no next IFD. 26 bytes.
+- Nothing else of the original survives: no GPS, camera, timestamps,
+  thumbnail or other IFDs.
+- Orientation 1, no Orientation, or EXIF that does not parse: no EXIF at all.
+
+Where it goes:
+
+- **JPEG:** a new `APP1` right after start-of-image, or after `APP0` JFIF
+  when that comes first.
+- **PNG:** in place of the old `eXIf`, with a new CRC.
+- **WebP:** in place of the old `EXIF`, with the `VP8X` EXIF flag set. A
+  file without `VP8X` cannot carry EXIF, so it gets none.
+
+The format is read from the bytes' magic number, and from the type only when
+the bytes have none. A file of one of these types that does not parse is
+refused with a top-level `malformed file` (a Myco string, not the spec's),
+and nothing is kept or sent. Every other type goes as it is.
 
 ## Servers
 
@@ -80,6 +157,10 @@ key, guest or a NIP-55 signer app. Sent as `Authorization: Nostr <base64>` on
 - `url` is the descriptor's only if it is `https` (or `http` on a `.fips`
   mesh name) and names the hash. Anything else gets `<server>/<sha256>`, so a
   server can't point the user's post at another file or host.
+- `sha256` is always the stripped file's. When stripping changed the file,
+  `originalSha256` is the hash of what the napplet sent, as the spec asks
+  ("SHOULD reflect this in the returned hashes"). It is not put in `nip94`
+  as `ox`: that tag would publish the hash of the unstripped file.
 - `nip94`: `url`, `m`, `x`, `size`, `dim` (PNG and GIF
   headers only), `fallback`, and `alt` from the caption.
 - `mimeType` is the server's `type` if it gave one, else what was sent.
@@ -140,8 +221,12 @@ Per napplet, the spec's three policies are:
 
 ## Offline
 
-- **Offline-only on:** `policy denied`, before anything is signed.
-- **No internet** (the breaker is tripped): `upload failed`.
+- **Offline-only on, no internet** (the breaker is tripped), **no server
+  configured, or every server refused:** the upload is still `ok: true`,
+  `complete`, from this device (see Results). Nothing is signed while
+  offline-only is on.
+- `policy denied` as a top-level error is only for a napplet without the
+  `upload` grant.
 - **Bounds:** server list 8 s, uploads 120 s together, mirror 15 s, per server
   5 s to connect and 20 s without progress, plus the signer's own wait (120 s
   for a signer app). The sum stays under the prelude's 5 min wait, checked by
@@ -158,15 +243,50 @@ Per napplet, the spec's three policies are:
   `outbox.publish`): signing may be a person approving in a signer app.
 - `upload.status` answers from the session's last 32 uploads; older or
   unknown ids get a top-level `error`.
-- After a successful upload the file is also kept in this device's own
-  Blossom, so paired phones can fetch it by hash. Best effort.
+
+### When no server took it
+
+Myco additions, marked as such since the spec has no local result:
+
+```json
+{
+  "ok": true,
+  "uploadId": "…",
+  "status": "complete",
+  "rail": "blossom",
+  "url": "blossom:sha256:<hex>",
+  "sha256": "<hex>",
+  "size": 1234,
+  "mimeType": "image/png",
+  "nip94": [["url", "blossom:sha256:<hex>"], ["m", "image/png"], ["x", "<hex>"], ["size", "1234"]],
+  "localOnly": true,
+  "remoteError": "policy denied"
+}
+```
+
+- `status` stays `complete`: the spec's states are a closed list, and the
+  file is stored. `localOnly: true` is the one field to check.
+- `url` is `blossom:sha256:<hex>`, which NAP-RESOURCE resolves (this device
+  first, then Circle peers). It is not a link anyone on the web can open.
+- `remoteError` is why no server has it, in the spec's strings:
+  `policy denied` (offline-only on, or not signed in), `upload failed` (no
+  internet, out of time, another upload running), `no server configured`,
+  `server rejected`, `quota exceeded`.
+- No `fallbackUrls`. `originalSha256` and `dimensions` as on success.
+- A signer's "no" is still `cancelled`, `ok: false`, not a local success. The
+  copy kept on this device stays.
+- Nothing retries the servers later. A napplet that wants the file public can
+  upload again when `info` lists `https`.
 
 ## Not built
 
 - NIP-96, and any rail but Blossom.
 - Progress (`uploading`, `upload.status.changed`).
 - Blurhash. Dimensions beyond PNG and GIF headers.
-- EXIF or other metadata stripping. Files go up as the napplet sent them.
+- Metadata stripping beyond JPEG, PNG, WebP and GLB (GIF comments, video,
+  PDF, audio tags), and GLB pictures in meshopt files (see Metadata).
+- Showing the user that stripping happened, or a setting to turn it off.
+- Retrying the servers for an upload kept only on this device.
 - A consent prompt showing type, size, target server and napplet, or a
   preview (spec SHOULD). Consent is the install grant.
 - Rate limiting per napplet (spec SHOULD). The size cap bounds one upload
@@ -177,7 +297,7 @@ Per napplet, the spec's three policies are:
 
 ## Implementations
 
-- Runtime: `nap/upload.rs`, the `UploadSink` seam (`UploadError` carries the
+- Runtime: `nap/upload.rs`, `nap/upload/strip.rs`, the `UploadSink` seam (`UploadError` carries the
   spec's error strings), `NapContext::uploads`, `Session::record_upload`.
 - Shell: `assets/shell.html` (bytes to base64), `assets/myco-prelude.js`
   (`upload.upload` with the signing wait).

@@ -67,8 +67,8 @@ pub struct NapContext {
     /// The installed-napplet catalog behind NAP-INTENT's `available` and
     /// `handlers`. See [`nap::intent::IntentCatalog`].
     pub intents: Arc<dyn nap::intent::IntentCatalog>,
-    /// Where NAP-UPLOAD puts a napplet's bytes: the user's Blossom servers.
-    /// See [`UploadSink`].
+    /// Where NAP-UPLOAD puts a napplet's bytes once they are kept in
+    /// `kept_blobs`: the user's Blossom servers. See [`UploadSink`].
     pub uploads: Arc<dyn UploadSink>,
 }
 

@@ -2,9 +2,11 @@
 //! `docs/design/napplet/NAP-UPLOAD.md`): a napplet's bytes onto the
 //! **user's** Blossom servers, signed as the user.
 //!
-//! The runtime crate has already checked the grant, capped and hashed the
-//! bytes and settled the type ([`myco_napplet_runtime::nap::upload`]). What
-//! happens here:
+//! The runtime crate has already checked the grant, capped the bytes,
+//! stripped their metadata, hashed them, settled the type and kept them in
+//! this device's Blossom ([`myco_napplet_runtime::nap::upload`]). This is the
+//! second, best-effort half: when it fails, the napplet is answered with the
+//! copy on this device. What happens here:
 //!
 //! 1. **Servers.** The user's BUD-03 list (kind 10063, `server` tags): this
 //!    device's relay first, then the user's own relays (their NIP-65 write
@@ -26,7 +28,7 @@
 //! over on its way here, for minutes while a signer app waits.
 //!
 //! Offline-only refuses at once, and so does an internet the breaker says is
-//! down. Every stage is bounded; the sum stays under the prelude's
+//! down; the upload then stays on this device only. Every stage is bounded; the sum stays under the prelude's
 //! [`myco_napplet_runtime::SIGNING_TIMEOUT`], so the napplet hears a clear
 //! failure rather than "timed out".
 

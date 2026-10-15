@@ -82,6 +82,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read 0, and they can be slightly off after a "Clear cache" that races a sync.
 ### Changed
 
+- **A napplet's upload always lands on this phone first, and loses its
+  metadata.** Before anything is stored or sent, Myco takes out what a file
+  says about where, when and on what it was made: EXIF (GPS, camera, time),
+  XMP, IPTC and comments from JPEG; text, time and EXIF chunks from PNG; EXIF
+  and XMP from WebP; and the generator, `extras` and XMP from 3D models (GLB),
+  pictures inside them included. Only the EXIF orientation is kept, so a
+  portrait photo still shows upright. The picture itself is not re-encoded. A file
+  of one of these types that can't be read is refused rather than uploaded as
+  it is. The clean file is then kept on the phone, where paired phones can
+  fetch it, and sent on to your Blossom servers as before. With offline-only
+  on, no internet or no server, the upload no longer fails: the napplet gets
+  the file's local `blossom:` address, marked `localOnly`.
 - **Less logging by default.** The Rust core now logs at INFO instead of
   DEBUG, which saves CPU on weak devices and battery on phones. Turn debug
   logs back on with `adb shell setprop debug.myco.log debug` and restart the
