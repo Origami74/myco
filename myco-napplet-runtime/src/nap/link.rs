@@ -15,6 +15,11 @@
 //!   (kinds 35129 / 15129 / 5129) opens Myco's install review for it, over the
 //!   running napplet. Never an install: the user confirms on the review sheet
 //!   (napplet-runtime §7.7).
+//! - A `napplet.link` — `https://napplet.link/<archetype>/<intent>?…` or
+//!   `napplet:<archetype>/<intent>?…` — is a NAP-INTENT request in link form
+//!   ([`crate::napplet_link`]): the host resolves it against its catalog and
+//!   opens the handler (or the chooser), exactly as for `intent.invoke`. It
+//!   never goes to the browser from here.
 //! - Anything else is `denied` with `unsupported-scheme`; a URL that does not
 //!   parse is `denied` with `invalid-url`.
 //!
@@ -36,6 +41,7 @@ use nostr::nips::nip19::{FromBech32, Nip19Coordinate};
 
 use crate::dispatch::Outcome;
 use crate::manifest::{KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT};
+use crate::napplet_link::{NappletLink, BAD_PATH, NOT_A_NAPPLET_LINK};
 use crate::seams::Envelope;
 
 /// The longest URL accepted. Generous for any real link, and a bound on what
@@ -61,6 +67,9 @@ pub enum LinkTarget {
     /// A napplet pointer — the bare `naddr1…`, lower-cased — for install
     /// review.
     Napplet(String),
+    /// A `napplet.link`: open whatever handles this role, as NAP-INTENT
+    /// would.
+    Intent(NappletLink),
 }
 
 /// A valid `link.open`, awaiting the host's decision.
@@ -137,33 +146,52 @@ pub fn classify(url: &str) -> Result<LinkTarget, &'static str> {
             if authority.is_empty() || authority.contains('@') {
                 return Err(INVALID_URL);
             }
-            Ok(LinkTarget::Web(url.to_string()))
-        }
-        "nostr" | "napplet" => {
-            let entity = rest.trim_start_matches("//").trim_end_matches('/');
-            let lowered = entity.to_ascii_lowercase();
-            // Another NIP-19 entity — a profile, a note — is a fine `nostr:`
-            // link, just not one this runtime opens.
-            if !lowered.starts_with("naddr1") {
-                return if scheme.eq_ignore_ascii_case("napplet") {
-                    Err(INVALID_URL)
-                } else if is_nip19_entity(&lowered) {
-                    Err(UNSUPPORTED_SCHEME)
-                } else {
-                    Err(INVALID_URL)
-                };
-            }
-            let coordinate = Nip19Coordinate::from_bech32(&lowered).map_err(|_| INVALID_URL)?;
-            let kind = coordinate.coordinate.kind.as_u16();
-            if kind == KIND_NAMED || kind == KIND_ROOT || kind == KIND_SNAPSHOT {
-                Ok(LinkTarget::Napplet(lowered))
-            } else {
-                // An naddr for something that is not a napplet — an nsite,
-                // an article. Opening it is not this runtime's business.
-                Err(UNSUPPORTED_SCHEME)
+            // A napplet.link opens a napplet, not its web page. A page on
+            // that host that is not that shape (its home page, say) is an
+            // ordinary web link; one that is that shape but whose query does
+            // not decode is refused, not quietly sent to the browser.
+            match NappletLink::parse(url) {
+                Ok(link) => Ok(LinkTarget::Intent(link)),
+                Err(NOT_A_NAPPLET_LINK | BAD_PATH) => Ok(LinkTarget::Web(url.to_string())),
+                Err(_) => Err(INVALID_URL),
             }
         }
+        // `napplet:<archetype>/<intent>` is a convention URI, not a
+        // pointer. A pointer has no `/` between two names, so the two
+        // spellings cannot be confused.
+        "napplet" => match NappletLink::parse(url) {
+            Ok(link) => Ok(LinkTarget::Intent(link)),
+            Err(NOT_A_NAPPLET_LINK) => pointer(scheme, rest),
+            Err(_) => Err(INVALID_URL),
+        },
+        "nostr" => pointer(scheme, rest),
         _ => Err(UNSUPPORTED_SCHEME),
+    }
+}
+
+/// A `nostr:` / `napplet:` link naming a napplet manifest.
+fn pointer(scheme: &str, rest: &str) -> Result<LinkTarget, &'static str> {
+    let entity = rest.trim_start_matches("//").trim_end_matches('/');
+    let lowered = entity.to_ascii_lowercase();
+    // Another NIP-19 entity — a profile, a note — is a fine `nostr:`
+    // link, just not one this runtime opens.
+    if !lowered.starts_with("naddr1") {
+        return if scheme.eq_ignore_ascii_case("napplet") {
+            Err(INVALID_URL)
+        } else if is_nip19_entity(&lowered) {
+            Err(UNSUPPORTED_SCHEME)
+        } else {
+            Err(INVALID_URL)
+        };
+    }
+    let coordinate = Nip19Coordinate::from_bech32(&lowered).map_err(|_| INVALID_URL)?;
+    let kind = coordinate.coordinate.kind.as_u16();
+    if kind == KIND_NAMED || kind == KIND_ROOT || kind == KIND_SNAPSHOT {
+        Ok(LinkTarget::Napplet(lowered))
+    } else {
+        // An naddr for something that is not a napplet — an nsite,
+        // an article. Opening it is not this runtime's business.
+        Err(UNSUPPORTED_SCHEME)
     }
 }
 
@@ -269,6 +297,60 @@ mod tests {
             classify("http://example.com"),
             Ok(LinkTarget::Web("http://example.com".into()))
         );
+    }
+
+    /// A napplet.link is an intent, never a page for the browser — in
+    /// either spelling, and never mistaken for a napplet pointer.
+    #[tokio::test]
+    async fn a_napplet_link_is_an_intent() {
+        let (ctx, mut s) = established().await;
+        let out = dispatch(
+            &ctx,
+            &mut s,
+            &open("https://napplet.link/profile/open?pubkey=abc"),
+        )
+        .await;
+        let Outcome::Link(request) = out else {
+            panic!("expected a link request, got {out:?}");
+        };
+        let LinkTarget::Intent(link) = &request.target else {
+            panic!("expected an intent, got {:?}", request.target);
+        };
+        assert_eq!(link.convention(), "napplet:profile/open");
+        assert_eq!(link.params["pubkey"], "abc");
+
+        assert!(matches!(
+            classify("napplet:note/open?id=x"),
+            Ok(LinkTarget::Intent(_))
+        ));
+        // The pointer spellings are untouched.
+        let pointer = naddr(KIND_NAMED, "x");
+        assert_eq!(
+            classify(&format!("napplet:{pointer}")),
+            Ok(LinkTarget::Napplet(pointer))
+        );
+    }
+
+    #[test]
+    fn a_napplet_link_that_is_not_that_shape() {
+        // A page on the host that is not a role — its home page — is a web
+        // link like any other.
+        for url in ["https://napplet.link/", "https://napplet.link/about"] {
+            assert_eq!(classify(url), Ok(LinkTarget::Web(url.into())), "{url}");
+        }
+        // The shape, with a query that does not decode, is refused rather
+        // than sent to the browser in its place.
+        assert_eq!(
+            classify("https://napplet.link/note/open?a=1&a=2"),
+            Err(INVALID_URL)
+        );
+        for url in [
+            "napplet:note/open#x",
+            "napplet:note/open?a=%",
+            "napplet:a/b/c",
+        ] {
+            assert_eq!(classify(url), Err(INVALID_URL), "{url}");
+        }
     }
 
     async fn denied_with(url: &str) -> String {

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`napplet.link` links open the right app.** A link like
+  `https://napplet.link/profile/open?pubkey=…` (or `napplet:profile/open?…`)
+  now opens whichever installed napplet handles that role, and hands it the
+  link's details, just as one napplet opening another does. With several
+  apps for the role, Myco asks which one. With none, it says so and offers to
+  open the link in your browser. A napplet can share these links too: opening
+  one from inside a napplet goes to the app, not the browser.
+
 ### Fixed
 
 - **A napplet's mesh subscription gets everything nearby phones send back.**

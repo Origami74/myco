@@ -584,6 +584,45 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletBindIntent(
     bound as jboolean
 }
 
+/// Open a `napplet.link` from outside the app — `https://napplet.link/…` or
+/// `napplet:<archetype>/<intent>?…` by VIEW intent. Returns one command as
+/// JSON: `open-napplet`, `open-nsite`, `choose-intent-handler` (show the
+/// chooser, then call again with the picked key as `pick`; `""` for none), or
+/// `link-refused` with `error`, `archetype` and `webUrl`. See
+/// `NappletHost::open_link`.
+/// Blocks on a catalog read; call it off the main thread.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletLink(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    url: JString,
+    pick: JString,
+) -> jstring {
+    let url = get_string(&mut env, &url);
+    let pick = get_string(&mut env, &pick);
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.napplet_context()
+        }
+        None => None,
+    };
+    let answer = match ctx {
+        Some((host, rt_handle)) => rt_handle.block_on(host.open_link(&url, Some(&pick))),
+        None => {
+            let link = myco_napplet_runtime::NappletLink::parse(&url).ok();
+            serde_json::json!({
+                "channel": "link-refused",
+                "error": "napplets are not available",
+                "archetype": link.as_ref().map(|l| l.archetype.clone()).unwrap_or_default(),
+                "webUrl": link.map(|l| l.web_url()).unwrap_or_default(),
+            })
+        }
+    };
+    jstr(&mut env, answer.to_string())
+}
+
 /// Carry one frame from a window's shell; returns the frames to send back,
 /// one JSON object per line (possibly none). See
 /// [`crate::napplet::frames_as_lines`].

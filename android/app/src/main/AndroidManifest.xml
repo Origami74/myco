@@ -105,6 +105,27 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="myco" />
             </intent-filter>
+            <!-- napplet.link: https://napplet.link/<archetype>/<intent>?… opens
+                 whichever installed napplet handles the role (NAP-INTENT). An
+                 app link: autoVerify checks the domain's
+                 /.well-known/assetlinks.json, so a verified install opens it
+                 here without asking. Elsewhere it is a web page. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:host="napplet.link" />
+            </intent-filter>
+            <!-- The same link as a convention URI: napplet:<archetype>/<intent>?…
+                 Kept apart from the https filter: a filter's schemes and hosts
+                 combine, and autoVerify must only ever see https. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="napplet" />
+            </intent-filter>
             <!-- Tap-to-pair: the OS reads the presenter's NDEF URI tag and delivers
                  the myco://pair link here (no reader mode needed on this side). -->
             <intent-filter>

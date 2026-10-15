@@ -27,6 +27,7 @@
 //! resolve.rs   manifest → blobs → verify → renderable artifact
 //! seams.rs     RelayBackend / BlobStore / Signer / EventSink / MeshSink / NapTransport
 //! error.rs     one error type; every variant is a refusal to render
+//! napplet_link.rs  `https://napplet.link/<archetype>/<intent>` → a NAP-INTENT request
 //! ```
 //!
 //! Design: `docs/design/napplet/napplet-runtime.md`.
@@ -41,6 +42,7 @@ pub mod error;
 pub mod host;
 pub mod manifest;
 pub mod nap;
+pub mod napplet_link;
 pub mod prelude;
 pub mod resolve;
 pub mod seams;
@@ -61,6 +63,7 @@ pub use manifest::{
 };
 pub use nap::deliveries_for;
 pub use nap::intent::{IntentCatalog, IntentCatalogSnapshot, IntentHandler, NoIntents};
+pub use napplet_link::NappletLink;
 pub use prelude::{
     render_for as render_prelude, PRELUDE_GLOBAL, SIGNING_TIMEOUT, SUPPLEMENT_GLOBAL,
 };

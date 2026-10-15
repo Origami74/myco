@@ -316,6 +316,54 @@ One sequencing consequence: NAP-INTENT delivers its selected convention over
 runtime-attested NAP-INC, so the intent bridge brings NAP-INC in with it. They land
 together.
 
+#### napplet.link
+
+A shareable link for an intent, for any archetype. Myco defines it; no NAP does.
+
+```text
+https://napplet.link/<archetype>/<intent>?<params>
+napplet:<archetype>/<intent>?<params>
+  ⇔ intent.invoke { archetype, action: <intent>,
+                    convention: "napplet:<archetype>/<intent>", payload: { …params } }
+```
+
+**Shape.** `https` only, host exactly `napplet.link` (no port, no userinfo). The path is
+exactly two slugs, lower-cased first because QR codes upper-case everything; one trailing
+slash is tolerated. The query is decoded by the web binding's rules (§5.4): text values, `+`
+literal, and a repeated name or bad escape refuses the link. A fragment is dropped on the
+`https` form and refused on the `napplet:` one. `napplet:naddr1…` is still install review;
+it has no `/`, so the two never meet. Parser: `myco-napplet-runtime/src/napplet_link.rs`.
+
+**Resolution.** Both entry points go through the NAP-INTENT resolver, with the link's exact
+convention and the user's default:
+
+- From another app (VIEW intent), `nappletLink` answers one command: open the handler
+  (its window binds the token, the payload arrives once it listens), open an nsite, or
+  show the "open with…" chooser and call again with the pick. The handler's `sender` is
+  `myco`.
+- From inside a napplet, `link.open` of a napplet.link takes the same path after NAP-LINK's
+  rate limit. The napplet hears `opened`, or `denied` with the resolver's reason
+  (`no handler`). It never hears an `intent.invoke.result`.
+
+**Fallback.** When nothing installed handles the role, Myco shows "No app here opens
+\<role\>" with **Open in browser**. The browser is picked with a `CATEGORY_APP_BROWSER`
+selector, so the link cannot loop back into Myco.
+
+**What the domain must serve.** The `https` filter has `android:autoVerify="true"`, so
+Android checks `https://napplet.link/.well-known/assetlinks.json` for package `app.myco`
+and the release signing certificate's SHA-256 fingerprint:
+
+```json
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": { "namespace": "android_app", "package_name": "app.myco",
+              "sha256_cert_fingerprints": ["<RELEASE CERT SHA-256>"] }
+}]
+```
+
+Without it, Android shows its own chooser (or the browser) instead of opening Myco
+directly. The web page each link lands on without Myco is out of scope here.
+
 ### 5.5 Window model
 
 **`NappletActivity` is a new Activity.** `NsiteActivity` does not grow napplet

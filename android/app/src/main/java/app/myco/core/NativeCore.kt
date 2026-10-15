@@ -74,6 +74,14 @@ internal object NativeCore {
      */
     external fun nappletBindIntent(handle: Long, sessionId: String, token: String): Boolean
 
+    /**
+     * Open a `napplet.link` from outside the app. Returns one command as JSON
+     * (`open-napplet`, `open-nsite`, `choose-intent-handler`) or
+     * `link-refused`. [pick] is the handler key the user chose on a chooser
+     * this call put up before, or `""`.
+     */
+    external fun nappletLink(handle: Long, url: String, pick: String): String
+
     /** Carry one shell frame; returns the frames to send back, one JSON object each. */
     external fun nappletFrame(handle: Long, sessionId: String, frameJson: String): Array<String>?
 
