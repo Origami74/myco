@@ -2,6 +2,7 @@ package app.myco.ui.intro
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,13 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -139,6 +147,9 @@ fun IntroScreen(
         }
     }
 
+    val skipFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { skipFocus.requestFocus() } }
+
     val dive = diveClock(diveAt, elapsed, returning)
     val pupil = pupilRadius(dive)
 
@@ -147,6 +158,15 @@ fun IntroScreen(
             .fillMaxSize()
             .pointerInput(Unit) {
                 detectTapGestures { if (diveAt == null) diveAt = elapsed }
+            }
+            // A remote or keyboard has no tap: OK/Enter skips the same way.
+            .focusRequester(skipFocus)
+            .focusable()
+            .onKeyEvent { event ->
+                val ok = event.key == Key.DirectionCenter || event.key == Key.Enter ||
+                    event.key == Key.NumPadEnter
+                if (ok && event.type == KeyEventType.KeyUp && diveAt == null) diveAt = elapsed
+                ok
             },
     ) {
         Box(

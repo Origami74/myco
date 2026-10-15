@@ -46,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import app.myco.ui.theme.TvAutoFocus
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -153,6 +154,7 @@ fun MeshSetupDialog(
             SetupCard(step, plan, MeshSetup.segments(step, plan, outcome)) {
                 StepContent(step, plan, nearbyBlocked, name, onAction, onAsk, onSaveName)
             }
+            TvAutoFocus(step)
             footnote(step, nearbyBlocked)?.let {
                 Spacer(Modifier.height(18.dp))
                 // On the scrim, not the card: dark in both themes.

@@ -56,12 +56,21 @@ fun mycoCoreFeatureArgs(): List<String> {
     return if (multipath) listOf("--features", "fips-multipath") else emptyList()
 }
 
-tasks.register<Exec>("buildRustArm64") {
+/**
+ * ABIs to build and package. arm64-v8a by default; Android TV boxes often run
+ * a 32-bit userspace on 64-bit chips, so a TV build adds armeabi-v7a:
+ * `./gradlew assembleDebug -Pmyco.abis=arm64-v8a,armeabi-v7a` (or MYCO_ABIS).
+ */
+val mycoAbis: List<String> =
+    ((findProperty("myco.abis") as String?) ?: System.getenv("MYCO_ABIS") ?: "arm64-v8a")
+        .split(',').map { it.trim() }.filter { it.isNotEmpty() }
+
+tasks.register<Exec>("buildRust") {
     workingDir = repoRoot.asFile
     commandLine(
-        *(listOf(
-            "cargo", "ndk",
-            "--target", "arm64-v8a",
+        *(listOf("cargo", "ndk")
+          + mycoAbis.flatMap { listOf("--target", it) }
+          + listOf(
             "--platform", "29",                       // minSdk 29 (L2CAP CoC)
             "--output-dir", rustOutputDir.asFile.absolutePath,
             "build",
@@ -72,8 +81,8 @@ tasks.register<Exec>("buildRustArm64") {
     )
 }
 
-tasks.matching { it.name in listOf("mergeDebugNativeLibs", "mergeReleaseNativeLibs") }
-    .configureEach { dependsOn("buildRustArm64") }
+tasks.matching { it.name in listOf("mergeDebugNativeLibs", "mergeReleaseNativeLibs", "mergeTvNativeLibs") }
+    .configureEach { dependsOn("buildRust") }
 
 // Release signing. Credentials live OUTSIDE git: an `android/keystore.properties`
 // file (gitignored) or environment variables (CI / an externally-managed or
@@ -101,7 +110,7 @@ android {
         // builds fall back to the committed defaults.
         versionCode = System.getenv("MYCO_VERSION_CODE")?.toIntOrNull() ?: 1
         versionName = System.getenv("MYCO_VERSION_NAME") ?: "0.0.1"
-        ndk { abiFilters += "arm64-v8a" }             // arm64 only
+        ndk { abiFilters += mycoAbis }                // see mycoAbis
         buildConfigField("String", "GIT_REV", "\"${gitRev()}\"")
     }
 
@@ -131,6 +140,17 @@ android {
             // release APK is produced (zsp / CI signs at publish time).
             signingConfig = if (hasReleaseKeystore)
                 signingConfigs.getByName("release") else null
+        }
+        // Release code (R8, not debuggable) signed with the debug key, so it
+        // installs over a debug build on a test device. Debug Compose is
+        // several times slower than release, which on a weak Android TV is
+        // the difference between usable and not: measure performance here.
+        //   ./gradlew assembleTv -Pmyco.abis=armeabi-v7a
+        create("tv") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = false
+            matchingFallbacks += "release"
         }
     }
 
