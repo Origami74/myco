@@ -376,6 +376,15 @@ impl reqwest::dns::Resolve for GuardedResolver {
             if reach == Reach::Mesh && !is_mesh_name(&host) && !loopback_name {
                 return refuse("not a mesh name");
             }
+            // A `<npub>.fips` name is resolved through the node, not the
+            // system resolver, which may not be the mesh's (see
+            // `resolve_mesh_name`).
+            if reach != Reach::Internet {
+                if let Some(ip) = crate::dns_intercept::resolve_mesh_name(&host).await {
+                    let addrs = vec![SocketAddr::new(IpAddr::V6(ip), 0)];
+                    return Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs);
+                }
+            }
             let addrs: Vec<SocketAddr> =
                 tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
             let allowed = |ip: IpAddr| {

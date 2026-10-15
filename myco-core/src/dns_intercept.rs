@@ -101,6 +101,79 @@ static QUERY_ID: AtomicU16 = AtomicU16::new(1);
 /// dial and the resolution are concurrent, and losing that race is the whole
 /// failure. Fire-and-forget on its own thread: the caller is a tokio task and
 /// this must not be what stalls the keepwarm loop.
+/// The mesh address behind a `<npub>.fips` host name. The address is a
+/// function of the key, so no resolver is needed to find it; `None` for any
+/// other host.
+fn fips_name_ip(host: &str) -> Option<(String, std::net::Ipv6Addr)> {
+    let npub = host.trim_end_matches('.').strip_suffix(".fips")?;
+    let ip = fips::PeerIdentity::from_npub(npub)
+        .ok()?
+        .address()
+        .to_ipv6();
+    Some((npub.to_string(), ip))
+}
+
+/// Resolve a `<npub>.fips` host for a dial, the way a lookup through the mesh
+/// resolver would: the node's responder is asked first, which registers the
+/// npub's identity with the node, and only then is the address handed back —
+/// so the first packet of the dial finds a route. Every call asks, so a peer
+/// the node has since forgotten is taught again, as each DNS lookup used to.
+///
+/// Never through the system resolver: some firmware adds its own DNS servers
+/// to every network, the VPN's included, and Android then sends queries to
+/// those (over DoH, when Private DNS is on), so a `.fips` name never reaches
+/// the mesh resolver and answers NXDOMAIN. Without a node (or with a responder
+/// that does not answer) the computed address is returned anyway: the dial
+/// then fails or succeeds on its own merits.
+pub async fn resolve_mesh_name(host: &str) -> Option<std::net::Ipv6Addr> {
+    let (npub, ip) = fips_name_ip(host)?;
+    let registered = tokio::task::spawn_blocking(move || register_route(&npub))
+        .await
+        .unwrap_or(false);
+    if !registered {
+        tracing::debug!(
+            host,
+            "mesh name not registered with the node before the dial"
+        );
+    }
+    Some(ip)
+}
+
+/// `url` with a `<npub>.fips` host replaced by its mesh address, resolved as
+/// in [`resolve_mesh_name`]; unchanged when the host is anything else.
+pub async fn mesh_literal_url(url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return url.to_string();
+    };
+    let Some(host) = parsed.host_str().map(str::to_string) else {
+        return url.to_string();
+    };
+    let Some(ip) = resolve_mesh_name(&host).await else {
+        return url.to_string();
+    };
+    if parsed.set_host(Some(&format!("[{ip}]"))).is_err() {
+        return url.to_string();
+    }
+    parsed.to_string()
+}
+
+/// Ask the node's responder for `<npub>.fips` and wait for the answer, which
+/// registers the identity as its side effect. Blocking (one loopback round
+/// trip, bounded by [`RESPONDER_TIMEOUT`]); false without a node or an answer.
+fn register_route(npub: &str) -> bool {
+    let Some(addr) = responder_addr() else {
+        return false;
+    };
+    let Some(query) = build_aaaa_query(&format!("{npub}.fips")) else {
+        return false;
+    };
+    let answered = resolve_via_responder(addr, &query).is_some();
+    if answered {
+        warmed().lock().unwrap().insert(npub.to_string());
+    }
+    answered
+}
+
 pub fn warm_route(npub: &str) {
     if fips::PeerIdentity::from_npub(npub).is_err() {
         return;
@@ -412,6 +485,48 @@ fn build_reply(orig_src_addr: &[u8], orig_src_port: u16, dns_reply: &[u8]) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn some_npub() -> String {
+        use nostr::ToBech32;
+        nostr::Keys::generate().public_key().to_bech32().unwrap()
+    }
+
+    #[test]
+    fn a_fips_name_maps_to_its_mesh_address_without_a_lookup() {
+        let npub = some_npub();
+        let want = fips::PeerIdentity::from_npub(&npub)
+            .unwrap()
+            .address()
+            .to_ipv6();
+        assert_eq!(
+            fips_name_ip(&format!("{npub}.fips")),
+            Some((npub.clone(), want))
+        );
+        assert_eq!(fips_name_ip(&format!("{npub}.fips.")), Some((npub, want)));
+        assert_eq!(fips_name_ip("example.com"), None);
+        assert_eq!(fips_name_ip("not-an-npub.fips"), None);
+    }
+
+    /// With no node up there is no responder to register with; the dial still
+    /// gets the computed address rather than failing on the name.
+    #[tokio::test]
+    async fn mesh_literal_url_rewrites_only_fips_hosts() {
+        let npub = some_npub();
+        let (_, ip) = fips_name_ip(&format!("{npub}.fips")).unwrap();
+        assert_eq!(
+            mesh_literal_url(&format!("ws://{npub}.fips:4870")).await,
+            format!("ws://[{ip}]:4870/")
+        );
+        assert_eq!(
+            mesh_literal_url(&format!("http://{npub}.fips:24243/abc?x=1")).await,
+            format!("http://[{ip}]:24243/abc?x=1")
+        );
+        assert_eq!(
+            mesh_literal_url("wss://relay.example/").await,
+            "wss://relay.example/"
+        );
+        assert_eq!(mesh_literal_url("not a url").await, "not a url");
+    }
 
     /// Build a minimal IPv6/UDP DNS query packet for `qname` to `[fd00::53]:53`.
     fn make_query(qname: &str, dst: [u8; 16]) -> Vec<u8> {
