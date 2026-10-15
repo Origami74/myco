@@ -383,8 +383,12 @@ async fn dial(
 ) -> Option<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 > {
+    // Dial the mesh address itself: a `<npub>.fips` name left to the system
+    // resolver can be answered by a DNS server outside the mesh.
+    let target = crate::dns_intercept::mesh_literal_url(url);
     for attempt in 0..2 {
-        match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url)).await {
+        match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&target)).await
+        {
             Ok(Ok((ws, _))) => return Some(ws),
             Ok(Err(e)) => match classify(&e) {
                 // The tunnel isn't up yet. Not the peer's fault — leave its
