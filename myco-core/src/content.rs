@@ -7137,6 +7137,10 @@ pub(crate) mod library_kind_tests {
             .unwrap();
         // Something else to prove the wipe still wipes.
         content.blobs().put(b"stray bytes").await.unwrap();
+        // The first count runs in the background; wait for it.
+        if let Some(blobs) = &content.blobs_local {
+            blobs.stats();
+        }
         assert_eq!(content.cache_view().blob_count, 2);
 
         let npub = napplet.author.to_bech32().unwrap();
