@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Apps tab stops redrawing twice a second after a search.** The search
+  box kept focus after the keyboard closed, and its blinking cursor redrew
+  the screen every 500 ms for as long as the tab stayed open. It now lets go
+  of focus when the keyboard closes or Search is pressed.
 - **The app no longer stalls while a sync is storing files.** The Storage
   figures (how many files, how much space) were recounted by listing every
   stored file each time a new one arrived — once a second during a sync, while
