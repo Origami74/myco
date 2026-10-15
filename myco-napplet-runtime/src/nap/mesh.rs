@@ -155,14 +155,55 @@ async fn subscribe(ctx: &NapContext, session: &mut Session, message: &Envelope) 
             Some(object) => vec![object.clone()],
             None => Vec::new(),
         };
-        if let Err(e) = ctx.mesh.pull(raw, ttl).await {
+        match ctx.mesh.pull(raw, ttl).await {
+            Ok(pulled) => deliver_pulled(session, &sub_id, filters, pulled),
             // The local backlog was already answered; a pull that could not
             // even start is worth a line, not a closed subscription.
-            tracing::warn!(sub_id, error = %e, "mesh pull could not be started");
+            Err(e) => tracing::warn!(sub_id, error = %e, "mesh pull could not be started"),
         }
     }
 
     out
+}
+
+/// Hand what peers send back to the subscription that asked, as it arrives.
+///
+/// Delivered here, not only through the local relay's live stream: that
+/// stream carries first sightings, and an event this device saw once and has
+/// since let go of comes back from a peer as a repeat — stored again, shown
+/// to nobody. The subscription's own seen-set still hands each event once,
+/// whichever path reaches it first, and a closed or replaced subscription
+/// gets nothing more.
+///
+/// Without a [`Streamer`](crate::session::Streamer) there is nowhere to push
+/// to between calls; the pull still fills the local relay, and the live
+/// stream delivers what is new.
+fn deliver_pulled(
+    session: &Session,
+    sub_id: &str,
+    filters: Vec<nostr::Filter>,
+    mut pulled: crate::seams::PulledEvents,
+) {
+    let Some(streamer) = session.streamer().cloned() else {
+        return;
+    };
+    let handle = session.subscription_handle("mesh", sub_id);
+    let sub_id = sub_id.to_string();
+    (streamer.spawn)(Box::pin(async move {
+        while let Some(event) = futures_util::StreamExt::next(&mut pulled).await {
+            if handle.is_closed() {
+                return;
+            }
+            // A peer's answer is untrusted: only what the napplet asked for.
+            let options = nostr::filter::MatchEventOptions::new();
+            if !filters.iter().any(|f| f.match_event(&event, options)) {
+                continue;
+            }
+            handle.deliver(&event.id, || {
+                (streamer.push)(crate::nap::event_frame("mesh", sub_id.as_str(), &event))
+            });
+        }
+    }));
 }
 
 /// `mesh.blobs` — how many reachable mesh peers hold each named blob.
@@ -498,6 +539,141 @@ mod tests {
         assert_eq!(pulls[0].1, 1);
         assert_eq!(pulls[0].0, vec![json!({"kinds": [20666]})]);
         assert_eq!(s.subscription_count(), 1);
+    }
+
+    /// A streaming session whose pushed frames land in the returned list.
+    fn streaming() -> (Session, std::sync::Arc<std::sync::Mutex<Vec<Envelope>>>) {
+        let pushed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Envelope>::new()));
+        let push = pushed.clone();
+        let s = granted().with_streamer(crate::session::Streamer {
+            push: std::sync::Arc::new(move |frame| push.lock().unwrap().push(frame)),
+            spawn: std::sync::Arc::new(|work| {
+                tokio::spawn(work);
+            }),
+        });
+        (s, pushed)
+    }
+
+    /// Wait until `pushed` holds at least `n` frames, then a little longer
+    /// for any that should not come.
+    async fn settle(pushed: &std::sync::Mutex<Vec<Envelope>>, n: usize) -> Vec<Envelope> {
+        for _ in 0..200 {
+            if pushed.lock().unwrap().len() >= n {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        pushed.lock().unwrap().clone()
+    }
+
+    /// What peers send back reaches the subscription that asked — including
+    /// an event the local relay would call a repeat — once each, and only
+    /// what its filters match.
+    #[tokio::test]
+    async fn pulled_events_reach_the_subscription_that_asked() {
+        let (ctx, mesh, _signer) = test_context_with_mesh(MeshLimits {
+            publish_ttl: 3,
+            subscribe_ttl: 2,
+        });
+        let keys = Keys::generate();
+        let bell = |text: &str| {
+            EventBuilder::new(nostr::Kind::from(20666u16), text)
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let stored = EventBuilder::new(nostr::Kind::from(1u16), "kept here")
+            .sign_with_keys(&keys)
+            .unwrap();
+        ctx.relay.publish(stored.clone()).await.unwrap();
+        let seen_before = bell("seen once, let go of");
+        let note = EventBuilder::text_note("not asked for")
+            .sign_with_keys(&keys)
+            .unwrap();
+        // A peer repeats the stored event, sends one this phone no longer
+        // holds, and one the filters do not match.
+        mesh.answer_pulls_with(vec![stored.clone(), seen_before.clone(), note]);
+
+        let (mut s, pushed) = streaming();
+        call(
+            &ctx,
+            &mut s,
+            Envelope::new("mesh.subscribe")
+                .with_id("s1")
+                .with_field("subId", "sub-1")
+                .with_field(
+                    "filters",
+                    json!([{"kinds": [20666]}, {"ids": [stored.id.to_hex()]}]),
+                )
+                .with_field("ttl", 1),
+        )
+        .await;
+
+        let frames = settle(&pushed, 3).await;
+        let events: Vec<String> = frames
+            .iter()
+            .filter(|f| f.msg_type == "mesh.event")
+            .map(|f| {
+                f.field("result").unwrap()["event"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|id| **id == stored.id.to_hex())
+                .count(),
+            1
+        );
+        assert!(events.contains(&seen_before.id.to_hex()), "{events:?}");
+        assert_eq!(
+            events.len(),
+            2,
+            "an unasked-for event was delivered: {events:?}"
+        );
+        assert_eq!(
+            frames.iter().filter(|f| f.msg_type == "mesh.eose").count(),
+            1
+        );
+    }
+
+    /// A subscription closed before the peers answer gets nothing from them.
+    #[tokio::test]
+    async fn a_closed_subscription_gets_no_pulled_events() {
+        let (ctx, mesh, _signer) = test_context_with_mesh(MeshLimits {
+            publish_ttl: 3,
+            subscribe_ttl: 2,
+        });
+        let (mut s, pushed) = streaming();
+        let late = EventBuilder::new(nostr::Kind::from(20666u16), "late")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        mesh.answer_pulls_with(vec![late]);
+        // Spawned work runs only once this test yields, so the close below
+        // lands before any peer answer is handled.
+        call(
+            &ctx,
+            &mut s,
+            Envelope::new("mesh.subscribe")
+                .with_id("s1")
+                .with_field("subId", "sub-1")
+                .with_field("filters", json!({"kinds": [20666]}))
+                .with_field("ttl", 1),
+        )
+        .await;
+        call(
+            &ctx,
+            &mut s,
+            Envelope::new("mesh.close").with_field("subId", "sub-1"),
+        )
+        .await;
+        let frames = settle(&pushed, 1).await;
+        assert!(
+            frames.iter().all(|f| f.msg_type != "mesh.event"),
+            "{frames:?}"
+        );
     }
 
     /// Zero hops is a local subscription: nobody is asked.

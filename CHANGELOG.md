@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A napplet's mesh subscription gets everything nearby phones send back.**
+  When `mesh.subscribe` asks Circle peers for their backlog, an event this
+  phone had seen once and since let go of (evicted from the cache, or an
+  ephemeral kind) used to come back from a peer and reach nobody. Each peer
+  answer now goes straight to the subscription that asked, once, and only if
+  it matches what the napplet asked for.
+
 - **The Apps tab stops redrawing twice a second after a search.** The search
   box kept focus after the keyboard closed, and its blinking cursor redrew
   the screen every 500 ms for as long as the tab stayed open. It now lets go
