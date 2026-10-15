@@ -415,6 +415,12 @@ The contract for napplet authors:
   window to the background — you land where you came from, and the napplet keeps
   running with its state, in Recents. Back never closes a napplet.
 
+On Android TV a backgrounded napplet is paused instead: a TV has nothing that puts a
+background app to sleep, so `NappletActivity` pauses its WebView while the window is off
+screen. The page becomes hidden and its frames stop, so the napplet gets a
+`visibilitychange` and can suspend itself. The session and its state stay, and it
+resumes when the window comes back. Phones keep the napplet running.
+
 This is plain, portable DOM behaviour (Escape = dismiss), so a napplet that already
 closes its dialogs on Escape gets back for free. It needs no new NAP.
 

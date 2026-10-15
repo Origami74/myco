@@ -554,8 +554,14 @@ fn budget_within(limit: u64, map_size: u64) -> u64 {
 /// to 1 MiB — a multiple of every page size LMDB meets, which it requires.
 /// Eviction keeps the store under the budget, so the map is a margin, not the
 /// limit; a budget raised far past it takes full effect at the next launch.
+///
+/// A 32-bit process can't reserve that much address space, so there the map
+/// is fixed at 256 MiB and [`budget_within`] holds the budget to half of it.
 fn map_size_for(limit: u64) -> usize {
     const MIB: u64 = 1024 * 1024;
+    if cfg!(not(target_pointer_width = "64")) {
+        return (256 * MIB) as usize;
+    }
     let floor = 1024 * MIB;
     let size = limit.min(MAX_BUDGET).saturating_mul(2).max(floor);
     (size.div_ceil(MIB) * MIB) as usize

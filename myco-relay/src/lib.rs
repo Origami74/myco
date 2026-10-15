@@ -48,7 +48,12 @@ use nsite_deck::seams::{AdminBackend, RelayBackend};
 /// and grown as sparse pages, not allocated. 1 GiB is far beyond what a
 /// phone's relay should hold and small enough that a 64-bit Android process
 /// reserves it without complaint.
+#[cfg(target_pointer_width = "64")]
 const MAP_SIZE: usize = 1024 * 1024 * 1024;
+/// A 32-bit process (armeabi-v7a, common on Android TV) has ~3 GiB of address
+/// space shared with the runtime, so the reservation shrinks to 256 MiB.
+#[cfg(not(target_pointer_width = "64"))]
+const MAP_SIZE: usize = 256 * 1024 * 1024;
 
 /// The JSON file the store persisted to before LMDB. Read once and renamed
 /// aside on the first open that finds it; never written again.

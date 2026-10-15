@@ -15,7 +15,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 just identity    # host smoke check: prints device identity via myco-core example
 
-just build       # debug APK (Gradle cross-compiles the Rust via the buildRustArm64 task)
+just build       # debug APK (Gradle cross-compiles the Rust via the buildRust task)
 just ndk-build   # standalone cargo-ndk cross-compile into jniLibs (don't combine with just build — double-compiles)
 just install     # build + adb install -r
 cd android && ./gradlew testDebugUnitTest   # Kotlin unit tests (app/src/test)
@@ -27,10 +27,10 @@ Required before opening a PR (per CONTRIBUTING.md): `cargo fmt --check`, `cargo 
 
 The workspace depends on `fips` as a **path dependency at `reference/fips`** — a local, gitignored checkout of the **`master`** branch of github.com/jmcorgan/fips (build against `master`, not a feature branch) carrying local patches (app-owned TUN, injectable `BleIo`, per-peer PSM discovery, macOS `BleIo`). Nothing builds without it. The Android Gradle build additionally reads `MYCO_FIPS_REPO_PATH` to emit a `patch.crates-io` override; `patch.crates-io` builds perturb `Cargo.lock`, so watch for a dirty lockfile after Android builds. Details: `docs/how-to/build.md` §4.
 
-### Android constraints (LOCKED)
+### Android constraints
 
-- **arm64-v8a only**, no emulator target — BLE/L2CAP need physical devices.
-- **minSdk 29** — hard floor: L2CAP Connection-Oriented Channel APIs exist only on API 29+.
+- **arm64-v8a by default**, no emulator target — BLE/L2CAP need physical devices. Other ABIs build via `-Pmyco.abis=…` / `MYCO_ABIS` (e.g. `armeabi-v7a` for 32-bit Android TV boxes); CI builds arm64 only, and a 32-bit build needs [jmcorgan/fips#191](https://github.com/jmcorgan/fips/pull/191).
+- **minSdk 29** (LOCKED) — hard floor: L2CAP Connection-Oriented Channel APIs exist only on API 29+.
 - Android builds need cargo-ndk, Android SDK + NDK, JDK 17, and the `aarch64-linux-android` Rust target.
 
 ## Architecture

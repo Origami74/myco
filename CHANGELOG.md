@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they live. Folders, listing and file watching are not supported yet
   (NAP-FS, picker subset).
 
+- **Android TV.** Myco installs on Android TV and appears on the home row
+  with its own banner. The tabs move to a side rail in landscape, and the
+  whole app works with a remote: a clear focus ring on everything, focus
+  lands in each dialog's main button, the Menu key (or holding OK) opens an
+  app's or a person's menu, and OK skips the intro. Apps and nsites pause
+  while their window is off screen, since a TV has nothing that sends a
+  backgrounded app to sleep. 32-bit TV boxes are supported
+  (`-Pmyco.abis=armeabi-v7a`), with smaller storage maps and cache defaults
+  there, and a `tv` build type gives release-speed builds for testing.
+
 ### Fixed
 
 - **A napplet's file field opens the file picker.** Tapping an
