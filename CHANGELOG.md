@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The app no longer stalls while a sync is storing files.** The Storage
+  figures (how many files, how much space) were recounted by listing every
+  stored file each time a new one arrived — once a second during a sync, while
+  the rest of the app waited. They are now counted once in the background and
+  kept up to date as files come and go. Until that first count finishes they
+  read 0, and they can be slightly off after a "Clear cache" that races a sync.
 ### Changed
 
 - **Less logging by default.** The Rust core now logs at INFO instead of
