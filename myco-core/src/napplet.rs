@@ -188,10 +188,13 @@ pub(crate) struct LiveNapplet {
     /// never does, so it cannot ask the window host for blobs itself. See
     /// [`NappletHost::blob`].
     blob_token: String,
+    /// The NAP-FS pick this window's host was asked to show, until it
+    /// answers. See [`crate::fs_pick`].
+    pub(crate) pick: crate::fs_pick::PickSlot,
 }
 
-/// A fresh blob-URL secret: 128 bits from the OS.
-fn new_blob_token() -> String {
+/// A fresh blob-URL secret: 128 bits from the OS. Also a NAP-FS pick token.
+pub(crate) fn new_blob_token() -> String {
     use chacha20poly1305::aead::rand_core::RngCore as _;
     let mut bytes = [0u8; 16];
     chacha20poly1305::aead::OsRng.fill_bytes(&mut bytes);
@@ -674,6 +677,7 @@ impl NappletHost {
                     identity_hash: resolved.identity_hash.clone(),
                 },
                 blob_token: new_blob_token(),
+                pick: Default::default(),
             },
         );
         // What `intent.changed` diffs against, taken once a window is open to
@@ -824,6 +828,9 @@ impl NappletHost {
                     .intent_invoke(session_id, request, std::time::Instant::now())
                     .await
             }
+            // NAP-FS: only the window host can show the system picker. The
+            // result comes later, when it answers (`fs_picked`).
+            Outcome::FsPick(request) => return self.fs_pick(session_id, request),
             other => other,
         };
 
@@ -1849,8 +1856,10 @@ pub fn effective_grants(requires: &[String]) -> Vec<String> {
 /// napplet that declared `upload` before Myco had it was never shown it, and
 /// `upload` sends files to the internet signed as the user — so it is not
 /// granted at open on the strength of that list. It comes back as
-/// `unreviewed`, and the update review puts it in front of the user.
-const GRANTED_ONLY_WHEN_SHOWN: &[&str] = &["upload"];
+/// `unreviewed`, and the update review puts it in front of the user. `fs`
+/// likewise: a napplet that declared it before Myco had it was never shown
+/// "Open and save files".
+const GRANTED_ONLY_WHEN_SHOWN: &[&str] = &["upload", "fs"];
 
 /// What a stored reviewed list covers: [`effective_grants`] of it, less
 /// [`GRANTED_ONLY_WHEN_SHOWN`].
