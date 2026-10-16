@@ -84,3 +84,36 @@ verifies release events and emits update notifications; its
 waits for the check to finish inside persistent background work. Myco uses the
 same discovery pattern, its own pinned publisher key and its existing Rust
 signature verifier, then hands installation to Zapstore.
+
+## Repeatable physical-device tests
+
+`SoftwareUpdateDeviceTest` uses AndroidJUnitRunner and refuses to modify update
+preferences unless the target package is `app.myco.updatetest`. Build both the
+isolated debug APK and its `assembleDebugAndroidTest` APK, install both, then run:
+
+```sh
+adb shell am instrument -w -r \
+  -e class 'app.myco.update.SoftwareUpdateDeviceTest#testBackgroundReleaseNotificationAndDeduplication' \
+  app.myco.updatetest.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Run while the launcher is visible. This enqueues the real SoftwareUpdateWorker,
+queries the live relay, checks the OS notification, confirms a second successful
+query does not repost it, and verifies mesh-only and automatic-off gates. It
+resets only this test package's signed-update preferences, not identity or mesh
+data. Its final state leaves automatic checks disabled.
+
+To test denial, disable **Show notifications** for the isolated test package in
+Android Settings, then run the same command with method
+`testBlockedNotificationsKeepCandidateAvailable`. A successful live check must
+retain the candidate while posting no notification and leaving notified_tag
+unset. The test is skipped when Android reports that notifications are enabled;
+a skip is not denial coverage. Re-enable the package's notifications afterward.
+On the Redmi tested here, changing POST_NOTIFICATION through appops did not
+change NotificationManager's enabled state; use Android's actual settings UI.
+
+On 2026-10-16, both methods passed on a Redmi Note 8 Pro (Android 11/API 30),
+including delivery while the launcher was visible. The earlier manual UI test
+also confirmed that tapping the actual update notification opened Myco's listing
+in the installed Zapstore app. This does not prove reboot or overnight delivery,
+or Android 13+ runtime-permission behavior.
