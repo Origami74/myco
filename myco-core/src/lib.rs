@@ -110,6 +110,7 @@ mod platform_peers;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod public_nodes;
 mod runtime;
+mod software_release;
 mod state;
 mod update_gate;
 // The bridge is pumped only by the Android VpnService (via tun_bridge_jni) and

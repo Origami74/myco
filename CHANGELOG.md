@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Myco tells you when its publisher signs a newer stable Zapstore release.**
+  It verifies the Nostr announcement against the pinned publisher key and
+  checks daily, including while the UI is closed, with an in-app notice and
+  one Android notification per version when notifications are allowed.
+  Settings has a manual check and an automatic-check switch. Mesh-only mode
+  pauses checks; opening the release page leaves installation to Android.
+  Local builds use the nearest stable Git tag for their version, and debug
+  builds start with automatic checks off.
+
 ### Fixed
 
 - **A napplet's mesh subscription gets everything nearby phones send back.**

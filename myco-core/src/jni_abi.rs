@@ -756,3 +756,12 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(
         }
     }
 }
+
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_verifySoftwareRelease(
+    mut env: JNIEnv,
+    _class: JClass,
+    event_json: JString,
+) -> jboolean {
+    crate::software_release::verify(&get_string(&mut env, &event_json)) as jboolean
+}
