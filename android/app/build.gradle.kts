@@ -94,6 +94,7 @@ android {
 
     defaultConfig {
         applicationId = "app.myco"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 29                                   // L2CAP CoC requirement
         targetSdk = 36
         // CI overrides these from the release tag (see .github/workflows/release.yml)
@@ -185,6 +186,8 @@ dependencies {
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     // …and an in-app camera scanner to read one back.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("junit:junit:4.13.2")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
     debugImplementation("androidx.compose.ui:ui-tooling")
