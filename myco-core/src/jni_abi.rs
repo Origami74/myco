@@ -94,15 +94,60 @@ pub extern "system" fn Java_app_myco_core_NativeCore_appNew(
     Box::into_raw(Box::new(AppHandle { rt: Mutex::new(rt) })) as jlong
 }
 
+/// Android system property holding an `EnvFilter` directive string that
+/// overrides [`DEFAULT_LOG_FILTER`], e.g. `debug` or
+/// `info,fips=debug,myco_core::peer_relay=debug`. Read once, when the native
+/// core is created, so a change takes effect on the next app start.
+const LOG_FILTER_PROPERTY: &std::ffi::CStr = c"debug.myco.log";
+
+/// Default log filter. fips alone has hundreds of per-packet / per-peer
+/// `debug!` sites; formatting and writing them to logd costs real CPU on weak
+/// devices and battery on phones, so DEBUG is opt-in via [`LOG_FILTER_PROPERTY`].
+const DEFAULT_LOG_FILTER: &str = "info";
+
+/// Read an Android system property; `None` when unset or empty.
+fn system_property(name: &std::ffi::CStr) -> Option<String> {
+    // PROP_VALUE_MAX (92) bytes, including the NUL terminator.
+    let mut buf = [0 as libc::c_char; 92];
+    // SAFETY: `name` is NUL-terminated and `buf` is PROP_VALUE_MAX bytes, the
+    // most `__system_property_get` ever writes.
+    let len = unsafe { libc::__system_property_get(name.as_ptr(), buf.as_mut_ptr()) };
+    if len <= 0 {
+        return None;
+    }
+    // SAFETY: on success the value in `buf` is NUL-terminated.
+    let value = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    let value = value.to_string_lossy().trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
 /// Route `tracing` (myco-core + fips) to Android logcat under the tag `myco`, so
 /// the sync engine / FSP / BLE internals are visible (`adb logcat -s myco`).
-/// Idempotent; level DEBUG.
+/// Idempotent. Level INFO unless the `debug.myco.log` system property supplies
+/// an `EnvFilter` directive (`adb shell setprop debug.myco.log debug`).
 fn init_android_logging() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
+        use tracing_subscriber::EnvFilter;
+        let requested = system_property(LOG_FILTER_PROPERTY);
+        let (filter, directive, bad) = match requested {
+            Some(d) => match EnvFilter::try_new(&d) {
+                Ok(f) => (f, d, None),
+                Err(e) => (
+                    EnvFilter::new(DEFAULT_LOG_FILTER),
+                    DEFAULT_LOG_FILTER.to_owned(),
+                    Some((d, e)),
+                ),
+            },
+            None => (
+                EnvFilter::new(DEFAULT_LOG_FILTER),
+                DEFAULT_LOG_FILTER.to_owned(),
+                None,
+            ),
+        };
         let writer = paranoid_android::AndroidLogMakeWriter::new("myco".to_owned());
         let _ = tracing_subscriber::registry()
             .with(
@@ -110,9 +155,12 @@ fn init_android_logging() {
                     .with_ansi(false)
                     .with_writer(writer),
             )
-            .with(tracing_subscriber::filter::LevelFilter::DEBUG)
+            .with(filter)
             .try_init();
-        tracing::info!("myco-core logcat bridge active (tag=myco, level=DEBUG)");
+        if let Some((d, e)) = bad {
+            tracing::warn!("ignoring invalid debug.myco.log filter {d:?}: {e}");
+        }
+        tracing::info!("myco-core logcat bridge active (tag=myco, filter={directive})");
     });
 }
 

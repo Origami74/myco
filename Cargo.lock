@@ -2388,6 +2388,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "futures-util",
  "myco-napplet-runtime",
  "nostr",
  "nsite-deck",

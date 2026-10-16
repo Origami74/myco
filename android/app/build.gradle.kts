@@ -157,6 +157,14 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 
+// The core's state model is immutable data classes behind `List`/`Map`/`Set`
+// interfaces, which the Compose compiler can't prove stable on its own. Without
+// this, every composable taking `AppState` or a list from it is compared by
+// instance and recomposes on every poll even when nothing it draws changed.
+composeCompiler {
+    stabilityConfigurationFiles.add(layout.projectDirectory.file("compose-stability.conf"))
+}
+
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.work:work-runtime-ktx:2.10.1")

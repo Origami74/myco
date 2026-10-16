@@ -18,6 +18,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Local builds use the nearest stable Git tag for their version, and debug
   builds start with automatic checks off.
 
+### Fixed
+
+- **A napplet's mesh subscription gets everything nearby phones send back.**
+  When `mesh.subscribe` asks Circle peers for their backlog, an event this
+  phone had seen once and since let go of (evicted from the cache, or an
+  ephemeral kind) used to come back from a peer and reach nobody. Each peer
+  answer now goes straight to the subscription that asked, once, and only if
+  it matches what the napplet asked for.
+
+- **A napplet refused permission to publish is told `ok: false`.** A
+  `relay.publish`, `outbox.publish`, `mesh.publish` or `local.publish` from a
+  napplet without that grant now answers with `ok: false` beside the reason,
+  as NAP-RELAY and NAP-OUTBOX require, rather than the reason alone. An
+  outbox refusal says `"policy denied"`, NAP-OUTBOX's word for it.
+
+- **The Apps tab stops redrawing twice a second after a search.** The search
+  box kept focus after the keyboard closed, and its blinking cursor redrew
+  the screen every 500 ms for as long as the tab stayed open. It now lets go
+  of focus when the keyboard closes or Search is pressed.
+- **The app no longer stalls while a sync is storing files.** The Storage
+  figures (how many files, how much space) were recounted by listing every
+  stored file each time a new one arrived — once a second during a sync, while
+  the rest of the app waited. They are now counted once in the background and
+  kept up to date as files come and go. Until that first count finishes they
+  read 0, and they can be slightly off after a "Clear cache" that races a sync.
+### Changed
+
+- **Less logging by default.** The Rust core now logs at INFO instead of
+  DEBUG, which saves CPU on weak devices and battery on phones. Turn debug
+  logs back on with `adb shell setprop debug.myco.log debug` and restart the
+  app; see `docs/how-to/build.md` §6.
+- **The app no longer redraws every second while a phone is linked.** Ping,
+  last-heard and storage counters change on nearly every once-a-second
+  refresh, and every visible screen and app tile used to redraw with them.
+  Now only the screens that show those numbers update: the Dev tab, the mesh
+  status panel, and Settings › Storage and › Internet. On a slow TV box with
+  an accessibility service on, this was a stall of several seconds. Low-RAM
+  devices also refresh every two seconds instead of every one, and the Dev tab
+  no longer runs a second refresh of its own.
+- **The red "no peers" dot no longer redraws the whole header.** Its pulse
+  now only repaints the dot instead of rebuilding the screen header 60 times
+  a second, which made slow devices stutter and cost battery. On low-memory
+  phones and on TVs the dot doesn't pulse at all; it stays solid red.
 
 ## [0.11.0] - 2026-10-13
 

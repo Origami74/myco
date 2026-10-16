@@ -1684,21 +1684,32 @@ impl myco_napplet_runtime::seams::MeshSink for NappletMeshSink {
         }
     }
 
-    async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<()> {
+    async fn pull(
+        &self,
+        filters: Vec<serde_json::Value>,
+        ttl: u8,
+    ) -> anyhow::Result<myco_napplet_runtime::PulledEvents> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let rx: myco_napplet_runtime::PulledEvents =
+            Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            }));
         let ttl = ttl.min(self.limits.read().unwrap().subscribe_ttl);
         if ttl == 0 {
-            return Ok(());
+            return Ok(rx);
         }
         let hub = self.hub.lock().unwrap().clone();
         let Some(hub) = hub else {
-            // Nothing to pull through and nowhere to deliver to.
-            return Ok(());
+            // Nothing to pull through: the stream ends with nothing in it.
+            return Ok(rx);
         };
         let content = self.content.clone();
         // Spawned: a peer two hops out answers in seconds, and the napplet's
         // next call must not queue behind it. What arrives is accepted into
-        // the hub, which is what delivers it to the napplet's live
-        // subscription — and to every other subscriber on this device.
+        // the hub, which wakes every other subscriber on this device with what
+        // is new, and handed back on `tx` to the subscription that asked,
+        // repeats included: the hub's live stream drops a repeat, and an event
+        // seen once and since evicted would otherwise reach nobody.
         tokio::spawn(async move {
             // `ttl` counts rings of peers beyond this device, as a publish's
             // budget does. The envelope carries the budget the *receiver* may
@@ -1714,15 +1725,17 @@ impl myco_napplet_runtime::seams::MeshSink for NappletMeshSink {
             let mut events = content.pull_from_peers_stream(filters, meta, None);
             let mut fresh = 0usize;
             while let Some(event) = events.recv().await {
-                match hub.accept_pulled(event).await {
+                match hub.accept_pulled(event.clone()).await {
                     Ok(true) => fresh += 1,
                     Ok(false) => {}
                     Err(e) => tracing::debug!(error = %e, "napplet mesh pull: could not store"),
                 }
+                // The subscription may be gone; the pull still fills the cache.
+                let _ = tx.send(event);
             }
             tracing::debug!(ttl, fresh, "napplet mesh pull finished");
         });
-        Ok(())
+        Ok(rx)
     }
 
     /// Over the mesh only, `HEAD` only; see [`crate::mesh_blobs`]. With the

@@ -9,6 +9,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -66,6 +74,13 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -387,16 +402,67 @@ fun AppsScreen(
     }
 }
 
+/**
+ * The Apps search box. It lets go of focus once the keyboard closes.
+ *
+ * A focused text field blinks its cursor every 500 ms for as long as it holds
+ * focus, and every blink is a frame. Nothing else on this screen takes focus
+ * from it (tapping the grid doesn't), so after one search, or one pass of a TV
+ * remote over the field, the Apps tab redrew twice a second for good. The
+ * query stays; only the cursor goes.
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SearchField(query: String, onChange: (String) -> Unit) {
+    val focusManager = LocalFocusManager.current
+    // A remote or keyboard moves focus through the field on its way to the
+    // grid; it must not pop the keyboard (or start a cursor blinking) just
+    // for passing by. In that mode the field is read-only until OK/Enter.
+    val keys = LocalInputModeManager.current.inputMode == InputMode.Keyboard
+    var editing by remember { mutableStateOf(false) }
+    var focused by remember { mutableStateOf(false) }
+    // Set once the keyboard has been up for this field, so its closing is
+    // told apart from the moment between focus and keyboard.
+    var keyboardShown by remember { mutableStateOf(false) }
+    val imeVisible = WindowInsets.isImeVisible
+    // A focused, editable field blinks its cursor (two frames a second,
+    // forever) — so once typing is over, stop editing: a touch user loses
+    // focus, a remote keeps it here so Down still reaches the grid.
+    val doneTyping = {
+        keyboardShown = false
+        editing = false
+        if (!keys) focusManager.clearFocus()
+    }
+    LaunchedEffect(focused, imeVisible) {
+        when {
+            !focused -> { keyboardShown = false; editing = false }
+            imeVisible -> keyboardShown = true
+            keyboardShown -> doneTyping()
+        }
+    }
     OutlinedTextField(
         value = query,
         onValueChange = onChange,
         singleLine = true,
+        readOnly = keys && !editing,
         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
         placeholder = { Text("Search apps") },
         shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth(),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { doneTyping() }),
+        modifier = Modifier
+            .fillMaxWidth()
+            .onFocusChanged { focused = it.isFocused }
+            .onPreviewKeyEvent {
+                val ok = it.key == Key.DirectionCenter || it.key == Key.Enter ||
+                    it.key == Key.NumPadEnter
+                if (keys && !editing && ok) {
+                    if (it.type == KeyEventType.KeyUp) editing = true
+                    true
+                } else {
+                    false
+                }
+            },
     )
 }
 
@@ -447,7 +513,7 @@ private fun NsiteTile(
             content = {
                 if (bmp != null) {
                     Image(
-                        bmp.asImageBitmap(),
+                        remember(bmp) { bmp.asImageBitmap() },
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize().padding(9.dp).alpha(iconAlpha),
@@ -588,7 +654,7 @@ private fun NappletSheet(
             ) {
                 if (bmp != null) {
                     Image(
-                        bmp.asImageBitmap(),
+                        remember(bmp) { bmp.asImageBitmap() },
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
@@ -715,7 +781,7 @@ private fun NappletTile(
             content = {
                 if (bmp != null) {
                     Image(
-                        bmp.asImageBitmap(),
+                        remember(bmp) { bmp.asImageBitmap() },
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize(),
@@ -1166,7 +1232,7 @@ private fun NappletMark(review: NappletReview, added: Boolean) {
         ) {
             if (bmp != null) {
                 Image(
-                    bmp.asImageBitmap(),
+                    remember(bmp) { bmp.asImageBitmap() },
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),

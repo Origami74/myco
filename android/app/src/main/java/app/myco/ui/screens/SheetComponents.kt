@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -95,7 +96,7 @@ internal fun QrCodeCard(
             .padding(14.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Image(bitmap.asImageBitmap(), contentDescription = contentDescription, modifier = Modifier.size(size))
+        Image(remember(bitmap) { bitmap.asImageBitmap() }, contentDescription = contentDescription, modifier = Modifier.size(size))
         if (badge != null) {
             // ~22% of the code: big enough to read across a table, small enough
             // that H-level recovery still has margin to spare.
