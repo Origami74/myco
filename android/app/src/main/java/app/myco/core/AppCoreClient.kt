@@ -1088,6 +1088,14 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
         NativeCore.nappletClose(requireHandle(), sessionId)
     }
 
+    /**
+     * Answer a NAP-FS pick. Hands [fds] to Rust, which owns (and closes) them
+     * from here on; the result reaches the napplet through the window's drain.
+     */
+    fun nappletFsPicked(sessionId: String, token: String, fds: IntArray, metaJson: String) {
+        NativeCore.nappletFsPicked(requireHandle(), sessionId, token, fds, metaJson)
+    }
+
     /** The shell page — trusted HTML compiled into the runtime, not an asset. */
     fun nappletShellPage(): String = NativeCore.nappletShellPage()
 

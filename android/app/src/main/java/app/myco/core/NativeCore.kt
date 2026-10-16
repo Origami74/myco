@@ -116,6 +116,13 @@ internal object NativeCore {
     /** Drop a window's session. */
     external fun nappletClose(handle: Long, sessionId: String)
 
+    /**
+     * The answer to a NAP-FS pick: [fds] detached descriptors for what the
+     * user chose, described by [metaJson] in the same order. Rust owns the
+     * descriptors from this call on, whatever happens to the answer.
+     */
+    external fun nappletFsPicked(handle: Long, sessionId: String, token: String, fds: IntArray, metaJson: String)
+
     external fun gatewayGet(
         handle: Long,
         host: String,
