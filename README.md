@@ -204,7 +204,8 @@ A napplet can also **keep** a note or picture it was shown on this phone, and
 ever what it was shown, never signed as you.
 
 With your OK on the install sheet, a napplet can also **upload** a file, such
-as a picture to post, to your Blossom servers, signed as you.
+as a picture to post, to your Blossom servers, signed as you. It can also
+**open or save a file you pick** in Android's file picker, and only that file.
 
 ### From a small example to two phones
 
@@ -234,7 +235,7 @@ Read on:
 
 - [Concepts & glossary](docs/design/core/concepts.md) — start here
 - [Architecture](docs/design/core/architecture.md)
-- [Napplet runtime](docs/design/napplet/napplet-runtime.md) · [NAP-MESH](docs/design/napplet/NAP-MESH.md) · [NAP-INTENT](docs/design/napplet/NAP-INTENT.md) · [NAP-UPLOAD](docs/design/napplet/NAP-UPLOAD.md)
+- [Napplet runtime](docs/design/napplet/napplet-runtime.md) · [NAP-MESH](docs/design/napplet/NAP-MESH.md) · [NAP-INTENT](docs/design/napplet/NAP-INTENT.md) · [NAP-UPLOAD](docs/design/napplet/NAP-UPLOAD.md) · [NAP-FS](docs/design/napplet/NAP-FS.md)
 - [The nsite layer](docs/design/nsite/nsite-layer.md) · [Propagation](docs/design/nsite/propagation.md)
 - [Identity & pairing](docs/design/core/identity-pairing.md) · [Security](docs/design/core/security.md)
 - [Build from source](docs/how-to/build.md) · [All docs](docs/README.md) · [Roadmap](docs/roadmap.md)
