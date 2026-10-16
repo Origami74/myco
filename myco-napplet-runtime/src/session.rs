@@ -30,7 +30,7 @@ use crate::seams::{ScopeOwner, WorkScope};
 /// a branch that cannot work.
 pub const IMPLEMENTED_DOMAINS: &[&str] = &[
     "shell", "identity", "relay", "mesh", "outbox", "local", "resource", "link", "theme", "inc",
-    "intent", "upload",
+    "intent", "upload", "fs",
 ];
 
 /// Domains every napplet gets, grant or no grant.
@@ -317,6 +317,10 @@ pub struct Session {
     /// The last NAP-UPLOAD results, by `uploadId`, for `upload.status`.
     /// Shared by every clone: an upload runs against a snapshot.
     uploads: Arc<Mutex<std::collections::VecDeque<(String, serde_json::Value)>>>,
+    /// The files the user picked for this window (NAP-FS): the only paths
+    /// `fs.*` resolves. Shared by every clone, and gone with the last one —
+    /// the window closing — which drops the platform handles.
+    picked: Arc<crate::nap::fs::PickedStore>,
 }
 
 impl Session {
@@ -349,6 +353,7 @@ impl Session {
             seen: Arc::new(Mutex::new(HashMap::new())),
             streamer: None,
             uploads: Arc::default(),
+            picked: Arc::default(),
         }
     }
 
@@ -378,6 +383,11 @@ impl Session {
             .iter()
             .find(|(id, _)| id == upload_id)
             .map(|(_, status)| status.clone())
+    }
+
+    /// The files picked for this window. See [`crate::nap::fs::PickedStore`].
+    pub fn picked(&self) -> &Arc<crate::nap::fs::PickedStore> {
+        &self.picked
     }
 
     /// The host's streamer, if it streams.

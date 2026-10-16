@@ -22,6 +22,9 @@
 // - `window.napplet.upload.upload` — replaced for the same reason
 //   (NAP-UPLOAD, napplet/naps PR #33): the upload's
 //   authorization is signed as the user before anything is sent.
+// - `window.napplet.fs.pickFile` / `pickFiles` / `pickSaveFile` — replaced
+//   for the same reason (NAP-FS, napplet/naps PR #88): the answer comes once
+//   the user has chosen a file in the system picker, which can take a while.
 //
 // Same wire as everything else: flat NIP-5D envelopes posted to the parent
 // frame, results correlated by `id`, pushes routed by `subId`. Nothing here is
@@ -64,6 +67,7 @@ var MycoPrelude = (function () {
     if (domains.has("local")) installLocal(napplet, routers);
     if (domains.has("resource") && napplet.resource) installResourceKeep(napplet, routers);
     if (domains.has("upload") && napplet.upload) installUploadUpload(napplet, routers);
+    if (domains.has("fs") && napplet.fs) installFsPick(napplet, routers);
     return napplet;
   }
 
@@ -186,6 +190,41 @@ var MycoPrelude = (function () {
         else reject(new Error(msg.error || "upload failed"));
       }, SIGNING_TIMEOUT_MS);
     };
+  }
+
+  // --- NAP-FS: the pickers, with a person-length wait ---------------------
+  //
+  // Drop-ins for the vendored `fs.pickFile`, `fs.pickFiles` and
+  // `fs.pickSaveFile`: the same envelope, resolved with `msg.result` or
+  // rejected with `msg.error` (`cancelled` when the user backs out), as the
+  // vendored ones do — but waiting `SIGNING_TIMEOUT_MS` rather than 30 s. The
+  // runtime answers once the user has picked, and a person browsing folders
+  // routinely takes longer than 30 s. Reads, writes and the rest stay the
+  // vendored ones.
+  function installFsPick(napplet, routers) {
+    if (Object.isFrozen(napplet.fs)) {
+      console.warn("myco: fs is frozen; pickers keep the 30 s wait");
+      return;
+    }
+    var request = requester(routers, [
+      "fs.pickFile.result",
+      "fs.pickFiles.result",
+      "fs.pickSaveFile.result"
+    ]);
+    function picker(type) {
+      return function (options) {
+        var message = { type: type };
+        if (options !== undefined) message.options = options;
+        return request(message, function (msg, resolve, reject) {
+          if (typeof msg.error === "string") reject(new Error(msg.error));
+          else if (msg.result !== undefined) resolve(msg.result);
+          else reject(new Error(type + " returned no result"));
+        }, SIGNING_TIMEOUT_MS);
+      };
+    }
+    napplet.fs.pickFile = picker("fs.pickFile");
+    napplet.fs.pickFiles = picker("fs.pickFiles");
+    napplet.fs.pickSaveFile = picker("fs.pickSaveFile");
   }
 
   // --- NAP-MESH --------------------------------------------------------------

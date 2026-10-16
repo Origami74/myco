@@ -1112,3 +1112,81 @@ impl crate::seams::HttpsFetcher for MemHttps {
         }
     }
 }
+
+/// A picked file held in memory, for NAP-FS tests: a
+/// [`PickedBytes`](crate::seams::PickedBytes) that records the largest
+/// single read, so a test can prove a range read never pulled the whole
+/// file.
+#[derive(Default)]
+pub struct MemFile {
+    data: std::sync::Mutex<Vec<u8>>,
+    largest_read: std::sync::atomic::AtomicUsize,
+    /// When set, every write fails with this OS error (28 is ENOSPC).
+    fail_writes: Option<i32>,
+}
+
+impl MemFile {
+    pub fn new(bytes: &[u8]) -> Self {
+        Self {
+            data: std::sync::Mutex::new(bytes.to_vec()),
+            ..Default::default()
+        }
+    }
+
+    /// An empty file whose writes fail with OS error `errno`.
+    pub fn failing_writes(errno: i32) -> Self {
+        Self {
+            fail_writes: Some(errno),
+            ..Default::default()
+        }
+    }
+
+    pub fn contents(&self) -> Vec<u8> {
+        self.data.lock().unwrap().clone()
+    }
+
+    /// The most bytes any one `read_at` returned.
+    pub fn largest_read(&self) -> usize {
+        self.largest_read.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn check_write(&self) -> std::io::Result<()> {
+        match self.fail_writes {
+            Some(errno) => Err(std::io::Error::from_raw_os_error(errno)),
+            None => Ok(()),
+        }
+    }
+}
+
+impl crate::seams::PickedBytes for MemFile {
+    fn size(&self) -> std::io::Result<u64> {
+        Ok(self.data.lock().unwrap().len() as u64)
+    }
+
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+        let data = self.data.lock().unwrap();
+        let start = (offset as usize).min(data.len());
+        let n = buf.len().min(data.len() - start);
+        buf[..n].copy_from_slice(&data[start..start + n]);
+        self.largest_read
+            .fetch_max(n, std::sync::atomic::Ordering::Relaxed);
+        Ok(n)
+    }
+
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        self.check_write()?;
+        let mut data = self.data.lock().unwrap();
+        let end = offset as usize + buf.len();
+        if data.len() < end {
+            data.resize(end, 0);
+        }
+        data[offset as usize..end].copy_from_slice(buf);
+        Ok(())
+    }
+
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.check_write()?;
+        self.data.lock().unwrap().resize(len as usize, 0);
+        Ok(())
+    }
+}

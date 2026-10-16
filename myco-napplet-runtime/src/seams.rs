@@ -19,6 +19,10 @@
 //!   hands over an event and a hop budget, and asks for backlog with one.
 //! - [`UploadSink`] — puts bytes on the user's Blossom servers, behind
 //!   NAP-UPLOAD. The runtime never sees a server or the authorization.
+//! - [`PickedBytes`] — the bytes of one file the user picked for a napplet,
+//!   behind NAP-FS. The runtime never sees a host path or a content URI; the
+//!   platform opens what the user chose and hands over something to read and
+//!   write at an offset. See [`PickedFile`].
 //! - [`HttpsFetcher`] — GETs an `https:` URL behind NAP-RESOURCE, with the
 //!   half of the private-address policy only a dialler can enforce.
 //! - [`NapTransport`] — the shell ↔ Rust channel. A seam so that dispatch,
@@ -867,6 +871,114 @@ impl UploadSink for NoUploads {
             UploadErrorCode::NoServerConfigured,
             "this device has nowhere to upload to",
         ))
+    }
+}
+
+/// The bytes of one file the user picked — the platform half of NAP-FS.
+///
+/// The picker itself is the host's (it needs a window: see
+/// [`crate::nap::fs::PickRequest`]); what comes back from it is one of these
+/// per file. On Android it is the file descriptor the document provider
+/// opened for the chosen URI; in tests, bytes in memory. The runtime reads
+/// and writes **ranges** through it and never pulls a whole file into memory
+/// for a range read.
+///
+/// Calls are blocking and short: one call moves at most
+/// [`crate::nap::fs::MAX_READ_BYTES`] or [`crate::nap::fs::MAX_WRITE_BYTES`].
+///
+/// Also the handle other features take a picked file by (NAP-UPLOAD, mesh
+/// file sharing): see [`crate::nap::fs::PickedHandle`] and
+/// [`PickedBytes::read_all`].
+pub trait PickedBytes: Send + Sync {
+    /// The file's size now.
+    fn size(&self) -> std::io::Result<u64>;
+    /// Read into `buf` from `offset`; the count read, `0` at the end.
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize>;
+    /// Write all of `buf` at `offset`, growing the file as needed.
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()>;
+    /// Cut or extend the file to `len` bytes.
+    fn set_len(&self, len: u64) -> std::io::Result<()>;
+    /// Push what was written to the backing store.
+    fn sync(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// The whole file, refusing one larger than `max` bytes — for a feature
+    /// that sends a picked file on (an upload, a mesh share) rather than
+    /// reading it in ranges.
+    fn read_all(&self, max: u64) -> std::io::Result<Vec<u8>> {
+        let len = self.size()?;
+        if len > max {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{len} bytes is over the {max} byte cap"),
+            ));
+        }
+        let mut out = vec![0u8; len as usize];
+        let mut at = 0usize;
+        while at < out.len() {
+            let n = self.read_at(&mut out[at..], at as u64)?;
+            if n == 0 {
+                break;
+            }
+            at += n;
+        }
+        out.truncate(at);
+        Ok(out)
+    }
+}
+
+/// A file opened from the platform — on Android, the descriptor a document
+/// provider gave for the picked URI. Reads and writes are positional
+/// (`pread` / `pwrite`), so concurrent range reads need no shared cursor.
+#[cfg(unix)]
+impl PickedBytes for std::fs::File {
+    fn size(&self) -> std::io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
+
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+        std::os::unix::fs::FileExt::read_at(self, buf, offset)
+    }
+
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        std::os::unix::fs::FileExt::write_all_at(self, buf, offset)
+    }
+
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        std::fs::File::set_len(self, len)
+    }
+
+    fn sync(&self) -> std::io::Result<()> {
+        self.sync_data()
+    }
+}
+
+/// One file the platform picker returned, before the runtime gives it a
+/// virtual path. Everything here came from the platform, not the napplet.
+#[derive(Clone)]
+pub struct PickedFile {
+    /// The name the provider reports (`OpenableColumns.DISPLAY_NAME`).
+    /// Untrusted text: cleaned before it becomes a path segment.
+    pub name: String,
+    /// The provider's MIME type, if it gave one.
+    pub mime: Option<String>,
+    /// Whether the platform opened it for reading.
+    pub readable: bool,
+    /// Whether the platform opened it for writing — the user picked a save
+    /// destination, or the provider granted write on an opened document.
+    pub writable: bool,
+    pub bytes: std::sync::Arc<dyn PickedBytes>,
+}
+
+impl std::fmt::Debug for PickedFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PickedFile")
+            .field("name", &self.name)
+            .field("mime", &self.mime)
+            .field("readable", &self.readable)
+            .field("writable", &self.writable)
+            .finish_non_exhaustive()
     }
 }
 
