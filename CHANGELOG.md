@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open the link in your browser. A napplet can share these links too: opening
   one from inside a napplet goes to the app, not the browser.
 
+- **Napplets can open and save files you pick.** A napplet with the new
+  "Files" permission can ask you to choose a file, or where to save one, in
+  Android's own file picker. It can then read and write that file, and only
+  that file, until you close it. It never sees your other files or where
+  they live. Folders, listing and file watching are not supported yet
+  (NAP-FS, picker subset).
+
 ### Fixed
 
 - **A napplet's file field opens the file picker.** Tapping an
