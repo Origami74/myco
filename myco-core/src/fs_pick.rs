@@ -292,12 +292,15 @@ mod tests {
             panic!("expected a pick command, got {out:?}");
         };
         assert_eq!(mode, "open");
-        assert_eq!(mime_types, &["text/markdown"]);
+        assert_eq!(mime_types, &["text/markdown", "text/x-markdown"]);
         assert!(*read && !*write);
         // As the window host reads it.
         let wire = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(wire["channel"], "pick-file");
-        assert_eq!(wire["mimeTypes"], json!(["text/markdown"]));
+        assert_eq!(
+            wire["mimeTypes"],
+            json!(["text/markdown", "text/x-markdown"])
+        );
 
         // A second pick while this one is up is refused at once.
         let again = send(&host, &session, json!({"type": "fs.pickFile", "id": "p2"})).await;

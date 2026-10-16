@@ -309,9 +309,14 @@ pub fn accept_mime_types(rules: &[Value]) -> Vec<String> {
         let Some(rule) = rule.as_object() else {
             continue;
         };
+        // Each type with the other names Android files the same files under:
+        // a CSV in Downloads is `text/comma-separated-values`, and a filter of
+        // `text/csv` alone left it greyed out in the picker.
         let mut push = |m: String| {
-            if !out.contains(&m) && out.len() < MAX_ACCEPT {
-                out.push(m);
+            for name in std::iter::once(m.as_str()).chain(mime_aliases(&m).iter().copied()) {
+                if !out.iter().any(|o| o == name) && out.len() < MAX_ACCEPT {
+                    out.push(name.to_string());
+                }
             }
         };
         if let Some(mime) = rule
@@ -332,6 +337,23 @@ pub fn accept_mime_types(rules: &[Value]) -> Vec<String> {
         out.push("*/*".to_string());
     }
     out
+}
+
+/// Other MIME types that name the same kind of file on Android.
+fn mime_aliases(mime: &str) -> &'static [&'static str] {
+    match mime {
+        "text/csv" => &[
+            "text/comma-separated-values",
+            "application/csv",
+            "text/x-csv",
+        ],
+        "text/tab-separated-values" => &["text/tsv"],
+        "application/json" => &["text/json"],
+        "text/markdown" => &["text/x-markdown"],
+        "application/gpx+xml" => &["application/octet-stream"],
+        "model/gltf-binary" => &["application/octet-stream"],
+        _ => &[],
+    }
 }
 
 /// A MIME type or range (`type/subtype`, `type/*`, `*/*`), lowercased and
@@ -942,7 +964,10 @@ mod tests {
         )
         .await;
         assert_eq!(req.mode, PickMode::Open);
-        assert_eq!(req.mime_types, ["text/plain", "text/markdown"]);
+        assert_eq!(
+            req.mime_types,
+            ["text/plain", "text/markdown", "text/x-markdown"]
+        );
         assert!(req.open_for_read && !req.open_for_write);
 
         let f = Arc::new(MemFile::new(b"Hello world!"));
@@ -1421,6 +1446,15 @@ mod tests {
         assert_eq!(
             m(json!([{"mime": "text/plain"}, {"extension": "txt"}])),
             ["text/plain"]
+        );
+        // A CSV in Android's Downloads is `text/comma-separated-values`:
+        // asked for as `.csv` or `text/csv`, it must still be choosable.
+        let csv = m(json!([{"extension": ".csv"}, {"mime": "text/csv"}]));
+        assert_eq!(csv[0], "text/csv");
+        assert!(csv.iter().any(|t| t == "text/comma-separated-values"));
+        assert_eq!(
+            csv.len(),
+            csv.iter().collect::<std::collections::HashSet<_>>().len()
         );
     }
 
