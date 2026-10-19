@@ -47,6 +47,8 @@ use myco_napplet_runtime::nap::intent::{
     self as nap_intent, Candidate, IntentCatalog, IntentCatalogSnapshot, IntentHandler,
     IntentRequest, Resolution, INVOKE_FAILED, USER_CANCELLED,
 };
+use myco_napplet_runtime::napplet_link::NappletLink;
+use myco_napplet_runtime::seams::Envelope;
 use myco_napplet_runtime::shell_link::{ChooserCandidate, ToShell};
 
 use crate::content::{Content, LibraryArchetype, LibraryItem, LibraryKind};
@@ -71,6 +73,15 @@ pub const INVOKE_COOLDOWN: Duration = Duration::from_millis(750);
 pub const MAX_PENDING_INTENTS: usize = 32;
 /// `error` for an invoke refused by the host's rate limit or queue bound.
 pub const INTENT_BUSY: &str = "busy: try again in a moment";
+
+/// The calling window of a request from no window at all: a `napplet.link`
+/// opened from outside the app. No session has this id, so whatever is sent
+/// to it goes nowhere — there is nobody to answer.
+pub(crate) const NO_WINDOW: &str = "";
+
+/// The `sender` a handler is told for a payload from a link opened outside
+/// the app. Myco relayed it; who wrote the link is not known.
+pub const LINK_SENDER: &str = MYCO_HANDLER_KEY;
 
 /// The user's default handler per archetype, shared by the reducer (which
 /// writes it, from the user's answers) and the catalog (which reads it).
@@ -233,6 +244,22 @@ pub fn nsite_host(payload: Option<&Value>) -> Option<String> {
         .map(|addr| addr.host_label())
 }
 
+/// `envelope` for the caller of `request`, unless nobody is waiting for it —
+/// a request made from a link is answered in the link's terms, by whoever
+/// took the link.
+fn reply(request: &IntentRequest, envelope: Envelope) -> Vec<ToShell> {
+    if request.answers_caller() {
+        vec![ToShell::to_napplet(envelope)]
+    } else {
+        Vec::new()
+    }
+}
+
+/// What a request that could not be routed comes back with: the request,
+/// for the caller's answer, and why. Boxed, because the request is large and
+/// the `Ok` side is the common one.
+pub(crate) type Unrouted = Box<(IntentRequest, &'static str)>;
+
 /// A fresh token: 128 bits from the OS.
 fn new_token() -> String {
     use chacha20poly1305::aead::rand_core::RngCore as _;
@@ -329,20 +356,13 @@ impl NappletHost {
             }
             last.insert(caller.to_string(), now);
         }
-        if self
-            .intents
-            .choosers
-            .lock()
-            .unwrap()
-            .values()
-            .any(|c| c.caller == caller)
+        match self
+            .intent_resolve(caller, &sender, request, now, None)
+            .await
         {
-            return vec![ToShell::to_napplet(request.failed(INTENT_BUSY))];
-        }
-
-        let catalog = self.ctx.intents.snapshot().await;
-        match nap_intent::resolve(&catalog, &request) {
-            Resolution::Refused(error) => {
+            Ok(frames) => frames,
+            Err(unrouted) => {
+                let (request, error) = *unrouted;
                 tracing::info!(
                     session = caller,
                     archetype = %request.archetype,
@@ -351,11 +371,56 @@ impl NappletHost {
                 );
                 vec![ToShell::to_napplet(request.failed(error))]
             }
+        }
+    }
+
+    /// Resolve `request` from the window `caller` (or [`NO_WINDOW`]) and
+    /// route it: the frames that open the handler or ask the user, or why
+    /// neither can happen. Shared by `intent.invoke` and `napplet.link`, so
+    /// a link and an invoke reach the same handler by the same rules.
+    ///
+    /// `pick` is a handler key the user already chose for this request,
+    /// answering a chooser a link from outside the app put up: there is no
+    /// window to hold that question open, so it is asked again with the
+    /// answer. A pick the catalog no longer offers is refused, not
+    /// substituted.
+    pub(crate) async fn intent_resolve(
+        &self,
+        caller: &str,
+        sender: &str,
+        request: IntentRequest,
+        now: Instant,
+        pick: Option<&str>,
+    ) -> Result<Vec<ToShell>, Unrouted> {
+        // One "open with…" question per window at a time.
+        if caller != NO_WINDOW
+            && self
+                .intents
+                .choosers
+                .lock()
+                .unwrap()
+                .values()
+                .any(|c| c.caller == caller)
+        {
+            return Err(Box::new((request, INTENT_BUSY)));
+        }
+
+        let catalog = self.ctx.intents.snapshot().await;
+        match nap_intent::resolve(&catalog, &request) {
+            Resolution::Refused(error) => Err(Box::new((request, error))),
             Resolution::Handler {
                 candidate,
                 convention,
-            } => self.intent_route(caller, &sender, request, &candidate, &convention, now),
+            } => self.intent_route(caller, sender, request, &candidate, &convention, now),
             Resolution::Choose(options) => {
+                if let Some(pick) = pick {
+                    return match options.iter().find(|(c, _)| c.key == pick) {
+                        Some((candidate, convention)) => {
+                            self.intent_route(caller, sender, request, candidate, convention, now)
+                        }
+                        None => Err(Box::new((request, INVOKE_FAILED))),
+                    };
+                }
                 let token = new_token();
                 let candidates = options
                     .iter()
@@ -371,24 +436,85 @@ impl NappletHost {
                     action: request.action.clone(),
                     candidates,
                 };
-                self.intents.choosers.lock().unwrap().insert(
-                    token,
-                    PendingChoice {
-                        caller: caller.to_string(),
-                        sender,
-                        request,
-                        options,
-                        created: now,
-                    },
-                );
-                vec![command]
+                // From no window, the answer comes back as `pick` on a new
+                // call; there is nothing to keep.
+                if caller != NO_WINDOW {
+                    self.intents.choosers.lock().unwrap().insert(
+                        token,
+                        PendingChoice {
+                            caller: caller.to_string(),
+                            sender: sender.to_string(),
+                            request,
+                            options,
+                            created: now,
+                        },
+                    );
+                }
+                Ok(vec![command])
+            }
+        }
+    }
+
+    /// Open a `napplet.link` that arrived from outside the app — another
+    /// app's VIEW intent, a scanned code. The answer is one command for the
+    /// window host as JSON: `open-napplet`, `open-nsite` or
+    /// `choose-intent-handler` (call again with the user's `pick`), or
+    /// `link-refused` with the `error`, the `archetype` and the link's
+    /// canonical `webUrl`, for the browser when nothing here opens it (empty
+    /// when there is no page to offer).
+    ///
+    /// Nobody is answered `intent.invoke.result`: there is no calling window.
+    /// The handler is told the payload came from [`LINK_SENDER`].
+    pub async fn open_link(&self, url: &str, pick: Option<&str>) -> Value {
+        let now = Instant::now();
+        self.sweep_intents(now);
+        let refused = |error: &str, archetype: &str, web_url: &str| {
+            serde_json::json!({
+                "channel": "link-refused",
+                "error": error,
+                "archetype": archetype,
+                "webUrl": web_url,
+            })
+        };
+        let link = match NappletLink::parse(url) {
+            Ok(link) => link,
+            // Not one of ours after all — a page on napplet.link that names
+            // no role, say. If it is a web page, the browser can have it.
+            Err(error) => {
+                let url = url.trim();
+                let web = url
+                    .get(..8)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+                return refused(error, "", if web { url } else { "" });
+            }
+        };
+        let request = IntentRequest::from_link(&link);
+        let pick = pick.filter(|p| !p.is_empty());
+        match self
+            .intent_resolve(NO_WINDOW, LINK_SENDER, request, now, pick)
+            .await
+        {
+            Ok(frames) => {
+                tracing::info!(convention = %link.convention(), "napplet link opened");
+                frames
+                    .iter()
+                    .find(|f| !matches!(f, ToShell::Napplet { .. }))
+                    .and_then(|f| serde_json::to_value(f).ok())
+                    .unwrap_or_else(|| refused(INVOKE_FAILED, &link.archetype, &link.web_url()))
+            }
+            Err(unrouted) => {
+                let error = unrouted.1;
+                tracing::info!(convention = %link.convention(), error, "napplet link refused");
+                refused(error, &link.archetype, &link.web_url())
             }
         }
     }
 
     /// Send a resolved request to `candidate`: Myco's nsite opener answers at
     /// once; a napplet gets a pending payload and an `open-napplet` command,
-    /// and the caller hears back when the window binds the token.
+    /// and the caller hears back when the window binds the token. Refused,
+    /// the request comes back with the reason, for the caller to answer in
+    /// its own terms.
     fn intent_route(
         &self,
         caller: &str,
@@ -397,25 +523,27 @@ impl NappletHost {
         candidate: &Candidate,
         convention: &str,
         now: Instant,
-    ) -> Vec<ToShell> {
+    ) -> Result<Vec<ToShell>, Unrouted> {
         if candidate.key == MYCO_HANDLER_KEY {
             let Some(host) = nsite_host(request.payload.as_ref()) else {
-                return vec![ToShell::to_napplet(request.failed(INVOKE_FAILED))];
+                return Err(Box::new((request, INVOKE_FAILED)));
             };
             tracing::info!(session = caller, %host, "intent: opening an nsite");
-            return vec![
-                ToShell::OpenNsite { host: host.clone() },
-                ToShell::to_napplet(request.handled(MYCO_HANDLER_KEY, &host, convention)),
-            ];
+            let mut frames = vec![ToShell::OpenNsite { host: host.clone() }];
+            frames.extend(reply(
+                &request,
+                request.handled(MYCO_HANDLER_KEY, &host, convention),
+            ));
+            return Ok(frames);
         }
         let Ok(addr) =
             NappletAddr::parse(&candidate.pointer).or_else(|_| NappletAddr::parse(&candidate.key))
         else {
-            return vec![ToShell::to_napplet(request.failed(INVOKE_FAILED))];
+            return Err(Box::new((request, INVOKE_FAILED)));
         };
         let mut pending = self.intents.pending.lock().unwrap();
         if pending.len() >= MAX_PENDING_INTENTS {
-            return vec![ToShell::to_napplet(request.failed(INTENT_BUSY))];
+            return Err(Box::new((request, INTENT_BUSY)));
         }
         let token = new_token();
         tracing::info!(
@@ -440,11 +568,11 @@ impl NappletHost {
                 created: now,
             },
         );
-        vec![ToShell::OpenNapplet {
+        Ok(vec![ToShell::OpenNapplet {
             pointer: candidate.pointer.clone(),
             title: candidate.title.clone().unwrap_or_default(),
             token,
-        }]
+        }])
     }
 
     /// The archetype an open chooser asks about — for the reducer, which
@@ -479,16 +607,22 @@ impl NappletHost {
         let frames = match picked {
             None => {
                 tracing::info!(session = %asked.caller, "intent chooser cancelled");
-                vec![ToShell::to_napplet(asked.request.failed(USER_CANCELLED))]
+                reply(&asked.request, asked.request.failed(USER_CANCELLED))
             }
-            Some((candidate, convention)) => self.intent_route(
+            Some((candidate, convention)) => match self.intent_route(
                 &asked.caller,
                 &asked.sender,
                 asked.request.clone(),
                 candidate,
                 convention,
                 now,
-            ),
+            ) {
+                Ok(frames) => frames,
+                Err(unrouted) => {
+                    let (request, error) = *unrouted;
+                    reply(&request, request.failed(error))
+                }
+            },
         };
         self.send_to(&asked.caller, frames);
         true
@@ -527,12 +661,15 @@ impl NappletHost {
                 return false;
             }
             p.bound = Some(session_id.to_string());
-            p.request.take().map(|request| {
-                (
-                    p.caller.clone(),
-                    request.handled(&p.handler, session_id, &p.convention),
-                )
-            })
+            p.request
+                .take()
+                .filter(IntentRequest::answers_caller)
+                .map(|request| {
+                    (
+                        p.caller.clone(),
+                        request.handled(&p.handler, session_id, &p.convention),
+                    )
+                })
         };
         if let Some((caller, result)) = answer {
             self.send_to(&caller, vec![ToShell::to_napplet(result)]);
@@ -548,7 +685,7 @@ impl NappletHost {
         let removed = self.intents.pending.lock().unwrap().remove(token);
         if let Some(mut p) = removed {
             if let Some(request) = p.request.take() {
-                self.send_to(&p.caller, vec![ToShell::to_napplet(request.failed(error))]);
+                self.send_to(&p.caller, reply(&request, request.failed(error)));
             }
         }
     }
@@ -620,10 +757,7 @@ impl NappletHost {
         for mut p in expired {
             tracing::info!(topic = %p.convention, bound = ?p.bound, "intent payload expired");
             if let Some(request) = p.request.take() {
-                self.send_to(
-                    &p.caller,
-                    vec![ToShell::to_napplet(request.failed(INVOKE_FAILED))],
-                );
+                self.send_to(&p.caller, reply(&request, request.failed(INVOKE_FAILED)));
             }
         }
         self.intents

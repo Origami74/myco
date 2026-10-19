@@ -38,6 +38,7 @@ use serde_json::{json, Value};
 
 use crate::dispatch::{NapContext, Outcome};
 use crate::manifest::{convention_intent, is_convention, is_slug, Archetype};
+use crate::napplet_link::NappletLink;
 use crate::seams::Envelope;
 use crate::session::Session;
 
@@ -280,9 +281,37 @@ pub struct IntentRequest {
     pub handler: HandlerChoice,
     pub behavior: IntentBehavior,
     call: Envelope,
+    /// Made from a `napplet.link` rather than sent as `intent.invoke`. No
+    /// one is waiting for an `intent.invoke.result`: a napplet that opened
+    /// the link is answered `link.open.result` once, by the host, and a link
+    /// from outside the app has nobody to answer at all.
+    from_link: bool,
 }
 
 impl IntentRequest {
+    /// The request a `napplet.link` stands for: its archetype, its intent as
+    /// the action, its exact convention, and its query as the payload. The
+    /// handler is the default — a link names a role, never a napplet.
+    pub fn from_link(link: &NappletLink) -> Self {
+        Self {
+            archetype: link.archetype.clone(),
+            action: link.intent.clone(),
+            convention: Some(link.convention()),
+            payload: Some(link.payload()),
+            handler: HandlerChoice::Default,
+            behavior: IntentBehavior::default(),
+            call: Envelope::new("intent.invoke"),
+            from_link: true,
+        }
+    }
+
+    /// Whether [`IntentRequest::handled`] and [`IntentRequest::failed`] have
+    /// anyone to go to. False for a request made from a link: those are
+    /// answered by the host, in the link's own terms.
+    pub fn answers_caller(&self) -> bool {
+        !self.from_link
+    }
+
     /// The answer once a handler took it: its dTag, the window it went to and
     /// the convention the payload is delivered on.
     pub fn handled(&self, handler: &str, window_id: &str, convention: &str) -> Envelope {
@@ -499,6 +528,7 @@ fn parse_invoke(message: &Envelope) -> Result<IntentRequest, Envelope> {
         handler,
         behavior,
         call: message.clone(),
+        from_link: false,
     })
 }
 
@@ -868,5 +898,42 @@ mod tests {
         assert!(changed_frame(&session(&[]), &a).is_none());
         let fresh = Session::new(NappletIdentity::new("x", "y"), ["intent"]);
         assert!(changed_frame(&fresh, &a).is_none());
+    }
+
+    /// A link is the same request an `intent.invoke` would be, resolved by
+    /// the same rules — with its exact convention, so a handler that does not
+    /// accept it is not picked.
+    #[test]
+    fn a_link_resolves_like_the_invoke_it_stands_for() {
+        let link = NappletLink::parse("https://napplet.link/profile/open?pubkey=abc").unwrap();
+        let from_link = IntentRequest::from_link(&link);
+        assert!(!from_link.answers_caller());
+        assert!(request(json!({"archetype": "profile"})).answers_caller());
+        assert_eq!(from_link.archetype, "profile");
+        assert_eq!(from_link.action, "open");
+        assert_eq!(
+            from_link.convention.as_deref(),
+            Some("napplet:profile/open")
+        );
+        assert_eq!(from_link.payload, Some(json!({"pubkey": "abc"})));
+        assert_eq!(from_link.handler, HandlerChoice::Default);
+
+        let c = catalog(
+            vec![
+                handler("npub1a:p", vec![arch("profile", "napplet:profile/open")]),
+                handler("npub1b:q", vec![arch("profile", "napplet:profile/view")]),
+            ],
+            &[],
+        );
+        let Resolution::Handler { candidate, .. } = resolve(&c, &from_link) else {
+            panic!("expected the one handler that accepts the convention");
+        };
+        assert_eq!(candidate.key, "npub1a:p");
+
+        let none = NappletLink::parse("napplet:pet/open").unwrap();
+        assert_eq!(
+            resolve(&c, &IntentRequest::from_link(&none)),
+            Resolution::Refused(NO_HANDLER)
+        );
     }
 }

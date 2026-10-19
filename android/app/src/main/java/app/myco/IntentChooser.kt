@@ -1,5 +1,11 @@
 package app.myco
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.util.Log
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -106,6 +112,7 @@ fun IntentChooserSheet(
     chooser: IntentChooser,
     onPick: (key: String, always: Boolean) -> Unit,
     onCancel: () -> Unit,
+    asker: String = "This app",
 ) {
     var always by remember(chooser.token) { mutableStateOf(false) }
     ModalBottomSheet(onDismissRequest = onCancel) {
@@ -113,7 +120,7 @@ fun IntentChooserSheet(
             Text("Open with", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(4.dp))
             Text(
-                "This app wants to open a ${archetypeLabel(chooser.archetype)}. Pick which app does it.",
+                "$asker wants to open a ${archetypeLabel(chooser.archetype)}. Pick which app does it.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -143,6 +150,96 @@ fun IntentChooserSheet(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = onCancel) { Text("Cancel") }
             }
+        }
+    }
+}
+
+/**
+ * A `napplet.link` nothing installed here opens (`link-refused`): the role it
+ * asked for, and the page to offer instead. [webUrl] is empty when there is
+ * none — a link that did not parse.
+ */
+data class NappletLinkRefusal(val archetype: String, val webUrl: String) {
+    companion object {
+        fun parse(obj: JSONObject): NappletLinkRefusal =
+            NappletLinkRefusal(obj.optString("archetype"), obj.optString("webUrl"))
+    }
+}
+
+/**
+ * Says that no app here opens the link, and offers its web page in a
+ * browser. Never anything that could install: getting an app that handles
+ * the role is the user's own business, from the Apps screen.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun NappletLinkRefusedSheet(
+    refusal: NappletLinkRefusal,
+    onOpenInBrowser: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
+            val role = refusal.archetype.ifEmpty { null }?.let { archetypeLabel(it) }
+            Text(
+                if (role != null) "No app here opens $role" else "Myco can't open this link",
+                style = MaterialTheme.typography.titleLarge,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                if (refusal.webUrl.isNotEmpty()) {
+                    "None of your apps can open this link. You can open it in your browser instead."
+                } else {
+                    "This link isn't one Myco understands."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onDismiss) { Text("Dismiss") }
+                if (refusal.webUrl.isNotEmpty()) {
+                    TextButton(onClick = onOpenInBrowser) { Text("Open in browser") }
+                }
+            }
+        }
+    }
+}
+
+/** `napplet.link` links: which intents carry one, and the browser fallback. */
+object NappletLinks {
+    const val HOST = "napplet.link"
+
+    /**
+     * Whether [uri] is for [MainActivity]'s napplet-link path rather than its
+     * `myco:` one: `https://napplet.link/…`, or a `napplet:` URI that is not a
+     * napplet pointer (`napplet:naddr1…` is install review, as before). Rust
+     * has the last word on the shape.
+     */
+    fun isNappletLink(uri: Uri): Boolean = when (uri.scheme?.lowercase()) {
+        "https" -> uri.host.equals(HOST, ignoreCase = true)
+        "napplet" -> {
+            val rest = uri.schemeSpecificPart.orEmpty().trimStart('/')
+            !rest.startsWith("naddr1", ignoreCase = true)
+        }
+        else -> false
+    }
+
+    /**
+     * Open [url] in a browser, never in Myco. Myco claims `napplet.link`, so a
+     * plain VIEW could come straight back here; the selector asks for an app
+     * in the browser category, which Myco is not.
+     */
+    fun openInBrowser(context: Context, url: String) {
+        val view = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            .addCategory(Intent.CATEGORY_BROWSABLE)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        view.selector = Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_BROWSER)
+        try {
+            context.startActivity(view)
+        } catch (e: ActivityNotFoundException) {
+            Log.w("MycoNappletLink", "no browser for $url", e)
+            Toast.makeText(context, "No browser to open this link", Toast.LENGTH_SHORT).show()
         }
     }
 }

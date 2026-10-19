@@ -767,3 +767,161 @@ async fn a_library_write_wakes_the_watcher() {
         .expect("the write left a permit");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- napplet.link ----------------------------------------------------------
+
+impl Fixture {
+    /// A napplet's `link.open`. The link gate's cooldown is device-wide, so
+    /// each test opens at most one link through it.
+    async fn link(&self, session: &str, url: &str) -> Vec<ToShell> {
+        self.send(
+            session,
+            json!({"type": "link.open", "id": "l1", "url": url}),
+        )
+        .await
+    }
+}
+
+fn link_status(frames: &[ToShell]) -> (String, Option<String>) {
+    let results = of_type(frames, "link.open.result");
+    assert_eq!(results.len(), 1, "{frames:?}");
+    (
+        results[0]["status"].as_str().unwrap().to_string(),
+        results[0]["error"].as_str().map(str::to_string),
+    )
+}
+
+/// The headline: a napplet opening `https://napplet.link/profile/open?…`
+/// takes the intent path — the handler's window, never the browser — and
+/// the handler hears the query as its payload, from the napplet that linked.
+/// The linking napplet hears `link.open.result` and nothing else.
+#[tokio::test]
+async fn a_napplet_link_from_a_napplet_opens_the_handler() {
+    let f = fixture().await;
+    let feed = f.open(&f.feed).await;
+
+    let out = f
+        .link(&feed, "https://napplet.link/profile/open?pubkey=abc")
+        .await;
+    assert!(
+        !out.iter()
+            .any(|f| matches!(f, ToShell::OpenExternal { .. })),
+        "a napplet.link went to the browser"
+    );
+    let (pointer, token) = open_command(&out).expect("the handler's window is opened");
+    assert_eq!(pointer, key_of(&f.profiles));
+    assert_eq!(link_status(&out), ("opened".into(), None));
+
+    let profiles = f.open(&f.profiles).await;
+    assert!(f.host.bind_intent(&profiles, &token).await);
+    assert!(
+        messages(&f.drain(&feed).await).is_empty(),
+        "the linking napplet heard more than its link result"
+    );
+    let events = of_type(&f.subscribe(&profiles, PROFILE).await, "inc.event");
+    assert_eq!(
+        events,
+        vec![
+            json!({"type": "inc.event", "topic": PROFILE, "sender": "feed",
+                    "payload": {"pubkey": "abc"}})
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_napplet_link_nothing_handles_is_denied_with_the_reason() {
+    let f = fixture().await;
+    let feed = f.open(&f.feed).await;
+    let out = f.link(&feed, "napplet:pet/open?name=rex").await;
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(
+        link_status(&out),
+        ("denied".into(), Some(NO_HANDLER.into()))
+    );
+}
+
+/// Several handlers: the chooser goes up over the linking window and the
+/// link counts as opened. A cancel tells nobody anything — the napplet
+/// already has its answer.
+#[tokio::test]
+async fn a_napplet_link_with_several_handlers_asks_the_user() {
+    let f = fixture().await;
+    f.both(None);
+    let feed = f.open(&f.feed).await;
+    let out = f.link(&feed, "https://napplet.link/profile/open").await;
+    let Some(ToShell::ChooseIntentHandler { token, .. }) = out.first().cloned() else {
+        panic!("expected the chooser first, got {out:?}");
+    };
+    assert_eq!(link_status(&out), ("opened".into(), None));
+
+    assert!(f.host.answer_intent_chooser(&token, None));
+    assert!(messages(&f.drain(&feed).await).is_empty());
+}
+
+/// From outside the app: one command for the window host, never a frame for
+/// a napplet; a chooser is answered by calling again with the pick.
+#[tokio::test]
+async fn a_napplet_link_from_outside_the_app() {
+    let f = fixture().await;
+    let url = "https://napplet.link/profile/open?pubkey=abc";
+
+    let opened = f.host.open_link(url, None).await;
+    assert_eq!(opened["channel"], "open-napplet");
+    assert_eq!(opened["pointer"], key_of(&f.profiles).as_str());
+    let profiles = f.open(&f.profiles).await;
+    assert!(
+        f.host
+            .bind_intent(&profiles, opened["token"].as_str().unwrap())
+            .await
+    );
+    let events = of_type(&f.subscribe(&profiles, PROFILE).await, "inc.event");
+    assert_eq!(events[0]["sender"], LINK_SENDER);
+    assert_eq!(events[0]["payload"], json!({"pubkey": "abc"}));
+
+    f.both(None);
+    let asked = f.host.open_link(url, None).await;
+    assert_eq!(asked["channel"], "choose-intent-handler");
+    assert_eq!(asked["candidates"].as_array().unwrap().len(), 2);
+    // Two links in a row both ask: nothing is held open for no window.
+    let again = f.host.open_link(url, None).await;
+    assert_eq!(again["channel"], "choose-intent-handler");
+
+    let picked = f.host.open_link(url, Some(&key_of(&f.cards))).await;
+    assert_eq!(picked["channel"], "open-napplet");
+    assert_eq!(picked["pointer"], key_of(&f.cards).as_str());
+    let stale = f.host.open_link(url, Some("npub1gone:x")).await;
+    assert_eq!(stale["channel"], "link-refused");
+}
+
+#[tokio::test]
+async fn a_napplet_link_from_outside_that_nothing_handles_offers_the_web() {
+    let f = fixture().await;
+    let refused = f.host.open_link("napplet:pet/open?name=a+b", None).await;
+    assert_eq!(
+        refused,
+        json!({"channel": "link-refused", "error": NO_HANDLER, "archetype": "pet",
+               "webUrl": "https://napplet.link/pet/open?name=a%2Bb"})
+    );
+    // A page on the host that names no role goes back to the browser as is.
+    let home = f.host.open_link("https://napplet.link/about", None).await;
+    assert_eq!(home["channel"], "link-refused");
+    assert_eq!(home["webUrl"], "https://napplet.link/about");
+    let bad = f.host.open_link("napplet:pet/open?a=%", None).await;
+    assert_eq!(bad["channel"], "link-refused");
+    assert_eq!(bad["webUrl"], "");
+}
+
+/// Myco's own `nsite` role answers a link too.
+#[tokio::test]
+async fn a_napplet_link_can_open_an_nsite() {
+    let f = fixture().await;
+    let npub = nostr::Keys::generate().public_key().to_bech32().unwrap();
+    let out = f
+        .host
+        .open_link(
+            &format!("https://napplet.link/nsite/open?host={npub}"),
+            None,
+        )
+        .await;
+    assert_eq!(out["channel"], "open-nsite", "{out}");
+}

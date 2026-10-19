@@ -302,6 +302,10 @@ pub const REVIEW_LINK_COOLDOWN: Duration = Duration::from_secs(5);
 /// How soon after one admitted web link another may open the browser.
 pub const WEB_LINK_COOLDOWN: Duration = Duration::from_secs(2);
 
+/// How soon after one admitted `napplet.link` another may open a window or
+/// put up a chooser.
+pub const INTENT_LINK_COOLDOWN: Duration = Duration::from_secs(2);
+
 /// `error` for a napplet link refused because the review sheet this napplet
 /// opened is still up over its window. NAP-LINK leaves the code open; this
 /// one says what to do: answer the sheet first.
@@ -330,17 +334,20 @@ struct LinkGate {
     review_owner: Mutex<Option<(String, String)>>,
     last_review: Mutex<Option<std::time::Instant>>,
     last_web: Mutex<Option<std::time::Instant>>,
+    last_intent: Mutex<Option<std::time::Instant>>,
 }
 
 impl LinkGate {
     /// Admit `target` for the window of `session` at `now`, returning the
-    /// command for the window host, or the `error` code to deny it with.
+    /// command for the window host, or the `error` code to deny it with. An
+    /// admitted `napplet.link` has no command yet (`None`): the host resolves
+    /// it against the intent catalog, which may still refuse it.
     fn admit(
         &self,
         session: &str,
         target: &LinkTarget,
         now: std::time::Instant,
-    ) -> Result<ToShell, &'static str> {
+    ) -> Result<Option<ToShell>, &'static str> {
         let within = |last: &Mutex<Option<std::time::Instant>>, cooldown: Duration| {
             let mut last = last.lock().unwrap();
             if last.is_some_and(|t| now.saturating_duration_since(t) < cooldown) {
@@ -354,7 +361,13 @@ impl LinkGate {
                 if within(&self.last_web, WEB_LINK_COOLDOWN) {
                     return Err(BLOCKED_BY_POLICY);
                 }
-                Ok(ToShell::OpenExternal { url: url.clone() })
+                Ok(Some(ToShell::OpenExternal { url: url.clone() }))
+            }
+            LinkTarget::Intent(_) => {
+                if within(&self.last_intent, INTENT_LINK_COOLDOWN) {
+                    return Err(BLOCKED_BY_POLICY);
+                }
+                Ok(None)
             }
             LinkTarget::Napplet(pointer) => {
                 // The runtime already decoded it; the host's own parser is the
@@ -390,9 +403,9 @@ impl LinkGate {
                     return Err(LINK_BUSY_TRY_AGAIN);
                 }
                 *self.review_owner.lock().unwrap() = Some((session.to_string(), pointer.clone()));
-                Ok(ToShell::ReviewNapplet {
+                Ok(Some(ToShell::ReviewNapplet {
                     pointer: pointer.clone(),
-                })
+                }))
             }
         }
     }
@@ -784,14 +797,13 @@ impl NappletHost {
         // answered `opened`; the command comes first so the window acts on
         // it before the napplet hears back.
         if let Outcome::Link(request) = &out {
-            return match self
-                .links
-                .admit(session_id, &request.target, std::time::Instant::now())
-            {
-                Ok(command) => {
+            let now = std::time::Instant::now();
+            return match self.links.admit(session_id, &request.target, now) {
+                Ok(Some(command)) => {
                     tracing::info!(session = session_id, ?command, "napplet link admitted");
                     vec![command, ToShell::to_napplet(request.opened())]
                 }
+                Ok(None) => self.link_intent(session_id, request, now).await,
                 Err(error) => {
                     tracing::info!(
                         session = session_id,
@@ -828,6 +840,56 @@ impl NappletHost {
             replies.extend(self.intent_deliveries(session_id).await);
         }
         replies
+    }
+
+    /// A napplet's `link.open` of a `napplet.link`, admitted: resolve it as
+    /// the `intent.invoke` it stands for and open the handler, or ask the
+    /// user. The napplet hears `opened` once a window or a chooser is on its
+    /// way, and `denied` with the resolver's reason ("no handler") when
+    /// nothing here takes it. It never hears an `intent.invoke.result`: it
+    /// did not send one.
+    async fn link_intent(
+        &self,
+        session_id: &str,
+        request: &myco_napplet_runtime::nap::link::LinkRequest,
+        now: std::time::Instant,
+    ) -> Vec<ToShell> {
+        let LinkTarget::Intent(link) = &request.target else {
+            return vec![ToShell::to_napplet(request.denied(INVALID_URL))];
+        };
+        let session = {
+            let sessions = self.sessions.lock().unwrap();
+            match sessions.get(session_id) {
+                Some(live) => live.session.clone(),
+                None => return Vec::new(),
+            }
+        };
+        let sender = session.lock().await.identity().d_tag.clone();
+        let intent = myco_napplet_runtime::nap::intent::IntentRequest::from_link(link);
+        match self
+            .intent_resolve(session_id, &sender, intent, now, None)
+            .await
+        {
+            Ok(mut frames) => {
+                tracing::info!(
+                    session = session_id,
+                    convention = %link.convention(),
+                    "napplet link routed as an intent"
+                );
+                frames.push(ToShell::to_napplet(request.opened()));
+                frames
+            }
+            Err(unrouted) => {
+                let error = unrouted.1;
+                tracing::info!(
+                    session = session_id,
+                    convention = %link.convention(),
+                    error,
+                    "napplet link refused"
+                );
+                vec![ToShell::to_napplet(request.denied(error))]
+            }
+        }
     }
 
     /// Record the app's light/dark appearance for one window, and push

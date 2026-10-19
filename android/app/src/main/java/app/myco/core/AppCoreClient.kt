@@ -1027,6 +1027,14 @@ class AppCoreClient(dataDir: String, appVersion: String) : AutoCloseable {
         NativeCore.nappletBindIntent(requireHandle(), sessionId, token)
 
     /**
+     * Resolve a `napplet.link` opened from outside the app to one command for
+     * the caller to carry out — see [NativeCore.nappletLink]. Blocks on a
+     * catalog read; call it off the main thread.
+     */
+    fun nappletLink(url: String, pick: String = ""): JSONObject =
+        JSONObject(NativeCore.nappletLink(requireHandle(), url, pick))
+
+    /**
      * Carry one frame from a window's shell to Rust, and return the frames to
      * send back. Empty is normal — a duplicate handshake, or an unrecognized
      * message that NIP-5D says to ignore in silence.

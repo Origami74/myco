@@ -107,6 +107,10 @@ class MainActivity : ComponentActivity() {
     private val nfcAdapter by lazy { NfcAdapter.getDefaultAdapter(this) }
     private val externalShareUris = mutableStateOf<List<Uri>>(emptyList())
     private val receivedFilePresentation = mutableStateOf<ReceivedFilePresentation?>(null)
+    /** A `napplet.link`'s "open with…" question: the link, and what to ask. */
+    private val linkChooser = mutableStateOf<Pair<String, IntentChooser>?>(null)
+    /** A `napplet.link` nothing here opens, waiting on "Open in browser". */
+    private val linkRefused = mutableStateOf<NappletLinkRefusal?>(null)
 
     /** Hosts with a live [watchPendingLink] coroutine, so resumes don't stack them. */
     private val pendingWatchers = mutableSetOf<String>()
@@ -295,6 +299,32 @@ class MainActivity : ComponentActivity() {
                             ask = explaining,
                             onConfirm = { asker.launch(it) },
                             onDismiss = asker::dismissExplain,
+                        )
+                    }
+
+                    // A napplet.link from another app: which app opens it, or
+                    // that none does. Over the intro too — the user just
+                    // tapped a link and is waiting on exactly this.
+                    linkChooser.value?.let { (url, asked) ->
+                        IntentChooserSheet(
+                            chooser = asked,
+                            asker = "This link",
+                            onPick = { key, always ->
+                                linkChooser.value = null
+                                if (always) core.dispatch(NativeActions.setIntentDefault(asked.archetype, key))
+                                openNappletLink(url, key)
+                            },
+                            onCancel = { linkChooser.value = null },
+                        )
+                    }
+                    linkRefused.value?.let { refusal ->
+                        NappletLinkRefusedSheet(
+                            refusal = refusal,
+                            onOpenInBrowser = {
+                                linkRefused.value = null
+                                NappletLinks.openInBrowser(this@MainActivity, refusal.webUrl)
+                            },
+                            onDismiss = { linkRefused.value = null },
                         )
                     }
 
@@ -1520,6 +1550,16 @@ class MainActivity : ComponentActivity() {
 
     private fun handleDeepLink(intent: Intent?) {
         val data = intent?.data ?: return
+        if (NappletLinks.isNappletLink(data)) {
+            openNappletLink(data.toString())
+            return
+        }
+        // `napplet:naddr1…` — the other `napplet:` link, now that Myco claims
+        // the scheme: install review, exactly as a scanned code.
+        if (data.scheme.equals("napplet", ignoreCase = true)) {
+            handleScannedText(data.toString())
+            return
+        }
         if (data.scheme != NsiteShare.SCHEME) return
         // The passive-dispatch twin of the reader-mode gate in handleNfcTag:
         // while the hotspot owns NFC, a peer's pair tag delivered by the OS as
@@ -1532,6 +1572,45 @@ class MainActivity : ComponentActivity() {
             return
         }
         handleScannedText(data.toString())
+    }
+
+    /**
+     * Follow a `napplet.link` — `https://napplet.link/<archetype>/<intent>?…`
+     * or `napplet:<archetype>/<intent>?…` — from another app. Rust resolves it
+     * exactly as a napplet's `intent.invoke`, with the query as the payload,
+     * and answers with one thing to do: open the handler (its window binds the
+     * token and the payload follows once it listens), open an nsite, ask
+     * which app (then ask Rust again with the [pick]), or say nothing here
+     * opens it and offer the web page.
+     *
+     * No gesture gate: the user just tapped the link.
+     */
+    private fun openNappletLink(url: String, pick: String = "") {
+        lifecycleScope.launch {
+            val answer = withContext(Dispatchers.IO) {
+                runCatching { core.nappletLink(url, pick) }.getOrNull()
+            } ?: return@launch
+            when (answer.optString("channel")) {
+                "open-napplet" -> {
+                    val pointer = answer.optString("pointer")
+                    if (pointer.isEmpty()) return@launch
+                    startActivity(
+                        NappletActivity.intent(
+                            this@MainActivity,
+                            pointer,
+                            answer.optString("title"),
+                            answer.optString("token"),
+                        ),
+                    )
+                }
+                "open-nsite" -> {
+                    val host = answer.optString("host")
+                    MycoLink.parseAppLink(MycoLink.buildAppLink(host, "/"))?.let { openAppLink(it) }
+                }
+                "choose-intent-handler" -> IntentChooser.parse(answer)?.let { linkChooser.value = url to it }
+                "link-refused" -> linkRefused.value = NappletLinkRefusal.parse(answer)
+            }
+        }
     }
 
     /**
