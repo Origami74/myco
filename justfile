@@ -27,7 +27,7 @@ identity:
     cargo run -q -p myco-core --example identity
 
 # Cross-compile myco-core for Android arm64 into jniLibs (standalone; the Gradle
-# build below also does this via the buildRustArm64 task — pick one driver).
+# build below also does this via the buildRust task — pick one driver).
 ndk-build:
     cargo ndk -t arm64-v8a --platform 29 -o {{android_dir}}/app/src/main/jniLibs build -p myco-core --release
 

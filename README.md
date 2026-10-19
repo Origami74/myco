@@ -30,6 +30,8 @@ with no signal. Once you have it, you can hand it on to the next person.
   even when you have left.
 - **Link over a USB cable**, phone to phone or phone to a desktop running
   fips, for the fastest transfer ([how](docs/how-to/connect-over-usb.md)).
+- **Run it on an Android TV.** Myco shows up on the TV's home row and works
+  with the remote; the TV joins the mesh over Wi-Fi or Ethernet.
 
 All of this is tested with every phone in airplane mode and Bluetooth on
 ([the runbook](docs/how-to/run-two-device-demo.md)).

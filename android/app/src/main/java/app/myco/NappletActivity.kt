@@ -309,15 +309,26 @@ class NappletActivity : ComponentActivity() {
     /** Whether the window has left the foreground since it was last shown. */
     private var wasStopped = false
 
+    private val onTv by lazy {
+        packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+    }
+
     private val restartPrompt by lazy { RestartPrompt.persisted(applicationContext) }
 
     override fun onStop() {
         super.onStop()
         wasStopped = true
+        // A TV has no task manager to put a backgrounded app to sleep, so a
+        // napplet left there would keep playing (a game's music, its loop).
+        // Pausing the WebView marks the page hidden and stops its frames; the
+        // napplet sees `visibilitychange` and can suspend itself. Phones keep
+        // the session running on purpose (napplet-runtime.md §5.5).
+        if (onTv && ::webView.isInitialized) webView.onPause()
     }
 
     override fun onStart() {
         super.onStart()
+        if (onTv && ::webView.isInitialized) webView.onResume()
         if (wasStopped) {
             wasStopped = false
             offerRestartIfUpdated()
@@ -1114,6 +1125,9 @@ class NappletActivity : ComponentActivity() {
     }
 
     private fun syncChrome() {
+        // A remote has no tap to put focus in the page: without this the
+        // first D-pad presses only walk Android's focus into the WebView.
+        if (onTv && !webView.hasFocus()) webView.requestFocus()
         ChromelessChrome.syncBarContrast(this, webView)
         ChromelessChrome.probeFullHeight(webView) { wants ->
             if (wants != pageOptedIntoFullHeight) {

@@ -82,7 +82,7 @@
           platformToolsVersion = "37.0.1";
           includeNDK = true;
           ndkVersions = [ ndkVersion ];
-          abiVersions = [ "arm64-v8a" ]; # arm64-v8a only (LOCKED)
+          abiVersions = [ "arm64-v8a" ]; # system-image ABI; APK ABIs come from myco.abis (arm64-v8a default)
           includeEmulator = false; # no emulator target — BLE/L2CAP need real devices
           includeSystemImages = false;
           includeCmake = false; # the Rust build uses cargo-ndk, not the SDK's CMake

@@ -517,6 +517,14 @@ pub struct CacheLimits {
 
 impl Default for CacheLimits {
     fn default() -> Self {
+        // 32-bit builds run on budget TV boxes: the event map is capped at
+        // 256 MiB there (half of it usable), and a few GB of flash is typical.
+        if cfg!(not(target_pointer_width = "64")) {
+            return Self {
+                event_bytes: 128 * 1024 * 1024,
+                blob_bytes: 512 * 1024 * 1024,
+            };
+        }
         Self {
             event_bytes: myco_cache::DEFAULT_EVENT_CACHE_BYTES,
             blob_bytes: myco_cache::DEFAULT_BLOB_CACHE_BYTES,

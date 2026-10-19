@@ -3,6 +3,7 @@ package app.myco.ui
 import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -43,6 +44,9 @@ import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -51,6 +55,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -334,40 +339,46 @@ fun MycoApp(
             LocalMeshControl provides MeshControl(meshEnabled, onMeshToggle),
             LocalLiveState provides live,
         ) {
+    val current by nav.currentBackStackEntryAsState()
+    // The full-screen pairing / Add surfaces hide the tab bar.
+    val showTabs = current?.destination?.route != "qr"
+    val tabs = if (developerMode) TABS else TABS.filterNot { it.route == "dev" }
+    val isSelected = { tab: Tab -> current?.destination?.hierarchy?.any { it.route == tab.route } == true }
+    val select = { tab: Tab ->
+        nav.navigate(tab.route) {
+            popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
+    val tabIcon: @Composable (Tab) -> Unit = { tab ->
+        val badged = (
+            tab.route == "settings" &&
+                (bleExhausted || radioAlert || backendErrors(state).isNotEmpty())
+            ) ||
+            (tab.route == "circle" && state.pendingPairRequests.isNotEmpty())
+        if (badged) {
+            BadgedBox(badge = { Badge() }) {
+                Icon(tab.icon, contentDescription = tab.label)
+            }
+        } else {
+            Icon(tab.icon, contentDescription = tab.label)
+        }
+    }
+    // In landscape the tabs move to a side rail, out of the content's way and
+    // within one D-pad press of it. Phones are locked to portrait, so this is
+    // Android TV, or a large screen where Android 16 ignores the lock.
+    val rail = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     Scaffold(
         snackbarHost = { SnackbarHost(snackbars) { SetupSnackbar(it) } },
         bottomBar = {
-            val current by nav.currentBackStackEntryAsState()
-            // The full-screen pairing / Add surfaces hide the bottom bar.
-            val route = current?.destination?.route
-            if (route != "qr") {
+            if (showTabs && !rail) {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                    val tabs = if (developerMode) TABS else TABS.filterNot { it.route == "dev" }
                     tabs.forEach { tab ->
-                        val selected = current?.destination?.hierarchy?.any { it.route == tab.route } == true
                         NavigationBarItem(
-                            selected = selected,
-                            onClick = {
-                                nav.navigate(tab.route) {
-                                    popUpTo(nav.graph.findStartDestination().id) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
-                            icon = {
-                                val badged = (
-                                    tab.route == "settings" &&
-                                        (bleExhausted || radioAlert || backendErrors(state).isNotEmpty())
-                                    ) ||
-                                    (tab.route == "circle" && state.pendingPairRequests.isNotEmpty())
-                                if (badged) {
-                                    BadgedBox(badge = { Badge() }) {
-                                        Icon(tab.icon, contentDescription = tab.label)
-                                    }
-                                } else {
-                                    Icon(tab.icon, contentDescription = tab.label)
-                                }
-                            },
+                            selected = isSelected(tab),
+                            onClick = { select(tab) },
+                            icon = { tabIcon(tab) },
                             label = { Text(tab.label) },
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = MaterialTheme.colorScheme.primary,
@@ -382,7 +393,27 @@ fun MycoApp(
             }
         },
     ) { padding ->
-        Surface(modifier = Modifier.padding(padding), color = MaterialTheme.colorScheme.background) {
+        Row(Modifier.padding(padding)) {
+        if (showTabs && rail) {
+            NavigationRail(containerColor = MaterialTheme.colorScheme.surface) {
+                tabs.forEach { tab ->
+                    NavigationRailItem(
+                        selected = isSelected(tab),
+                        onClick = { select(tab) },
+                        icon = { tabIcon(tab) },
+                        label = { Text(tab.label) },
+                        colors = NavigationRailItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.primary,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ),
+                    )
+                }
+            }
+        }
+        Surface(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.background) {
             NavHost(navController = nav, startDestination = "apps") {
                 composable("apps") {
                     AppsScreen(
@@ -440,6 +471,7 @@ fun MycoApp(
                 }
             }
         }
+        } // Row
     }
         } // CompositionLocalProvider(LocalMeshControl)
 
