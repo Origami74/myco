@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A napplet's file field opens the file picker.** Tapping an
+  `<input type="file">` in a napplet used to do nothing. It now opens
+  Android's file picker, and the picker shows every kind of file the field
+  accepts: `accept=".csv,text/csv"` offers CSV files however Android labels
+  them, and a type Android doesn't know opens the picker to all files.
+
 - **A napplet's mesh subscription gets everything nearby phones send back.**
   When `mesh.subscribe` asks Circle peers for their backlog, an event this
   phone had seen once and since let go of (evicted from the cache, or an
