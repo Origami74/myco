@@ -129,7 +129,7 @@ class SystemAskTest {
         Regex("""registerForActivityResult""") to setOf(
             REQUESTER,
             "signer/SignerActivity.kt", // Amber signer
-            "NappletActivity.kt", // file picker: a napplet's <input type="file">
+            "NappletActivity.kt", // file pickers: a napplet's <input type="file"> and its NAP-FS picks
         ),
         Regex("""rememberLauncherForActivityResult""") to setOf(
             "ui/MycoApp.kt", // file picker: send files to a peer

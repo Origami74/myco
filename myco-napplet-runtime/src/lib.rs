@@ -62,6 +62,7 @@ pub use manifest::{
     ManifestIcon, NappletManifest, ICON_MIME_TYPES, KINDS, KIND_NAMED, KIND_ROOT, KIND_SNAPSHOT,
 };
 pub use nap::deliveries_for;
+pub use nap::fs::{PickMode, PickRequest, PickedHandle, PickedStore};
 pub use nap::intent::{IntentCatalog, IntentCatalogSnapshot, IntentHandler, NoIntents};
 pub use napplet_link::NappletLink;
 pub use prelude::{
@@ -71,9 +72,10 @@ pub use resolve::{resolve, ResolvedNapplet};
 pub use seams::{
     is_mesh_relay_url, BlobFetcher, BlobHints, BlobReach, BlobStore, Direction, EarlyAnswer,
     Envelope, EventSink, HttpsError, HttpsErrorCode, HttpsFetcher, LaneTransport, MeshLimits,
-    MeshReach, MeshSink, NapTransport, NoFetcher, NoHttps, NoUploads, OutboxResolver, PlanSource,
-    PulledEvents, RelayBackend, RelayLane, RelayPlan, ScopeOwner, Signer, StoreOnlySink,
-    UploadBlob, UploadError, UploadErrorCode, UploadSink, Uploaded, WorkScope, MAX_BLOB_HASHES,
+    MeshReach, MeshSink, NapTransport, NoFetcher, NoHttps, NoUploads, OutboxResolver, PickedBytes,
+    PickedFile, PlanSource, PulledEvents, RelayBackend, RelayLane, RelayPlan, ScopeOwner, Signer,
+    StoreOnlySink, UploadBlob, UploadError, UploadErrorCode, UploadSink, Uploaded, WorkScope,
+    MAX_BLOB_HASHES,
 };
 pub use session::{
     Appearance, NappletIdentity, Session, Streamer, SubscriptionHandle, IMPLEMENTED_DOMAINS,

@@ -779,6 +779,54 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletNewerVersion(
     jstr(&mut env, newer.unwrap_or_default())
 }
 
+/// The window host's answer to a NAP-FS pick (`pick-file` with `token`):
+/// `fds` the file descriptors it opened for the chosen documents
+/// (`ParcelFileDescriptor.detachFd`), and `meta_json` what it knows of each,
+/// in the same order — see [`crate::fs_pick::pick_answer`].
+///
+/// **Takes ownership of every descriptor in `fds`**, first and whatever
+/// else happens: they are closed here if the answer goes nowhere (a closed
+/// window, a stale token), and otherwise when the window's session goes.
+/// The result reaches the napplet through the window's drain.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_nappletFsPicked(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    session_id: JString,
+    token: JString,
+    fds: jni::objects::JIntArray,
+    meta_json: JString,
+) {
+    use std::os::fd::FromRawFd as _;
+    let count = env.get_array_length(&fds).unwrap_or(0).max(0) as usize;
+    let mut raw = vec![0i32; count];
+    if count > 0 && env.get_int_array_region(&fds, 0, &mut raw).is_err() {
+        raw.clear();
+    }
+    // SAFETY: the window host detached these descriptors for us and keeps no
+    // copy; from here each is owned by exactly one `File`.
+    let files: Vec<std::fs::File> = raw
+        .into_iter()
+        .filter(|fd| *fd >= 0)
+        .map(|fd| unsafe { std::fs::File::from_raw_fd(fd) })
+        .collect();
+    let session_id = get_string(&mut env, &session_id);
+    let token = get_string(&mut env, &token);
+    let meta_json = get_string(&mut env, &meta_json);
+    let answer = crate::fs_pick::pick_answer(files, &meta_json);
+    let ctx = match unsafe { handle_ref(handle) } {
+        Some(h) => {
+            let mut guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+            guard.napplet_context()
+        }
+        None => None,
+    };
+    if let Some((host, rt_handle)) = ctx {
+        rt_handle.block_on(host.fs_picked(&session_id, &token, answer));
+    }
+}
+
 /// Drop a window's session. Every later frame for it is ignored.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(

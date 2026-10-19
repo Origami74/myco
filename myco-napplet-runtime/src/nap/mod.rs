@@ -8,6 +8,7 @@
 //! `NAP-MESH` is Myco's own — the one capability with no standard equivalent,
 //! specified in the registry's form so it can be proposed there.
 
+pub mod fs;
 pub mod identity;
 pub mod inc;
 pub mod intent;

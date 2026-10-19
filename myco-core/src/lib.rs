@@ -50,6 +50,9 @@ mod mesh_relay;
 // holds one session per open napplet window. See
 // `docs/design/napplet/napplet-runtime.md`.
 mod napplet;
+// NAP-FS: the host's half of a pick — the window host's picker, and the
+// descriptors it hands back.
+mod fs_pick;
 // NAP-MESH `mesh.blobs`: which blobs the Circle's Blossom stores hold, asked
 // with a bounded, remembered `HEAD` per peer over the mesh.
 mod mesh_blobs;

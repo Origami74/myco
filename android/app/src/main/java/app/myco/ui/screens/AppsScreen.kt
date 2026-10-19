@@ -1299,6 +1299,7 @@ private fun capabilityWording(domain: String): Capability = when (domain) {
     "intent" -> Capability("Other apps", "Ask to open a profile, a note or a site in another of your apps — you pick which")
     "inc" -> Capability("App to app", "Receive what another app hands it when opening it")
     "upload" -> Capability("Upload files", "Put files on your Blossom servers, signed as you, where anyone with the link can see them")
+    "fs" -> Capability("Files", "Open files you choose, and save files where you choose")
     "notify" -> Capability("Notifications", "Send you notifications")
     "theme" -> Capability("Theme", "Match your colours")
     "link" -> Capability("Links", "Ask to open web links in your browser, and suggest other apps for you to add")

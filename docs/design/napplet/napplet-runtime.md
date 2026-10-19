@@ -22,7 +22,8 @@ reuse), [../circle/circle.md](../circle/circle.md) (what "everyone nearby" means
 
 > Status: built through S2, S3's `NAP-OUTBOX`, `NAP-RESOURCE` (`blossom:`
 > and `https:`), `NAP-LINK`, `NAP-THEME` (default themes, no picker) and `NAP-UPLOAD`
-> (Blossom only; see [NAP-UPLOAD.md](NAP-UPLOAD.md)), S5, and the
+> (Blossom only; see [NAP-UPLOAD.md](NAP-UPLOAD.md)), the picker subset of
+> `NAP-FS` (see [NAP-FS.md](NAP-FS.md)), S5, and the
 > in-app half of S2b (`NAP-INTENT`, and the subscribe side of `NAP-INC`; see
 > [NAP-INTENT.md](NAP-INTENT.md)). Each stage below says what shipped. Not
 > built: S2b's Android entry points, S4 (composition), the rest of S3
@@ -942,6 +943,15 @@ hop only. `upload` is **not** a default grant: only a napplet that declares it g
 it, from the install sheet, and a reviewed list recorded before this build does not
 count for it. Runtime: `UploadSink` seam, `nap/upload.rs`. Core:
 `BlossomUploader` in `myco-core/src/blossom_upload.rs`.
+
+**`NAP-FS` shipped, picker subset only** (upstream draft, [napplet/naps PR #88](https://github.com/napplet/naps/pull/88), not merged; Myco's notes in [`NAP-FS.md`](NAP-FS.md)).
+A napplet asks for a file (or a place to save one); Android's picker comes up,
+and the napplet reads and writes that file in ranges until its window closes.
+Paths are minted at pick time (`/picked/<name>`) and nothing else resolves.
+Directories, listing, mkdir/remove/move and watches answer `unsupported`. The
+window host hands Rust a file descriptor per picked document, never a URI.
+`fs` is **not** a default grant. Runtime: `nap/fs.rs`, the `PickedBytes`
+seam, `Outcome::FsPick`. Core: `myco-core/src/fs_pick.rs`.
 
 ### S4 — Composition
 

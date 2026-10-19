@@ -123,6 +123,14 @@ import java.io.ByteArrayInputStream
  * touch on this window (or an answer on the chooser) in the last few seconds
  * vouches for it; otherwise the user confirms first.
  *
+ * ## Files (NAP-FS)
+ *
+ * `pick-file` puts the system file picker up — open one, open several, or
+ * choose where to save — gated like a web link (a recent touch, else a
+ * one-tap ask). What the user picks is opened through the ContentResolver
+ * and handed to Rust as file descriptors ([FilePicks.open]); Rust reads and
+ * writes them by offset and closes them with the session. A cancel says so.
+ *
  * ## An update that asks for more
  *
  * When the version this window opens declares a capability the user never
@@ -260,6 +268,22 @@ class NappletActivity : ComponentActivity() {
     /** Another app this napplet asked to open, waiting on the user's confirmation. */
     private var pendingOpen by mutableStateOf<IntentOpen?>(null)
 
+    /** A NAP-FS pick waiting on the user's say-so, when no recent touch vouched for it. */
+    private var pendingPick by mutableStateOf<FilePick?>(null)
+
+    /** The NAP-FS pick whose system picker is up. Main thread only. */
+    private var activePick: FilePick? = null
+
+    /**
+     * The system file picker. One launcher for all three NAP-FS picks: the
+     * intent is built per pick ([FilePicks.intentFor]), since a save's type
+     * and name differ every time. Registered at construction, as Android
+     * requires.
+     */
+    private val pickLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult(),
+    ) { result -> onPicked(result.resultCode, result.data) }
+
     /**
      * NAP-INTENT tokens that reached this window before its session existed
      * (an [onNewIntent] during the splash). Bound once the open lands. Main
@@ -357,6 +381,50 @@ class NappletActivity : ComponentActivity() {
                 IntentOpen(title = "this site in Myco", pointer = "", token = "", nsiteHost = obj.optString("host")),
             )
             "choose-intent-handler" -> chooser = IntentChooser.parse(obj)
+            "pick-file" -> FilePick.parse(obj)?.let(::askToPick)
+        }
+    }
+
+    /**
+     * NAP-FS: show the system picker now if the user just touched this
+     * window, else ask first — a napplet's `postMessage` carries no gesture,
+     * and a picker takes the screen. Rust allows one pick per window at a
+     * time, so a second never arrives while one is up.
+     */
+    private fun askToPick(pick: FilePick) {
+        if (recentGesture()) launchPick(pick) else pendingPick = pick
+    }
+
+    private fun launchPick(pick: FilePick) {
+        activePick = pick
+        val launched = runCatching { pickLauncher.launch(FilePicks.intentFor(pick)) }
+        if (launched.isFailure) {
+            // No documents UI on this phone: say so rather than leave the
+            // napplet waiting.
+            Log.w(TAG, "no file picker to show", launched.exceptionOrNull())
+            activePick = null
+            answerPick(pick, IntArray(0), FilePicks.failed("io-error"))
+        }
+    }
+
+    /** The picker came back: open what was chosen, off the main thread, and hand it to Rust. */
+    private fun onPicked(resultCode: Int, data: Intent?) {
+        // A window recreated while its picker was up: that pick belonged to
+        // the session before, which is gone. Nothing was opened.
+        val pick = activePick ?: return
+        activePick = null
+        val uris = if (resultCode == RESULT_OK) FilePicks.urisOf(data) else emptyList()
+        lifecycleScope.launch(Dispatchers.IO) {
+            val (fds, meta) = FilePicks.open(contentResolver, uris, pick)
+            answerPick(pick, fds, meta)
+        }
+    }
+
+    /** Hand a pick's answer to Rust, which owns [fds] from here on. */
+    private fun answerPick(pick: FilePick, fds: IntArray, meta: String) {
+        val id = synchronized(sessionLock) { sessionId }
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { client.nappletFsPicked(id, pick.token, fds, meta) }
         }
     }
 
@@ -501,7 +569,7 @@ class NappletActivity : ComponentActivity() {
     /** Whether a sheet or dialog of this window is on screen over the napplet. */
     private fun sheetUp(): Boolean =
         review != null || updateReview != null || pendingExternal != null || updatedTo != null ||
-            chooser != null || pendingOpen != null
+            chooser != null || pendingOpen != null || pendingPick != null
 
     /** The review sheets and the link confirmation, over the WebView. */
     private fun overlay(): ComposeView = ComposeView(this).apply {
@@ -599,6 +667,37 @@ class NappletActivity : ComponentActivity() {
                             TextButton(onClick = {
                                 pendingOpen = null
                                 declineIntentTarget(target)
+                            }) { Text("Cancel") }
+                        },
+                    )
+                }
+                pendingPick?.let { pick ->
+                    val saving = pick.mode == FilePick.Mode.SAVE
+                    AlertDialog(
+                        onDismissRequest = {
+                            pendingPick = null
+                            answerPick(pick, IntArray(0), FilePicks.cancelled())
+                        },
+                        title = { Text(if (saving) "Save a file?" else "Choose a file?") },
+                        text = {
+                            Text(
+                                if (saving) {
+                                    "This app wants you to pick where to save a file. It can only write to the one you pick."
+                                } else {
+                                    "This app wants you to choose a file for it to open. It only sees the files you choose."
+                                },
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                pendingPick = null
+                                launchPick(pick)
+                            }) { Text(if (saving) "Choose where" else "Choose") }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                pendingPick = null
+                                answerPick(pick, IntArray(0), FilePicks.cancelled())
                             }) { Text("Cancel") }
                         },
                     )
@@ -1110,7 +1209,7 @@ class NappletActivity : ComponentActivity() {
             return when (obj.optString("channel")) {
                 "relaunch" -> Outbound.Relaunch
                 "open-external", "review-napplet", "open-napplet", "open-nsite",
-                "choose-intent-handler" -> Outbound.Host(obj)
+                "choose-intent-handler", "pick-file" -> Outbound.Host(obj)
                 "napplet" -> if (awaitingInit && relayedType(frame) == "shell.init") Outbound.Init else Outbound.Post
                 else -> Outbound.Post
             }

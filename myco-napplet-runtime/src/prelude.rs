@@ -24,7 +24,8 @@
 //! waits [`SIGNING_TIMEOUT`] instead of the vendored 30 s — a publish is signed
 //! first, and with a signer app that is a person approving it. `mesh.publish`
 //! gets the same wait. (`relay.publish` needs nothing: the vendored one has no
-//! timer.)
+//! timer.) NAP-FS's three pickers get it too: they answer once a person has
+//! chosen a file.
 //!
 //! ## Every API is injected, always
 //!
@@ -250,6 +251,26 @@ mod tests {
         // And `upload` reaches both installers' allowlist.
         let s = Session::new(NappletIdentity::new("d", "a"), Vec::<String>::new());
         assert!(s.available_domains().contains(&"upload".to_string()));
+    }
+
+    /// NAP-FS: the vendored installer carries `window.napplet.fs`, and the
+    /// supplement replaces the three pickers with ones that wait as long as a
+    /// person choosing a file takes. The vendored ones give up after 30 s.
+    #[test]
+    fn fs_pickers_wait_the_signing_timeout() {
+        assert!(PRELUDE_IIFE.contains(r#"domains.has("fs")"#));
+        assert!(PRELUDE_IIFE.contains(r#"request6("fs.pickFile""#));
+        assert!(SUPPLEMENT_IIFE.contains(r#"domains.has("fs") && napplet.fs"#));
+        for picker in ["pickFile", "pickFiles", "pickSaveFile"] {
+            assert!(
+                SUPPLEMENT_IIFE
+                    .contains(&format!(r#"napplet.fs.{picker} = picker("fs.{picker}");"#)),
+                "{picker} keeps the vendored wait"
+            );
+            assert!(SUPPLEMENT_IIFE.contains(&format!(r#""fs.{picker}.result""#)));
+        }
+        let s = Session::new(NappletIdentity::new("d", "a"), Vec::<String>::new());
+        assert!(s.available_domains().contains(&"fs".to_string()));
     }
 
     /// NAP-LINK and NAP-THEME need nothing from the supplement: the vendored

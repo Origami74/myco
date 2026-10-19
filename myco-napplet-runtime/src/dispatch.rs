@@ -93,6 +93,12 @@ pub enum Outcome {
     /// [`IntentRequest::handled`](nap::intent::IntentRequest::handled) or
     /// [`IntentRequest::failed`](nap::intent::IntentRequest::failed).
     Intent(nap::intent::IntentRequest),
+    /// A valid NAP-FS pick (`fs.pickFile`, `fs.pickFiles`,
+    /// `fs.pickSaveFile`) for the host to put in front of the user — only the
+    /// window host can show the system picker. See [`nap::fs`]. Answered with
+    /// [`PickRequest::answer`](nap::fs::PickRequest::answer) or
+    /// [`PickRequest::cancelled`](nap::fs::PickRequest::cancelled).
+    FsPick(nap::fs::PickRequest),
 }
 
 impl Outcome {
@@ -100,7 +106,7 @@ impl Outcome {
     pub fn envelopes(&self) -> &[Envelope] {
         match self {
             Self::Reply(envelopes) => envelopes,
-            Self::Ignore | Self::Link(_) | Self::Intent(_) => &[],
+            Self::Ignore | Self::Link(_) | Self::Intent(_) | Self::FsPick(_) => &[],
         }
     }
 }
@@ -143,6 +149,10 @@ fn refusal(message: &Envelope, why: &str) -> Envelope {
     // What was refused is in the log line above.
     if message.domain() == "upload" {
         return message.to_error(nap::upload::POLICY_DENIED);
+    }
+    // NAP-FS (napplet/naps PR #88) answers in its own `FsError` strings.
+    if message.domain() == "fs" {
+        return message.to_error(nap::fs::POLICY_DENIED);
     }
     // A publish result's `ok` is required (NAP-RELAY, NAP-OUTBOX): a refused
     // publish is `ok: false` beside the reason, the same shape as any other
@@ -223,6 +233,7 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
         "inc" => Outcome::Reply(nap::inc::handle(session, message)),
         "intent" => nap::intent::handle(ctx, message).await,
         "upload" => Outcome::Reply(nap::upload::handle(ctx, session, message).await),
+        "fs" => nap::fs::handle(session, message),
         // Implemented, granted, established — and still unrouted. Reaching here
         // means the implemented set grew without a handler, which is a bug in
         // this crate rather than anything the napplet did.

@@ -119,6 +119,22 @@ pub enum ToShell {
         action: String,
         candidates: Vec<ChooserCandidate>,
     },
+    /// Show the system file picker for a NAP-FS pick: `mode` is `open`,
+    /// `open-multiple` or `save` ([`crate::nap::fs::PickMode`]). Handled by
+    /// the window host, which answers through `nappletFsPicked` with `token`
+    /// and the files the platform opened — `read` / `write` say how to open
+    /// them — or a cancel. Everything else here is a cleaned hint for the
+    /// picker: the napplet chose it, and none of it is authority.
+    #[serde(rename = "pick-file", rename_all = "camelCase")]
+    PickFile {
+        token: String,
+        mode: String,
+        mime_types: Vec<String>,
+        suggested_name: String,
+        save_mime: String,
+        read: bool,
+        write: bool,
+    },
 }
 
 /// One entry in the "open with…" chooser.
