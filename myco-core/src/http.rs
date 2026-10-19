@@ -355,9 +355,15 @@ pub(crate) fn refused_by_guard(e: &reqwest::Error) -> bool {
     false
 }
 
-/// The client's resolver: the system's answers, unless **any** of them is
+/// The client's resolver. A `<npub>.fips` name on a mesh or configured client
+/// resolves to the address its key implies, registered with the node first
+/// (`dns_intercept::resolve_mesh_name`); the system resolver may not be the
+/// mesh's. Any other name gets the system's answers, unless **any** of them is
 /// outside the reach, in which case the name is refused and nothing is
 /// dialled. The addresses returned are the ones connected to.
+///
+/// A dial to a `.fips` name therefore carries the mesh address, not the name,
+/// in its `Host` header; nothing routes on `Host` today.
 struct GuardedResolver {
     reach: Reach,
     allow_loopback: bool,
@@ -375,6 +381,15 @@ impl reqwest::dns::Resolve for GuardedResolver {
             let loopback_name = allow_loopback && host.trim_end_matches('.') == "localhost";
             if reach == Reach::Mesh && !is_mesh_name(&host) && !loopback_name {
                 return refuse("not a mesh name");
+            }
+            // A `<npub>.fips` name is resolved through the node, not the
+            // system resolver, which may not be the mesh's (see
+            // `resolve_mesh_name`).
+            if reach != Reach::Internet {
+                if let Some((ip, _)) = crate::dns_intercept::resolve_mesh_name(&host).await {
+                    let addrs = vec![SocketAddr::new(IpAddr::V6(ip), 0)];
+                    return Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs);
+                }
             }
             let addrs: Vec<SocketAddr> =
                 tokio::net::lookup_host((host.as_str(), 0)).await?.collect();

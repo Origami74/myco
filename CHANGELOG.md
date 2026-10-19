@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as NAP-RELAY and NAP-OUTBOX require, rather than the reason alone. An
   outbox refusal says `"policy denied"`, NAP-OUTBOX's word for it.
 
+- **Circle peers stay reachable when the network's DNS isn't Myco's.** Some
+  devices (seen on an Android TV) add their own DNS servers to every network,
+  Myco's tunnel included, and Android's Private DNS then sends lookups to
+  those over HTTPS — so a peer's `<npub>.fips` name never reached the mesh
+  resolver and the relay connection and pairing never came up. Myco now turns
+  `<npub>.fips` into the peer's mesh address itself for its own connections.
+
 - **The Apps tab stops redrawing twice a second after a search.** The search
   box kept focus after the keyboard closed, and its blinking cursor redrew
   the screen every 500 ms for as long as the tab stayed open. It now lets go
