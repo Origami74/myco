@@ -67,13 +67,14 @@ const BACKOFF_CAP: Duration = Duration::from_secs(180);
 const WARMUP_RETRY: Duration = Duration::from_millis(1500);
 
 /// Why a dial failed, which decides whether it counts against the peer.
+///
+/// A dial made before the node is up never gets here: it is caught before the
+/// connect, when the peer's name cannot be registered
+/// ([`crate::dns_intercept::NotReady`]), and leaves the backoff alone.
 enum DialFault {
-    /// No resolver yet — the mesh TUN is still coming up, so `<npub>.fips`
-    /// cannot resolve. Says nothing about the peer; must not arm its backoff,
-    /// or a peer can be held off for minutes because we dialled too early.
-    NoResolver,
-    /// The node has no route to the peer *yet*. Usually a cold route: the send
-    /// itself starts the lookup, so an immediate retry tends to succeed.
+    /// The node has no route to the peer *yet*. Usually a cold route that is
+    /// still settling after the name was registered, so a short retry tends to
+    /// succeed.
     NoRoute,
     /// Anything else — refused, timed out, protocol error. A real failure.
     Hard,
@@ -81,9 +82,7 @@ enum DialFault {
 
 fn classify(err: &tokio_tungstenite::tungstenite::Error) -> DialFault {
     let text = err.to_string();
-    if text.contains("failed to lookup address information") {
-        DialFault::NoResolver
-    } else if text.contains("Network is unreachable") || text.contains("No route to host") {
+    if text.contains("Network is unreachable") || text.contains("No route to host") {
         DialFault::NoRoute
     } else {
         DialFault::Hard
@@ -383,18 +382,45 @@ async fn dial(
 ) -> Option<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 > {
+    dial_via(
+        url,
+        npub,
+        dial_backoff,
+        crate::dns_intercept::mesh_literal_url(url).await,
+    )
+    .await
+}
+
+/// [`dial`] with the target already resolved, so the not-ready path can be
+/// tested without a node.
+async fn dial_via(
+    url: &str,
+    npub: &str,
+    dial_backoff: &BackoffMap,
+    target: Result<String, crate::dns_intercept::NotReady>,
+) -> Option<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+> {
+    // Dial the mesh address itself: a `<npub>.fips` name left to the system
+    // resolver can be answered by a DNS server outside the mesh.
+    let target = match target {
+        Ok(target) => target,
+        // No node to register the name with yet — the mesh TUN is still
+        // coming up. Not the peer's fault: leave its backoff untouched so the
+        // next keepwarm tick dials again.
+        Err(crate::dns_intercept::NotReady) => {
+            tracing::debug!(npub, url, "peer relay dial before the mesh node was up");
+            return None;
+        }
+    };
     for attempt in 0..2 {
-        match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(url)).await {
+        match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&target)).await
+        {
             Ok(Ok((ws, _))) => return Some(ws),
             Ok(Err(e)) => match classify(&e) {
-                // The tunnel isn't up yet. Not the peer's fault — leave its
-                // backoff untouched so the next keepwarm tick dials again.
-                DialFault::NoResolver => {
-                    tracing::debug!(npub, url, "peer relay dial before the mesh TUN was up");
-                    return None;
-                }
-                // Cold route: this send starts the lookup that warms it, so give
-                // that a moment and try once more before counting a failure.
+                // Cold route: the name was registered just now and the route
+                // may still be settling, so give it a moment and try once more
+                // before counting a failure.
                 DialFault::NoRoute if attempt == 0 => {
                     tracing::debug!(npub, url, "no route yet, warming");
                     tokio::time::sleep(WARMUP_RETRY).await;
@@ -629,27 +655,36 @@ mod tests {
         assert_eq!(handle_inbound(&frame, &mut pending), Some("r2".into()));
     }
 
-    /// The classifier reads OS error text, so pin the three cases: mistaking a
-    /// startup race for a peer failure holds a good peer off for minutes.
+    /// The classifier reads OS error text, so pin both cases.
     #[test]
     fn dial_faults_are_classified() {
         use std::io::Error;
         let io =
             |msg: &str| tokio_tungstenite::tungstenite::Error::Io(Error::other(msg.to_string()));
         assert!(matches!(
-            classify(&io(
-                "failed to lookup address information: No address associated with hostname"
-            )),
-            DialFault::NoResolver
+            classify(&io("Network is unreachable (os error 101)")),
+            DialFault::NoRoute
         ));
         assert!(matches!(
-            classify(&io("Network is unreachable (os error 101)")),
+            classify(&io("No route to host (os error 113)")),
             DialFault::NoRoute
         ));
         assert!(matches!(
             classify(&io("Connection refused (os error 111)")),
             DialFault::Hard
         ));
+    }
+
+    /// A dial asked for before the node is up must not arm the peer's backoff:
+    /// that startup race would otherwise hold a good peer off for minutes.
+    #[tokio::test]
+    async fn a_dial_before_the_node_is_up_leaves_backoff_alone() {
+        let backoff: BackoffMap = Arc::new(Mutex::new(HashMap::new()));
+        let npub = "npub1mqelkzqp4659fws35h2wvr7z9caka5ml8qddj3ssnwaulwpxdd9sdc3esw";
+        let url = format!("ws://{npub}.fips:4870");
+        let dialled = dial_via(&url, npub, &backoff, Err(crate::dns_intercept::NotReady)).await;
+        assert!(dialled.is_none());
+        assert!(backoff.lock().unwrap().is_empty());
     }
 
     use crate::mesh_relay::serve_on;
