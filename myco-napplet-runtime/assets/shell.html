@@ -147,6 +147,11 @@
     // written here — the runtime owns the value and a Rust test pins it.
     frame.setAttribute('sandbox', command.sandbox);
     frame.setAttribute('referrerpolicy', 'no-referrer');
+    // The sandboxed frame is cross-origin to this page, and Chromium lets a
+    // cross-origin frame write the clipboard only when the embedder delegates
+    // it. Write only — on a user's tap, as everywhere — so a napplet's "Copy"
+    // copies. Reading the clipboard stays denied: nothing delegates it.
+    frame.setAttribute('allow', 'clipboard-write');
     frame.srcdoc = command.artifact;
     // Keyboard focus lives in the napplet's frame, not this page: the back
     // gesture arrives as an Escape keydown, and the napplet has to be the one

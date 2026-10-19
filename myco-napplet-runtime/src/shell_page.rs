@@ -44,6 +44,15 @@ mod tests {
         assert_eq!(SrcdocArtifact::SANDBOX, "allow-scripts");
     }
 
+    /// A napplet's "Copy" works: the cross-origin frame is delegated clipboard
+    /// *write*, and nothing else — reading the clipboard stays denied.
+    #[test]
+    fn the_page_delegates_clipboard_write_only() {
+        let page = shell_page();
+        assert!(page.contains("frame.setAttribute('allow', 'clipboard-write')"));
+        assert!(!page.contains("clipboard-read"));
+    }
+
     /// Every inbound message is bound to the frame the shell created. Without
     /// this check any window that can reach the page could speak as the napplet.
     #[test]
