@@ -126,7 +126,11 @@ class SystemAskTest {
         Regex("""requestPermissions\(""") to setOf(REQUESTER),
         Regex("""shouldShowRequestPermissionRationale""") to setOf(REQUESTER),
         // Launchers that ask Android nothing: the Amber signer and file pickers.
-        Regex("""registerForActivityResult""") to setOf(REQUESTER, "signer/SignerActivity.kt"),
+        Regex("""registerForActivityResult""") to setOf(
+            REQUESTER,
+            "signer/SignerActivity.kt", // Amber signer
+            "NappletActivity.kt", // file picker: a napplet's <input type="file">
+        ),
         Regex("""rememberLauncherForActivityResult""") to setOf(
             "ui/MycoApp.kt", // file picker: send files to a peer
             "ui/screens/CircleScreen.kt", // file picker: hotspot share

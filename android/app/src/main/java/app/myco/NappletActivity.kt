@@ -12,7 +12,10 @@ import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ViewGroup
+import android.content.ActivityNotFoundException
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -23,6 +26,7 @@ import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.addCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
@@ -147,6 +151,19 @@ class NappletActivity : ComponentActivity() {
      * two sides sees the other's mark and closes the session. See [onCreate].
      */
     private var sessionId: String = ""
+
+    /**
+     * The page waiting on a file picker, if any. WebView asks the app to show
+     * one for an `<input type="file">`; without [WebChromeClient.onShowFileChooser]
+     * the button does nothing. What the user picks goes to this window only,
+     * the way a browser hands a picked file to the page that asked.
+     */
+    private var pendingFiles: ValueCallback<Array<Uri>>? = null
+
+    private val pickFiles = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        pendingFiles?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data))
+        pendingFiles = null
+    }
 
     /** Set by [onDestroy]; a session opened after this is closed by its opener. */
     private var windowGone = false
@@ -732,6 +749,26 @@ class NappletActivity : ComponentActivity() {
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.mediaPlaybackRequiresUserGesture = false
+            webChromeClient = object : WebChromeClient() {
+                override fun onShowFileChooser(
+                    view: WebView,
+                    callback: ValueCallback<Array<Uri>>,
+                    params: FileChooserParams,
+                ): Boolean {
+                    // One picker at a time: a page asking again cancels the first.
+                    pendingFiles?.onReceiveValue(null)
+                    pendingFiles = callback
+                    return try {
+                        pickFiles.launch(fileChooserIntent(params.acceptTypes, params.mode == FileChooserParams.MODE_OPEN_MULTIPLE))
+                        true
+                    } catch (e: ActivityNotFoundException) {
+                        Log.w(TAG, "no app can pick files", e)
+                        pendingFiles = null
+                        callback.onReceiveValue(null)
+                        true
+                    }
+                }
+            }
             webViewClient = NappletWebViewClient(
                 client = client,
                 shellHostOf = { shellHost },
@@ -1379,3 +1416,58 @@ private class NappletWebViewClient(
         const val BLOB_PREFIX = "/_blob/"
     }
 }
+
+/**
+ * The picker intent for an `<input type="file" accept="…">`.
+ *
+ * Not [WebChromeClient.FileChooserParams.createIntent]: it takes only the
+ * first accept entry and passes it on as a MIME type, so `accept=".csv,text/csv"`
+ * asked the picker for files of type ".csv" — none — and nothing could be
+ * chosen. Here every entry counts: extensions become MIME types, CSV gets the
+ * names Android also files it under, and anything unrecognised opens the
+ * picker to all files rather than to none.
+ */
+internal fun fileChooserIntent(accept: Array<String>?, multiple: Boolean): Intent {
+    val mimes = acceptedMimeTypes(accept)
+    return Intent(Intent.ACTION_GET_CONTENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = mimes.singleOrNull() ?: "*/*"
+        if (mimes.size > 1) putExtra(Intent.EXTRA_MIME_TYPES, mimes.toTypedArray())
+        if (multiple) putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+    }
+}
+
+/** MIME types for an `accept` list; empty means "any file". */
+internal fun acceptedMimeTypes(accept: Array<String>?): List<String> {
+    val out = linkedSetOf<String>()
+    for (raw in accept.orEmpty().flatMap { it.split(',') }) {
+        val a = raw.trim().lowercase()
+        when {
+            a.isEmpty() -> Unit
+            a.startsWith(".") -> {
+                val ext = a.removePrefix(".")
+                EXTRA_MIMES[ext]?.let(out::addAll)
+                    ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)?.let(out::add)
+                    // An extension nobody knows: let the user find it among all files.
+                    ?: return emptyList()
+            }
+            a.contains('/') -> {
+                out.add(a)
+                MIME_ALIASES[a]?.let(out::addAll)
+            }
+            else -> return emptyList()
+        }
+    }
+    return out.toList()
+}
+
+/** Extensions whose files Android labels in more than one way. */
+private val EXTRA_MIMES = mapOf(
+    "csv" to listOf("text/csv", "text/comma-separated-values", "application/csv", "text/plain"),
+    "json" to listOf("application/json", "text/plain"),
+    "glb" to listOf("model/gltf-binary", "application/octet-stream"),
+)
+
+private val MIME_ALIASES = mapOf(
+    "text/csv" to listOf("text/comma-separated-values", "application/csv"),
+)
