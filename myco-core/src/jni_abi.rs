@@ -845,10 +845,24 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_app_myco_core_NativeCore_verifySoftwareRelease(
+pub extern "system" fn Java_app_myco_core_NativeCore_fetchSoftwareRelease(
     mut env: JNIEnv,
     _class: JClass,
-    event_json: JString,
-) -> jboolean {
-    crate::software_release::verify(&get_string(&mut env, &event_json)) as jboolean
+) -> jstring {
+    // Keep the runtime alive: the shared relay pool owns background tasks.
+    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
+        std::sync::OnceLock::new();
+    let result = match RUNTIME
+        .get_or_init(|| tokio::runtime::Runtime::new().map_err(|error| error.to_string()))
+    {
+        Ok(runtime) => runtime.block_on(crate::software_release::fetch()),
+        Err(error) => Err(anyhow::anyhow!("Release runtime: {error}")),
+    };
+    match result {
+        Ok(tag) => jstr(&mut env, tag),
+        Err(error) => {
+            let _ = env.throw_new("java/io/IOException", error.to_string());
+            std::ptr::null_mut()
+        }
+    }
 }

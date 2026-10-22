@@ -4,7 +4,7 @@ The Android app queries `wss://relay.zapstore.dev` for NIP-82 kind 30063
 release announcements for `app.myco`, restricted to the publisher in
 `zapstore.yaml`. Filtering is not authentication: Rust's existing `nostr`
 implementation verifies both the event ID and BIP-340 signature against the
-pinned publisher key before Kotlin reads the announcement. Wrong publishers,
+pinned publisher key before validating the announcement in Rust. Wrong publishers,
 tampered events, future timestamps, other app IDs, prereleases, non-main
 channels, malformed versions and missing asset references cannot trigger a
 notice. The highest stable numeric version is compared with the installed build.
@@ -32,9 +32,10 @@ usable. Enabling notification permission later lets a cached release notify
 without waiting for the next daily query. Separate signed-release preferences
 avoid trusting cached candidates from the old GitHub-only checker.
 
-The release query is bounded to 20 seconds, 100 events and 150 response frames;
-individual text frames are capped at 256 KiB. Only authenticated announcements
-are considered. A relay outage leaves the previous verified candidate intact
+The release query uses the shared Rust relay client, with a 20-second deadline
+and a filter requesting up to 100 events. The shared client owns connection and
+message limits and subscription cleanup. Only authenticated announcements are
+considered. A relay outage leaves the previous verified candidate intact
 and retries after an hour. A relay can withhold announcements; signatures
 prevent forgery but cannot guarantee delivery or freshness.
 
@@ -68,8 +69,8 @@ Publisher key rotation requires updating the pinned trust anchor deliberately.
    reconnect and retry. Toggle mesh-only during a query: no new notice.
 7. A test build at the latest version should report up to date. Rust tests use
    a real public signed 0.11.0 fixture, reject content/key tampering and valid
-   attacker signatures. Kotlin tests cover version ordering, wrong app/channel,
-   missing assets, future timestamps and failed authentication.
+   attacker signatures. Rust tests cover announcement fields and authentication; Kotlin tests cover
+   installed-version ordering and check throttling.
 
 Do not uninstall or clear the production package to install a debug APK.
 Debug and publisher signing keys differ, so a production APK cannot be updated

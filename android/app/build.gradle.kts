@@ -186,7 +186,6 @@ composeCompiler {
 }
 
 dependencies {
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.work:work-runtime-ktx:2.10.1")
     implementation("androidx.core:core-ktx:1.13.1")
     // System splash (Android 12+ API, backported to minSdk via the library): a
@@ -217,6 +216,5 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("junit:junit:4.13.2")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20240303")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
