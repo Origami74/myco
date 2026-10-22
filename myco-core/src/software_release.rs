@@ -96,7 +96,7 @@ fn announcement_tag(event: &Event, now: u64) -> Option<String> {
 fn newest(events: impl IntoIterator<Item = Event>, now: u64) -> anyhow::Result<String> {
     events
         .into_iter()
-        .filter(|event| authenticated(event))
+        .filter(authenticated)
         .filter_map(|event| announcement_tag(&event, now))
         .max_by_key(|tag| stable_version(tag).unwrap())
         .ok_or_else(|| anyhow::anyhow!("No verified Myco release found"))

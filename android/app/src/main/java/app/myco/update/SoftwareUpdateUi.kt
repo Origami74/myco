@@ -29,7 +29,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun rememberSoftwareUpdates(offlineOnly: Boolean): SoftwareUpdates {
     val context = LocalContext.current.applicationContext
-    val updates = remember(context) { SoftwareUpdates(context) }
+    val updates = remember(context) { SoftwareUpdates.getInstance(context) }
     val state by updates.state.collectAsState()
     val owner = LocalLifecycleOwner.current
     // One scheduling entry point; toggle handlers only persist their setting.

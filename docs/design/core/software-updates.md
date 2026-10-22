@@ -15,16 +15,22 @@ an APK; Zapstore and Android handle APK hashes and package signatures. Tapping
 the notice opens the fixed official Zapstore listing. No release-provided URL
 is opened and no user identity or private signing key is sent to the relay.
 
-Automatic checks default on for release builds and off for debug builds. A
+Automatic checks default off in all build types; saved choices are preserved.
+Enabling them contacts `wss://relay.zapstore.dev` daily, including with the UI
+closed. The relay sees the phone's IP address and a Myco release query. Check
+now contacts the same relay even with automatic checks off. A
 unique WorkManager task wakes approximately hourly with network constraints,
 sharing the foreground check's persisted daily success / hourly failure gate
-and process-wide mutex. Android can delay this work for battery management.
+and one process-wide SoftwareUpdates instance. Concurrent callers join the
+same in-flight check, and the UI observes background progress and results
+through the shared StateFlow. Android can delay this work for battery management.
 Closing the UI and rebooting do not discard scheduled work; force-stopping the
 app prevents background delivery until it is opened again. This is periodic
 release discovery with an Android notification, not instant server push.
 
 Mesh-only mode and disabling automatic checks cancel the worker. The worker
-checks persisted settings before using the network, and a query already in
+reads mesh-only directly from `myco_prefs/offline_only` (default false,
+matching the core) and the automatic-check preference before using the network, and a query already in
 flight cannot post a result after those settings change. The UI retains Check
 now, a version badge, View update / Later, and one system notification per
 version. Notification denial or a disabled channel leaves the in-app notice

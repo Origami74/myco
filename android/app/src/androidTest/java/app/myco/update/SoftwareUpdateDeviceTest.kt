@@ -44,7 +44,7 @@ class SoftwareUpdateDeviceTest {
         assertEquals("Myco update available", notification.notification.extras.getString("android.title"))
         val postedAt = notification.postTime
 
-        val updates = SoftwareUpdates(context)
+        val updates = SoftwareUpdates.getInstance(context)
         runBlocking { updates.check(offlineOnly = false, force = true) }
         assertTrue("Repeated live query must succeed", prefs.getBoolean("last_success", false))
         assertEquals("Repeated checks must not repost", postedAt,
@@ -74,7 +74,7 @@ class SoftwareUpdateDeviceTest {
         prefs.edit().clear().putBoolean("automatic", false).commit()
         context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE)
             .edit().putBoolean("offline_only", false).commit()
-        val updates = SoftwareUpdates(context)
+        val updates = SoftwareUpdates.getInstance(context)
         runBlocking { updates.check(offlineOnly = false, force = true) }
         assertTrue(prefs.getBoolean("last_success", false))
         assertNotNull(updates.state.value.availableTag)
@@ -89,7 +89,7 @@ class SoftwareUpdateDeviceTest {
         val mainPrefs = context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
         mainPrefs.edit().putBoolean("offline_only", false).commit()
-        val updates = SoftwareUpdates(context)
+        val updates = SoftwareUpdates.getInstance(context)
         assertFalse(updates.state.value.automatic)
         runBlocking { updates.check(offlineOnly = false) }
         assertEquals(0L, prefs.getLong("last_attempt", 0))
@@ -105,7 +105,7 @@ class SoftwareUpdateDeviceTest {
         mainPrefs.edit().putBoolean("offline_only", false).commit()
         assertFalse(softwareUpdatesOfflineOnly(context))
         updates.setAutomatic(true)
-        assertTrue(SoftwareUpdates(context).state.value.automatic)
+        assertTrue(SoftwareUpdates.getInstance(context).state.value.automatic)
         updates.setAutomatic(false)
         updates.configureBackground()
     }

@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one Android notification per version when notifications are allowed.
   Settings has a manual check and an automatic-check switch. Mesh-only mode
   pauses checks; opening the release page leaves installation to Android.
-  Local builds use the nearest stable Git tag for their version, and debug
-  builds start with automatic checks off.
+  Local builds use the nearest stable Git tag for their version. Automatic
+  checks start off in all builds and can be enabled in Settings.
 
 - **`napplet.link` links open the right app.** A link like
   `https://napplet.link/profile/open?pubkey=…` (or `napplet:profile/open?…`)

@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit
 class SoftwareUpdateWorker(context: Context, parameters: WorkerParameters) :
     CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result {
-        SoftwareUpdates(applicationContext).check(softwareUpdatesOfflineOnly(applicationContext))
+        SoftwareUpdates.getInstance(applicationContext).check(softwareUpdatesOfflineOnly(applicationContext))
         return Result.success()
     }
 
