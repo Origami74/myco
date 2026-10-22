@@ -14,9 +14,7 @@ import java.util.concurrent.TimeUnit
 class SoftwareUpdateWorker(context: Context, parameters: WorkerParameters) :
     CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result {
-        val prefs = applicationContext.getSharedPreferences("signed_software_updates", Context.MODE_PRIVATE)
-        // Fail closed until the UI has supplied the mesh-only setting.
-        SoftwareUpdates(applicationContext).check(prefs.getBoolean("offline_only", true))
+        SoftwareUpdates(applicationContext).check(softwareUpdatesOfflineOnly(applicationContext))
         return Result.success()
     }
 

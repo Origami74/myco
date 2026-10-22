@@ -44,8 +44,8 @@ class SoftwareUpdates(context: Context) {
     private val mutex = checkMutex
     private val mutableState = MutableStateFlow(
         SoftwareUpdateState(
-            // Keep development builds quiet unless explicitly enabled.
-            automatic = prefs.getBoolean("automatic", !BuildConfig.DEBUG),
+            // Network checks are opt-in in every build type.
+            automatic = prefs.getBoolean("automatic", false),
             availableTag = prefs.getString("available_tag", null)?.takeIf {
                 isNewerRelease(BuildConfig.VERSION_NAME, it)
             },
@@ -54,15 +54,14 @@ class SoftwareUpdates(context: Context) {
     )
     val state = mutableState.asStateFlow()
 
-    fun configureBackground(offlineOnly: Boolean) {
-        prefs.edit().putBoolean("offline_only", offlineOnly).commit()
-        SoftwareUpdateWorker.schedule(context, mutableState.value.automatic && !offlineOnly)
+    fun configureBackground() {
+        SoftwareUpdateWorker.schedule(context,
+            prefs.getBoolean("automatic", false) && !softwareUpdatesOfflineOnly(context))
     }
 
     fun setAutomatic(enabled: Boolean) {
         prefs.edit().putBoolean("automatic", enabled).apply()
         mutableState.value = mutableState.value.copy(automatic = enabled)
-        SoftwareUpdateWorker.schedule(context, enabled && !prefs.getBoolean("offline_only", true))
     }
 
     fun dismissBanner() {
@@ -83,12 +82,12 @@ class SoftwareUpdates(context: Context) {
     suspend fun check(offlineOnly: Boolean, force: Boolean = false) {
         if (!mutex.tryLock()) return
         try {
-            if (offlineOnly) {
+            if (offlineOnly || softwareUpdatesOfflineOnly(context)) {
                 if (force) mutableState.value = mutableState.value.copy(message = "Turn off mesh-only mode to check online")
                 return
             }
-            if (!force && (!prefs.getBoolean("automatic", !BuildConfig.DEBUG) ||
-                    prefs.getBoolean("offline_only", true))) return
+            if (!force && (!prefs.getBoolean("automatic", false) ||
+                    softwareUpdatesOfflineOnly(context))) return
             val cached = prefs.getString("available_tag", null)?.takeIf {
                 isNewerRelease(BuildConfig.VERSION_NAME, it)
             }
@@ -113,8 +112,8 @@ class SoftwareUpdates(context: Context) {
             prefs.edit().putLong("last_attempt", now).putBoolean("last_success", false).apply()
             val tag = withContext(Dispatchers.IO) { fetchReleaseTag() }
             // A setting may have changed while the relay query was in flight.
-            if (prefs.getBoolean("offline_only", true) ||
-                (!force && !prefs.getBoolean("automatic", !BuildConfig.DEBUG))) return
+            if (softwareUpdatesOfflineOnly(context) ||
+                (!force && !prefs.getBoolean("automatic", false))) return
             val available = tag.takeIf { isNewerRelease(BuildConfig.VERSION_NAME, it) }
             prefs.edit().putString("available_tag", available).putBoolean("last_success", true).apply()
             mutableState.value = mutableState.value.copy(
@@ -163,3 +162,8 @@ class SoftwareUpdates(context: Context) {
         }
     }
 }
+
+/** Use the same preference and default as MainActivity's native-core configuration. */
+internal fun softwareUpdatesOfflineOnly(context: Context): Boolean =
+    context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE)
+        .getBoolean("offline_only", false)

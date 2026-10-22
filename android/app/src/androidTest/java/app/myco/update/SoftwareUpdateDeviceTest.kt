@@ -20,8 +20,9 @@ class SoftwareUpdateDeviceTest {
         val prefs = context.getSharedPreferences("signed_software_updates", Context.MODE_PRIVATE)
         val notifications = context.getSystemService(NotificationManager::class.java)
         notifications.cancel(4001)
-        prefs.edit().clear().putBoolean("automatic", true)
-            .putBoolean("offline_only", false).commit()
+        prefs.edit().clear().putBoolean("automatic", true).commit()
+        val mainPrefs = context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE)
+        mainPrefs.edit().putBoolean("offline_only", false).commit()
 
         val manager = WorkManager.getInstance(context)
         manager.cancelAllWork().result.get(10, TimeUnit.SECONDS)
@@ -50,11 +51,13 @@ class SoftwareUpdateDeviceTest {
             notifications.activeNotifications.single { it.id == 4001 }.postTime)
 
         val lastAttempt = prefs.getLong("last_attempt", 0)
-        updates.configureBackground(offlineOnly = true)
+        mainPrefs.edit().putBoolean("offline_only", true).commit()
+        updates.configureBackground()
         runBlocking { updates.check(offlineOnly = true, force = true) }
         assertEquals(lastAttempt, prefs.getLong("last_attempt", 0))
         assertEquals("Turn off mesh-only mode to check online", updates.state.value.message)
-        updates.configureBackground(offlineOnly = false)
+        mainPrefs.edit().putBoolean("offline_only", false).commit()
+        updates.configureBackground()
         updates.setAutomatic(false)
         runBlocking { updates.check(offlineOnly = false) }
         assertEquals(lastAttempt, prefs.getLong("last_attempt", 0))
@@ -68,13 +71,42 @@ class SoftwareUpdateDeviceTest {
         org.junit.Assume.assumeFalse(notifications.areNotificationsEnabled())
         val prefs = context.getSharedPreferences("signed_software_updates", Context.MODE_PRIVATE)
         notifications.cancel(4001)
-        prefs.edit().clear().putBoolean("automatic", false)
-            .putBoolean("offline_only", false).commit()
+        prefs.edit().clear().putBoolean("automatic", false).commit()
+        context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE)
+            .edit().putBoolean("offline_only", false).commit()
         val updates = SoftwareUpdates(context)
         runBlocking { updates.check(offlineOnly = false, force = true) }
         assertTrue(prefs.getBoolean("last_success", false))
         assertNotNull(updates.state.value.availableTag)
         assertNull(prefs.getString("notified_tag", null))
         assertTrue(notifications.activeNotifications.none { it.id == 4001 })
+    }
+    @Test
+    fun testOptInDefaultAndAuthoritativeOfflineSetting() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        check(context.packageName == "app.myco.updatetest")
+        val prefs = context.getSharedPreferences("signed_software_updates", Context.MODE_PRIVATE)
+        val mainPrefs = context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE)
+        prefs.edit().clear().commit()
+        mainPrefs.edit().putBoolean("offline_only", false).commit()
+        val updates = SoftwareUpdates(context)
+        assertFalse(updates.state.value.automatic)
+        runBlocking { updates.check(offlineOnly = false) }
+        assertEquals(0L, prefs.getLong("last_attempt", 0))
+
+        // A stale update-specific copy must never override the main setting.
+        prefs.edit().putBoolean("offline_only", false).commit()
+        mainPrefs.edit().putBoolean("offline_only", true).commit()
+        assertTrue(softwareUpdatesOfflineOnly(context))
+        runBlocking { updates.check(offlineOnly = false, force = true) }
+        assertEquals("Turn off mesh-only mode to check online", updates.state.value.message)
+        assertEquals(0L, prefs.getLong("last_attempt", 0))
+        prefs.edit().putBoolean("offline_only", true).commit()
+        mainPrefs.edit().putBoolean("offline_only", false).commit()
+        assertFalse(softwareUpdatesOfflineOnly(context))
+        updates.setAutomatic(true)
+        assertTrue(SoftwareUpdates(context).state.value.automatic)
+        updates.setAutomatic(false)
+        updates.configureBackground()
     }
 }

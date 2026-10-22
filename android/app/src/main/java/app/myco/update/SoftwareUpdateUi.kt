@@ -23,7 +23,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
-import app.myco.BuildConfig
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -33,8 +32,9 @@ fun rememberSoftwareUpdates(offlineOnly: Boolean): SoftwareUpdates {
     val updates = remember(context) { SoftwareUpdates(context) }
     val state by updates.state.collectAsState()
     val owner = LocalLifecycleOwner.current
+    // One scheduling entry point; toggle handlers only persist their setting.
     LaunchedEffect(updates, owner, offlineOnly, state.automatic) {
-        updates.configureBackground(offlineOnly)
+        updates.configureBackground()
         owner.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
                 updates.check(offlineOnly)
@@ -67,7 +67,6 @@ fun SoftwareUpdateSettings(updates: SoftwareUpdates, offlineOnly: Boolean) {
     val scope = rememberCoroutineScope()
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Software updates", style = MaterialTheme.typography.titleMedium)
-        Text("Installed: ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodySmall)
         Row(Modifier.fillMaxWidth()) {
             Column(Modifier.weight(1f)) {
                 Text("Automatic update checks")

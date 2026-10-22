@@ -458,10 +458,7 @@ fun MycoApp(
                         onFixConnection = onFixConnection,
                         openPermissions = openPermissions,
                         onPermissionsOpened = { openPermissions = false },
-                        onOfflineOnlyToggle = { enabled ->
-                            softwareUpdates.configureBackground(enabled)
-                            onOfflineOnlyToggle(enabled)
-                        },
+                        onOfflineOnlyToggle = onOfflineOnlyToggle,
                         developerMode = developerMode,
                         onDeveloperModeToggle = { on -> developerMode = on; onDeveloperModeToggle(on) },
                         bleExhausted = bleExhausted,
