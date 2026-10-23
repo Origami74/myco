@@ -13,7 +13,8 @@ map, the [index](./README.md).
 
 ## Status — 2026-10-23
 
-**Shipped in v0.12.0** (2026-10-23; the [CHANGELOG](../CHANGELOG.md) and
+**Shipped in v0.12.0 and v0.12.1** (2026-10-23; v0.12.1 is the same Myco on
+current fips; the [CHANGELOG](../CHANGELOG.md) and
 [release notes](../RELEASE-NOTES.md) have the detail):
 
 - **Myco update notices.** A publisher-signed stable release on Zapstore is

@@ -1232,22 +1232,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9844ddc3a6e533d62bba727eb6c28b5d360921d5175e9ff0f1e621a5c590a4d5"
 
 [[package]]
-name = "fips"
+name = "fips-core"
+version = "0.0.0"
+dependencies = [
+ "bech32 0.12.0",
+ "chacha20poly1305",
+ "hashbrown 0.16.1",
+ "hex",
+ "hkdf",
+ "hmac 0.13.0",
+ "libm",
+ "once_cell",
+ "ring",
+ "secp256k1 0.30.0",
+ "serde",
+ "sha2 0.11.0",
+ "siphasher",
+ "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
+name = "fips-mesh"
 version = "0.6.0-dev"
 dependencies = [
  "arc-swap",
- "bech32 0.12.0",
  "bluer",
  "clap",
  "crossbeam-channel",
  "dirs",
  "dispatch2",
+ "fips-core",
  "futures",
  "hex",
- "hkdf",
- "hmac 0.13.0",
+ "if-addrs",
  "libc",
- "libm",
  "mdns-sd",
  "netlink-packet-core",
  "netlink-packet-netfilter",
@@ -2351,13 +2370,14 @@ dependencies = [
  "axum",
  "base64",
  "chacha20poly1305",
- "fips",
+ "fips-mesh",
  "futures-util",
  "hex",
  "if-addrs",
  "ipstack",
  "jni",
  "jpeg-encoder",
+ "libc",
  "myco-blossom",
  "myco-cache",
  "myco-napplet-runtime",

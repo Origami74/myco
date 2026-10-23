@@ -1,6 +1,10 @@
-# Myco v0.12.0
+# Myco v0.12.1
 
 **Released**: 2026-10-23
+
+v0.12.1 is v0.12.0 built on **current fips**, the mesh core underneath Myco.
+v0.12.0 was built on a fips from 2026-10-08, about 150 commits behind. Everything
+v0.12.0 brought is here; what's new is below it in "Since v0.12.0".
 
 v0.12.0 tells you when **a new Myco is out**, lets napplets keep **private
 data** and **files you pick**, groups **permissions the way Android does**,
@@ -16,9 +20,23 @@ and runs on **Android TV**.
   they allow, and you can switch things off before adding an app.
 - Myco installs on Android TV and works with a remote.
 
-**No wire-format change from v0.11.0.** v0.12.0 and v0.11.x phones pair and
-exchange messages as before, and everything upgrades in place. Update notices
-start with this version: a phone on v0.11.x isn't told about v0.12.0.
+**Myco's own messages are unchanged from v0.11.0**: v0.12.1, v0.12.0 and
+v0.11.x phones pair and exchange messages as before, and everything upgrades
+in place. Update notices start with v0.12: a phone on v0.11.x isn't told
+about this release.
+
+## Since v0.12.0
+
+- **The mesh core moves to current fips.**
+  - **Multi-path switchover:** a peer's links switch between transports
+    (Bluetooth, Wi-Fi, USB, network) without a new handshake, and traffic
+    moves at once when the active link drops.
+  - **Path MTU:** a lowered path MTU recovers, links are held to their MTU,
+    and the default UDP MTU is 1357.
+  - **Hardening:** the spanning tree, the Bloom filter exchange and sessions
+    are hardened.
+- **32-bit TV boxes without a patch.** fips now builds for `armeabi-v7a`
+  as it is.
 
 ## At a glance
 

@@ -159,8 +159,11 @@ and which are upstream candidates.
 ### `MYCO_FIPS_REPO_PATH` and the Gradle build
 
 The Android build additionally reads `MYCO_FIPS_REPO_PATH` and emits a
-`--config patch.crates-io.fips.path="…"` override for the `cargo ndk` call
-(`localFipsCargoConfigArgs()` in `build.gradle.kts`). It refuses to build if
+`--config patch.crates-io.<package>.path="…"` override for the `cargo ndk` call
+(`localFipsCargoConfigArgs()` in `build.gradle.kts`), with the package name read
+from the checkout's `Cargo.toml`. fips is published as `fips-mesh` (crates.io's
+`fips` is another crate); its library is still `fips`, which is why the
+workspace depends on it as `fips = { package = "fips-mesh", path = … }`. It refuses to build if
 the variable is set and does not point at a fips checkout. A `patch.crates-io`
 build perturbs `Cargo.lock`; if it comes back dirty after an Android build,
 `git checkout Cargo.lock`.
