@@ -760,11 +760,15 @@ impl HttpsFetcher for NoHttps {
 /// touches the world: choosing servers, signing the BUD-02 authorization as
 /// the user, and the HTTP upload. A napplet never names a server and never
 /// sees the authorization.
+///
+/// On an `Err` that may be kept ([`UploadError::keep_locally`]) the handler
+/// keeps a copy on this device; the napplet is still told it failed.
 #[async_trait]
 pub trait UploadSink: Send + Sync {
-    /// Whether an upload could go anywhere right now. `false` when the user
-    /// switched the internet off (offline-only), or there is no uploader.
-    /// Advisory: `upload.info` reports it, and an upload can still fail.
+    /// Whether an upload could reach a server right now. `false` when the
+    /// user switched the internet off (offline-only), or there is no
+    /// uploader. Advisory: `upload.info` drops `https` from what it may
+    /// return, and an upload can still fail.
     async fn available(&self) -> bool;
 
     /// Upload `blob` and say where it landed. `Err` says why, as one of the
@@ -833,18 +837,34 @@ impl UploadErrorCode {
     }
 }
 
-/// A failed upload: the code the napplet is shown, and the detail logged.
+/// A failed upload: the code the napplet is shown, the detail logged, and
+/// whether keeping the file on this device may stand in for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UploadError {
     pub code: UploadErrorCode,
     pub detail: String,
+    /// No server could be reached or took the file, so NAP-UPLOAD keeps a
+    /// copy on this device. `false` when the user did not approve the upload
+    /// (any signing failure, a "no" or no answer) or it never got its turn:
+    /// nothing is kept.
+    pub keep_locally: bool,
 }
 
 impl UploadError {
+    /// No server took the file: it may be kept on this device instead.
     pub fn new(code: UploadErrorCode, detail: impl Into<String>) -> Self {
         Self {
             code,
             detail: detail.into(),
+            keep_locally: true,
+        }
+    }
+
+    /// The upload did not happen, and nothing may stand in for it.
+    pub fn not_kept(code: UploadErrorCode, detail: impl Into<String>) -> Self {
+        Self {
+            keep_locally: false,
+            ..Self::new(code, detail)
         }
     }
 }

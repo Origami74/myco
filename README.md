@@ -206,7 +206,9 @@ A napplet can also **keep** a note or picture it was shown on this phone, and
 ever what it was shown, never signed as you.
 
 With your OK on the install sheet, a napplet can also **upload** a file, such
-as a picture to post, to your Blossom servers, signed as you. It can also
+as a picture to post, to your Blossom servers, signed as you. With no
+internet it can keep the file on your phone instead, where paired phones can
+fetch it. It can also
 **open or save a file you pick** in Android's file picker, and only that file.
 
 ### From a small example to two phones

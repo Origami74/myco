@@ -471,6 +471,7 @@ pub fn test_context_with_mesh(
         fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
         https: std::sync::Arc::new(crate::seams::NoHttps),
         https_memory: std::sync::Arc::default(),
+        local_uploads: std::sync::Arc::default(),
         intents: std::sync::Arc::new(crate::nap::intent::NoIntents),
         uploads: std::sync::Arc::new(crate::seams::NoUploads),
     };
@@ -509,6 +510,7 @@ pub fn test_context_with_outbox() -> (
         fetcher: std::sync::Arc::new(crate::seams::NoFetcher),
         https: std::sync::Arc::new(crate::seams::NoHttps),
         https_memory: std::sync::Arc::default(),
+        local_uploads: std::sync::Arc::default(),
         intents: std::sync::Arc::new(crate::nap::intent::NoIntents),
         uploads: std::sync::Arc::new(crate::seams::NoUploads),
     };
@@ -531,15 +533,28 @@ pub fn test_context_with_uploads() -> (crate::dispatch::NapContext, std::sync::A
 pub struct MemUploads {
     uploaded: std::sync::Mutex<Vec<crate::seams::UploadBlob>>,
     fail_with: Option<crate::seams::UploadErrorCode>,
+    /// Fail with [`crate::seams::UploadError::not_kept`].
+    refuse: bool,
     /// Report this as the stored hash, as a server that transformed the file.
     stored_sha256: Option<String>,
 }
 
 impl MemUploads {
-    /// One whose every upload fails with `code`.
+    /// One whose every upload fails with `code`, as no server taking it.
+    /// `user cancelled` is a signing failure, so it is never kept.
     pub fn failing(code: crate::seams::UploadErrorCode) -> Self {
         Self {
             fail_with: Some(code),
+            ..Default::default()
+        }
+    }
+
+    /// One whose every upload fails with `code` and may not be kept on the
+    /// device, as a busy uploader or an unsigned upload.
+    pub fn refusing(code: crate::seams::UploadErrorCode) -> Self {
+        Self {
+            fail_with: Some(code),
+            refuse: true,
             ..Default::default()
         }
     }
@@ -570,7 +585,12 @@ impl crate::seams::UploadSink for MemUploads {
         blob: &crate::seams::UploadBlob,
     ) -> Result<crate::seams::Uploaded, crate::seams::UploadError> {
         if let Some(code) = self.fail_with {
-            return Err(crate::seams::UploadError::new(code, "staged failure"));
+            let refused = self.refuse || code == crate::seams::UploadErrorCode::UserCancelled;
+            return Err(if refused {
+                crate::seams::UploadError::not_kept(code, "staged failure")
+            } else {
+                crate::seams::UploadError::new(code, "staged failure")
+            });
         }
         self.uploaded.lock().unwrap().push(blob.clone());
         let sha = self.stored_sha256.clone().unwrap_or(blob.sha256.clone());

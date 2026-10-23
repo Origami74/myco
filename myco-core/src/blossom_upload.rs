@@ -3,8 +3,9 @@
 //! **user's** Blossom servers, signed as the user.
 //!
 //! The runtime crate has already checked the grant, capped and hashed the
-//! bytes and settled the type ([`myco_napplet_runtime::nap::upload`]). What
-//! happens here:
+//! bytes and settled the type ([`myco_napplet_runtime::nap::upload`]). When
+//! this fails with nobody to blame but the servers, the runtime keeps a copy
+//! on this device; the napplet is still told it failed. What happens here:
 //!
 //! 1. **Servers.** The user's BUD-03 list (kind 10063, `server` tags): this
 //!    device's relay first, then the user's own relays (their NIP-65 write
@@ -307,9 +308,10 @@ impl BlossomUploader {
         let template = auth_template(user, &blob.sha256, crate::content::now_secs());
         // The signer bounds itself (a signer app gets its own answer
         // timeout). A signer app's "no" is `external_signer::REJECTED`.
+        // Unsigned is unapproved, whatever the reason: nothing is kept.
         let auth = self.signer.sign(template).await.map_err(|e| {
             let said_no = said_no(&e);
-            UploadError::new(
+            UploadError::not_kept(
                 if said_no {
                     UploadErrorCode::UserCancelled
                 } else {
@@ -395,8 +397,9 @@ impl UploadSink for BlossomUploader {
                 "no internet right now: an upload has to reach a Blossom server",
             ));
         }
+        // Never its turn: the napplet retries, nothing is kept instead.
         let Ok(_only_one) = self.one_at_a_time.try_acquire() else {
-            return Err(UploadError::new(
+            return Err(UploadError::not_kept(
                 UploadErrorCode::UploadFailed,
                 "another upload is still running: one at a time",
             ));
@@ -907,6 +910,7 @@ mod tests {
         let running = up.one_at_a_time.try_acquire().unwrap();
         let err = up.upload(&blob(b"x")).await.unwrap_err();
         assert_eq!(err.code, UploadErrorCode::UploadFailed);
+        assert!(!err.keep_locally, "a busy uploader is not a local upload");
         assert!(seen.lock().unwrap().is_empty());
         drop(running);
         up.upload(&blob(b"x")).await.unwrap();
@@ -978,6 +982,7 @@ mod tests {
             let (up, _) = uploader(mem_relay(), Arc::new(Refusing(why)), vec![server.clone()]);
             let err = up.upload(&blob(b"bytes")).await.unwrap_err();
             assert_eq!(err.code, code, "{why}");
+            assert!(!err.keep_locally, "unsigned is never kept: {why}");
         }
         assert!(seen.lock().unwrap().is_empty());
         // Context added on top of the signer's "no" still reads as a no.

@@ -2354,6 +2354,7 @@ mod tests {
             fetcher: Arc::new(myco_napplet_runtime::seams::NoFetcher),
             https: Arc::new(myco_napplet_runtime::seams::NoHttps),
             https_memory: Arc::default(),
+            local_uploads: Arc::default(),
             kept_blobs: blobs,
             intents: Arc::new(myco_napplet_runtime::NoIntents),
             uploads: Arc::new(myco_napplet_runtime::NoUploads),
