@@ -13,8 +13,8 @@ map, the [index](./README.md).
 
 ## Status — 2026-10-23
 
-**On `main` for the next version** (unreleased; the
-[CHANGELOG](../CHANGELOG.md) has the detail):
+**Shipped in v0.12.0** (2026-10-23; the [CHANGELOG](../CHANGELOG.md) and
+[release notes](../RELEASE-NOTES.md) have the detail):
 
 - **Myco update notices.** A publisher-signed stable release on Zapstore is
   found by a daily check, from Zapstore and from the Circle, so a mesh-only
@@ -36,7 +36,7 @@ map, the [index](./README.md).
   Circle reach when the network's DNS isn't Myco's, and several redraw and
   stall fixes.
 
-## Shipped — 2026-10-13
+## Earlier releases
 
 **Shipped** (v0.11.0 — the USB lane (phone to phone and phone to desktop over a cable), a native TUN pump, napplets in the current NIP-5D format and their icons, `https:` resources, `mesh.blobs`, authors' Blossom server lists; v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
 reads over a shared relay pool, Chronofeed and Simple Profile; v0.8.1 —

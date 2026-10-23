@@ -1,123 +1,108 @@
-# Myco v0.11.0
+# Myco v0.12.0
 
-**Released**: 2026-10-13
+**Released**: 2026-10-23
 
-v0.11.0 links phones **over a USB cable**, opens **napplets in the new
-NIP-5D format** with **their own icons**, and lets napplets load **pictures
-from the web**.
+v0.12.0 tells you when **a new Myco is out**, lets napplets keep **private
+data** and **files you pick**, groups **permissions the way Android does**,
+and runs on **Android TV**.
 
-- A USB-C cable links two phones, or a phone and a desktop running fips, with
-  no network at all: the fastest lane Myco has.
-- Every app on napplet.soy, published in the format NIP-5D adopted on
-  2026-10-07, installs and opens. Older napplets still open.
-- A napplet's own icon shows in the install sheet, the Apps grid, Recents and
-  on home-screen shortcuts.
-- Napplets can load `https:` pictures and files, such as profile pictures on
-  someone's server, through Myco and only from the public internet.
-- Apps hosted on their author's own Blossom servers install and update.
-- The App Store shows "Around you" apps only when a phone nearby can serve
-  them.
+- Myco checks for a signed new release, from Zapstore and from your Circle,
+  and tells you once per version. A phone in mesh-only mode hears it from
+  its peers.
+- Napplets can keep data encrypted to your own key, so relays and other
+  people see only ciphertext.
+- Napplets can open and save a file you pick, and only that file.
+- Permissions come in groups with an icon and a switch, sorted by how much
+  they allow, and you can switch things off before adding an app.
+- Myco installs on Android TV and works with a remote.
 
-**No wire-format change from v0.10.0.** v0.11.0 and v0.10.x phones pair and
-exchange messages as before, and everything upgrades in place. A v0.10.x
-phone can't open napplets in the new format, so update both phones to share
-them.
+**No wire-format change from v0.11.0.** v0.12.0 and v0.11.x phones pair and
+exchange messages as before, and everything upgrades in place. Update notices
+start with this version: a phone on v0.11.x isn't told about v0.12.0.
 
 ## At a glance
 
-- **Link over a USB cable.** Plug two phones together with a USB-C to USB-C
-  cable, or a phone into a desktop running fips. It works with no network at
-  all and carries over 100 Mbps, where Bluetooth manages tens of kB/s.
-  - Tap "Open Myco" once; after that Myco starts by itself when you plug in,
-    even with the screen locked.
-  - Between two phones, the one that becomes USB host asks once to use the
-    other. Both need Myco running.
-  - The peer shows under a **USB** block in the mesh status sheet.
-  - [How to connect over USB](docs/how-to/connect-over-usb.md).
-- **Napplets in the current NIP-5D format.** A napplet now names its single
-  file by hash (`x`), describes itself in the event text, and lists required
-  (`R`) and optional (`O`) capabilities.
-  - The install sheet marks optional capabilities, and warns when an app needs
-    one Myco can't provide. An update that adds one warns the same way.
-  - Napplets in the old format still open, through a fallback that will be
-    removed after 2026.
-  - A napplet republished in the new format counts as a new version: "Check
-    for updates" offers it, and the sheet may ask about capabilities you never
-    reviewed. Your grants and the app's saved data are kept.
-- **Napplet icons.** PNG, JPEG or WebP, checked against the hash the
-  manifest signs and decoded before it is shown. Without a valid icon you see
-  the coloured initial as before.
-  - Shortcuts pinned before this release get the icon too.
-  - The icon is kept with the app, so clearing the cache doesn't lose it.
-- **Pictures from the web in napplets (`https:`).** A napplet with the
-  resource permission can ask for an `https://` link. Myco fetches it: plain
-  GET, no cookies or logins, at most five redirects, 30 seconds and 64 MiB.
-  - Only public addresses: never this phone, your Wi-Fi network or a mesh
-    name, checked again after every redirect.
-  - The server sees your IP address and which link was opened.
-  - Nothing is fetched with offline-only on. SVG is refused.
-- **Authors' own file servers.** Myco reads the Blossom server list an author
-  publishes (BUD-03) and looks there after the servers an app names, and
-  before the public defaults.
-- **Which nearby phones hold a file (`mesh.blobs`).** A napplet with the mesh
-  grant can ask how many Circle phones in reach have each of up to 64 files.
-  Myco asks over the mesh only, without downloading anything. The App Store
-  uses it for "Around you".
+- **Update notices.** Myco looks once a day for a stable release signed by
+  Myco's publisher key, and shows a banner and one notification per version.
+  - It asks Zapstore and your Circle. Each phone keeps the newest signed
+    announcement, so one phone with internet tells the room.
+  - In mesh-only mode only the Circle is asked; Zapstore is never contacted.
+  - Settings › Software updates has **Check now** and the automatic switch,
+    on by default. Zapstore sees your IP address and a query for Myco.
+  - **View update** opens Myco's Zapstore page. Installing stays with
+    Zapstore and Android.
+- **Private data for napplets.** A napplet hands Myco plaintext; Myco
+  encrypts it to your own key (NIP-44), signs and publishes it.
+  - Your napplets that can read events (relays, outbox or mesh) get it back
+    in plaintext, whichever app wrote it. The install sheet says so.
+  - Logged in with Amber, Myco asks Amber to encrypt and decrypt. **If you
+    logged in with Amber before this version, log in again** so Amber is
+    asked for those permissions.
+- **Files you pick (NAP-FS).** A napplet with the new **Files** permission
+  can ask you to choose a file, or where to save one, in Android's own file
+  picker. It reads and writes that file only, until you close it.
+  - A napplet's `<input type="file">` opens the picker too.
+- **Permissions in groups.** The install sheet and an app's Permissions page
+  group what it may do: Post as you, Nearby devices, Files & media, Profile,
+  Apps & links. Each has an icon and one switch, and the details behind a tap.
+  - Sorted by level: **acts as you** first, then **sensitive**, then the
+    **standard** ones most apps need, folded into one row at install.
+  - Switch things off before adding an app. A group the app needs is marked;
+    turning it off warns but is allowed.
+- **A tidier app menu.** Long-press an app: **Open** sits next to its name,
+  then one row of icons (Share, Permissions, Home screen, Updates) and Remove.
+  - The share sheet shows its link with **Copy** and **Share**, to send by
+    message. On the other phone: open it, or **Add app › Paste a link**.
+- **Uploads that stay on the phone.** A napplet can upload to this phone
+  only (`blossom-local`), with no internet and no signature, for paired
+  phones to fetch. An upload to your servers that fails offline keeps a copy
+  on the phone. Each app may keep 64 MiB a day this way.
+- **`napplet.link` links open the right app.** `https://napplet.link/<role>/<intent>?…`
+  opens whichever installed napplet handles that role, or asks which one.
+- **Android TV.** On the home row with its own banner, tabs on a side rail,
+  and everything works with a remote: focus rings, Menu (or hold OK) for an
+  app's menu. 32-bit TV boxes are supported with `-Pmyco.abis=armeabi-v7a`.
 
 ## Also
 
-- **Names resolve with a roaming SIM on Wi-Fi.** With the mesh on, a phone
-  whose roaming SIM's DNS servers don't answer over Wi-Fi could resolve no
-  names at all, so napplet updates and icons never arrived. Myco now asks
-  every DNS server at once.
-- **A faster mesh on every lane.** Myco now moves packets between apps and the
-  mesh in its native core, without the per-packet hop through Java that capped
-  throughput.
-- **Peers show up within a second,** not up to 8 seconds, and your Circle is
-  redialled as soon as a direct link comes or goes, such as a cable plugged
-  back in.
-- **Napplet posts reach all your outbox relays.** A note posted through
-  NAP-OUTBOX went to only two of your write relays. It now goes to every one
-  you list.
-- **Posting waits less.** A post that tags people now waits for this phone,
-  two relays and the people's inbox relays, and at most 3 seconds for an
-  inbox relay. Slower ones are delivered in the background.
-- **AVIF and HEIC pictures show in napplets.** They were taken for videos and
-  shown as broken pictures.
-- **No more dialling your own network.** A Blossom server named in a link, an
-  author's list or an app manifest is used only when it is on the public
-  internet. A custom Blossom store you set in Settings still works.
-- **Your profile picture in Settings** goes through the same safe fetcher as
-  napplet pictures.
+- **A napplet already on this phone installs offline.** Myco looks in its own
+  store first, so a napplet kept from an earlier install no longer fails
+  with "no source served artifact".
+- **Circle peers stay reachable when the network's DNS isn't Myco's.** Some
+  devices send every lookup to their own DNS over HTTPS. Myco now finds
+  `<npub>.fips` peers by their mesh address itself.
+- **Mesh subscriptions get every peer's answer**, including events this phone
+  had already seen and let go of.
+- **A napplet's Copy button copies.** Writing the clipboard on a tap works;
+  reading it stays blocked.
+- **A refused publish says `ok: false`**, as NAP-RELAY and NAP-OUTBOX require.
+- **Smoother on slow devices.** No more redrawing every screen once a second
+  while a phone is linked, no blinking search cursor redrawing the Apps tab,
+  and no stalls while a sync stores files. Less logging by default
+  (`adb shell setprop debug.myco.log debug` turns it back on).
 
 ## Known issues
 
-- **A pulled USB cable can linger in the status sheet.** If the other phone
-  is still reachable another way, it can stay listed under **USB** after the
-  cable is pulled. The link itself is gone.
-- **USB and adb share the cable.** While the USB lane holds the port, adb
-  over that cable drops. Use wireless debugging to install builds.
-- **Mesh over the internet is new.** It hasn't yet been tested with two
-  phones on different networks reaching each other through a public node.
-  It is off by default.
+- **Private data with Amber asks a lot.** Unless Amber is set to "always
+  allow", reading private data asks per event, and the app waits:
+  [#161](https://github.com/Origami74/myco/issues/161).
+- **"Needs this" only at install.** An app's Permissions page doesn't yet
+  mark what the app requires, or warn when you switch it off.
+- **`blossom:` links are for Myco phones.** Few other Nostr clients open
+  them, so a napplet should only post one when there is no `https:` link.
+- **Uploads: no per-upload prompt, no progress.** The install-sheet grant is
+  the consent; there is no progress bar and no cancel. Metadata such as EXIF
+  is the napplet's to strip.
 - **`https:` pictures aren't kept across restarts.** Myco remembers a web
   link for five minutes; after that, or a restart, it fetches it again.
-- **Uploads: no per-upload prompt, no progress.** The install-sheet grant is
-  the consent; without a signer app, an allowed app uploads without asking
-  each time. EXIF and other metadata are not stripped. There is no progress
-  bar and no cancel.
-- **Composer can't attach a picture itself yet.** An app that uploads one,
-  such as Doodle Duo, can hand Composer the link.
-- **Few apps declare a role yet.** Opening "a profile", "an article" or "a
-  composer" needs an app whose manifest declares that archetype, such as
-  Simple Profile, Noris or Composer.
-- **Reading positions in Noris stay on the phone.** Myco can't encrypt for an
-  app yet (`relay.publishEncrypted`).
-- **A custom relay is read, not streamed.** With a custom relay set, reads wait
-  for it rather than streaming as they arrive.
-- **Big files are held in memory** while they load (up to 64 MB each).
-- **Paid relays.** Relays that require a paid account (nostr.wine, for one)
-  refuse Myco's reads, so apps published only there can't be found.
+- **A pulled USB cable can linger in the status sheet** if the other phone is
+  still reachable another way. The link itself is gone.
+- **USB and adb share the cable.** Use wireless debugging to install builds
+  while the USB lane is in use.
+- **A custom relay is read, not streamed**, and **big files are held in
+  memory** while they load (up to 64 MB each).
+- **Paid relays** (nostr.wine, for one) refuse Myco's reads, so apps
+  published only there can't be found.
 - **Open nsite windows and updates.** An update can mix old and new files in
   an open nsite window until it reloads:
   [#71](https://github.com/Origami74/myco/issues/71).

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-23
+
 ### Added
 
 - **Myco tells you when its publisher signs a newer stable Zapstore release.**
@@ -99,6 +101,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the rest of the app waited. They are now counted once in the background and
   kept up to date as files come and go. Until that first count finishes they
   read 0, and they can be slightly off after a "Clear cache" that races a sync.
+
+- **A napplet's Copy button copies.** A napplet runs in a sandboxed frame,
+  and Android's WebView lets such a frame write the clipboard only when Myco
+  allows it. It now does, for writing only and on a tap: copying worked
+  nowhere before, and napplets fell back to "select the text and copy it".
+  Reading the clipboard stays blocked.
+
 ### Changed
 
 - **Permissions in groups, like Android's.** When you add a napplet, and on
