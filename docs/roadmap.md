@@ -95,8 +95,8 @@ Ordered by what unblocks what. Each is its own PR or short series.
 
 ### N10 — Connect to public internet mesh nodes
 
-> Status: built, awaiting the two-network test —
-> [design/fips/public-mesh-nodes.md](design/fips/public-mesh-nodes.md).
+**Done** — built and tested across two networks;
+[design/fips/public-mesh-nodes.md](design/fips/public-mesh-nodes.md).
 
 **Goal.** When a phone is online, it can also peer with public FIPS nodes
 over the internet, so Circle members who aren't in the same room still reach
@@ -333,15 +333,12 @@ opens the napplet.
 
 ### N5 — An app store napplet in place of the Discover tab
 
-**Partly built** (v0.8.0) — the AppStore napplet ships preinstalled
-(`DEFAULT_NAPPLETS`) and the native Discover tab is gone. It lists napplets
-from relays and from the phones around you (NAP-MESH), with stacks (NIP-51 app
-sets), recommendations from people you follow and profiles; Install hands the
-app's `naddr` to Myco over NAP-LINK, which opens the install review. Still
-open: it lists napplets only, not nsites; it can't see *which* nearby phone
-holds an app; its "Around you" needs `mesh` in the published manifest (the
-upstream napplet tooling drops Myco-only `requires`); and "Open" for an
-installed app waits on NAP-INTENT (N7).
+**Done** — the AppStore napplet ships preinstalled (`DEFAULT_NAPPLETS`) and
+the native Discover tab is gone (v0.8.0, completed since); tested. It lists
+napplets from relays and from the phones around you (NAP-MESH), with stacks
+(NIP-51 app sets), recommendations from people you follow and profiles;
+Install hands the app's `naddr` to Myco over NAP-LINK, which opens the
+install review.
 
 **Goal.** Retire the built-in Discover tab and ship "around me" as a
 **napplet** — the first-party app store. It lists what your Circle holds
@@ -376,9 +373,9 @@ live. README and the intro diagrams updated to say "apps", not "sites".
 
 ### N7 — NAP-INTENT: open another napplet by role
 
-**Built** (slices 1 and 2) in v0.9.0 — `nap/intent.rs`, `nap/inc.rs`,
-`myco-core/src/intent.rs`; see [NAP-INTENT](./design/napplet/NAP-INTENT.md).
-Slice 3 (the Android bridge) is still to do.
+**Done** — `nap/intent.rs`, `nap/inc.rs`, `myco-core/src/intent.rs` (slices 1
+and 2 in v0.9.0) and the Android bridge (slice 3); tested. See
+[NAP-INTENT](./design/napplet/NAP-INTENT.md).
 
 **Goal.** A napplet asks Myco to open "a `note` viewer" or "a `profile`" — a
 role (archetype), never a specific app — and Myco picks the handler from the
