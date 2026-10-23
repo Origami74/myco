@@ -11,7 +11,32 @@ map, the [index](./README.md).
 
 ---
 
-## Status — 2026-10-13
+## Status — 2026-10-23
+
+**On `main` for the next version** (unreleased; the
+[CHANGELOG](../CHANGELOG.md) has the detail):
+
+- **Myco update notices.** A publisher-signed stable release on Zapstore is
+  found by a daily check, from Zapstore and from the Circle, so a mesh-only
+  phone hears of it from peers; one notification per version, opt-out in
+  Settings. Installing stays with Zapstore — N11 is the in-Myco path.
+- **Private data for napplets.** `relay.publishEncrypted` encrypts to the
+  user's own key (NIP-44, local key or Amber), and the user's own encrypted
+  events reach napplets in plaintext.
+- **`blossom-local` uploads.** A second NAP-UPLOAD rail keeps a file on this
+  phone for the mesh, with no internet or signature; a `blossom` upload that
+  fails offline keeps a copy too. Budgeted per napplet.
+- **Files you pick** (NAP-FS, picker subset), **`napplet.link` links** open
+  the right app, and **Android TV**.
+- **App menu and permissions.** A compact long-press menu, a copyable share
+  link, and permissions in Android-style groups with levels (acts as you,
+  sensitive, standard) and switches on the install sheet.
+- Fixes: offline install of a napplet already here, mesh subscriptions
+  getting every peer's answer, a refused publish answering `ok: false`,
+  Circle reach when the network's DNS isn't Myco's, and several redraw and
+  stall fixes.
+
+## Shipped — 2026-10-13
 
 **Shipped** (v0.11.0 — the USB lane (phone to phone and phone to desktop over a cable), a native TUN pump, napplets in the current NIP-5D format and their icons, `https:` resources, `mesh.blobs`, authors' Blossom server lists; v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
 reads over a shared relay pool, Chronofeed and Simple Profile; v0.8.1 —
@@ -97,7 +122,41 @@ path between them, see each other as reachable in the Circle and exchange a
 `mesh.publish` through a public node; switching the option off drops those
 links.
 
+### N12 — Permissions held against the manifest
+
+**Goal.** One permission model, worked out from what the installed version
+declares. Today a napplet's grants are four hand-kept lists (`granted`,
+`denied`, `reviewed`, `unreviewed`); the Permissions sheet lists every domain
+Myco implements rather than what the app asked for, and can't say which ones
+the app requires. Keeping "never decided" apart from "said no" by hand is
+what let switches turned off at install come back on at the next open.
+
+**Shape.**
+
+- Store only the person's **decisions** (domain → allowed or denied). Work out
+  everything else from the installed version's **manifest** (`R` / `O`) and
+  Myco's **policy** (implemented domains, Basics, the sensitivity table).
+- One core function, `permission_view(manifest, decisions, policy)`, gives
+  each domain its group, level, required / optional / not declared, decision
+  and whether it is granted. The install sheet, the Permissions sheet, the
+  open-time check and the update review all use it; Kotlin only draws it.
+- A declared domain with no decision is not granted: it is up for review,
+  which is the "this update asks for more" case. A decision for a domain the
+  current version no longer declares is kept and shown as unused.
+- Settle first: a manifest that declares nothing (the toolchain dropped its
+  `R` tags), which today gets the default set. Migration: `granted` →
+  allowed, `denied` → denied.
+
+**Exit criterion.** The Permissions sheet lists what the installed version
+declares, marks what it requires, and warns on switching one off; a switch
+turned off at install or later stays off across opens and updates; an update
+declaring more puts only the new domains up for review.
+
 ### N11 — Share Myco itself
+
+**Partly built** — update notices: a publisher-signed release event is found
+on Zapstore or from the Circle and the phone is told (see Status). Handing the
+APK itself over the mesh, and to a phone without Myco, is still open.
 
 **Goal.** Hand the Myco app on from inside Myco, so someone without it gets
 it from a phone nearby instead of a download. Today every newcomer needs the
@@ -440,6 +499,12 @@ Each its own milestone with its own design pass. Roughly in order of pull.
   open nsite window can mix old and new files when an update is applied — the
   §5.2 open-window gate was never built —
   [#71](https://github.com/Origami74/myco/issues/71).
+- **Private data with a signer app.** With Amber not set to "always allow",
+  reading private data asks for approval per event, and a window waits on
+  it: a plaintext cache, and no approval screens from background frames —
+  [#161](https://github.com/Origami74/myco/issues/161).
+- **`blossom-local` upstream.** Propose the rail for NAP-UPLOAD in
+  napplet/naps, so other shells can offer the same mesh-only upload.
 - **"Recently updated" on the Apps screen.** Needs a local "activated at" time
   recorded when an app's served version moves —
   [#69](https://github.com/Origami74/myco/issues/69).
