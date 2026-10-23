@@ -52,6 +52,8 @@ class SignerActivity : ComponentActivity() {
             putExtra("type", intent.getStringExtra(EXTRA_TYPE))
             putExtra("id", requestId)
             putExtra("current_user", intent.getStringExtra(EXTRA_CURRENT_USER))
+            // NIP-55: the other party of a `nip44_*` request.
+            intent.getStringExtra(EXTRA_PEER)?.takeIf { it.isNotEmpty() }?.let { putExtra("pubkey", it) }
         }
         try {
             launcher.launch(signerIntent)
@@ -77,6 +79,7 @@ class SignerActivity : ComponentActivity() {
         private const val EXTRA_PAYLOAD = "app.myco.signer.PAYLOAD"
         private const val EXTRA_CURRENT_USER = "app.myco.signer.CURRENT_USER"
         private const val EXTRA_PACKAGE = "app.myco.signer.PACKAGE"
+        private const val EXTRA_PEER = "app.myco.signer.PEER"
 
         fun intent(context: Context, req: ExternalSigner.Request): Intent =
             Intent(context, SignerActivity::class.java).apply {
@@ -86,6 +89,7 @@ class SignerActivity : ComponentActivity() {
                 putExtra(EXTRA_PAYLOAD, req.payload)
                 putExtra(EXTRA_CURRENT_USER, req.currentUser)
                 putExtra(EXTRA_PACKAGE, req.pkg)
+                putExtra(EXTRA_PEER, req.peer)
             }
     }
 }

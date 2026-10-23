@@ -424,6 +424,54 @@ impl myco_napplet_runtime::seams::Signer for UserSigner {
             }
         }
     }
+
+    async fn nip44_encrypt(
+        &self,
+        peer: &nostr::PublicKey,
+        plaintext: &str,
+    ) -> anyhow::Result<String> {
+        use nostr::nips::nip44;
+        match self.identity()? {
+            Identity::Local(keys) => {
+                nip44::encrypt(keys.secret_key(), peer, plaintext, nip44::Version::V2)
+                    .map_err(|e| anyhow::anyhow!("encryption failed: {e}"))
+            }
+            Identity::External(user) => {
+                crate::external_signer::nip44_via(
+                    &self.bridge,
+                    "nip44_encrypt",
+                    peer,
+                    plaintext,
+                    &user.pubkey,
+                    &user.package,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn nip44_decrypt(
+        &self,
+        peer: &nostr::PublicKey,
+        ciphertext: &str,
+    ) -> anyhow::Result<String> {
+        use nostr::nips::nip44;
+        match self.identity()? {
+            Identity::Local(keys) => nip44::decrypt(keys.secret_key(), peer, ciphertext)
+                .map_err(|e| anyhow::anyhow!("decryption failed: {e}")),
+            Identity::External(user) => {
+                crate::external_signer::nip44_via(
+                    &self.bridge,
+                    "nip44_decrypt",
+                    peer,
+                    ciphertext,
+                    &user.pubkey,
+                    &user.package,
+                )
+                .await
+            }
+        }
+    }
 }
 
 #[cfg(test)]

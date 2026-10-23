@@ -48,6 +48,20 @@ pub trait Signer: Send + Sync {
 
     /// Sign an event the runtime has already authorised.
     async fn sign(&self, unsigned: UnsignedEvent) -> anyhow::Result<Event>;
+
+    /// NIP-44 encrypt `plaintext` from the user to `peer`.
+    ///
+    /// Like signing, the runtime decides what is encrypted and for whom; the
+    /// napplet hands over plaintext and never sees a key. A signer that cannot
+    /// encrypt says so, and the publish fails with that reason.
+    async fn nip44_encrypt(&self, _peer: &PublicKey, _plaintext: &str) -> anyhow::Result<String> {
+        anyhow::bail!("this signer cannot encrypt")
+    }
+
+    /// NIP-44 decrypt `ciphertext` exchanged between the user and `peer`.
+    async fn nip44_decrypt(&self, _peer: &PublicKey, _ciphertext: &str) -> anyhow::Result<String> {
+        anyhow::bail!("this signer cannot decrypt")
+    }
 }
 
 /// One relay a napplet's traffic can travel over.

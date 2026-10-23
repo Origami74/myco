@@ -211,6 +211,11 @@ internet it can keep the file on your phone instead, where paired phones can
 fetch it. It can also
 **open or save a file you pick** in Android's file picker, and only that file.
 
+A napplet can also keep **private data**: Myco encrypts it to your own key
+(NIP-44) before it is stored or sent, so relays and other people see only
+ciphertext. Your apps that can read your events (relays, outbox or mesh) get
+it back in plaintext, whichever app wrote it; the install sheet says so.
+
 ### From a small example to two phones
 
 1. **Build** a single-file napplet, following

@@ -586,6 +586,20 @@ contacts or relay list, or delete your events. The refusal is `ok: false` with t
 reason on the `.result` frame. The runtime's own first-use kind 0 and 10002 do not go
 through it.
 
+Encryption is mediated the same way. `relay.publishEncrypted` takes plaintext, and Rust
+encrypts it with NIP-44 to the user's own key, signs and publishes it. The recipient must
+be the user: this is private data a napplet keeps for you, not messaging. NIP-04 is
+refused. On the way back, every frame that leaves the host for a window (call replies and
+pushed deliveries) passes through one rule (`nap::encrypted::reveal`). An event the user
+signed, whose signature verifies and whose content is a NIP-44 payload the user
+encrypted to themselves, reaches the napplet in plaintext, as NAP-RELAY requires. That
+covers any kind and any napplet that can read events (`relay`, `outbox` or `mesh`),
+whichever app wrote it, NIP-78 app data and the private halves of NIP-51 lists alike:
+which kinds a protocol keeps private is the protocol's business, not the shell's. The
+install sheet says so for each of those grants. Logged in with a signer app, encrypting and decrypting go
+through it (NIP-55 `nip44_encrypt` / `nip44_decrypt`). Decrypting what others encrypted
+to the user (DMs) is not built.
+
 Relay access sits behind one resolver with three lanes: the local relay, mesh relays
 addressed as `ws://<npub>.fips:4870`, and internet relays when reachable (§7.4).
 `relay.query` reads the whole pool — the local relay and the configured relays unless

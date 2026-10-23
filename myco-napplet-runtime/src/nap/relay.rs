@@ -73,12 +73,7 @@ pub async fn handle(
             }
             Vec::new()
         }
-        // Encryption is not wired up yet. Saying so beats a silent drop, which
-        // a napplet would wait on forever.
-        "publishEncrypted" => vec![message
-            .to_result()
-            .with_field("ok", false)
-            .with_field("error", "encrypted publishing is not available yet")],
+        "publishEncrypted" => vec![publish_encrypted(ctx, message).await],
         _ => Vec::new(),
     }
 }
@@ -313,6 +308,61 @@ async fn publish(
         .with_field("eventId", id)
 }
 
+/// `relay.publishEncrypted` — encrypt the template's `content` to the user
+/// (NIP-44), sign and publish it.
+///
+/// The recipient must be the user: this is private storage, not messaging
+/// (see [`crate::nap::encrypted`]). NIP-04 is refused rather than quietly
+/// upgraded, so a napplet asking for it learns it did not get it.
+///
+/// The result carries the event as published. The host reveals it on the way
+/// out, like any delivery, so the napplet reads back what it wrote.
+async fn publish_encrypted(ctx: &NapContext, message: &Envelope) -> Envelope {
+    match message.field("encryption").and_then(|v| v.as_str()) {
+        None | Some("nip44") => {}
+        Some(other) => {
+            return failed(
+                message,
+                format!("encryption `{other}` is not offered; use nip44"),
+            )
+        }
+    }
+    let Ok(user) = ctx.signer.public_key().await else {
+        return failed(message, "there is no user key on this device yet");
+    };
+    let recipient = message.field("recipient").and_then(|v| v.as_str());
+    if recipient != Some(user.to_hex().as_str()) {
+        return failed(
+            message,
+            "encrypted events can only be encrypted to the user for now",
+        );
+    }
+
+    let mut template = match parse_template(message) {
+        Ok(template) => template,
+        Err(e) => return failed(message, e),
+    };
+    template.content = match ctx.signer.nip44_encrypt(&user, &template.content).await {
+        Ok(ciphertext) => ciphertext,
+        Err(e) => return failed(message, format!("could not encrypt: {e}")),
+    };
+    let signed = match sign_parsed(ctx, template).await {
+        Ok(event) => event,
+        Err(e) => return failed(message, e),
+    };
+    if let Err(e) = ctx.sink.accept(signed.clone()).await {
+        return failed(message, format!("could not publish: {e}"));
+    }
+
+    let id = signed.id.to_hex();
+    tracing::info!(kind = %signed.kind.as_u16(), event = %id, "napplet published encrypted");
+    message
+        .to_result()
+        .with_field("ok", true)
+        .with_field("event", event_json(&signed))
+        .with_field("eventId", id)
+}
+
 /// Sign the `event` template on `message` as the user.
 ///
 /// Shared with NAP-MESH and NAP-OUTBOX, whose templates are NAP-RELAY's
@@ -326,6 +376,20 @@ pub(crate) async fn sign_template(
     ctx: &NapContext,
     message: &Envelope,
 ) -> Result<nostr::Event, String> {
+    let template = parse_template(message)?;
+    sign_parsed(ctx, template).await
+}
+
+/// A napplet's event template, read and checked: what it may set, and nothing
+/// it may not.
+pub(crate) struct Template {
+    pub kind: Kind,
+    pub content: String,
+    pub tags: Vec<Tag>,
+}
+
+/// Read the `event` template on `message` under the module's rules.
+pub(crate) fn parse_template(message: &Envelope) -> Result<Template, String> {
     let Some(template) = message.field("event").and_then(|v| v.as_object()) else {
         return Err("publish needs an event template".to_string());
     };
@@ -366,13 +430,30 @@ pub(crate) async fn sign_template(
             }
         }
     }
+    Ok(Template {
+        kind,
+        content,
+        tags,
+    })
+}
 
+/// Sign a checked template as the user, now.
+pub(crate) async fn sign_parsed(
+    ctx: &NapContext,
+    template: Template,
+) -> Result<nostr::Event, String> {
     let Ok(pubkey) = ctx.signer.public_key().await else {
         return Err("there is no user key on this device yet".to_string());
     };
 
     // The runtime owns author and time; the napplet owns the message.
-    let unsigned = UnsignedEvent::new(pubkey, Timestamp::now(), kind, tags, content);
+    let unsigned = UnsignedEvent::new(
+        pubkey,
+        Timestamp::now(),
+        template.kind,
+        template.tags,
+        template.content,
+    );
 
     ctx.signer
         .sign(unsigned)
@@ -1044,21 +1125,160 @@ mod tests {
         }
     }
 
-    /// Encryption is not built yet. A napplet is told so, rather than left
-    /// waiting on a reply that never comes.
+    fn encrypted(user: &nostr::PublicKey, content: &str) -> Envelope {
+        Envelope::new("relay.publishEncrypted")
+            .with_id("f6")
+            .with_field(
+                "event",
+                json!({"kind": 37512, "content": content, "tags": [["d", "outfit"]]}),
+            )
+            .with_field("recipient", user.to_hex())
+            .with_field("encryption", "nip44")
+    }
+
+    /// A private event is stored and carried as NIP-44 ciphertext, and any
+    /// napplet reading it back gets the plaintext — the kind is private, not
+    /// the app.
     #[tokio::test]
-    async fn encrypted_publishing_says_it_is_unavailable() {
-        let (ctx, _signer) = test_context();
-        let out = call(
-            &ctx,
-            Envelope::new("relay.publishEncrypted")
-                .with_id("f6")
-                .with_field("event", json!({"kind": 4, "content": "secret"}))
-                .with_field("recipient", "abc"),
-        )
-        .await;
-        assert_eq!(out[0].field("ok").unwrap(), &json!(false));
-        assert!(out[0].field("error").is_some());
+    async fn an_encrypted_event_is_stored_encrypted_and_read_back_plain() {
+        use crate::nap::encrypted::reveal;
+
+        let (ctx, signer) = test_context();
+        let user = signer.public_key();
+        let out = call(&ctx, encrypted(&user, "tent 1.2kg")).await;
+        assert_eq!(out[0].field("ok").unwrap(), &json!(true), "{out:?}");
+
+        let stored = &ctx
+            .relay
+            .query(&[Filter::new().author(user).kind(Kind::from(37512))])
+            .await
+            .unwrap()[0];
+        assert_ne!(stored.content, "tent 1.2kg");
+
+        let frame = Envelope::new("relay.event")
+            .with_field("subId", "mine")
+            .with_field("result", result_of(stored));
+        let read = reveal(ctx.signer.as_ref(), frame).await;
+        assert_eq!(
+            read.fields["result"]["event"]["content"],
+            json!("tent 1.2kg")
+        );
+
+        // The publish result too, so the writer reads back what it wrote.
+        let result = reveal(ctx.signer.as_ref(), out[0].clone()).await;
+        assert_eq!(result.fields["event"]["content"], json!("tent 1.2kg"));
+    }
+
+    /// Self only, NIP-44 only, and the template rules still apply.
+    #[tokio::test]
+    async fn encrypted_publishing_is_to_the_user_with_nip44() {
+        let (ctx, signer) = test_context();
+        let user = signer.public_key();
+
+        let someone = Keys::generate().public_key();
+        let refused = [
+            encrypted(&someone, "x"),
+            encrypted(&user, "x").with_field("encryption", "nip04"),
+            encrypted(&user, "x").with_field("event", json!({"kind": 3, "content": "x"})),
+        ];
+        for message in refused {
+            let out = call(&ctx, message.clone()).await;
+            assert_eq!(out[0].field("ok").unwrap(), &json!(false), "{message:?}");
+        }
+    }
+
+    /// Any kind the user encrypted to themselves is read in plaintext — NIP-78
+    /// app data and a NIP-51 private list alike. Someone else's event, and
+    /// one whose signature fails, stay ciphertext.
+    #[tokio::test]
+    async fn only_the_users_own_signed_events_are_revealed() {
+        use crate::nap::encrypted::reveal;
+
+        let (ctx, signer) = test_context();
+        let user = signer.public_key();
+        let secret = ctx.signer.nip44_encrypt(&user, "muted").await.unwrap();
+        let own = |kind: u16| {
+            UnsignedEvent::new(user, Timestamp::now(), Kind::from(kind), [], secret.clone())
+        };
+
+        let app_data = ctx.signer.sign(own(30078)).await.unwrap();
+        let mute_list = ctx.signer.sign(own(10000)).await.unwrap();
+        let stranger = Keys::generate();
+        let theirs = EventBuilder::new(Kind::from(37512), secret.clone())
+            .sign_with_keys(&stranger)
+            .unwrap();
+        let mine = ctx.signer.sign(own(37512)).await.unwrap();
+        let mut forged = event_json(&mine);
+        forged["created_at"] = json!(mine.created_at.as_secs() + 1);
+
+        let frame = Envelope::new("relay.query.result").with_field(
+            "events",
+            json!([
+                result_of(&app_data),
+                result_of(&mute_list),
+                result_of(&theirs),
+                {"event": forged},
+            ]),
+        );
+        let out = reveal(ctx.signer.as_ref(), frame).await;
+        let contents: Vec<&serde_json::Value> = out.fields["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| &item["event"]["content"])
+            .collect();
+        assert_eq!(
+            contents,
+            [
+                &json!("muted"),
+                &json!("muted"),
+                &json!(secret),
+                &json!(secret)
+            ]
+        );
+    }
+
+    /// A signer that can't decrypt (a signer app that said no, or isn't
+    /// there) leaves the event as it came: ciphertext, never an empty or
+    /// broken content.
+    #[tokio::test]
+    async fn an_event_the_signer_cannot_decrypt_stays_ciphertext() {
+        use crate::nap::encrypted::reveal;
+
+        struct NoDecrypt(std::sync::Arc<crate::testing::TestSigner>);
+        #[async_trait::async_trait]
+        impl crate::seams::Signer for NoDecrypt {
+            async fn public_key(&self) -> anyhow::Result<nostr::PublicKey> {
+                Ok(self.0.public_key())
+            }
+            async fn sign(&self, unsigned: UnsignedEvent) -> anyhow::Result<nostr::Event> {
+                crate::seams::Signer::sign(self.0.as_ref(), unsigned).await
+            }
+            async fn nip44_decrypt(&self, _: &nostr::PublicKey, _: &str) -> anyhow::Result<String> {
+                anyhow::bail!("rejected")
+            }
+        }
+
+        let (ctx, signer) = test_context();
+        let user = signer.public_key();
+        let secret = ctx.signer.nip44_encrypt(&user, "muted").await.unwrap();
+        let mine = ctx
+            .signer
+            .sign(UnsignedEvent::new(
+                user,
+                Timestamp::now(),
+                Kind::from(30078),
+                [],
+                secret.clone(),
+            ))
+            .await
+            .unwrap();
+        let refusing = NoDecrypt(signer);
+        let frame = Envelope::new("relay.event")
+            .with_field("subId", "mine")
+            .with_field("result", result_of(&mine));
+        let out = reveal(&refusing, frame).await;
+        assert_eq!(out.fields["result"]["event"]["content"], json!(secret));
     }
 
     /// A published event must be *handed on*, not only written. Storing alone

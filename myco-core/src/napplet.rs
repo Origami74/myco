@@ -834,12 +834,15 @@ impl NappletHost {
             other => other,
         };
 
-        let mut replies: Vec<ToShell> = out
-            .envelopes()
-            .iter()
-            .cloned()
-            .map(ToShell::to_napplet)
-            .collect();
+        let mut replies = self
+            .reveal(
+                out.envelopes()
+                    .iter()
+                    .cloned()
+                    .map(ToShell::to_napplet)
+                    .collect(),
+            )
+            .await;
         // A napplet now listening may have a payload waiting for exactly this
         // topic: handed over after the subscribe's result, so the shim has
         // registered the handler by the time it arrives.
@@ -1034,6 +1037,31 @@ impl NappletHost {
             while let Ok(next) = drain.try_recv() {
                 out.push(next);
             }
+        }
+        drop(drain);
+        self.reveal(out).await
+    }
+
+    /// Decrypt, in frames bound for a napplet, the events the user encrypted
+    /// to themselves (NAP-RELAY: napplets receive plaintext content).
+    ///
+    /// Done here, where every frame leaves for a window — call replies and
+    /// pushed deliveries alike — so no path can carry ciphertext the napplet
+    /// should have read, and the runtime's rule
+    /// ([`myco_napplet_runtime::nap::encrypted`]) is applied in one place.
+    async fn reveal(&self, frames: Vec<ToShell>) -> Vec<ToShell> {
+        let mut out = Vec::with_capacity(frames.len());
+        for frame in frames {
+            out.push(match frame {
+                ToShell::Napplet { message } => ToShell::Napplet {
+                    message: myco_napplet_runtime::nap::encrypted::reveal(
+                        self.ctx.signer.as_ref(),
+                        message,
+                    )
+                    .await,
+                },
+                other => other,
+            });
         }
         out
     }
@@ -2400,6 +2428,179 @@ mod tests {
             relays: Vec::new(),
         };
         (NappletHost::new(test_ctx(relay, blobs)), addr)
+    }
+
+    /// A napplet's private data goes out encrypted and comes back plain:
+    /// stored as NIP-44 ciphertext, read in plaintext through the window's
+    /// replies — the publish result and a query alike.
+    #[tokio::test]
+    async fn private_data_is_stored_encrypted_and_read_back_plain() {
+        // Publishes land in the relay the napplet reads, as on a device.
+        let napplet = NappletBuilder::new().build();
+        let relay = Arc::new(MemRelay::new());
+        let blobs = Arc::new(MemBlobs::new());
+        for (_, bytes) in &napplet.blobs {
+            blobs.put(bytes).await.unwrap();
+        }
+        relay.publish(napplet.manifest.clone()).await.unwrap();
+        let addr = NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
+        };
+        let mut ctx = test_ctx(relay.clone(), blobs);
+        ctx.sink = Arc::new(myco_napplet_runtime::seams::StoreOnlySink(relay));
+        let host = NappletHost::new(ctx);
+        let opened = host
+            .open(&addr, Some(vec!["relay".to_string()]))
+            .await
+            .unwrap();
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        let user = host.ctx.signer.public_key().await.unwrap();
+        let ask = |message: serde_json::Value| {
+            serde_json::json!({"channel": "napplet", "message": message}).to_string()
+        };
+        let napplet_message = |replies: Vec<ToShell>, msg_type: &str| {
+            replies
+                .into_iter()
+                .find_map(|r| match r {
+                    ToShell::Napplet { message } if message.msg_type == msg_type => Some(message),
+                    _ => None,
+                })
+                .unwrap()
+        };
+
+        let published = host
+            .frame(
+                &opened.session_id,
+                &ask(serde_json::json!({
+                    "type": "relay.publishEncrypted",
+                    "id": "e",
+                    "event": {"kind": 30078, "content": "tent 1.2kg", "tags": [["d", "gear"]]},
+                    "recipient": user.to_hex(),
+                })),
+            )
+            .await;
+        let result = napplet_message(published, "relay.publishEncrypted.result");
+        assert_eq!(result.fields["ok"], serde_json::json!(true), "{result:?}");
+        assert_eq!(result.fields["event"]["content"], "tent 1.2kg");
+
+        let stored = host
+            .ctx
+            .relay
+            .query(&[nostr::Filter::new()
+                .author(user)
+                .kind(nostr::Kind::from(30078))])
+            .await
+            .unwrap();
+        assert_ne!(stored[0].content, "tent 1.2kg");
+
+        // A subscription's backlog is pushed, and drained through
+        // `next_frames`: the other way out of the host.
+        host.frame(
+            &opened.session_id,
+            &ask(serde_json::json!({
+                "type": "relay.subscribe",
+                "id": "s",
+                "subId": "gear",
+                "filters": [{"kinds": [30078], "authors": [user.to_hex()]}],
+            })),
+        )
+        .await;
+        let mut pushed = Vec::new();
+        while !pushed
+            .iter()
+            .any(|f| matches!(f, ToShell::Napplet { message } if message.msg_type == "relay.eose"))
+        {
+            let more = host
+                .next_frames(&opened.session_id, Duration::from_secs(2))
+                .await;
+            assert!(!more.is_empty(), "the backlog never arrived");
+            pushed.extend(more);
+        }
+        let delivered = napplet_message(pushed, "relay.event");
+        assert_eq!(delivered.fields["result"]["event"]["content"], "tent 1.2kg");
+    }
+
+    /// The rule is not tied to the `relay` grant: a napplet that reads
+    /// events another way, here `outbox` alone, gets the user's private
+    /// events in plaintext too — as the install sheet says.
+    #[tokio::test]
+    async fn private_data_reaches_a_napplet_without_the_relay_grant() {
+        use myco_napplet_runtime::seams::{Direction, PlanSource};
+        let napplet = NappletBuilder::new().requires(&["outbox"]).build();
+        let relay = Arc::new(MemRelay::new());
+        let blobs = Arc::new(MemBlobs::new());
+        for (_, bytes) in &napplet.blobs {
+            blobs.put(bytes).await.unwrap();
+        }
+        relay.publish(napplet.manifest.clone()).await.unwrap();
+        let addr = NappletAddr {
+            author: napplet.author,
+            d_tag: Some("fixture".to_string()),
+            relays: Vec::new(),
+        };
+        let mut ctx = test_ctx(relay, blobs);
+        let outbox = test_outbox();
+        ctx.outbox = outbox.clone();
+        ctx.lanes = outbox.clone();
+
+        // Written by some other app: encrypted to the user, on their relay.
+        let user = ctx.signer.public_key().await.unwrap();
+        let secret = ctx.signer.nip44_encrypt(&user, "tent 1.2kg").await.unwrap();
+        let private = ctx
+            .signer
+            .sign(nostr::UnsignedEvent::new(
+                user,
+                nostr::Timestamp::now(),
+                nostr::Kind::from(30078),
+                [nostr::Tag::identifier("gear")],
+                secret,
+            ))
+            .await
+            .unwrap();
+        let theirs = "wss://mine.example";
+        outbox.set_plan(user, Direction::Read, &[theirs], PlanSource::Nip65);
+        outbox.relay(theirs).publish(private).await.unwrap();
+
+        let host = NappletHost::new(ctx);
+        let opened = host
+            .open(&addr, Some(vec!["outbox".to_string()]))
+            .await
+            .unwrap();
+        host.frame(
+            &opened.session_id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        let replies = host
+            .frame(
+                &opened.session_id,
+                &serde_json::json!({"channel": "napplet", "message": {
+                    "type": "outbox.query",
+                    "id": "q",
+                    "filters": [{"kinds": [30078], "authors": [user.to_hex()]}],
+                }})
+                .to_string(),
+            )
+            .await;
+        let result = replies
+            .into_iter()
+            .find_map(|r| match r {
+                ToShell::Napplet { message } if message.msg_type == "outbox.query.result" => {
+                    Some(message)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            result.fields["events"][0]["event"]["content"], "tent 1.2kg",
+            "{result:?}"
+        );
     }
 
     /// What one window of a napplet was shown, another window of the same

@@ -218,7 +218,7 @@ and `relay.publish` signs with it.
 
 **Built** — `external_signer.rs`, `app.myco.signer`; see
 [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.1. Encryption
-(`nip44_*`) is not carried yet: nothing in Myco asks for it.
+(`nip44_encrypt` / `nip44_decrypt`) is carried for `relay.publishEncrypted`.
 
 **Goal.** The third login option from N1, straight after it. The key lives in
 Amber (NIP-55); it never enters Myco. The runtime's `Signer` gets a second

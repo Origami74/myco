@@ -45,8 +45,11 @@ pub struct SignerRequest {
     /// NIP-55 method: `sign_event`, `nip44_encrypt`, …
     #[serde(rename = "type")]
     pub method: String,
-    /// The method's payload: the unsigned event JSON for `sign_event`.
+    /// The method's payload: the unsigned event JSON for `sign_event`, the
+    /// plaintext or ciphertext for `nip44_encrypt` / `nip44_decrypt`.
     pub payload: String,
+    /// The other party for `nip44_*`, hex; empty for `sign_event`.
+    pub peer: String,
     /// The logged-in user, hex.
     pub current_user: String,
     /// The signer app's package, from login.
@@ -83,6 +86,20 @@ impl SignerBridge {
         package: &str,
         timeout: Duration,
     ) -> anyhow::Result<String> {
+        self.request_with_peer(method, payload, "", current_user, package, timeout)
+            .await
+    }
+
+    /// [`Self::request`] for a method about another party: `peer`, hex.
+    pub async fn request_with_peer(
+        &self,
+        method: &str,
+        payload: String,
+        peer: &str,
+        current_user: &PublicKey,
+        package: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<String> {
         let id = format!("s{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id.clone(), tx);
@@ -90,6 +107,7 @@ impl SignerBridge {
             id: id.clone(),
             method: method.to_string(),
             payload,
+            peer: peer.to_string(),
             current_user: current_user.to_hex(),
             package: package.to_string(),
         });
@@ -161,6 +179,35 @@ pub async fn sign_via(
         .verify()
         .map_err(|e| anyhow::anyhow!("the signer's signature is invalid: {e}"))?;
     Ok(event)
+}
+
+/// NIP-44 encrypt or decrypt through the signer app: `method` is
+/// `nip44_encrypt` or `nip44_decrypt`, `text` the plaintext or ciphertext,
+/// `peer` the other party (the user themselves for private data).
+///
+/// What comes back is not checked the way a signature is: there is nothing
+/// to check it against. A signer that lies here lies only to the user it
+/// holds the key for.
+pub async fn nip44_via(
+    bridge: &SignerBridge,
+    method: &str,
+    peer: &PublicKey,
+    text: &str,
+    pubkey: &PublicKey,
+    package: &str,
+) -> anyhow::Result<String> {
+    let answer = bridge
+        .request_with_peer(
+            method,
+            text.to_string(),
+            &peer.to_hex(),
+            pubkey,
+            package,
+            ANSWER_TIMEOUT,
+        )
+        .await?;
+    anyhow::ensure!(!answer.is_empty(), "the signer sent nothing back");
+    Ok(answer)
 }
 
 #[cfg(test)]
@@ -256,6 +303,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(err, "rejected");
+    }
+
+    /// NIP-44 goes to the signer with the other party beside the text.
+    #[tokio::test]
+    async fn nip44_carries_the_peer() {
+        let keys = Keys::generate();
+        let bridge = Arc::new(SignerBridge::default());
+        let me = keys.public_key().to_hex();
+        answer_with(bridge.clone(), move |req| {
+            assert_eq!(req.method, "nip44_decrypt");
+            assert_eq!(req.peer, me);
+            Ok(format!("plain:{}", req.payload))
+        });
+        let out = nip44_via(
+            &bridge,
+            "nip44_decrypt",
+            &keys.public_key(),
+            "cipher",
+            &keys.public_key(),
+            "p",
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "plain:cipher");
     }
 
     #[tokio::test]
