@@ -1,8 +1,9 @@
 # Myco signed release notifications
 
-The Android app queries `wss://relay.zapstore.dev` for NIP-82 kind 30063
-release announcements for `app.myco`, restricted to the publisher in
-`zapstore.yaml`. Filtering is not authentication: Rust's existing `nostr`
+The Android app looks for NIP-82 kind 30063 release announcements for
+`app.myco`, restricted to the publisher in `zapstore.yaml`, in three places at
+once: its own store, its Circle (one forwarded hop, the ordinary mesh pull),
+and `wss://relay.zapstore.dev` unless mesh-only mode is on. Filtering is not authentication: Rust's existing `nostr`
 implementation verifies both the event ID and BIP-340 signature against the
 pinned publisher key before validating the announcement in Rust. Wrong publishers,
 tampered events, future timestamps, other app IDs, prereleases, non-main
@@ -15,11 +16,23 @@ an APK; Zapstore and Android handle APK hashes and package signatures. Tapping
 the notice opens the fixed official Zapstore listing. No release-provided URL
 is opened and no user identity or private signing key is sent to the relay.
 
-Automatic checks default off in all build types; saved choices are preserved.
-Enabling them contacts `wss://relay.zapstore.dev` daily, including with the UI
-closed. The relay sees the phone's IP address and a Myco release query. Check
-now contacts the same relay even with automatic checks off. A
-unique WorkManager task wakes approximately hourly with network constraints,
+## Asking the Circle
+
+Every check keeps the newest verified announcement in the device's own relay,
+so the device answers its Circle's next check. One phone that reaches Zapstore
+is enough for the room: a mesh-only phone asks its peers, and their peers, and
+gets the same signed event. A peer can withhold a release but cannot forge or
+alter one; the event is verified against the pinned key as if it came from
+Zapstore. The Circle is asked only while the core runs (the mesh service or the
+UI); a background check in a process without one asks only Zapstore.
+
+## Scheduling
+
+Automatic checks default on; saved choices are preserved. Outside mesh-only
+they contact `wss://relay.zapstore.dev` daily, including with the UI closed.
+The relay sees the phone's IP address and a Myco release query. Check now runs
+even with automatic checks off. A unique WorkManager task wakes approximately
+hourly with no network constraint, since the Circle needs none,
 sharing the foreground check's persisted daily success / hourly failure gate
 and one process-wide SoftwareUpdates instance. Concurrent callers join the
 same in-flight check, and the UI observes background progress and results
@@ -28,10 +41,10 @@ Closing the UI and rebooting do not discard scheduled work; force-stopping the
 app prevents background delivery until it is opened again. This is periodic
 release discovery with an Android notification, not instant server push.
 
-Mesh-only mode and disabling automatic checks cancel the worker. The worker
-reads mesh-only directly from `myco_prefs/offline_only` (default false,
-matching the core) and the automatic-check preference before using the network, and a query already in
-flight cannot post a result after those settings change. The UI retains Check
+Disabling automatic checks cancels the worker. Each check reads mesh-only
+directly from `myco_prefs/offline_only` (default false, matching the core) and
+leaves Zapstore out when it is on. A query already in flight cannot post a
+result after automatic checks are turned off. The UI retains Check
 now, a version badge, View update / Later, and one system notification per
 version. Notification denial or a disabled channel leaves the in-app notice
 usable. Enabling notification permission later lets a cached release notify
@@ -57,7 +70,7 @@ Publisher key rotation requires updating the pinned trust anchor deliberately.
 1. Build a separate debug test package using `MYCO_UPDATE_TEST_BUILD=1` and
    `MYCO_VERSION_NAME=0.10.0`. It installs as `app.myco.updatetest` and keeps
    the normal app and its data untouched. Use an ARM64 emulator or spare phone.
-2. Enable notifications and turn on automatic checks in Settings. Check now
+2. Enable notifications; automatic checks are on by default. Check now
    should find the real publisher-signed 0.11.0 announcement (or a later stable
    release), show the banner and badge, and post one notification. Tap it:
    the official Myco Zapstore listing should open.
@@ -71,8 +84,10 @@ Publisher key rotation requires updating the pinned trust anchor deliberately.
    run and reboot, without forcing it, because forcing bypasses OS constraints.
 5. Deny notifications: the banner still works. Grant permission, reopen, and
    confirm one notice. Disable the channel: no crash or repeated alert.
-6. Mesh-only / automatic off: no active periodic worker. Offline: no crash;
-   reconnect and retry. Toggle mesh-only during a query: no new notice.
+6. Automatic off: no active periodic worker. Offline: no crash; reconnect and
+   retry. Mesh-only with a Circle peer that has checked online: Check now finds
+   the release with no internet. Mesh-only with no core running: "Start the
+   mesh to ask your Circle for updates".
 7. A test build at the latest version should report up to date. Rust tests use
    a real public signed 0.11.0 fixture, reject content/key tampering and valid
    attacker signatures. Rust tests cover announcement fields and authentication; Kotlin tests cover
@@ -106,7 +121,8 @@ adb shell am instrument -w -r \
 
 Run while the launcher is visible. This enqueues the real SoftwareUpdateWorker,
 queries the live relay, checks the OS notification, confirms a second successful
-query does not repost it, and verifies mesh-only and automatic-off gates. It
+query does not repost it, and verifies the default-on schedule, the mesh-only
+gate without a core, and the automatic-off gate. It
 resets only this test package's signed-update preferences, not identity or mesh
 data. Its final state leaves automatic checks disabled.
 

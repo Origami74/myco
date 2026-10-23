@@ -1,12 +1,16 @@
-//! Query and authenticate Myco's publisher-signed Zapstore announcements.
-use nostr::{Event, PublicKey};
+//! Find and authenticate Myco's publisher-signed Zapstore announcements, from
+//! the Zapstore relay or from the Circle.
+use crate::content::Content;
+use crate::mesh_wire::{new_query_id, MeshMeta};
+use nostr::{Event, Filter, PublicKey};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PUBLISHER: &str = "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr";
 const RELAY: &str = "wss://relay.zapstore.dev";
 
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub fn verify(json: &str) -> bool {
+#[cfg(test)]
+fn verify(json: &str) -> bool {
     serde_json::from_str::<Event>(json).is_ok_and(|event| authenticated(&event))
 }
 
@@ -93,22 +97,24 @@ fn announcement_tag(event: &Event, now: u64) -> Option<String> {
     Some(version.to_owned())
 }
 
-fn newest(events: impl IntoIterator<Item = Event>, now: u64) -> anyhow::Result<String> {
+/// The newest authenticated stable announcement among `events`.
+fn newest(events: impl IntoIterator<Item = Event>, now: u64) -> Option<(String, Event)> {
     events
         .into_iter()
         .filter(authenticated)
-        .filter_map(|event| announcement_tag(&event, now))
-        .max_by_key(|tag| stable_version(tag).unwrap())
-        .ok_or_else(|| anyhow::anyhow!("No verified Myco release found"))
+        .filter_map(|event| Some((announcement_tag(&event, now)?, event)))
+        .max_by_key(|(tag, _)| stable_version(tag).unwrap())
 }
 
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub async fn fetch() -> anyhow::Result<String> {
+fn release_filter() -> anyhow::Result<serde_json::Value> {
     let publisher = PublicKey::parse(PUBLISHER)?;
-    let filter = serde_json::json!({
+    Ok(serde_json::json!({
         "kinds": [30063], "authors": [publisher.to_hex()],
         "#i": ["app.myco"], "limit": 100,
-    });
+    }))
+}
+
+async fn from_zapstore(filter: serde_json::Value) -> anyhow::Result<Vec<Event>> {
     let events = tokio::time::timeout(
         Duration::from_secs(20),
         crate::ip_source::query_relay(RELAY, filter),
@@ -120,8 +126,62 @@ pub async fn fetch() -> anyhow::Result<String> {
     if events.is_empty() {
         anyhow::bail!("{RELAY} returned no Myco releases");
     }
+    Ok(events)
+}
+
+/// Find the newest signed release this device can reach: the announcements
+/// it keeps, its Circle up to two hops out, and — when `online` — the
+/// Zapstore relay, asked side by side. The winner is kept, so this device
+/// answers its Circle's next check, mesh-only phones included. Every source
+/// is checked against the pinned publisher alike: a peer can withhold a
+/// release, not forge one.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub async fn check(content: Option<Arc<Content>>, online: bool) -> anyhow::Result<String> {
+    let filter = release_filter()?;
+    let nearby = async {
+        let Some(content) = &content else {
+            return Vec::new();
+        };
+        let mut events = match serde_json::from_value::<Filter>(filter.clone()) {
+            Ok(kept) => content.relay().query(&[kept]).await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        let meta = MeshMeta::pull(1, new_query_id(), crate::content::PULL_BUDGET_MS);
+        events.extend(
+            content
+                .pull_from_peers(vec![filter.clone()], meta, None)
+                .await,
+        );
+        events
+    };
+    let zapstore = async {
+        if online {
+            Some(from_zapstore(filter.clone()).await)
+        } else {
+            None
+        }
+    };
+    let (mut events, zapstore) = tokio::join!(nearby, zapstore);
+    let zapstore_error = match zapstore {
+        Some(Ok(found)) => {
+            events.extend(found);
+            None
+        }
+        Some(Err(error)) => Some(error),
+        None => None,
+    };
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    newest(events, now)
+    let Some((tag, event)) = newest(events, now) else {
+        return Err(
+            zapstore_error.unwrap_or_else(|| anyhow::anyhow!("No verified Myco release found"))
+        );
+    };
+    if let Some(content) = &content {
+        if let Err(error) = content.relay().publish(event).await {
+            tracing::debug!(%error, "software release: announcement not kept");
+        }
+    }
+    Ok(tag)
 }
 
 #[cfg(test)]
@@ -242,9 +302,37 @@ mod tests {
             serde_json::from_str(include_str!("software-release-fixture.json")).unwrap();
         let now = real.created_at.as_secs();
         assert_eq!(
-            newest(vec![metadata("99.0.0", "app.myco", "main"), real], now).unwrap(),
+            newest(vec![metadata("99.0.0", "app.myco", "main"), real], now)
+                .unwrap()
+                .0,
             "0.11.0"
         );
-        assert!(newest(vec![metadata("99.0.0", "app.myco", "main")], now).is_err());
+        assert!(newest(vec![metadata("99.0.0", "app.myco", "main")], now).is_none());
+    }
+
+    /// A mesh-only phone learns of a release from its Circle, and keeps it to
+    /// answer its own Circle in turn.
+    #[tokio::test]
+    async fn mesh_only_check_asks_the_circle_and_keeps_the_answer() {
+        use nostr::nips::nip19::ToBech32;
+        let dir = std::env::temp_dir().join(format!("myco-release-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let content = Arc::new(Content::open(&dir).unwrap());
+        let real: Event =
+            serde_json::from_str(include_str!("software-release-fixture.json")).unwrap();
+        let peer_npub = Keys::generate().public_key().to_bech32().unwrap();
+        let url = crate::content::library_kind_tests::mesh_peer_holding(vec![real.clone()]).await;
+        content.add_to_circle(&peer_npub, "peer");
+        content.peer_relays().redirect(&peer_npub, &url);
+
+        assert_eq!(check(Some(content.clone()), false).await.unwrap(), "0.11.0");
+        let kept = content
+            .relay()
+            .query(&[Filter::new().id(real.id)])
+            .await
+            .unwrap();
+        assert_eq!(kept, vec![real]);
+        assert!(check(None, false).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

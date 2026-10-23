@@ -55,7 +55,8 @@ class SoftwareUpdateDeviceTest {
         updates.configureBackground()
         runBlocking { updates.check(offlineOnly = true, force = true) }
         assertEquals(lastAttempt, prefs.getLong("last_attempt", 0))
-        assertEquals("Turn off mesh-only mode to check online", updates.state.value.message)
+        // No core runs in the test process, so mesh-only has no Circle to ask.
+        assertEquals("Start the mesh to ask your Circle for updates", updates.state.value.message)
         mainPrefs.edit().putBoolean("offline_only", false).commit()
         updates.configureBackground()
         updates.setAutomatic(false)
@@ -82,31 +83,33 @@ class SoftwareUpdateDeviceTest {
         assertTrue(notifications.activeNotifications.none { it.id == 4001 })
     }
     @Test
-    fun testOptInDefaultAndAuthoritativeOfflineSetting() {
+    fun testAutomaticByDefaultAndAuthoritativeOfflineSetting() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         check(context.packageName == "app.myco.updatetest")
         val prefs = context.getSharedPreferences("signed_software_updates", Context.MODE_PRIVATE)
         val mainPrefs = context.getSharedPreferences("myco_prefs", Context.MODE_PRIVATE)
+        val manager = WorkManager.getInstance(context)
+        manager.cancelAllWork().result.get(10, TimeUnit.SECONDS)
         prefs.edit().clear().commit()
-        mainPrefs.edit().putBoolean("offline_only", false).commit()
+        mainPrefs.edit().putBoolean("offline_only", true).commit()
         val updates = SoftwareUpdates.getInstance(context)
-        assertFalse(updates.state.value.automatic)
-        runBlocking { updates.check(offlineOnly = false) }
-        assertEquals(0L, prefs.getLong("last_attempt", 0))
+        // With nothing saved, background checks are scheduled, mesh-only included.
+        updates.configureBackground()
+        val work = manager.getWorkInfosForUniqueWork("myco-software-update").get(10, TimeUnit.SECONDS)
+        assertTrue(work.any { it.state == WorkInfo.State.ENQUEUED })
 
         // A stale update-specific copy must never override the main setting.
         prefs.edit().putBoolean("offline_only", false).commit()
-        mainPrefs.edit().putBoolean("offline_only", true).commit()
         assertTrue(softwareUpdatesOfflineOnly(context))
         runBlocking { updates.check(offlineOnly = false, force = true) }
-        assertEquals("Turn off mesh-only mode to check online", updates.state.value.message)
+        assertEquals("Start the mesh to ask your Circle for updates", updates.state.value.message)
         assertEquals(0L, prefs.getLong("last_attempt", 0))
         prefs.edit().putBoolean("offline_only", true).commit()
         mainPrefs.edit().putBoolean("offline_only", false).commit()
         assertFalse(softwareUpdatesOfflineOnly(context))
-        updates.setAutomatic(true)
-        assertTrue(SoftwareUpdates.getInstance(context).state.value.automatic)
         updates.setAutomatic(false)
         updates.configureBackground()
+        assertTrue(manager.getWorkInfosForUniqueWork("myco-software-update").get(10, TimeUnit.SECONDS)
+            .none { it.state == WorkInfo.State.ENQUEUED })
     }
 }

@@ -15,6 +15,7 @@ import androidx.core.app.NotificationManagerCompat
 import app.myco.BuildConfig
 import app.myco.onboarding.SystemAsk
 import app.myco.R
+import app.myco.core.MycoCore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,6 +28,8 @@ private const val DAY_MS = 24 * 60 * 60 * 1000L
 private const val RETRY_MS = 60 * 60 * 1000L
 private const val CHANNEL = "software_updates"
 private const val NOTIFICATION_ID = 4001
+// Checks reveal nothing beyond an IP to Zapstore, and only outside mesh-only.
+private const val AUTOMATIC_DEFAULT = true
 
 data class SoftwareUpdateState(
     val automatic: Boolean,
@@ -51,8 +54,7 @@ class SoftwareUpdates private constructor(context: Context) {
     private val checks = UpdateCheckCoordinator()
     private val mutableState = MutableStateFlow(
         SoftwareUpdateState(
-            // Network checks are opt-in in every build type.
-            automatic = prefs.getBoolean("automatic", false),
+            automatic = prefs.getBoolean("automatic", AUTOMATIC_DEFAULT),
             availableTag = prefs.getString("available_tag", null)?.takeIf {
                 isNewerRelease(BuildConfig.VERSION_NAME, it)
             },
@@ -62,8 +64,7 @@ class SoftwareUpdates private constructor(context: Context) {
     val state = mutableState.asStateFlow()
 
     fun configureBackground() {
-        SoftwareUpdateWorker.schedule(context,
-            prefs.getBoolean("automatic", false) && !softwareUpdatesOfflineOnly(context))
+        SoftwareUpdateWorker.schedule(context, prefs.getBoolean("automatic", AUTOMATIC_DEFAULT))
     }
 
     fun setAutomatic(enabled: Boolean) {
@@ -88,12 +89,7 @@ class SoftwareUpdates private constructor(context: Context) {
 
     suspend fun check(offlineOnly: Boolean, force: Boolean = false) = checks.run(force) {
         try {
-            if (offlineOnly || softwareUpdatesOfflineOnly(context)) {
-                if (force) mutableState.update { it.copy(message = "Turn off mesh-only mode to check online") }
-                return@run
-            }
-            if (!force && (!prefs.getBoolean("automatic", false) ||
-                    softwareUpdatesOfflineOnly(context))) return@run
+            if (!force && !prefs.getBoolean("automatic", AUTOMATIC_DEFAULT)) return@run
             val cached = prefs.getString("available_tag", null)?.takeIf {
                 isNewerRelease(BuildConfig.VERSION_NAME, it)
             }
@@ -102,24 +98,21 @@ class SoftwareUpdates private constructor(context: Context) {
             val now = System.currentTimeMillis()
             val interval = if (prefs.getBoolean("last_success", false)) DAY_MS else RETRY_MS
             if (!force && !updateCheckDue(now, prefs.getLong("last_attempt", 0), interval)) return@run
-            val connectivity = context.getSystemService(ConnectivityManager::class.java)
-            // The mesh VPN may be the default network without itself validating.
-            // A validated underlying internet connection is sufficient for a check.
-            val online = connectivity.allNetworks.any { network ->
-                val capabilities = connectivity.getNetworkCapabilities(network)
-                capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
-                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-            }
-            if (!online) {
-                if (force) mutableState.update { it.copy(message = "Connect to the internet to check for updates") }
+            // Mesh-only never reaches the internet, but the Circle can still answer.
+            val meshOnly = offlineOnly || softwareUpdatesOfflineOnly(context)
+            val online = !meshOnly && hasInternet()
+            val core = MycoCore.existing()?.handle() ?: 0L
+            if (!online && core == 0L) {
+                if (force) mutableState.update { it.copy(message =
+                    if (meshOnly) "Start the mesh to ask your Circle for updates"
+                    else "Connect to the internet to check for updates") }
                 return@run
             }
             mutableState.update { it.copy(checking = true, message = null) }
             prefs.edit().putLong("last_attempt", now).putBoolean("last_success", false).apply()
-            val tag = withContext(Dispatchers.IO) { fetchReleaseTag() }
-            // A setting may have changed while the relay query was in flight.
-            if (softwareUpdatesOfflineOnly(context) ||
-                (!force && !prefs.getBoolean("automatic", false))) return@run
+            val tag = withContext(Dispatchers.IO) { ZapstoreRelease.fetch(core, online) }
+            // The setting may have changed while the query was in flight.
+            if (!force && !prefs.getBoolean("automatic", AUTOMATIC_DEFAULT)) return@run
             val available = tag.takeIf { isNewerRelease(BuildConfig.VERSION_NAME, it) }
             prefs.edit().putString("available_tag", available).putBoolean("last_success", true).apply()
             mutableState.update { it.copy(
@@ -138,7 +131,16 @@ class SoftwareUpdates private constructor(context: Context) {
         }
     }
 
-    private fun fetchReleaseTag(): String = ZapstoreRelease.fetch()
+    // The mesh VPN may be the default network without itself validating.
+    // A validated underlying internet connection is sufficient for a check.
+    private fun hasInternet(): Boolean {
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+        return connectivity.allNetworks.any { network ->
+            val capabilities = connectivity.getNetworkCapabilities(network)
+            capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        }
+    }
 
     private fun notifyOnce(tag: String) {
         if (prefs.getString("notified_tag", null) == tag) return

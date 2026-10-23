@@ -13,7 +13,7 @@ internal object NativeCore {
     }
 
     external fun initializeAndroidContext(context: Context)
-    external fun fetchSoftwareRelease(): String
+    external fun fetchSoftwareRelease(handle: Long, online: Boolean): String
     external fun appNew(dataDir: String, appVersion: String): Long
     external fun appFree(handle: Long)
     external fun stateJson(handle: Long): String

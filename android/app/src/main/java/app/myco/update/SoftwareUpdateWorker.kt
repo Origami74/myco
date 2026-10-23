@@ -1,10 +1,8 @@
 package app.myco.update
 
 import android.content.Context
-import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -27,11 +25,9 @@ class SoftwareUpdateWorker(context: Context, parameters: WorkerParameters) :
                 manager.cancelUniqueWork(NAME)
                 return
             }
-            val request = PeriodicWorkRequestBuilder<SoftwareUpdateWorker>(1, TimeUnit.HOURS)
-                .setConstraints(Constraints.Builder()
-                    .setRequiredNetworkType(NetworkType.CONNECTED).build())
-                .build()
-            manager.enqueueUniquePeriodicWork(NAME, ExistingPeriodicWorkPolicy.KEEP, request)
+            // No network constraint: in mesh-only mode the Circle answers.
+            val request = PeriodicWorkRequestBuilder<SoftwareUpdateWorker>(1, TimeUnit.HOURS).build()
+            manager.enqueueUniquePeriodicWork(NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
         }
     }
 }

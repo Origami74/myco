@@ -14,6 +14,9 @@ object MycoCore {
     @Volatile
     private var client: AppCoreClient? = null
 
+    /** The client if something already started it; never starts one. */
+    fun existing(): AppCoreClient? = client
+
     fun client(context: Context): AppCoreClient {
         client?.let { return it }
         return synchronized(this) {

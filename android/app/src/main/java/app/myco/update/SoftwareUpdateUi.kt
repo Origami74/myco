@@ -70,21 +70,21 @@ fun SoftwareUpdateSettings(updates: SoftwareUpdates, offlineOnly: Boolean) {
         Row(Modifier.fillMaxWidth()) {
             Column(Modifier.weight(1f)) {
                 Text("Automatic update checks")
-                Text("Check signed Zapstore releases daily, including in the background. Requires internet.",
+                Text(if (offlineOnly) "Mesh-only: asks your Circle, never the internet."
+                    else "Checks signed releases on Zapstore and your Circle daily, including in the background.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Switch(checked = state.automatic, onCheckedChange = updates::setAutomatic)
         }
         val message = when {
-            offlineOnly -> "Update checks are paused in mesh-only mode"
             state.checking -> "Checking for updates…"
             state.availableTag != null -> "Myco ${state.availableTag} is available"
             else -> state.message
         }
         message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(enabled = !state.checking && !offlineOnly,
+            TextButton(enabled = !state.checking,
                 onClick = { scope.launch { updates.check(offlineOnly, force = true) } }) { Text("Check now") }
             if (state.availableTag != null) {
                 TextButton(onClick = updates::openRelease) { Text("View update") }

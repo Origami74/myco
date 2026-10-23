@@ -249,13 +249,14 @@ Read on:
 - **Download:** the APK from the
   [latest release](https://github.com/Origami74/myco/releases/latest), or
   through [Zapstore](https://zapstore.dev/apps/app.myco).
-- **Updates:** Automatic checks are **off by default**. Enable them in Settings →
-  Software updates to check publisher-signed stable releases daily, including
-  while the UI is closed. Checks contact `wss://relay.zapstore.dev`, which sees
-  your IP address and a query for Myco releases; no user identity or private
-  signing key is sent. **Check now** makes the same request manually, even with
-  automatic checks off. Mesh-only mode blocks both. **View update** opens the
-  official Zapstore listing; you choose whether to download and install.
+- **Updates:** Myco checks daily for publisher-signed stable releases, including
+  while the UI is closed (turn it off in Settings → Software updates). It asks
+  your Circle and `wss://relay.zapstore.dev`, which sees your IP address and a
+  query for Myco releases; no user identity or private signing key is sent. In
+  mesh-only mode it asks only your Circle. Every phone keeps the newest signed
+  announcement it has seen, so one phone with internet tells the rest. **View
+  update** opens the official Zapstore listing; you choose whether to download
+  and install.
 - **Installing the APK:** Android asks whether your browser (or file app) may
   install apps. Allow it, install Myco, and you can turn it off again.
 - **Needs:** Android 10 or newer, on a 64-bit ARM phone. NFC is optional; QR
