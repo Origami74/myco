@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-23
+
+### Changed
+
+- **Built on current fips.** v0.12.0 was built on a fips from 2026-10-08,
+  about 150 commits behind its `master`. v0.12.1 is the same Myco built on
+  current fips `master` plus the USB transport. For phones that means:
+  - **Multi-path switchover:** a peer's links switch between transports
+    without a new handshake, and traffic moves at once when the active link
+    is gone.
+  - **Path MTU:** a lowered path MTU recovers, links are held to their MTU,
+    and the default UDP MTU is 1357.
+  - **Hardening:** fixes to the spanning tree, the Bloom filter exchange and
+    sessions.
+  - **32-bit builds:** fips now builds for 32-bit Android (`armeabi-v7a`)
+    without a patch.
+- **fips is a `fips-mesh` package.** fips is now published as `fips-mesh`
+  (its library is still `fips`). The workspace dependency names the package,
+  and the Android build's `MYCO_FIPS_REPO_PATH` override reads the name from
+  the checkout.
+
 ## [0.12.0] - 2026-10-23
 
 ### Added

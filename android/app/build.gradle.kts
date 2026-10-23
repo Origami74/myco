@@ -39,7 +39,13 @@ fun localFipsCargoConfigArgs(): List<String> {
     require(fipsRoot.resolve("Cargo.toml").isFile && fipsRoot.resolve("src/lib.rs").isFile) {
         "MYCO_FIPS_REPO_PATH must point at a fips checkout (Cargo.toml + src/lib.rs)"
     }
-    return listOf("--config", "patch.crates-io.fips.path=\"${fipsRoot.absolutePath}\"")
+    // The package name, not the library's: fips is published as `fips-mesh`
+    // (crates.io's `fips` is another crate), while its library stays `fips`.
+    val pkg = fipsRoot.resolve("Cargo.toml").readLines()
+        .firstOrNull { it.trim().startsWith("name") }
+        ?.substringAfter('"')?.substringBefore('"')
+        ?: "fips"
+    return listOf("--config", "patch.crates-io.$pkg.path=\"${fipsRoot.absolutePath}\"")
 }
 
 /**
