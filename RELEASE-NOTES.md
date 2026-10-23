@@ -109,6 +109,15 @@ every phone, all the time. Every phone benefits; a slow or low-memory one most.
   reading it stays blocked.
 - **A refused publish says `ok: false`**, as NAP-RELAY and NAP-OUTBOX require.
 
+## Contributions
+
+Thanks to the people outside the core team who contributed to this release:
+
+- **@shaibearary** — update notices: checking for publisher-signed Zapstore
+  releases, verifying them in Rust against the pinned key, and the in-app
+  notice and notification
+  ([#151](https://github.com/Origami74/myco/pull/151)).
+
 ## Known issues
 
 - **Private data with Amber asks a lot.** Unless Amber is set to "always
