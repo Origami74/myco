@@ -1677,15 +1677,28 @@ mod tests {
         .await
         .unwrap();
 
-        // Collect everything the client link carries back.
+        // Collect everything the client link carries back, until both the OK
+        // and the live echo of the event are in. The OK is sent only after the
+        // store write, so the backend check below never races it. Waiting on a
+        // quiet gap instead let a loaded CI runner stop reading after EOSE and
+        // query the store before the event had landed.
+        let id = msg.id.to_hex();
         let mut seen = Vec::new();
-        for _ in 0..4 {
-            match tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await {
-                Ok(Some(Ok(WsMessage::Text(txt)))) => seen.push(txt.to_string()),
-                _ => break,
-            }
+        let (mut ok, mut echoed) = (false, false);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !(ok && echoed) {
+            let frame = tokio::time::timeout_at(deadline, ws.next())
+                .await
+                .unwrap_or_else(|_| panic!("no OK and echo within 10 s, got: {seen:?}"));
+            let Some(Ok(WsMessage::Text(txt))) = frame else {
+                panic!("the client link closed early, got: {seen:?}");
+            };
+            let txt = txt.to_string();
+            let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
+            ok |= v[0] == "OK" && v[1] == id.as_str();
+            echoed |= v[0] == "EVENT" && v[2]["id"] == id.as_str();
+            seen.push(txt);
         }
-        assert!(!seen.is_empty(), "the client link carried something");
         for frame in &seen {
             assert!(
                 !frame.contains(crate::mesh_wire::MESH)
