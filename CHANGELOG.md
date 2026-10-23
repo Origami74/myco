@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Myco tells you when its publisher signs a newer stable Zapstore release.**
+  It verifies the Nostr announcement against the pinned publisher key and
+  checks daily, including while the UI is closed, with an in-app notice and
+  one Android notification per version when notifications are allowed.
+  Settings has a manual check and an automatic-check switch (on by default).
+  Phones ask their Circle as well as Zapstore and keep the newest signed
+  announcement, so mesh-only phones learn of releases from peers; opening the
+  release page leaves installation to Android. Local builds use the nearest
+  stable Git tag for their version.
+
 - **`napplet.link` links open the right app.** A link like
   `https://napplet.link/profile/open?pubkey=…` (or `napplet:profile/open?…`)
   now opens whichever installed napplet handles that role, and hands it the

@@ -103,13 +103,22 @@ android {
 
     defaultConfig {
         applicationId = "app.myco"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 29                                   // L2CAP CoC requirement
         targetSdk = 36
         // CI overrides these from the release tag (see .github/workflows/release.yml)
         // so each store release gets a unique, increasing versionCode; local
         // builds fall back to the committed defaults.
         versionCode = System.getenv("MYCO_VERSION_CODE")?.toIntOrNull() ?: 1
-        versionName = System.getenv("MYCO_VERSION_NAME") ?: "0.0.1"
+        versionName = System.getenv("MYCO_VERSION_NAME") ?: runCatching {
+            // A local build must not mistake the current release for an update
+            // just because it still carries the original 0.0.1 placeholder.
+            val process = ProcessBuilder("git", "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", "--exclude", "*-*", "--exclude", "*+*")
+                .directory(repoRoot.asFile).redirectErrorStream(true).start()
+            val tag = process.inputStream.bufferedReader().readText().trim()
+            if (process.waitFor() == 0 && Regex("v[0-9]+\\.[0-9]+\\.[0-9]+").matches(tag))
+                tag.removePrefix("v") else "0.0.1"
+        }.getOrDefault("0.0.1")
         ndk { abiFilters += mycoAbis }                // see mycoAbis
         buildConfigField("String", "GIT_REV", "\"${gitRev()}\"")
     }
@@ -126,6 +135,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Opt-in isolated package for notification tests against real releases.
+            if (System.getenv("MYCO_UPDATE_TEST_BUILD") == "1")
+                applicationIdSuffix = ".updatetest"
+        }
         release {
             // R8 drops unused Kotlin/Java code and resources; without it the
             // dex alone was ~43 MB (mostly material-icons-extended). The keep
@@ -172,6 +186,7 @@ composeCompiler {
 }
 
 dependencies {
+    implementation("androidx.work:work-runtime-ktx:2.10.1")
     implementation("androidx.core:core-ktx:1.13.1")
     // System splash (Android 12+ API, backported to minSdk via the library): a
     // black window with the Myco mark while the activity warms up.
@@ -198,6 +213,8 @@ dependencies {
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     // …and an in-app camera scanner to read one back.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("junit:junit:4.13.2")
     testImplementation("junit:junit:4.13.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

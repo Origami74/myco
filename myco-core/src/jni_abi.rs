@@ -843,3 +843,43 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(
         }
     }
 }
+
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_fetchSoftwareRelease(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    online: jboolean,
+) -> jstring {
+    let online = online != 0;
+    // With a running core the check also asks the Circle, on the core's runtime.
+    let context = unsafe { handle_ref(handle) }.and_then(|h| {
+        let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+        guard.gateway_context()
+    });
+    // Without one, keep a runtime alive: the shared relay pool owns background
+    // tasks. One worker is plenty for a daily query and keeps idle threads off
+    // the process.
+    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
+        std::sync::OnceLock::new();
+    let result = match context {
+        Some((content, rt)) => rt.block_on(crate::software_release::check(Some(content), online)),
+        None => match RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(runtime) => runtime.block_on(crate::software_release::check(None, online)),
+            Err(error) => Err(anyhow::anyhow!("Release runtime: {error}")),
+        },
+    };
+    match result {
+        Ok(tag) => jstr(&mut env, tag),
+        Err(error) => {
+            let _ = env.throw_new("java/io/IOException", error.to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
