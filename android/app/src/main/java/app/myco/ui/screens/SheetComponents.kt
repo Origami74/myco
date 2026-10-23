@@ -1,6 +1,8 @@
 package app.myco.ui.screens
 
 import android.graphics.Bitmap
+import android.content.Intent
+import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -20,10 +22,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -37,6 +42,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -151,6 +158,56 @@ internal fun SheetAction(
         Icon(icon, contentDescription = null, tint = tint)
         Spacer(Modifier.size(14.dp))
         Text(label, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/**
+ * A share link as text, for the people who can't scan or tap: the [uri],
+ * cut to one line, with Copy and Share. Both hand over the bare link —
+ * "Paste a link" on the other phone reads exactly that, not a sentence
+ * around it.
+ */
+@Composable
+internal fun ShareLinkRow(uri: String, title: String) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 14.dp, end = 4.dp),
+        ) {
+            Text(
+                uri,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = {
+                clipboard.setText(AnnotatedString(uri))
+                // Android 13+ confirms a copy itself; a toast on top doubles it.
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                    Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
+                }
+            }) {
+                Icon(Icons.Filled.ContentCopy, contentDescription = "Copy link", tint = MaterialTheme.colorScheme.primary)
+            }
+            IconButton(onClick = {
+                val send = Intent(Intent.ACTION_SEND)
+                    .setType("text/plain")
+                    .putExtra(Intent.EXTRA_TEXT, uri)
+                    .putExtra(Intent.EXTRA_SUBJECT, title)
+                context.startActivity(Intent.createChooser(send, "Share $title"))
+            }) {
+                Icon(Icons.Filled.Share, contentDescription = "Share link", tint = MaterialTheme.colorScheme.primary)
+            }
+        }
     }
 }
 

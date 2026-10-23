@@ -1446,6 +1446,10 @@ private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismis
                         style = MaterialTheme.typography.bodySmall,
                         textAlign = TextAlign.Center,
                     )
+                    Spacer(Modifier.height(12.dp))
+                    // The same link as the QR, for sending by message. In Myco
+                    // it opens with "Paste a link" on the Add app sheet.
+                    ShareLinkRow(uri = target.uri, title = target.title)
                 }
             }
             Spacer(Modifier.height(12.dp))
