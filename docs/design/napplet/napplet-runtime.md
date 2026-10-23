@@ -167,6 +167,16 @@ return to Myco. An icon never blocks a load and is not part of the identity.
 
 **Capabilities.** The install sheet lists `R` and `O` domains together, marks the
 optional ones, and warns when a required domain is one this build cannot provide.
+Install and Permissions sheets group the domains as Android groups permissions
+(`PermissionGroups.kt`): Post as you (`relay`, `outbox`), Nearby devices (`mesh`),
+Files & media (`resource`, `local`, `fs`, `upload`), Profile (`identity`), Apps & links
+(`intent`, `inc`, `link`), Notifications (`notify`), and Other for domains this build
+doesn't know; `shell`, `theme` and `config` are Basics, always granted. Each group has
+one switch and its parts behind a tap, and is sorted by level: **acts as you**
+(`relay`, `outbox`, `upload`), **sensitive** (`mesh`, `fs`, `notify`), **standard**
+(the rest, folded into one row at install). A group takes the level of its most
+sensitive part the app gets. What the install switches leave on is what is granted; a
+required domain is labelled and may still be switched off, with a warning.
 
 ### 4.1 Aggregate verification for nsites too
 

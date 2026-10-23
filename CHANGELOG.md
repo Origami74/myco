@@ -101,6 +101,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read 0, and they can be slightly off after a "Clear cache" that races a sync.
 ### Changed
 
+- **Permissions in groups, like Android's.** When you add a napplet, and on
+  its Permissions page, what it may do is grouped (Post as you, Nearby
+  devices, Files & media, Profile, Apps & links), each with an icon and one
+  switch, and the details behind a tap. Groups are sorted by how much they
+  allow: acting as you first, then sensitive ones, then the standard ones
+  most apps need, folded into one row. You can now switch things off before
+  adding an app; one it says it needs is marked, and turning it off warns.
 - **A tidier app menu.** Long-pressing an app shows **Open** next to its
   name, then one row of icons: Share, Permissions (napplets), Home screen and
   Updates, with Remove app below. **Reload app** and the info line that did

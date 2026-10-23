@@ -2040,6 +2040,7 @@ impl AppRuntime {
         // download, which is how "Not on this phone — hold to reload" (and a
         // newer version with the same permissions) lands.
         let keep_grants = reviewed.installed && reviewed.unreviewed.is_empty();
+        let denied = switched_off(&reviewed.grants, &granted);
         let record = Install {
             npub: addr.author.to_bech32().unwrap_or_default(),
             d_tag: addr.d_tag.clone(),
@@ -2049,6 +2050,7 @@ impl AppRuntime {
                 addr.d_tag.as_deref(),
             ),
             granted,
+            denied,
             requires: reviewed.requires.clone(),
             pointer: pointer.to_string(),
             archetypes: reviewed
@@ -3646,6 +3648,9 @@ struct Install {
     title: Option<String>,
     shell_host: String,
     granted: Vec<String>,
+    /// What the review offered and the user switched off: a decision, so a
+    /// later open does not grant it as "reviewed but never decided".
+    denied: Vec<String>,
     requires: Vec<String>,
     pointer: String,
     /// The roles the reviewed manifest declares, for the intent catalog.
@@ -3671,6 +3676,17 @@ impl Install {
             &self.pointer,
             crate::content::now_secs(),
         );
+        if !self.denied.is_empty() {
+            content.set_napplet_grants(
+                &self.npub,
+                self.d_tag.as_deref(),
+                crate::content::NappletGrants {
+                    granted: self.granted.clone(),
+                    denied: self.denied.clone(),
+                    reviewed: self.requires.clone(),
+                },
+            );
+        }
         if let Some(archetypes) = &self.archetypes {
             content.record_napplet_archetypes(
                 &self.npub,
@@ -3679,6 +3695,16 @@ impl Install {
             );
         }
     }
+}
+
+/// What the review sheet offered that the user switched off before adding:
+/// recorded as denied, which is what keeps it off at the next open.
+fn switched_off(offered: &[String], granted: &[String]) -> Vec<String> {
+    offered
+        .iter()
+        .filter(|d| !granted.contains(d))
+        .cloned()
+        .collect()
 }
 
 /// Close the review sheet for `pointer`, if it is still the one open.
@@ -4908,6 +4934,44 @@ mod tests {
             .find(|i| i.kind == LibraryKind::Napplet && i.d_tag.as_deref() == Some("chat"))
             .unwrap();
         assert_eq!(item.granted, vec!["shell".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What is switched off on the install sheet is recorded as denied, not
+    /// left as "reviewed but never decided" — which the next open would
+    /// grant (`open_inner` widens over reviewed domains that are neither
+    /// granted nor denied).
+    #[test]
+    fn what_is_switched_off_at_install_stays_off() {
+        use nostr::nips::nip19::ToBech32;
+
+        let offered: Vec<String> = ["identity", "relay", "mesh"].map(String::from).to_vec();
+        let granted: Vec<String> = ["identity", "mesh"].map(String::from).to_vec();
+        assert_eq!(switched_off(&offered, &granted), vec!["relay".to_string()]);
+        assert!(switched_off(&offered, &offered).is_empty());
+
+        let dir = temp_dir("install-switched-off");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rt = AppRuntime::new(dir.to_str().unwrap(), "0.0.1");
+        let content = rt.content.clone().unwrap();
+        let npub = nostr::Keys::generate().public_key().to_bech32().unwrap();
+        Install {
+            npub: npub.clone(),
+            d_tag: Some("chat".to_string()),
+            title: Some("Chat".to_string()),
+            shell_host: "shell-host".to_string(),
+            granted: granted.clone(),
+            denied: switched_off(&offered, &granted),
+            requires: vec!["mesh".to_string()],
+            pointer: format!("{npub}:chat"),
+            archetypes: None,
+        }
+        .apply(&content);
+
+        let grants = content.napplet_grants(&npub, Some("chat")).unwrap();
+        assert_eq!(grants.granted, granted);
+        assert_eq!(grants.denied, vec!["relay".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

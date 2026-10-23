@@ -721,20 +721,23 @@ private fun PermissionsSheet(
         )
         Spacer(Modifier.height(12.dp))
         val listed = (domains + item.granted.filter { it !in domains }).distinct()
+        val granted = item.granted.toSet()
         // The list scrolls under the title, so the last switches stay
         // reachable on a small screen or a TV.
         Column(Modifier.verticalScroll(rememberScrollState())) {
-            listed.forEach { domain ->
-                val allowed = domain in item.granted
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                ) {
-                    CapabilityRow(domain, dimmed = !allowed, modifier = Modifier.weight(1f))
-                    Spacer(Modifier.size(12.dp))
-                    Switch(checked = allowed, onCheckedChange = { onGrant(domain, it) })
-                }
-            }
+            PermissionGroupList(
+                domains = listed,
+                granted = granted,
+                // The Library doesn't keep what an app declared, so nothing is
+                // marked as needed here; the install sheet showed it.
+                needed = emptySet(),
+                appName = item.title.ifEmpty { item.dTag ?: "This app" },
+                installing = false,
+                onChange = { changed, allow ->
+                    // Only what actually changes: each grant restarts an open window.
+                    changed.filter { (it in granted) != allow }.forEach { onGrant(it, allow) }
+                },
+            )
         }
     }
 }
@@ -916,6 +919,9 @@ internal fun NappletReviewSheet(
     // failure has to be able to come back to this sheet to be seen.
     val installing by rememberUpdatedState(review.installing)
     val answer = reviewAnswer(review)
+    // What the switches say, starting from everything the review offers. A new
+    // review (another app, or the same one fetched again) starts over.
+    var chosen by remember(review.pointer, review.grants) { mutableStateOf(review.grants.toSet()) }
     ModalBottomSheet(
         onDismissRequest = { if (!installing) onDismiss() },
         sheetState = rememberModalBottomSheetState(
@@ -1105,14 +1111,25 @@ internal fun NappletReviewSheet(
                         },
                         style = MaterialTheme.typography.titleSmall,
                     )
-                    Spacer(Modifier.height(10.dp))
-                    review.grants.forEach { domain ->
-                        CapabilityRow(domain, optional = domain in review.optional)
-                        Spacer(Modifier.height(10.dp))
-                    }
+                    Spacer(Modifier.height(4.dp))
+                    PermissionGroupList(
+                        domains = review.grants,
+                        granted = chosen,
+                        needed = (review.requires - review.optional.toSet()).toSet(),
+                        optional = review.optional.toSet(),
+                        appName = review.title.ifEmpty { "This app" },
+                        installing = true,
+                        onChange = { domains, allow ->
+                            chosen = if (allow) chosen + domains else chosen - domains.toSet()
+                        },
+                        // Installed with nothing new to agree to: the core keeps
+                        // the grants it has (keep_grants), so switches here
+                        // would do nothing. Permissions is where to change them.
+                        editable = !(review.installed && review.unreviewed.isEmpty()),
+                    )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "You can change your mind later — press and hold the app.",
+                        "Tap a group for the details. You can change these later — press and hold the app.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1133,7 +1150,8 @@ internal fun NappletReviewSheet(
                 // it has landed.
                 Button(
                     enabled = !review.installing,
-                    onClick = { onInstall(review.grants) },
+                    // What the switches left on; Basics always go along.
+                    onClick = { onInstall(review.grants.filter { it in chosen || it in BASICS }) },
                 ) {
                     if (review.installing) {
                         CircularProgressIndicator(
@@ -1279,9 +1297,9 @@ internal fun nappletLaunchTarget(review: NappletReview, library: List<LibraryIte
  * and dropping it from the list would understate what is being agreed to.
  */
 /** A capability as a person reads it: a name, and what allowing it means. */
-private data class Capability(val title: String, val detail: String)
+internal data class Capability(val title: String, val detail: String)
 
-private fun capabilityWording(domain: String): Capability = when (domain) {
+internal fun capabilityWording(domain: String): Capability = when (domain) {
     "relay" -> Capability("Relays", "Read and post as you on your relays, without asking each time. It can also read the private data your apps keep encrypted there")
     "outbox" -> Capability("Outbox", "Post as you to your relays and to other people's, and read from theirs. It can also read the private data your apps keep encrypted there")
     "mesh" -> Capability("Mesh", "Post as you to phones nearby, and read what they share, without asking each time. It can also read the private data your apps keep encrypted on this phone")
@@ -1299,31 +1317,6 @@ private fun capabilityWording(domain: String): Capability = when (domain) {
     "config" -> Capability("Settings", "Have settings you can change")
     "shell" -> Capability("Start up", "Every app does this")
     else -> Capability(domain, "Something this version of Myco doesn't know about")
-}
-
-/** One capability, as a title with its meaning underneath. */
-@Composable
-private fun CapabilityRow(
-    domain: String,
-    dimmed: Boolean = false,
-    optional: Boolean = false,
-    modifier: Modifier = Modifier,
-) {
-    val c = capabilityWording(domain)
-    Column(modifier = modifier) {
-        Text(
-            // The app declared it can do without this one (NIP-5D `O`).
-            if (optional) "${c.title} (optional)" else c.title,
-            style = MaterialTheme.typography.bodyLarge,
-            fontWeight = FontWeight.SemiBold,
-            color = if (dimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-        )
-        Text(
-            c.detail,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
 }
 
 @Composable
