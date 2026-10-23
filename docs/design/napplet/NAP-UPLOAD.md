@@ -26,15 +26,78 @@ A napplet hands Myco a file. Myco puts it on the user's Blossom servers,
 signed as the user, and answers with the URL and NIP-94 tags. Doodle Duo uses
 it to post its score picture in a note.
 
+A napplet that wants the file only on this phone and its Circle (no
+internet, nothing public) asks for the `blossom-local` rail instead.
+
 API, schemas, wire and error strings: see the spec.
 
 ## Rails
 
-- **Blossom only.** `info` lists one rail, `blossom`, returning `https` URLs.
-- A request naming any other rail (`nip96` included) gets `unsupported rail`.
-  No rail means Blossom.
-- `info` is advisory. It says Blossom is disabled while offline-only is on;
-  nothing requires calling it first.
+Two rails, both Blossom. The spec lets a shell name its own rails.
+
+| Rail | Where | `returns` | `enabled` |
+|---|---|---|---|
+| `blossom` (default) | the user's Blossom servers | `["https"]` | off while offline-only is on |
+| `blossom-local` | this device's own Blossom store | `["blossom"]` | always |
+
+- No rail means `blossom`. Any other (`nip96` included) gets
+  `unsupported rail`.
+- `info` is advisory; nothing requires calling it first.
+- The napplet chooses; Myco never turns one into the other. A `blossom`
+  upload is `complete` only with a URL a server confirmed, which anyone can
+  open. A `blossom:` URL only comes from `blossom-local`, asked for on
+  purpose.
+
+## This device's store
+
+Uploads are kept in this device's Blossom (`NapContext::kept_blobs`, the
+store `resource.keep` writes to). Kept means not cache: nothing evicts it.
+
+- **`blossom-local`:** the file goes there and nowhere else. No signature,
+  no internet; works with offline-only on.
+- **`blossom` that a server took:** a copy is kept too, best effort. A full
+  disk does not undo the upload.
+- **`blossom` that no server could take** (offline-only, no internet, no
+  server, every one refused): `failed`, and a copy is kept anyway, for a
+  retry or a Circle peer. The napplet is not told: it can't share that copy
+  publicly. A napplet that wants it shared on the mesh uploads again with
+  `blossom-local` (the copy already here makes that free).
+- **An upload that never ran keeps nothing:** unsigned for any reason (the
+  signer said no, never answered, or isn't there) or refused because another
+  upload is running. The napplet gets `failed` (`cancelled` for a "no") and
+  can try again.
+
+More:
+
+- It is the file exactly as the napplet sent it, so the hash is the same
+  here and on the servers.
+- Circle peers can fetch it by hash over the mesh, from `:24243`, the
+  paired-only Blossom server. `mesh.blobs` on their side counts this phone
+  among those that hold it. That server answers from the kept store and the
+  cache together.
+- With a custom blob store set in Settings, "this device's Blossom" is that
+  store, and the phone runs no mesh Blossom server. Peers then cannot fetch
+  it from this phone.
+- Kept without a server is always written to the kept store, even when the
+  cache already has the file, so a `blossom:` URL can't be evicted. A full
+  disk fails a `blossom-local` upload with `upload failed`.
+
+### Budget
+
+Keeping a file without a server costs no signature: `blossom-local`, and the
+copy of a `blossom` upload no server could take. So each napplet may keep
+64 MiB (four uploads at the size cap) that way per 24 hours (`LocalUploads`).
+Past that a `blossom-local` upload is `failed` with `quota exceeded` (this
+device's store is the server whose quota it is), and a failed `blossom`
+upload keeps no copy. A file already on this device costs nothing. The count
+is in memory, so restarting Myco starts every napplet's day again; it bounds
+the rate, not the total.
+
+## Metadata
+
+Myco does not strip metadata. The file is kept and sent byte for byte as the
+napplet handed it over. A napplet that uploads photos removes EXIF (GPS,
+camera, time) itself, before calling `upload.upload`.
 
 ## Servers
 
@@ -140,8 +203,12 @@ Per napplet, the spec's three policies are:
 
 ## Offline
 
-- **Offline-only on:** `policy denied`, before anything is signed.
-- **No internet** (the breaker is tripped): `upload failed`.
+- **Offline-only on:** `blossom` is `failed`, `policy denied`, before
+  anything is signed; `info` shows it disabled. `blossom-local` works.
+- **No internet** (the breaker is tripped): `blossom` is `failed`,
+  `upload failed`. `blossom-local` works.
+- Either way a copy of the `blossom` upload is kept (see This device's
+  store).
 - **Bounds:** server list 8 s, uploads 120 s together, mirror 15 s, per server
   5 s to connect and 20 s without progress, plus the signer's own wait (120 s
   for a signer app). The sum stays under the prelude's 5 min wait, checked by
@@ -158,19 +225,46 @@ Per napplet, the spec's three policies are:
   `outbox.publish`): signing may be a person approving in a signer app.
 - `upload.status` answers from the session's last 32 uploads; older or
   unknown ids get a top-level `error`.
-- After a successful upload the file is also kept in this device's own
-  Blossom, so paired phones can fetch it by hash. Best effort.
+
+### `blossom-local`
+
+```json
+{
+  "ok": true,
+  "uploadId": "…",
+  "status": "complete",
+  "rail": "blossom-local",
+  "url": "blossom:sha256:<hex>",
+  "sha256": "<hex>",
+  "size": 1234,
+  "mimeType": "image/png",
+  "nip94": [["url", "blossom:sha256:<hex>"], ["m", "image/png"], ["x", "<hex>"], ["size", "1234"]]
+}
+```
+
+- Plain spec fields. `complete` because this device's store confirmed the
+  bytes.
+- `url` is `blossom:sha256:<hex>`, which NAP-RESOURCE resolves (this device
+  first, then Circle peers). It is not a link anyone on the web can open,
+  and few Nostr clients read `blossom:`, so it is for the mesh, not for a
+  public note.
+- No `fallbackUrls`. `dimensions` as for `blossom`.
+- Past the napplet's budget (see Budget): `failed`, `quota exceeded`.
 
 ## Not built
 
-- NIP-96, and any rail but Blossom.
+- NIP-96, and any rail but the two Blossom ones.
 - Progress (`uploading`, `upload.status.changed`).
 - Blurhash. Dimensions beyond PNG and GIF headers.
-- EXIF or other metadata stripping. Files go up as the napplet sent them.
+- Metadata stripping. That is the napplet's job (see Metadata).
+- Retrying the servers later for a `blossom` upload that failed offline
+  (spec-wise: answering `uploading` and finishing with
+  `upload.status.changed`).
 - A consent prompt showing type, size, target server and napplet, or a
   preview (spec SHOULD). Consent is the install grant.
-- Rate limiting per napplet (spec SHOULD). The size cap bounds one upload
-  and only one runs at a time; nothing bounds how many in a row.
+- Rate limiting per napplet (spec SHOULD) for uploads a server takes. The
+  size cap bounds one upload and only one runs at a time; the signer is the
+  only brake on how many in a row. Keeping without a server has the Budget.
 - `noTransform` and `metadata` are ignored. BUD-02 `PUT /upload` does not
   transform anyway.
 - Cancelling an upload in flight.

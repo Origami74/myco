@@ -2305,6 +2305,7 @@ impl AppRuntime {
                     // fetcher, so the device has one in-flight limit, not two.
                     https: account.https(),
                     https_memory: Arc::default(),
+                    local_uploads: Arc::default(),
                     // NAP-INTENT's catalog: the Library, and the user's
                     // defaults.
                     intents: Arc::new(crate::intent::LibraryIntents::new(

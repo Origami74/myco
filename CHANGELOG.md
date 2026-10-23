@@ -92,6 +92,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read 0, and they can be slightly off after a "Clear cache" that races a sync.
 ### Changed
 
+- **Napplets can keep an upload on this phone, for the mesh.** A second
+  upload rail, `blossom-local`, stores the file in the phone's own Blossom
+  store with no internet and no signature, also with offline-only on. The
+  napplet gets a `blossom:` address that paired phones can fetch. An upload
+  to your Blossom servers that fails offline still fails, but a copy is kept
+  on the phone. Each napplet may keep 64 MiB a day without a server; an
+  upload the signer didn't approve keeps nothing.
 - **Less logging by default.** The Rust core now logs at INFO instead of
   DEBUG, which saves CPU on weak devices and battery on phones. Turn debug
   logs back on with `adb shell setprop debug.myco.log debug` and restart the

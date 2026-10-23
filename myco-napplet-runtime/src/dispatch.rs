@@ -70,6 +70,9 @@ pub struct NapContext {
     /// Where NAP-UPLOAD puts a napplet's bytes: the user's Blossom servers.
     /// See [`UploadSink`].
     pub uploads: Arc<dyn UploadSink>,
+    /// What each napplet kept through uploads no server took. One per
+    /// device, like `https_memory`. See [`nap::upload::LocalUploads`].
+    pub local_uploads: Arc<nap::upload::LocalUploads>,
 }
 
 /// What to do with an inbound message.
