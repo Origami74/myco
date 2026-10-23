@@ -394,9 +394,10 @@ per-device choice; the author's newest is still what spreads).
 
 ### 6.4 UI — the per-app settings window
 
-Today the long-press app sheet's **Info** row is a no-op
+The long-press app sheet had a no-op **Info** row; it is gone, and the sheet
+shows the identifier in its header instead
 ([AppsScreen.kt](../../../android/app/src/main/java/app/myco/ui/screens/AppsScreen.kt)).
-It becomes **"App settings"** — a per-app window that hosts:
+The proposal stands as a new entry: **"App settings"** — a per-app window that hosts:
 
 - the site identity (host / npub) Info used to show,
 - **Check for updates** (manual trigger; shows progress + `updateAvailable`),

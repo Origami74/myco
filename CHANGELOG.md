@@ -101,6 +101,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read 0, and they can be slightly off after a "Clear cache" that races a sync.
 ### Changed
 
+- **A tidier app menu.** Long-pressing an app shows **Open** next to its
+  name, then one row of icons: Share, Permissions (napplets), Home screen and
+  Updates, with Remove app below. **Reload app** and the info line that did
+  nothing are gone. The menu and the Permissions page always open fully, and
+  a long permission list scrolls.
+- **Send an app's share link by message.** The share sheet shows the link its
+  QR holds, with Copy and Share. On the other phone, open it or use **Add app
+  › Paste a link**; you get a pair request from that phone to accept, as with
+  the QR.
 - **Napplets can keep an upload on this phone, for the mesh.** A second
   upload rail, `blossom-local`, stores the file in the phone's own Blossom
   store with no internet and no signature, also with offline-only on. The

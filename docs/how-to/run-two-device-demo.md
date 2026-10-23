@@ -114,7 +114,7 @@ event` on B).
 | Pair request never accepted | A left the Circle tab before B scanned, so the request needs a manual accept | Look for the prompt on A; or re-show the code (it rotates) |
 | Share scanned, ring never fills | No mesh route yet — the link came up after the pull started | Wait for the lane icon, then scan again; the pull retries the holder first |
 | "Couldn't find this app" on a napplet share | Same as above, or the sharer's link dropped mid-fetch | **Try again** on the sheet |
-| App opens but a napplet says a capability was refused | Not granted at install (declared nothing) | Long-press › **Manage permissions** |
+| App opens but a napplet says a capability was refused | Not granted at install (declared nothing) | Long-press › **Permissions** |
 | Everything works until the phones are apart | That's the mesh: live-path only. The app stays, the feed does not | Expected — B is now a holder; a third phone can pull from B |
 | VPN consent dialog again | The app-owned TUN was revoked (another VPN, or the system) | Accept; Settings › Permissions › Mesh connection › Fix re-prompts |
 | "Another VPN is always on" card | Another app is set as the always-on VPN, so Android won't hand Myco the slot | Settings › Network & internet › VPN › that app: turn off Always-on VPN, then Try again |

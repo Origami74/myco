@@ -6,7 +6,9 @@ are kept for the record; the shipped screens moved on:
 - The shell is a bottom-nav with **Apps · Circle · Settings · Dev**;
   mockup 03 predates the Circle tab's bump-to-pair and file sharing.
 - The Apps grid holds **napplets** as well as nsites (🦆 badge), and the
-  long-press sheet (mockup 02) gained **Manage permissions** and **Reload app**.
+  long-press sheet (mockup 02) is now compact: **Open** in its header, then an
+  icon row (Share, Permissions for napplets, Home screen, Updates) and
+  **Remove app**.
 - Settings (04) gained Mesh lanes (Bluetooth, Wi-Fi Aware, Network), **App
   reach**, Storage with custom relay/Blossom, and Identity.
 - The QR flow (06) is now one of two: NFC bump is the headline.
