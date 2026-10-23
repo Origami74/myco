@@ -39,10 +39,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddToHomeScreen
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.HomeMax
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -52,6 +51,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -229,7 +229,12 @@ fun AppsScreen(
     }
 
     sheetFor?.let { site ->
-        ModalBottomSheet(onDismissRequest = { sheetFor = null }) {
+        // Fully expanded, as the install sheet: a half-open sheet left the
+        // last actions below the fold.
+        ModalBottomSheet(
+            onDismissRequest = { sheetFor = null },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
             AppSheet(
                 client = client,
                 site = site,
@@ -291,7 +296,10 @@ fun AppsScreen(
         // Read the live entry, not the snapshot the long-press captured: a
         // switch on this sheet changes the grants, and the sheet shows them.
         val item = state.library.firstOrNull { it.nappletPointer == picked.nappletPointer } ?: picked
-        ModalBottomSheet(onDismissRequest = { nappletSheetFor = null }) {
+        ModalBottomSheet(
+            onDismissRequest = { nappletSheetFor = null },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
             NappletSheet(
                 client = client,
                 item = item,
@@ -328,13 +336,6 @@ fun AppsScreen(
                     client.dispatch(NativeActions.checkNsiteUpdates())
                     android.widget.Toast.makeText(context, "Checking for updates…", android.widget.Toast.LENGTH_SHORT).show()
                 },
-                onReload = {
-                    nappletSheetFor = null
-                    // Same path a fresh add takes: fetch, verify, then the
-                    // review screen — so a reload can also correct what the app
-                    // is allowed to do, and never widens it silently.
-                    client.dispatch(NativeActions.fetchNapplet(item.nappletPointer))
-                },
                 onRemove = {
                     nappletSheetFor = null
                     confirmForgetNapplet = item
@@ -346,7 +347,10 @@ fun AppsScreen(
     permissionsFor?.let { picked ->
         // Live entry, not the snapshot: the switches change what this shows.
         val item = state.library.firstOrNull { it.nappletPointer == picked.nappletPointer } ?: picked
-        ModalBottomSheet(onDismissRequest = { permissionsFor = null }) {
+        ModalBottomSheet(
+            onDismissRequest = { permissionsFor = null },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
             PermissionsSheet(
                 item = item,
                 domains = state.nappletDomains,
@@ -636,7 +640,6 @@ private fun NappletSheet(
     onShare: () -> Unit,
     onPinToHome: () -> Unit,
     onCheckUpdates: () -> Unit,
-    onReload: () -> Unit,
     onRemove: () -> Unit,
 ) {
     var icon by remember(item.nappletPointer) { mutableStateOf<Bitmap?>(null) }
@@ -644,66 +647,51 @@ private fun NappletSheet(
         icon = withContext(Dispatchers.IO) { NappletIcons.fetch(client, item.nappletPointer) }
     }
     Column(modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            val bmp = icon
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(if (bmp == null) tileColorFor(item.nappletPointer) else Color.White),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (bmp != null) {
-                    Image(
-                        remember(bmp) { bmp.asImageBitmap() },
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                } else {
-                    Text(
-                        item.title.take(1).uppercase().ifEmpty { "N" },
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                    )
+        AppSheetHeader(
+            tile = {
+                val bmp = icon
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (bmp == null) tileColorFor(item.nappletPointer) else Color.White),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (bmp != null) {
+                        Image(
+                            remember(bmp) { bmp.asImageBitmap() },
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        Text(
+                            item.title.take(1).uppercase().ifEmpty { "N" },
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
                 }
-            }
-            Spacer(Modifier.size(12.dp))
-            Column {
-                Text(
-                    item.title.ifEmpty { item.dTag ?: item.authorNpub.take(12) },
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    "napplet",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
+            },
+            title = item.title.ifEmpty { item.dTag ?: item.authorNpub.take(12) },
+            subtitle = "napplet · ${item.dTag ?: item.authorNpub.take(16)}",
+            onOpen = onOpen,
+        )
+        Spacer(Modifier.height(20.dp))
+        Row(Modifier.fillMaxWidth()) {
+            SheetIconAction(Icons.Filled.Share, "Share", Modifier.weight(1f)) { onShare() }
+            // What this app may do, on its own sheet: the wording is long and
+            // the switches want room.
+            SheetIconAction(Icons.Filled.Lock, "Permissions", Modifier.weight(1f)) { onManagePermissions() }
+            SheetIconAction(Icons.Filled.AddToHomeScreen, "Home screen", Modifier.weight(1f)) { onPinToHome() }
+            // The same check the nsite sheet offers: every installed app,
+            // napplets included, asked for a newer version.
+            SheetIconAction(Icons.Filled.Refresh, "Updates", Modifier.weight(1f)) { onCheckUpdates() }
         }
-        Spacer(Modifier.height(16.dp))
-        SheetAction(Icons.Filled.HomeMax, "Open") { onOpen() }
-        SheetAction(Icons.Filled.Share, "Share") { onShare() }
-        // What this app may do, on its own page: the wording is long and the
-        // switches want room.
-        SheetAction(Icons.Filled.Lock, "Manage permissions") { onManagePermissions() }
-        SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
-
-        // The same check the nsite sheet offers: every installed app, napplets
-        // included, asked for a newer version; the toast says what came of it.
-        SheetAction(Icons.Filled.Refresh, "Check for updates") { onCheckUpdates() }
-        // Fetches the app again and shows the same screen it was added with.
-        // The way to revisit what it is allowed to do without removing it and
-        // finding its link again — or to force a re-fetch when a check found
-        // nothing but the app still misbehaves.
-        SheetAction(Icons.Filled.Refresh, "Reload app") { onReload() }
-        Spacer(Modifier.height(8.dp))
-
+        HorizontalDivider(Modifier.padding(top = 16.dp, bottom = 4.dp))
         SheetAction(Icons.Filled.Delete, "Remove app", tint = MaterialTheme.colorScheme.error) {
             onRemove()
         }
-        SheetAction(Icons.Filled.Info, item.dTag ?: item.authorNpub.take(16)) { }
     }
 }
 
@@ -733,15 +721,19 @@ private fun PermissionsSheet(
         )
         Spacer(Modifier.height(12.dp))
         val listed = (domains + item.granted.filter { it !in domains }).distinct()
-        listed.forEach { domain ->
-            val allowed = domain in item.granted
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-            ) {
-                CapabilityRow(domain, dimmed = !allowed, modifier = Modifier.weight(1f))
-                Spacer(Modifier.size(12.dp))
-                Switch(checked = allowed, onCheckedChange = { onGrant(domain, it) })
+        // The list scrolls under the title, so the last switches stay
+        // reachable on a small screen or a TV.
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            listed.forEach { domain ->
+                val allowed = domain in item.granted
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                ) {
+                    CapabilityRow(domain, dimmed = !allowed, modifier = Modifier.weight(1f))
+                    Spacer(Modifier.size(12.dp))
+                    Switch(checked = allowed, onCheckedChange = { onGrant(domain, it) })
+                }
             }
         }
     }
@@ -1359,42 +1351,41 @@ private fun AppSheet(
     onPinToHome: () -> Unit,
     onRemove: () -> Unit,
 ) {
+    val updating = site.updateTotal > 0L && !site.updateAvailable
     Column(modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(tileColorFor(site.host)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(initialOf(site), color = androidx.compose.ui.graphics.Color.White, fontWeight = FontWeight.Bold)
-            }
-            Spacer(Modifier.size(12.dp))
-            Column {
-                Text(site.title.ifEmpty { site.host.take(12) }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                val updating = site.updateTotal > 0L && !site.updateAvailable
-                Text(
-                    if (updating) "Updating… ${site.updatePulled}/${site.updateTotal}"
-                    else "nsite · ${site.filesTotal} files · ${site.state}",
-                    color = if (updating) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
-        Spacer(Modifier.height(16.dp))
-        SheetAction(Icons.Filled.HomeMax, "Open") { onOpen() }
-        SheetAction(Icons.Filled.Share, "Share") { onShare() }
-        if (site.state == "ready") {
-            SheetAction(Icons.Filled.Add, "Add to Home screen") { onPinToHome() }
-        }
+        AppSheetHeader(
+            tile = {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(tileColorFor(site.host)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(initialOf(site), color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            title = site.title.ifEmpty { site.host.take(12) },
+            subtitle = if (updating) "Updating… ${site.updatePulled}/${site.updateTotal}"
+            else "nsite · ${site.filesTotal} files · ${site.state}",
+            subtitleColor = if (updating) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            onOpen = onOpen,
+        )
+        Spacer(Modifier.height(20.dp))
         val ctx = androidx.compose.ui.platform.LocalContext.current
-        SheetAction(Icons.Filled.Refresh, "Check for updates") {
-            client.dispatch(NativeActions.checkNsiteUpdates())
-            android.widget.Toast.makeText(ctx, "Checking for updates…", android.widget.Toast.LENGTH_SHORT).show()
+        Row(Modifier.fillMaxWidth()) {
+            SheetIconAction(Icons.Filled.Share, "Share", Modifier.weight(1f)) { onShare() }
+            if (site.state == "ready") {
+                SheetIconAction(Icons.Filled.AddToHomeScreen, "Home screen", Modifier.weight(1f)) { onPinToHome() }
+            }
+            SheetIconAction(Icons.Filled.Refresh, "Updates", Modifier.weight(1f)) {
+                client.dispatch(NativeActions.checkNsiteUpdates())
+                android.widget.Toast.makeText(ctx, "Checking for updates…", android.widget.Toast.LENGTH_SHORT).show()
+            }
         }
+        HorizontalDivider(Modifier.padding(top = 16.dp, bottom = 4.dp))
         SheetAction(Icons.Filled.Delete, "Remove app", tint = MaterialTheme.colorScheme.error) { onRemove() }
-        SheetAction(Icons.Filled.Info, site.host) { }
     }
 }
 
@@ -1455,6 +1446,10 @@ private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismis
                         style = MaterialTheme.typography.bodySmall,
                         textAlign = TextAlign.Center,
                     )
+                    Spacer(Modifier.height(12.dp))
+                    // The same link as the QR, for sending by message. In Myco
+                    // it opens with "Paste a link" on the Add app sheet.
+                    ShareLinkRow(uri = target.uri, title = target.title)
                 }
             }
             Spacer(Modifier.height(12.dp))
