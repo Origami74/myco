@@ -63,6 +63,38 @@ start with this version: a phone on v0.11.x isn't told about v0.12.0.
   and everything works with a remote: focus rings, Menu (or hold OK) for an
   app's menu. 32-bit TV boxes are supported with `-Pmyco.abis=armeabi-v7a`.
 
+## Faster on slow devices
+
+Getting Myco to run well on a cheap Android TV box turned up work it did on
+every phone, all the time. Every phone benefits; a slow or low-memory one most.
+
+- **No more redrawing every screen once a second.** While any phone was
+  linked, the once-a-second refresh changed peer timings, signal strength and
+  storage counters, and every visible screen and app tile redrew with them.
+  On a slow TV box with an accessibility service on, that was a stall of
+  several seconds. Now only the screens that show those numbers update: the
+  Dev tab, the mesh status panel, and Settings › Storage and › Internet.
+  Low-memory devices refresh every two seconds instead of every second.
+- **The "no peers" dot repaints only itself.** Its pulse rebuilt the whole
+  screen header 60 times a second while you had no peers. On low-memory
+  phones and on TVs it no longer pulses; it stays solid red.
+- **No stalls while a sync stores files.** The Storage figures were recounted
+  by listing every stored file each time a new one arrived, about once a
+  second during a sync, while the rest of the app waited. They are now
+  counted once and kept up to date.
+- **The Apps tab stops redrawing after a search.** The search box kept focus
+  after the keyboard closed, and its blinking cursor redrew the tab twice a
+  second for as long as it stayed open.
+- **Less logging.** The core logs at INFO instead of DEBUG, which saves CPU
+  and battery. `adb shell setprop debug.myco.log debug` and a restart turn
+  debug logs back on.
+- **Apps pause when you can't see them, on TV.** A TV has nothing that sends
+  a backgrounded app to sleep, so napplet and nsite windows pause while off
+  screen there.
+- **Room for 32-bit TV boxes.** On 32-bit builds the local databases map
+  256 MiB and the cache defaults are smaller, to fit the address space and a
+  TV's flash.
+
 ## Also
 
 - **A napplet already on this phone installs offline.** Myco looks in its own
@@ -76,10 +108,6 @@ start with this version: a phone on v0.11.x isn't told about v0.12.0.
 - **A napplet's Copy button copies.** Writing the clipboard on a tap works;
   reading it stays blocked.
 - **A refused publish says `ok: false`**, as NAP-RELAY and NAP-OUTBOX require.
-- **Smoother on slow devices.** No more redrawing every screen once a second
-  while a phone is linked, no blinking search cursor redrawing the Apps tab,
-  and no stalls while a sync stores files. Less logging by default
-  (`adb shell setprop debug.myco.log debug` turns it back on).
 
 ## Known issues
 
