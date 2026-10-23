@@ -2,31 +2,39 @@ package app.myco.update
 
 import kotlinx.coroutines.CompletableDeferred
 
-/** Concurrent callers await the same check; only its owner performs network work. */
+/**
+ * Concurrent callers await the same check; only its owner performs network work.
+ * A forced caller does not settle for an unforced run, which may skip the query.
+ */
 internal class UpdateCheckCoordinator {
-    private val lock = Any()
-    private var active: CompletableDeferred<Unit>? = null
+    private class Active(val force: Boolean) {
+        val completion = CompletableDeferred<Unit>()
+    }
 
-    suspend fun run(check: suspend () -> Unit) {
-        val (completion, owner) = synchronized(lock) {
-            active?.let { it to false } ?: CompletableDeferred<Unit>().let {
-                active = it
-                it to true
+    private val lock = Any()
+    private var active: Active? = null
+
+    suspend fun run(force: Boolean = false, check: suspend () -> Unit) {
+        val mine = Active(force)
+        while (true) {
+            val running = synchronized(lock) { active ?: mine.also { active = it } }
+            if (running === mine) break
+            if (running.force || !force) {
+                running.completion.await()
+                return
             }
-        }
-        if (!owner) {
-            completion.await()
-            return
+            // Let the unforced run finish, whatever its outcome, then run ours.
+            running.completion.join()
         }
         try {
             check()
-            completion.complete(Unit)
+            mine.completion.complete(Unit)
         } catch (error: Throwable) {
-            completion.completeExceptionally(error)
+            mine.completion.completeExceptionally(error)
             throw error
         } finally {
             synchronized(lock) {
-                if (active === completion) active = null
+                if (active === mine) active = null
             }
         }
     }

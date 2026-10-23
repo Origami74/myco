@@ -86,7 +86,7 @@ class SoftwareUpdates private constructor(context: Context) {
         }
     }
 
-    suspend fun check(offlineOnly: Boolean, force: Boolean = false) = checks.run {
+    suspend fun check(offlineOnly: Boolean, force: Boolean = false) = checks.run(force) {
         try {
             if (offlineOnly || softwareUpdatesOfflineOnly(context)) {
                 if (force) mutableState.update { it.copy(message = "Turn off mesh-only mode to check online") }

@@ -32,6 +32,40 @@ class UpdateCheckCoordinatorTest {
         assertEquals(2, calls)
     }
 
+    @Test fun forcedCallerRunsAgainAfterUnforcedCheck() = runBlocking {
+        val checks = UpdateCheckCoordinator()
+        val release = CompletableDeferred<Unit>()
+        val runs = mutableListOf<String>()
+        val background = launch(start = CoroutineStart.UNDISPATCHED) {
+            checks.run { release.await(); runs += "background" }
+        }
+        val manual = launch(start = CoroutineStart.UNDISPATCHED) {
+            checks.run(force = true) { runs += "manual" }
+        }
+        val other = launch(start = CoroutineStart.UNDISPATCHED) {
+            checks.run { runs += "other" }
+        }
+        release.complete(Unit)
+        listOf(background, manual, other).forEach { it.join() }
+        assertEquals(listOf("background", "manual"), runs)
+    }
+
+    @Test fun forcedCallerJoinsForcedCheck() = runBlocking {
+        val checks = UpdateCheckCoordinator()
+        val release = CompletableDeferred<Unit>()
+        var calls = 0
+        val first = launch(start = CoroutineStart.UNDISPATCHED) {
+            checks.run(force = true) { calls++; release.await() }
+        }
+        val second = launch(start = CoroutineStart.UNDISPATCHED) {
+            checks.run(force = true) { calls++ }
+        }
+        release.complete(Unit)
+        first.join()
+        second.join()
+        assertEquals(1, calls)
+    }
+
     @Test fun cancellingWaiterDoesNotCancelBackgroundCheck() = runBlocking {
         val checks = UpdateCheckCoordinator()
         val release = CompletableDeferred<Unit>()

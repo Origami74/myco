@@ -115,6 +115,11 @@ pub async fn fetch() -> anyhow::Result<String> {
     )
     .await
     .map_err(|_| anyhow::anyhow!("Release query timed out"))??;
+    // A relay that refuses the REQ (CLOSED: rate limit, restart) answers with
+    // nothing; say so rather than blaming the events.
+    if events.is_empty() {
+        anyhow::bail!("{RELAY} returned no Myco releases");
+    }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     newest(events, now)
 }
