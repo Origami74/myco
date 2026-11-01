@@ -250,6 +250,15 @@ private fun HotspotOn(
             view.url.orEmpty().removePrefix("http://"),
             onClick = { copy("Link", view.url.orEmpty()) },
         )
+        // A phone on a Wi-Fi without internet often keeps sending traffic over
+        // mobile data, where this address goes nowhere.
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Page doesn't load? Turn off mobile data on the other phone.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            textAlign = TextAlign.Center,
+        )
     } else {
         QrCodeCard(
             wifiQr,
