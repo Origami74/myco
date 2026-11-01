@@ -124,9 +124,8 @@ a release over itself). Install:
 The release key's hash is pinned once, in the core
 (`release_apk::RELEASE_CERT_SHA256`); Android reads it from there.
 
-This needs `REQUEST_INSTALL_PACKAGES`. GitHub Releases has no rule against
-it. Whether Zapstore allows it has not been checked yet; that has to be
-settled before a release ships with this.
+This needs `REQUEST_INSTALL_PACKAGES`. Myco ships through GitHub Releases
+and Zapstore, and neither restricts it.
 
 ### Scheduling the carry
 
