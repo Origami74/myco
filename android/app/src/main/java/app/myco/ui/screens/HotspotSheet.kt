@@ -60,7 +60,9 @@ import app.myco.share.NsiteShare
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 
 /**
- * The file-share hotspot sheet, opened from the Circle tab's hotspot bubble.
+ * The file-share hotspot sheet, opened from the Circle tab's hotspot bubble —
+ * or from Share Myco on the Apps tab ([forMyco]), which is the same hotspot
+ * and page, worded for handing over the app (the page's Get Myco card).
  *
  * Off: explains and offers to start. On: the two steps a guest walks —
  * (1) a `WIFI:` QR that joins this phone's hotspot, (2) the file page's
@@ -75,8 +77,9 @@ fun HotspotSheet(
     shared: List<SharedFiles.Entry>,
     onStart: () -> Unit,
     onStop: () -> Unit,
-    onShareFiles: () -> Unit,
+    onShareFiles: (() -> Unit)?,
     onDismiss: () -> Unit,
+    forMyco: Boolean = false,
 ) {
     // Skip the half-height resting state: the two steps plus the file lists are
     // taller than a partially-expanded sheet, so at the default height step 2
@@ -100,7 +103,7 @@ fun HotspotSheet(
                     tint = MaterialTheme.colorScheme.primary,
                 )
                 Spacer(Modifier.width(8.dp))
-                Text("Share files over hotspot", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(if (forMyco) "Share Myco over hotspot" else "Share files over hotspot", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.height(14.dp))
 
@@ -116,9 +119,15 @@ fun HotspotSheet(
                         Spacer(Modifier.height(12.dp))
                     }
                     Text(
-                        "Opens a Wi-Fi hotspot on this phone and a web page on it. " +
-                            "Anyone who joins — no Myco needed — can download the files " +
-                            "you share and send you files back.",
+                        if (forMyco) {
+                            "Opens a Wi-Fi hotspot on this phone and a web page on it. " +
+                                "The other phone joins, opens the page and downloads " +
+                                "Myco — no internet needed."
+                        } else {
+                            "Opens a Wi-Fi hotspot on this phone and a web page on it. " +
+                                "Anyone who joins — no Myco needed — can download the files " +
+                                "you share, send you files back, or get Myco itself."
+                        },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodyMedium,
                         textAlign = TextAlign.Center,
@@ -135,7 +144,7 @@ fun HotspotSheet(
                     Text("Starting the hotspot…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
 
-                HotspotPhase.ON -> HotspotOn(view, shared, onStop, onShareFiles)
+                HotspotPhase.ON -> HotspotOn(view, shared, onStop, onShareFiles, forMyco)
             }
         }
     }
@@ -147,7 +156,8 @@ private fun HotspotOn(
     view: HotspotView,
     shared: List<SharedFiles.Entry>,
     onStop: () -> Unit,
-    onShareFiles: () -> Unit,
+    onShareFiles: (() -> Unit)?,
+    forMyco: Boolean,
 ) {
     val ssid = view.ssid.orEmpty()
     val pass = view.passphrase.orEmpty()
@@ -197,7 +207,7 @@ private fun HotspotOn(
             enabled = urlQr != null,
             shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
         ) {
-            Text("2 · Share files", style = MaterialTheme.typography.labelLarge)
+            Text(if (forMyco) "2 · Get Myco" else "2 · Share files", style = MaterialTheme.typography.labelLarge)
         }
     }
     Spacer(Modifier.height(12.dp))
@@ -263,12 +273,14 @@ private fun HotspotOn(
     TransferSummary(offers, shared)
     Spacer(Modifier.height(10.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        OutlinedButton(onClick = onShareFiles) {
-            Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(6.dp))
-            // Not "Share files" — that is what step 2 is called now, and this
-            // button does the narrower thing of picking what to offer.
-            Text("Add files")
+        if (onShareFiles != null) {
+            OutlinedButton(onClick = onShareFiles) {
+                Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                // Not "Share files" — that is what step 2 is called now, and this
+                // button does the narrower thing of picking what to offer.
+                Text("Add files")
+            }
         }
         TextButton(onClick = onStop) {
             Text("Stop hotspot", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)

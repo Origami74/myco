@@ -1,6 +1,7 @@
 package app.myco.hotspot
 
 import android.util.Log
+import app.myco.share.MycoApk
 import fi.iki.elonen.NanoHTTPD
 import java.io.FileInputStream
 import java.io.InputStream
@@ -23,10 +24,16 @@ import org.json.JSONObject
  * part headers as ASCII) — a multipart POST form stays as the no-JS fallback.
  * The script also polls `/offers` for files the phone is pushing ([Outbox])
  * and pops an accept/decline dialog per offer, AirDrop-style.
+ *
+ * On top of the page sits **Get Myco**: Myco's own APK ([apk], null for a
+ * split install), so a guest without Myco installs it from here with no
+ * internet. It is served without asking the owner — it is the app itself,
+ * nothing of theirs.
  */
 class FileShareServer(
     private val files: SharedFiles,
     private val outbox: Outbox,
+    private val apk: MycoApk.Info?,
     port: Int,
 ) : NanoHTTPD(port) {
 
@@ -46,6 +53,7 @@ class FileShareServer(
             session.method == Method.POST && session.uri.startsWith(FILE_PREFIX) &&
                 session.uri.endsWith(REQUEST_SUFFIX) ->
                 requestDownload(session.uri.removePrefix(FILE_PREFIX).removeSuffix(REQUEST_SUFFIX))
+            session.method == Method.GET && session.uri == APK_PATH -> sendApk()
             session.method == Method.GET && session.uri.startsWith(FILE_PREFIX) ->
                 download(session.uri.removePrefix(FILE_PREFIX), session)
             session.method == Method.PUT && session.uri.startsWith(UPLOAD_PREFIX) ->
@@ -126,6 +134,15 @@ class FileShareServer(
         )
     }
 
+    /** Myco's own APK, streamed from where it is installed. */
+    private fun sendApk(): Response {
+        val apk = apk ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "gone\n")
+        Log.i(TAG, "guest is downloading ${apk.name}")
+        val resp = newFixedLengthResponse(Response.Status.OK, MycoApk.MIME, FileInputStream(apk.file), apk.size)
+        attachAs(resp, apk.name)
+        return resp
+    }
+
     /** The primary upload path: one raw body per file, its name in the URL. */
     private fun uploadPut(session: IHTTPSession): Response {
         val name = URLDecoder.decode(session.uri.removePrefix(UPLOAD_PREFIX), "UTF-8")
@@ -191,6 +208,25 @@ class FileShareServer(
             "<ul class=\"files\">\n$rows\n</ul>"
         }
         val note = banner?.let { "<p class=\"banner\">${esc(it)}</p>" } ?: ""
+        // Plain link, no approval round-trip: see the class doc.
+        val getMyco = apk?.let { a ->
+            val sha = MycoApk.cachedSha256(a)?.let {
+                "<p class=\"sha\">SHA-256 <code>${esc(it)}</code><br>Matches the checksum on the release page.</p>"
+            } ?: ""
+            """
+            <div class="card">
+              <h2>Get Myco</h2>
+              <p class="muted">The app this phone is using. Android 10 or newer, 64-bit.</p>
+              <div class="actions">
+                <a class="btn btn-primary" href="$APK_PATH">Download Myco ${esc(a.version)}</a>
+                <span class="fsize">${human(a.size)}</span>
+              </div>
+              <p class="muted small">Android asks whether your browser may install apps.
+                Allow it, install Myco, then you can turn it off again.</p>
+              $sha
+            </div>
+            """.trimIndent()
+        } ?: ""
         // Styled to match the app's AMOLED theme (ui/theme/Theme.kt): black
         // ground, white text, emerald 34D399 accent with black on-accent,
         // 3F3F46 outlines, FF6B6B error — and the hotspot sheet's shapes
@@ -244,6 +280,13 @@ class FileShareServer(
               .dialog h2 { margin: 0 0 .5rem; font-size: 1.05rem; }
               .dialog p { margin: 0; }
               .dialog .actions { justify-content: flex-end; margin-top: 1rem; }
+              .card { border: 1px solid var(--outline); border-radius: 1rem; padding: 1rem 1.1rem;
+                      margin: 1rem 0 0; background: var(--surface); }
+              .card h2 { margin: 0 0 .2rem; font-size: 1.1rem; }
+              .card p { margin: .2rem 0; }
+              .card a.btn { text-decoration: none; display: inline-block; }
+              .small { font-size: .8rem; margin-top: .8rem !important; }
+              .sha { color: var(--muted); font-size: .72rem; word-break: break-all; margin-top: .6rem !important; }
             </style>
             <header>
               <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" aria-hidden="true">
@@ -255,6 +298,7 @@ class FileShareServer(
             </header>
             <p class="hint">Every transfer waits for an OK on the phone — give it a moment.</p>
             $note
+            $getMyco
             <div class="label">Download from the phone</div>
             $listing
             <div class="label">Send files to the phone</div>
@@ -477,6 +521,7 @@ class FileShareServer(
         private const val UPLOAD_PREFIX = "/upload/"
         private const val OFFER_PREFIX = "/offer/"
         private const val REQUEST_SUFFIX = "/request"
+        private const val APK_PATH = "/myco.apk"
 
         /** How long an approved-download token stays spendable. Generous — it
          *  only bridges the page's redirect after the owner already said yes. */

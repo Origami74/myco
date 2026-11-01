@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Share Myco.** A **Share Myco** bubble on the Apps tab gives the app itself
+  to a phone that doesn't have it. **Over a hotspot** needs no internet: the
+  other phone joins this phone's Wi-Fi, opens the page and downloads Myco
+  (the page shows the APK's SHA-256). **Send the app file** hands the APK to
+  the Android share menu (Quick Share, Bluetooth, a messenger). The file-share
+  hotspot page from the Circle tab offers Myco too.
+
 ## [0.12.1] - 2026-10-23
 
 ### Changed

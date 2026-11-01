@@ -39,9 +39,10 @@ All of this is tested with every phone in airplane mode and Bluetooth on
 What Myco does not do yet:
 
 - It is **Android only** (Android 10 or newer, 64-bit ARM phones).
-- **Myco itself** comes from a download, not from another phone. See
-  [Get Myco](#get-myco). Sharing Myco from inside Myco is on the
-  [roadmap](docs/roadmap.md#n11--share-myco-itself).
+- **Updates to Myco** come from a download, not from another phone.
+  **Share Myco** hands the app to a phone without it, but a phone with Myco
+  doesn't yet update from a newer one nearby
+  ([roadmap](docs/roadmap.md#n11--share-myco-itself)).
 - Phones find each other **only while Myco is open on screen**. A phone in a
   pocket finds nobody.
 - **Mesh over the internet** is opt-in (Settings › Mesh › Internet) and not
@@ -256,6 +257,10 @@ Read on:
 - **Download:** the APK from the
   [latest release](https://github.com/Origami74/myco/releases/latest), or
   through [Zapstore](https://zapstore.dev/apps/app.myco).
+- **From a phone nearby:** someone who has Myco taps **Share Myco** on the
+  Apps tab. **Over a hotspot** works with no internet: join their Wi-Fi, open
+  the page they show you and tap **Download Myco**. **Send the app file**
+  sends the APK through Quick Share, Bluetooth or a messenger.
 - **Updates:** Myco checks daily for publisher-signed stable releases, including
   while the UI is closed (turn it off in Settings → Software updates). It asks
   your Circle and `wss://relay.zapstore.dev`, which sees your IP address and a
@@ -268,10 +273,6 @@ Read on:
   install apps. Allow it, install Myco, and you can turn it off again.
 - **Needs:** Android 10 or newer, on a 64-bit ARM phone. NFC is optional; QR
   works everywhere.
-
-Myco cannot pass itself on from phone to phone yet
-([on the roadmap](docs/roadmap.md#n11--share-myco-itself)). Each person needs the APK
-before they can receive apps.
 
 ## Status
 

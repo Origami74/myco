@@ -108,6 +108,11 @@ import app.myco.nfc.NfcReader
 import app.myco.nfc.PairPresent
 import app.myco.share.NsiteShare
 import app.myco.ui.ScreenHeader
+import app.myco.LocalSystemAsker
+import app.myco.hotspot.HotspotService
+import app.myco.hotspot.SharedFiles
+import app.myco.onboarding.SystemAsk
+import androidx.compose.runtime.collectAsState
 import app.myco.ui.theme.tileColorFor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -136,6 +141,15 @@ fun AppsScreen(
     var nappletSheetFor by remember { mutableStateOf<LibraryItem?>(null) }
     var permissionsFor by remember { mutableStateOf<LibraryItem?>(null) }
     var confirmForgetNapplet by remember { mutableStateOf<LibraryItem?>(null) }
+
+    // Share Myco: the choice sheet, and the hotspot sheet it leads to. The
+    // hotspot is the Circle tab's one (HotspotService owns it); this only
+    // opens it worded for handing over the app.
+    var shareMyco by remember { mutableStateOf(false) }
+    var mycoHotspot by remember { mutableStateOf(false) }
+    val hotspot by HotspotService.view.collectAsState()
+    val sharedFiles by SharedFiles.get(LocalContext.current).entries.collectAsState()
+    val asker = LocalSystemAsker.current
 
     // One-shot toast with the result of a "Check for updates" run (fires when the
     // core bumps the check generation), so the user gets explicit feedback.
@@ -172,9 +186,12 @@ fun AppsScreen(
     LazyVerticalGrid(
         columns = GridCells.Fixed(columns),
         modifier = Modifier.fillMaxSize(),
+        // The bottom leaves room for the Share Myco bubble over the last row.
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
-            horizontal = APPS_SIDE_PADDING,
-            vertical = 20.dp,
+            start = APPS_SIDE_PADDING,
+            end = APPS_SIDE_PADDING,
+            top = 20.dp,
+            bottom = 96.dp,
         ),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -226,6 +243,40 @@ fun AppsScreen(
         }
     }
     }
+    ShareMycoBubble(
+        onClick = { shareMyco = true },
+        modifier = Modifier.align(Alignment.BottomEnd).padding(24.dp),
+    )
+    }
+
+    if (shareMyco) {
+        ShareMycoSheet(
+            // Not allowed yet: the explanation first, whose button asks;
+            // MainActivity starts the hotspot when Android says yes.
+            onHotspot = {
+                if (SystemAsk.Hotspot.granted(context)) HotspotService.start(context)
+                else asker?.explain(SystemAsk.Hotspot)
+                shareMyco = false
+                mycoHotspot = true
+            },
+            onDismiss = { shareMyco = false },
+        )
+    }
+
+    if (mycoHotspot) {
+        HotspotSheet(
+            view = hotspot,
+            shared = sharedFiles,
+            onStart = {
+                if (SystemAsk.Hotspot.granted(context)) HotspotService.start(context)
+                else asker?.explain(SystemAsk.Hotspot)
+            },
+            onStop = { HotspotService.stop(context) },
+            // Handing over the app, not files: the Circle tab's sheet adds those.
+            onShareFiles = null,
+            onDismiss = { mycoHotspot = false },
+            forMyco = true,
+        )
     }
 
     sheetFor?.let { site ->
