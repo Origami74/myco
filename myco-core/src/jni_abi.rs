@@ -844,6 +844,72 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(
     }
 }
 
+/// Make this phone hold the newest signed release APK for its Circle (see
+/// `release_apk`): kept already, its own installed APK, a Circle peer, or —
+/// with `internet` — the release's own URLs. Returns the release as JSON
+/// (`version`, `version_code`, `sha256`, `size`, `source`); throws
+/// `IOException` with the reason it isn't held. Needs a running core.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_prepareSoftwareRelease(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    internet: jboolean,
+    installed_apk: JString,
+    abi: JString,
+) -> jstring {
+    let installed = get_string(&mut env, &installed_apk);
+    let installed = (!installed.is_empty()).then(|| std::path::PathBuf::from(installed));
+    let abi = get_string(&mut env, &abi);
+    let context = unsafe { handle_ref(handle) }.and_then(|h| {
+        let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+        guard.gateway_context()
+    });
+    let result = match context {
+        Some((content, rt)) => rt
+            .block_on(crate::release_apk::prepare(
+                content,
+                internet != 0,
+                installed,
+                &abi,
+            ))
+            .and_then(|prepared| Ok(serde_json::to_string(&prepared)?)),
+        None => Err(anyhow::anyhow!("Start the mesh to carry updates")),
+    };
+    match result {
+        Ok(json) => jstr(&mut env, json),
+        Err(error) => {
+            let _ = env.throw_new("java/io/IOException", error.to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Write the kept release APK `sha256` to `dest`, checked against its name,
+/// for Android's installer. Throws `IOException` when it can't.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_exportSoftwareRelease(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    sha256: JString,
+    dest: JString,
+) {
+    let sha256 = get_string(&mut env, &sha256);
+    let dest = std::path::PathBuf::from(get_string(&mut env, &dest));
+    let context = unsafe { handle_ref(handle) }.and_then(|h| {
+        let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
+        guard.gateway_context()
+    });
+    let result = match context {
+        Some((content, rt)) => rt.block_on(crate::release_apk::export(&content, &sha256, &dest)),
+        None => Err(anyhow::anyhow!("Start the mesh to install the update")),
+    };
+    if let Err(error) = result {
+        let _ = env.throw_new("java/io/IOException", error.to_string());
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_fetchSoftwareRelease(
     mut env: JNIEnv,

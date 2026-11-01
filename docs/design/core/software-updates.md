@@ -11,10 +11,10 @@ channels, malformed versions and missing asset references cannot trigger a
 notice. The highest stable numeric version is compared with the installed build.
 There is no GitHub metadata fallback that could bypass signature verification.
 
-This authenticates a release announcement. The app does not fetch or install
-an APK; Zapstore and Android handle APK hashes and package signatures. Tapping
-the notice opens the fixed official Zapstore listing. No release-provided URL
-is opened and no user identity or private signing key is sent to the relay.
+This authenticates a release announcement. Tapping the notice opens the fixed
+official Zapstore listing, unless the Circle has already brought the APK (see
+[Carrying the APK](#carrying-the-apk)). No user identity or private signing key
+is sent to the relay.
 
 ## Asking the Circle
 
@@ -25,6 +25,79 @@ gets the same signed event. A peer can withhold a release but cannot forge or
 alter one; the event is verified against the pinned key as if it came from
 Zapstore. The Circle is asked only while the core runs (the mesh service or the
 UI); a background check in a process without one asks only Zapstore.
+
+## Carrying the APK
+
+Each phone keeps the newest release APK in its kept Blossom store, so the
+Circle updates with no internet (`myco-core/src/release_apk.rs`).
+
+### What vouches for it
+
+The announcement names a **file event** (kind 3063) with an `e` tag. Myco
+accepts one only if:
+
+- the pinned publisher signed it, and the kept announcement names it;
+- it is `app.myco`, the announced version, an APK (`m`) for this phone's ABI
+  (`f`);
+- its `apk_certificate_hash` is the release key
+  (`98:43:2B:…:7E:79`), and `x` and `size` are well formed, size at most
+  64 MiB.
+
+The file event is kept beside the announcement, so the phone answers its
+Circle's next pull for it.
+
+### Where the bytes come from
+
+In order, stopping at the first that works:
+
+1. **Kept already.**
+2. **This phone's installed APK**, when it hashes to `x` — a phone updated
+   through Zapstore carries the release it runs for free.
+3. **A Circle peer's Blossom**, one peer at a time
+   (`http://<npub>.fips:24243/<x>`).
+4. **The file event's `https` URLs** (Zapstore's CDN, GitHub), only on an
+   unmetered connection outside mesh-only.
+
+Every source is checked the same way: exactly `size` bytes hashing to `x`.
+
+### Compressed for the mesh
+
+A release APK stores its native library and dex uncompressed, so zstd at
+level 19 takes 25 MB to about 10 MB. Once kept, the phone writes that
+variant to `blossom/zstd/<x>` (seconds of CPU, once per release). The
+Blossom server hands it out only to a client sending
+`Accept-Encoding: zstd`, as `Content-Encoding: zstd`; any other client gets
+the plain blob. The fetching phone decodes it bounded to `size` and checks
+the result against `x`: the variant needs no signature of its own.
+
+### One release kept
+
+After a release is kept, the APKs of every older release the phone has a
+file event for are removed, with their variants. "Clear local database"
+keeps the carried release, its announcement and its file event. A phone
+using a custom Blossom server carries nothing.
+
+### Installing
+
+The banner and Settings show **Install** when the carried release is the
+available update and this build is release-signed (a debug build can't take
+a release over itself). Install:
+
+1. Asks for Android's per-app "Install unknown apps" switch, through the
+   usual explain-then-ask flow (`SystemAsk.InstallUpdates`), once.
+2. Writes the kept APK to the cache, re-checked against `x`.
+3. Reads it as Android does: this app's package, a higher `versionCode`,
+   signed with the release key. Anything else stops here.
+4. Hands it to `PackageInstaller`. Android shows its own "Update?" prompt,
+   and refuses an update signed with another key regardless.
+
+This needs `REQUEST_INSTALL_PACKAGES`. Myco ships through GitHub Releases
+and Zapstore, which allow it.
+
+### Scheduling the carry
+
+Every check carries, due or not (Circle members come and go), while the core
+runs. A carry that finds nothing new is cheap: a few kept-store queries.
 
 ## Scheduling
 

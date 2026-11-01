@@ -4671,6 +4671,12 @@ impl Content {
             }
         }
 
+        // The release APK this phone carries for its Circle, and the signed
+        // events that vouch for it.
+        let (release_events, release_apk) = crate::release_apk::kept_release(self).await;
+        keep_events.extend(release_events.iter().map(|id| id.to_bytes()));
+        keep_blobs.extend(release_apk);
+
         if let Some(store) = &self.relay_store {
             // The user's own profile and relay lists, by the pubkey alone: the
             // store keeps one of each per author, so this is at most three

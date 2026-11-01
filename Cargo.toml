@@ -76,6 +76,9 @@ axum = { version = "0.8", features = ["ws"] }
 # Bind the mesh servers IPV6_V6ONLY so `[::]:port` doesn't collide with another
 # app squatting on `127.0.0.1:port` (the mesh is IPv6-only anyway).
 socket2 = "0.6"
+# Precompressed blob variants (`myco-blossom`): Myco's own release APK travels
+# the mesh at ~40% of its size. Builds libzstd with `cc`, like the NDK expects.
+zstd = { version = "0.13", default-features = false }
 
 # The release library ships inside the APK, so build it small: one codegen
 # unit with whole-program LTO lets the linker drop unused code across crates,

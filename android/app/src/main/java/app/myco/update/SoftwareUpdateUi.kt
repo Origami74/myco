@@ -23,6 +23,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import app.myco.LocalSystemAsker
+import app.myco.onboarding.SystemAsk
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -45,16 +47,42 @@ fun rememberSoftwareUpdates(offlineOnly: Boolean): SoftwareUpdates {
     return updates
 }
 
+/**
+ * Install the carried update: Android's "install unknown apps" switch first
+ * (explained, then its settings page), then the install, which Android
+ * confirms with the user.
+ */
+@Composable
+private fun rememberInstall(updates: SoftwareUpdates): () -> Unit {
+    val context = LocalContext.current
+    val asker = LocalSystemAsker.current
+    val scope = rememberCoroutineScope()
+    return {
+        if (SystemAsk.InstallUpdates.granted(context)) scope.launch { updates.install() }
+        else asker?.explain(SystemAsk.InstallUpdates)
+    }
+}
+
 @Composable
 fun SoftwareUpdateBanner(updates: SoftwareUpdates) {
     val state by updates.state.collectAsState()
     val tag = state.availableTag ?: return
     if (state.dismissedTag == tag) return
+    val install = rememberInstall(updates)
     Surface(modifier = Modifier.statusBarsPadding(), color = MaterialTheme.colorScheme.primaryContainer) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-            Text("Myco $tag is available", style = MaterialTheme.typography.titleSmall)
+            Text(
+                if (state.installable) "Myco $tag is ready to install" else "Myco $tag is available",
+                style = MaterialTheme.typography.titleSmall,
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = updates::openRelease) { Text("View update") }
+                if (state.installable) {
+                    TextButton(enabled = !state.installing, onClick = install) {
+                        Text(if (state.installing) "Installing…" else "Install")
+                    }
+                } else {
+                    TextButton(onClick = updates::openRelease) { Text("View update") }
+                }
                 TextButton(onClick = updates::dismissBanner) { Text("Later") }
             }
         }
@@ -77,16 +105,30 @@ fun SoftwareUpdateSettings(updates: SoftwareUpdates, offlineOnly: Boolean) {
             }
             Switch(checked = state.automatic, onCheckedChange = updates::setAutomatic)
         }
+        val install = rememberInstall(updates)
         val message = when {
             state.checking -> "Checking for updates…"
+            state.installing -> "Installing…"
+            state.message != null && state.installable -> state.message
+            state.installable -> "Myco ${state.availableTag} is ready to install"
             state.availableTag != null -> "Myco ${state.availableTag} is available"
             else -> state.message
         }
         message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        state.carried?.let { carried ->
+            // What this phone hands its Circle, update or not.
+            Text(
+                "Carrying Myco ${carried.version} for your Circle (${carried.size / 1_048_576} MB)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(enabled = !state.checking,
                 onClick = { scope.launch { updates.check(offlineOnly, force = true) } }) { Text("Check now") }
-            if (state.availableTag != null) {
+            if (state.installable) {
+                TextButton(enabled = !state.installing, onClick = install) { Text("Install") }
+            } else if (state.availableTag != null) {
                 TextButton(onClick = updates::openRelease) { Text("View update") }
             }
         }

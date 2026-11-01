@@ -149,6 +149,22 @@ enum class SystemAsk(
         ),
         intentAction = BluetoothAdapter.ACTION_REQUEST_ENABLE,
     ),
+
+    /**
+     * Android's per-app "Install unknown apps" switch, which installing a
+     * Myco update carried by the Circle needs (`update/ReleaseInstaller`).
+     * Off by default on every phone; a switch the user can turn off again.
+     */
+    InstallUpdates(
+        AskMechanism.Intent,
+        Explanation(
+            title = "Install updates",
+            body = "Next, Android asks to let Myco install apps.",
+            note = "Myco installs only Myco updates signed by its publisher. Android still asks before each one.",
+            button = "Open settings",
+        ),
+        intentAction = Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+    ),
     ;
 
     /**
@@ -166,7 +182,7 @@ enum class SystemAsk(
         Camera -> listOf(Manifest.permission.CAMERA)
         Notifications ->
             if (sdk >= Build.VERSION_CODES.TIRAMISU) listOf(Manifest.permission.POST_NOTIFICATIONS) else emptyList()
-        Vpn, Battery, BluetoothOn -> emptyList()
+        Vpn, Battery, BluetoothOn, InstallUpdates -> emptyList()
     }
 
     /** [permissions] for this phone, with [Nearby] following the lane switches. */
@@ -187,7 +203,7 @@ enum class SystemAsk(
     fun intent(context: Context): Intent? = when (mechanism) {
         AskMechanism.VpnConsent -> vpnConsent(context)
         AskMechanism.Intent -> when (this) {
-            Battery -> Intent(intentAction, Uri.parse("package:${context.packageName}"))
+            Battery, InstallUpdates -> Intent(intentAction, Uri.parse("package:${context.packageName}"))
             else -> Intent(intentAction)
         }
         AskMechanism.Permissions -> null
@@ -202,6 +218,7 @@ enum class SystemAsk(
         Vpn -> vpnConsent(context) == null
         BluetoothOn -> (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
             ?.adapter?.isEnabled == true
+        InstallUpdates -> context.packageManager.canRequestPackageInstalls()
     }
 
     companion object {

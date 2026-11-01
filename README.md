@@ -266,9 +266,13 @@ Read on:
   your Circle and `wss://relay.zapstore.dev`, which sees your IP address and a
   query for Myco releases; no user identity or private signing key is sent. In
   mesh-only mode it asks only your Circle. Every phone keeps the newest signed
-  announcement it has seen, so one phone with internet tells the rest. **View
-  update** opens the official Zapstore listing; you choose whether to download
-  and install.
+  announcement it has seen, so one phone with internet tells the rest.
+- **Updates from your Circle:** every phone also keeps the newest release APK
+  (from its own install, a paired phone, or, on unmetered Wi-Fi, the release
+  download) and hands it to paired phones over the mesh, compressed to about
+  10 MB. When it's on your phone, **Install** updates Myco with no internet:
+  Myco checks it is signed by the publisher, and Android asks before
+  installing. Otherwise **View update** opens the Zapstore listing.
 - **Installing the APK:** Android asks whether your browser (or file app) may
   install apps. Allow it, install Myco, and you can turn it off again.
 - **Needs:** Android 10 or newer, on a 64-bit ARM phone. NFC is optional; QR

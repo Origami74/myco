@@ -9,12 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Updates from your Circle.** Every phone keeps the newest Myco release APK
+  and serves it to paired phones over the mesh, so a phone updates with no
+  internet. The APK comes from the phone's own install when it is that
+  release, from a paired phone, or, on unmetered Wi-Fi outside mesh-only, from
+  the release download. It is accepted only as the exact bytes Zapstore's
+  publisher-signed file event names, and installed only if it is signed with
+  the release key; Android asks before installing. It travels zstd-compressed
+  (25 MB to about 10 MB). Only the newest release is kept.
+
 - **Share Myco.** A **Share Myco** bubble on the Apps tab gives the app itself
   to a phone that doesn't have it. **Over a hotspot** needs no internet: the
   other phone joins this phone's Wi-Fi, opens the page and downloads Myco
   (the page shows the APK's SHA-256). **Send the app file** hands the APK to
   the Android share menu (Quick Share, Bluetooth, a messenger). The file-share
   hotspot page from the Circle tab offers Myco too.
+
+### Changed
+
+- **Smaller APK.** The Myco mark (launcher, splash, TV banner) is a WebP
+  instead of a PNG: 1.3 MB to 0.3 MB.
 
 ## [0.12.1] - 2026-10-23
 

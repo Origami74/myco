@@ -8,6 +8,7 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -16,6 +17,8 @@ import app.myco.BuildConfig
 import app.myco.onboarding.SystemAsk
 import app.myco.R
 import app.myco.core.MycoCore
+import app.myco.core.NativeCore
+import app.myco.share.MycoApk
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,7 +40,16 @@ data class SoftwareUpdateState(
     val checking: Boolean = false,
     val message: String? = null,
     val dismissedTag: String? = null,
-)
+    /** The release APK this phone keeps for its Circle, if any. */
+    val carried: CarriedRelease? = null,
+    val installing: Boolean = false,
+    /** This Myco is release-signed: only such a build takes a release over itself. */
+    val releaseBuild: Boolean = false,
+) {
+    /** The available update is on this phone, and this build can take it. */
+    val installable: Boolean
+        get() = releaseBuild && carried != null && carried.version == availableTag
+}
 
 /** Release checks shared by the UI and persistent background work. */
 class SoftwareUpdates private constructor(context: Context) {
@@ -59,6 +71,7 @@ class SoftwareUpdates private constructor(context: Context) {
                 isNewerRelease(BuildConfig.VERSION_NAME, it)
             },
             dismissedTag = prefs.getString("dismissed_tag", null),
+            releaseBuild = MycoApk.info(this.context)?.release == true,
         ),
     )
     val state = mutableState.asStateFlow()
@@ -76,6 +89,40 @@ class SoftwareUpdates private constructor(context: Context) {
         val tag = mutableState.value.availableTag ?: return
         prefs.edit().putString("dismissed_tag", tag).apply()
         mutableState.update { it.copy(dismissedTag = tag) }
+    }
+
+    /** Install the carried update; Android asks the user first. */
+    suspend fun install() {
+        val release = mutableState.value.carried ?: return
+        if (mutableState.value.installing) return
+        mutableState.update { it.copy(installing = true, message = null) }
+        val error = withContext(Dispatchers.IO) {
+            ReleaseInstaller.install(context, MycoCore.existing()?.handle() ?: 0L, release)
+        }
+        mutableState.update { it.copy(installing = false, message = error) }
+    }
+
+    /**
+     * Keep the newest release APK for the Circle (and for this phone's own
+     * update): from this phone's installed APK when it is that release, else
+     * a Circle peer, else — on an unmetered connection outside mesh-only —
+     * the release's own download. Runs on every check, due or not: Circle
+     * members come and go.
+     */
+    private suspend fun carry(core: Long, meshOnly: Boolean) {
+        if (core == 0L) return
+        val internet = !meshOnly && hasInternet(unmetered = true)
+        val own = MycoApk.info(context)?.takeIf { it.release }?.file?.path.orEmpty()
+        val abi = "android-" + (Build.SUPPORTED_ABIS.firstOrNull() ?: return)
+        val carried = withContext(Dispatchers.IO) {
+            try {
+                CarriedRelease.fromJson(NativeCore.prepareSoftwareRelease(core, internet, own, abi))
+            } catch (e: java.io.IOException) {
+                Log.i("SoftwareUpdates", "Release not carried: ${e.message}")
+                null
+            }
+        }
+        mutableState.update { it.copy(carried = carried) }
     }
 
     fun openRelease() {
@@ -97,11 +144,14 @@ class SoftwareUpdates private constructor(context: Context) {
             if (cached != null) notifyOnce(cached)
             val now = System.currentTimeMillis()
             val interval = if (prefs.getBoolean("last_success", false)) DAY_MS else RETRY_MS
-            if (!force && !updateCheckDue(now, prefs.getLong("last_attempt", 0), interval)) return@run
             // Mesh-only never reaches the internet, but the Circle can still answer.
             val meshOnly = offlineOnly || softwareUpdatesOfflineOnly(context)
-            val online = !meshOnly && hasInternet()
             val core = MycoCore.existing()?.handle() ?: 0L
+            if (!force && !updateCheckDue(now, prefs.getLong("last_attempt", 0), interval)) {
+                carry(core, meshOnly)
+                return@run
+            }
+            val online = !meshOnly && hasInternet()
             if (!online && core == 0L) {
                 if (force) mutableState.update { it.copy(message =
                     if (meshOnly) "Start the mesh to ask your Circle for updates"
@@ -121,6 +171,7 @@ class SoftwareUpdates private constructor(context: Context) {
             ) }
             if (available != null) notifyOnce(available)
             else NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
+            carry(core, meshOnly)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -133,12 +184,15 @@ class SoftwareUpdates private constructor(context: Context) {
 
     // The mesh VPN may be the default network without itself validating.
     // A validated underlying internet connection is sufficient for a check.
-    private fun hasInternet(): Boolean {
+    // With [unmetered], only a connection that costs nothing counts: a ~25 MB
+    // download is never made on mobile data.
+    private fun hasInternet(unmetered: Boolean = false): Boolean {
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
         return connectivity.allNetworks.any { network ->
             val capabilities = connectivity.getNetworkCapabilities(network)
             capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
+                (!unmetered || capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
         }
     }
 

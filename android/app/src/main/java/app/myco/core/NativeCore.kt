@@ -14,6 +14,15 @@ internal object NativeCore {
 
     external fun initializeAndroidContext(context: Context)
     external fun fetchSoftwareRelease(handle: Long, online: Boolean): String
+
+    /** Hold the newest signed release APK for the Circle; JSON of the release,
+     *  or throws [java.io.IOException] with why it isn't held. Blocking. */
+    @Throws(java.io.IOException::class)
+    external fun prepareSoftwareRelease(handle: Long, internet: Boolean, installedApk: String, abi: String): String
+
+    /** Write the kept release APK to [dest], re-checked against [sha256]. Blocking. */
+    @Throws(java.io.IOException::class)
+    external fun exportSoftwareRelease(handle: Long, sha256: String, dest: String)
     external fun appNew(dataDir: String, appVersion: String): Long
     external fun appFree(handle: Long)
     external fun stateJson(handle: Long): String

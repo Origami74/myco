@@ -6,16 +6,20 @@
 //! grants reads to paired peers while withholding uploads. Routes:
 //!
 //! - `GET  /<sha256>` → blob bytes (`application/octet-stream`; the gateway infers
-//!   the real content-type from the manifest path, not from Blossom).
+//!   the real content-type from the manifest path, not from Blossom). A client
+//!   sending `Accept-Encoding: zstd` gets the precompressed variant instead
+//!   when one is stored ([`FsBlobStore::store_zstd`]), as
+//!   `Content-Encoding: zstd`; the bytes it decodes to are the blob.
 //! - `HEAD /<sha256>` → 200 if present, 404 if not (the "all blobs present?" probe).
 //! - `PUT  /upload`    → store the body keyed by `sha256(body)`, return a descriptor.
 
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::Router;
@@ -47,6 +51,8 @@ pub type AccessFn = Arc<dyn Fn(IpAddr, BlobOp) -> bool + Send + Sync>;
 struct BlossomState {
     store: Arc<dyn BlobStore>,
     access: Option<AccessFn>,
+    /// Where zstd variants are looked for ([`FsBlobStore::zstd_dir`]).
+    precompressed: Option<PathBuf>,
 }
 
 impl BlossomState {
@@ -93,6 +99,7 @@ pub async fn serve_on(
         BlossomState {
             store,
             access: None,
+            precompressed: None,
         },
         listener,
     )
@@ -101,16 +108,19 @@ pub async fn serve_on(
 
 /// Serve on an already-bound listener, restricting **mesh** sources to those that
 /// pass `access` (loopback is always allowed). The runtime uses this so only
-/// paired (Circle) peers can pull/push blobs.
+/// paired (Circle) peers can pull/push blobs. `precompressed` is the store's
+/// [`FsBlobStore::zstd_dir`], when it keeps zstd variants.
 pub async fn serve_on_guarded(
     store: Arc<dyn BlobStore>,
     listener: tokio::net::TcpListener,
     access: AccessFn,
+    precompressed: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     serve_state(
         BlossomState {
             store,
             access: Some(access),
+            precompressed,
         },
         listener,
     )
@@ -148,11 +158,31 @@ async fn get_blob(
     Path(sha256): Path<String>,
     State(st): State<BlossomState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Response {
     if !st.allows(addr, BlobOp::Read) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    match st.store.get(&blob_hash(&sha256)).await {
+    let hash = blob_hash(&sha256);
+    if let Some(variant) = st
+        .precompressed
+        .as_ref()
+        .filter(|_| accepts_zstd(&headers) && is_hash(&hash))
+        .map(|dir| dir.join(&hash))
+    {
+        if let Ok(bytes) = tokio::fs::read(&variant).await {
+            return (
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream"),
+                    (header::CONTENT_ENCODING, "zstd"),
+                    (header::VARY, "Accept-Encoding"),
+                ],
+                bytes,
+            )
+                .into_response();
+        }
+    }
+    match st.store.get(&hash).await {
         Ok(Some(bytes)) => (
             [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
             bytes,
@@ -161,6 +191,26 @@ async fn get_blob(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// Whether the request lists `zstd` in `Accept-Encoding` (with a non-zero
+/// q-value, if any).
+fn accepts_zstd(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::ACCEPT_ENCODING)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|coding| {
+            let mut parts = coding.split(';').map(str::trim);
+            parts.next().is_some_and(|c| c.eq_ignore_ascii_case("zstd"))
+                && parts.all(|p| p.replace(' ', "") != "q=0")
+        })
+}
+
+/// A 64-hex name: the only kind joined onto the variants directory.
+fn is_hash(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 async fn head_blob(
@@ -246,6 +296,62 @@ mod tests {
             .unwrap();
         assert_eq!(head_miss.status(), 404);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn zstd_variant_only_for_a_client_that_asks() {
+        let dir = std::env::temp_dir().join(format!("myco-blossom-zstd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Arc::new(FsBlobStore::open(&dir).unwrap());
+        let body = b"compress me ".repeat(4096);
+        let hash = store.put(&body).await.unwrap();
+        let encoded = store.store_zstd(&hash, 3).unwrap().unwrap();
+        assert!(encoded < body.len() as u64);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let open: AccessFn = Arc::new(|_, _| true);
+        tokio::spawn(serve_on_guarded(
+            store.clone(),
+            listener,
+            open,
+            Some(store.zstd_dir()),
+        ));
+        let url = format!("http://{addr}/{hash}");
+        let client = reqwest::Client::new();
+
+        // Asked: the variant, labelled, decoding to the blob.
+        let got = client
+            .get(&url)
+            .header("accept-encoding", "gzip, zstd")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(got.headers()["content-encoding"], "zstd");
+        let bytes = got.bytes().await.unwrap();
+        assert_eq!(bytes.len() as u64, encoded);
+        assert_eq!(
+            crate::decode_zstd_bounded(&bytes, body.len()).unwrap(),
+            body
+        );
+        // A bound below the decoded size refuses it.
+        assert!(crate::decode_zstd_bounded(&bytes, body.len() - 1).is_none());
+
+        // Not asked (or refused with q=0): the plain blob.
+        for accept in [None, Some("zstd;q=0")] {
+            let mut req = client.get(&url);
+            if let Some(accept) = accept {
+                req = req.header("accept-encoding", accept);
+            }
+            let got = req.send().await.unwrap();
+            assert!(got.headers().get("content-encoding").is_none());
+            assert_eq!(got.bytes().await.unwrap().as_ref(), body.as_slice());
+        }
+
+        // Removing the blob takes its variant with it.
+        assert!(store.remove(&hash));
+        assert!(!store.has_zstd(&hash));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

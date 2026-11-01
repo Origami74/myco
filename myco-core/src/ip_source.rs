@@ -1768,7 +1768,7 @@ impl PeerSource for IpPeerSource {
 /// exceed `max`: from `Content-Length` when the server sends one, otherwise as
 /// the chunks arrive. `None` too when no chunk arrives for `stall`, and for a
 /// read error; the caller tries the next server either way.
-async fn read_body_bounded(
+pub(crate) async fn read_body_bounded(
     mut resp: reqwest::Response,
     max: Option<usize>,
     stall: Option<Duration>,
