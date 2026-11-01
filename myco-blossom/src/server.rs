@@ -349,6 +349,17 @@ mod tests {
             assert_eq!(got.bytes().await.unwrap().as_ref(), body.as_slice());
         }
 
+        // A frame asking for a 2^27 window (zstd's default limit) is refused.
+        let mut big_window = Vec::new();
+        {
+            let mut encoder = zstd::stream::write::Encoder::new(&mut big_window, 1).unwrap();
+            encoder.window_log(27).unwrap();
+            encoder.include_contentsize(false).unwrap();
+            std::io::Write::write_all(&mut encoder, b"tiny").unwrap();
+            encoder.finish().unwrap();
+        }
+        assert!(crate::decode_zstd_bounded(&big_window, 1024).is_none());
+
         // Removing the blob takes its variant with it.
         assert!(store.remove(&hash));
         assert!(!store.has_zstd(&hash));

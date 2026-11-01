@@ -211,9 +211,12 @@ impl FsBlobStore {
             return Ok(None);
         };
         std::fs::create_dir_all(self.zstd_dir())?;
-        let tmp = self
-            .zstd_dir()
-            .join(format!(".tmp-{}-{}", std::process::id(), hash));
+        let tmp = self.zstd_dir().join(format!(
+            ".tmp-{}-{}-{}",
+            std::process::id(),
+            ZSTD_TMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            hash
+        ));
         let result = (|| -> anyhow::Result<u64> {
             let out = std::fs::File::create(&tmp)?;
             let mut encoder = zstd::stream::write::Encoder::new(out, level)?;
@@ -338,12 +341,22 @@ impl FsBlobStore {
 /// The subdirectory of a blob store's root holding zstd variants.
 const ZSTD_DIR: &str = "zstd";
 
+/// The largest window a decoded variant may use: 16 MiB.
+const ZSTD_WINDOW_LOG_MAX: u32 = 24;
+
+/// Tells concurrent variant writes of one blob apart.
+static ZSTD_TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Decode a zstd body, refusing one that would decode to more than `max`
 /// bytes — a peer's variant is untrusted until its output hashes right, and
 /// a small body can expand without bound.
 pub fn decode_zstd_bounded(encoded: &[u8], max: usize) -> Option<Vec<u8>> {
     use std::io::Read as _;
-    let decoder = zstd::stream::read::Decoder::new(encoded).ok()?;
+    let mut decoder = zstd::stream::read::Decoder::new(encoded).ok()?;
+    // A frame may ask for a window up to 2^27 by default; cap it near what
+    // the variants use (level 19 asks 2^23), so 18 hostile bytes can't make
+    // the decoder reserve 128 MiB.
+    decoder.window_log_max(ZSTD_WINDOW_LOG_MAX).ok()?;
     let mut out = Vec::new();
     decoder.take(max as u64 + 1).read_to_end(&mut out).ok()?;
     (out.len() <= max).then_some(out)

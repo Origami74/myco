@@ -270,7 +270,7 @@ Read on:
 - **Updates from your Circle:** every phone also keeps the newest release APK
   (from its own install, a paired phone, or, on unmetered Wi-Fi, the release
   download) and hands it to paired phones over the mesh, compressed to about
-  10 MB. When it's on your phone, **Install** updates Myco with no internet:
+  11 MB. When it's on your phone, **Install** updates Myco with no internet:
   Myco checks it is signed by the publisher, and Android asks before
   installing. Otherwise **View update** opens the Zapstore listing.
 - **Installing the APK:** Android asks whether your browser (or file app) may

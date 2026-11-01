@@ -55,22 +55,25 @@ fn stable_version(tag: &str) -> Option<[u64; 3]> {
     Some(result)
 }
 
+/// The values of every `name` tag on `event`, in order.
+pub(crate) fn tag_values<'a>(event: &'a Event, name: &str) -> Vec<&'a str> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let fields = tag.as_slice();
+            (fields.first().map(String::as_str) == Some(name))
+                .then(|| fields.get(1).map(String::as_str))
+                .flatten()
+        })
+        .collect()
+}
+
 pub(crate) fn announcement_tag(event: &Event, now: u64) -> Option<String> {
     if event.created_at.as_secs() > now.saturating_add(300) {
         return None;
     }
-    let values = |name: &str| -> Vec<&str> {
-        event
-            .tags
-            .iter()
-            .filter_map(|tag| {
-                let fields = tag.as_slice();
-                (fields.first().map(String::as_str) == Some(name))
-                    .then(|| fields.get(1).map(String::as_str))
-                    .flatten()
-            })
-            .collect()
-    };
+    let values = |name: &str| tag_values(event, name);
     if values("i") != ["app.myco"] {
         return None;
     }

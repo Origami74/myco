@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.content.pm.SigningInfo
 import android.util.Log
 import androidx.core.content.FileProvider
+import app.myco.core.NativeCore
 import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
@@ -44,9 +45,9 @@ object MycoApk {
 
     const val MIME = "application/vnd.android.package-archive"
 
-    /** SHA-256 of the Myco release signing certificate (as pinned in #151). */
-    internal const val RELEASE_CERT_SHA256 =
-        "98432b60e463819071928666c894961dbd646f3e89197cfa654cd52afc9a7e79"
+    /** SHA-256 of the Myco release signing certificate, from the core's one
+     *  pin (`release_apk::RELEASE_CERT_SHA256`). */
+    private val releaseCertSha256: String by lazy { NativeCore.releaseCertSha256() }
 
     @Volatile
     private var cached: Pair<String, Info>? = null
@@ -178,7 +179,7 @@ object MycoApk {
             listOfNotNull(signing.signingCertificateHistory?.lastOrNull())
         }
         return !certs.isNullOrEmpty() && certs.all { cert ->
-            MessageDigest.getInstance("SHA-256").digest(cert.toByteArray()).toHex() == RELEASE_CERT_SHA256
+            MessageDigest.getInstance("SHA-256").digest(cert.toByteArray()).toHex() == releaseCertSha256
         }
     }
 

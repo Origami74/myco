@@ -20,6 +20,9 @@ internal object NativeCore {
     @Throws(java.io.IOException::class)
     external fun prepareSoftwareRelease(handle: Long, internet: Boolean, installedApk: String, abi: String): String
 
+    /** SHA-256 (lowercase hex) of Myco's release signing certificate — the one pin. */
+    external fun releaseCertSha256(): String
+
     /** Write the kept release APK to [dest], re-checked against [sha256]. Blocking. */
     @Throws(java.io.IOException::class)
     external fun exportSoftwareRelease(handle: Long, sha256: String, dest: String)

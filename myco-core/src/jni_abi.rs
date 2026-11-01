@@ -885,6 +885,19 @@ pub extern "system" fn Java_app_myco_core_NativeCore_prepareSoftwareRelease(
     }
 }
 
+/// The SHA-256 of Myco's release signing certificate (lowercase hex): the one
+/// pin, which Android checks an update APK and its own signature against.
+#[no_mangle]
+pub extern "system" fn Java_app_myco_core_NativeCore_releaseCertSha256(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    jstr(
+        &mut env,
+        crate::release_apk::RELEASE_CERT_SHA256.to_string(),
+    )
+}
+
 /// Write the kept release APK `sha256` to `dest`, checked against its name,
 /// for Android's installer. Throws `IOException` when it can't.
 #[no_mangle]

@@ -109,8 +109,32 @@ impl MeshBlobs {
 
     /// How many reachable peers hold each of `hashes`.
     pub async fn ask(&self, hashes: &[String]) -> BlobReach {
-        let peers = self.probe.peers();
+        let (peers, held) = self.held(hashes).await;
         let mut holders: BTreeMap<String, usize> = hashes.iter().map(|h| (h.clone(), 0)).collect();
+        for (_, hash) in held {
+            if let Some(count) = holders.get_mut(&hash) {
+                *count += 1;
+            }
+        }
+        BlobReach {
+            peers: peers.len(),
+            holders,
+        }
+    }
+
+    /// The reachable peers that hold `sha256_hex`, by npub — for a caller
+    /// about to download it from one of them (`release_apk`). Same bounds
+    /// and memory as [`MeshBlobs::ask`].
+    pub async fn holders(&self, sha256_hex: &str) -> Vec<String> {
+        let (_, held) = self.held(&[sha256_hex.to_string()]).await;
+        held.into_iter().map(|(npub, _)| npub).collect()
+    }
+
+    /// The reachable peers, and each (peer, blob) of `hashes` known to be
+    /// held: remembered, or asked within the bounds.
+    async fn held(&self, hashes: &[String]) -> (Vec<String>, Vec<(String, String)>) {
+        let peers = self.probe.peers();
+        let mut held = Vec::new();
 
         // Blob-major, so the first round touches every peer once: a dead
         // peer is found out on its first blob, not its last.
@@ -118,7 +142,7 @@ impl MeshBlobs {
         for hash in hashes {
             for npub in &peers {
                 match self.recall(npub, hash) {
-                    Some(true) => *holders.get_mut(hash).unwrap() += 1,
+                    Some(true) => held.push((npub.clone(), hash.clone())),
                     Some(false) => {}
                     None => todo.push((npub.clone(), hash.clone())),
                 }
@@ -140,9 +164,9 @@ impl MeshBlobs {
                     )
                     .await;
                     match answer {
-                        Ok(Ok(held)) => {
-                            self.remember(&npub, &hash, held);
-                            held.then_some(hash)
+                        Ok(Ok(found)) => {
+                            self.remember(&npub, &hash, found);
+                            found.then_some((npub, hash))
                         }
                         _ => {
                             failed.lock().unwrap().insert(npub.clone());
@@ -157,7 +181,7 @@ impl MeshBlobs {
             loop {
                 tokio::select! {
                     next = asks.next() => match next {
-                        Some(Some(hash)) => *holders.get_mut(&hash).unwrap() += 1,
+                        Some(Some(pair)) => held.push(pair),
                         Some(None) => {}
                         None => break,
                     },
@@ -169,10 +193,7 @@ impl MeshBlobs {
             }
         }
 
-        BlobReach {
-            peers: peers.len(),
-            holders,
-        }
+        (peers, held)
     }
 
     fn recall(&self, npub: &str, hash: &str) -> Option<bool> {
@@ -334,6 +355,27 @@ mod tests {
 
     fn hashes(list: &[&str]) -> Vec<String> {
         list.iter().map(|h| h.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn holders_names_the_peers_that_hold_a_blob() {
+        let probe = Arc::new(
+            FakeProbe::new(&["p1", "p2", "p3"])
+                .holding("p1", A)
+                .holding("p3", A)
+                .holding("p2", B)
+                .silent("p2"),
+        );
+        let blobs = MeshBlobs::with_bounds(probe.clone(), quick());
+        let mut found = blobs.holders(A).await;
+        found.sort();
+        assert_eq!(found, vec!["p1".to_string(), "p3".to_string()]);
+        // Remembered, the silent peer as a miss too: asked again, no peer is.
+        let asked = probe.asks().len();
+        let mut again = blobs.holders(A).await;
+        again.sort();
+        assert_eq!(again, found);
+        assert_eq!(probe.asks().len(), asked);
     }
 
     #[tokio::test]

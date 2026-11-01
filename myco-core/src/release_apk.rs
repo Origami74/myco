@@ -13,33 +13,43 @@
 //! 1. **Already kept** — nothing to do.
 //! 2. **This phone runs it** — the installed APK hashes to the signed sha256
 //!    (a phone updated through Zapstore), so it is copied in for free.
-//! 3. **A Circle peer holds it** — fetched from their Blossom, preferring
-//!    the zstd variant (about 40% of the size: the APK stores its native
-//!    library uncompressed).
+//! 3. **A Circle peer holds it** — the peers [`crate::mesh_blobs`] finds
+//!    holding it, one at a time, through [`IpPeerSource`] with its zstd
+//!    variant (about 40% of the size: the APK stores its native library
+//!    uncompressed).
 //! 4. **The internet**, only when the caller allows it (unmetered, not
-//!    mesh-only) — the file event's own URLs.
+//!    mesh-only) — the file event's Blossom URLs.
+//!
+//! Every download is held to a time budget sized from the APK, and the whole
+//! carry to [`CARRY_DEADLINE`]: a peer that drips bytes can slow a carry,
+//! never hold it. A peer that failed is skipped for [`PEER_FAILED_FOR`].
 //!
 //! Once kept, the zstd variant is written for peers that fetch it, and older
-//! releases' APKs are removed: one release is carried, ~25 + ~10 MB.
+//! releases' APKs are removed: one release is carried, ~25 + ~11 MB.
 //!
 //! Installing is Android's job ([`export`] hands it the verified bytes); it
 //! checks the APK's signing certificate and version again before it asks the
 //! user, and Android itself refuses an update signed by another key.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use nostr::{Event, EventId, Filter, Kind, PublicKey};
+use myco_napplet_runtime::manifest::is_sha256_hex;
+use nostr::{Event, EventId, Filter, PublicKey};
+use nsite_deck::sha256_hex;
+use nsite_deck::PeerSource as _;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::content::Content;
+use crate::ip_source::IpPeerSource;
 use crate::mesh_wire::{new_query_id, MeshMeta};
-use crate::software_release::{self as release, PUBLISHER};
+use crate::software_release::{self as release, tag_values, PUBLISHER};
 
-/// SHA-256 of the certificate Myco releases are signed with. The file event
-/// must name it; Android checks the APK against it again before installing.
+/// SHA-256 of the certificate Myco releases are signed with — the one pin:
+/// the file event must name it, and Android reads it from here (over JNI) to
+/// check the APK again before installing.
 pub const RELEASE_CERT_SHA256: &str =
     "98432b60e463819071928666c894961dbd646f3e89197cfa654cd52afc9a7e79";
 
@@ -49,12 +59,22 @@ const APK_MIME: &str = "application/vnd.android.package-archive";
 /// The largest APK carried. A release is ~25 MB; this bounds what a signed
 /// event can make a phone download and hold.
 pub const MAX_APK_BYTES: u64 = 64 * 1024 * 1024;
-/// zstd level for the variant peers fetch: ~10 MB from 25, in seconds.
-const ZSTD_LEVEL: i32 = 19;
-/// How long a peer gets to start answering.
-const PEER_ANSWER: Duration = Duration::from_secs(20);
+/// zstd level for the variant peers fetch. On the v0.12.1 APK: 25.0 MB to
+/// 10.6 MB in 3.3 s and 86 MB of memory on a laptop (level 19: 10.1 MB,
+/// 4.7 s, 118 MB; level 9: 11.3 MB, 0.2 s, 59 MB). Phones are slower; it
+/// runs once per release, off the async workers.
+const ZSTD_LEVEL: i32 = 17;
+/// How long a variant that failed to write is not tried again.
+const ZSTD_RETRY_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
 /// How long a download may go without a byte before the source is dropped.
 const STALL: Duration = Duration::from_secs(30);
+/// The slowest download allowed to finish: a source gets the time this rate
+/// needs for the whole APK, plus [`STALL`] to start. Slow BLE still fits.
+const MIN_RATE_BYTES_PER_SEC: u64 = 64 * 1024;
+/// The most one carry may take, all sources together.
+pub const CARRY_DEADLINE: Duration = Duration::from_secs(15 * 60);
+/// How long a peer that failed to hand over the release is not asked again.
+const PEER_FAILED_FOR: Duration = Duration::from_secs(3 * 60 * 60);
 
 /// The release APK a signed file event describes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -62,6 +82,7 @@ pub struct ReleaseFile {
     pub version: String,
     /// Android's `versionCode`, when the event names one.
     pub version_code: Option<u64>,
+    /// Lowercase hex.
     pub sha256: String,
     pub size: u64,
     /// Where it can be downloaded on the internet (`https` only).
@@ -79,6 +100,14 @@ pub struct Prepared {
     pub source: &'static str,
 }
 
+/// Whether `event` is a file event the pinned publisher signed for Myco.
+fn publisher_file(event: &Event) -> bool {
+    PublicKey::parse(PUBLISHER).is_ok_and(|publisher| event.pubkey == publisher)
+        && event.kind.as_u16() == FILE_KIND
+        && tag_values(event, "i") == ["app.myco"]
+        && event.verify().is_ok()
+}
+
 /// The file event `announcement` points at, read as a [`ReleaseFile`] for
 /// `abi` (e.g. `android-arm64-v8a`) — or `None` unless every check passes:
 /// the pinned publisher signed it, the announcement names it, and it is the
@@ -89,8 +118,7 @@ pub(crate) fn file_from_event(
     announcement: &Event,
     abi: &str,
 ) -> Option<ReleaseFile> {
-    let publisher = PublicKey::parse(PUBLISHER).ok()?;
-    if file.pubkey != publisher || file.kind.as_u16() != FILE_KIND || file.verify().is_err() {
+    if !publisher_file(file) {
         return None;
     }
     file_fields(file, announcement, abi)
@@ -100,8 +128,7 @@ pub(crate) fn file_from_event(
 fn file_fields(file: &Event, announcement: &Event, abi: &str) -> Option<ReleaseFile> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     let version = release::announcement_tag(announcement, now)?;
-    let named = tag_values(announcement, "e");
-    if !named.contains(&file.id.to_hex().as_str()) {
+    if !tag_values(announcement, "e").contains(&file.id.to_hex().as_str()) {
         return None;
     }
     if tag_values(file, "i") != ["app.myco"]
@@ -113,7 +140,7 @@ fn file_fields(file: &Event, announcement: &Event, abi: &str) -> Option<ReleaseF
         return None;
     }
     let sha256 = match tag_values(file, "x").as_slice() {
-        [x] if is_sha256(x) => x.to_string(),
+        [x] if is_sha256_hex(x) => x.to_ascii_lowercase(),
         _ => return None,
     };
     let size = match tag_values(file, "size").as_slice() {
@@ -141,29 +168,6 @@ fn file_fields(file: &Event, announcement: &Event, abi: &str) -> Option<ReleaseF
     })
 }
 
-fn tag_values<'a>(event: &'a Event, name: &str) -> Vec<&'a str> {
-    event
-        .tags
-        .iter()
-        .filter_map(|tag| {
-            let fields = tag.as_slice();
-            (fields.first().map(String::as_str) == Some(name))
-                .then(|| fields.get(1).map(String::as_str))
-                .flatten()
-        })
-        .collect()
-}
-
-fn is_sha256(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
-}
-
 /// The newest announcement this phone keeps, if any.
 async fn kept_announcement(content: &Content) -> Option<Event> {
     let filter = serde_json::from_value::<Filter>(release::release_filter().ok()?).ok()?;
@@ -176,7 +180,7 @@ async fn kept_announcement(content: &Content) -> Option<Event> {
 fn file_filter(announcement: &Event) -> Option<serde_json::Value> {
     let ids: Vec<&str> = tag_values(announcement, "e")
         .into_iter()
-        .filter(|id| is_sha256(id))
+        .filter(|id| is_sha256_hex(id))
         .collect();
     (!ids.is_empty()).then(|| serde_json::json!({ "ids": ids, "kinds": [FILE_KIND] }))
 }
@@ -226,8 +230,22 @@ async fn release_file(
 /// Make this phone hold the newest signed release APK for `abi` in its kept
 /// Blossom store (see the module docs for where it looks). `internet` allows
 /// downloading it from the file event's URLs; `installed` is this phone's own
-/// APK, used when it is that release.
+/// APK, used when it is that release. Bounded by [`CARRY_DEADLINE`].
 pub async fn prepare(
+    content: Arc<Content>,
+    internet: bool,
+    installed: Option<PathBuf>,
+    abi: &str,
+) -> anyhow::Result<Prepared> {
+    tokio::time::timeout(
+        CARRY_DEADLINE,
+        prepare_unbounded(content, internet, installed, abi),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Carrying the update took too long; trying again later"))?
+}
+
+async fn prepare_unbounded(
     content: Arc<Content>,
     internet: bool,
     installed: Option<PathBuf>,
@@ -237,7 +255,6 @@ pub async fn prepare(
         anyhow::anyhow!("A custom Blossom server is configured; updates are not carried")
     })?;
     let file = release_file(&content, internet, abi).await?;
-    let max = file.size as usize;
     let source = if nsite_deck::seams::BlobStore::has(&*store, &file.sha256).await {
         "kept"
     } else {
@@ -250,20 +267,40 @@ pub async fn prepare(
         } else {
             anyhow::bail!("Myco {} isn't on any phone nearby yet", file.version);
         };
-        debug_assert_eq!(bytes.len(), max);
         nsite_deck::seams::BlobStore::put(&*store, &bytes).await?;
         tracing::info!(version = %file.version, source, "release apk: kept");
         source
     };
-    // The variant peers fetch, and only one release carried.
-    let (zstd_store, sha) = (store.clone(), file.sha256.clone());
-    match tokio::task::spawn_blocking(move || zstd_store.store_zstd(&sha, ZSTD_LEVEL)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(error)) => tracing::warn!(%error, "release apk: zstd variant not written"),
-        Err(error) => tracing::warn!(%error, "release apk: zstd variant task failed"),
+    write_variant(&store, &file.sha256).await;
+    let files = publisher_files(&content).await;
+    for x in older_release_blobs(&files, &file.sha256) {
+        if store.remove(&x) {
+            tracing::info!(sha256 = %x, "release apk: older release removed");
+        }
     }
-    prune_older(&content, &store, &file.sha256).await;
     Ok(Prepared { file, source })
+}
+
+/// The zstd variant peers fetch, unless it is there or failed lately.
+async fn write_variant(store: &Arc<myco_blossom::FsBlobStore>, sha256: &str) {
+    static FAILED: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+    if store.has_zstd(sha256) {
+        return;
+    }
+    if let Some((sha, at)) = FAILED.lock().unwrap().as_ref() {
+        if sha == sha256 && at.elapsed() < ZSTD_RETRY_AFTER {
+            return;
+        }
+    }
+    let (zstd_store, sha) = (store.clone(), sha256.to_string());
+    let written = tokio::task::spawn_blocking(move || zstd_store.store_zstd(&sha, ZSTD_LEVEL))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
+    if let Err(error) = written {
+        tracing::warn!(%error, "release apk: zstd variant not written");
+        *FAILED.lock().unwrap() = Some((sha256.to_string(), Instant::now()));
+    }
 }
 
 /// This phone's installed APK, when it is the release (a phone that updated
@@ -283,143 +320,176 @@ async fn from_installed(installed: Option<PathBuf>, file: &ReleaseFile) -> Optio
     .flatten()
 }
 
-/// The release from a Circle peer's Blossom, one peer at a time (racing a
-/// 10 MB body across every peer would fetch it from all of them, over BLE).
-async fn from_circle(content: &Content, file: &ReleaseFile) -> Option<Vec<u8>> {
+/// The time one source gets for `size` bytes: [`STALL`] to start, then
+/// [`MIN_RATE_BYTES_PER_SEC`].
+fn download_budget(size: u64) -> Duration {
+    STALL + Duration::from_secs(size / MIN_RATE_BYTES_PER_SEC + 1)
+}
+
+/// Peers that failed to hand over a release lately: (npub, sha256) → when.
+static PEER_FAILURES: Mutex<Option<HashMap<(String, String), Instant>>> = Mutex::new(None);
+
+fn peer_failed_lately(npub: &str, sha256: &str) -> bool {
+    let mut failures = PEER_FAILURES.lock().unwrap();
+    let map = failures.get_or_insert_with(HashMap::new);
+    map.retain(|_, at| at.elapsed() < PEER_FAILED_FOR);
+    map.contains_key(&(npub.to_string(), sha256.to_string()))
+}
+
+fn remember_peer_failure(npub: &str, sha256: &str) {
+    PEER_FAILURES
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert((npub.to_string(), sha256.to_string()), Instant::now());
+}
+
+/// The release from a Circle peer's Blossom. Only peers `mesh_blobs` finds
+/// holding it are asked, one at a time (racing a 10 MB body across every
+/// peer would fetch it from all of them, over BLE), starting at a rotating
+/// offset so one bad peer is not always first; a peer that fails is skipped
+/// for a while.
+async fn from_circle(content: &Arc<Content>, file: &ReleaseFile) -> Option<Vec<u8>> {
+    let probe = crate::mesh_blobs::MeshBlobs::new(Arc::new(crate::mesh_blobs::HttpProbe::new(
+        content.clone(),
+    )));
+    let mut holders: Vec<String> = probe
+        .holders(&file.sha256)
+        .await
+        .into_iter()
+        .filter(|npub| !peer_failed_lately(npub, &file.sha256))
+        .collect();
+    if holders.is_empty() {
+        return None;
+    }
+    let offset = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0)
+        % holders.len();
+    holders.rotate_left(offset);
+    // No total timeout on the client: [`download_budget`] bounds each fetch.
     let http = crate::http::HttpClient::mesh(
         reqwest::Client::builder().connect_timeout(Duration::from_secs(10)),
     );
-    for npub in content.reachable_npubs() {
-        let url = format!(
-            "{}/{}",
-            crate::ip_source::mesh_blossom_url(&npub),
-            file.sha256
-        );
-        match fetch_verified(&http, &url, file, true).await {
-            Some(bytes) => return Some(bytes),
-            None => tracing::debug!(%npub, "release apk: not from this peer"),
+    let pool = content.peer_relays();
+    for npub in holders {
+        let Ok(source) = crate::ip_source::mesh_source_for(pool.clone(), &npub) else {
+            continue;
+        };
+        let source = source
+            .with_http_client(http.clone())
+            .with_max_blob_bytes(file.size as usize)
+            .with_stall_timeout(STALL)
+            .with_total_timeout(download_budget(file.size))
+            .accept_zstd();
+        match source.fetch_blob(&file.sha256, &[]).await {
+            Ok(Some(bytes)) => return Some(bytes),
+            _ => {
+                tracing::debug!(%npub, "release apk: not from this peer");
+                remember_peer_failure(&npub, &file.sha256);
+            }
         }
     }
     None
 }
 
-/// The release from the file event's own URLs, when the internet is allowed.
+/// The Blossom servers among the file event's URLs: `https://…/<sha256>`.
+/// (Zapstore's CDN is one; a plain download link is not, and is skipped.)
+fn blossom_servers(file: &ReleaseFile) -> Vec<String> {
+    let suffix = format!("/{}", file.sha256);
+    file.urls
+        .iter()
+        .filter_map(|url| url.strip_suffix(&suffix).map(str::to_owned))
+        .collect()
+}
+
+/// The release from the file event's Blossom URLs, when the internet is
+/// allowed.
 async fn from_internet(file: &ReleaseFile, allowed: bool) -> Option<Vec<u8>> {
-    if !allowed {
+    let servers = blossom_servers(file);
+    if !allowed || servers.is_empty() {
         return None;
     }
     let http = crate::http::HttpClient::internet(
         reqwest::Client::builder().connect_timeout(Duration::from_secs(10)),
     );
-    for url in &file.urls {
-        if let Some(bytes) = fetch_verified(&http, url, file, false).await {
-            return Some(bytes);
-        }
-        tracing::debug!(%url, "release apk: not from this url");
-    }
-    None
-}
-
-/// GET `url`, accept only bytes that are exactly the release (`size`,
-/// `sha256`). With `zstd`, the peer's precompressed variant is asked for and
-/// decoded, bounded to the release's size.
-async fn fetch_verified(
-    http: &crate::http::HttpClient,
-    url: &str,
-    file: &ReleaseFile,
-    zstd: bool,
-) -> Option<Vec<u8>> {
-    let mut request = http.get(url).ok()?;
-    if zstd {
-        request = request.header(reqwest::header::ACCEPT_ENCODING, "zstd");
-    }
-    let resp = tokio::time::timeout(PEER_ANSWER, request.send())
+    IpPeerSource::new(Vec::new(), servers)
+        .with_http_client(http)
+        .ignoring_manifest_servers()
+        .with_max_blob_bytes(file.size as usize)
+        .with_stall_timeout(STALL)
+        .with_total_timeout(download_budget(file.size))
+        .fetch_blob(&file.sha256, &[])
         .await
-        .ok()?
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let encoded = resp
-        .headers()
-        .get(reqwest::header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("zstd"));
-    let size = file.size as usize;
-    // A zstd body of an incompressible file can be a little larger than it.
-    let body_max = if encoded {
-        size + size / 64 + 4096
-    } else {
-        size
-    };
-    let body = crate::ip_source::read_body_bounded(resp, Some(body_max), Some(STALL)).await?;
-    let bytes = if encoded {
-        myco_blossom::decode_zstd_bounded(&body, size)?
-    } else {
-        body
-    };
-    (bytes.len() == size && sha256_hex(&bytes) == file.sha256).then_some(bytes)
+        .ok()
+        .flatten()
 }
 
-/// Remove the APKs of every other release this phone keeps a file event for.
-async fn prune_older(content: &Content, store: &myco_blossom::FsBlobStore, keep: &str) {
+/// Every publisher-signed Myco file event this phone keeps.
+async fn publisher_files(content: &Content) -> Vec<Event> {
     let Ok(publisher) = PublicKey::parse(PUBLISHER) else {
-        return;
+        return Vec::new();
     };
     let filter = Filter::new()
-        .kind(Kind::Custom(FILE_KIND))
-        .author(publisher)
-        .custom_tag(
-            nostr::SingleLetterTag::lowercase(nostr::Alphabet::I),
-            "app.myco",
-        );
-    let Ok(files) = content.relay().query(&[filter]).await else {
-        return;
-    };
-    for event in files.iter().filter(|e| e.verify().is_ok()) {
-        for x in tag_values(event, "x") {
-            if x != keep && is_sha256(x) && store.remove(x) {
-                tracing::info!(sha256 = %x, "release apk: older release removed");
-            }
-        }
-    }
+        .kind(nostr::Kind::Custom(FILE_KIND))
+        .author(publisher);
+    content.relay().query(&[filter]).await.unwrap_or_default()
 }
 
-/// What "Clear local database" must keep for the carried release: the
-/// announcement and file event, and the APK (its zstd variant goes with it).
-pub(crate) async fn kept_release(content: &Content) -> (Vec<EventId>, Option<String>) {
-    let Some(announcement) = kept_announcement(content).await else {
-        return (Vec::new(), None);
-    };
+/// The APKs of every other release among `files` — only publisher-signed
+/// Myco file events count, so no one else's event can name a blob for
+/// removal — never `keep`.
+fn older_release_blobs(files: &[Event], keep: &str) -> Vec<String> {
+    files
+        .iter()
+        .filter(|e| publisher_file(e))
+        .flat_map(|e| tag_values(e, "x"))
+        .filter(|x| is_sha256_hex(x))
+        .map(str::to_ascii_lowercase)
+        .filter(|x| x != keep)
+        .collect()
+}
+
+/// What "Clear local database" must keep for the carried release, from the
+/// kept announcement and the publisher-signed file events it names: those
+/// events, and every APK they name (each ABI's; variants go with them).
+fn release_keep_set(announcement: &Event, files: &[Event]) -> (Vec<EventId>, Vec<String>) {
+    let named = tag_values(announcement, "e");
     let mut ids = vec![announcement.id];
-    let mut sha = None;
-    if let Some(filter) =
-        file_filter(&announcement).and_then(|f| serde_json::from_value::<Filter>(f).ok())
+    let mut blobs = Vec::new();
+    for file in files
+        .iter()
+        .filter(|f| named.contains(&f.id.to_hex().as_str()) && publisher_file(f))
     {
-        for event in content.relay().query(&[filter]).await.unwrap_or_default() {
-            if PublicKey::parse(PUBLISHER).is_ok_and(|p| p == event.pubkey)
-                && event.kind.as_u16() == FILE_KIND
-            {
-                ids.push(event.id);
-                if let [x] = tag_values(&event, "x").as_slice() {
-                    if is_sha256(x) {
-                        sha = Some(x.to_string());
-                    }
-                }
-            }
-        }
+        ids.push(file.id);
+        blobs.extend(
+            tag_values(file, "x")
+                .into_iter()
+                .filter(|x| is_sha256_hex(x))
+                .map(str::to_ascii_lowercase),
+        );
     }
-    (ids, sha)
+    (ids, blobs)
+}
+
+/// [`release_keep_set`] for what this phone keeps.
+pub(crate) async fn kept_release(content: &Content) -> (Vec<EventId>, Vec<String>) {
+    let Some(announcement) = kept_announcement(content).await else {
+        return (Vec::new(), Vec::new());
+    };
+    release_keep_set(&announcement, &publisher_files(content).await)
 }
 
 /// Write the kept release APK `sha256` to `dest` for the installer, checked
 /// against its name once more on the way out.
 pub async fn export(content: &Content, sha256: &str, dest: &Path) -> anyhow::Result<()> {
-    anyhow::ensure!(is_sha256(sha256), "not a sha256: {sha256}");
+    anyhow::ensure!(is_sha256_hex(sha256), "not a sha256: {sha256}");
+    let sha256 = sha256.to_ascii_lowercase();
     let store = content
         .blobs_local()
         .ok_or_else(|| anyhow::anyhow!("No embedded blob store"))?;
-    let bytes = nsite_deck::seams::BlobStore::get(&*store, sha256)
+    let bytes = nsite_deck::seams::BlobStore::get(&*store, &sha256)
         .await?
         .ok_or_else(|| anyhow::anyhow!("The update isn't on this phone"))?;
     anyhow::ensure!(sha256_hex(&bytes) == sha256, "The kept update is damaged");
@@ -440,7 +510,7 @@ pub async fn export(content: &Content, sha256: &str, dest: &Path) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Tag};
+    use nostr::{EventBuilder, Keys, Kind, Tag};
 
     const ABI: &str = "android-arm64-v8a";
 
@@ -565,20 +635,80 @@ mod tests {
         assert_eq!(file_from_event(&tampered, &ann, ABI), None);
     }
 
-    /// A peer's Blossom hands out the zstd variant; the fetch decodes it and
-    /// accepts it only as exactly the signed release.
-    #[tokio::test]
-    async fn fetches_the_zstd_variant_and_checks_it() {
-        let dir = std::env::temp_dir().join(format!("myco-release-apk-{}", std::process::id()));
+    fn real_release() -> (Event, Event) {
+        let ann = serde_json::from_str(include_str!("release-0.12.1-announcement.json")).unwrap();
+        let file = serde_json::from_str(include_str!("release-0.12.1-file.json")).unwrap();
+        (ann, file)
+    }
+
+    /// The real file event's tags under another key: what an attacker can
+    /// publish about the release.
+    fn forged_copy(file: &Event) -> Event {
+        let tags = file
+            .tags
+            .iter()
+            .map(|t| t.as_slice().to_vec())
+            .collect::<Vec<_>>();
+        signed(&Keys::generate(), FILE_KIND, tags)
+    }
+
+    const REAL_X: &str = "06f39fc91f11bf44adecee3b00bb7ca777b59f96dc6fe4957135107752b75fca";
+
+    #[test]
+    fn prune_names_only_publisher_signed_other_releases() {
+        let (_, file) = real_release();
+        let forged = forged_copy(&file);
+        // Another release kept: the real file event's APK goes.
+        assert_eq!(
+            older_release_blobs(&[file.clone(), forged.clone()], &"a".repeat(64)),
+            vec![REAL_X.to_string()]
+        );
+        // The carried release itself never goes.
+        assert!(older_release_blobs(&[file], REAL_X).is_empty());
+        // A forged event names nothing for removal.
+        assert!(older_release_blobs(&[forged], &"a".repeat(64)).is_empty());
+    }
+
+    #[test]
+    fn keep_set_is_the_announcement_its_files_and_their_apks() {
+        let (ann, file) = real_release();
+        let forged = forged_copy(&file);
+        let (ids, blobs) = release_keep_set(&ann, &[file.clone(), forged.clone()]);
+        assert_eq!(ids, vec![ann.id, file.id]);
+        assert_eq!(blobs, vec![REAL_X.to_string()]);
+        // Not named by the announcement (and not the publisher's): not kept.
+        let (ids, blobs) = release_keep_set(&ann, &[forged]);
+        assert_eq!(ids, vec![ann.id]);
+        assert!(blobs.is_empty());
+    }
+
+    #[test]
+    fn only_blossom_urls_are_internet_sources_and_budgets_scale() {
+        let (ann, file) = real_release();
+        let release = file_from_event(&file, &ann, ABI).unwrap();
+        // The CDN URL is `<server>/<x>`; the GitHub download is not.
+        assert_eq!(
+            blossom_servers(&release),
+            vec!["https://cdn.zapstore.dev".to_string()]
+        );
+        // 25 MB at the floor rate fits in well under the carry deadline.
+        let budget = download_budget(release.size);
+        assert!(budget > Duration::from_secs(380) && budget < CARRY_DEADLINE);
+    }
+
+    /// A Blossom server with one blob and its zstd variant, on loopback.
+    async fn serve_blob(apk: &[u8]) -> (Arc<myco_blossom::FsBlobStore>, String, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "myco-release-apk-{}-{}",
+            std::process::id(),
+            sha256_hex(apk)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Arc::new(myco_blossom::FsBlobStore::open(&dir).unwrap());
-        let apk = b"not really an apk, but compressible ".repeat(2048);
-        let sha = nsite_deck::seams::BlobStore::put(&*store, &apk)
+        let sha = nsite_deck::seams::BlobStore::put(&*store, apk)
             .await
             .unwrap();
-        let variant = store.store_zstd(&sha, 3).unwrap().unwrap();
-        assert!(variant < apk.len() as u64 / 4);
-
+        store.store_zstd(&sha, 3).unwrap().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let open: myco_blossom::server::AccessFn = Arc::new(|_, _| true);
@@ -588,34 +718,72 @@ mod tests {
             open,
             Some(store.zstd_dir()),
         ));
-        let http = crate::http::HttpClient::mesh(reqwest::Client::builder());
-        let url = format!("http://{addr}/{sha}");
-        let file = ReleaseFile {
-            version: "0.12.1".into(),
-            version_code: None,
-            sha256: sha.clone(),
-            size: apk.len() as u64,
-            urls: Vec::new(),
-        };
-        assert_eq!(fetch_verified(&http, &url, &file, true).await.unwrap(), apk);
-        assert_eq!(
-            fetch_verified(&http, &url, &file, false).await.unwrap(),
-            apk
-        );
+        (store, sha, format!("http://{addr}"))
+    }
 
-        // The signed size is smaller than what the peer serves: refused.
-        let short = ReleaseFile {
-            size: file.size - 1,
-            ..file.clone()
-        };
-        assert!(fetch_verified(&http, &url, &short, true).await.is_none());
-        // The bytes don't hash to the signed name: refused.
-        let other = ReleaseFile {
-            sha256: "0".repeat(64),
-            ..file.clone()
-        };
-        let wrong = format!("http://{addr}/{sha}");
-        assert!(fetch_verified(&http, &wrong, &other, true).await.is_none());
-        let _ = std::fs::remove_dir_all(&dir);
+    fn mesh_source(server: &str, max: usize) -> IpPeerSource {
+        IpPeerSource::new(Vec::new(), vec![server.to_string()])
+            .on_mesh()
+            .with_max_blob_bytes(max)
+            .with_stall_timeout(Duration::from_secs(5))
+            .with_total_timeout(Duration::from_secs(10))
+            .accept_zstd()
+    }
+
+    /// The variant is fetched and decoded; a corrupt variant falls back to
+    /// the plain blob; a blob over the signed size is refused either way.
+    #[tokio::test]
+    async fn fetches_the_zstd_variant_and_falls_back_from_a_bad_one() {
+        let apk = b"not really an apk, but compressible ".repeat(2048);
+        let (store, sha, server) = serve_blob(&apk).await;
+        let got = mesh_source(&server, apk.len()).fetch_blob(&sha, &[]).await;
+        assert_eq!(got.unwrap().unwrap(), apk);
+
+        // A variant that decodes to other bytes: the plain blob instead.
+        let other = zstd::encode_all(&b"something else entirely"[..], 3).unwrap();
+        std::fs::write(store.zstd_dir().join(&sha), other).unwrap();
+        let got = mesh_source(&server, apk.len()).fetch_blob(&sha, &[]).await;
+        assert_eq!(got.unwrap().unwrap(), apk);
+
+        // Larger than the signed size: refused, variant or not.
+        let got = mesh_source(&server, apk.len() - 1)
+            .fetch_blob(&sha, &[])
+            .await;
+        assert!(got.unwrap().is_none());
+    }
+
+    /// A server that sends a byte just inside the stall timeout is cut off by
+    /// the total budget, not waited on for good.
+    #[tokio::test]
+    async fn a_dripping_server_is_cut_off_by_the_total_budget() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+                        .await;
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        if socket.write_all(b"x").await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let source = IpPeerSource::new(Vec::new(), vec![format!("http://{addr}")])
+            .on_mesh()
+            .with_max_blob_bytes(1_000_000)
+            .with_stall_timeout(Duration::from_secs(1))
+            .with_total_timeout(Duration::from_millis(600));
+        let started = Instant::now();
+        let got = source.fetch_blob(&"a".repeat(64), &[]).await.unwrap();
+        assert!(got.is_none());
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 }

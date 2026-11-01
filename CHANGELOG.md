@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the release download. It is accepted only as the exact bytes Zapstore's
   publisher-signed file event names, and installed only if it is signed with
   the release key; Android asks before installing. It travels zstd-compressed
-  (25 MB to about 10 MB). Only the newest release is kept.
+  (25 MB to about 11 MB). Only the newest release is kept.
 
 - **Share Myco.** A **Share Myco** bubble on the Apps tab gives the app itself
   to a phone that doesn't have it. **Over a hotspot** needs no internet: the

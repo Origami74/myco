@@ -96,11 +96,17 @@ object ReleaseInstaller {
         }
         val id = installer.createSession(params)
         installer.openSession(id).use { session ->
-            apk.inputStream().use { src ->
-                session.openWrite("base.apk", 0, apk.length()).use { out ->
-                    src.copyTo(out)
-                    session.fsync(out)
+            try {
+                apk.inputStream().use { src ->
+                    session.openWrite("base.apk", 0, apk.length()).use { out ->
+                        src.copyTo(out)
+                        session.fsync(out)
+                    }
                 }
+            } catch (e: Exception) {
+                // A half-written session would sit in Android's installer.
+                session.abandon()
+                throw e
             }
             // Mutable: the installer fills in the status and, for the user's
             // confirmation, the activity to start. Explicit, as Android 14
