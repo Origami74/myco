@@ -1,6 +1,7 @@
 package app.myco.ui.screens
 
 import android.content.ActivityNotFoundException
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -104,7 +105,8 @@ fun ShareMycoSheet(onHotspot: () -> Unit, onDismiss: () -> Unit) {
             Spacer(Modifier.height(6.dp))
             Text(
                 "Give the app to someone nearby who doesn't have it yet. " +
-                    "Their phone needs Android 10 or newer, 64-bit.",
+                    "Their phone needs Android 10 or newer" +
+                    (if (apk?.only64Bit == true) ", 64-bit." else "."),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
@@ -142,7 +144,9 @@ fun ShareMycoSheet(onHotspot: () -> Unit, onDismiss: () -> Unit) {
                     scope.launch {
                         // Copying ~100 MB into the cache; not on the main thread.
                         val intent = withContext(Dispatchers.IO) {
-                            runCatching { MycoApk.shareIntent(context) }.getOrNull()
+                            runCatching { MycoApk.shareIntent(context) }
+                                .onFailure { Log.w("MycoShare", "preparing the APK to share failed", it) }
+                                .getOrNull()
                         }
                         preparing = false
                         try {
@@ -163,6 +167,17 @@ fun ShareMycoSheet(onHotspot: () -> Unit, onDismiss: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
+            if (!apk.release) {
+                // Not signed with the release key: whoever installs it can't
+                // update from Zapstore or GitHub over it.
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Development build — it won't update from Zapstore or GitHub.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
     }
 }

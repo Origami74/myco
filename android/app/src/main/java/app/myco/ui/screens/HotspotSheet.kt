@@ -56,6 +56,7 @@ import app.myco.hotspot.HotspotView
 import app.myco.hotspot.Outbox
 import app.myco.hotspot.SharedFiles
 import app.myco.hotspot.WifiQr
+import app.myco.share.MycoApk
 import app.myco.share.NsiteShare
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 
@@ -81,6 +82,8 @@ fun HotspotSheet(
     onDismiss: () -> Unit,
     forMyco: Boolean = false,
 ) {
+    val context = LocalContext.current
+    val canShareMyco = remember { MycoApk.info(context) != null }
     // Skip the half-height resting state: the two steps plus the file lists are
     // taller than a partially-expanded sheet, so at the default height step 2
     // sits below the fold and reads as a cut-off sheet rather than a scrollable
@@ -126,7 +129,10 @@ fun HotspotSheet(
                         } else {
                             "Opens a Wi-Fi hotspot on this phone and a web page on it. " +
                                 "Anyone who joins — no Myco needed — can download the files " +
-                                "you share, send you files back, or get Myco itself."
+                                "you share" +
+                                // A split install has no Get Myco card to offer.
+                                if (canShareMyco) ", send you files back, or get Myco itself."
+                                else " and send you files back."
                         },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodyMedium,

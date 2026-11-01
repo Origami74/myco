@@ -184,8 +184,10 @@ class HotspotService : Service() {
 
     /** Bind the file page, walking a few ports in case one is taken. */
     private fun startServer(): FileShareServer? {
+        // The page's brand mark, read once per server rather than per request.
+        val icon = runCatching { assets.open("hotspot/myco-icon.png").use { it.readBytes() } }.getOrNull()
         for (port in BASE_PORT until BASE_PORT + PORT_TRIES) {
-            val srv = FileShareServer(SharedFiles.get(this), Outbox.get(this), MycoApk.info(this), port)
+            val srv = FileShareServer(SharedFiles.get(this), Outbox.get(this), MycoApk.info(this), icon, port)
             try {
                 srv.start(SOCKET_READ_TIMEOUT_MS, false)
                 return srv

@@ -251,11 +251,10 @@ fun AppsScreen(
 
     if (shareMyco) {
         ShareMycoSheet(
-            // Not allowed yet: the explanation first, whose button asks;
-            // MainActivity starts the hotspot when Android says yes.
+            // Already allowed: start it right away. Otherwise open the sheet
+            // only, and let its Start button ask — one window at a time.
             onHotspot = {
                 if (SystemAsk.Hotspot.granted(context)) HotspotService.start(context)
-                else asker?.explain(SystemAsk.Hotspot)
                 shareMyco = false
                 mycoHotspot = true
             },
