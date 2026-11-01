@@ -558,19 +558,22 @@ pub async fn serve_on_with(
 }
 
 /// Serve a pre-built (shared) [`RelayHub`] on `listener`. Spawn this once per
-/// listener that should share the same store + live bus + gossiper.
-pub async fn serve_on_hub(
-    hub: Arc<RelayHub>,
-    listener: tokio::net::TcpListener,
-) -> anyhow::Result<()> {
+/// listener that should share the same store + live bus + gossiper. Any
+/// listener that names its peers by socket address will do: a kernel socket,
+/// or the mesh stack's (see [`crate::mesh_net`]).
+pub async fn serve_on_hub<L>(hub: Arc<RelayHub>, listener: L) -> anyhow::Result<()>
+where
+    L: axum::serve::Listener<Addr = SocketAddr>,
+{
     let app = Router::new()
         .route("/", get(root))
         .layer(axum::middleware::from_fn_with_state(hub.clone(), admit))
         .with_state(hub);
     // Connect-info gives each socket's peer address, so the handler can tell a
-    // loopback (WebView) connection from a mesh peer.
+    // loopback (WebView) connection from a mesh peer. `tap_io` is what lets
+    // axum read it off any listener, not only its own `TcpListener`.
     axum::serve(
-        listener,
+        axum::serve::ListenerExt::tap_io(listener, |_: &mut L::Io| {}),
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;

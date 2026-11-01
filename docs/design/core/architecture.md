@@ -1,6 +1,6 @@
 # System Architecture
 
-The structure of **Myco** on one phone: four layers, five Rust crates in one
+The structure of **Myco** on one phone: four layers, seven Rust crates in one
 `.so`, a Kotlin shell, and the boundary between them. Vocabulary is in
 [concepts.md](./concepts.md); the visual companion is
 [diagrams/01-system-layering.svg](../diagrams/01-system-layering.svg).
@@ -26,7 +26,8 @@ The structure of **Myco** on one phone: four layers, five Rust crates in one
 │  3 Relay/Blob  myco-relay · myco-blossom · mesh_relay (proxy, hub)   │
 │                gossip · peer_relay (pool) · outbox lanes             │
 │  4 FIPS        the fips node · lanes: BLE bridge, Aware/LAN UDP,     │
-│                TCP · TUN bridge · .fips DNS · control socket         │
+│                TCP · mesh stack (fips-host) · TUN bridge · .fips DNS │
+│                · control socket                                      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -45,6 +46,7 @@ Each layer talks only to the one below it. Layer 1 never names a radio; layer
 | `myco-relay` | 3 | embedded NIP-01 relay store: what this phone **keeps**, in LMDB via `nostr-lmdb`; expired events swept | implements `RelayBackend` |
 | `myco-blossom` | 3 | embedded Blossom store: sha256-named files, hash verified on write | implements `BlobStore` |
 | `myco-cache` | 3 | the shell cache: a second LMDB and blob directory for what passed through, held to a byte budget by segmented LRU | implements `RelayBackend`, `BlobStore` |
+| `fips-host` | 4 | hosting a FIPS node in an app, with no Myco types: the userspace mesh TCP/IP stack (`netstack`) that lets Myco reach the mesh with no VPN | the node's app-owned TUN channels |
 
 The two layer-1 crates are **Android-free and transport-agnostic**. Every
 concrete thing — the relay in use, the radio, the WebView — arrives through a
@@ -192,9 +194,18 @@ envelope over `.fips` addresses.
 - **TCP** — when the phone has internet.
 
 Peers can hold several paths at once (multi-path core); fips sends on one and
-keeps the others as standbys. The IPv6 side is an app-owned `VpnService` TUN
-scoped to Myco's uid, routing `fd00::/8`; `.fips` DNS is answered by the node's
-own resolver. Rust reads peer state through the node's control socket
+keeps the others as standbys.
+
+The IPv6 side is the node's app-owned TUN: two packet channels, no system
+device. Myco's own sockets terminate those packets in process, on a userspace
+TCP/IP stack (`fips-host`'s `netstack`, through `mesh_net.rs`). The relay,
+Blossom and pairing servers listen on it, and peer dials go out on it, so Myco
+needs no `VpnService`. See [../fips/mesh-stack.md](../fips/mesh-stack.md).
+
+A `VpnService` TUN routing `fd00::/8` runs only when the user lets other apps on
+the mesh ("Allow other apps to use mesh") or sets an exit proxy. Packets the
+stack doesn't claim go to it. `.fips` DNS is answered by the node's own
+resolver. Rust reads peer state through the node's control socket
 (`control_client.rs`). Design: [../fips/](../fips/).
 
 ---
@@ -210,7 +221,7 @@ per-purpose entry points that need bytes or blocking: the napplet channel
 (`gatewayGet`), the BLE byte bridge, the UDP socket hand-off, and the TUN packet
 pump. All listed in [../../reference/ffi-surface.md](../../reference/ffi-surface.md).
 
-Kotlin owns: the UI, the WebViews, the radios, NFC, the `VpnService`, notifications,
+Kotlin owns: the UI, the WebViews, the radios, NFC, the optional `VpnService`, notifications,
 the share sheet. Rust owns: both identities, the Circle, the stores, the node,
 the gossip, every capability a napplet gets.
 

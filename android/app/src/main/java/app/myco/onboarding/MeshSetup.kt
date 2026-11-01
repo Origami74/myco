@@ -5,21 +5,23 @@ package app.myco.onboarding
  *
  * The popup has up to four segments — Install Myco (always done), Nearby
  * devices, Connection and Name — and these are the states it can be in across
- * the last three. Only [EnableMesh], the two explain cards, the three refusal
- * cards and [Name] ask the user anything; the `Asking…` and [Connecting]
- * states are what sits behind Android's own prompts. Each Android prompt comes
- * after a card that says what it is for, and only on that card's button:
- * the happy path is "Yes", "Allow nearby devices", Android's nearby prompt, "Allow VPN",
- * Android's VPN prompt, then "Use this name".
+ * the last three. Only the two explain cards, the three refusal cards and
+ * [Name] ask the user anything; the `Asking…` and [Connecting] states are what
+ * sits behind Android's own prompts. Each Android prompt comes after a card
+ * that says what it is for, and only on that card's button: the happy path is
+ * "Allow nearby devices", Android's nearby prompt, then "Use this name".
  *
- * Every run that has mesh steps opens on [EnableMesh], whoever opened it: an
- * Android prompt is only ever launched by a tap on one of the popup's buttons,
- * never by the popup opening (see [MeshSetup.systemPromptUp]).
+ * The mesh itself is on from the first launch: it needs no permission of its
+ * own (Myco's traffic has its own stack in the core, no VPN). The popup only
+ * asks for what the radios need. The Connection steps — the VPN — are in a run
+ * only when the VPN is wanted: when other apps are allowed on the mesh (see
+ * `MeshSharing`).
+ *
+ * A run opens on the first card that has something to ask ([MeshSetup.firstStep]),
+ * never behind an Android prompt: a prompt is only ever launched by a tap on
+ * one of the popup's buttons (see [MeshSetup.systemPromptUp]).
  */
 enum class SetupStep {
-    /** "Enable mesh?" — the first card of every run with mesh steps. */
-    EnableMesh,
-
     /**
      * "Nearby devices": what Android is about to ask for, before it asks. Its
      * "Allow nearby devices" launches the nearby prompt; "Not now" carries on without it,
@@ -34,7 +36,7 @@ enum class SetupStep {
     NearbyRefused,
 
     /**
-     * "Mesh connection": what the VPN Android is about to ask for is, before
+     * "Other apps on the mesh": what the VPN Android is about to ask for is, before
      * it asks. Its "Allow VPN" launches the consent prompt; "Not now" skips the
      * VPN like a refusal would. Shown only when a prompt would follow.
      */
@@ -46,7 +48,7 @@ enum class SetupStep {
     /** Consent given; waiting for the tunnel to come up (or fail). */
     Connecting,
 
-    /** VPN consent refused: "Mesh needs the VPN". */
+    /** VPN consent refused: "Other apps can’t use the mesh". */
     VpnRefused,
 
     /** Another app's always-on VPN holds the slot: "Another VPN is always on". */
@@ -56,22 +58,15 @@ enum class SetupStep {
     Name,
 }
 
-/**
- * What opened this run of the popup. It decides what the grey button on
- * "Enable mesh?" does.
- */
+/** What opened this run of the popup. */
 enum class SetupEntry {
     /** The app starting on a fresh install (see [MeshSetup.launchEntry]). */
     Launch,
 
-    /**
-     * The app starting after an upgrade, with the mesh on and something it
-     * needs missing. The mesh already ran, so the grey button is "Not now"
-     * and leaves it on, and the popup doesn't hold it down while it shows.
-     */
+    /** The app starting after an upgrade, with the mesh on and something it needs missing. */
     Upgrade,
 
-    /** The user switched the mesh on (Settings, the status pill) with something missing. */
+    /** The user switched the mesh on (Settings › Mesh) with something missing. */
     MeshSwitch,
 
     /** A Fix in Settings (Permissions, the VPN warning card) or a radio toggle. */
@@ -82,22 +77,26 @@ enum class SetupEntry {
 enum class Segment { Install, Nearby, Connection, Name }
 
 /** How one segment of the progress bar draws. */
-enum class SegmentState { Done, Active, Problem, Pending, Skipped }
+enum class SegmentState { Done, Active, Problem, Pending }
 
 /**
- * Which segments this run of the popup has. [mesh] covers Nearby devices and
- * Connection together; [name] is the name step. A fresh install has both; the
- * mesh switch reopens it with only the mesh steps once the name is chosen; an
- * upgrade whose mesh already works but never chose a name gets only the name.
+ * Which segments this run of the popup has. [mesh] covers Nearby devices and,
+ * when [connection], the VPN; [name] is the name step. A fresh install has
+ * both; the mesh switch reopens it with only the mesh steps once the name is
+ * chosen; an upgrade whose mesh already works but never chose a name gets only
+ * the name. [connection] is whether the VPN is wanted at all (other apps
+ * allowed on the mesh); without it the mesh steps end after Nearby devices.
  */
 data class SetupPlan(
     val mesh: Boolean,
     val name: Boolean,
     val entry: SetupEntry = SetupEntry.Launch,
+    val connection: Boolean = true,
 ) {
     val segments: List<Segment> = buildList {
         add(Segment.Install)
-        if (mesh) addAll(listOf(Segment.Nearby, Segment.Connection))
+        if (mesh) add(Segment.Nearby)
+        if (mesh && connection) add(Segment.Connection)
         if (name) add(Segment.Name)
     }
 }
@@ -106,23 +105,17 @@ data class SetupPlan(
  * How the mesh steps of this run went, for drawing the segments behind the
  * one on screen.
  *
- * @param declined "No thanks": Nearby and Connection were skipped.
  * @param nearbyRefused carried on past a nearby refusal.
  * @param connectionSkipped "Not now" / "Continue without" on the VPN.
- * @param dismissed "Not now" on "Enable mesh?" on an upgrade or in a run the
- *   user opened later: nothing was asked and nothing changed, so it leaves
- *   no snackbar.
  */
 data class MeshOutcome(
-    val declined: Boolean = false,
     val nearbyRefused: Boolean = false,
     val connectionSkipped: Boolean = false,
-    val dismissed: Boolean = false,
 )
 
 /** What to do about the popup when the app starts. */
 enum class LaunchDecision {
-    /** Show the popup at "Enable mesh?". */
+    /** Show the popup on its first card with something to ask. */
     Show,
 
     /** Nothing to ask: record setup as done without showing anything. */
@@ -146,11 +139,20 @@ enum class SetupNotice {
     /** Mesh on, but the nearby permissions were refused. */
     NearbyMissing,
 
-    /** Mesh off because the VPN step was skipped or blocked. */
+    /** Mesh off. */
     MeshOff,
 
-    /** Mesh off because the user said "No thanks". */
-    Declined,
+    /**
+     * Once, after upgrading from a build whose mesh needed the VPN, for
+     * someone who had it running: Myco has let the slot go.
+     */
+    VpnNoLongerNeeded,
+
+    /**
+     * Once, after that upgrade, for someone whose mesh was off — often
+     * because the VPN it used to need was refused or taken.
+     */
+    MeshWorksWithoutVpn,
 }
 
 /**
@@ -202,6 +204,8 @@ object MeshSetup {
      *   decided yet → show it.
      *
      * @param meshPref the stored mesh switch, null when it was never written.
+     * @param vpnPrepared the VPN consent is Myco's — or the VPN isn't wanted,
+     *   so there is none to ask for.
      */
     fun atLaunch(
         onboardingDone: Boolean,
@@ -231,8 +235,14 @@ object MeshSetup {
         mesh: LaunchDecision,
         nameChosen: Boolean,
         entry: SetupEntry = SetupEntry.Launch,
+        connection: Boolean = true,
     ): SetupPlan? {
-        val plan = SetupPlan(mesh = mesh == LaunchDecision.Show, name = !nameChosen, entry = entry)
+        val plan = SetupPlan(
+            mesh = mesh == LaunchDecision.Show,
+            name = !nameChosen,
+            entry = entry,
+            connection = connection,
+        )
         return if (plan.mesh || plan.name) plan else null
     }
 
@@ -248,29 +258,28 @@ object MeshSetup {
         if (!introSeen || firstRunUnfinished) SetupEntry.Launch else SetupEntry.Upgrade
 
     /**
-     * Whether the popup keeps the node and tunnel down while it shows: only
-     * a first run's mesh steps, where nobody has said yes yet and "Yes"
-     * starts them. An upgrade's mesh already ran, and a run opened later
-     * leaves the mesh as it is until something is answered.
-     */
-    fun holdsMeshBack(step: SetupStep?, plan: SetupPlan): Boolean =
-        plan.entry == SetupEntry.Launch && step != null && step != SetupStep.Name
-
-    /**
      * The mesh steps opened from outside the popup — the mesh switch, a
      * Settings fix, a radio toggle — with the name step only if it was never
-     * answered. Opens on "Enable mesh?" like every other run ([firstStep]).
+     * answered. Opens on its first card with something to ask ([firstStep]).
      */
-    fun reopenPlan(entry: SetupEntry, nameChosen: Boolean): SetupPlan =
-        SetupPlan(mesh = true, name = !nameChosen, entry = entry)
+    fun reopenPlan(entry: SetupEntry, nameChosen: Boolean, connection: Boolean = true): SetupPlan =
+        SetupPlan(mesh = true, name = !nameChosen, entry = entry, connection = connection)
 
     /**
-     * The card a run of the popup opens on. With mesh steps that is always
-     * the "Enable mesh?" confirmation — never an `Asking…` step, so opening
-     * the popup never puts an Android prompt up by itself.
+     * The card a run of the popup opens on: the first one with something to
+     * ask. The "Nearby devices" card when the nearby group is missing, then
+     * the VPN card when this run wants the VPN and it isn't Myco's, then the
+     * name. Null when nothing is left to ask. Never an `Asking…` step, so
+     * opening the popup never puts an Android prompt up by itself.
+     *
+     * @param vpnPrepared the VPN consent is Myco's, or it isn't wanted.
      */
-    fun firstStep(plan: SetupPlan): SetupStep =
-        if (plan.mesh) SetupStep.EnableMesh else SetupStep.Name
+    fun firstStep(plan: SetupPlan, nearbyGranted: Boolean, vpnPrepared: Boolean): SetupStep? = when {
+        plan.mesh && !nearbyGranted -> SetupStep.ExplainNearby
+        plan.mesh && plan.connection && !vpnPrepared -> SetupStep.ExplainVpn
+        plan.name -> SetupStep.Name
+        else -> null
+    }
 
     /**
      * Whether [step] is one that sits behind an Android prompt. The Activity
@@ -281,36 +290,18 @@ object MeshSetup {
         step == SetupStep.AskingNearby || step == SetupStep.AskingVpn
 
     /**
-     * Whether the grey button on "Enable mesh?" just closes the popup ("Not
-     * now", nothing changed) rather than declining the mesh ("No thanks", on
-     * to the name). Only a first run declines; an upgrade, or a run the user
-     * opened later by switching the mesh on or tapping a Fix, closes and
-     * leaves things be — "No thanks" there would switch off a mesh that ran.
-     */
-    fun greyButtonCloses(plan: SetupPlan): Boolean = plan.entry != SetupEntry.Launch
-
-    /**
-     * Where to go once the mesh steps are over, whichever way they ended
-     * ("No thanks" included — the name matters without mesh too): the name
-     * step if this run has one, otherwise null, which closes the popup.
+     * Where to go once the mesh steps are over, whichever way they ended: the
+     * name step if this run has one, otherwise null, which closes the popup.
      */
     fun afterMesh(plan: SetupPlan): SetupStep? = if (plan.name) SetupStep.Name else null
 
     /**
-     * Where "Yes, enable" leads: the "Nearby devices" card that explains the
-     * nearby prompt before Android shows it — or, with the nearby group
-     * already granted and so no prompt to come, straight past the nearby step
-     * ([afterNearby]). Never an `Asking…` step.
-     */
-    fun afterYes(nearbyGranted: Boolean, vpnPrepared: Boolean): SetupStep =
-        if (nearbyGranted) afterNearby(vpnPrepared) else SetupStep.ExplainNearby
-
-    /**
      * Where to go once the nearby step is behind (granted, or carried on past
-     * a refusal): the "Mesh connection" card that explains the VPN before
-     * Android asks for it — or, with the consent already Myco's and so no
-     * prompt to come, straight to bringing the tunnel up. Never an `Asking…`
-     * step: the VPN prompt waits for a tap on the card ([vpnStep]).
+     * a refusal), in a run with the Connection steps: the card that explains
+     * the VPN before Android asks for it — or, with the consent already Myco's
+     * and so no prompt to come, straight to bringing the tunnel up. Never an
+     * `Asking…` step: the VPN prompt waits for a tap on the card ([vpnStep]).
+     * A run without them ([SetupPlan.connection]) goes to [afterMesh] instead.
      */
     fun afterNearby(vpnPrepared: Boolean): SetupStep =
         if (vpnPrepared) SetupStep.Connecting else SetupStep.ExplainVpn
@@ -325,14 +316,14 @@ object MeshSetup {
 
     /**
      * "Not now" on the connection card or a VPN refusal, "Continue without" on
-     * the always-on card: the Connection segment is marked skipped (the mesh
-     * goes off), then [afterMesh].
+     * the always-on card: the Connection segment is marked skipped (other apps
+     * stay off the mesh; Myco's own mesh carries on), then [afterMesh].
      */
     fun skipConnection(outcome: MeshOutcome): MeshOutcome = outcome.copy(connectionSkipped = true)
 
     /** The segment [step] belongs to. */
     fun segmentOf(step: SetupStep): Segment = when (step) {
-        SetupStep.EnableMesh, SetupStep.ExplainNearby, SetupStep.AskingNearby,
+        SetupStep.ExplainNearby, SetupStep.AskingNearby,
         SetupStep.NearbyRefused -> Segment.Nearby
         SetupStep.ExplainVpn, SetupStep.AskingVpn, SetupStep.Connecting,
         SetupStep.VpnRefused, SetupStep.AlwaysOnVpn -> Segment.Connection
@@ -345,9 +336,9 @@ object MeshSetup {
 
     /**
      * How each of [plan]'s segments draws while [step] is on screen. Segments
-     * behind it say how they went — done, amber for a refusal the user carried
-     * on past, struck through for steps "No thanks" skipped — and the ones
-     * ahead are pending, so the count stays the same on every path.
+     * behind it say how they went — done, or amber for a refusal the user
+     * carried on past — and the ones ahead are pending, so the count stays the
+     * same on every path.
      */
     fun segments(step: SetupStep, plan: SetupPlan, outcome: MeshOutcome): List<SegmentState> {
         val current = segmentOf(step)
@@ -359,7 +350,6 @@ object MeshSetup {
                 seg == Segment.Install -> SegmentState.Done
                 i > currentIndex -> SegmentState.Pending
                 i == currentIndex -> if (refusalCard) SegmentState.Problem else SegmentState.Active
-                outcome.declined || outcome.dismissed -> SegmentState.Skipped
                 seg == Segment.Nearby && outcome.nearbyRefused -> SegmentState.Problem
                 seg == Segment.Connection && outcome.connectionSkipped -> SegmentState.Problem
                 else -> SegmentState.Done
@@ -402,8 +392,7 @@ object MeshSetup {
         !allGranted && !anyRationale && elapsedMs in 0 until FAST_ANSWER_MS
 
     /** The snackbar for how the popup ended. */
-    fun notice(meshOn: Boolean, nearbyGranted: Boolean, declined: Boolean): SetupNotice = when {
-        declined -> SetupNotice.Declined
+    fun notice(meshOn: Boolean, nearbyGranted: Boolean): SetupNotice = when {
         !meshOn -> SetupNotice.MeshOff
         !nearbyGranted -> SetupNotice.NearbyMissing
         else -> SetupNotice.AllSet

@@ -75,14 +75,14 @@ enum class SystemAsk(
         ),
     ),
 
-    /** The VPN consent behind the mesh adapter (app-owned TUN). */
+    /** The VPN consent behind "Allow other apps to use mesh" (the app-owned TUN). */
     Vpn(
         AskMechanism.VpnConsent,
         Explanation(
-            title = "Mesh connection",
+            title = "Other apps on the mesh",
             body = "Next, Android asks to set up a VPN.",
-            note = "The VPN connects this phone to the FIPS mesh, so any app can reach devices on it. " +
-                "Your regular internet traffic doesn’t go through it.",
+            note = "The VPN lets other apps on this phone reach devices on the FIPS mesh. " +
+                "Myco doesn’t need it for itself, and your regular internet traffic doesn’t go through it.",
             button = "Allow VPN",
         ),
     ),

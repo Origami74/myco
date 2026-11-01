@@ -81,6 +81,16 @@ enum DialFault {
 }
 
 fn classify(err: &tokio_tungstenite::tungstenite::Error) -> DialFault {
+    // The mesh stack says so by kind (its "destination unreachable"); a
+    // kernel socket, in its error text.
+    if let tokio_tungstenite::tungstenite::Error::Io(e) = err {
+        if matches!(
+            e.kind(),
+            std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable
+        ) {
+            return DialFault::NoRoute;
+        }
+    }
     let text = err.to_string();
     if text.contains("Network is unreachable") || text.contains("No route to host") {
         DialFault::NoRoute
@@ -379,9 +389,7 @@ async fn dial(
     url: &str,
     npub: &str,
     dial_backoff: &BackoffMap,
-) -> Option<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-> {
+) -> Option<tokio_tungstenite::WebSocketStream<crate::mesh_net::MeshStream>> {
     dial_via(
         url,
         npub,
@@ -398,9 +406,7 @@ async fn dial_via(
     npub: &str,
     dial_backoff: &BackoffMap,
     target: Result<String, crate::dns_intercept::NotReady>,
-) -> Option<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-> {
+) -> Option<tokio_tungstenite::WebSocketStream<crate::mesh_net::MeshStream>> {
     // Dial the mesh address itself: a `<npub>.fips` name left to the system
     // resolver can be answered by a DNS server outside the mesh.
     let target = match target {
@@ -414,9 +420,9 @@ async fn dial_via(
         }
     };
     for attempt in 0..2 {
-        match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&target)).await
-        {
-            Ok(Ok((ws, _))) => return Some(ws),
+        // On the mesh stack when there is one (no VPN needed); see `mesh_net`.
+        match tokio::time::timeout(CONNECT_TIMEOUT, crate::mesh_net::connect_ws(&target)).await {
+            Ok(Ok(ws)) => return Some(ws),
             Ok(Err(e)) => match classify(&e) {
                 // Cold route: the name was registered just now and the route
                 // may still be settling, so give it a moment and try once more
@@ -655,7 +661,8 @@ mod tests {
         assert_eq!(handle_inbound(&frame, &mut pending), Some("r2".into()));
     }
 
-    /// The classifier reads OS error text, so pin both cases.
+    /// The classifier reads OS error text and the mesh stack's error kind, so
+    /// pin both.
     #[test]
     fn dial_faults_are_classified() {
         use std::io::Error;
@@ -673,6 +680,12 @@ mod tests {
             classify(&io("Connection refused (os error 111)")),
             DialFault::Hard
         ));
+        // The mesh stack's "destination unreachable", by kind.
+        let unreachable = tokio_tungstenite::tungstenite::Error::Io(Error::new(
+            std::io::ErrorKind::HostUnreachable,
+            "[fd00::1]:4870: no route to host",
+        ));
+        assert!(matches!(classify(&unreachable), DialFault::NoRoute));
     }
 
     /// A dial asked for before the node is up must not arm the peer's backoff:

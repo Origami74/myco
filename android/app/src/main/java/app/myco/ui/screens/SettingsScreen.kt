@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
@@ -146,6 +147,8 @@ fun SettingsScreen(
     onReplayIntro: () -> Unit = {},
     onFixNearby: () -> Unit = {},
     onFixConnection: () -> Unit = {},
+    shareMesh: Boolean = false,
+    onShareMeshToggle: (Boolean) -> Unit = {},
     /** Open straight on Settings › Permissions (the setup snackbar's action). */
     openPermissions: Boolean = false,
     onPermissionsOpened: () -> Unit = {},
@@ -189,6 +192,8 @@ fun SettingsScreen(
             onOpenDeveloper = { page = SettingsPage.Developer },
             onOpenPermissions = { page = SettingsPage.Permissions },
             onFixConnection = onFixConnection,
+            shareMesh = shareMesh,
+            onShareMeshToggle = onShareMeshToggle,
         )
         SettingsPage.Permissions -> PermissionsSettings(
             meshEnabled = meshEnabled,
@@ -240,6 +245,8 @@ private fun RootSettings(
     onOpenDeveloper: () -> Unit,
     onOpenPermissions: () -> Unit,
     onFixConnection: () -> Unit,
+    shareMesh: Boolean,
+    onShareMeshToggle: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val deviceName = DeviceName.current(context, state.ownNpub)
@@ -287,7 +294,7 @@ private fun RootSettings(
             SettingRow(
                 icon = Icons.Filled.Security,
                 title = "Permissions",
-                subtitle = "Nearby devices, VPN, notifications",
+                subtitle = "Nearby devices, notifications",
                 alert = meshEnabled && !SystemAsk.Nearby.granted(context),
                 onClick = onOpenPermissions,
             )
@@ -296,15 +303,26 @@ private fun RootSettings(
         Spacer(Modifier.height(8.dp))
         GroupLabel("MESH")
         SectionCard {
-            // The master switch (an app-owned VPN/TUN under the hood). Required for
-            // this device to reach the mesh; its transports below ride on top of it,
-            // so they grey out when the mesh is off.
+            // The master switch. Required for this device to reach the mesh; its
+            // transports below ride on top of it, so they grey out when the mesh
+            // is off. No VPN under it: Myco's own traffic has its own stack.
             ToggleRow(
                 icon = Icons.Filled.Lan,
                 title = "Enable",
                 subtitle = "Connect this device to the mesh",
                 checked = meshEnabled,
                 onToggle = onMeshToggle,
+            )
+            RowDivider()
+            // The VPN: only other apps need it. It takes Android's one VPN slot,
+            // so it is off unless asked for.
+            ToggleRow(
+                icon = Icons.Filled.Share,
+                title = "Allow other apps to use mesh",
+                subtitle = "Other apps can reach mesh devices and .fips names. Uses Android’s VPN slot",
+                checked = shareMesh,
+                onToggle = onShareMeshToggle,
+                enabled = meshEnabled,
             )
             RowDivider()
             ToggleRow(
@@ -418,7 +436,7 @@ private fun RootSettings(
             Spacer(Modifier.height(8.dp))
             RadioWarningCard(warning) {
                 when (warning.action) {
-                    RadioAction.FIX_VPN -> onFixConnection() // the setup popup, on "Enable mesh?"
+                    RadioAction.FIX_VPN -> onFixConnection() // the setup popup, on its VPN card
                     // Android's "turn Bluetooth on?" dialog, after its explanation.
                     RadioAction.ENABLE_BLUETOOTH -> asker?.explain(SystemAsk.BluetoothOn)
                     RadioAction.ENABLE_WIFI -> runCatching {
@@ -846,7 +864,8 @@ private fun DeveloperSettings(
                     "Route web traffic through an HTTP proxy on a mesh exit node. " +
                         "Enter the exit as <npub>.fips:8080 (or [fd00::…]:8080). " +
                         "Use socks5://<npub>.fips:1080 to send all of the phone's TCP " +
-                        "traffic through a SOCKS5 proxy instead. Blank = off.",
+                        "traffic through a SOCKS5 proxy instead. Blank = off. " +
+                        "Uses Android's VPN slot, as letting other apps use the mesh does.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

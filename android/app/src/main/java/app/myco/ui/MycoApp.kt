@@ -13,8 +13,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -66,9 +64,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
@@ -163,6 +159,8 @@ fun MycoApp(
     onFixNearby: () -> Unit = {},
     /** "Fix" on the mesh connection (Permissions, the VPN warning card). */
     onFixConnection: () -> Unit = {},
+    shareMesh: Boolean = false,
+    onShareMeshToggle: (Boolean) -> Unit = {},
     /** What the setup popup ended with, to show as a snackbar once. */
     setupNotice: SetupNotice? = null,
     onSetupNoticeShown: () -> Unit = {},
@@ -314,15 +312,17 @@ fun MycoApp(
     var pickedShareUris by rememberSaveable(stateSaver = UriListSaver) {
         mutableStateOf<List<Uri>>(emptyList())
     }
-    // The setup popup's parting word. A "Settings" tap goes to Settings ›
-    // Permissions, where everything it skipped can be fixed.
+    // The setup popup's parting word, or a one-off notice. A "Settings" tap
+    // goes to Settings › Permissions, where everything setup skipped can be
+    // fixed — or, for news, to Settings itself.
     val snackbars = remember { SnackbarHostState() }
     var openPermissions by remember { mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(setupNotice) {
         val notice = setupNotice ?: return@LaunchedEffect
-        val result = snackbars.showSnackbar(SetupSnackbarVisuals(notice))
+        val visuals = SetupSnackbarVisuals(notice)
+        val result = snackbars.showSnackbar(visuals)
         if (result == SnackbarResult.ActionPerformed) {
-            openPermissions = true
+            openPermissions = visuals.opensPermissions
             nav.navigate("settings") {
                 popUpTo(nav.graph.findStartDestination().id) { saveState = true }
                 launchSingleTop = true
@@ -340,7 +340,7 @@ fun MycoApp(
     // File offers must not be owned by Circle or any other selected destination.
     Box(Modifier.fillMaxSize()) {
         androidx.compose.runtime.CompositionLocalProvider(
-            LocalMeshControl provides MeshControl(meshEnabled, onMeshToggle),
+            LocalMeshControl provides MeshControl(meshEnabled),
             LocalLiveState provides live,
         ) {
     val current by nav.currentBackStackEntryAsState()
@@ -456,6 +456,8 @@ fun MycoApp(
                         onMeshToggle = onMeshToggle,
                         onFixNearby = onFixNearby,
                         onFixConnection = onFixConnection,
+                        shareMesh = shareMesh,
+                        onShareMeshToggle = onShareMeshToggle,
                         openPermissions = openPermissions,
                         onPermissionsOpened = { openPermissions = false },
                         onOfflineOnlyToggle = onOfflineOnlyToggle,
@@ -667,22 +669,22 @@ private fun IncomingRequestDialog(name: String, onAccept: () -> Unit, onIgnore: 
 
 // ----- shared UI building blocks used across screens -----
 
-/** Mesh master-switch state + toggle, provided by [MycoApp] so the status pill
- *  (rendered inside every screen's header) can flip the mesh without threading
- *  a callback through each screen's signature. */
-data class MeshControl(val enabled: Boolean, val toggle: (Boolean) -> Unit)
+/** Mesh master-switch state, provided by [MycoApp] so the status pill
+ *  (rendered inside every screen's header) can show it without threading it
+ *  through each screen's signature. */
+data class MeshControl(val enabled: Boolean)
 
-val LocalMeshControl = androidx.compose.runtime.compositionLocalOf { MeshControl(true) {} }
+val LocalMeshControl = androidx.compose.runtime.compositionLocalOf { MeshControl(true) }
 
 /**
- * The status pill shown top-right on every screen. Three segments:
- * mesh on/off toggle · Circle reachable/total · live peer count.
+ * The status pill shown top-right on every screen: Circle reachable/total ·
+ * live peer count.
  *
- * Tapping anywhere but the switch opens [MeshStatusSheet] — the pill is a
- * summary, and the summary is only useful if the thing it summarises is one
- * tap away. With the mesh off the whole pill goes red rather than merely
- * showing an unchecked switch: "off" is a state worth noticing from across the
- * room, and a grey slider is not.
+ * Tapping it opens [MeshStatusSheet] — the pill is a summary, and the summary
+ * is only useful if the thing it summarises is one tap away. It has no mesh
+ * switch: the mesh needs no permission of its own any more, so it is rarely
+ * turned off, and the switch lives in Settings › Mesh. With the mesh off the
+ * whole pill goes red: "off" is a state worth noticing from across the room.
  */
 @Composable
 fun PeersPill(state: AppState) {
@@ -717,56 +719,7 @@ fun PeersPill(state: AppState) {
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier.padding(start = 4.dp, end = 4.dp),
         ) {
-            // 1 — mesh master switch: the same slider as the Settings rows,
-            // scaled down to pill height.
-            //
-            // The whole left block toggles, not the slider. Sizing the Box was
-            // not enough on its own: the Switch keeps its own hit rect and
-            // swallows everything inside it, so taps landing in the Box but
-            // beside the slider did nothing — which is what made this fiddly.
-            // Handing the click to the Box and passing the Switch a null
-            // onCheckedChange makes the slider a pure indicator and the entire
-            // 72×48 block the target. `scale` is a draw transform only, so the
-            // slider stays small while the target does not.
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .height(40.dp)
-                    .toggleable(
-                        value = mesh.enabled,
-                        onValueChange = { mesh.toggle(it) },
-                        role = Role.Switch,
-                        // No ripple: a bounded indication on a block wider than
-                        // the thing it draws reads as a misaligned button.
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                    )
-                    .padding(start = 6.dp),
-            ) {
-                // Named, so the slider is not a mystery switch on every screen.
-                Text(
-                    "mesh",
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.labelMedium,
-                )
-                Box(
-                    modifier = Modifier.size(width = 52.dp, height = 40.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    androidx.compose.material3.Switch(
-                        checked = mesh.enabled,
-                        onCheckedChange = null,
-                        modifier = Modifier.scale(0.7f),
-                        colors = androidx.compose.material3.SwitchDefaults.colors(
-                            // Off is a fault state here, not a neutral one.
-                            uncheckedTrackColor = MaterialTheme.colorScheme.error,
-                            uncheckedBorderColor = MaterialTheme.colorScheme.error,
-                            uncheckedThumbColor = MaterialTheme.colorScheme.onError,
-                        ),
-                    )
-                }
-            }
-            // 2/3 — the counts, and the whole of them is the panel affordance.
+            // The counts, and the whole of them is the panel affordance.
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(7.dp),
@@ -775,9 +728,8 @@ fun PeersPill(state: AppState) {
                         onClick = { sheetOpen = true },
                         onClickLabel = "Show mesh and circle status",
                     )
-                    .padding(start = 2.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+                    .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
             ) {
-                PillDivider()
                 // Circle: reachable now / total paired.
                 Icon(
                     Icons.Filled.People,
