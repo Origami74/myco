@@ -1,0 +1,22 @@
+[package]
+name = "fips-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host a FIPS node inside an app: a userspace TCP/IP stack over the node's packet channels, so the app reaches the mesh without a VPN"
+
+[dependencies]
+smoltcp = { version = "0.14", default-features = false, features = [
+    "std",
+    "medium-ip",
+    "proto-ipv6",
+    "socket-tcp",
+    "socket-tcp-cubic",
+    "async",
+] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time"] }

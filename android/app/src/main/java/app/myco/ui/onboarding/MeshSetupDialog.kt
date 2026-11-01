@@ -84,11 +84,6 @@ import app.myco.onboarding.SystemAsk
  * [Confirmed] through `onAsk` instead.
  */
 enum class SetupAction {
-    Yes,
-    NoThanks,
-
-    /** The grey button on "Enable mesh?" in a run opened later: close, change nothing. */
-    NotNowEnable,
     OpenAppSettings,
     ContinueAfterNearby,
     NotNow,
@@ -187,25 +182,6 @@ private fun StepContent(
     onSaveName: (String) -> Unit,
 ) {
     when (step) {
-        // Deliberately short: the title and one line. What the VPN is and
-        // isn't is said on "Mesh connection", just before Android asks.
-        // Every run with mesh steps opens here, and only "Yes, enable" asks
-        // Android anything.
-        SetupStep.EnableMesh -> {
-            IconBadge(warn = false) { PhonesIcon(MaterialTheme.colorScheme.primary) }
-            Title("Enable mesh?")
-            Body("Mesh needs a few permissions in order to work.")
-            Spacer(Modifier.height(28.dp))
-            PrimaryButton("Yes, enable") { onAction(SetupAction.Yes) }
-            Spacer(Modifier.height(10.dp))
-            // At launch the grey button declines the mesh and goes on; in a
-            // run the user opened later it only closes the popup.
-            if (MeshSetup.greyButtonCloses(plan)) {
-                NeutralButton("Not now") { onAction(SetupAction.NotNowEnable) }
-            } else {
-                NeutralButton("No thanks") { onAction(SetupAction.NoThanks) }
-            }
-        }
         // Said before Android asks, so its nearby prompt never comes
         // unexplained. Only "Allow nearby devices" asks; "Not now" carries on without it.
         SetupStep.ExplainNearby ->
@@ -248,9 +224,9 @@ private fun StepContent(
         )
         SetupStep.VpnRefused -> {
             IconBadge(warn = true) { MeshIcon(MaterialTheme.colorScheme.tertiary) }
-            Title("Mesh needs the VPN")
-            Body("The VPN connects this phone to the FIPS mesh; your regular internet traffic doesn’t go through it.")
-            Note("Without it, apps on nearby mesh devices can’t be reached. Apps on this phone still open.")
+            Title("Other apps can’t use the mesh")
+            Body("The VPN is how other apps on this phone reach the FIPS mesh; your regular internet traffic doesn’t go through it.")
+            Note("Myco itself still works on the mesh without it.")
             Spacer(Modifier.height(20.dp))
             AskButton(SystemAsk.Vpn, "Try again", onAsk)
             Spacer(Modifier.height(6.dp))
@@ -268,15 +244,11 @@ private fun StepContent(
             Title("Another VPN is always on", size = 21)
             Body(
                 "Android runs only one VPN at a time, and another app’s VPN is set to " +
-                    "always on, so Myco’s mesh connection can’t start.",
+                    "always on, so other apps can’t be let onto the mesh.",
             )
-            // True to the code: with the VPN step failed the mesh is switched
-            // off, and the radios only start the node while it is on — but the
-            // gateway, relay and Blossom store are local and never needed it.
-            Note(
-                "Apps already on this phone still open. Finding nearby mesh devices and " +
-                    "sharing apps with them won’t work until it’s fixed.",
-            )
+            // True to the code: Myco's own mesh traffic has its own stack in the
+            // core, so only "Allow other apps to use mesh" is lost here.
+            Note("Myco itself still works on the mesh: finding nearby devices and sharing apps with them.")
             Spacer(Modifier.height(16.dp))
             FixBox(
                 "Settings › Network & internet › VPN › the other app: turn off " +
@@ -442,7 +414,7 @@ private fun SegmentBar(labels: List<Segment>, segments: List<SegmentState>) {
                         SegmentState.Done -> primary to 1f
                         SegmentState.Active -> primary to 0.5f
                         SegmentState.Problem -> warn to 1f
-                        SegmentState.Pending, SegmentState.Skipped -> track to 0f
+                        SegmentState.Pending -> track to 0f
                     }
                     drawRoundRect(track, origin, barSize, r)
                     if (fraction > 0f) {
@@ -465,7 +437,6 @@ private fun SegmentBar(labels: List<Segment>, segments: List<SegmentState>) {
                     when (seg) {
                         SegmentState.Done -> "✓ $label"
                         SegmentState.Problem -> "! $label"
-                        SegmentState.Skipped -> "– $label"
                         else -> label
                     },
                     color = when (seg) {
@@ -580,7 +551,7 @@ internal fun PrimaryButton(text: String, enabled: Boolean = true, onClick: () ->
     ) { Text(text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp) }
 }
 
-/** "No thanks" / "Not now": filled, but grey — a real choice, not a hidden one. */
+/** "Not now": filled, but grey — a real choice, not a hidden one. */
 @Composable
 internal fun NeutralButton(text: String, onClick: () -> Unit) {
     val dark = isDark()

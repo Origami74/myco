@@ -356,6 +356,15 @@ impl AppRuntime {
         // FIPS's effective IPv6 MTU (transport_mtu - 77). The VpnService sets this
         // on the TUN and the MSS clamp derives from it, so packets fit the mesh.
         identity.fips_mtu = node.effective_ipv6_mtu();
+        // Myco's own sockets reach the mesh through a userspace stack on the
+        // node's address, so they need no VpnService (see `mesh_net`). Started
+        // before the servers below, which listen on it.
+        #[cfg(target_os = "android")]
+        crate::mesh_net::init(
+            rt.handle(),
+            fips::Ipv6Address::from_node_addr(node.node_addr()).to_ipv6(),
+            node.effective_ipv6_mtu() as usize,
+        );
 
         // The content layer (relay + Blossom + gateway + Library) lives for the
         // whole process; it is independent of the node's start/stop lifecycle.
@@ -533,6 +542,20 @@ impl AppRuntime {
                         format!("relay port 4870 unavailable (another app using it?): {e}");
                 }
             }
+            // The same relay on the mesh stack, where peers reach it with no
+            // VPN up. Nothing else on the device can hold this port.
+            match crate::mesh_net::listen(4870) {
+                Some(Ok(listener)) => {
+                    let hub = hub.clone();
+                    rt.spawn(async move {
+                        if let Err(e) = crate::mesh_relay::serve_on_hub(hub, listener).await {
+                            tracing::error!(error = %e, "mesh-stack relay server exited");
+                        }
+                    });
+                }
+                Some(Err(e)) => tracing::error!(error = %e, "mesh-stack relay could not listen"),
+                None => {}
+            }
             // Loopback socket: the in-app nsite WebView talks to `ws://localhost:4870`
             // / `ws://127.0.0.1:4870`; the mesh socket is v6only, so serve loopback
             // explicitly. Connections here are classified as `Origin::Local`.
@@ -579,6 +602,23 @@ impl AppRuntime {
                             tracing::error!(error = %e, "auth service exited");
                         }
                     });
+                    // And on the mesh stack, for peers pairing with no VPN up.
+                    match crate::mesh_net::listen(crate::auth_service::AUTH_PORT) {
+                        Some(Ok(listener)) => {
+                            let content_for_auth = content.clone();
+                            rt.spawn(async move {
+                                if let Err(e) =
+                                    crate::auth_service::serve_on(content_for_auth, listener).await
+                                {
+                                    tracing::error!(error = %e, "mesh-stack auth service exited");
+                                }
+                            });
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!(error = %e, "mesh-stack auth service could not listen")
+                        }
+                        None => {}
+                    }
                 }
                 Err(e) => {
                     if !mesh_warning.is_empty() {
@@ -592,14 +632,11 @@ impl AppRuntime {
                     ));
                 }
             }
-            match (
-                blobs.clone(),
-                myco_blossom::server::bind("[::]:24243".parse::<SocketAddr>().unwrap()),
-            ) {
-                (None, _) => {
+            match blobs.clone() {
+                None => {
                     tracing::info!("blossom: not serving, a custom blob store is configured");
                 }
-                (Some(blobs), Ok(listener)) => {
+                Some(blobs) => {
                     // Same paired-only gate for blobs: a mesh source must be a
                     // current Circle member (loopback bypasses). Pairing never
                     // touches Blossom, so there's no handshake exception here.
@@ -616,24 +653,51 @@ impl AppRuntime {
                     // The embedded store's zstd variants (the release APK) go to
                     // a peer that asks for them; see `release_apk`.
                     let precompressed = content.blobs_local().map(|store| store.zstd_dir());
-                    rt.spawn(async move {
-                        if let Err(e) = myco_blossom::server::serve_on_guarded(
-                            blobs,
-                            listener,
-                            access,
-                            precompressed,
-                        )
-                        .await
-                        {
-                            tracing::error!(error = %e, "mesh blossom server exited");
+                    match myco_blossom::server::bind("[::]:24243".parse::<SocketAddr>().unwrap()) {
+                        Ok(listener) => {
+                            let (blobs, access, precompressed) =
+                                (blobs.clone(), access.clone(), precompressed.clone());
+                            rt.spawn(async move {
+                                if let Err(e) = myco_blossom::server::serve_on_guarded(
+                                    blobs,
+                                    listener,
+                                    access,
+                                    precompressed,
+                                )
+                                .await
+                                {
+                                    tracing::error!(error = %e, "mesh blossom server exited");
+                                }
+                            });
                         }
-                    });
-                }
-                (Some(_), Err(e)) => {
-                    if !mesh_warning.is_empty() {
-                        mesh_warning.push_str("; ");
+                        Err(e) => {
+                            if !mesh_warning.is_empty() {
+                                mesh_warning.push_str("; ");
+                            }
+                            mesh_warning.push_str(&format!("blossom port 24243 unavailable: {e}"));
+                        }
                     }
-                    mesh_warning.push_str(&format!("blossom port 24243 unavailable: {e}"));
+                    // And on the mesh stack, where peers reach it with no VPN up.
+                    match crate::mesh_net::listen(24243) {
+                        Some(Ok(listener)) => {
+                            rt.spawn(async move {
+                                if let Err(e) = myco_blossom::server::serve_on_guarded(
+                                    blobs,
+                                    listener,
+                                    access,
+                                    precompressed,
+                                )
+                                .await
+                                {
+                                    tracing::error!(error = %e, "mesh-stack blossom server exited");
+                                }
+                            });
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!(error = %e, "mesh-stack blossom could not listen")
+                        }
+                        None => {}
+                    }
                 }
             }
 
@@ -2488,6 +2552,7 @@ impl AppRuntime {
             // MSS ceiling from FIPS's effective IPv6 MTU (transport_mtu-77) minus
             // the IPv6+TCP headers — same as the system-TUN path's max_mss.
             let max_mss = node.effective_ipv6_mtu().saturating_sub(60);
+            crate::mesh_net::set_mtu(node.effective_ipv6_mtu() as usize);
             let (tun_outbound_tx, tun_inbound_rx) = node.enable_app_owned_tun();
             crate::tun_bridge::install(tun_outbound_tx, tun_inbound_rx, max_mss);
             // Let Android learn each UDP transport's raw fd once it opens, so

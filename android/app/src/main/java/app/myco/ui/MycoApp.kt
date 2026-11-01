@@ -163,6 +163,8 @@ fun MycoApp(
     onFixNearby: () -> Unit = {},
     /** "Fix" on the mesh connection (Permissions, the VPN warning card). */
     onFixConnection: () -> Unit = {},
+    shareMesh: Boolean = false,
+    onShareMeshToggle: (Boolean) -> Unit = {},
     /** What the setup popup ended with, to show as a snackbar once. */
     setupNotice: SetupNotice? = null,
     onSetupNoticeShown: () -> Unit = {},
@@ -456,6 +458,8 @@ fun MycoApp(
                         onMeshToggle = onMeshToggle,
                         onFixNearby = onFixNearby,
                         onFixConnection = onFixConnection,
+                        shareMesh = shareMesh,
+                        onShareMeshToggle = onShareMeshToggle,
                         openPermissions = openPermissions,
                         onPermissionsOpened = { openPermissions = false },
                         onOfflineOnlyToggle = onOfflineOnlyToggle,

@@ -8,6 +8,12 @@ the app straddles:
 - **`.fips` / IPv6 mesh** — what the *native* sync engine talks to, to pull a
   peer's content. Never the WebView.
 
+**Where the mesh sockets live.** The mesh listeners (`4870`, `4873`, `24243`)
+listen twice: on the kernel's `[::]`, and on Myco's in-process mesh stack at
+the node's own `fd00::` address. Peers reach them on the stack, with no VPN. The
+kernel sockets matter only while "Allow other apps to use mesh" runs the
+`VpnService` TUN. See [../design/fips/mesh-stack.md](../design/fips/mesh-stack.md).
+
 Design context: [../design/nsite/nsite-layer.md](../design/nsite/nsite-layer.md) (§5,
 sync-over-FIPS), [../design/nsite/nsite-layer.md §3.2](../design/nsite/nsite-layer.md)
 (URL scheme). Established facts cited inline.

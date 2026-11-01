@@ -119,6 +119,12 @@ mod runtime;
 mod software_release;
 mod state;
 mod update_gate;
+// Myco's own sockets on the mesh: a userspace TCP/IP stack on the node's
+// address, so the relay, Blossom and pairing servers and their clients need no
+// VpnService. Started only on Android; the host reaches the mesh, if at all,
+// through a system TUN.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod mesh_net;
 // The bridge is pumped only by the Android VpnService (via tun_bridge_jni) and
 // installed only on Android, so its fns read as dead on the host build.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]

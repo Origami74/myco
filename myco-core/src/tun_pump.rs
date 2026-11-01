@@ -50,6 +50,7 @@ pub(crate) fn start(fd: OwnedFd) {
         move || write_loop(&fd, &running)
     });
     *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = Some(running);
+    crate::tun_bridge::set_tun_attached(true);
     tracing::info!("native TUN pump started");
 }
 
@@ -58,6 +59,7 @@ pub(crate) fn start(fd: OwnedFd) {
 pub(crate) fn stop() {
     if let Some(running) = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).take() {
         running.store(false, Ordering::Relaxed);
+        crate::tun_bridge::set_tun_attached(false);
         tracing::info!("native TUN pump stopping");
     }
 }
@@ -234,5 +236,9 @@ mod tests {
         );
 
         stop();
+        // Let the threads see the flag and leave before the lock is released:
+        // a writer still waiting on the bridge would take the next test's
+        // packet.
+        std::thread::sleep(Duration::from_millis(3 * POLL_MS as u64));
     }
 }

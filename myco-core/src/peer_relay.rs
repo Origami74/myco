@@ -379,9 +379,7 @@ async fn dial(
     url: &str,
     npub: &str,
     dial_backoff: &BackoffMap,
-) -> Option<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-> {
+) -> Option<tokio_tungstenite::WebSocketStream<crate::mesh_net::MeshStream>> {
     dial_via(
         url,
         npub,
@@ -398,9 +396,7 @@ async fn dial_via(
     npub: &str,
     dial_backoff: &BackoffMap,
     target: Result<String, crate::dns_intercept::NotReady>,
-) -> Option<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-> {
+) -> Option<tokio_tungstenite::WebSocketStream<crate::mesh_net::MeshStream>> {
     // Dial the mesh address itself: a `<npub>.fips` name left to the system
     // resolver can be answered by a DNS server outside the mesh.
     let target = match target {
@@ -414,9 +410,9 @@ async fn dial_via(
         }
     };
     for attempt in 0..2 {
-        match tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&target)).await
-        {
-            Ok(Ok((ws, _))) => return Some(ws),
+        // On the mesh stack when there is one (no VPN needed); see `mesh_net`.
+        match tokio::time::timeout(CONNECT_TIMEOUT, crate::mesh_net::connect_ws(&target)).await {
+            Ok(Ok(ws)) => return Some(ws),
             Ok(Err(e)) => match classify(&e) {
                 // Cold route: the name was registered just now and the route
                 // may still be settling, so give it a moment and try once more

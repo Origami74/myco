@@ -38,7 +38,6 @@ class SetupSnackbarVisuals(val notice: SetupNotice) : SnackbarVisuals {
         SetupNotice.NearbyMissing ->
             "Mesh is on, but Myco can’t find nearby mesh devices — fix it in Settings › Permissions."
         SetupNotice.MeshOff -> "Mesh is off — fix it in Settings › Permissions."
-        SetupNotice.Declined -> "Mesh is off — turn it on any time in Settings."
     }
     override val actionLabel: String? = if (notice == SetupNotice.AllSet) null else "Settings"
     override val withDismissAction: Boolean = false

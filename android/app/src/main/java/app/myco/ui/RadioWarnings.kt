@@ -8,6 +8,7 @@ import app.myco.aware.AwareHealth
 import app.myco.ble.BleHealth
 import app.myco.core.AppState
 import app.myco.onboarding.SystemAsk
+import app.myco.vpn.MeshSharing
 import app.myco.vpn.MycoVpnService
 
 /** What tapping a [RadioWarning] should do. Dispatched in SettingsScreen. */
@@ -25,24 +26,25 @@ data class RadioWarning(val title: String, val detail: String, val action: Radio
 fun radioWarnings(context: Context, state: AppState, meshEnabled: Boolean): List<RadioWarning> {
     val warnings = mutableListOf<RadioWarning>()
 
-    // The mesh rides an app-owned VPN/TUN. Consent not granted means the VPN
-    // slot is NOT ours (consent revoked, or another VPN app took the slot) —
-    // the node may look healthy but no mesh traffic can flow.
-    if (meshEnabled && !SystemAsk.Vpn.granted(context)) {
+    // Only other apps ride the VPN (Myco's own traffic has its own stack), so
+    // it is worth a warning only when the user let them on ([MeshSharing]).
+    // Consent not granted means the slot is NOT ours (revoked, or another VPN
+    // app took it).
+    val vpnWanted = meshEnabled && MeshSharing.vpnWanted(context)
+    if (vpnWanted && !SystemAsk.Vpn.granted(context)) {
         warnings += RadioWarning(
-            title = "Mesh has no VPN slot",
-            detail = "Another app holds the VPN slot (or access was revoked), so no mesh " +
-                "traffic can flow. Tap to re-assign the VPN to Myco.",
+            title = "Other apps can’t use the mesh",
+            detail = "Another app holds the VPN slot (or access was revoked). Myco itself " +
+                "still works on the mesh. Tap to re-assign the VPN to Myco.",
             action = RadioAction.FIX_VPN,
         )
-    } else if (meshEnabled && !MycoVpnService.isUp()) {
+    } else if (vpnWanted && !MycoVpnService.isUp()) {
         // The slot is ours but the tunnel is not up: revoked and since
-        // re-authorised, or never established after consent. Radio links
-        // still show peers, which is exactly why this needs saying.
+        // re-authorised, or never established after consent.
         warnings += RadioWarning(
-            title = "Mesh tunnel is down",
-            detail = "Peers may be linked over the radios, but no mesh traffic can flow " +
-                "until the tunnel is back. Tap to bring it up.",
+            title = "Other apps can’t use the mesh",
+            detail = "The VPN that lets other apps reach the mesh is down. Myco itself " +
+                "still works on the mesh. Tap to bring it up.",
             action = RadioAction.FIX_VPN,
         )
     }

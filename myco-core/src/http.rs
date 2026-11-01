@@ -22,7 +22,10 @@
 //!   differently.
 //! - **Redirects**, every hop judged as the first URL was, at most
 //!   [`MAX_REDIRECTS`].
-//! - **No proxy**, which would resolve names out of the resolver's sight.
+//! - **No proxy**, which would resolve names out of the resolver's sight —
+//!   save the one `Mesh` clients use to reach the in-process mesh stack
+//!   ([`crate::mesh_net::proxy`]), which is handed resolved addresses only
+//!   and refuses anything off the mesh.
 //!
 //! "Private" for `Internet` is [`is_private_ip`] — loopback, RFC 1918,
 //! link-local, unique-local (the mesh), CGNAT, NAT64-wrapped private — and
@@ -139,6 +142,14 @@ impl HttpClient {
                     reach,
                     allow_loopback,
                 }));
+                // Mesh connections ride the in-process mesh stack, which
+                // reqwest can only reach through a proxy (`mesh_net`). The
+                // name is still resolved here, by the guarded resolver: the
+                // bridge is handed an address, never a name.
+                let builder = match (reach, crate::mesh_net::proxy()) {
+                    (Reach::Mesh, Some(proxy)) => builder.proxy(proxy),
+                    _ => builder,
+                };
                 match redirects {
                     Redirects::None => builder.redirect(reqwest::redirect::Policy::none()),
                     Redirects::Judged => {
@@ -378,6 +389,29 @@ impl reqwest::dns::Resolve for GuardedResolver {
                 Err(Box::new(Refused(format!("{host}: {why}")))
                     as Box<dyn std::error::Error + Send + Sync>)
             };
+            let allowed = |ip: IpAddr| {
+                (allow_loopback && ip.is_loopback())
+                    || match reach {
+                        Reach::Internet => !is_private_ip(ip) && !is_own_network(ip),
+                        Reach::Mesh => is_mesh_address(ip),
+                        Reach::Configured => true,
+                    }
+            };
+            // An address literal. Through a proxy (the mesh bridge, see
+            // `mesh_net`) reqwest asks the resolver even for these, an IPv6
+            // one still in its brackets; judge it as `may_dial` did, and hand
+            // it back as it is.
+            if let Ok(ip) = host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<IpAddr>()
+            {
+                if !allowed(ip) {
+                    return refuse("outside this client's reach");
+                }
+                let addrs = vec![SocketAddr::new(ip, 0)];
+                return Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs);
+            }
             let loopback_name = allow_loopback && host.trim_end_matches('.') == "localhost";
             if reach == Reach::Mesh && !is_mesh_name(&host) && !loopback_name {
                 return refuse("not a mesh name");
@@ -393,14 +427,6 @@ impl reqwest::dns::Resolve for GuardedResolver {
             }
             let addrs: Vec<SocketAddr> =
                 tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
-            let allowed = |ip: IpAddr| {
-                (allow_loopback && ip.is_loopback())
-                    || match reach {
-                        Reach::Internet => !is_private_ip(ip) && !is_own_network(ip),
-                        Reach::Mesh => is_mesh_address(ip),
-                        Reach::Configured => true,
-                    }
-            };
             if addrs.iter().any(|a| !allowed(a.ip())) {
                 return refuse(match reach {
                     Reach::Mesh => "resolves outside the mesh",
