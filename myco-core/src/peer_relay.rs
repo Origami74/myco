@@ -81,6 +81,16 @@ enum DialFault {
 }
 
 fn classify(err: &tokio_tungstenite::tungstenite::Error) -> DialFault {
+    // The mesh stack says so by kind (its "destination unreachable"); a
+    // kernel socket, in its error text.
+    if let tokio_tungstenite::tungstenite::Error::Io(e) = err {
+        if matches!(
+            e.kind(),
+            std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable
+        ) {
+            return DialFault::NoRoute;
+        }
+    }
     let text = err.to_string();
     if text.contains("Network is unreachable") || text.contains("No route to host") {
         DialFault::NoRoute
@@ -651,7 +661,8 @@ mod tests {
         assert_eq!(handle_inbound(&frame, &mut pending), Some("r2".into()));
     }
 
-    /// The classifier reads OS error text, so pin both cases.
+    /// The classifier reads OS error text and the mesh stack's error kind, so
+    /// pin both.
     #[test]
     fn dial_faults_are_classified() {
         use std::io::Error;
@@ -669,6 +680,12 @@ mod tests {
             classify(&io("Connection refused (os error 111)")),
             DialFault::Hard
         ));
+        // The mesh stack's "destination unreachable", by kind.
+        let unreachable = tokio_tungstenite::tungstenite::Error::Io(Error::new(
+            std::io::ErrorKind::HostUnreachable,
+            "[fd00::1]:4870: no route to host",
+        ));
+        assert!(matches!(classify(&unreachable), DialFault::NoRoute));
     }
 
     /// A dial asked for before the node is up must not arm the peer's backoff:

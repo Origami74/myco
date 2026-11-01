@@ -69,6 +69,7 @@ on every launch.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `mesh_enabled` | on | the master switch: the node and its radios |
+| `vpn_free_notice` | — | the one-time "mesh no longer needs the VPN" notice has been given |
 | `share_mesh` | off | "Allow other apps to use mesh": runs the `VpnService` TUN so other apps reach `fd00::/8` and `.fips` names. Myco's own traffic never needs it |
 | `ble_enabled` | on | the BLE lane |
 | `wifi_aware_enabled` | on | the Wi-Fi Aware lane |

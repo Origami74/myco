@@ -78,7 +78,7 @@ private data class PermissionSnapshot(
 /**
  * **Settings › Permissions** — what Myco has from Android, one row each, with
  * the way to fix it beside it. Permissions only: the mesh switch lives where
- * it always has (Settings › Mesh, the status pill).
+ * it always has (Settings › Mesh).
  *
  * With the mesh on, the mesh rows' Fix reopens the setup popup on the
  * matching explain card, which asks Android and brings the lanes up. With it off there is nothing to start, so they show the same

@@ -37,37 +37,34 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 static STACK: OnceLock<Netstack> = OnceLock::new();
 
-/// Start the mesh stack on `addr`, the node's mesh address, carrying
-/// `mtu`-byte packets. Its packets go to whichever node is installed in
-/// `tun_bridge` at the time, so it outlives a node rebuilt on a BLE
-/// off-and-on. Later calls only update the MTU.
-pub(crate) fn init(handle: &tokio::runtime::Handle, addr: Ipv6Addr, mtu: usize) {
-    if let Some(stack) = STACK.get() {
-        stack.set_mtu(mtu);
+/// The runtime the stack runs on, which the SOCKS bridge shares.
+static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+/// Start the mesh stack on `addr`, the node's mesh address, once per process.
+/// Its packets go to whichever node is installed in `tun_bridge` at the time,
+/// so it outlives a node rebuilt on a BLE off-and-on. It sends packets of at
+/// most 1280 bytes, which FIPS carries over any path whatever the node's MTU,
+/// so it needs nothing from the node beyond the address.
+pub(crate) fn init(handle: &tokio::runtime::Handle, addr: Ipv6Addr) {
+    let _ = RUNTIME.set(handle.clone());
+    if STACK.get().is_some() {
         return;
     }
     let stack = Netstack::start(
-        Config::new(addr, mtu),
+        Config::new(addr),
         Box::new(|packet| {
             crate::tun_bridge::to_mesh(packet);
         }),
         handle,
     );
     if STACK.set(stack).is_ok() {
-        tracing::info!(%addr, mtu, "mesh stack started");
+        tracing::info!(%addr, "mesh stack started");
     }
 }
 
 /// The mesh stack, when this process runs one.
 pub(crate) fn stack() -> Option<&'static Netstack> {
     STACK.get()
-}
-
-/// Follow a change in the node's MTU.
-pub(crate) fn set_mtu(mtu: usize) {
-    if let Some(stack) = STACK.get() {
-        stack.set_mtu(mtu);
-    }
 }
 
 /// A listener on the mesh stack's `port`, or `None` with no stack.
@@ -205,6 +202,10 @@ static BRIDGE: OnceLock<Option<Bridge>> = OnceLock::new();
 /// How long a client has to finish the SOCKS handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long the bridge waits on a dial — the stack's own connect timeout
+/// bounds it too; this covers the kernel path.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// A proxy that carries an HTTP client's mesh connections onto the mesh
 /// stack, or `None` when there is no stack to carry them to (the kernel
 /// reaches the mesh itself then, if it can). Always on in tests, so the
@@ -230,7 +231,8 @@ fn secret() -> String {
     ))
 }
 
-/// Bind the bridge on loopback and serve it from a thread of its own, so it
+/// Bind the bridge on loopback and serve it on the stack's runtime — or, in a
+/// process with no stack (the host, tests), on a thread of its own, so it
 /// needs no runtime from whoever builds the first mesh client.
 fn start_bridge() -> Option<Bridge> {
     let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
@@ -243,6 +245,10 @@ fn start_bridge() -> Option<Bridge> {
     let port = listener.local_addr().ok()?.port();
     let (user, pass) = (secret(), secret());
     let creds = (user.clone(), pass.clone());
+    if let Some(handle) = RUNTIME.get() {
+        handle.spawn(serve_bridge(listener, creds));
+        return Some(Bridge { port, user, pass });
+    }
     let spawned = std::thread::Builder::new()
         .name("myco-mesh-proxy".into())
         .spawn(move || {
@@ -309,14 +315,23 @@ async fn relay(mut client: tokio::net::TcpStream, creds: &(String, String)) -> i
     let Some(target) = target else {
         return Ok(());
     };
-    let mut upstream = match dial(target).await {
+    // The client gives up on its own timeout by closing its socket; stop
+    // dialling then, rather than hold a socket for a fetch nobody awaits.
+    let dialled = tokio::select! {
+        dialled = tokio::time::timeout(DIAL_TIMEOUT, dial(target)) => dialled
+            .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "dial timed out"))),
+        () = hung_up(&client) => {
+            return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "client left mid-dial"));
+        }
+    };
+    let mut upstream = match dialled {
         Ok(s) => s,
         Err(e) => {
             let rep = match e.kind() {
                 io::ErrorKind::ConnectionRefused => REP_REFUSED,
-                io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable => {
-                    REP_UNREACHABLE
-                }
+                io::ErrorKind::NetworkUnreachable
+                | io::ErrorKind::HostUnreachable
+                | io::ErrorKind::TimedOut => REP_UNREACHABLE,
                 _ => REP_FAILURE,
             };
             reply(&mut client, rep).await?;
@@ -326,6 +341,19 @@ async fn relay(mut client: tokio::net::TcpStream, creds: &(String, String)) -> i
     reply(&mut client, REP_OK).await?;
     tokio::io::copy_bidirectional(&mut client, &mut upstream).await?;
     Ok(())
+}
+
+/// Resolves once the client has closed its end. It sends nothing between its
+/// `CONNECT` and our reply, so anything readable then is the close.
+async fn hung_up(client: &tokio::net::TcpStream) {
+    let mut probe = [0u8; 1];
+    loop {
+        match client.peek(&mut probe).await {
+            Ok(0) | Err(_) => return,
+            // Early bytes are not a close: wait out the dial.
+            Ok(_) => std::future::pending::<()>().await,
+        }
+    }
 }
 
 /// The SOCKS handshake, ending at the target to dial — or `None` once a
@@ -564,6 +592,95 @@ mod tests {
             s.read_exact(&mut rep).await.unwrap();
             assert_eq!(rep[1], want, "{name}");
         }
+    }
+
+    /// Two mesh stacks, each one's packets offered to the other.
+    fn stack_pair() -> (Netstack, Netstack) {
+        let addr = |last| Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, last);
+        let handle = tokio::runtime::Handle::current();
+        let (to_b, mut for_b) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (to_a, mut for_a) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let a = Netstack::start(
+            Config::new(addr(1)),
+            Box::new(move |p| {
+                let _ = to_b.send(p);
+            }),
+            &handle,
+        );
+        let b = Netstack::start(
+            Config::new(addr(2)),
+            Box::new(move |p| {
+                let _ = to_a.send(p);
+            }),
+            &handle,
+        );
+        let (a2, b2) = (a.clone(), b.clone());
+        tokio::spawn(async move {
+            while let Some(p) = for_b.recv().await {
+                let _ = b2.offer(p);
+            }
+        });
+        tokio::spawn(async move {
+            while let Some(p) = for_a.recv().await {
+                let _ = a2.offer(p);
+            }
+        });
+        (a, b)
+    }
+
+    /// A server on the mesh stack sees each peer by its mesh address, so the
+    /// Circle gate judges the right one — here Blossom's, which refuses a
+    /// stranger.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_gate_sees_a_stack_peer_by_its_mesh_address() {
+        let (a, b) = stack_pair();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let access: myco_blossom::server::AccessFn = std::sync::Arc::new(move |ip, _| {
+            record.lock().unwrap().push(ip);
+            false
+        });
+        let listener = MeshListener(b.bind(24243).unwrap());
+        tokio::spawn(myco_blossom::server::serve_on_guarded(
+            std::sync::Arc::new(nsite_deck::testing::MemBlobs::new()),
+            listener,
+            access,
+            None,
+        ));
+        let remote = std::net::SocketAddrV6::new(b.addr(), 24243, 0, 0);
+        let mut stream = a.connect(remote).await.unwrap();
+        let sha = "0".repeat(64);
+        stream
+            .write_all(format!("HEAD /{sha} HTTP/1.1\r\nHost: peer\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut head = [0u8; 12];
+        stream.read_exact(&mut head).await.unwrap();
+        assert!(
+            head.starts_with(b"HTTP/1.1 4"),
+            "{:?}",
+            String::from_utf8_lossy(&head)
+        );
+        assert_eq!(*seen.lock().unwrap(), vec![IpAddr::V6(a.addr())]);
+    }
+
+    /// A client that hangs up mid-dial is noticed, so the bridge stops
+    /// dialling for it.
+    #[tokio::test]
+    async fn the_bridge_notices_a_client_hanging_up() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (served, _) = listener.accept().await.unwrap();
+        let waiting = tokio::spawn(async move { hung_up(&served).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "still connected");
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .expect("the hang-up should be seen")
+            .unwrap();
     }
 
     #[tokio::test]

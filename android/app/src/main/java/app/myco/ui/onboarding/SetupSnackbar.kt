@@ -38,14 +38,22 @@ class SetupSnackbarVisuals(val notice: SetupNotice) : SnackbarVisuals {
         SetupNotice.NearbyMissing ->
             "Mesh is on, but Myco can’t find nearby mesh devices — fix it in Settings › Permissions."
         SetupNotice.MeshOff -> "Mesh is off — fix it in Settings › Permissions."
+        SetupNotice.VpnNoLongerNeeded ->
+            "Myco no longer uses the VPN, so yours can run alongside it. To let other " +
+                "apps use the mesh, turn it on in Settings › Mesh."
+        SetupNotice.MeshWorksWithoutVpn -> "Mesh no longer needs a VPN — turn it on in Settings › Mesh."
     }
     override val actionLabel: String? = if (notice == SetupNotice.AllSet) null else "Settings"
+
+    /** Where "Settings" goes: Permissions for what setup skipped, else the root (Mesh). */
+    val opensPermissions: Boolean
+        get() = notice == SetupNotice.NearbyMissing || notice == SetupNotice.MeshOff
     override val withDismissAction: Boolean = false
     override val duration: SnackbarDuration =
         if (notice == SetupNotice.AllSet) SnackbarDuration.Short else SnackbarDuration.Long
 
-    /** Anything short of "all set" carries the amber mark. */
-    val warning: Boolean get() = notice != SetupNotice.AllSet
+    /** A problem left behind carries the amber mark; news does not. */
+    val warning: Boolean get() = opensPermissions
 }
 
 /** Draws [SetupSnackbarVisuals]; any other snackbar falls back to its message. */

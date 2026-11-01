@@ -202,6 +202,7 @@ class MainActivity : ComponentActivity() {
 
         meshEnabled.value = prefs.getBoolean(PREF_MESH, true)
         shareMesh.value = MeshSharing.enabled(this)
+        noticeVpnFreeMeshOnce()
         asker.restore(savedInstanceState)
         if (savedInstanceState != null) {
             restoreSetup(savedInstanceState)
@@ -413,7 +414,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** The mesh switch, flipped by the user (Settings, the status pill). */
+    /** The mesh switch, flipped by the user (Settings › Mesh). */
     private fun onMeshToggle(enabled: Boolean) {
         if (!enabled) {
             setMeshEnabled(false)
@@ -427,6 +428,24 @@ class MainActivity : ComponentActivity() {
         applyTunnel()
         if (MeshSetup.meshOnNeedsSetup(SystemAsk.Nearby.granted(this), connectionReady())) {
             openMeshRun(SetupEntry.MeshSwitch)
+        }
+    }
+
+    /**
+     * Once, on the first launch of a build whose mesh needs no VPN, tell
+     * someone upgrading what changed: the VPN they had running is let go (and
+     * how to get it back for other apps), or the mesh they had off — often
+     * because the VPN was refused or taken — now works without it. A fresh
+     * install has nothing to be told.
+     */
+    private fun noticeVpnFreeMeshOnce() {
+        if (prefs.getBoolean(PREF_VPN_FREE_NOTICE, false)) return
+        prefs.edit().putBoolean(PREF_VPN_FREE_NOTICE, true).apply()
+        if (!prefs.getBoolean(PREF_INTRO_SEEN, false)) return
+        setupNotice.value = when {
+            !meshEnabled.value -> SetupNotice.MeshWorksWithoutVpn
+            !vpnWanted() && SystemAsk.Vpn.granted(this) -> SetupNotice.VpnNoLongerNeeded
+            else -> return
         }
     }
 
@@ -548,6 +567,9 @@ class MainActivity : ComponentActivity() {
             if (MycoVpnService.isUp()) MycoVpnService.stop(this)
             return
         }
+        // Wanted, but Android hasn't handed Myco the slot: nothing to start.
+        // The popup's VPN card, or the Settings warning, asks for it.
+        if (!SystemAsk.Vpn.granted(this)) return
         val state = core.state()
         val ula = state.fipsIpv6
         android.util.Log.i("MycoVpn", "applyTunnel: ula=$ula mtu=${state.fipsMtu} attempt=$attempt")
@@ -1883,6 +1905,9 @@ class MainActivity : ComponentActivity() {
         private const val PENDING_WATCH_MS = 3 * 60 * 1000L
         private const val PENDING_WATCH_POLL_MS = 1000L
         const val PREF_EXIT_PROXY = "exit_proxy"
+
+        /** The one-time "mesh no longer needs the VPN" notice has been given. */
+        const val PREF_VPN_FREE_NOTICE = "vpn_free_notice"
         /** Set once the intro has played all the way through. */
         const val PREF_INTRO_SEEN = "intro_seen"
 

@@ -11,11 +11,23 @@ const B: Ipv6Addr = Ipv6Addr::new(0xfd02, 0, 0, 0, 0, 0, 0, 2);
 /// FIPS's effective IPv6 MTU on a 1280-byte transport.
 const MTU: usize = 1203;
 
+/// The test stacks' shape: the defaults, at [`MTU`].
+fn config(addr: Ipv6Addr) -> Config {
+    Config {
+        mtu: MTU,
+        ..Config::new(addr)
+    }
+}
+
 /// A stack whose packets go into a channel, and that channel.
 fn stack(addr: Ipv6Addr) -> (Netstack, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+    stack_with(config(addr))
+}
+
+fn stack_with(config: Config) -> (Netstack, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let stack = Netstack::start(
-        Config::new(addr, MTU),
+        config,
         Box::new(move |p| {
             let _ = tx.send(p);
         }),
@@ -27,8 +39,12 @@ fn stack(addr: Ipv6Addr) -> (Netstack, tokio::sync::mpsc::UnboundedReceiver<Vec<
 /// Two stacks, each one's packets offered to the other. `lose` decides, by
 /// packet number across both directions, which never arrive.
 fn pair(lose: fn(u64) -> bool) -> (Netstack, Netstack) {
-    let (a, from_a) = stack(A);
-    let (b, from_b) = stack(B);
+    pair_with(config(A), config(B), lose)
+}
+
+fn pair_with(a: Config, b: Config, lose: fn(u64) -> bool) -> (Netstack, Netstack) {
+    let (a, from_a) = stack_with(a);
+    let (b, from_b) = stack_with(b);
     let sent = Arc::new(AtomicU64::new(0));
     for (mut from, to) in [(from_a, b.clone()), (from_b, a.clone())] {
         let sent = sent.clone();
@@ -197,7 +213,7 @@ async fn one_listener_per_port_until_dropped() {
     a.bind(4870).unwrap();
     // The ephemeral range is the dialler's.
     assert_eq!(
-        a.bind(61000).unwrap_err().kind(),
+        a.bind(61001).unwrap_err().kind(),
         io::ErrorKind::InvalidInput
     );
 }
@@ -245,4 +261,251 @@ impl Netstack {
     fn config_ephemeral(&self) -> RangeInclusive<u16> {
         self.shared.ephemeral.clone()
     }
+}
+
+// --- holding up against peers ---
+
+const X: Ipv6Addr = Ipv6Addr::new(0xfd03, 0, 0, 0, 0, 0, 0, 3);
+
+/// B listens; A and X reach it, and B's replies reach A only: X sends its
+/// first `syns` packets (its SYNs) and is never heard from again.
+fn with_a_vanishing_peer(b: Config, syns: u64) -> (Netstack, Netstack, Netstack) {
+    let (a, mut from_a) = stack(A);
+    let (b, mut from_b) = stack_with(b);
+    let (x, mut from_x) = stack(X);
+    let to_b = b.clone();
+    tokio::spawn(async move {
+        while let Some(p) = from_a.recv().await {
+            let _ = to_b.offer(p);
+        }
+    });
+    let to_b = b.clone();
+    tokio::spawn(async move {
+        let mut n = 0;
+        while let Some(p) = from_x.recv().await {
+            n += 1;
+            if n <= syns {
+                let _ = to_b.offer(p);
+            }
+        }
+    });
+    let to_a = a.clone();
+    tokio::spawn(async move {
+        while let Some(p) = from_b.recv().await {
+            if p[24..40] == A.octets() {
+                let _ = to_a.offer(p);
+            }
+        }
+    });
+    (a, b, x)
+}
+
+/// Eight handshakes left hanging fill a listener's backlog; they time out and
+/// the listener takes connections again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_handshakes_time_out() {
+    let b = Config {
+        handshake_timeout: Duration::from_millis(500),
+        per_peer: 100,
+        ..config(B)
+    };
+    let (a, b, x) = with_a_vanishing_peer(b, 8);
+    let listener = b.bind(4873).unwrap();
+    tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+    for _ in 0..8 {
+        let x = x.clone();
+        tokio::spawn(async move {
+            let _ = x.connect(at(B, 4873)).await;
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Full of X's half-open handshakes: A is turned away for now…
+    let early = a.connect(at(B, 4873)).await;
+    assert_eq!(early.unwrap_err().kind(), io::ErrorKind::ConnectionRefused);
+    // …but not for good.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::timeout(WAIT, a.connect(at(B, 4873)))
+        .await
+        .unwrap()
+        .expect("the listener should accept again");
+}
+
+/// A peer may hold only its share: its handshakes past it are dropped, so
+/// the backlog stays open to everyone else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_peer_cannot_fill_a_backlog() {
+    let b = Config {
+        per_peer: 3,
+        ..config(B)
+    };
+    let (a, b, x) = with_a_vanishing_peer(b, 8);
+    let listener = b.bind(4873).unwrap();
+    tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+    for _ in 0..8 {
+        let x = x.clone();
+        tokio::spawn(async move {
+            let _ = x.connect(at(B, 4873)).await;
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(WAIT, a.connect(at(B, 4873)))
+        .await
+        .unwrap()
+        .expect("A should still get in");
+}
+
+/// One peer opening connection after connection stops at its share, and the
+/// stack can still dial out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_peer_cannot_take_every_socket() {
+    let b = Config {
+        per_peer: 16,
+        connect_timeout: Duration::from_millis(500),
+        ..config(B)
+    };
+    let (a, b) = pair_with(config(A), b, lossless);
+    let listener = b.bind(4870).unwrap();
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let keep = held.clone();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = listener.accept().await {
+            keep.lock().unwrap().push(s);
+        }
+    });
+    let mut mine = Vec::new();
+    for _ in 0..64 {
+        match a.connect(at(B, 4870)).await {
+            Ok(s) => mine.push(s),
+            Err(_) => break,
+        }
+    }
+    assert_eq!(mine.len(), 16, "A's share");
+    let _back = a.bind(9).unwrap();
+    tokio::time::timeout(WAIT, b.connect(at(A, 9)))
+        .await
+        .unwrap()
+        .expect("B can still dial out");
+}
+
+/// Listeners never take the sockets kept for dials, however many peers
+/// connect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listeners_leave_the_dial_reserve() {
+    let b = Config {
+        max_sockets: 20,
+        dial_reserve: 4,
+        per_peer: 100,
+        ..config(B)
+    };
+    let (a, b) = pair_with(config(A), b, lossless);
+    let listener = b.bind(4870).unwrap();
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let keep = held.clone();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = listener.accept().await {
+            keep.lock().unwrap().push(s);
+        }
+    });
+    let mut mine = Vec::new();
+    while let Ok(Ok(s)) =
+        tokio::time::timeout(Duration::from_millis(500), a.connect(at(B, 4870))).await
+    {
+        mine.push(s);
+    }
+    assert!(
+        b.socket_count() <= 16,
+        "listeners held {}",
+        b.socket_count()
+    );
+    let _back = a.bind(9).unwrap();
+    tokio::time::timeout(WAIT, b.connect(at(A, 9)))
+        .await
+        .unwrap()
+        .expect("the reserve is there for B's own dial");
+}
+
+/// A dial nobody answers ends at the connect timeout and frees its socket.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dial_nobody_answers_times_out() {
+    let (a, _nowhere) = stack_with(Config {
+        connect_timeout: Duration::from_millis(300),
+        ..config(A)
+    });
+    let err = tokio::time::timeout(WAIT, a.connect(at(B, 80)))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    tokio::time::timeout(WAIT, async {
+        while a.socket_count() != 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the dial's socket was not freed");
+}
+
+/// The node's "destination unreachable" ends a dial at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_route_ends_a_dial_at_once() {
+    let (a, mut out) = stack(A);
+    let dial = tokio::spawn({
+        let a = a.clone();
+        async move { a.connect(at(B, 4870)).await }
+    });
+    let syn = out.recv().await.unwrap();
+    // What the node sends back: ICMPv6 type 1, from its own address, quoting
+    // the SYN.
+    let mut icmp = vec![0u8; 48];
+    icmp[0] = 0x60;
+    let len = (8 + syn.len()) as u16;
+    icmp[4..6].copy_from_slice(&len.to_be_bytes());
+    icmp[6] = 58;
+    icmp[7] = 64;
+    icmp[8..24].copy_from_slice(&A.octets());
+    icmp[24..40].copy_from_slice(&A.octets());
+    icmp[40] = 1;
+    icmp.extend_from_slice(&syn);
+    assert!(a.claims(&icmp));
+    a.offer(icmp).unwrap();
+    let err = tokio::time::timeout(Duration::from_secs(1), dial)
+        .await
+        .expect("the dial should end at once")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::HostUnreachable);
+}
+
+static CUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// An open connection whose peer goes silent is reset, and its socket freed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_peer_is_let_go() {
+    let short = |c: Config| Config {
+        keep_alive: Duration::from_millis(200),
+        dead_peer_timeout: Duration::from_secs(1),
+        ..c
+    };
+    let (a, b) = pair_with(short(config(A)), short(config(B)), |_| {
+        CUT.load(Ordering::Relaxed)
+    });
+    let listener = b.bind(4870).unwrap();
+    let (client, accepted) = tokio::join!(a.connect(at(B, 4870)), listener.accept());
+    let mut client = client.unwrap();
+    let (_server, _) = accepted.unwrap();
+    let before = a.socket_count();
+    CUT.store(true, Ordering::Relaxed);
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf))
+        .await
+        .expect("the connection should be reset");
+    assert!(matches!(read, Ok(0) | Err(_)));
+    drop(client);
+    tokio::time::timeout(WAIT, async {
+        while a.socket_count() >= before {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the socket was not freed");
 }

@@ -66,7 +66,7 @@ enum class SetupEntry {
     /** The app starting after an upgrade, with the mesh on and something it needs missing. */
     Upgrade,
 
-    /** The user switched the mesh on (Settings, the status pill) with something missing. */
+    /** The user switched the mesh on (Settings › Mesh) with something missing. */
     MeshSwitch,
 
     /** A Fix in Settings (Permissions, the VPN warning card) or a radio toggle. */
@@ -141,6 +141,18 @@ enum class SetupNotice {
 
     /** Mesh off. */
     MeshOff,
+
+    /**
+     * Once, after upgrading from a build whose mesh needed the VPN, for
+     * someone who had it running: Myco has let the slot go.
+     */
+    VpnNoLongerNeeded,
+
+    /**
+     * Once, after that upgrade, for someone whose mesh was off — often
+     * because the VPN it used to need was refused or taken.
+     */
+    MeshWorksWithoutVpn,
 }
 
 /**

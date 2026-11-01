@@ -24,14 +24,31 @@
 //! `ip_local_port_range` of 32768–60999, so the kernel's own mesh connections
 //! never land in it.
 //!
+//! ## Holding up against peers
+//!
+//! Any node on the mesh can send this stack packets, so nothing a peer does
+//! may hold a socket for good, or take the sockets everyone else needs:
+//!
+//! - **Every socket has a lifetime.** A handshake that stalls is dropped after
+//!   [`Config::handshake_timeout`], a dial after [`Config::connect_timeout`],
+//!   and an open connection whose peer stops answering its keep-alives after
+//!   [`Config::dead_peer_timeout`].
+//! - **One peer gets a share, not the lot.** A peer holding
+//!   [`Config::per_peer`] sockets has its next connection attempt dropped.
+//! - **Dials keep a reserve.** Listeners never take the last
+//!   [`Config::dial_reserve`] sockets, so a flood of inbound connections
+//!   cannot stop this node reaching out.
+//!
 //! ## What it is not
 //!
-//! TCP only, over IPv6 only — the only thing FIPS's IPv6 shim carries that
-//! an app's own services use. No UDP, no ICMP (an ICMPv6 error from the node is
-//! not claimed, so a dial to an unreachable peer ends at its timeout rather
-//! than at once). TIME-WAIT is not kept: a closed socket is freed as soon as
-//! its close completes, as the ephemeral ports rotate through a range of
-//! several thousand before one is reused.
+//! TCP only, over IPv6 only — the only thing FIPS's IPv6 shim carries that an
+//! app's own services use. Of ICMPv6 it reads only "destination unreachable"
+//! for its own dials, which ends the dial at once
+//! ([`io::ErrorKind::HostUnreachable`]). No path-MTU discovery: the stack sends
+//! at most [`IPV6_MIN_MTU`]-byte packets, which FIPS carries over any path
+//! (fragmenting where a path is narrower). TIME-WAIT is not kept: a closed
+//! socket is freed as soon as its close completes, as the ephemeral ports
+//! rotate through a range of several thousand before one is reused.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::poll_fn;
@@ -65,37 +82,64 @@ const CLOSE_LINGER: Duration = Duration::from_secs(30);
 /// smoltcp's next timer says.
 const MAX_IDLE: Duration = Duration::from_secs(1);
 
+/// IPv6's minimum link MTU: the largest packet FIPS carries over every path.
+pub const IPV6_MIN_MTU: usize = 1280;
+
 /// The stack's shape. [`Config::new`] fills in the defaults.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// This node's mesh address: the stack's only address.
     pub addr: Ipv6Addr,
-    /// The largest IPv6 packet the node carries — FIPS's effective IPv6 MTU.
-    /// TCP's MSS follows from it, so no segment needs clamping.
+    /// The largest IPv6 packet the stack sends. TCP's MSS follows from it, so
+    /// no segment needs clamping. Fixed for the stack's life: smoltcp reads it
+    /// once. [`IPV6_MIN_MTU`] by default, which FIPS carries over any path.
     pub mtu: usize,
-    /// Local ports outgoing connections are given.
+    /// Local ports outgoing connections are given. The default starts above
+    /// 61000, the top of the kernel's range on older Linux too.
     pub ephemeral: RangeInclusive<u16>,
     /// Receive and send buffer per connection, each, in bytes.
     pub buffer: usize,
     /// Most sockets at once — listening, connecting, open and closing alike.
     pub max_sockets: usize,
+    /// Of [`Self::max_sockets`], how many listeners may never take: kept for
+    /// this node's own dials.
+    pub dial_reserve: usize,
+    /// Most sockets one remote address may hold at once, in any state. A
+    /// connection attempt past it is dropped.
+    pub per_peer: usize,
     /// Handshakes a listener can have in flight at once.
     pub backlog: usize,
     /// Inbound packets waiting for the driver; more are dropped.
     pub rx_queue: usize,
+    /// How long an inbound handshake may stall before its socket is dropped
+    /// and a fresh one listens in its place.
+    pub handshake_timeout: Duration,
+    /// How long a dial waits for the peer to answer.
+    pub connect_timeout: Duration,
+    /// How often an idle open connection checks that its peer is there.
+    pub keep_alive: Duration,
+    /// How long an open connection's peer may go without a sound — keep-alive
+    /// answers included — before the connection is reset.
+    pub dead_peer_timeout: Duration,
 }
 
 impl Config {
-    /// The defaults, for a node at `addr` carrying `mtu`-byte packets.
-    pub fn new(addr: Ipv6Addr, mtu: usize) -> Self {
+    /// The defaults, for a node at `addr`.
+    pub fn new(addr: Ipv6Addr) -> Self {
         Self {
             addr,
-            mtu,
-            ephemeral: 61000..=65535,
+            mtu: IPV6_MIN_MTU,
+            ephemeral: 61001..=65535,
             buffer: 64 * 1024,
             max_sockets: 256,
+            dial_reserve: 64,
+            per_peer: 32,
             backlog: 8,
             rx_queue: 1024,
+            handshake_timeout: Duration::from_secs(10),
+            connect_timeout: Duration::from_secs(15),
+            keep_alive: Duration::from_secs(30),
+            dead_peer_timeout: Duration::from_secs(120),
         }
     }
 }
@@ -143,11 +187,59 @@ struct State {
     next_port: u16,
     /// Sockets whose stream was dropped, finishing their close.
     closing: Vec<(SocketHandle, std::time::Instant)>,
+    /// Dials ended by an ICMPv6 "destination unreachable".
+    unreachable: HashSet<SocketHandle>,
+    limits: Limits,
+    shut: bool,
+}
+
+/// The parts of [`Config`] the stack consults as it runs.
+#[derive(Clone, Copy)]
+struct Limits {
     buffer: usize,
     max_sockets: usize,
+    dial_reserve: usize,
+    per_peer: usize,
     backlog: usize,
     rx_queue: usize,
-    shut: bool,
+    handshake_timeout: smoltcp::time::Duration,
+    connect_timeout: Duration,
+    keep_alive: smoltcp::time::Duration,
+    dead_peer_timeout: smoltcp::time::Duration,
+}
+
+fn smol(d: Duration) -> smoltcp::time::Duration {
+    smoltcp::time::Duration::from_micros(d.as_micros() as u64)
+}
+
+/// The fields of a TCP segment `offer` looks at, from a packet `claims` passed.
+fn tcp_syn_from(packet: &[u8]) -> Option<Ipv6Addr> {
+    // Flags at TCP offset 13: SYN set, ACK clear — a new connection attempt.
+    let flags = *packet.get(40 + 13)?;
+    if packet[6] == 6 && flags & 0x02 != 0 && flags & 0x10 == 0 {
+        let src: [u8; 16] = packet[8..24].try_into().ok()?;
+        Some(Ipv6Addr::from(src))
+    } else {
+        None
+    }
+}
+
+/// For an ICMPv6 "destination unreachable" about one of `ours` TCP segments:
+/// the dial it refers to, as (local port, remote address).
+fn unreachable_dial(packet: &[u8], ours: &Ipv6Addr) -> Option<(u16, Ipv6Addr)> {
+    // ICMPv6 header (8 bytes), then the offending packet: its IPv6 header
+    // (40) and at least the TCP ports (4).
+    const INNER: usize = 40 + 8;
+    if packet.len() < INNER + 44 || packet[6] != 58 || packet[40] != 1 {
+        return None;
+    }
+    let inner = &packet[INNER..];
+    if inner[0] >> 4 != 6 || inner[6] != 6 || inner[8..24] != ours.octets() {
+        return None;
+    }
+    let dst: [u8; 16] = inner[24..40].try_into().ok()?;
+    let port = u16::from_be_bytes([inner[40], inner[41]]);
+    Some((port, Ipv6Addr::from(dst)))
 }
 
 #[derive(Default)]
@@ -187,6 +279,18 @@ impl Netstack {
             tx: Vec::new(),
             mtu: config.mtu,
         };
+        let limits = Limits {
+            buffer: config.buffer,
+            max_sockets: config.max_sockets,
+            dial_reserve: config.dial_reserve.min(config.max_sockets),
+            per_peer: config.per_peer.max(1),
+            backlog: config.backlog.max(1),
+            rx_queue: config.rx_queue,
+            handshake_timeout: smol(config.handshake_timeout),
+            connect_timeout: config.connect_timeout,
+            keep_alive: smol(config.keep_alive),
+            dead_peer_timeout: smol(config.dead_peer_timeout),
+        };
         let mut iface_config = IfaceConfig::new(HardwareAddress::Ip);
         iface_config.random_seed = seed(&config.addr);
         let mut iface = Interface::new(iface_config, &mut device, SmolInstant::now());
@@ -210,10 +314,8 @@ impl Netstack {
                 used_ports: HashSet::new(),
                 next_port: start,
                 closing: Vec::new(),
-                buffer: config.buffer,
-                max_sockets: config.max_sockets,
-                backlog: config.backlog.max(1),
-                rx_queue: config.rx_queue,
+                unreachable: HashSet::new(),
+                limits,
                 shut: false,
             }),
             wake: Notify::new(),
@@ -232,25 +334,26 @@ impl Netstack {
         self.shared.addr
     }
 
-    /// Follow a change in the node's MTU. Connections already open keep the
-    /// MSS they agreed.
-    pub fn set_mtu(&self, mtu: usize) {
-        self.shared.lock().device.mtu = mtu;
-    }
-
     /// Inbound packets dropped so far because the stack was not keeping up.
     pub fn dropped(&self) -> usize {
         self.shared.dropped.load(Ordering::Relaxed)
     }
 
     /// Whether an inbound IPv6 `packet` is this stack's: TCP, to its address,
-    /// on a port it listens on or one in its ephemeral range.
+    /// on a port it listens on or one in its ephemeral range — or an ICMPv6
+    /// "destination unreachable" about one of its own dials.
     pub fn claims(&self, packet: &[u8]) -> bool {
-        // 40-byte fixed header, then (with no extension headers) TCP's ports.
-        if packet.len() < 44 || packet[0] >> 4 != 6 || packet[6] != 6 {
+        if packet.len() < 44 || packet[0] >> 4 != 6 {
             return false;
         }
         if packet[24..40] != self.shared.addr.octets() {
+            return false;
+        }
+        if let Some((port, _)) = unreachable_dial(packet, &self.shared.addr) {
+            return self.shared.ephemeral.contains(&port);
+        }
+        // 40-byte fixed header, then (with no extension headers) TCP's ports.
+        if packet[6] != 6 {
             return false;
         }
         let port = u16::from_be_bytes([packet[42], packet[43]]);
@@ -271,7 +374,19 @@ impl Netstack {
         }
         {
             let mut state = self.shared.lock();
-            if state.device.rx.len() >= state.rx_queue {
+            if let Some((port, remote)) = unreachable_dial(&packet, &self.shared.addr) {
+                state.abort_dial(port, remote);
+                drop(state);
+                self.shared.wake.notify_one();
+                return Ok(());
+            }
+            if let Some(src) = tcp_syn_from(&packet) {
+                if state.held_by(src) >= state.limits.per_peer {
+                    self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+            }
+            if state.device.rx.len() >= state.limits.rx_queue {
                 self.shared.dropped.fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
@@ -316,8 +431,10 @@ impl Netstack {
         })
     }
 
-    /// Open a connection to `remote`. Fails when the peer refuses; a peer that
-    /// never answers is left to the caller's timeout.
+    /// Open a connection to `remote`. Fails when the peer refuses
+    /// ([`io::ErrorKind::ConnectionRefused`]), when the mesh has no route to it
+    /// ([`io::ErrorKind::HostUnreachable`]), or when it does not answer within
+    /// [`Config::connect_timeout`] ([`io::ErrorKind::TimedOut`]).
     pub async fn connect(&self, remote: SocketAddrV6) -> io::Result<TcpStream> {
         let handle = {
             let mut state = self.shared.lock();
@@ -327,7 +444,8 @@ impl Netstack {
             let port = state.alloc_port(&self.shared).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::AddrNotAvailable, "no free local port")
             })?;
-            let Some(handle) = state.new_socket() else {
+            let cap = state.limits.max_sockets;
+            let Some(handle) = state.new_socket(cap) else {
                 state.used_ports.remove(&port);
                 return Err(io::Error::new(
                     io::ErrorKind::OutOfMemory,
@@ -336,11 +454,16 @@ impl Netstack {
             };
             state.ports.insert(handle, port);
             let endpoint = IpEndpoint::new(IpAddress::Ipv6(*remote.ip()), remote.port());
+            // Twice the dial's own timeout, so that one decides — and reports
+            // `TimedOut` — whenever this future is polled to it.
+            let backstop = smol(state.limits.connect_timeout * 2);
             let dialled = {
                 let State { iface, sockets, .. } = &mut *state;
-                sockets
-                    .get_mut::<tcp::Socket>(handle)
-                    .connect(iface.context(), endpoint, port)
+                let socket = sockets.get_mut::<tcp::Socket>(handle);
+                // The socket gives up on its own too, should this future
+                // stop being polled.
+                socket.set_timeout(Some(backstop));
+                socket.connect(iface.context(), endpoint, port)
             };
             if let Err(e) = dialled {
                 state.forget(handle);
@@ -355,8 +478,16 @@ impl Netstack {
             shared: self.shared.clone(),
             handle,
         };
-        poll_fn(|cx| {
+        let timeout = self.shared.lock().limits.connect_timeout;
+        let established = poll_fn(|cx| {
             let mut state = self.shared.lock();
+            let limits = state.limits;
+            if state.unreachable.remove(&handle) {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::HostUnreachable,
+                    format!("{remote}: no route to host"),
+                )));
+            }
             let socket = state.sockets.get_mut::<tcp::Socket>(handle);
             match socket.state() {
                 tcp::State::SynSent | tcp::State::SynReceived => {
@@ -367,11 +498,19 @@ impl Netstack {
                     io::ErrorKind::ConnectionRefused,
                     format!("{remote} refused the connection"),
                 ))),
-                _ => Poll::Ready(Ok(())),
+                _ => {
+                    live(socket, &limits);
+                    Poll::Ready(Ok(()))
+                }
             }
-        })
-        .await?;
-        Ok(stream)
+        });
+        match tokio::time::timeout(timeout, established).await {
+            Ok(result) => result.map(|()| stream),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{remote} did not answer"),
+            )),
+        }
     }
 
     /// Sockets the stack holds right now, of every kind.
@@ -396,14 +535,22 @@ fn seed(addr: &Ipv6Addr) -> u64 {
     nanos ^ (bits as u64) ^ ((bits >> 64) as u64).rotate_left(17)
 }
 
+/// An open connection's timers: keep-alives, and a reset once the peer has
+/// been silent too long.
+fn live(socket: &mut tcp::Socket, limits: &Limits) {
+    socket.set_keep_alive(Some(limits.keep_alive));
+    socket.set_timeout(Some(limits.dead_peer_timeout));
+}
+
 impl State {
-    fn new_socket(&mut self) -> Option<SocketHandle> {
-        if self.count >= self.max_sockets {
+    /// A fresh socket, if fewer than `cap` are held.
+    fn new_socket(&mut self, cap: usize) -> Option<SocketHandle> {
+        if self.count >= cap {
             return None;
         }
         let mut socket = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0; self.buffer]),
-            tcp::SocketBuffer::new(vec![0; self.buffer]),
+            tcp::SocketBuffer::new(vec![0; self.limits.buffer]),
+            tcp::SocketBuffer::new(vec![0; self.limits.buffer]),
         );
         socket.set_congestion_control(tcp::CongestionControl::Cubic);
         // Request/response traffic (HTTP, WebSocket frames) waits on every
@@ -417,8 +564,48 @@ impl State {
     fn forget(&mut self, handle: SocketHandle) {
         self.sockets.remove(handle);
         self.count -= 1;
+        self.unreachable.remove(&handle);
         if let Some(port) = self.ports.remove(&handle) {
             self.used_ports.remove(&port);
+        }
+    }
+
+    /// Sockets `peer` holds, in any state — counting its connection attempts
+    /// still queued for the driver, which will each take one.
+    fn held_by(&self, peer: Ipv6Addr) -> usize {
+        let queued = self
+            .device
+            .rx
+            .iter()
+            .filter(|p| tcp_syn_from(p) == Some(peer))
+            .count();
+        queued
+            + self
+                .sockets
+                .iter()
+                .filter_map(|(_, s)| match s {
+                    smoltcp::socket::Socket::Tcp(t) => t.remote_endpoint(),
+                    #[allow(unreachable_patterns)] // only TCP sockets are ever added
+                    _ => None,
+                })
+                .filter(|e| e.addr == IpAddress::Ipv6(peer))
+                .count()
+    }
+
+    /// End the dial from `port` to `remote`, which the mesh says it cannot
+    /// reach. Only a dial still waiting for its answer: an open connection
+    /// rides out a route that comes and goes, as a kernel's would.
+    fn abort_dial(&mut self, port: u16, remote: Ipv6Addr) {
+        let found = self.ports.iter().find_map(|(&handle, &p)| {
+            let socket = self.sockets.get::<tcp::Socket>(handle);
+            (p == port
+                && socket.state() == tcp::State::SynSent
+                && socket.remote_endpoint().map(|e| e.addr) == Some(IpAddress::Ipv6(remote)))
+            .then_some(handle)
+        });
+        if let Some(handle) = found {
+            self.unreachable.insert(handle);
+            self.sockets.get_mut::<tcp::Socket>(handle).abort();
         }
     }
 
@@ -434,23 +621,25 @@ impl State {
         None
     }
 
-    /// Top a listener's backlog back up to full with listening sockets.
+    /// Top a listener's backlog back up to full with listening sockets,
+    /// leaving [`Limits::dial_reserve`] untouched.
     fn refill(&mut self, port: u16) {
-        let want = self.backlog;
+        let want = self.limits.backlog;
+        let cap = self.limits.max_sockets - self.limits.dial_reserve;
         while self
             .listeners
             .get(&port)
             .is_some_and(|l| l.backlog.len() < want)
         {
-            let Some(handle) = self.new_socket() else {
+            let Some(handle) = self.new_socket(cap) else {
                 return;
             };
-            if self
-                .sockets
-                .get_mut::<tcp::Socket>(handle)
-                .listen(port)
-                .is_err()
-            {
+            let handshake = self.limits.handshake_timeout;
+            let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+            // Counts only once a SYN has arrived: a stalled handshake then
+            // closes, and is replaced, instead of holding the slot.
+            socket.set_timeout(Some(handshake));
+            if socket.listen(port).is_err() {
                 self.forget(handle);
                 return;
             }
@@ -463,6 +652,7 @@ impl State {
     /// Move each listener's finished handshakes to its accept queue.
     fn service_listeners(&mut self) {
         let ports: Vec<u16> = self.listeners.keys().copied().collect();
+        let limits = self.limits;
         for port in ports {
             let mut gone = Vec::new();
             {
@@ -474,9 +664,12 @@ impl State {
                 };
                 let mut promoted = false;
                 listening.backlog.retain(|&handle| {
-                    match sockets.get::<tcp::Socket>(handle).state() {
+                    let socket = sockets.get_mut::<tcp::Socket>(handle);
+                    match socket.state() {
                         tcp::State::Listen | tcp::State::SynReceived => true,
                         tcp::State::Established | tcp::State::CloseWait => {
+                            // Off the handshake timer, onto keep-alives.
+                            live(socket, &limits);
                             listening.ready.push_back(handle);
                             promoted = true;
                             false

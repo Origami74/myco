@@ -33,6 +33,11 @@ The packets now end inside the app, on a userspace TCP/IP stack.
   starts the stack, hands servers a listener, dials, and runs a loopback
   SOCKS5 bridge for reqwest.
 
+`socks_exit` already runs a userspace stack, `ipstack`. That one only
+*terminates* flows other apps start, which is all an exit needs. Myco's own
+services also have to *open* connections, which `ipstack` can't, so this stack
+is smoltcp.
+
 The wire doesn't change: still IPv6 over FSP port 256. A phone on this stack
 and a phone on the old VPN path talk to each other as before.
 
@@ -44,23 +49,28 @@ Inbound packets from the node pass through `tun_bridge`:
 
 1. **The stack** takes TCP to its own address on a port it claims. That is a
    port it listens on (`4870`, `4873`, `24243`), or one in its ephemeral range
-   (`61000–65535`, used for its own dials).
+   (`61001–65535`, used for its own dials). It also takes an ICMPv6
+   "destination unreachable" about one of its own dials, which ends that dial
+   at once.
 2. **The VPN's TUN** gets everything else, if it is attached.
 3. **Nothing** gets it otherwise. It is dropped, not queued.
 
-The ephemeral range sits above Android's `ip_local_port_range` (32768–60999).
-The kernel's own mesh connections, made by other apps through the VPN, never
-land in it.
+The ephemeral range sits above the kernel's `ip_local_port_range`
+(32768–60999, or 32768–61000 on older kernels). The kernel's own mesh
+connections, made by other apps through the VPN, never land in it.
 
 ## Servers
 
-Each mesh server listens twice:
+Each mesh server listens on the stack, where peers reach it. The stack claims
+those ports whether the VPN runs or not, so peer traffic never reaches the
+kernel.
 
-- on the stack, where peers reach it;
-- on the kernel's `[::]`, where it matters only while the VPN runs.
+Each also keeps its old kernel socket on `[::]`. Peers don't use it; it only
+serves this phone's other apps dialing its own address. Losing it to another
+app is logged, not shown: peers are unaffected.
 
-Both hand axum the peer's `fd00::` address, so the Circle gate reads it the
-same way.
+The stack hands axum the peer's `fd00::` address, so the Circle gate reads it
+as before.
 
 ## Clients
 
@@ -71,7 +81,8 @@ same way.
     as this device;
   - takes resolved addresses only. Names stay with the guarded resolver in
     `http.rs`;
-  - refuses anything outside `fd00::/8`.
+  - refuses anything outside `fd00::/8`;
+  - gives up on a dial after 20 s, or as soon as the client hangs up.
 
 ## What the VPN is still for
 
@@ -82,14 +93,29 @@ answers `.fips` names system-wide, as before.
 Refusing the VPN, or another app holding the slot, now costs only that. Myco's
 own mesh keeps working.
 
+## Holding up against peers
+
+Any mesh node can send the stack packets, so a peer can't hold a socket
+forever or take everyone's. The defaults (`fips_host::netstack::Config`):
+
+| Limit | Default | What it stops |
+| --- | --- | --- |
+| Handshake timeout | 10 s | half-open handshakes filling a listener's backlog of 8 |
+| Connect timeout | 15 s | dials to a peer that never answers |
+| Keep-alive, then reset | every 30 s, reset after 120 s of silence | connections to peers that walked away |
+| Sockets per peer | 32 | one peer taking the stack's 256 sockets |
+| Reserved for dials | 64 of 256 | inbound connections leaving no socket to dial out |
+
 ## Known limits
 
 - **Loss recovery is weaker than Linux's.** smoltcp has no SACK and a 1 s floor
   on its retransmission timeout. In host tests, 1 MB took about 60 ms with no
   loss, 3 s at 1% loss, and 70 s at 5%. BLE L2CAP is itself reliable, so
   losses at the IP level should be rare. Measure on devices.
-- **TCP only.** No UDP or ICMP on the stack. A dial to an unreachable peer
-  ends at its timeout, not on an ICMPv6 error.
+- **TCP only.** No UDP. Of ICMP, only "destination unreachable" for its own
+  dials.
+- **1280-byte packets.** The stack sends at most IPv6's minimum MTU, which FIPS
+  carries over any path. No path-MTU discovery.
 - **No TIME-WAIT.** A closed socket is freed once its close completes. Ports
   rotate through several thousand before one is reused.
 

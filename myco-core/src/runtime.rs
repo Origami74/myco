@@ -363,7 +363,6 @@ impl AppRuntime {
         crate::mesh_net::init(
             rt.handle(),
             fips::Ipv6Address::from_node_addr(node.node_addr()).to_ipv6(),
-            node.effective_ipv6_mtu() as usize,
         );
 
         // The content layer (relay + Blossom + gateway + Library) lives for the
@@ -526,8 +525,10 @@ impl AppRuntime {
             *relay_hub.lock().unwrap() = Some(hub.clone());
             content.set_hub(&hub);
 
-            // Mesh socket: IPV6_V6ONLY `[::]:4870` so it doesn't collide with the
-            // loopback bind and is reachable by peers at `ws://<npub>.fips:4870`.
+            // Kernel socket: IPV6_V6ONLY `[::]:4870` so it doesn't collide with
+            // the loopback bind. With the mesh stack running (Android) peers
+            // reach the relay on the stack below, which claims the port even
+            // while the VPN is up, so losing this socket costs them nothing.
             match crate::mesh_relay::bind("[::]:4870".parse::<SocketAddr>().unwrap()) {
                 Ok(listener) => {
                     let hub = hub.clone();
@@ -537,13 +538,16 @@ impl AppRuntime {
                         }
                     });
                 }
+                Err(e) if crate::mesh_net::stack().is_some() => {
+                    tracing::warn!(error = %e, "kernel [::]:4870 unavailable; peers use the mesh stack");
+                }
                 Err(e) => {
                     mesh_warning =
                         format!("relay port 4870 unavailable (another app using it?): {e}");
                 }
             }
-            // The same relay on the mesh stack, where peers reach it with no
-            // VPN up. Nothing else on the device can hold this port.
+            // The same relay on the mesh stack, where peers reach it. Nothing
+            // else on the device can hold this port.
             match crate::mesh_net::listen(4870) {
                 Some(Ok(listener)) => {
                     let hub = hub.clone();
@@ -602,23 +606,10 @@ impl AppRuntime {
                             tracing::error!(error = %e, "auth service exited");
                         }
                     });
-                    // And on the mesh stack, for peers pairing with no VPN up.
-                    match crate::mesh_net::listen(crate::auth_service::AUTH_PORT) {
-                        Some(Ok(listener)) => {
-                            let content_for_auth = content.clone();
-                            rt.spawn(async move {
-                                if let Err(e) =
-                                    crate::auth_service::serve_on(content_for_auth, listener).await
-                                {
-                                    tracing::error!(error = %e, "mesh-stack auth service exited");
-                                }
-                            });
-                        }
-                        Some(Err(e)) => {
-                            tracing::error!(error = %e, "mesh-stack auth service could not listen")
-                        }
-                        None => {}
-                    }
+                }
+                // Peers pair over the mesh stack below; see the relay's socket.
+                Err(e) if crate::mesh_net::stack().is_some() => {
+                    tracing::warn!(error = %e, "kernel [::]:4873 unavailable; peers use the mesh stack");
                 }
                 Err(e) => {
                     if !mesh_warning.is_empty() {
@@ -631,6 +622,24 @@ impl AppRuntime {
                         crate::auth_service::AUTH_PORT
                     ));
                 }
+            }
+            // And on the mesh stack, where peers pair, whatever became of the
+            // kernel socket.
+            match crate::mesh_net::listen(crate::auth_service::AUTH_PORT) {
+                Some(Ok(listener)) => {
+                    let content_for_auth = content.clone();
+                    rt.spawn(async move {
+                        if let Err(e) =
+                            crate::auth_service::serve_on(content_for_auth, listener).await
+                        {
+                            tracing::error!(error = %e, "mesh-stack auth service exited");
+                        }
+                    });
+                }
+                Some(Err(e)) => {
+                    tracing::error!(error = %e, "mesh-stack auth service could not listen")
+                }
+                None => {}
             }
             match blobs.clone() {
                 None => {
@@ -670,6 +679,10 @@ impl AppRuntime {
                                 }
                             });
                         }
+                        // Peers fetch over the mesh stack below; see the relay's socket.
+                        Err(e) if crate::mesh_net::stack().is_some() => {
+                            tracing::warn!(error = %e, "kernel [::]:24243 unavailable; peers use the mesh stack");
+                        }
                         Err(e) => {
                             if !mesh_warning.is_empty() {
                                 mesh_warning.push_str("; ");
@@ -677,7 +690,7 @@ impl AppRuntime {
                             mesh_warning.push_str(&format!("blossom port 24243 unavailable: {e}"));
                         }
                     }
-                    // And on the mesh stack, where peers reach it with no VPN up.
+                    // And on the mesh stack, where peers reach it.
                     match crate::mesh_net::listen(24243) {
                         Some(Ok(listener)) => {
                             rt.spawn(async move {
@@ -2552,7 +2565,6 @@ impl AppRuntime {
             // MSS ceiling from FIPS's effective IPv6 MTU (transport_mtu-77) minus
             // the IPv6+TCP headers — same as the system-TUN path's max_mss.
             let max_mss = node.effective_ipv6_mtu().saturating_sub(60);
-            crate::mesh_net::set_mtu(node.effective_ipv6_mtu() as usize);
             let (tun_outbound_tx, tun_inbound_rx) = node.enable_app_owned_tun();
             crate::tun_bridge::install(tun_outbound_tx, tun_inbound_rx, max_mss);
             // Let Android learn each UDP transport's raw fd once it opens, so
