@@ -180,6 +180,61 @@ impl FsBlobStore {
         self.root.join(sha256_hex)
     }
 
+    /// Where precompressed variants live: `<root>/zstd/<sha256>`, each the
+    /// zstd encoding of the blob of that name. The server hands one out only
+    /// to a client that sends `Accept-Encoding: zstd`; the blob's name, and
+    /// so its check, stays the hash of the decoded bytes.
+    pub fn zstd_dir(&self) -> PathBuf {
+        self.root.join(ZSTD_DIR)
+    }
+
+    fn zstd_path(&self, sha256_hex: &str) -> PathBuf {
+        self.zstd_dir().join(sha256_hex)
+    }
+
+    /// Whether a zstd variant of this blob is stored.
+    pub fn has_zstd(&self, sha256_hex: &str) -> bool {
+        self.zstd_path(&sha256_hex.to_ascii_lowercase()).is_file()
+    }
+
+    /// Compress a stored blob into its zstd variant at `level` (1–22), unless
+    /// one is there already. CPU-heavy for a large blob (seconds at level
+    /// 19 for 25 MB): call it off the async workers. Returns the variant's
+    /// size, or `None` when the blob itself is not stored.
+    pub fn store_zstd(&self, sha256_hex: &str, level: i32) -> anyhow::Result<Option<u64>> {
+        let hash = sha256_hex.to_ascii_lowercase();
+        let dest = self.zstd_path(&hash);
+        if let Ok(meta) = std::fs::metadata(&dest) {
+            return Ok(Some(meta.len()));
+        }
+        let Ok(src) = std::fs::File::open(self.blob_path(&hash)) else {
+            return Ok(None);
+        };
+        std::fs::create_dir_all(self.zstd_dir())?;
+        let tmp = self.zstd_dir().join(format!(
+            ".tmp-{}-{}-{}",
+            std::process::id(),
+            ZSTD_TMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            hash
+        ));
+        let result = (|| -> anyhow::Result<u64> {
+            let out = std::fs::File::create(&tmp)?;
+            let mut encoder = zstd::stream::write::Encoder::new(out, level)?;
+            std::io::copy(&mut std::io::BufReader::new(src), &mut encoder)?;
+            encoder.finish()?.sync_all()?;
+            std::fs::rename(&tmp, &dest)?;
+            Ok(std::fs::metadata(&dest)?.len())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result.map(Some)
+    }
+
+    fn remove_zstd(&self, sha256_hex: &str) {
+        let _ = std::fs::remove_file(self.zstd_path(sha256_hex));
+    }
+
     /// The store's figures **without touching the disk** — safe under a lock
     /// the UI waits on. `None` until they are first known; the first call
     /// starts a background walk of the directory to learn them.
@@ -232,6 +287,9 @@ impl FsBlobStore {
                     .to_str()
                     .is_some_and(|name| keep.contains(name));
                 if !kept && std::fs::remove_file(entry.path()).is_ok() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        self.remove_zstd(name);
+                    }
                     continue;
                 }
                 left.count += 1;
@@ -258,6 +316,7 @@ impl FsBlobStore {
         if removed {
             st.removed(&hash, len);
         }
+        self.remove_zstd(&hash);
         removed
     }
 
@@ -277,6 +336,30 @@ impl FsBlobStore {
             })
             .collect()
     }
+}
+
+/// The subdirectory of a blob store's root holding zstd variants.
+const ZSTD_DIR: &str = "zstd";
+
+/// The largest window a decoded variant may use: 16 MiB.
+const ZSTD_WINDOW_LOG_MAX: u32 = 24;
+
+/// Tells concurrent variant writes of one blob apart.
+static ZSTD_TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Decode a zstd body, refusing one that would decode to more than `max`
+/// bytes — a peer's variant is untrusted until its output hashes right, and
+/// a small body can expand without bound.
+pub fn decode_zstd_bounded(encoded: &[u8], max: usize) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut decoder = zstd::stream::read::Decoder::new(encoded).ok()?;
+    // A frame may ask for a window up to 2^27 by default; cap it near what
+    // the variants use (level 19 asks 2^23), so 18 hostile bytes can't make
+    // the decoder reserve 128 MiB.
+    decoder.window_log_max(ZSTD_WINDOW_LOG_MAX).ok()?;
+    let mut out = Vec::new();
+    decoder.take(max as u64 + 1).read_to_end(&mut out).ok()?;
+    (out.len() <= max).then_some(out)
 }
 
 fn is_blob_name(entry: &std::fs::DirEntry) -> bool {
@@ -347,6 +430,7 @@ impl BlobStore for FsBlobStore {
         for entry in std::fs::read_dir(&self.root)?.filter_map(Result::ok) {
             let _ = std::fs::remove_file(entry.path());
         }
+        let _ = std::fs::remove_dir_all(self.zstd_dir());
         self.stats.state.lock().unwrap().reset(BlobStats::default());
         Ok(())
     }

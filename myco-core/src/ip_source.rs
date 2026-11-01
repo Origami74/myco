@@ -737,6 +737,10 @@ pub fn default_blossom_servers() -> Vec<String> {
     .collect()
 }
 
+/// The most a zstd variant may decode to when the source sets no
+/// [`IpPeerSource::with_max_blob_bytes`].
+const MAX_DECODED_VARIANT: usize = 64 * 1024 * 1024;
+
 /// Fetches manifests from public relays and blobs from public Blossom over IP.
 pub struct IpPeerSource {
     relays: Vec<String>,
@@ -778,6 +782,19 @@ pub struct IpPeerSource {
     /// Give up on a blob when nothing arrives for this long. See
     /// [`IpPeerSource::with_stall_timeout`].
     stall_timeout: Option<Duration>,
+    /// Give up on one server's blob after this long in all. See
+    /// [`IpPeerSource::with_total_timeout`].
+    total_timeout: Option<Duration>,
+    /// Ask for a server's zstd variant. See [`IpPeerSource::accept_zstd`].
+    accept_zstd: bool,
+}
+
+/// How one server answered a blob fetch.
+enum Fetched {
+    Blob(Vec<u8>),
+    /// Its zstd variant did not decode to the blob; the plain blob may.
+    BadVariant,
+    Miss,
 }
 
 impl IpPeerSource {
@@ -796,6 +813,8 @@ impl IpPeerSource {
             first_answer_grace: None,
             max_blob_bytes: None,
             stall_timeout: None,
+            total_timeout: None,
+            accept_zstd: false,
         }
     }
 
@@ -886,6 +905,122 @@ impl IpPeerSource {
     pub fn with_stall_timeout(mut self, stall: Duration) -> Self {
         self.stall_timeout = Some(stall);
         self
+    }
+
+    /// Give up on one server's blob after `total`, however steadily it
+    /// arrives — for a caller that must finish: a peer sending a byte just
+    /// inside the stall timeout would otherwise hold the fetch for good.
+    /// Size it from the blob: a slow honest link must still fit.
+    pub fn with_total_timeout(mut self, total: Duration) -> Self {
+        self.total_timeout = Some(total);
+        self
+    }
+
+    /// Ask each server for its zstd variant of the blob (`Accept-Encoding:
+    /// zstd`, see `myco_blossom::server`), decoded bounded by
+    /// [`IpPeerSource::with_max_blob_bytes`]. The decoded bytes are checked
+    /// against the name like any blob; when a variant fails that, the same
+    /// server is asked once more for the plain blob.
+    pub fn accept_zstd(mut self) -> Self {
+        self.accept_zstd = true;
+        self
+    }
+
+    /// [`IpPeerSource::fetch_once`], held to [`IpPeerSource::with_total_timeout`].
+    async fn fetch_bounded(&self, server: &str, url: &str, want: &str, zstd: bool) -> Fetched {
+        let attempt = self.fetch_once(server, url, want, zstd);
+        match self.total_timeout {
+            Some(total) => tokio::time::timeout(total, attempt)
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::debug!("{server}: blob not done in {total:?}");
+                    Fetched::Miss
+                }),
+            None => attempt.await,
+        }
+    }
+
+    /// One GET of `url`, accepted only as bytes hashing to `want`.
+    async fn fetch_once(&self, server: &str, url: &str, want: &str, zstd: bool) -> Fetched {
+        let mut request = match self.http.get(url) {
+            Ok(request) => request,
+            Err(why) => {
+                tracing::debug!("blob server {server}: {why}");
+                return Fetched::Miss;
+            }
+        };
+        if zstd {
+            request = request.header(reqwest::header::ACCEPT_ENCODING, "zstd");
+        }
+        let sent = match self.stall_timeout {
+            Some(stall) => match tokio::time::timeout(stall, request.send()).await {
+                Ok(sent) => sent,
+                Err(_) => {
+                    tracing::debug!("{server}: no response in {stall:?}");
+                    return Fetched::Miss;
+                }
+            },
+            None => request.send().await,
+        };
+        let resp = match sent {
+            Ok(r) => {
+                let retry_after = r
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                crate::relay_health::record_http_status(
+                    server,
+                    r.status().as_u16(),
+                    retry_after.as_deref(),
+                );
+                if !r.status().is_success() {
+                    // A 404 is "not here", and the server up and answering.
+                    return Fetched::Miss;
+                }
+                r
+            }
+            Err(e) if crate::http::refused_by_guard(&e) => {
+                // The guard's refusal says nothing of the server's health.
+                tracing::debug!("blob server {server} refused: {e}");
+                return Fetched::Miss;
+            }
+            Err(e) => {
+                crate::relay_health::record_http_error(server, &e);
+                return Fetched::Miss;
+            }
+        };
+        let encoded = zstd
+            && resp
+                .headers()
+                .get(reqwest::header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("zstd"));
+        // A variant of an incompressible blob can be a little larger than it.
+        let body_max = match (encoded, self.max_blob_bytes) {
+            (true, Some(max)) => Some(max + max / 64 + 4096),
+            (_, max) => max,
+        };
+        let Some(body) = read_body_bounded(resp, body_max, self.stall_timeout).await else {
+            return Fetched::Miss;
+        };
+        let bytes = if encoded {
+            let max = self.max_blob_bytes.unwrap_or(MAX_DECODED_VARIANT);
+            match myco_blossom::decode_zstd_bounded(&body, max) {
+                Some(bytes) => bytes,
+                None => return Fetched::BadVariant,
+            }
+        } else {
+            body
+        };
+        // Self-authenticating: only accept bytes that hash to the wanted name.
+        if sha256_hex(&bytes) == want {
+            Fetched::Blob(bytes)
+        } else if encoded {
+            Fetched::BadVariant
+        } else {
+            Fetched::Miss
+        }
     }
 
     /// Fetch manifests of an explicit kind instead of the nsite kind implied by
@@ -1682,65 +1817,26 @@ impl PeerSource for IpPeerSource {
 
         for server in candidates {
             let url = format!("{}/{}", server.trim_end_matches('/'), sha256_hex_want);
-            let request = match self.http.get(&url) {
-                Ok(request) => request,
-                Err(why) => {
-                    tracing::debug!("blob server {server}: {why}");
-                    continue;
-                }
-            };
             // A server that failed a moment ago (5xx; TLS, DNS or a refused
             // connection while online) is not asked again until its skip is
             // up. A 404 is an answer — "not here" — and never held against it.
             if crate::relay_health::is_skipped(&server) {
                 continue;
             }
-            let sent = match self.stall_timeout {
-                Some(stall) => match tokio::time::timeout(stall, request.send()).await {
-                    Ok(sent) => sent,
-                    Err(_) => {
-                        tracing::debug!("{server}: no response in {stall:?}");
-                        continue;
+            match self
+                .fetch_bounded(&server, &url, sha256_hex_want, self.accept_zstd)
+                .await
+            {
+                Fetched::Blob(bytes) => return Ok(Some(bytes)),
+                Fetched::BadVariant => {
+                    if let Fetched::Blob(bytes) = self
+                        .fetch_bounded(&server, &url, sha256_hex_want, false)
+                        .await
+                    {
+                        return Ok(Some(bytes));
                     }
-                },
-                None => request.send().await,
-            };
-            let resp = match sent {
-                Ok(r) => {
-                    let retry_after = r
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .map(str::to_string);
-                    crate::relay_health::record_http_status(
-                        &server,
-                        r.status().as_u16(),
-                        retry_after.as_deref(),
-                    );
-                    if !r.status().is_success() {
-                        // A 404 is "not here", and the server up and answering.
-                        continue;
-                    }
-                    r
                 }
-                Err(e) if crate::http::refused_by_guard(&e) => {
-                    // The guard's refusal says nothing of the server's health.
-                    tracing::debug!("blob server {server} refused: {e}");
-                    continue;
-                }
-                Err(e) => {
-                    crate::relay_health::record_http_error(&server, &e);
-                    continue;
-                }
-            };
-            let Some(bytes) =
-                read_body_bounded(resp, self.max_blob_bytes, self.stall_timeout).await
-            else {
-                continue;
-            };
-            // Self-authenticating: only accept bytes that hash to the wanted name.
-            if sha256_hex(&bytes) == sha256_hex_want {
-                return Ok(Some(bytes));
+                Fetched::Miss => {}
             }
         }
         Ok(None)
@@ -1768,7 +1864,7 @@ impl PeerSource for IpPeerSource {
 /// exceed `max`: from `Content-Length` when the server sends one, otherwise as
 /// the chunks arrive. `None` too when no chunk arrives for `stall`, and for a
 /// read error; the caller tries the next server either way.
-async fn read_body_bounded(
+pub(crate) async fn read_body_bounded(
     mut resp: reqwest::Response,
     max: Option<usize>,
     stall: Option<Duration>,

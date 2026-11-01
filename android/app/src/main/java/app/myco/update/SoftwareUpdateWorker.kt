@@ -12,7 +12,10 @@ import java.util.concurrent.TimeUnit
 class SoftwareUpdateWorker(context: Context, parameters: WorkerParameters) :
     CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result {
-        SoftwareUpdates.getInstance(applicationContext).check(softwareUpdatesOfflineOnly(applicationContext))
+        val updates = SoftwareUpdates.getInstance(applicationContext)
+        updates.check(softwareUpdatesOfflineOnly(applicationContext))
+        // The carry runs apart from the check; the work isn't done until it is.
+        updates.awaitCarry()
         return Result.success()
     }
 

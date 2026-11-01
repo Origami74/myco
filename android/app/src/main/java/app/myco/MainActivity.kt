@@ -714,6 +714,10 @@ class MainActivity : ComponentActivity() {
             SystemAsk.Camera -> if (result.refusedForGood) openAppSettings()
             SystemAsk.Notifications -> if (result.refusedForGood) openNotificationSettings(this)
             SystemAsk.Battery, SystemAsk.BluetoothOn -> Unit
+            // Allowed from the Install button: carry on with the install.
+            SystemAsk.InstallUpdates -> if (result.granted) {
+                lifecycleScope.launch { app.myco.update.SoftwareUpdates.getInstance(this@MainActivity).install() }
+            }
         }
     }
 

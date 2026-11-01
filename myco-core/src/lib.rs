@@ -112,6 +112,9 @@ mod platform_peers;
 // list, and the dials over the internet lane. The driver runs on Android only.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod public_nodes;
+// Myco's own release APK, carried by the Circle; driven from Android only.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod release_apk;
 mod runtime;
 mod software_release;
 mod state;

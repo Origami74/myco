@@ -6,15 +6,16 @@ use nostr::{Event, Filter, PublicKey};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const PUBLISHER: &str = "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr";
-const RELAY: &str = "wss://relay.zapstore.dev";
+pub(crate) const PUBLISHER: &str =
+    "npub1hw6amg8p24ne08c9gdq8hhpqx0t0pwanpae9z25crn7m9uy7yarse465gr";
+pub(crate) const RELAY: &str = "wss://relay.zapstore.dev";
 
 #[cfg(test)]
 fn verify(json: &str) -> bool {
     serde_json::from_str::<Event>(json).is_ok_and(|event| authenticated(&event))
 }
 
-fn authenticated(event: &Event) -> bool {
+pub(crate) fn authenticated(event: &Event) -> bool {
     PublicKey::parse(PUBLISHER).is_ok_and(|publisher| {
         event.pubkey == publisher && event.kind.as_u16() == 30063 && event.verify().is_ok()
     })
@@ -54,22 +55,25 @@ fn stable_version(tag: &str) -> Option<[u64; 3]> {
     Some(result)
 }
 
-fn announcement_tag(event: &Event, now: u64) -> Option<String> {
+/// The values of every `name` tag on `event`, in order.
+pub(crate) fn tag_values<'a>(event: &'a Event, name: &str) -> Vec<&'a str> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let fields = tag.as_slice();
+            (fields.first().map(String::as_str) == Some(name))
+                .then(|| fields.get(1).map(String::as_str))
+                .flatten()
+        })
+        .collect()
+}
+
+pub(crate) fn announcement_tag(event: &Event, now: u64) -> Option<String> {
     if event.created_at.as_secs() > now.saturating_add(300) {
         return None;
     }
-    let values = |name: &str| -> Vec<&str> {
-        event
-            .tags
-            .iter()
-            .filter_map(|tag| {
-                let fields = tag.as_slice();
-                (fields.first().map(String::as_str) == Some(name))
-                    .then(|| fields.get(1).map(String::as_str))
-                    .flatten()
-            })
-            .collect()
-    };
+    let values = |name: &str| tag_values(event, name);
     if values("i") != ["app.myco"] {
         return None;
     }
@@ -98,7 +102,7 @@ fn announcement_tag(event: &Event, now: u64) -> Option<String> {
 }
 
 /// The newest authenticated stable announcement among `events`.
-fn newest(events: impl IntoIterator<Item = Event>, now: u64) -> Option<(String, Event)> {
+pub(crate) fn newest(events: impl IntoIterator<Item = Event>, now: u64) -> Option<(String, Event)> {
     events
         .into_iter()
         .filter(authenticated)
@@ -106,7 +110,7 @@ fn newest(events: impl IntoIterator<Item = Event>, now: u64) -> Option<(String, 
         .max_by_key(|(tag, _)| stable_version(tag).unwrap())
 }
 
-fn release_filter() -> anyhow::Result<serde_json::Value> {
+pub(crate) fn release_filter() -> anyhow::Result<serde_json::Value> {
     let publisher = PublicKey::parse(PUBLISHER)?;
     Ok(serde_json::json!({
         "kinds": [30063], "authors": [publisher.to_hex()],
@@ -114,7 +118,7 @@ fn release_filter() -> anyhow::Result<serde_json::Value> {
     }))
 }
 
-async fn from_zapstore(filter: serde_json::Value) -> anyhow::Result<Vec<Event>> {
+pub(crate) async fn from_zapstore(filter: serde_json::Value) -> anyhow::Result<Vec<Event>> {
     let events = tokio::time::timeout(
         Duration::from_secs(20),
         crate::ip_source::query_relay(RELAY, filter),

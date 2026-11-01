@@ -16,6 +16,7 @@ import androidx.compose.material.icons.outlined.BatteryFull
 import androidx.compose.material.icons.outlined.Bluetooth
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.WifiTethering
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -129,5 +130,6 @@ private fun AskIcon(ask: SystemAsk, color: Color) {
         SystemAsk.Camera -> Icon(Icons.Outlined.PhotoCamera, null, tint = color, modifier = glyph)
         SystemAsk.Hotspot -> Icon(Icons.Outlined.WifiTethering, null, tint = color, modifier = glyph)
         SystemAsk.BluetoothOn -> Icon(Icons.Outlined.Bluetooth, null, tint = color, modifier = glyph)
+        SystemAsk.InstallUpdates -> Icon(Icons.Outlined.SystemUpdate, null, tint = color, modifier = glyph)
     }
 }

@@ -11,10 +11,10 @@ channels, malformed versions and missing asset references cannot trigger a
 notice. The highest stable numeric version is compared with the installed build.
 There is no GitHub metadata fallback that could bypass signature verification.
 
-This authenticates a release announcement. The app does not fetch or install
-an APK; Zapstore and Android handle APK hashes and package signatures. Tapping
-the notice opens the fixed official Zapstore listing. No release-provided URL
-is opened and no user identity or private signing key is sent to the relay.
+This authenticates a release announcement. Tapping the notice opens the fixed
+official Zapstore listing, unless the Circle has already brought the APK (see
+[Carrying the APK](#carrying-the-apk)). No user identity or private signing key
+is sent to the relay.
 
 ## Asking the Circle
 
@@ -25,6 +25,119 @@ gets the same signed event. A peer can withhold a release but cannot forge or
 alter one; the event is verified against the pinned key as if it came from
 Zapstore. The Circle is asked only while the core runs (the mesh service or the
 UI); a background check in a process without one asks only Zapstore.
+
+## Carrying the APK
+
+Each phone keeps the newest release APK in its kept Blossom store, so the
+Circle updates with no internet (`myco-core/src/release_apk.rs`).
+
+### What vouches for it
+
+The announcement names a **file event** (kind 3063) with an `e` tag. Myco
+accepts one only if:
+
+- the pinned publisher signed it, and the kept announcement names it;
+- it is `app.myco`, the announced version, an APK (`m`) for this phone's ABI
+  (`f`);
+- its `apk_certificate_hash` is the release key
+  (`98:43:2B:…:7E:79`), and `x` and `size` are well formed, size at most
+  64 MiB.
+
+The file event is kept beside the announcement, so the phone answers its
+Circle's next pull for it.
+
+### Where the bytes come from
+
+In order, stopping at the first that works:
+
+1. **Kept already.**
+2. **This phone's installed APK**, when it hashes to `x` — a phone updated
+   through Zapstore carries the release it runs for free.
+3. **A Circle peer's Blossom** (`http://<npub>.fips:24243/<x>`). Only the
+   peers `mesh_blobs` finds holding `x` are asked, one at a time, from a
+   rotating start. A peer that fails is skipped for three hours.
+4. **The file event's Blossom URLs** (`https://…/<x>`, Zapstore's CDN), only
+   on an unmetered connection outside mesh-only, and only while automatic
+   checks are on. A plain download link (GitHub) is not used.
+
+Every source goes through the same fetch as any blob (`IpPeerSource`), and
+is checked the same way: exactly `size` bytes hashing to `x`.
+
+### Bounded in time
+
+A peer can't hold a carry:
+
+- Each source gets a time budget sized from the APK: 30 s to start, then
+  the time 64 KiB/s needs for the whole file (about 6.5 min for 25 MB).
+  Sending a byte just inside the 30 s stall limit doesn't buy more.
+- The whole carry stops after 15 minutes.
+- The carry runs apart from the update check, so a slow one never holds
+  "Checking for updates…" or the next check.
+
+### Compressed for the mesh
+
+A release APK stores its native library and dex uncompressed, so zstd
+shrinks it a lot. Measured on the v0.12.1 APK (25.0 MB) on a laptop:
+
+| Level | Size | Time | Memory |
+| --- | --- | --- | --- |
+| 9 | 11.3 MB | 0.2 s | 59 MB |
+| **17** | **10.6 MB** | **3.3 s** | **86 MB** |
+| 19 | 10.1 MB | 4.7 s | 118 MB |
+
+Myco uses level 17. Once kept, the phone writes the variant to
+`blossom/zstd/<x>`, once per release, off the async workers; a phone is
+several times slower than these figures. A write that fails is not retried
+for six hours.
+
+The Blossom server hands the variant out only to a client sending
+`Accept-Encoding: zstd`, as `Content-Encoding: zstd`; any other client gets
+the plain blob. The fetching phone decodes it bounded to `size`, with the
+zstd window capped at 16 MiB, and checks the result against `x`: the
+variant needs no signature of its own. A variant that fails the check is
+followed by one fetch of the plain blob from the same peer.
+
+### One release kept
+
+After a release is kept, the APKs named by every other publisher-signed
+Myco file event the phone keeps are removed, with their variants. No one
+else's event can name a blob for removal. "Clear local database" keeps the
+newest announcement, the publisher-signed file events it names, and every
+APK they name (one per ABI). A phone using a custom Blossom server carries
+nothing.
+
+### Installing
+
+The banner and Settings show **Install** when the carried release is the
+available update and this build is release-signed (a debug build can't take
+a release over itself). Install:
+
+1. Asks for Android's per-app "Install unknown apps" switch, through the
+   usual explain-then-ask flow (`SystemAsk.InstallUpdates`), once.
+2. Writes the kept APK to the cache, re-checked against `x`.
+3. Reads it as Android does: this app's package, a higher `versionCode`,
+   signed with the release key. Anything else stops here.
+4. Hands it to `PackageInstaller`. Android shows its own "Update?" prompt,
+   and refuses an update signed with another key regardless. A session that
+   fails while being written is abandoned.
+
+The release key's hash is pinned once, in the core
+(`release_apk::RELEASE_CERT_SHA256`); Android reads it from there.
+
+This needs `REQUEST_INSTALL_PACKAGES`. Myco ships through GitHub Releases
+and Zapstore, and neither restricts it.
+
+### Scheduling the carry
+
+Every check starts a carry, due or not (Circle members come and go), while
+the core runs; one carry runs at a time. With automatic checks off, the
+carry still runs but never downloads from the internet: it serves the
+Circle what this phone has, or gets from it. Background work waits for the
+carry it started.
+
+A carry with the release already kept is cheap: a few kept-store queries.
+One without it asks each reachable Circle member once (`HEAD`, remembered
+briefly), then downloads from a holder if there is one.
 
 ## Scheduling
 

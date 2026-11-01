@@ -613,9 +613,17 @@ impl AppRuntime {
                             content_for_blob.may_upload_blobs(ip)
                         }
                     });
+                    // The embedded store's zstd variants (the release APK) go to
+                    // a peer that asks for them; see `release_apk`.
+                    let precompressed = content.blobs_local().map(|store| store.zstd_dir());
                     rt.spawn(async move {
-                        if let Err(e) =
-                            myco_blossom::server::serve_on_guarded(blobs, listener, access).await
+                        if let Err(e) = myco_blossom::server::serve_on_guarded(
+                            blobs,
+                            listener,
+                            access,
+                            precompressed,
+                        )
+                        .await
                         {
                             tracing::error!(error = %e, "mesh blossom server exited");
                         }
