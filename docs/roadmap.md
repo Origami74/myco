@@ -156,8 +156,10 @@ declaring more puts only the new domains up for review.
 ### N11 — Share Myco itself
 
 **Partly built** — update notices: a publisher-signed release event is found
-on Zapstore or from the Circle and the phone is told (see Status). Handing the
-APK itself over the mesh, and to a phone without Myco, is still open.
+on Zapstore or from the Circle and the phone is told (see Status); and
+**Share Myco** on the Apps tab hands the installed APK to a phone without
+Myco, over a hotspot page or the Android share menu. Updating a paired phone
+from a newer one over the mesh is still open.
 
 **Goal.** Hand the Myco app on from inside Myco, so someone without it gets
 it from a phone nearby instead of a download. Today every newcomer needs the

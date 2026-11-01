@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What the FileProvider (`<package>.files`) may hand out: only the copy of
+     Myco's own APK that the share menu sends (share/MycoApk.kt). -->
+<paths>
+    <cache-path name="apk" path="shared-apk/" />
+</paths>

@@ -20,6 +20,7 @@ import app.myco.R
 import app.myco.aware.AwareRadio
 import app.myco.aware.AwareService
 import app.myco.nfc.PairPresent
+import app.myco.share.MycoApk
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import kotlinx.coroutines.CoroutineScope
@@ -85,6 +86,9 @@ class HotspotService : Service() {
         // A fresh session offers nothing from previous ones: only files the
         // owner picks now, or uploads received now, are served to guests.
         SharedFiles.get(this).beginSession()
+        // The page shows the APK's checksum once it is known; hashing ~100 MB
+        // takes a moment, so start now rather than on the guest's first visit.
+        Thread({ MycoApk.warmSha256(applicationContext) }, "myco-apk-sha").start()
         // The Wi-Fi chip cannot host an AP interface next to the Aware (NAN)
         // session the mesh's Aware lane holds — seen on Pixel 9 as HalDevMgr
         // "bestIfaceCreationProposal is null" followed by ERROR_INCOMPATIBLE_MODE.
@@ -180,8 +184,10 @@ class HotspotService : Service() {
 
     /** Bind the file page, walking a few ports in case one is taken. */
     private fun startServer(): FileShareServer? {
+        // The page's brand mark, read once per server rather than per request.
+        val icon = runCatching { assets.open("hotspot/myco-icon.png").use { it.readBytes() } }.getOrNull()
         for (port in BASE_PORT until BASE_PORT + PORT_TRIES) {
-            val srv = FileShareServer(SharedFiles.get(this), Outbox.get(this), port)
+            val srv = FileShareServer(SharedFiles.get(this), Outbox.get(this), MycoApk.info(this), icon, port)
             try {
                 srv.start(SOCKET_READ_TIMEOUT_MS, false)
                 return srv
