@@ -32,8 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for one. Myco's own relay, Blossom and pairing traffic now runs on a TCP/IP
   stack inside the app. The mesh is on from the first launch, with no "Enable
   mesh?" step: the node and same-network discovery start once the intro
-  finishes, and setup asks only for nearby devices and your name. The mesh
-  switch is gone from the status pill; it stays in Settings › Mesh. On the
+  finishes, and setup asks only for nearby devices and your name. On the
   first launch after updating, Myco says once what changed. The VPN is
   still there, off by default, for letting
   other apps on the phone reach the mesh: **Settings › Mesh › Allow other apps
