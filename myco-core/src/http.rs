@@ -308,7 +308,7 @@ fn is_mesh_name(name: &str) -> bool {
 }
 
 /// A FIPS mesh address: `fd00::/8`.
-fn is_mesh_address(ip: IpAddr) -> bool {
+pub(crate) fn is_mesh_address(ip: IpAddr) -> bool {
     matches!(ip, IpAddr::V6(v6) if v6.segments()[0] & 0xff00 == 0xfd00)
 }
 

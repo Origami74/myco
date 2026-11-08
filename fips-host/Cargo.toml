@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Host a FIPS node inside an app: a userspace TCP/IP stack over the node's packet channels, so the app reaches the mesh without a VPN"
 
 [dependencies]
-smoltcp = { version = "0.14", default-features = false, features = [
+smoltcp = { workspace = true, features = [
     "std",
     "medium-ip",
     "proto-ipv6",

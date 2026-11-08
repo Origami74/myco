@@ -116,25 +116,6 @@ struct AuthState {
     limiter: Arc<Limiter>,
 }
 
-/// Bind the auth listener. IPv6 binds are `IPV6_V6ONLY` so `[::]:port` does not
-/// collide with a loopback squatter, matching the other mesh servers.
-pub fn bind(addr: SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
-    let domain = if addr.is_ipv6() {
-        socket2::Domain::IPV6
-    } else {
-        socket2::Domain::IPV4
-    };
-    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
-    if addr.is_ipv6() {
-        socket.set_only_v6(true)?;
-    }
-    socket.set_reuse_address(true)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&addr.into())?;
-    socket.listen(128)?;
-    Ok(tokio::net::TcpListener::from_std(socket.into())?)
-}
-
 /// Serve the auth plane on an already-bound listener: a kernel socket, or the
 /// mesh stack's (see [`crate::mesh_net`]).
 pub async fn serve_on<L>(content: Arc<Content>, listener: L) -> anyhow::Result<()>

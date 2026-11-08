@@ -81,6 +81,11 @@ socket2 = "0.6"
 # Precompressed blob variants (`myco-blossom`): Myco's own release APK travels
 # the mesh at ~40% of its size. Builds libzstd with `cc`, like the NDK expects.
 zstd = { version = "0.13", default-features = false }
+# The in-process TCP/IP stack `fips-host` runs on the node's packets, so
+# Myco reaches the mesh with no VPN.
+smoltcp = { version = "0.14", default-features = false }
+# Constant-time comparison of the mesh SOCKS bridge's secret.
+subtle = "2.6"
 
 # The release library ships inside the APK, so build it small: one codegen
 # unit with whole-program LTO lets the linker drop unused code across crates,

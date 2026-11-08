@@ -28,11 +28,14 @@
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use fips_host::netstack::{Config, Netstack, TcpListener, TcpStream};
+use subtle::ConstantTimeEq;
+
+use crate::http::is_mesh_address;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 static STACK: OnceLock<Netstack> = OnceLock::new();
@@ -42,10 +45,12 @@ static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 
 /// Start the mesh stack on `addr`, the node's mesh address, once per process.
 /// Its packets go to whichever node is installed in `tun_bridge` at the time,
-/// so it outlives a node rebuilt on a BLE off-and-on. Its SYNs are clamped to
-/// the node's MSS ceiling on the way out, as the kernel's were: a peer told
-/// 1220 sends segments the node can only carry as IPv6 fragments, which the
-/// stack does not reassemble.
+/// so it outlives a node rebuilt on a BLE off-and-on.
+///
+/// The stack keeps its default MTU, the IPv6 minimum of 1280: the IPv6 MTU
+/// FIPS carries on its default transports, whose MTU it sets to 1280 plus its
+/// own overhead for exactly this. smoltcp then advertises an MSS (1220) whose
+/// segments the node carries whole, with no clamp on the way out.
 pub(crate) fn init(handle: &tokio::runtime::Handle, addr: Ipv6Addr) {
     let _ = RUNTIME.set(handle.clone());
     if STACK.get().is_some() {
@@ -53,8 +58,7 @@ pub(crate) fn init(handle: &tokio::runtime::Handle, addr: Ipv6Addr) {
     }
     let stack = Netstack::start(
         Config::new(addr),
-        Box::new(|mut packet| {
-            crate::tun_bridge::clamp_mss(&mut packet);
+        Box::new(|packet| {
             crate::tun_bridge::to_mesh(packet);
         }),
         handle,
@@ -101,16 +105,84 @@ impl axum::serve::Listener for MeshListener {
     }
 }
 
-/// Whether `ip` is a mesh address (`fd00::/8`).
-fn is_mesh(ip: &IpAddr) -> bool {
-    matches!(ip, IpAddr::V6(v6) if v6.octets()[0] == 0xfd)
+/// A server's listener where peers reach it: the mesh stack's, or a kernel
+/// socket when the process runs no stack. One type, so a server is spawned the
+/// same way on either.
+pub(crate) enum PeerListener {
+    Kernel(tokio::net::TcpListener),
+    Stack(MeshListener),
+}
+
+impl axum::serve::Listener for PeerListener {
+    type Io = MeshStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        match self {
+            Self::Kernel(l) => {
+                let (stream, peer) = axum::serve::Listener::accept(l).await;
+                (MeshStream::Kernel(stream), peer)
+            }
+            Self::Stack(l) => {
+                let (stream, peer) = l.accept().await;
+                (MeshStream::Stack(stream), peer)
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        match self {
+            Self::Kernel(l) => l.local_addr(),
+            Self::Stack(l) => l.local_addr(),
+        }
+    }
+}
+
+/// Every listener a server on `port` needs for peers, and why peers cannot
+/// reach it when they cannot.
+///
+/// The kernel socket is `[::]:port`, IPV6_V6ONLY so it does not collide with a
+/// loopback bind. With the mesh stack running (Android) peers reach the server
+/// on the stack instead, which claims the port even while the VPN is up: there
+/// a lost kernel socket costs peers nothing, and a lost stack listener cuts
+/// them off whatever became of the kernel one.
+pub(crate) fn peer_listeners(port: u16) -> (Vec<PeerListener>, Option<String>) {
+    let mut listeners = Vec::new();
+    let kernel = crate::mesh_relay::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)));
+    let stack = listen(port);
+    let unreachable = match (kernel, stack) {
+        (Ok(k), None) => {
+            listeners.push(PeerListener::Kernel(k));
+            None
+        }
+        (Err(e), None) => Some(e.to_string()),
+        (kernel, Some(stack)) => {
+            match kernel {
+                Ok(k) => listeners.push(PeerListener::Kernel(k)),
+                Err(e) => {
+                    tracing::warn!(port, error = %e, "kernel socket unavailable; peers use the mesh stack")
+                }
+            }
+            match stack {
+                Ok(s) => {
+                    listeners.push(PeerListener::Stack(s));
+                    None
+                }
+                Err(e) => Some(format!("mesh stack: {e}")),
+            }
+        }
+    };
+    if let Some(why) = &unreachable {
+        tracing::error!(port, error = %why, "peers cannot reach this port");
+    }
+    (listeners, unreachable)
 }
 
 /// A TCP connection to `addr`: on the mesh stack for a mesh address when
 /// there is one, through the kernel for anything else.
 pub(crate) async fn dial(addr: SocketAddr) -> io::Result<MeshStream> {
     match (addr, STACK.get()) {
-        (SocketAddr::V6(v6), Some(stack)) if is_mesh(&addr.ip()) => {
+        (SocketAddr::V6(v6), Some(stack)) if is_mesh_address(addr.ip()) => {
             Ok(MeshStream::Stack(stack.connect(v6).await?))
         }
         _ => {
@@ -192,14 +264,25 @@ impl AsyncWrite for MeshStream {
 
 // ── The SOCKS5 bridge ───────────────────────────────────────────────────────
 
-/// Where the bridge listens and the credentials it asks for.
-struct Bridge {
-    port: u16,
+/// The credentials the bridge asks for: fixed for the process, so a bridge
+/// started again after a failure needs no client rebuilt.
+struct Creds {
     user: String,
     pass: String,
 }
 
-static BRIDGE: OnceLock<Option<Bridge>> = OnceLock::new();
+static CREDS: OnceLock<Creds> = OnceLock::new();
+
+fn creds() -> &'static Creds {
+    CREDS.get_or_init(|| Creds {
+        user: secret(),
+        pass: secret(),
+    })
+}
+
+/// The bridge's port while it is serving; `None` before its first use and
+/// after a failure, so the next request binds it again.
+static BRIDGE_PORT: Mutex<Option<u16>> = Mutex::new(None);
 
 /// How long a client has to finish the SOCKS handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -212,17 +295,42 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
 /// stack, or `None` when there is no stack to carry them to (the kernel
 /// reaches the mesh itself then, if it can). Always on in tests, so the
 /// bridge is exercised by every mesh-client test.
+///
+/// Asked per request, so a bridge that could not start is tried again on
+/// the next one. Until it starts, requests go to a port nothing can listen
+/// on and fail: never around the bridge, through the kernel, which has no
+/// route to the mesh without the VPN.
 pub(crate) fn proxy() -> Option<reqwest::Proxy> {
     if STACK.get().is_none() && !cfg!(test) {
         return None;
     }
-    let bridge = BRIDGE.get_or_init(start_bridge).as_ref()?;
-    // `socks5`, not `socks5h`: the client resolves the name itself, through
-    // its guarded resolver (`http`), and hands the bridge an address.
-    reqwest::Proxy::all(format!("socks5://127.0.0.1:{}", bridge.port))
-        .map(|p| p.basic_auth(&bridge.user, &bridge.pass))
-        .inspect_err(|e| tracing::warn!(error = %e, "mesh proxy unusable"))
-        .ok()
+    Some(reqwest::Proxy::custom(|_| Some(bridge_url(bridge_port()))))
+}
+
+/// The proxy URL for a bridge on `port`, or for none: port 0, which no
+/// socket can listen on, so the connection is refused.
+// `socks5`, not `socks5h`: the client resolves the name itself, through its
+// guarded resolver (`http`), and hands the bridge an address.
+fn bridge_url(port: Option<u16>) -> String {
+    let Creds { user, pass } = creds();
+    format!("socks5://{user}:{pass}@127.0.0.1:{}", port.unwrap_or(0))
+}
+
+/// The serving bridge's port, starting it if it is not serving.
+fn bridge_port() -> Option<u16> {
+    let mut port = BRIDGE_PORT.lock().unwrap_or_else(|e| e.into_inner());
+    if port.is_none() {
+        *port = start_bridge();
+    }
+    *port
+}
+
+/// Forget the bridge on `port`, so the next request starts another.
+fn bridge_stopped(port: u16) {
+    let mut current = BRIDGE_PORT.lock().unwrap_or_else(|e| e.into_inner());
+    if *current == Some(port) {
+        *current = None;
+    }
 }
 
 /// A random hex secret: the CSPRNG the file transfer uses.
@@ -236,20 +344,18 @@ fn secret() -> String {
 /// Bind the bridge on loopback and serve it on the stack's runtime — or, in a
 /// process with no stack (the host, tests), on a thread of its own, so it
 /// needs no runtime from whoever builds the first mesh client.
-fn start_bridge() -> Option<Bridge> {
+fn start_bridge() -> Option<u16> {
     let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!(error = %e, "mesh proxy could not bind; mesh HTTP is refused");
+            tracing::warn!(error = %e, "mesh proxy could not bind; mesh HTTP fails until it can");
             return None;
         }
     };
     let port = listener.local_addr().ok()?.port();
-    let (user, pass) = (secret(), secret());
-    let creds = (user.clone(), pass.clone());
     if let Some(handle) = RUNTIME.get() {
-        handle.spawn(serve_bridge(listener, creds));
-        return Some(Bridge { port, user, pass });
+        handle.spawn(serve_bridge(listener, port));
+        return Some(port);
     }
     let spawned = std::thread::Builder::new()
         .name("myco-mesh-proxy".into())
@@ -261,19 +367,20 @@ fn start_bridge() -> Option<Bridge> {
                 Ok(rt) => rt,
                 Err(e) => {
                     tracing::warn!(error = %e, "mesh proxy runtime failed");
+                    bridge_stopped(port);
                     return;
                 }
             };
-            rt.block_on(serve_bridge(listener, creds));
+            rt.block_on(serve_bridge(listener, port));
         });
     if let Err(e) = spawned {
         tracing::warn!(error = %e, "mesh proxy thread failed");
         return None;
     }
-    Some(Bridge { port, user, pass })
+    Some(port)
 }
 
-async fn serve_bridge(listener: std::net::TcpListener, creds: (String, String)) {
+async fn serve_bridge(listener: std::net::TcpListener, port: u16) {
     let listener = match listener
         .set_nonblocking(true)
         .and_then(|()| tokio::net::TcpListener::from_std(listener))
@@ -281,18 +388,17 @@ async fn serve_bridge(listener: std::net::TcpListener, creds: (String, String)) 
         Ok(l) => l,
         Err(e) => {
             tracing::warn!(error = %e, "mesh proxy listener failed");
+            bridge_stopped(port);
             return;
         }
     };
-    let creds = std::sync::Arc::new(creds);
     loop {
         let Ok((client, _)) = listener.accept().await else {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
-        let creds = creds.clone();
         tokio::spawn(async move {
-            if let Err(e) = relay(client, &creds).await {
+            if let Err(e) = relay(client, creds()).await {
                 tracing::debug!(error = %e, "mesh proxy connection ended");
             }
         });
@@ -310,7 +416,7 @@ const REP_ADDRESS_TYPE: u8 = 0x08;
 
 /// One SOCKS5 client: username/password auth (RFC 1929), a `CONNECT` to an
 /// address literal, then bytes both ways.
-async fn relay(mut client: tokio::net::TcpStream, creds: &(String, String)) -> io::Result<()> {
+async fn relay(mut client: tokio::net::TcpStream, creds: &Creds) -> io::Result<()> {
     let target = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(&mut client, creds))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "SOCKS handshake"))??;
@@ -362,7 +468,7 @@ async fn hung_up(client: &tokio::net::TcpStream) {
 /// refusal has been sent.
 async fn handshake(
     client: &mut tokio::net::TcpStream,
-    (user, pass): &(String, String),
+    Creds { user, pass }: &Creds,
 ) -> io::Result<Option<SocketAddr>> {
     // Greeting: version, the methods offered. Only username/password (0x02)
     // is accepted.
@@ -388,7 +494,13 @@ async fn handshake(
     client.read_exact(&mut plen).await?;
     let mut got_pass = vec![0u8; plen[0] as usize];
     client.read_exact(&mut got_pass).await?;
-    if ver[0] != 1 || got_user != user.as_bytes() || got_pass != pass.as_bytes() {
+    // Constant time: any app on the phone can try the bridge as often as it
+    // likes, so a comparison that stops at the first wrong byte would let it
+    // learn the secret a byte at a time.
+    let authorised: bool = (got_user.as_slice().ct_eq(user.as_bytes())
+        & got_pass.as_slice().ct_eq(pass.as_bytes()))
+    .into();
+    if ver[0] != 1 || !authorised {
         client.write_all(&[1, 1]).await?;
         return Ok(None);
     }
@@ -441,7 +553,7 @@ async fn handshake(
     let mut port = [0u8; 2];
     client.read_exact(&mut port).await?;
     // The mesh only. Loopback too in tests, whose servers live there.
-    if !(is_mesh(&ip) || (cfg!(test) && ip.is_loopback())) {
+    if !(is_mesh_address(ip) || (cfg!(test) && ip.is_loopback())) {
         reply(client, REP_NOT_ALLOWED).await?;
         return Ok(None);
     }
@@ -458,10 +570,10 @@ mod tests {
 
     #[test]
     fn only_fd00_is_mesh() {
-        assert!(is_mesh(&"fd12::1".parse().unwrap()));
-        assert!(!is_mesh(&"fe80::1".parse().unwrap()));
-        assert!(!is_mesh(&"2001:db8::1".parse().unwrap()));
-        assert!(!is_mesh(&"10.0.0.1".parse().unwrap()));
+        assert!(is_mesh_address("fd12::1".parse().unwrap()));
+        assert!(!is_mesh_address("fe80::1".parse().unwrap()));
+        assert!(!is_mesh_address("2001:db8::1".parse().unwrap()));
+        assert!(!is_mesh_address("10.0.0.1".parse().unwrap()));
     }
 
     async fn echo_server() -> SocketAddr {
@@ -486,8 +598,7 @@ mod tests {
         pass: &str,
         target: SocketAddr,
     ) -> (tokio::net::TcpStream, Option<u8>) {
-        assert!(proxy().is_some());
-        let port = BRIDGE.get().unwrap().as_ref().unwrap().port;
+        let port = bridge_port().unwrap();
         let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .unwrap();
@@ -523,16 +634,15 @@ mod tests {
         (s, Some(rep[1]))
     }
 
-    fn creds() -> (String, String) {
-        let _ = proxy();
-        let b = BRIDGE.get().unwrap().as_ref().unwrap();
-        (b.user.clone(), b.pass.clone())
+    fn user_pass() -> (String, String) {
+        let Creds { user, pass } = creds();
+        (user.clone(), pass.clone())
     }
 
     #[tokio::test]
     async fn bridge_carries_an_authenticated_connect() {
         let echo = echo_server().await;
-        let (user, pass) = creds();
+        let (user, pass) = user_pass();
         let (mut s, rep) = socks(&user, &pass, echo).await;
         assert_eq!(rep, Some(REP_OK));
         s.write_all(b"hello").await.unwrap();
@@ -567,13 +677,13 @@ mod tests {
     #[tokio::test]
     async fn bridge_reads_a_bracketed_literal_sent_as_a_name() {
         let echo = echo_server().await;
-        let (user, pass) = creds();
+        let (user, pass) = user_pass();
         for (name, want) in [
             (format!("[{}]", echo.ip()), REP_OK),
             (echo.ip().to_string(), REP_OK),
             ("example.com".to_string(), REP_ADDRESS_TYPE),
         ] {
-            let port = BRIDGE.get().unwrap().as_ref().unwrap().port;
+            let port = bridge_port().unwrap();
             let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
                 .unwrap();
@@ -603,15 +713,14 @@ mod tests {
 
     /// Two stacks on a link that carries packets of at most `mtu` bytes and
     /// loses the rest, as FIPS does a packet it can only send as fragments.
-    /// Each clamps its packets on the way out, as [`init`] wires it.
+    /// Each is configured as [`init`] configures it.
     fn link_pair(mtu: usize) -> (Netstack, Netstack) {
         let addr = |last| Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, last);
         let handle = tokio::runtime::Handle::current();
         let (to_b, mut for_b) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let (to_a, mut for_a) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let link = move |to: tokio::sync::mpsc::UnboundedSender<Vec<u8>>| {
-            Box::new(move |mut p: Vec<u8>| {
-                crate::tun_bridge::clamp_mss(&mut p);
+            Box::new(move |p: Vec<u8>| {
                 if p.len() <= mtu {
                     let _ = to.send(p);
                 }
@@ -669,14 +778,14 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), vec![IpAddr::V6(a.addr())]);
     }
 
-    /// A peer sends the stack segments that fit the node's MTU. Unclamped,
-    /// the stack advertised 1220, and a peer's full segments became packets
-    /// FIPS could only fragment: a v0.8 phone's file-share offer never
-    /// arrived, though its small frames did.
+    /// A peer sends the stack segments that fit the node's MTU. A stack
+    /// whose MSS ran past the node's drew full segments FIPS could only
+    /// fragment: a v0.8 phone's file-share offer never arrived, though its
+    /// small frames did.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_peer_sends_segments_that_fit_the_node() {
-        // FIPS's effective MTU on a 1280-byte transport, where the clamp is 1143.
-        let (a, b) = link_pair(1203);
+        // FIPS's IPv6 MTU on its default transports.
+        let (a, b) = link_pair(fips_host::netstack::IPV6_MIN_MTU);
         let listener = b.bind(4870).unwrap();
         let remote = std::net::SocketAddrV6::new(b.addr(), 4870, 0, 0);
         let sent = vec![7u8; 16 * 1024];
@@ -716,17 +825,43 @@ mod tests {
             .unwrap();
     }
 
+    /// A bridge that stopped is started again by the next request.
+    #[tokio::test]
+    async fn a_stopped_bridge_starts_again() {
+        let first = bridge_port().unwrap();
+        bridge_stopped(first);
+        let second = bridge_port().unwrap();
+        assert_ne!(first, second);
+        let echo = echo_server().await;
+        let (user, pass) = user_pass();
+        let (_, rep) = socks(&user, &pass, echo).await;
+        assert_eq!(rep, Some(REP_OK));
+    }
+
+    /// With no bridge, a mesh request fails rather than leaving through the
+    /// kernel.
+    #[tokio::test]
+    async fn no_bridge_fails_closed() {
+        let echo = echo_server().await;
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(bridge_url(None)).unwrap())
+            .build()
+            .unwrap();
+        let sent = client.get(format!("http://{echo}/")).send().await;
+        assert!(sent.is_err(), "{sent:?}");
+    }
+
     #[tokio::test]
     async fn bridge_refuses_a_wrong_secret() {
         let echo = echo_server().await;
-        let (user, _) = creds();
+        let (user, _) = user_pass();
         let (_, rep) = socks(&user, "not-the-secret", echo).await;
         assert_eq!(rep, None);
     }
 
     #[tokio::test]
     async fn bridge_refuses_anything_off_the_mesh() {
-        let (user, pass) = creds();
+        let (user, pass) = user_pass();
         let (_, rep) = socks(&user, &pass, "93.184.216.34:80".parse().unwrap()).await;
         assert_eq!(rep, Some(REP_NOT_ALLOWED));
     }

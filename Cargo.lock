@@ -2471,6 +2471,7 @@ dependencies = [
  "sha2 0.10.9",
  "simple-dns",
  "socket2",
+ "subtle",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tower",

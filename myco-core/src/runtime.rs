@@ -525,40 +525,22 @@ impl AppRuntime {
             *relay_hub.lock().unwrap() = Some(hub.clone());
             content.set_hub(&hub);
 
-            // Kernel socket: IPV6_V6ONLY `[::]:4870` so it doesn't collide with
-            // the loopback bind. With the mesh stack running (Android) peers
-            // reach the relay on the stack below, which claims the port even
-            // while the VPN is up, so losing this socket costs them nothing.
-            match crate::mesh_relay::bind("[::]:4870".parse::<SocketAddr>().unwrap()) {
-                Ok(listener) => {
-                    let hub = hub.clone();
-                    rt.spawn(async move {
-                        if let Err(e) = crate::mesh_relay::serve_on_hub(hub, listener).await {
-                            tracing::error!(error = %e, "mesh relay server exited");
-                        }
-                    });
-                }
-                Err(e) if crate::mesh_net::stack().is_some() => {
-                    tracing::warn!(error = %e, "kernel [::]:4870 unavailable; peers use the mesh stack");
-                }
-                Err(e) => {
-                    mesh_warning =
-                        format!("relay port 4870 unavailable (another app using it?): {e}");
-                }
+            // Where peers reach the relay: the mesh stack, or a kernel socket
+            // with no stack (see `mesh_net::peer_listeners`).
+            let (listeners, unreachable) = crate::mesh_net::peer_listeners(4870);
+            for listener in listeners {
+                let hub = hub.clone();
+                rt.spawn(async move {
+                    if let Err(e) = crate::mesh_relay::serve_on_hub(hub, listener).await {
+                        tracing::error!(error = %e, "mesh relay server exited");
+                    }
+                });
             }
-            // The same relay on the mesh stack, where peers reach it. Nothing
-            // else on the device can hold this port.
-            match crate::mesh_net::listen(4870) {
-                Some(Ok(listener)) => {
-                    let hub = hub.clone();
-                    rt.spawn(async move {
-                        if let Err(e) = crate::mesh_relay::serve_on_hub(hub, listener).await {
-                            tracing::error!(error = %e, "mesh-stack relay server exited");
-                        }
-                    });
-                }
-                Some(Err(e)) => tracing::error!(error = %e, "mesh-stack relay could not listen"),
-                None => {}
+            if let Some(e) = unreachable {
+                add_warning(
+                    &mut mesh_warning,
+                    format!("relay port 4870 unavailable (another app using it?): {e}"),
+                );
             }
             // Loopback socket: the in-app nsite WebView talks to `ws://localhost:4870`
             // / `ws://127.0.0.1:4870`; the mesh socket is v6only, so serve loopback
@@ -577,14 +559,14 @@ impl AppRuntime {
                     // if another app holds it they'll silently talk to the WRONG
                     // relay (you'd see messages that aren't yours). Flag it loudly;
                     // the UI watches for "port 4870" to pop a warning.
-                    if !mesh_warning.is_empty() {
-                        mesh_warning.push_str("; ");
-                    }
-                    mesh_warning.push_str(&format!(
-                        "Another app is using port 4870 — Myco's relay couldn't start, \
-                         so apps will talk to the wrong relay. Close the other app and \
-                         restart Myco. ({e})"
-                    ));
+                    add_warning(
+                        &mut mesh_warning,
+                        format!(
+                            "Another app is using port 4870 — Myco's relay couldn't start, \
+                             so apps will talk to the wrong relay. Close the other app and \
+                             restart Myco. ({e})"
+                        ),
+                    );
                 }
             }
             // The auth plane: the one port open to peers we have never met, and
@@ -592,54 +574,26 @@ impl AppRuntime {
             // servers matter — without it a stranger cannot pair at all, and the
             // relay and Blossom gates below have no exceptions to let them in.
             // See `reference/thinning-custom-relay.md` (D6).
-            match crate::auth_service::bind(
-                format!("[::]:{}", crate::auth_service::AUTH_PORT)
-                    .parse::<SocketAddr>()
-                    .unwrap(),
-            ) {
-                Ok(listener) => {
-                    let content_for_auth = content.clone();
-                    rt.spawn(async move {
-                        if let Err(e) =
-                            crate::auth_service::serve_on(content_for_auth, listener).await
-                        {
-                            tracing::error!(error = %e, "auth service exited");
-                        }
-                    });
-                }
-                // Peers pair over the mesh stack below; see the relay's socket.
-                Err(e) if crate::mesh_net::stack().is_some() => {
-                    tracing::warn!(error = %e, "kernel [::]:4873 unavailable; peers use the mesh stack");
-                }
-                Err(e) => {
-                    if !mesh_warning.is_empty() {
-                        mesh_warning.push_str("; ");
+            let port = crate::auth_service::AUTH_PORT;
+            let (listeners, unreachable) = crate::mesh_net::peer_listeners(port);
+            for listener in listeners {
+                let content_for_auth = content.clone();
+                rt.spawn(async move {
+                    if let Err(e) = crate::auth_service::serve_on(content_for_auth, listener).await
+                    {
+                        tracing::error!(error = %e, "auth service exited");
                     }
-                    mesh_warning.push_str(&format!(
-                        "Another app is using port {} — Myco can't accept pairing \
-                         requests, so new peers won't be able to pair with this \
-                         device. ({e})",
-                        crate::auth_service::AUTH_PORT
-                    ));
-                }
+                });
             }
-            // And on the mesh stack, where peers pair, whatever became of the
-            // kernel socket.
-            match crate::mesh_net::listen(crate::auth_service::AUTH_PORT) {
-                Some(Ok(listener)) => {
-                    let content_for_auth = content.clone();
-                    rt.spawn(async move {
-                        if let Err(e) =
-                            crate::auth_service::serve_on(content_for_auth, listener).await
-                        {
-                            tracing::error!(error = %e, "mesh-stack auth service exited");
-                        }
-                    });
-                }
-                Some(Err(e)) => {
-                    tracing::error!(error = %e, "mesh-stack auth service could not listen")
-                }
-                None => {}
+            if let Some(e) = unreachable {
+                add_warning(
+                    &mut mesh_warning,
+                    format!(
+                        "Another app is using port {port} — Myco can't accept pairing \
+                         requests, so new peers won't be able to pair with this \
+                         device. ({e})"
+                    ),
+                );
             }
             match blobs.clone() {
                 None => {
@@ -662,54 +616,28 @@ impl AppRuntime {
                     // The embedded store's zstd variants (the release APK) go to
                     // a peer that asks for them; see `release_apk`.
                     let precompressed = content.blobs_local().map(|store| store.zstd_dir());
-                    match myco_blossom::server::bind("[::]:24243".parse::<SocketAddr>().unwrap()) {
-                        Ok(listener) => {
-                            let (blobs, access, precompressed) =
-                                (blobs.clone(), access.clone(), precompressed.clone());
-                            rt.spawn(async move {
-                                if let Err(e) = myco_blossom::server::serve_on_guarded(
-                                    blobs,
-                                    listener,
-                                    access,
-                                    precompressed,
-                                )
-                                .await
-                                {
-                                    tracing::error!(error = %e, "mesh blossom server exited");
-                                }
-                            });
-                        }
-                        // Peers fetch over the mesh stack below; see the relay's socket.
-                        Err(e) if crate::mesh_net::stack().is_some() => {
-                            tracing::warn!(error = %e, "kernel [::]:24243 unavailable; peers use the mesh stack");
-                        }
-                        Err(e) => {
-                            if !mesh_warning.is_empty() {
-                                mesh_warning.push_str("; ");
+                    let (listeners, unreachable) = crate::mesh_net::peer_listeners(24243);
+                    for listener in listeners {
+                        let (blobs, access, precompressed) =
+                            (blobs.clone(), access.clone(), precompressed.clone());
+                        rt.spawn(async move {
+                            if let Err(e) = myco_blossom::server::serve_on_guarded(
+                                blobs,
+                                listener,
+                                access,
+                                precompressed,
+                            )
+                            .await
+                            {
+                                tracing::error!(error = %e, "mesh blossom server exited");
                             }
-                            mesh_warning.push_str(&format!("blossom port 24243 unavailable: {e}"));
-                        }
+                        });
                     }
-                    // And on the mesh stack, where peers reach it.
-                    match crate::mesh_net::listen(24243) {
-                        Some(Ok(listener)) => {
-                            rt.spawn(async move {
-                                if let Err(e) = myco_blossom::server::serve_on_guarded(
-                                    blobs,
-                                    listener,
-                                    access,
-                                    precompressed,
-                                )
-                                .await
-                                {
-                                    tracing::error!(error = %e, "mesh-stack blossom server exited");
-                                }
-                            });
-                        }
-                        Some(Err(e)) => {
-                            tracing::error!(error = %e, "mesh-stack blossom could not listen")
-                        }
-                        None => {}
+                    if let Some(e) = unreachable {
+                        add_warning(
+                            &mut mesh_warning,
+                            format!("blossom port 24243 unavailable: {e}"),
+                        );
                     }
                 }
             }
@@ -3856,6 +3784,15 @@ fn settle_napplet_review(
         );
         false
     }
+}
+
+/// Add `warning` to the ones the UI shows (`AppState::error`).
+#[cfg(target_os = "android")]
+fn add_warning(warnings: &mut String, warning: String) {
+    if !warnings.is_empty() {
+        warnings.push_str("; ");
+    }
+    warnings.push_str(&warning);
 }
 
 #[cfg(test)]

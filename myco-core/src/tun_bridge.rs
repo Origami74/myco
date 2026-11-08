@@ -21,9 +21,9 @@ use tokio::sync::mpsc::Sender as MeshSender;
 
 /// Clamp outbound TCP SYNs to FIPS's MSS (the app-owned path bypasses the
 /// system-TUN reader's clamp; see `fips` `Node::enable_app_owned_tun`). Set on
-/// install to `effective_ipv6_mtu - 60`; the default is FIPS's effective MTU for
-/// the 1280 transport floor (`1280 - 77 - 60`).
-static MAX_MSS: AtomicU16 = AtomicU16::new(1143);
+/// install to `effective_ipv6_mtu - 60`; the default is FIPS's effective MTU on
+/// its default transports, the IPv6 minimum (`1280 - 60`).
+static MAX_MSS: AtomicU16 = AtomicU16::new(1220);
 
 #[allow(clippy::type_complexity)]
 static OUTBOUND: OnceLock<Mutex<Option<MeshSender<Vec<u8>>>>> = OnceLock::new();
@@ -73,9 +73,9 @@ pub(crate) fn set_tun_attached(attached: bool) {
 }
 
 /// Clamp a TCP SYN's MSS to the node's ceiling (`effective_ipv6_mtu - 60`).
-/// Every TCP flow on the mesh gets it, whichever end terminates the flow: the
-/// kernel behind the TUN, or the mesh stack, which would otherwise advertise
-/// 1220 and draw segments bigger than the node carries whole.
+/// Applied to every SYN arriving from the mesh, whichever end terminates the
+/// flow, so a peer that does not clamp its own is still sent segments that
+/// fit; and to the kernel's outgoing SYNs behind the TUN.
 pub(crate) fn clamp_mss(packet: &mut [u8]) {
     fips::ipv6tun::tcp_mss::clamp_tcp_mss(packet, MAX_MSS.load(Ordering::Relaxed));
 }
