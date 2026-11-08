@@ -42,9 +42,10 @@ static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 
 /// Start the mesh stack on `addr`, the node's mesh address, once per process.
 /// Its packets go to whichever node is installed in `tun_bridge` at the time,
-/// so it outlives a node rebuilt on a BLE off-and-on. It sends packets of at
-/// most 1280 bytes, which FIPS carries over any path whatever the node's MTU,
-/// so it needs nothing from the node beyond the address.
+/// so it outlives a node rebuilt on a BLE off-and-on. Its SYNs are clamped to
+/// the node's MSS ceiling on the way out, as the kernel's were: a peer told
+/// 1220 sends segments the node can only carry as IPv6 fragments, which the
+/// stack does not reassemble.
 pub(crate) fn init(handle: &tokio::runtime::Handle, addr: Ipv6Addr) {
     let _ = RUNTIME.set(handle.clone());
     if STACK.get().is_some() {
@@ -52,7 +53,8 @@ pub(crate) fn init(handle: &tokio::runtime::Handle, addr: Ipv6Addr) {
     }
     let stack = Netstack::start(
         Config::new(addr),
-        Box::new(|packet| {
+        Box::new(|mut packet| {
+            crate::tun_bridge::clamp_mss(&mut packet);
             crate::tun_bridge::to_mesh(packet);
         }),
         handle,
@@ -596,24 +598,27 @@ mod tests {
 
     /// Two mesh stacks, each one's packets offered to the other.
     fn stack_pair() -> (Netstack, Netstack) {
+        link_pair(usize::MAX)
+    }
+
+    /// Two stacks on a link that carries packets of at most `mtu` bytes and
+    /// loses the rest, as FIPS does a packet it can only send as fragments.
+    /// Each clamps its packets on the way out, as [`init`] wires it.
+    fn link_pair(mtu: usize) -> (Netstack, Netstack) {
         let addr = |last| Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, last);
         let handle = tokio::runtime::Handle::current();
         let (to_b, mut for_b) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let (to_a, mut for_a) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        let a = Netstack::start(
-            Config::new(addr(1)),
-            Box::new(move |p| {
-                let _ = to_b.send(p);
-            }),
-            &handle,
-        );
-        let b = Netstack::start(
-            Config::new(addr(2)),
-            Box::new(move |p| {
-                let _ = to_a.send(p);
-            }),
-            &handle,
-        );
+        let link = move |to: tokio::sync::mpsc::UnboundedSender<Vec<u8>>| {
+            Box::new(move |mut p: Vec<u8>| {
+                crate::tun_bridge::clamp_mss(&mut p);
+                if p.len() <= mtu {
+                    let _ = to.send(p);
+                }
+            })
+        };
+        let a = Netstack::start(Config::new(addr(1)), link(to_b), &handle);
+        let b = Netstack::start(Config::new(addr(2)), link(to_a), &handle);
         let (a2, b2) = (a.clone(), b.clone());
         tokio::spawn(async move {
             while let Some(p) = for_b.recv().await {
@@ -662,6 +667,34 @@ mod tests {
             String::from_utf8_lossy(&head)
         );
         assert_eq!(*seen.lock().unwrap(), vec![IpAddr::V6(a.addr())]);
+    }
+
+    /// A peer sends the stack segments that fit the node's MTU. Unclamped,
+    /// the stack advertised 1220, and a peer's full segments became packets
+    /// FIPS could only fragment: a v0.8 phone's file-share offer never
+    /// arrived, though its small frames did.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_peer_sends_segments_that_fit_the_node() {
+        // FIPS's effective MTU on a 1280-byte transport, where the clamp is 1143.
+        let (a, b) = link_pair(1203);
+        let listener = b.bind(4870).unwrap();
+        let remote = std::net::SocketAddrV6::new(b.addr(), 4870, 0, 0);
+        let sent = vec![7u8; 16 * 1024];
+        let body = sent.clone();
+        tokio::spawn(async move {
+            let mut stream = a.connect(remote).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+            stream.flush().await.unwrap();
+            // Held open until the reader has it all.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut got = vec![0u8; sent.len()];
+        tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut got))
+            .await
+            .expect("every segment should fit the link")
+            .unwrap();
+        assert_eq!(got, sent);
     }
 
     /// A client that hangs up mid-dial is noticed, so the bridge stops

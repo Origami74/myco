@@ -72,6 +72,14 @@ pub(crate) fn set_tun_attached(attached: bool) {
     TUN_ATTACHED.store(attached, Ordering::Relaxed);
 }
 
+/// Clamp a TCP SYN's MSS to the node's ceiling (`effective_ipv6_mtu - 60`).
+/// Every TCP flow on the mesh gets it, whichever end terminates the flow: the
+/// kernel behind the TUN, or the mesh stack, which would otherwise advertise
+/// 1220 and draw segments bigger than the node carries whole.
+pub(crate) fn clamp_mss(packet: &mut [u8]) {
+    fips::ipv6tun::tcp_mss::clamp_tcp_mss(packet, MAX_MSS.load(Ordering::Relaxed));
+}
+
 /// Send a packet of the mesh stack's to the node. Dropped when no node is
 /// installed or its queue is full; TCP sends it again.
 pub(crate) fn to_mesh(packet: Vec<u8>) -> bool {
@@ -93,7 +101,10 @@ pub fn install(
     // Ends by itself when the node it belongs to is dropped.
     let tx = to_tun().0.clone();
     std::thread::spawn(move || {
-        for packet in inbound_rx {
+        for mut packet in inbound_rx {
+            // Both directions, so a peer that does not clamp its own SYN is
+            // still sent segments that fit.
+            clamp_mss(&mut packet);
             let packet = match crate::mesh_net::stack() {
                 Some(stack) => match stack.offer(packet) {
                     Ok(()) => continue,
@@ -133,7 +144,7 @@ pub fn send_packet(mut packet: Vec<u8>) -> bool {
         crate::socks_exit::offer(packet);
         return true; // consumed = carried or dropped
     }
-    fips::ipv6tun::tcp_mss::clamp_tcp_mss(&mut packet, MAX_MSS.load(Ordering::Relaxed));
+    clamp_mss(&mut packet);
     to_mesh(packet)
 }
 

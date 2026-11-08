@@ -114,8 +114,11 @@ forever or take everyone's. The defaults (`fips_host::netstack::Config`):
   losses at the IP level should be rare. Measure on devices.
 - **TCP only.** No UDP. Of ICMP, only "destination unreachable" for its own
   dials.
-- **1280-byte packets.** The stack sends at most IPv6's minimum MTU, which FIPS
-  carries over any path. No path-MTU discovery.
+- **The node's MSS, both ways.** Every SYN in or out of the stack is clamped
+  to the node's ceiling (`effective_ipv6_mtu - 60`), as the kernel's were, so
+  neither end sends a segment the node would have to fragment. The stack
+  doesn't reassemble IPv6 fragments, so a path narrower than the node's MTU
+  still stalls large transfers. No path-MTU discovery.
 - **No TIME-WAIT.** A closed socket is freed once its close completes. Ports
   rotate through several thousand before one is reused.
 
