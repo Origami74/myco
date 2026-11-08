@@ -169,6 +169,9 @@
           a napplet and carry a payload; it may never grant a capability.
           `uiMode` is handled in place: a dark-mode switch is pushed to the
           napplet as NAP-THEME's `theme.changed` rather than restarting it.
+          Rotation and resizes too: a recreate reloads the WebView and the
+          napplet loses everything it holds in memory (a game pad mid-game
+          falls back to its start screen). The page gets a `resize` instead.
         -->
         <activity
             android:name=".NappletActivity"
@@ -177,7 +180,7 @@
             android:autoRemoveFromRecents="false"
             android:theme="@style/Theme.Myco.Splash"
             android:windowSoftInputMode="adjustResize"
-            android:configChanges="uiMode"
+            android:configChanges="uiMode|orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
             android:label="@string/app_name" />
 
         <!-- Invisible: shows the signer app's approval screen for one signing
