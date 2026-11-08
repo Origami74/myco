@@ -741,7 +741,9 @@ class NappletActivity : ComponentActivity() {
      * Dark mode flipped while the napplet is open. The manifest keeps this
      * window alive through a `uiMode` change, so the napplet is not restarted
      * for it: the session hears the new appearance and pushes NAP-THEME's
-     * `theme.changed`; the sheet above re-themes on its own.
+     * `theme.changed`; the sheet above re-themes on its own. Rotation and
+     * resizes land here too; the appearance is unchanged then, and the host
+     * sends nothing for an unchanged one.
      */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
