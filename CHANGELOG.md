@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Smaller APK.** The Myco mark (launcher, splash, TV banner) is a WebP
   instead of a PNG: 1.3 MB to 0.3 MB.
 
+### Fixed
+
+- **Apps survive rotation.** Turning the phone, or resizing the window, no
+  longer restarts an open app: it keeps its place (a game stays mid-game)
+  and lays itself out for the new size.
+
 ## [0.12.1] - 2026-10-23
 
 ### Changed
