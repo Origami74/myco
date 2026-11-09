@@ -67,7 +67,9 @@ kernel.
 
 Each also keeps its old kernel socket on `[::]`. Peers don't use it; it only
 serves this phone's other apps dialing its own address. Losing it to another
-app is logged, not shown: peers are unaffected.
+app is logged, not shown: peers are unaffected. A port peers can't reach — the
+stack's listener failed, or, with no stack, the kernel socket — is shown as a
+warning. `mesh_net::peer_listeners` binds every server's ports the same way.
 
 The stack hands axum the peer's `fd00::` address, so the Circle gate reads it
 as before.
@@ -77,12 +79,15 @@ as before.
 - **Peer relay WebSockets** dial the stack directly (`mesh_net::connect_ws`).
 - **Mesh HTTP** (reqwest) can't be given a socket of ours. Mesh clients go
   through a SOCKS5 bridge on `127.0.0.1` that dials the stack. The bridge:
-  - needs a per-process secret, so no other app can use it to reach the mesh
-    as this device;
+  - needs a per-process secret, compared in constant time, so no other app can
+    use it to reach the mesh as this device;
   - takes resolved addresses only. Names stay with the guarded resolver in
     `http.rs`;
   - refuses anything outside `fd00::/8`;
   - gives up on a dial after 20 s, or as soon as the client hangs up.
+  - is started again by the next request after a failure. Until then mesh
+    requests fail; they never fall back to kernel sockets, which have no route
+    to the mesh without the VPN.
 
 ## What the VPN is still for
 
@@ -114,11 +119,13 @@ forever or take everyone's. The defaults (`fips_host::netstack::Config`):
   losses at the IP level should be rare. Measure on devices.
 - **TCP only.** No UDP. Of ICMP, only "destination unreachable" for its own
   dials.
-- **The node's MSS, both ways.** Every SYN in or out of the stack is clamped
-  to the node's ceiling (`effective_ipv6_mtu - 60`), as the kernel's were, so
-  neither end sends a segment the node would have to fragment. The stack
-  doesn't reassemble IPv6 fragments, so a path narrower than the node's MTU
-  still stalls large transfers. No path-MTU discovery.
+- **A 1280-byte MTU.** The stack sends IPv6 packets of at most 1280 bytes and
+  advertises an MSS of 1220: the IPv6 MTU FIPS carries on its default
+  transports. A SYN arriving from a peer is still clamped to the node's ceiling
+  (`effective_ipv6_mtu - 60`), so the stack never sends more than the node
+  carries whole. The stack doesn't reassemble IPv6 fragments, so a node set
+  below the FIPS default transport MTU, or a narrower path, still stalls
+  large transfers from a peer. No path-MTU discovery.
 - **No TIME-WAIT.** A closed socket is freed once its close completes. Ports
   rotate through several thousand before one is reused.
 
