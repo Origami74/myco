@@ -78,21 +78,31 @@ class MeshSetupTest {
     private val A = SegmentState.Active
     private val P = SegmentState.Pending
     private val X = SegmentState.Problem
-    private val S = SegmentState.Skipped
 
     @Test
     fun aFreshInstallHasAllFourSegments() {
         val plan = MeshSetup.launchPlan(LaunchDecision.Show, nameChosen = false)
         assertEquals(full, plan)
         assertEquals(listOf(Segment.Install, Segment.Nearby, Segment.Connection, Segment.Name), full.segments)
-        assertEquals(SetupStep.EnableMesh, MeshSetup.firstStep(full))
+        // No confirm card: it opens on the first thing to ask.
+        assertEquals(SetupStep.ExplainNearby, MeshSetup.firstStep(full, nearbyGranted = false, vpnPrepared = false))
+    }
+
+    @Test
+    fun withoutTheVpnWantedThereIsNoConnectionSegment() {
+        val plan = MeshSetup.launchPlan(LaunchDecision.Show, nameChosen = false, connection = false)!!
+        assertEquals(listOf(Segment.Install, Segment.Nearby, Segment.Name), plan.segments)
+        assertEquals(3, MeshSetup.stepNumber(SetupStep.Name, plan))
+        assertEquals(listOf(D, D, A), MeshSetup.segments(SetupStep.Name, plan, MeshOutcome()))
+        val reopened = MeshSetup.reopenPlan(SetupEntry.Fix, nameChosen = true, connection = false)
+        assertEquals(listOf(Segment.Install, Segment.Nearby), reopened.segments)
     }
 
     @Test
     fun anUpgradeWithAWorkingMeshButNoNameAsksOnlyTheName() {
         val plan = MeshSetup.launchPlan(LaunchDecision.MarkDone, nameChosen = false)
         assertEquals(nameOnly, plan)
-        assertEquals(SetupStep.Name, MeshSetup.firstStep(nameOnly))
+        assertEquals(SetupStep.Name, MeshSetup.firstStep(nameOnly, nearbyGranted = false, vpnPrepared = false))
         assertEquals(2, MeshSetup.stepNumber(SetupStep.Name, nameOnly))
         assertEquals(2, nameOnly.segments.size)
         assertEquals(listOf(D, A), MeshSetup.segments(SetupStep.Name, nameOnly, MeshOutcome()))
@@ -112,49 +122,48 @@ class MeshSetupTest {
         assertNull(MeshSetup.afterMesh(meshOnly))
     }
 
-    // --- runs opened later: confirm first, ask only on a tap ---
+    // --- a run opens on its first card with something to ask ---
 
     @Test
-    fun meshSwitchedOnLaterOpensOnTheConfirmCardWithNoRequestPending() {
-        // Fresh install, "No thanks", name done; later the mesh switch is
-        // turned on with the permissions still missing.
-        assertTrue(MeshSetup.meshOnNeedsSetup(nearbyGranted = false, vpnPrepared = false))
-        val plan = MeshSetup.reopenPlan(SetupEntry.MeshSwitch, nameChosen = true)
-        assertEquals(SetupPlan(mesh = true, name = false, entry = SetupEntry.MeshSwitch), plan)
-        val first = MeshSetup.firstStep(plan)
-        assertEquals(SetupStep.EnableMesh, first)
-        assertFalse(MeshSetup.systemPromptUp(first))
-        assertEquals(listOf(D, A, P), MeshSetup.segments(first, plan, MeshOutcome()))
-        // The grey button is "Not now": it closes, nothing else follows.
-        assertTrue(MeshSetup.greyButtonCloses(plan))
-        assertNull(MeshSetup.afterMesh(plan))
+    fun theFirstCardIsWhateverIsMissingFirst() {
+        // Nearby first, then the VPN (when this run wants it), then the name.
+        assertEquals(SetupStep.ExplainNearby, MeshSetup.firstStep(full, nearbyGranted = false, vpnPrepared = true))
+        assertEquals(SetupStep.ExplainVpn, MeshSetup.firstStep(full, nearbyGranted = true, vpnPrepared = false))
+        assertEquals(SetupStep.Name, MeshSetup.firstStep(full, nearbyGranted = true, vpnPrepared = true))
+        // A run without the VPN never opens on its card.
+        val noVpn = SetupPlan(mesh = true, name = false, connection = false)
+        assertNull(MeshSetup.firstStep(noVpn, nearbyGranted = true, vpnPrepared = false))
+        assertEquals(SetupStep.ExplainNearby, MeshSetup.firstStep(noVpn, nearbyGranted = false, vpnPrepared = false))
+        // Nothing missing and no name to ask: nothing to show.
+        assertNull(MeshSetup.firstStep(meshOnly, nearbyGranted = true, vpnPrepared = true))
     }
 
     @Test
-    fun aSettingsFixOpensOnTheConfirmCardWithNoRequestPending() {
-        for (nameChosen in listOf(true, false)) {
-            val plan = MeshSetup.reopenPlan(SetupEntry.Fix, nameChosen = nameChosen)
-            val first = MeshSetup.firstStep(plan)
-            assertEquals(SetupStep.EnableMesh, first)
-            assertFalse(MeshSetup.systemPromptUp(first))
-            assertTrue(MeshSetup.greyButtonCloses(plan))
-        }
+    fun meshSwitchedOnLaterOpensOnTheNearbyCardWithNoRequestPending() {
+        assertTrue(MeshSetup.meshOnNeedsSetup(nearbyGranted = false, vpnPrepared = true))
+        val plan = MeshSetup.reopenPlan(SetupEntry.MeshSwitch, nameChosen = true)
+        assertEquals(SetupPlan(mesh = true, name = false, entry = SetupEntry.MeshSwitch), plan)
+        val first = MeshSetup.firstStep(plan, nearbyGranted = false, vpnPrepared = true)
+        assertEquals(SetupStep.ExplainNearby, first)
+        assertFalse(MeshSetup.systemPromptUp(first))
+        assertEquals(listOf(D, A, P), MeshSetup.segments(first!!, plan, MeshOutcome()))
+        assertNull(MeshSetup.afterMesh(plan))
     }
 
     @Test
     fun noRunOpensBehindAnAndroidPrompt() {
         val plans = listOf(full, meshOnly, nameOnly) +
             SetupEntry.entries.flatMap { e -> listOf(true, false).map { MeshSetup.reopenPlan(e, it) } }
-        for (plan in plans) assertFalse(MeshSetup.systemPromptUp(MeshSetup.firstStep(plan)))
+        for (plan in plans) {
+            for (nearby in listOf(true, false)) {
+                for (vpn in listOf(true, false)) {
+                    assertFalse(MeshSetup.systemPromptUp(MeshSetup.firstStep(plan, nearby, vpn)))
+                }
+            }
+        }
         assertTrue(MeshSetup.systemPromptUp(SetupStep.AskingNearby))
         assertTrue(MeshSetup.systemPromptUp(SetupStep.AskingVpn))
         assertFalse(MeshSetup.systemPromptUp(null))
-    }
-
-    @Test
-    fun onlyTheLaunchRunSaysNoThanks() {
-        assertFalse(MeshSetup.greyButtonCloses(full))
-        assertFalse(MeshSetup.greyButtonCloses(meshOnly))
     }
 
     // --- first run or upgrade ---
@@ -175,53 +184,15 @@ class MeshSetupTest {
         assertEquals(SetupEntry.Upgrade, MeshSetup.launchEntry(introSeen = true, firstRunUnfinished = false))
     }
 
-    @Test
-    fun anUpgradeSaysNotNowAndKeepsItsMesh() {
-        val plan = MeshSetup.launchPlan(LaunchDecision.Show, nameChosen = true, entry = SetupEntry.Upgrade)!!
-        assertEquals(SetupEntry.Upgrade, plan.entry)
-        // "No thanks" would switch off a mesh that was running.
-        assertTrue(MeshSetup.greyButtonCloses(plan))
-        assertNull(MeshSetup.afterMesh(plan))
-    }
-
-    @Test
-    fun onlyAFirstRunHoldsTheMeshBack() {
-        val first = MeshSetup.launchPlan(LaunchDecision.Show, nameChosen = false, entry = SetupEntry.Launch)!!
-        for (step in SetupStep.entries - SetupStep.Name) {
-            assertTrue("$step", MeshSetup.holdsMeshBack(step, first))
-        }
-        // The name is asked after the mesh steps; nothing left to hold.
-        assertFalse(MeshSetup.holdsMeshBack(SetupStep.Name, first))
-        assertFalse(MeshSetup.holdsMeshBack(null, first))
-        for (entry in SetupEntry.entries - SetupEntry.Launch) {
-            val plan = SetupPlan(mesh = true, name = false, entry = entry)
-            for (step in SetupStep.entries) assertFalse("$entry $step", MeshSetup.holdsMeshBack(step, plan))
-        }
-    }
-
-    @Test
-    fun notNowOnALaterRunWithTheNameStillOpenGoesOnToIt() {
-        val plan = MeshSetup.reopenPlan(SetupEntry.MeshSwitch, nameChosen = false)
-        assertEquals(SetupStep.Name, MeshSetup.afterMesh(plan))
-        assertEquals(listOf(D, S, S, A), MeshSetup.segments(SetupStep.Name, plan, MeshOutcome(dismissed = true)))
-    }
-
     // --- nearby devices are explained before Android asks for them ---
 
     @Test
-    fun yesLeadsToTheNearbyCardWithNoPromptPending() {
-        val next = MeshSetup.afterYes(nearbyGranted = false, vpnPrepared = false)
-        assertEquals(SetupStep.ExplainNearby, next)
+    fun theNearbyCardIsStepTwoWithNoPromptPending() {
+        val next = SetupStep.ExplainNearby
         assertFalse(MeshSetup.systemPromptUp(next))
         // Step 2 of 4, Nearby active.
         assertEquals(2, MeshSetup.stepNumber(next, full))
         assertEquals(listOf(D, A, P, P), MeshSetup.segments(next, full, MeshOutcome()))
-    }
-
-    @Test
-    fun withNearbyAlreadyGrantedYesSkipsTheNearbyCard() {
-        assertEquals(SetupStep.ExplainVpn, MeshSetup.afterYes(nearbyGranted = true, vpnPrepared = false))
-        assertEquals(SetupStep.Connecting, MeshSetup.afterYes(nearbyGranted = true, vpnPrepared = true))
     }
 
     // --- the VPN is explained before Android asks for it ---
@@ -264,24 +235,16 @@ class MeshSetupTest {
         assertFalse(MeshSetup.systemPromptUp(SetupStep.Connecting))
     }
 
-    // --- progress bar: mesh yes / no, then the name ---
+    // --- progress bar ---
 
     @Test
-    fun yesThenNameCountsOneToFour() {
-        assertEquals(2, MeshSetup.stepNumber(SetupStep.EnableMesh, full))
-        assertEquals(listOf(D, A, P, P), MeshSetup.segments(SetupStep.EnableMesh, full, MeshOutcome()))
+    fun nearbyThenNameCountsOneToFour() {
+        assertEquals(2, MeshSetup.stepNumber(SetupStep.ExplainNearby, full))
         assertEquals(3, MeshSetup.stepNumber(SetupStep.Connecting, full))
         assertEquals(listOf(D, D, A, P), MeshSetup.segments(SetupStep.Connecting, full, MeshOutcome()))
         // The Name card is the last step: 4 of 4.
         assertEquals(4, MeshSetup.stepNumber(SetupStep.Name, full))
         assertEquals(listOf(D, D, D, A), MeshSetup.segments(SetupStep.Name, full, MeshOutcome()))
-    }
-
-    @Test
-    fun noThanksStillEndsOnTheNameWithMeshStepsSkipped() {
-        val declined = MeshOutcome(declined = true)
-        assertEquals(4, MeshSetup.stepNumber(SetupStep.Name, full))
-        assertEquals(listOf(D, S, S, A), MeshSetup.segments(SetupStep.Name, full, declined))
     }
 
     @Test
@@ -375,9 +338,8 @@ class MeshSetupTest {
 
     @Test
     fun theSnackbarSaysHowItEnded() {
-        assertEquals(SetupNotice.AllSet, MeshSetup.notice(meshOn = true, nearbyGranted = true, declined = false))
-        assertEquals(SetupNotice.NearbyMissing, MeshSetup.notice(meshOn = true, nearbyGranted = false, declined = false))
-        assertEquals(SetupNotice.MeshOff, MeshSetup.notice(meshOn = false, nearbyGranted = true, declined = false))
-        assertEquals(SetupNotice.Declined, MeshSetup.notice(meshOn = false, nearbyGranted = false, declined = true))
+        assertEquals(SetupNotice.AllSet, MeshSetup.notice(meshOn = true, nearbyGranted = true))
+        assertEquals(SetupNotice.NearbyMissing, MeshSetup.notice(meshOn = true, nearbyGranted = false))
+        assertEquals(SetupNotice.MeshOff, MeshSetup.notice(meshOn = false, nearbyGranted = true))
     }
 }

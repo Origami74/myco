@@ -35,7 +35,9 @@ The workspace depends on `fips` as a **path dependency at `reference/fips`** —
 
 ## Architecture
 
-Six Rust crates build into the one `cdylib`, `libmyco_core.so`:
+Seven Rust crates build into the one `cdylib`, `libmyco_core.so`:
+
+- **`fips-host`** — hosting a FIPS node inside an app, with no Myco types: today the userspace TCP/IP stack (`netstack`, smoltcp) that terminates the node's packets in process, so Myco needs no `VpnService`. Headed to own the node lifecycle, transports, shared-node detection and the system TUN, and to be extracted as a library; new FIPS plumbing goes here.
 
 - **`myco-napplet-runtime`** — the napplet host: NIP-5D manifest, verified resolve, sessions and grants, one module per NAP.
 - **`myco-core`** — the app crate and only cdylib. Owns device identity (one Nostr keypair, persisted on first launch), embeds the FIPS mesh node, and wires everything together: Tokio multi-thread runtime (`runtime.rs`), TUN packet bridge, `.fips` DNS interception, BLE/Wi-Fi Aware/AP lane bridges, peer diagnostics, and mesh gossip.

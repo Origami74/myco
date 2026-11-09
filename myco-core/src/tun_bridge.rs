@@ -1,5 +1,11 @@
-//! Process-global bridge between the Android `VpnService`'s TUN fd and the FIPS
-//! node's app-owned-TUN channels (from [`fips::Node::enable_app_owned_tun`]).
+//! Process-global bridge between the FIPS node's app-owned-TUN channels (from
+//! [`fips::Node::enable_app_owned_tun`]) and the two things that terminate its
+//! packets: Myco's own mesh stack ([`crate::mesh_net`]), always, and the Android
+//! `VpnService`'s TUN fd, only while the user lets other apps use the mesh.
+//!
+//! Inbound, the stack takes what it [claims](fips_host::netstack::Netstack::claims)
+//! — TCP to Myco's ports and its own dials — and the TUN gets the rest, or
+//! nothing gets it when no TUN is attached ([`set_tun_attached`]).
 //!
 //! The node's channel ends are [`install`]ed when it starts; the VpnService pump
 //! (via the `tun_bridge_jni` exports) calls [`send_packet`] for each IPv6 packet
@@ -7,7 +13,7 @@
 //! the fd (mesh → app). The ends live in statics, not on `AppRuntime`, so the
 //! blocking `next_packet` never holds the reducer lock — mirroring the BLE bridge.
 
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -15,9 +21,9 @@ use tokio::sync::mpsc::Sender as MeshSender;
 
 /// Clamp outbound TCP SYNs to FIPS's MSS (the app-owned path bypasses the
 /// system-TUN reader's clamp; see `fips` `Node::enable_app_owned_tun`). Set on
-/// install to `effective_ipv6_mtu - 60`; the default is FIPS's effective MTU for
-/// the 1280 transport floor (`1280 - 77 - 60`).
-static MAX_MSS: AtomicU16 = AtomicU16::new(1143);
+/// install to `effective_ipv6_mtu - 60`; the default is FIPS's effective MTU on
+/// its default transports, the IPv6 minimum (`1280 - 60`).
+static MAX_MSS: AtomicU16 = AtomicU16::new(1220);
 
 #[allow(clippy::type_complexity)]
 static OUTBOUND: OnceLock<Mutex<Option<MeshSender<Vec<u8>>>>> = OnceLock::new();
@@ -56,6 +62,33 @@ pub fn push_local(packet: Vec<u8>) {
     let _ = to_tun().0.send(packet);
 }
 
+/// Whether a TUN fd is being pumped. Without one, inbound packets the mesh
+/// stack does not claim have nowhere to go and are dropped, rather than
+/// queued for a reader that is not coming.
+static TUN_ATTACHED: AtomicBool = AtomicBool::new(false);
+
+/// Record whether the TUN pump is running (see [`crate::tun_pump`]).
+pub(crate) fn set_tun_attached(attached: bool) {
+    TUN_ATTACHED.store(attached, Ordering::Relaxed);
+}
+
+/// Clamp a TCP SYN's MSS to the node's ceiling (`effective_ipv6_mtu - 60`).
+/// Applied to every SYN arriving from the mesh, whichever end terminates the
+/// flow, so a peer that does not clamp its own is still sent segments that
+/// fit; and to the kernel's outgoing SYNs behind the TUN.
+pub(crate) fn clamp_mss(packet: &mut [u8]) {
+    fips::ipv6tun::tcp_mss::clamp_tcp_mss(packet, MAX_MSS.load(Ordering::Relaxed));
+}
+
+/// Send a packet of the mesh stack's to the node. Dropped when no node is
+/// installed or its queue is full; TCP sends it again.
+pub(crate) fn to_mesh(packet: Vec<u8>) -> bool {
+    match outbound().lock().unwrap().as_ref() {
+        Some(tx) => tx.try_send(packet).is_ok(),
+        None => false,
+    }
+}
+
 /// Install the node's app-owned-TUN channel ends and the MSS ceiling
 /// (`effective_ipv6_mtu - 60`). Replaces any prior install (the node is rebuilt on
 /// a BLE off→on cycle, yielding fresh channels).
@@ -68,7 +101,20 @@ pub fn install(
     // Ends by itself when the node it belongs to is dropped.
     let tx = to_tun().0.clone();
     std::thread::spawn(move || {
-        for packet in inbound_rx {
+        for mut packet in inbound_rx {
+            // Both directions, so a peer that does not clamp its own SYN is
+            // still sent segments that fit.
+            clamp_mss(&mut packet);
+            let packet = match crate::mesh_net::stack() {
+                Some(stack) => match stack.offer(packet) {
+                    Ok(()) => continue,
+                    Err(packet) => packet,
+                },
+                None => packet,
+            };
+            if !TUN_ATTACHED.load(Ordering::Relaxed) {
+                continue;
+            }
             if tx.send(packet).is_err() {
                 break;
             }
@@ -98,11 +144,8 @@ pub fn send_packet(mut packet: Vec<u8>) -> bool {
         crate::socks_exit::offer(packet);
         return true; // consumed = carried or dropped
     }
-    fips::ipv6tun::tcp_mss::clamp_tcp_mss(&mut packet, MAX_MSS.load(Ordering::Relaxed));
-    match outbound().lock().unwrap().as_ref() {
-        Some(tx) => tx.try_send(packet).is_ok(),
-        None => false,
-    }
+    clamp_mss(&mut packet);
+    to_mesh(packet)
 }
 
 /// True if `packet` is an IPv6 packet destined for the mesh ULA (`fd00::/8`).
@@ -144,6 +187,7 @@ mod tests {
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
         let (in_tx, in_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         install(out_tx, in_rx, 1143);
+        set_tun_attached(true);
 
         // app → mesh: a mesh-bound packet reaches the node outbound channel.
         let pkt = mesh_packet(1);
@@ -178,5 +222,11 @@ mod tests {
 
         // Nothing pending → timeout.
         assert_eq!(next_packet(Duration::from_millis(20)), None);
+
+        // With no TUN attached (other apps not allowed on the mesh), an inbound
+        // packet the mesh stack does not claim is dropped, not queued.
+        set_tun_attached(false);
+        in_tx.send(vec![0x60, 7]).unwrap();
+        assert_eq!(next_packet(Duration::from_millis(200)), None);
     }
 }

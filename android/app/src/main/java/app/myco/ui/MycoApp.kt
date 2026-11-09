@@ -163,6 +163,8 @@ fun MycoApp(
     onFixNearby: () -> Unit = {},
     /** "Fix" on the mesh connection (Permissions, the VPN warning card). */
     onFixConnection: () -> Unit = {},
+    shareMesh: Boolean = false,
+    onShareMeshToggle: (Boolean) -> Unit = {},
     /** What the setup popup ended with, to show as a snackbar once. */
     setupNotice: SetupNotice? = null,
     onSetupNoticeShown: () -> Unit = {},
@@ -314,15 +316,17 @@ fun MycoApp(
     var pickedShareUris by rememberSaveable(stateSaver = UriListSaver) {
         mutableStateOf<List<Uri>>(emptyList())
     }
-    // The setup popup's parting word. A "Settings" tap goes to Settings ›
-    // Permissions, where everything it skipped can be fixed.
+    // The setup popup's parting word, or a one-off notice. A "Settings" tap
+    // goes to Settings › Permissions, where everything setup skipped can be
+    // fixed — or, for news, to Settings itself.
     val snackbars = remember { SnackbarHostState() }
     var openPermissions by remember { mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(setupNotice) {
         val notice = setupNotice ?: return@LaunchedEffect
-        val result = snackbars.showSnackbar(SetupSnackbarVisuals(notice))
+        val visuals = SetupSnackbarVisuals(notice)
+        val result = snackbars.showSnackbar(visuals)
         if (result == SnackbarResult.ActionPerformed) {
-            openPermissions = true
+            openPermissions = visuals.opensPermissions
             nav.navigate("settings") {
                 popUpTo(nav.graph.findStartDestination().id) { saveState = true }
                 launchSingleTop = true
@@ -456,6 +460,8 @@ fun MycoApp(
                         onMeshToggle = onMeshToggle,
                         onFixNearby = onFixNearby,
                         onFixConnection = onFixConnection,
+                        shareMesh = shareMesh,
+                        onShareMeshToggle = onShareMeshToggle,
                         openPermissions = openPermissions,
                         onPermissionsOpened = { openPermissions = false },
                         onOfflineOnlyToggle = onOfflineOnlyToggle,

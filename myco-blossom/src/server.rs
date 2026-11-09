@@ -110,12 +110,18 @@ pub async fn serve_on(
 /// pass `access` (loopback is always allowed). The runtime uses this so only
 /// paired (Circle) peers can pull/push blobs. `precompressed` is the store's
 /// [`FsBlobStore::zstd_dir`], when it keeps zstd variants.
-pub async fn serve_on_guarded(
+///
+/// Any listener that names its peers by socket address will do — a kernel
+/// socket, or an embedder's userspace stack.
+pub async fn serve_on_guarded<L>(
     store: Arc<dyn BlobStore>,
-    listener: tokio::net::TcpListener,
+    listener: L,
     access: AccessFn,
     precompressed: Option<PathBuf>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    L: axum::serve::Listener<Addr = SocketAddr>,
+{
     serve_state(
         BlossomState {
             store,
@@ -127,7 +133,10 @@ pub async fn serve_on_guarded(
     .await
 }
 
-async fn serve_state(state: BlossomState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
+async fn serve_state<L>(state: BlossomState, listener: L) -> anyhow::Result<()>
+where
+    L: axum::serve::Listener<Addr = SocketAddr>,
+{
     // Raise the request-body cap from axum's 2 MB default: nsite assets and the
     // adaptive dev speedtest (up to 16 MiB) exceed it. 64 MiB is a generous cap
     // that still bounds a single upload.
@@ -140,9 +149,10 @@ async fn serve_state(state: BlossomState, listener: tokio::net::TcpListener) -> 
         )
         .with_state(state);
     // Connect-info gives each request's source address, so the gate can tell a
-    // loopback (in-app gateway) request from a mesh peer's.
+    // loopback (in-app gateway) request from a mesh peer's. `tap_io` is what
+    // lets axum read it off any listener, not only its own `TcpListener`.
     axum::serve(
-        listener,
+        axum::serve::ListenerExt::tap_io(listener, |_: &mut L::Io| {}),
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;

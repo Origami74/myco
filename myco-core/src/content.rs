@@ -5814,6 +5814,18 @@ mod tests {
             for stalls in [false, true, false] {
                 let (mut sock, _) = listener.accept().await.unwrap();
                 tokio::spawn(async move {
+                    // Read the request first: a response sent before it can
+                    // reach the client, through the mesh proxy, before the
+                    // request is written, and is refused as unexpected.
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        use tokio::io::AsyncReadExt;
+                        if sock.read(&mut byte).await.unwrap() == 0 {
+                            return;
+                        }
+                        head.push(byte[0]);
+                    }
                     sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n")
                         .await
                         .unwrap();

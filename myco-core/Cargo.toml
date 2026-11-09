@@ -12,6 +12,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 fips = { workspace = true }
+fips-host = { path = "../fips-host" }
 nsite-deck = { path = "../nsite-deck" }
 myco-napplet-runtime = { path = "../myco-napplet-runtime" }
 myco-relay = { path = "../myco-relay" }
@@ -27,8 +28,9 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 chacha20poly1305 = { workspace = true }
+subtle = { workspace = true }
 tokio = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["socks"] }
 if-addrs = { workspace = true }
 tokio-tungstenite = { workspace = true }
 rustic-applesauce = { workspace = true }

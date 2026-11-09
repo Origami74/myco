@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **No VPN needed.** Myco no longer takes Android's VPN slot to reach the mesh,
+  so a VPN you already run keeps working beside it, and setup no longer asks
+  for one. Myco's own relay, Blossom and pairing traffic now runs on a TCP/IP
+  stack inside the app. The mesh is on from the first launch, with no "Enable
+  mesh?" step: the node and same-network discovery start once the intro
+  finishes, and setup asks only for nearby devices and your name. On the
+  first launch after updating, Myco says once what changed. The VPN is
+  still there, off by default, for letting
+  other apps on the phone reach the mesh: **Settings › Mesh › Allow other apps
+  to use mesh**. The exit proxy still uses it. Works with phones on older
+  Myco: the mesh traffic is unchanged.
 - **Smaller APK.** The Myco mark (launcher, splash, TV banner) is a WebP
   instead of a PNG: 1.3 MB to 0.3 MB.
 
