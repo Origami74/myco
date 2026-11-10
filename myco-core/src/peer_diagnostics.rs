@@ -185,10 +185,17 @@ pub fn merge_peers(
                 }
             }
         };
-        // Every other path that is not confirmed gone. Deduplicated: the Aware
+        // Every other path that has answered: live, or suspect (proven, quiet
+        // for a moment). A probing path has not answered yet, and may never:
+        // a USB path's address names one attachment, so the paths of earlier
+        // plugs stay probing after the cable is out, and listing them showed
+        // USB for a peer reached only over the LAN. Deduplicated: the Aware
         // pool can hold more than one path to a peer, and that is one lane.
         let mut also_reachable_via: Vec<String> = Vec::new();
-        for path in paths.iter().filter(|p| !p.active && p.state != "dead") {
+        for path in paths
+            .iter()
+            .filter(|p| !p.active && matches!(p.state.as_str(), "live" | "suspect"))
+        {
             if !path.lane.is_empty()
                 && path.lane != transport
                 && !also_reachable_via.contains(&path.lane)
@@ -1039,7 +1046,8 @@ mod tests {
         view.paths = vec![
             path("udp", "live", false),
             path("aware", "live", true),
-            path("ble", "probing", false),
+            path("ble", "suspect", false),
+            path("usb", "probing", false),
             path("tcp", "dead", false),
         ];
         let mut lane_by_npub = HashMap::new();
@@ -1059,10 +1067,14 @@ mod tests {
             0,
         );
         assert_eq!(out[0].transport, "aware");
-        assert_eq!(out[0].also_reachable_via, vec!["ble", "udp"]);
+        assert_eq!(
+            out[0].also_reachable_via,
+            vec!["ble", "udp"],
+            "live and suspect paths only: a probing path has not answered"
+        );
         assert_eq!(
             out[0].paths.len(),
-            4,
+            5,
             "every path crosses the FFI, dead ones included"
         );
         assert!(out[0].paths.iter().any(|p| p.lane == "aware" && p.active));
