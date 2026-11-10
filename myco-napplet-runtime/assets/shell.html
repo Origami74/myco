@@ -19,11 +19,12 @@
 // It also keeps keyboard focus in the napplet's frame, where the back
 // gesture arrives as an Escape keydown.
 //
-// It holds no key, opens no connection, and makes no policy decision — its
+// It holds no key and opens no connection. Capability grants remain in Rust;
+// controller sampling runs here only while Rust authorizes it. Its
 // one fetch reads a delivered blob from its own origin, which the window
 // host serves itself and never sends to the network. Every
-// capability is implemented on the Rust side; this page cannot grant anything
-// because it has nothing to grant.
+// capability is authorized on the Rust side. Controller snapshots, like blob
+// materialization, stay here to avoid carrying per-frame values over JNI.
 (function () {
   'use strict';
 
@@ -56,6 +57,11 @@
 
     if (frameData.channel === 'shell') {
       if (frameData.action === 'load') load(frameData);
+      return;
+    }
+
+    if (frameData.channel === 'gamepad') {
+      setGamepadSubscription(frameData.enabled === true);
       return;
     }
 
@@ -151,7 +157,8 @@
     // cross-origin frame write the clipboard only when the embedder delegates
     // it. Write only — on a user's tap, as everywhere — so a napplet's "Copy"
     // copies. Reading the clipboard stays denied: nothing delegates it.
-    frame.setAttribute('allow', 'clipboard-write');
+    // Controller input belongs to the host. CSP does not govern this API.
+    frame.setAttribute('allow', "clipboard-write; gamepad 'none'");
     frame.srcdoc = command.artifact;
     // Keyboard focus lives in the napplet's frame, not this page: the back
     // gesture arrives as an Escape keydown, and the napplet has to be the one
@@ -161,6 +168,103 @@
     document.body.appendChild(frame);
     frame.focus();
   }
+
+  // --- NAP-GAMEPAD: authorized native reader ----------------------------
+  // The opaque napplet cannot reach this closure or manufacture control frames.
+  // Android reports its window ownership separately: document focus alone is
+  // insufficient when a native dialog or another Android task covers the view.
+  var gamepadSubscribed = false;
+  var hostActive = false;
+  var gamepadFrame = null;
+  var lastGamepadState = null;
+
+  function unit(value, min) {
+    return typeof value === 'number' && Number.isFinite(value)
+      ? Math.max(min, Math.min(1, value)) : 0;
+  }
+
+  function sampleGamepads() {
+    if (typeof navigator.getGamepads !== 'function') {
+      return { available: false, reason: 'unavailable', pads: [] };
+    }
+    try {
+      var native = navigator.getGamepads();
+      var pads = [];
+      for (var i = 0; i < Math.min(native.length, 8); i++) {
+        var pad = native[i];
+        pads.push(pad && pad.connected ? {
+          index: i, id: String(pad.id).slice(0, 128),
+          mapping: String(pad.mapping).slice(0, 16), connected: true,
+          timestamp: Number.isFinite(pad.timestamp) ? Math.max(0, pad.timestamp) : 0,
+          axes: Array.from(pad.axes).slice(0, 16).map(function (axis) { return unit(axis, -1); }),
+          buttons: Array.from(pad.buttons).slice(0, 32).map(function (button) {
+            return { value: unit(button.value, 0), pressed: !!button.pressed,
+              touched: typeof button.touched === 'boolean' ? button.touched : !!button.pressed };
+          })
+        } : null);
+      }
+      return { available: true, pads: pads };
+    } catch (error) {
+      return { available: false,
+        reason: error.name === 'SecurityError' ? 'blocked' : 'unavailable', pads: [] };
+    }
+  }
+
+  function gamepadTick(force) {
+    if (gamepadFrame !== null) cancelAnimationFrame(gamepadFrame);
+    gamepadFrame = null;
+    if (!gamepadSubscribed || !frame) return;
+    var sample = sampleGamepads();
+    var focused = sample.available && hostActive && document.visibilityState === 'visible' &&
+      document.hasFocus() && document.activeElement === frame;
+    var state = { type: 'gamepad.state', available: sample.available,
+      focused: focused, pads: sample.pads };
+    if (!sample.available) state.reason = sample.reason;
+    if (!focused) {
+      state.pads.forEach(function (pad) {
+        if (!pad) return;
+        pad.timestamp = 0;
+        pad.axes = pad.axes.map(function () { return 0; });
+        pad.buttons = pad.buttons.map(function () {
+          return { value: 0, pressed: false, touched: false };
+        });
+      });
+    }
+    var serialized = JSON.stringify(state);
+    if (force || serialized !== lastGamepadState) {
+      lastGamepadState = serialized;
+      post(state);
+    }
+    // Sample every display frame only while there is live input to read: a
+    // connected controller and focus. Otherwise the loop sleeps, and the
+    // connection, focus and visibility events below wake it. A failing reader
+    // keeps polling so its recovery is seen.
+    var live = sample.pads.some(function (pad) { return pad !== null; });
+    if (!sample.available || (focused && live)) {
+      gamepadFrame = requestAnimationFrame(function () { gamepadTick(false); });
+    }
+  }
+
+  function setGamepadSubscription(enabled) {
+    gamepadSubscribed = enabled;
+    lastGamepadState = null;
+    if (gamepadFrame !== null) cancelAnimationFrame(gamepadFrame);
+    gamepadFrame = null;
+    if (enabled) gamepadTick(true);
+  }
+
+  window.addEventListener('myco-host-focus', function (event) {
+    hostActive = event.detail === true;
+    gamepadTick(false);
+  });
+  // Capture catches focus transitions into/out of the iframe as well as the
+  // top-level window; send neutral input immediately, even if rAF is suspended.
+  window.addEventListener('focus', function () { gamepadTick(false); }, true);
+  window.addEventListener('blur', function () { gamepadTick(false); }, true);
+  document.addEventListener('visibilitychange', function () { gamepadTick(false); });
+  window.addEventListener('gamepadconnected', function () { gamepadTick(false); });
+  window.addEventListener('gamepaddisconnected', function () { gamepadTick(false); });
+  window.addEventListener('pagehide', function () { setGamepadSubscription(false); });
 
   // --- napplet -> shell -------------------------------------------------
 

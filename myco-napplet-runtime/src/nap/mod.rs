@@ -10,6 +10,7 @@
 
 pub mod encrypted;
 pub mod fs;
+pub mod gamepad;
 pub mod identity;
 pub mod inc;
 pub mod intent;

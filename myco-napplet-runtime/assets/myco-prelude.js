@@ -7,6 +7,7 @@
 // - `window.napplet.shell` — NAP-SHELL's napplet-side half. The vendored shim
 //   has no `shell` domain, so without this `shell.supports()` — the spec's
 //   discovery mechanism — is undefined for every domain.
+// - `window.napplet.gamepad` — NAP-GAMEPAD cached controller snapshots.
 // - `window.napplet.mesh` — NAP-MESH (`docs/design/napplet/NAP-MESH.md`),
 //   Myco's own domain, which the vendored installer filters out because it is
 //   not in the upstream registry yet.
@@ -62,6 +63,7 @@ var MycoPrelude = (function () {
     });
 
     installShell(napplet, domains, routers);
+    if (domains.has("gamepad")) installGamepad(napplet, routers);
     if (domains.has("outbox") && napplet.outbox) installOutboxPublish(napplet, routers);
     if (domains.has("mesh")) installMesh(napplet, routers);
     if (domains.has("local")) installLocal(napplet, routers);
@@ -69,6 +71,122 @@ var MycoPrelude = (function () {
     if (domains.has("upload") && napplet.upload) installUploadUpload(napplet, routers);
     if (domains.has("fs") && napplet.fs) installFsPick(napplet, routers);
     return napplet;
+  }
+
+  // --- NAP-GAMEPAD: cached snapshots, no requests on the render path -------
+  function installGamepad(napplet, routers) {
+    var state = { available: true, focused: false, pads: [] };
+    var listeners = new Set();
+    var subscribed = false;
+    var ready = false;
+    var nativeDescriptor = Object.getOwnPropertyDescriptor(Navigator.prototype, "getGamepads");
+    var native = nativeDescriptor && nativeDescriptor.value;
+    var replaceNative = false;
+    if (typeof native === "function") {
+      try { native.call(navigator); }
+      catch (error) { replaceNative = error.name === "SecurityError"; }
+    }
+    var nativePads = [];
+    function own(proto, values) {
+      var result = Object.create(proto);
+      Object.keys(values).forEach(function (key) {
+        Object.defineProperty(result, key, { value: values[key], enumerable: true });
+      });
+      return result;
+    }
+    function nativePad(pad, connected) {
+      return own(typeof Gamepad === "function" ? Gamepad.prototype : Object.prototype, {
+        index: pad.index, id: pad.id, mapping: pad.mapping, connected: connected,
+        timestamp: pad.timestamp, axes: Object.freeze(pad.axes.slice()),
+        buttons: Object.freeze(pad.buttons.map(function (button) {
+          return own(typeof GamepadButton === "function" ? GamepadButton.prototype : Object.prototype,
+            { value: button.value, pressed: button.pressed, touched: button.touched });
+        })),
+        vibrationActuator: null, hapticActuators: Object.freeze([])
+      });
+    }
+    function connectionEvent(type, pad) {
+      // GamepadEvent's constructor requires a native controller, but Event has
+      // the internal event slots needed by native dispatch and on* handlers.
+      var event = new Event(type);
+      if (typeof GamepadEvent === "function") Object.setPrototypeOf(event, GamepadEvent.prototype);
+      Object.defineProperty(event, "gamepad", { value: pad, enumerable: true });
+      window.dispatchEvent(event);
+    }
+    function postSubscribe() {
+      window.parent.postMessage({ type: "gamepad.subscribe" }, "*");
+    }
+    // Startup use waits for the handshake, while reads always stay synchronous.
+    napplet.shell.ready.then(function () {
+      ready = true;
+      if (subscribed) postSubscribe();
+    });
+    function ensureSubscription() {
+      if (subscribed) return;
+      subscribed = true;
+      if (ready) postSubscribe();
+    }
+    function snapshot() {
+      // Consumers cannot mutate the cached state seen by another consumer.
+      return { available: state.available, focused: state.focused,
+        ...(state.reason ? { reason: state.reason } : {}),
+        pads: state.pads.map(function (pad) {
+          return pad && { ...pad, axes: pad.axes.slice(),
+            buttons: pad.buttons.map(function (button) { return { ...button }; }) };
+        }) };
+    }
+    routers.push(function (msg) {
+      if (msg.type !== "gamepad.state" || !Array.isArray(msg.pads)) return;
+      var previous = nativePads;
+      state = { available: msg.available === true, focused: msg.available === true && msg.focused === true,
+        pads: msg.pads };
+      if (!state.available) state.reason = msg.reason === "blocked" ? "blocked" : "unavailable";
+      if (replaceNative) {
+        nativePads = state.pads.map(function (pad) { return pad && nativePad(pad, true); });
+        for (var i = 0; i < Math.max(previous.length, nativePads.length); i++) {
+          var before = previous[i], after = nativePads[i];
+          var same = before && after && before.id === after.id && before.mapping === after.mapping;
+          if (before && !same) connectionEvent("gamepaddisconnected", nativePad(before, false));
+          if (after && !same) connectionEvent("gamepadconnected", after);
+        }
+      }
+      listeners.forEach(function (handler) {
+        try { handler(snapshot()); } catch (error) { console.error("gamepad handler threw", error); }
+      });
+    });
+    Object.defineProperty(napplet, "gamepad", { enumerable: true, value: Object.freeze({
+      getGamepads: function () { ensureSubscription(); return snapshot().pads; },
+      get available() { ensureSubscription(); return state.available; },
+      get focused() { ensureSubscription(); return state.focused; },
+      onChange: function (handler) {
+        if (typeof handler !== "function") throw new TypeError("gamepad handler must be a function");
+        listeners.add(handler);
+        ensureSubscription();
+        return { close: function () { listeners.delete(handler); } };
+      }
+    }) });
+    if (replaceNative) {
+      var replacement = {
+        getGamepads() {
+          // Match the native receiver check, including objects that merely
+          // inherit Navigator.prototype, without throwing a native policy
+          // exception on every animation frame.
+          if (this !== navigator) throw new TypeError("Illegal invocation");
+          ensureSubscription();
+          if (state.reason === "blocked") throw new DOMException("Controller access denied", "SecurityError");
+          return nativePads.slice();
+        }
+      }.getGamepads;
+      Object.defineProperty(Navigator.prototype, "getGamepads", {
+        ...nativeDescriptor, value: replacement
+      });
+      // Event-driven games may never poll until gamepadconnected fires.
+      ensureSubscription();
+    }
+    window.addEventListener("pagehide", function () {
+      if (subscribed) window.parent.postMessage({ type: "gamepad.unsubscribe" }, "*");
+      subscribed = false;
+    });
   }
 
   // --- NAP-SHELL: the napplet-side half ------------------------------------

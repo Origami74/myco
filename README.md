@@ -178,6 +178,8 @@ run. It asks Myco for what it needs, and gets only what the person grants:
   the person sets,
 - pictures and files by content hash, from this phone, a paired phone, or
   public servers,
+- game controllers through `window.napplet.gamepad` or `navigator.getGamepads()`,
+  with live input only while the app has focus,
 - other apps, by role: "open this profile" opens the person's profile app,
   the one they chose as the default, or the one they pick when asked.
 

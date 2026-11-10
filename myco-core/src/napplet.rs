@@ -734,7 +734,14 @@ impl NappletHost {
             // checked per call anyway.
             let mut s = session.lock().await;
             if s.identity().d_tag == wanted && s.identity().author == author {
+                let gamepad_was_active = s.gamepad_subscribed();
                 s.set_granted(granted.clone());
+                if gamepad_was_active && !s.is_granted("gamepad") {
+                    let _ = outbox.send(ToShell::Gamepad { enabled: false });
+                    let _ = outbox.send(ToShell::to_napplet(
+                        myco_napplet_runtime::nap::gamepad::blocked(),
+                    ));
+                }
                 let _ = outbox.send(ToShell::Relaunch);
             }
         }
@@ -772,10 +779,10 @@ impl NappletHost {
 
         // The session handle is cloned out and the map's lock released before
         // awaiting, so a slow capability call never blocks another window.
-        let session = {
+        let (session, outbox) = {
             let sessions = self.sessions.lock().unwrap();
             match sessions.get(session_id) {
-                Some(live) => live.session.clone(),
+                Some(live) => (live.session.clone(), live.outbox.clone()),
                 None => return Vec::new(),
             }
         };
@@ -790,7 +797,16 @@ impl NappletHost {
         // moment the call arrived.
         let out = if myco_napplet_runtime::needs_session(&message) {
             let mut session = session.lock().await;
-            dispatch(&self.ctx, &mut session, &message).await
+            let outcome = dispatch(&self.ctx, &mut session, &message).await;
+            if let Outcome::Gamepad { enabled } = outcome {
+                // The same FIFO as grant revocation, while still holding the
+                // session: a delayed subscribe reply cannot re-enable input
+                // after a later permission change stopped it.
+                let _ = outbox.send(ToShell::Gamepad { enabled });
+                Outcome::Ignore
+            } else {
+                outcome
+            }
         } else {
             let mut snapshot = session.lock().await.clone();
             dispatch(&self.ctx, &mut snapshot, &message).await
@@ -2725,6 +2741,45 @@ mod tests {
             )
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn gamepad_controls_and_revocation_share_the_window_fifo() {
+        let (host, addr) = host_with_fixture().await;
+        let opened = host
+            .open(&addr, Some(vec!["gamepad".into()]))
+            .await
+            .unwrap();
+        let id = &opened.session_id;
+        host.frame(
+            id,
+            r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
+        )
+        .await;
+        let subscribe = r#"{"channel":"napplet","message":{"type":"gamepad.subscribe"}}"#;
+        // Authorization travels on the same queue as subsequent revocation,
+        // never as a direct reply that could overtake the stop command.
+        assert!(host.frame(id, subscribe).await.is_empty());
+        host.apply_grants(&addr.author, Some("fixture"), vec![])
+            .await;
+        let frames = host.next_frames(id, Duration::from_secs(1)).await;
+        assert_eq!(
+            frames,
+            vec![
+                ToShell::Gamepad { enabled: true },
+                ToShell::Gamepad { enabled: false },
+                ToShell::to_napplet(myco_napplet_runtime::nap::gamepad::blocked()),
+                ToShell::Relaunch,
+            ]
+        );
+        assert_eq!(
+            host.frame(id, subscribe).await,
+            vec![ToShell::to_napplet(
+                myco_napplet_runtime::nap::gamepad::blocked()
+            )]
+        );
+        host.close(id);
+        assert!(host.frame(id, subscribe).await.is_empty());
     }
 
     /// A napplet naddr of the named kind, for NAP-LINK tests.

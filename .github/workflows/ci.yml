@@ -2,7 +2,7 @@ name: CI
 
 # Build + test on every push and pull request. The Rust job runs the workspace
 # unit tests (myco-core etc.); the Android job confirms the app and its native
-# library still build. All actions are pinned to current major versions (Node 20).
+# library still build; the napplet-shell job runs the shell's browser tests. All actions are pinned to current major versions (Node 20).
 
 on:
   push:
@@ -60,6 +60,35 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  # The trusted shell and prelude are JavaScript the Rust tests only embed.
+  # These drive them in Chromium: the gamepad binding, its native projection,
+  # focus neutralization, and that a sandboxed napplet cannot read controllers.
+  napplet-shell:
+    name: Napplet shell — browser tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Outside the checkout: the repo has no package.json for these tests.
+      - name: Install Playwright + Chromium
+        run: |
+          mkdir -p "$RUNNER_TEMP/pw" && cd "$RUNNER_TEMP/pw"
+          npm init -y >/dev/null
+          npm install playwright@1
+          npx playwright install --with-deps chromium
+
+      - name: Gamepad binding and projection
+        run: node myco-napplet-runtime/tests/browser/gamepad.mjs "$RUNNER_TEMP/pw/node_modules/playwright/index.mjs"
+
+      - name: Controller probe
+        run: node myco-napplet-runtime/tests/browser/gamepad-probe.mjs "$RUNNER_TEMP/pw/node_modules/playwright/index.mjs"
 
   android:
     name: Android — assembleDebug

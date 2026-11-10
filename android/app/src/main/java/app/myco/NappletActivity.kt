@@ -313,6 +313,35 @@ class NappletActivity : ComponentActivity() {
         packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
     }
 
+    /** A browser document can keep focus while its Android window is covered. */
+    private var gamepadResumed = false
+
+    private fun syncGamepadFocus() {
+        if (!::webView.isInitialized) return
+        val active = gamepadResumed && hasWindowFocus()
+        webView.evaluateJavascript(
+            "window.dispatchEvent(new CustomEvent('myco-host-focus', {detail: $active}))",
+            null,
+        )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        gamepadResumed = true
+        syncGamepadFocus()
+    }
+
+    override fun onPause() {
+        gamepadResumed = false
+        syncGamepadFocus()
+        super.onPause()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        syncGamepadFocus()
+    }
+
     private val restartPrompt by lazy { RestartPrompt.persisted(applicationContext) }
 
     override fun onStop() {
@@ -885,7 +914,7 @@ class NappletActivity : ComponentActivity() {
                 client = client,
                 shellHostOf = { shellHost },
                 sessionId = { synchronized(sessionLock) { sessionId } },
-                onContentVisible = { syncChrome() },
+                onContentVisible = { syncChrome(); syncGamepadFocus() },
                 onRendererGone = { finish() },
                 onUnhandledEscape = ::backEscapeUnhandled,
             )
@@ -956,9 +985,19 @@ class NappletActivity : ComponentActivity() {
         // a relay query waiting on a slow relay does not hold up the publish
         // behind it. Rust holds the session only for calls that change it.
         frameJob = lifecycleScope.launch(Dispatchers.IO) {
+            // Controller subscription control keeps its arrival order on a lane
+            // of its own. Not inline: Rust takes the session to answer it, so a
+            // gamepad frame waiting behind a slow `relay.subscribe` would hold
+            // up every frame after it. Bounded: a flood only stalls this queue.
+            val gamepadFrames = kotlinx.coroutines.channels.Channel<String>(GAMEPAD_QUEUE)
+            launch { for (frame in gamepadFrames) relay(frame) }
             var established = false
             for (frame in inbound) {
                 if (established) {
+                    if (relayedType(frame)?.startsWith("gamepad.") == true) {
+                        gamepadFrames.send(frame)
+                        continue
+                    }
                     val slots = if (isResourceCall(frame)) resourceInFlight else inFlight
                     launch { slots.withPermit { relay(frame) } }
                 } else {
@@ -1179,6 +1218,9 @@ class NappletActivity : ComponentActivity() {
 
         /** See [inbound]. */
         private const val INBOUND_CAPACITY = 64
+
+        /** Gamepad subscribe/unsubscribe frames waiting their turn, in order. */
+        private const val GAMEPAD_QUEUE = 16
 
         /** A touch this recent stands in for a gesture behind a web link. See [openLink]. */
         private const val GESTURE_WINDOW_MS = 5_000L

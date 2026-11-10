@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug builds only, and never to be copied into the main manifest.
+             Exported so `adb shell am start` reaches it; guarded by DUMP, which
+             the adb shell holds and no installed app can, so other apps on
+             the phone cannot launch it. -->
+        <activity
+            android:name=".GamepadProbeActivity"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
+            android:label="Myco controller probe" />
+    </application>
+</manifest>
