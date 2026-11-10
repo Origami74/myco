@@ -39,10 +39,22 @@ class UsbService : Service() {
     /** While the cable is in, relink an accessory whose link ended — the
      *  host restarted, or the node closed it — with the phone still in
      *  accessory mode. Nothing on the bus changes then, so no attach intent
-     *  comes; without this the link stays down until a replug. */
+     *  comes; without this the link stays down until a replug.
+     *
+     *  Not on the tick that first sees the accessory released: a pulled
+     *  cable ends the link at once, but Android lists the accessory for a few
+     *  seconds more while it leaves accessory mode, and opening it then gets
+     *  a session that is already over. Holding that descriptor is what made
+     *  a quick replug fail, because Android must open the same device to
+     *  start the next session. A tick later the cable's accessory is gone,
+     *  and one still listed really is attached. */
     private val relink = object : Runnable {
+        private var held = false
+
         override fun run() {
-            UsbAccessoryActivity.reattachAttached(this@UsbService)
+            val holds = UsbAccessoryActivity.holdsAccessory()
+            if (!holds && !held) UsbAccessoryActivity.reattachAttached(this@UsbService)
+            held = holds
             handler.postDelayed(this, RELINK_INTERVAL_MS)
         }
     }
