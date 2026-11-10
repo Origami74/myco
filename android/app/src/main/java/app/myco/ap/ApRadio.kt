@@ -358,6 +358,7 @@ class ApRadio private constructor(private val context: Context) {
             port = LAN_UDP_PORT
             setAttribute(TXT_NPUB, npub)
             setAttribute("v", "1")
+            setAttribute(TXT_SCOPE, LAN_SCOPE)
         }
         val listener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(registered: NsdServiceInfo) {
@@ -729,6 +730,15 @@ class ApRadio private constructor(private val context: Context) {
 
         /** TXT key carrying the advertising node's npub. */
         private const val TXT_NPUB = "npub"
+
+        /** TXT key carrying the advertising node's LAN discovery scope. */
+        private const val TXT_SCOPE = "scope"
+
+        /** The scope a fips node with the default discovery settings browses
+         *  for: it derives its LAN scope from its Nostr app tag, which is
+         *  `fips-overlay-v1` by default, and skips adverts without it — so a
+         *  desktop daemon never saw a phone's advert. */
+        private const val LAN_SCOPE = "fips-overlay-v1"
 
         /** The lane label pushed to [NativeCore.awarePeerFound]/[NativeCore.awarePeerLost],
          *  and asked of [NativeCore.nextUdpTransportFd] — distinguishes this radio from
