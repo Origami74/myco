@@ -985,13 +985,17 @@ class NappletActivity : ComponentActivity() {
         // a relay query waiting on a slow relay does not hold up the publish
         // behind it. Rust holds the session only for calls that change it.
         frameJob = lifecycleScope.launch(Dispatchers.IO) {
+            // Controller subscription control keeps its arrival order on a lane
+            // of its own. Not inline: Rust takes the session to answer it, so a
+            // gamepad frame waiting behind a slow `relay.subscribe` would hold
+            // up every frame after it. Bounded: a flood only stalls this queue.
+            val gamepadFrames = kotlinx.coroutines.channels.Channel<String>(GAMEPAD_QUEUE)
+            launch { for (frame in gamepadFrames) relay(frame) }
             var established = false
             for (frame in inbound) {
                 if (established) {
-                    // Subscription control must keep arrival order, independent
-                    // of slow network capability calls and their semaphores.
                     if (relayedType(frame)?.startsWith("gamepad.") == true) {
-                        relay(frame)
+                        gamepadFrames.send(frame)
                         continue
                     }
                     val slots = if (isResourceCall(frame)) resourceInFlight else inFlight
@@ -1214,6 +1218,9 @@ class NappletActivity : ComponentActivity() {
 
         /** See [inbound]. */
         private const val INBOUND_CAPACITY = 64
+
+        /** Gamepad subscribe/unsubscribe frames waiting their turn, in order. */
+        private const val GAMEPAD_QUEUE = 16
 
         /** A touch this recent stands in for a gesture behind a web link. See [openLink]. */
         private const val GESTURE_WINDOW_MS = 5_000L

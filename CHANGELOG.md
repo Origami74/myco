@@ -54,10 +54,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer restarts an open app: it keeps its place (a game stays mid-game)
   and lays itself out for the new size.
 
-- Deny direct gamepad access inside napplet frames as the prerequisite for
-  shell-mediated controller input. A debug-only controller probe exercises the
-  production shell.
-
 ## [0.12.1] - 2026-10-23
 
 ### Changed

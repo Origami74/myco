@@ -99,9 +99,23 @@ try {
       catch (error) { return error.name; }
     }, receiver), 'TypeError');
   }
+  // With no controller connected the shell does not poll every frame.
+  const idleReads = await page.evaluate(async () => {
+    let reads = 0;
+    const original = Object.getOwnPropertyDescriptor(navigator, 'getGamepads');
+    Object.defineProperty(navigator, 'getGamepads', { configurable: true, value() {
+      reads++; return original.value.call(this);
+    } });
+    for (let i = 0; i < 10; i++) await new Promise(resolve => requestAnimationFrame(resolve));
+    Object.defineProperty(navigator, 'getGamepads', original);
+    return reads;
+  });
+  assert.equal(idleReads, 0);
   const pad = { index: 1, id: 'Test controller', mapping: 'standard', connected: true,
     timestamp: 42, axes: [0.75, -2, 2], buttons: [{ value: 2, pressed: true }] };
-  await page.evaluate(pad => { testPads = [null, pad]; }, pad);
+  // The reader sleeps with no controller; a connection event wakes it, as
+  // the browser fires one when a controller first appears.
+  await page.evaluate(pad => { testPads = [null, pad]; dispatchEvent(new Event('gamepadconnected')); }, pad);
   await child.waitForFunction(() => napplet.gamepad.focused && napplet.gamepad.getGamepads()[1]?.timestamp === 42);
   const pads = await child.evaluate(() => napplet.gamepad.getGamepads());
   assert.deepEqual(await child.evaluate(() => connections), [{ type: 'gamepadconnected', index: 1,
@@ -138,13 +152,14 @@ try {
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   assert.equal(await child.evaluate(() => states.length), beforeIdle);
   // Connection metadata still changes while focus is elsewhere.
-  await page.evaluate(() => { testPads = [null, null]; });
+  await page.evaluate(() => { testPads = [null, null]; dispatchEvent(new Event('gamepaddisconnected')); });
   await child.waitForFunction(() => napplet.gamepad.getGamepads()[1] === null);
   assert.equal(await child.evaluate(() => connections.at(-1).type), 'gamepaddisconnected');
   assert.equal(await child.evaluate(() => connections.at(-1).connected), false);
   assert.equal(await child.evaluate(() => nativeDisconnectCalls), 1);
   await page.evaluate(pad => {
     testPads = [null, pad];
+    dispatchEvent(new Event('gamepadconnected'));
     dispatchEvent(new CustomEvent('myco-host-focus', { detail: true }));
   }, pad);
   await child.waitForFunction(() => napplet.gamepad.focused);

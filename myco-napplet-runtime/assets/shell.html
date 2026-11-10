@@ -235,7 +235,14 @@
       lastGamepadState = serialized;
       post(state);
     }
-    gamepadFrame = requestAnimationFrame(function () { gamepadTick(false); });
+    // Sample every display frame only while there is live input to read: a
+    // connected controller and focus. Otherwise the loop sleeps, and the
+    // connection, focus and visibility events below wake it. A failing reader
+    // keeps polling so its recovery is seen.
+    var live = sample.pads.some(function (pad) { return pad !== null; });
+    if (!sample.available || (focused && live)) {
+      gamepadFrame = requestAnimationFrame(function () { gamepadTick(false); });
+    }
   }
 
   function setGamepadSubscription(enabled) {

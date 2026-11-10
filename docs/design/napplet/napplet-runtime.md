@@ -1456,7 +1456,9 @@ and empty `pads`, rather than a request/result error.
 
 Rust owns one subscription flag per session, authorizes subscribe/unsubscribe,
 and caps subscribe churn at 120/s. Malformed messages and unknown actions are
-ignored. Every admitted subscribe commands a fresh snapshot. Authorization and
+ignored. Every admitted subscribe commands a fresh snapshot. On Android the
+window relays gamepad frames on a lane of their own, in arrival order, so one
+waiting on the session lock behind a slow call does not hold up other frames. Authorization and
 revocation controls travel through the same session-locked outbound FIFO, so a
 late subscribe cannot overtake permission withdrawal. Revocation stops the
 reader, sends blocked state, then uses the existing window relaunch path.
@@ -1464,8 +1466,11 @@ reader, sends blocked state, then uses the existing window relaunch path.
 The trusted shell owns one native reader per WebView and sends snapshots directly
 to its napplet using structured clone. Values never make a per-frame JNI round
 trip. Native input remains denied to napplet frames, including nested frames.
-Snapshots are deduplicated and normally sampled once per animation frame; focus,
-visibility and connection events trigger an immediate check. Slots are capped at
+Snapshots are deduplicated and sampled once per animation frame only while there
+is live input: a connected controller and focus. Otherwise the reader sleeps, and
+focus, visibility and connection events wake it for an immediate check, so a
+window with no controller costs nothing per frame. A failing reader keeps
+polling so its recovery is seen. Slots are capped at
 8, axes at 16 and buttons at 32, with bounded identifiers and clamped values.
 Unfocused snapshots retain connection metadata but zero axes, buttons and timing.
 Unsubscribe and page teardown stop the loop.
@@ -1506,7 +1511,9 @@ The standard napplet API remains available independently of native replacement.
 A debug-only `GamepadProbeActivity` loads the actual embedded shell HTML through
 an Android debug asset source set. Its fake runtime channel loads a diagnostic
 iframe using the production shell's load path and source checks. It exposes no
-core session or signing capabilities. Release builds include neither the activity
+core session or signing capabilities. It is exported for `adb shell am start`
+but guarded by `android.permission.DUMP`, which the adb shell holds and no
+installed app can, so other apps cannot launch it. Release builds include neither the activity
 nor its diagnostic assets.
 
 Run on a physical phone after installing a debug APK:
@@ -1534,6 +1541,8 @@ Playwright, without Android or the Rust native library:
 node myco-napplet-runtime/tests/browser/gamepad-probe.mjs /path/to/playwright/index.mjs
 ```
 
+CI runs both browser tests (the `Napplet shell — browser tests` job).
+
 It checks shell access, iframe and nested-frame denial, frame focus and script errors.
 The adjacent `tests/browser/gamepad.mjs` exercises the actual shell, vendored
 prelude and supplement with a deterministic fake native reader and authorized
@@ -1547,11 +1556,3 @@ the core host test covers subscription/revocation FIFO ordering. It does not
 substitute for Android WebView or physical-controller testing. The probe samples
 at 100 ms for readable diagnostics, not the eventual gameplay delivery cadence.
 
-The local `../napplet-soy/packages/runtime/src/gamepad-session.ts` is the reference
-for the browser broker: bounded snapshots, neutral input outside focus, one reader
-per shell page, change deduplication and subscription teardown. Its `prelude.ts`
-`gamepadPrelude()` is the reference for the subsequent native-API compatibility
-projection: replace only an operation denied with `SecurityError`, preserve native
-property descriptors and prototypes, validate parent messages and synthesize
-connection events. Myco has one WebView per window, so Android window ownership
-and lifecycle need to complement the reference's document/iframe focus checks.
