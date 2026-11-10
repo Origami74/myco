@@ -499,6 +499,8 @@ class MainActivity : ComponentActivity() {
         if (enabled) {
             // Node follows the master switch (radio toggles only gate radios).
             core.dispatch(NativeActions.startNode())
+            // The stopped node closed its USB link; the cable is still in.
+            app.myco.usb.UsbAccessoryActivity.reattachAttached(this)
             startBleWhenNodeUp()
         } else {
             tunnelWait?.cancel()

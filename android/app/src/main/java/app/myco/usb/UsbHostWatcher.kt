@@ -61,6 +61,9 @@ object UsbHostWatcher {
             }
             started = true
             Log.i(TAG, "watching for USB devices while host")
+            // Once per process: a cable already in when the process started
+            // brings no attach intent.
+            UsbAccessoryActivity.reattachAttached(app)
         }
     }
 
