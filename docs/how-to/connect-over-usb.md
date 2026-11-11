@@ -14,8 +14,8 @@ USB-A-to-C charging cable cannot join two phones.
 
 1. Open Myco on both phones, with the mesh on.
 2. Connect the cable.
-3. On the phone that becomes the host, Android asks **"Allow Myco to access
-   …?"**. Tap **OK**.
+3. On the phone that becomes the host, Android may ask **"Allow Myco to
+   access …?"** (stock Android does, on every plug). Tap **OK**.
 4. Android may then ask **"Open Myco to handle FIPS mesh link?"** on either
    phone. Tick **Always** and tap **OK**. It does not ask again.
 
