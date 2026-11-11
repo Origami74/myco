@@ -55,6 +55,16 @@ hands the descriptor to the core, and starts `UsbService` to keep the
 process — and the mesh — up while the cable is in. This works with Myco not
 running and the screen locked: the attach starts the app.
 
+The attach intent fires only when the host enumerates the phone, so a
+process or node that restarts with the cable in would stay unlinked until a
+replug. Myco therefore also links with an already attached FIPS accessory it
+has permission for at process start and when the mesh is switched back on,
+and `UsbService` checks every 5 s whether the process still holds
+`/dev/usb_accessory`, relinking if the core closed it. It reopens only an
+accessory that is still listed on a second check: Android keeps listing one
+for a few seconds after the cable comes out, and holding that stale
+descriptor would stop the next plug from entering accessory mode.
+
 **Host** (this phone holds the host role of a USB-C cable to another phone).
 The core gets the device's descriptor and fips asks it to switch into
 accessory mode. It comes back as an accessory device and is handed over
@@ -65,9 +75,12 @@ again, and that time fips links with it. Two routes deliver the device:
   Android (a Pixel) does not offer a device exposing MTP — which every phone
   does — to any app unless one is already its default; it shows its own
   "USB device connected" notification instead. The broadcast still reaches
-  runtime receivers, so a running Myco asks for permission and hands the
-  device over itself. `UsbHandoff` keeps the two routes from handing over
-  one attachment twice.
+  runtime receivers, so a running Myco hands the device over itself. It asks
+  for permission (a grant Android keeps only until the device detaches) only
+  if, two seconds after the attach, the phone is still on the bus and no
+  route has taken it. It leaves a phone already in accessory mode to the
+  manifest route, which always gets it. `UsbHandoff` keeps the two routes
+  from handing over one attachment twice.
 
 The phone in the host role therefore needs Myco running. With the mesh on,
 it is.

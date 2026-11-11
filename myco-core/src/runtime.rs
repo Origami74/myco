@@ -884,7 +884,7 @@ impl AppRuntime {
                     // feature is what lets this crate still build against
                     // fips master (see `Cargo.toml`).
                     #[cfg(feature = "fips-multipath")]
-                    role: Some(fips::config::TransportRole::Backup),
+                    role: fips::config::TransportRole::Backup,
                     ..Default::default()
                 });
         }
@@ -952,7 +952,7 @@ impl AppRuntime {
                 fips::config::UdpConfig {
                     outbound_only: Some(true),
                     #[cfg(feature = "fips-multipath")]
-                    role: Some(fips::config::TransportRole::Backup),
+                    role: fips::config::TransportRole::Backup,
                     ..Default::default()
                 },
             );

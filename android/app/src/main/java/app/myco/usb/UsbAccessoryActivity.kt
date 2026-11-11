@@ -6,8 +6,10 @@ import android.hardware.usb.UsbAccessory
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
+import android.system.Os
 import android.util.Log
 import app.myco.core.NativeCore
+import java.io.File
 
 /**
  * Started by Android when a USB host switches this phone into accessory mode
@@ -58,5 +60,40 @@ class UsbAccessoryActivity : Activity() {
             Log.i(TAG, "accessory ${accessory.manufacturer}/${accessory.model} v${accessory.version} → core (taken=$taken)")
             return taken
         }
+
+        /**
+         * Link with a fips accessory that is already attached. The attach
+         * intent fires only when the host enumerates this phone, so a process
+         * that starts — or a node that restarts — with the cable already in
+         * would otherwise sit unlinked until a replug. Permission granted by
+         * that intent lasts until the cable is pulled, so this needs no
+         * dialog; without it, nothing is asked here and the next plug brings
+         * the intent. An accessory this process already holds open fails to
+         * open again (the driver allows one opener), so a live link is left
+         * as it is.
+         */
+        fun reattachAttached(context: Context) {
+            if (holdsAccessory()) return
+            val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
+            val ours = usb.accessoryList.orEmpty().filter {
+                it.manufacturer == "FIPS" && it.model == "fips-link" && usb.hasPermission(it)
+            }
+            for (accessory in ours) {
+                if (attach(context, accessory)) {
+                    runCatching { UsbService.start(context) }
+                        .onFailure { Log.w(TAG, "could not start the USB service", it) }
+                }
+            }
+        }
+
+        /** Whether this process has the accessory open: the core holds its
+         *  descriptor for as long as the link lives and closes it when the
+         *  link ends, which Kotlin is not told of. */
+        fun holdsAccessory(): Boolean =
+            File("/proc/self/fd").listFiles().orEmpty().any {
+                runCatching { Os.readlink(it.path) }.getOrNull() == ACCESSORY_NODE
+            }
+
+        private const val ACCESSORY_NODE = "/dev/usb_accessory"
     }
 }

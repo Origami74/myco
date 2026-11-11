@@ -8,6 +8,8 @@ import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 
@@ -26,8 +28,11 @@ import android.util.Log
  * The `USB_DEVICE_ATTACHED` broadcast still goes to receivers registered at
  * runtime before the system decides what to show, so a running Myco hears
  * it here: a phone-like device is handed to the core if Myco may already use
- * it, and otherwise Myco asks for permission (one system dialog) and hands it
- * over once granted. The core switches it into accessory mode; it comes back
+ * it, and otherwise, unless the manifest route took it within a couple of
+ * seconds, Myco asks for permission (one system dialog per plug: Android
+ * remembers that grant only until the device detaches) and hands it over
+ * once granted. A phone already in accessory mode is left to the manifest
+ * route, which always gets it. The core switches it into accessory mode; it comes back
  * as an accessory device, which exposes no MTP, and the manifest route takes
  * it from there.
  *
@@ -61,6 +66,9 @@ object UsbHostWatcher {
             }
             started = true
             Log.i(TAG, "watching for USB devices while host")
+            // Once per process: a cable already in when the process started
+            // brings no attach intent.
+            UsbAccessoryActivity.reattachAttached(app)
         }
     }
 
@@ -68,20 +76,20 @@ object UsbHostWatcher {
         val device = deviceOf(intent) ?: return
         when (intent.action) {
             UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                if (!looksLikePhone(device)) return
+                // A phone already in accessory mode exposes no MTP, so the
+                // manifest's [UsbDeviceActivity] always gets it.
+                if (isAccessory(device) || !looksLikePhone(device)) return
                 val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
                 if (usb.hasPermission(device)) {
                     handOver(context, device)
                 } else {
-                    Log.i(TAG, "asking to use ${device.deviceName} as USB host")
-                    val pending = PendingIntent.getBroadcast(
-                        context,
-                        0,
-                        Intent(ACTION_PERMISSION).setPackage(context.packageName),
-                        // The system adds the device and the answer as extras.
-                        PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-                    )
-                    usb.requestPermission(device, pending)
+                    // Where Android offers the phone to Myco itself (Samsung
+                    // does, stock Android does not), the manifest route takes
+                    // it with no dialog once "Always" is set, and the switch
+                    // takes it off the bus. Ask only if neither has happened
+                    // shortly after: the permission this asks for lasts one
+                    // attachment and cannot be remembered.
+                    handler.postDelayed({ askIfUnclaimed(context, device) }, ASK_DELAY_MS)
                 }
             }
             ACTION_PERMISSION -> {
@@ -92,6 +100,25 @@ object UsbHostWatcher {
                 }
             }
         }
+    }
+
+    private fun askIfUnclaimed(context: Context, device: UsbDevice) {
+        val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
+        val attached = usb.deviceList.values.any { it.deviceName == device.deviceName }
+        if (!attached || UsbHandoff.claimed(device)) return
+        if (usb.hasPermission(device)) {
+            handOver(context, device)
+            return
+        }
+        Log.i(TAG, "asking to use ${device.deviceName} as USB host")
+        val pending = PendingIntent.getBroadcast(
+            context,
+            0,
+            Intent(ACTION_PERMISSION).setPackage(context.packageName),
+            // The system adds the device and the answer as extras.
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        usb.requestPermission(device, pending)
     }
 
     private fun handOver(context: Context, device: UsbDevice) {
@@ -121,8 +148,16 @@ object UsbHostWatcher {
         }
     }
 
+    private fun isAccessory(device: UsbDevice): Boolean =
+        device.vendorId == AOA_VID && device.productId in AOA_PIDS
+
     private const val AOA_VID = 0x18d1
     private val AOA_PIDS = 0x2d00..0x2d05
+
+    /** How long after a phone attaches the manifest route has to take it
+     *  before Myco asks for permission itself. */
+    private const val ASK_DELAY_MS = 2_000L
+    private val handler = Handler(Looper.getMainLooper())
 }
 
 /**
@@ -135,12 +170,22 @@ internal object UsbHandoff {
     private const val WINDOW_MS = 5_000L
     private val recent = HashMap<String, Long>()
 
+    /** Whether `device` was claimed within [WINDOW_MS], without claiming it. */
+    @Synchronized
+    fun claimed(device: UsbDevice): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        recent.entries.removeAll { now - it.value > WINDOW_MS }
+        return recent.containsKey(keyOf(device))
+    }
+
+    private fun keyOf(device: UsbDevice) = "${device.deviceName}:${device.vendorId}:${device.productId}"
+
     /** True the first time `device` is claimed within [WINDOW_MS]. */
     @Synchronized
     fun claim(device: UsbDevice): Boolean {
         val now = SystemClock.elapsedRealtime()
         recent.entries.removeAll { now - it.value > WINDOW_MS }
-        val key = "${device.deviceName}:${device.vendorId}:${device.productId}"
+        val key = keyOf(device)
         if (recent.containsKey(key)) return false
         recent[key] = now
         return true

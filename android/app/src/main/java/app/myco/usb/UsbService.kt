@@ -11,7 +11,9 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.hardware.usb.UsbManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import app.myco.MainActivity
@@ -32,12 +34,38 @@ import app.myco.core.NativeActions
  */
 class UsbService : Service() {
     private var detachWatch: BroadcastReceiver? = null
+    private val handler = Handler(Looper.getMainLooper())
+
+    /** While the cable is in, relink an accessory whose link ended — the
+     *  host restarted, or the node closed it — with the phone still in
+     *  accessory mode. Nothing on the bus changes then, so no attach intent
+     *  comes; without this the link stays down until a replug.
+     *
+     *  Not on the tick that first sees the accessory released: a pulled
+     *  cable ends the link at once, but Android lists the accessory for a few
+     *  seconds more while it leaves accessory mode, and opening it then gets
+     *  a session that is already over. Holding that descriptor is what made
+     *  a quick replug fail, because Android must open the same device to
+     *  start the next session. A tick later the cable's accessory is gone,
+     *  and one still listed really is attached. */
+    private val relink = object : Runnable {
+        private var held = false
+
+        override fun run() {
+            val holds = UsbAccessoryActivity.holdsAccessory()
+            if (!holds && !held) UsbAccessoryActivity.reattachAttached(this@UsbService)
+            held = holds
+            handler.postDelayed(this, RELINK_INTERVAL_MS)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundCompat()
         watchDetach()
+        handler.removeCallbacks(relink)
+        handler.postDelayed(relink, RELINK_INTERVAL_MS)
 
         val meshOn = getSharedPreferences("myco_prefs", MODE_PRIVATE)
             .getBoolean(MainActivity.PREF_MESH, true)
@@ -56,6 +84,7 @@ class UsbService : Service() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(relink)
         detachWatch?.let { runCatching { unregisterReceiver(it) } }
         detachWatch = null
         super.onDestroy()
@@ -115,6 +144,7 @@ class UsbService : Service() {
         private const val TAG = "MycoUsbService"
         private const val NOTIF_ID = 5
         private const val CHANNEL_ID = "myco_usb"
+        private const val RELINK_INTERVAL_MS = 5_000L
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, UsbService::class.java))

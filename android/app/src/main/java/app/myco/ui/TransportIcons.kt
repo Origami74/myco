@@ -88,13 +88,18 @@ fun PathIcons(peer: PeerDiagnostic?, size: Int = 18) {
 private val LANE_ORDER = listOf("ble", "aware", "usb", "udp")
 
 /**
- * The lanes a peer has a non-dead path on, in [LANE_ORDER], each with whether
- * fips currently sends on it. The Aware pool can hold several paths to one
- * peer — that is one lane, lit if any of them is active.
+ * The lanes a peer has an answering path on — live or suspect, or the active
+ * one — in [LANE_ORDER], each with whether fips currently sends on it. A
+ * probing path has not answered and may never: a USB path names one
+ * attachment, so earlier plugs' paths stay probing after the cable is out.
+ * The Aware pool can hold several paths to one peer — that is one lane, lit
+ * if any of them is active.
  */
 fun peerLanes(peer: PeerDiagnostic?): List<Pair<String, Boolean>> {
     if (peer == null) return emptyList()
-    val live = peer.paths.filter { it.state != "dead" && it.lane.isNotEmpty() }
+    val live = peer.paths.filter {
+        it.lane.isNotEmpty() && (it.active || it.state == "live" || it.state == "suspect")
+    }
     if (live.isEmpty()) {
         return if (peer.transport.isEmpty()) emptyList() else listOf(peer.transport to true)
     }

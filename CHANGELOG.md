@@ -50,6 +50,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **USB relinks without a replug.** Restarting Myco, or switching the mesh off
+  and on, with the cable in now brings the USB link back by itself, and a
+  quick replug between two phones no longer leaves them unlinked.
+
+- **Fewer USB permission prompts.** Plugging two phones together no longer
+  asks "Allow Myco to access …" on every re-enumeration. Myco asks only when
+  no other route took the phone, which on stock Android is once per plug.
+
+- **USB no longer shown after unplugging.** A peer reached only over the LAN
+  no longer shows a USB lane left over from an earlier plug: lanes count only
+  once they answer.
+
+- **Desktop fips finds phones on the LAN.** Myco's LAN advert now carries the
+  scope a default fips daemon browses for, so a desktop node discovers the
+  phone, not only the other way round.
+
 - **Apps survive rotation.** Turning the phone, or resizing the window, no
   longer restarts an open app: it keeps its place (a game stays mid-game)
   and lays itself out for the new size.
