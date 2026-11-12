@@ -99,6 +99,11 @@ pub enum Outcome {
     /// [`IntentRequest::handled`](nap::intent::IntentRequest::handled) or
     /// [`IntentRequest::failed`](nap::intent::IntentRequest::failed).
     Intent(nap::intent::IntentRequest),
+    /// A valid NAP-INTENT `intent.launch` naming one napplet, for the host to
+    /// open, or to offer for install — only the host knows what is installed
+    /// and what is on screen. See [`nap::intent::LaunchRequest`]. Answered
+    /// with its `accepted` or `failed`.
+    Launch(nap::intent::LaunchRequest),
     /// A valid NAP-FS pick (`fs.pickFile`, `fs.pickFiles`,
     /// `fs.pickSaveFile`) for the host to put in front of the user — only the
     /// window host can show the system picker. See [`nap::fs`]. Answered with
@@ -115,6 +120,7 @@ impl Outcome {
             Self::Ignore
             | Self::Link(_)
             | Self::Intent(_)
+            | Self::Launch(_)
             | Self::FsPick(_)
             | Self::Gamepad { .. } => &[],
         }

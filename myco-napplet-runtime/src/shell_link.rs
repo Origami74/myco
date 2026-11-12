@@ -286,6 +286,7 @@ mod tests {
             serde_json::json!({"channel": "open-napplet", "pointer": "npub1x:profiles",
                                "title": "Profiles", "token": "t1"})
         );
+
         assert_eq!(
             serde_json::to_value(ToShell::OpenNsite {
                 host: "npub1x".into()

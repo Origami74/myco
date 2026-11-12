@@ -199,6 +199,11 @@ pub struct LibraryItem {
 pub struct LibraryArchetype {
     pub slug: String,
     pub convention: String,
+    /// The parameter names the `i` tag advertised. Absent from entries
+    /// written before NAP-INTENT exposed them; those read as none until the
+    /// served version next moves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<String>,
 }
 
 impl LibraryArchetype {
@@ -210,6 +215,7 @@ impl LibraryArchetype {
             .map(|a| Self {
                 slug: a.slug.clone(),
                 convention: a.convention.clone(),
+                params: a.params.clone(),
             })
             .collect()
     }

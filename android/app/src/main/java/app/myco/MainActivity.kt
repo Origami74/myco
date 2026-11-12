@@ -258,7 +258,7 @@ class MainActivity : ComponentActivity() {
                             initialLanEnabled = prefs.getBoolean(PREF_LAN, true),
                             onLanToggle = { enabled -> setLanEnabled(enabled) },
                             onLaunchNsite = { hostLabel, title -> launchNsite(hostLabel, title) },
-                            onLaunchNapplet = { pointer, title -> launchNapplet(pointer, title) },
+                            onLaunchNapplet = { pointer, title, token -> launchNapplet(pointer, title, token) },
                             onPinNappletToHome = { pointer, title -> pinNappletToHomeScreen(pointer, title) },
                             onPinToHome = { hostLabel, title -> pinToHomeScreen(hostLabel, title) },
                             onScanned = { text -> handleScannedText(text) },
@@ -1336,8 +1336,8 @@ class MainActivity : ComponentActivity() {
      * the Library on the Rust side — an intent must never be able to supply
      * them, and this one has nowhere to put them.
      */
-    private fun launchNapplet(pointer: String, title: String) {
-        startActivity(nappletIntent(pointer, title))
+    private fun launchNapplet(pointer: String, title: String, intentToken: String = "") {
+        startActivity(NappletActivity.intent(this, pointer, title, intentToken))
     }
 
     /**

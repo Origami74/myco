@@ -115,7 +115,10 @@ import java.io.ByteArrayInputStream
  * - `open-napplet` — start (or bring forward) the handler's own window with a
  *   delivery token. That window hands the token to Rust with its session —
  *   at open, or in [onNewIntent] when its task already existed — and Rust
- *   delivers the payload once the handler listens.
+ *   delivers the payload once the handler listens. An app a request
+ *   recommended and the user then added from a review gets its token on
+ *   that review instead (`NappletReview.intentToken`): the sheet's Open
+ *   passes it, so nothing opens without that tap.
  * - `open-nsite` — Myco's own handler for the `nsite` role: follow the same
  *   `myco://app/<host>` path a deep link takes.
  *
@@ -575,7 +578,9 @@ class NappletActivity : ComponentActivity() {
                 runCatching { client.state().library }.getOrDefault(emptyList())
             }
             val (pointer, title) = nappletLaunchTarget(added, library)
-            startActivity(intent(this@NappletActivity, pointer, title))
+            // A NAP-INTENT payload waiting for this app, if a request
+            // recommended it: delivered once it opens.
+            startActivity(intent(this@NappletActivity, pointer, title, added.intentToken))
         }
     }
 

@@ -152,7 +152,7 @@ fun MycoApp(
     initialLanEnabled: Boolean = true,
     onLanToggle: (Boolean) -> Unit = {},
     onLaunchNsite: (host: String, title: String) -> Unit,
-    onLaunchNapplet: (pointer: String, title: String) -> Unit,
+    onLaunchNapplet: (pointer: String, title: String, intentToken: String) -> Unit,
     onPinNappletToHome: (pointer: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,

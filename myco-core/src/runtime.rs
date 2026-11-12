@@ -1148,7 +1148,15 @@ impl AppRuntime {
                 self.rev += 1;
             }
             NativeAppAction::DismissNappletReview => {
-                *self.napplet_review.lock().unwrap() = None;
+                let closed = self.napplet_review.lock().unwrap().take();
+                // A NAP-INTENT request may be waiting on this napplet's
+                // install: added, it goes there; declined, it is resolved
+                // without the recommendation.
+                if let (Some(review), Some(host), Some(rt)) =
+                    (closed, self.napplet_host.clone(), self.rt.as_ref())
+                {
+                    rt.spawn(async move { host.review_closed(&review.pointer).await });
+                }
                 self.rev += 1;
             }
             NativeAppAction::SetIntentDefault { archetype, handler } => {
@@ -1770,6 +1778,7 @@ impl AppRuntime {
                 icon: None,
                 error: message,
                 holder: holder_for_retry.clone(),
+                intent_token: String::new(),
                 manifest: None,
             });
         };
@@ -1855,6 +1864,7 @@ impl AppRuntime {
             grants: Vec::new(),
             error: String::new(),
             holder: holder.clone(),
+            intent_token: String::new(),
             manifest: None,
         });
 
@@ -1934,6 +1944,7 @@ impl AppRuntime {
                         grants,
                         error: String::new(),
                         holder: holder.clone(),
+                        intent_token: String::new(),
                         manifest: Some(event),
                     }
                 }
@@ -1961,6 +1972,7 @@ impl AppRuntime {
                         grants: Vec::new(),
                         error: e.to_string(),
                         holder: holder.clone(),
+                        intent_token: String::new(),
                         manifest: None,
                     }
                 }
@@ -2336,7 +2348,12 @@ impl AppRuntime {
                 // Installs and updates keep the napplet's files locally.
                 .with_kept_blobs(content.blobs())
                 // NAP-LINK never stacks a second review on the one showing.
-                .with_review_slot(self.napplet_review.clone()),
+                .with_review_slot(self.napplet_review.clone())
+                // NAP-INTENT's recommended handlers are looked up where a
+                // review would look for them.
+                .with_hint_resolver(Arc::new(HintSources {
+                    content: content.clone(),
+                })),
             );
 
             // Feed every accepted event to open napplets' subscriptions — this
@@ -3531,6 +3548,7 @@ fn update_review(
         grants,
         error: String::new(),
         holder: None,
+        intent_token: String::new(),
         manifest: None,
     }
 }
@@ -3567,6 +3585,48 @@ fn answered_update(
 /// of range sends nothing, and waiting out the HTTP client's 60 s for it
 /// leaves the user staring at a progress ring.
 const NAPPLET_MESH_STALL: Duration = Duration::from_secs(5);
+
+/// NAP-INTENT's [`crate::intent::HintResolver`] over the same sources, and
+/// the same offline-only rule, the install review fetches from: the hint's
+/// relays, the user's, the phones nearby.
+struct HintSources {
+    content: Arc<crate::content::Content>,
+}
+
+#[async_trait::async_trait]
+impl crate::intent::HintResolver for HintSources {
+    async fn contracts(
+        &self,
+        hint: &myco_napplet_runtime::nap::intent::HandlerHint,
+    ) -> Option<Vec<myco_napplet_runtime::manifest::Archetype>> {
+        let addr = crate::napplet::NappletAddr {
+            author: nostr::PublicKey::from_hex(&hint.author).ok()?,
+            d_tag: Some(hint.d_tag.clone()),
+            relays: hint.relays.clone(),
+        };
+        let sources = napplet_sources(
+            &addr,
+            None,
+            &self.content.reachable_npubs(),
+            self.content.peer_relays(),
+            self.content.relay(),
+            self.content.is_offline_only(),
+        );
+        for source in &sources {
+            // Signature, author and `d` are checked here; the kind below.
+            let Ok((event, _)) = crate::napplet::fetch_manifest(&addr, source.as_ref()).await
+            else {
+                continue;
+            };
+            if event.kind.as_u16() != myco_napplet_runtime::nap::intent::HINT_KIND {
+                return None;
+            }
+            let manifest = myco_napplet_runtime::NappletManifest::from_event(event).ok()?;
+            return Some(manifest.archetypes);
+        }
+        None
+    }
+}
 
 /// Who [`napplet_sources`] asks for a napplet.
 #[derive(Debug, PartialEq)]
@@ -4286,6 +4346,7 @@ mod tests {
             icon: None,
             error: String::new(),
             holder: None,
+            intent_token: String::new(),
             manifest: None,
         };
         rt.napplet_updates
@@ -5212,6 +5273,7 @@ mod tests {
             grants: Vec::new(),
             error: String::new(),
             holder: None,
+            intent_token: String::new(),
             manifest: None,
         }
     }

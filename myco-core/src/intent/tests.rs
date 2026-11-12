@@ -2,9 +2,7 @@
 //! the Library catalog and the nsite built-in.
 
 use super::*;
-use myco_napplet_runtime::nap::intent::{
-    IntentCatalogSnapshot, NO_HANDLER, UNSUPPORTED_ACTION, UNSUPPORTED_CONVENTION,
-};
+use myco_napplet_runtime::nap::intent::{IntentCatalogSnapshot, NO_HANDLER, UNSUPPORTED_ACTION};
 use myco_napplet_runtime::testing::NappletBuilder;
 use nostr::nips::nip19::ToBech32;
 use nsite_deck::seams::{BlobStore, RelayBackend};
@@ -21,9 +19,24 @@ impl IntentCatalog for TestIntents {
     }
 }
 
+/// Hinted napplets as a test has them: the contracts each address resolves
+/// to, if any.
+#[derive(Default)]
+struct TestHints(Mutex<BTreeMap<String, Vec<Archetype>>>);
+
+#[async_trait::async_trait]
+impl HintResolver for TestHints {
+    async fn contracts(&self, hint: &HandlerHint) -> Option<Vec<Archetype>> {
+        self.0.lock().unwrap().get(&hint.address).cloned()
+    }
+}
+
 struct Fixture {
     host: NappletHost,
     intents: Arc<TestIntents>,
+    hints: Arc<TestHints>,
+    /// The app-wide review slot, as `AppRuntime` shares it.
+    review: crate::napplet::ReviewSlot,
     feed: NappletAddr,
     profiles: NappletAddr,
     cards: NappletAddr,
@@ -33,15 +46,25 @@ fn key_of(addr: &NappletAddr) -> String {
     handler_key(&addr.author.to_bech32().unwrap(), addr.d_tag.as_deref())
 }
 
+fn address_of(addr: &NappletAddr) -> String {
+    format!(
+        "35129:{}:{}",
+        addr.author.to_hex(),
+        addr.d_tag.as_deref().unwrap()
+    )
+}
+
 fn handler_for(addr: &NappletAddr, title: &str) -> IntentHandler {
     IntentHandler {
         key: key_of(addr),
         d_tag: addr.d_tag.clone().unwrap_or_default(),
+        address: Some(address_of(addr)),
         title: Some(title.to_string()),
         pointer: key_of(addr),
         archetypes: vec![Archetype {
             slug: "profile".into(),
             convention: "napplet:profile/open".into(),
+            params: vec!["pubkey".into()],
         }],
     }
 }
@@ -53,7 +76,7 @@ impl Fixture {
         handlers.extend(builtin_handlers());
         *self.intents.0.lock().unwrap() = IntentCatalogSnapshot {
             handlers,
-            defaults: BTreeMap::new(),
+            ..IntentCatalogSnapshot::default()
         };
     }
 
@@ -69,6 +92,7 @@ impl Fixture {
             defaults: default
                 .map(|a| BTreeMap::from([("profile".to_string(), key_of(a))]))
                 .unwrap_or_default(),
+            ..IntentCatalogSnapshot::default()
         };
     }
 
@@ -150,9 +174,15 @@ async fn fixture() -> Fixture {
     ctx.kept_blobs = blobs;
     ctx.intents = intents.clone();
     let mut addrs = addrs.into_iter();
+    let hints = Arc::new(TestHints::default());
+    let review: crate::napplet::ReviewSlot = Arc::new(Mutex::new(None));
     let fixture = Fixture {
-        host: NappletHost::new(ctx),
+        host: NappletHost::new(ctx)
+            .with_hint_resolver(hints.clone())
+            .with_review_slot(review.clone()),
         intents,
+        hints,
+        review,
         feed: addrs.next().unwrap(),
         profiles: addrs.next().unwrap(),
         cards: addrs.next().unwrap(),
@@ -218,11 +248,22 @@ async fn a_sole_handler_opens_and_hears_the_payload_after_it_subscribes() {
     assert_eq!(
         results[0]["result"],
         json!({"ok": true, "archetype": "profile", "action": "open", "handled": true,
-               "handler": "profiles", "windowId": profiles, "convention": PROFILE})
+               "handler": key_of(&f.profiles), "windowId": profiles, "convention": PROFILE})
+    );
+    // The current binding's `intent.deliver` goes at once: the window has
+    // finished its handshake, and the binding holds it for `onDelivery`. The
+    // sender is the caller's catalog identifier.
+    let handler_frames = f.drain(&profiles).await;
+    assert_eq!(
+        of_type(&handler_frames, "intent.deliver"),
+        vec![json!({"type": "intent.deliver",
+                    "delivery": {"sender": key_of(&f.feed), "archetype": "profile",
+                                 "action": "open", "convention": PROFILE,
+                                 "payload": {"pubkey": "abc"}}})]
     );
     assert!(
-        of_type(&f.drain(&profiles).await, "inc.event").is_empty(),
-        "delivered before the napplet listened"
+        of_type(&handler_frames, "inc.event").is_empty(),
+        "the first draft's inc.event waits until the napplet listened"
     );
 
     // It subscribes: the result, then the payload, from the caller.
@@ -400,7 +441,7 @@ async fn no_handler_and_unsupported_requests_fail_at_once() {
         ),
         (
             json!({"archetype": "profile", "convention": "napplet:person/open"}),
-            UNSUPPORTED_CONVENTION,
+            nap_intent::INVALID_CONVENTION,
         ),
     ] {
         let out = f.invoke(&feed, request.clone()).await;
@@ -629,6 +670,7 @@ fn the_catalog_is_the_librarys_declared_roles_and_myco() {
     let profile = LibraryArchetype {
         slug: "profile".into(),
         convention: PROFILE.into(),
+        params: vec!["pubkey".into()],
     };
     let mut titled = library_item(&npub, "profiles", Some(vec![profile.clone()]));
     titled.title = "Profiles".into();
@@ -656,6 +698,14 @@ fn the_catalog_is_the_librarys_declared_roles_and_myco() {
     assert_eq!(catalog.handlers[0].pointer, "naddr1whatever");
     assert_eq!(catalog.handlers[1].title.as_deref(), Some("cards"));
     assert_eq!(catalog.handlers[1].pointer, format!("{npub}:cards"));
+    // What a `handlerHint` is matched against, and the params the Library kept.
+    let hex = nostr::PublicKey::parse(&npub).unwrap().to_hex();
+    assert_eq!(
+        catalog.handlers[0].address.as_deref(),
+        Some(format!("35129:{hex}:profiles").as_str())
+    );
+    assert_eq!(catalog.handlers[0].archetypes[0].params, vec!["pubkey"]);
+    assert_eq!(catalog.handlers[2].address, None, "Myco's own handler");
 
     let views = archetype_views(&library, &catalog.defaults);
     let names: Vec<_> = views.iter().map(|v| v.archetype.clone()).collect();
@@ -725,7 +775,8 @@ async fn archetypes_are_backfilled_and_follow_the_served_version() {
         entry(&content).archetypes,
         Some(vec![LibraryArchetype {
             slug: "profile".into(),
-            convention: PROFILE.into()
+            convention: PROFILE.into(),
+            params: Vec::new(),
         }])
     );
 
@@ -924,4 +975,474 @@ async fn a_napplet_link_can_open_an_nsite() {
         )
         .await;
     assert_eq!(out["channel"], "open-nsite", "{out}");
+}
+
+/// A handler whose window is not through its handshake yet gets
+/// `intent.deliver` with its `shell.init`, not before: the binding that holds
+/// a delivery for `onDelivery` is installed by then.
+#[tokio::test]
+async fn intent_deliver_waits_for_the_handshake() {
+    let f = fixture().await;
+    let feed = f.open(&f.feed).await;
+    let out = f
+        .invoke(&feed, json!({"archetype": "profile", "payload": {"n": 2}}))
+        .await;
+    let (_, token) = open_command(&out).unwrap();
+
+    let opened = f
+        .host
+        .open(&f.profiles, Some(crate::napplet::effective_grants(&[])))
+        .await
+        .unwrap();
+    let profiles = opened.session_id;
+    assert!(f.host.bind_intent(&profiles, &token).await);
+    assert!(of_type(&f.drain(&profiles).await, "intent.deliver").is_empty());
+
+    let out = f.send(&profiles, json!({"type": "shell.ready"})).await;
+    let types: Vec<String> = messages(&out)
+        .iter()
+        .map(|m| m["type"].as_str().unwrap().to_string())
+        .collect();
+    let init = types.iter().position(|t| t == "shell.init").unwrap();
+    let deliver = types.iter().position(|t| t == "intent.deliver").unwrap();
+    assert!(init < deliver, "{types:?}");
+    assert_eq!(
+        of_type(&out, "intent.deliver")[0]["delivery"]["payload"],
+        json!({"n": 2})
+    );
+    // Once.
+    let again = f.send(&profiles, json!({"type": "shell.ready"})).await;
+    assert!(of_type(&again, "intent.deliver").is_empty());
+}
+
+fn hint_for(addr: &NappletAddr) -> Value {
+    json!({"address": address_of(addr), "relays": ["wss://relay.example"]})
+}
+
+/// An installed recommendation is opened over the chooser; the user's
+/// default still wins over it.
+#[tokio::test]
+async fn an_installed_hint_is_opened_unless_there_is_a_default() {
+    let f = fixture().await;
+    f.both(None);
+    let feed = f.open(&f.feed).await;
+    let out = f
+        .invoke(
+            &feed,
+            json!({"archetype": "profile", "handlerHint": hint_for(&f.cards)}),
+        )
+        .await;
+    assert_eq!(open_command(&out).unwrap().0, key_of(&f.cards));
+
+    f.both(Some(&f.profiles));
+    let out = f
+        .invoke(
+            &feed,
+            json!({"archetype": "profile", "handlerHint": hint_for(&f.cards)}),
+        )
+        .await;
+    assert_eq!(open_command(&out).unwrap().0, key_of(&f.profiles));
+}
+
+/// What the window host does with a `review-napplet`: fetch it, so the
+/// app-wide slot shows that napplet's review.
+fn show_review(f: &Fixture, pointer: &str) {
+    *f.review.lock().unwrap() = Some(crate::napplet::NappletReview {
+        pointer: pointer.to_string(),
+        intent_token: String::new(),
+        loading: false,
+        installing: false,
+        added: false,
+        installed: false,
+        ready: false,
+        unreviewed: Vec::new(),
+        update_available: false,
+        already_installed: false,
+        grants: Vec::new(),
+        title: String::new(),
+        description: String::new(),
+        requires: Vec::new(),
+        optional: Vec::new(),
+        unsupported: Vec::new(),
+        icon: None,
+        error: String::new(),
+        holder: None,
+        manifest: None,
+    });
+}
+
+fn review_command(frames: &[ToShell]) -> Option<String> {
+    frames.iter().find_map(|f| match f {
+        ToShell::ReviewNapplet { pointer } => Some(pointer.clone()),
+        _ => None,
+    })
+}
+
+/// Only `profiles` is installed; `cards` is recommended. Myco looks its
+/// manifest up, puts its review up over the caller and answers `ok` at once.
+/// Returns the caller's window and the review's pointer.
+async fn hint_cards(f: &Fixture) -> (String, String) {
+    f.hints.0.lock().unwrap().insert(
+        address_of(&f.cards),
+        vec![handler_for(&f.cards, "Cards").archetypes[0].clone()],
+    );
+    let feed = f.open(&f.feed).await;
+    let out = f
+        .invoke(
+            &feed,
+            json!({"archetype": "profile", "payload": {"pubkey": "abc"},
+                   "handlerHint": hint_for(&f.cards)}),
+        )
+        .await;
+    assert!(
+        open_command(&out).is_none(),
+        "profiles is not opened instead"
+    );
+    assert_eq!(
+        of_type(&out, "intent.invoke.result")[0]["result"],
+        json!({"ok": true, "archetype": "profile", "action": "open", "handled": true,
+               "handler": key_of(&f.cards), "convention": PROFILE})
+    );
+    let review = review_command(&out).expect("the review is put up");
+    let parsed = NappletAddr::parse(&review).unwrap();
+    assert_eq!(parsed.author, f.cards.author);
+    assert_eq!(parsed.d_tag.as_deref(), Some("cards"));
+    assert_eq!(parsed.relays, vec!["wss://relay.example"]);
+    show_review(f, &review);
+    (feed, review)
+}
+
+/// The user adds `cards` from its review: the Library changes.
+async fn add_cards(f: &Fixture) {
+    f.both(None);
+    f.host.intents_changed().await;
+}
+
+/// A recommended napplet that is not installed: once the user adds it from
+/// its review, the payload waits on that review's Open — nothing opens by
+/// itself — and reaches the napplet when it opens with the token.
+#[tokio::test]
+async fn an_added_hint_gets_its_payload_through_the_reviews_open() {
+    let f = fixture().await;
+    let (feed, _) = hint_cards(&f).await;
+    add_cards(&f).await;
+
+    let frames = f.drain(&feed).await;
+    assert!(open_command(&frames).is_none(), "nothing opens by itself");
+    assert!(
+        of_type(&frames, "intent.invoke.result").is_empty(),
+        "the caller was answered once, already"
+    );
+    let token = f
+        .review
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .intent_token
+        .clone();
+    assert!(!token.is_empty(), "the review's Open carries the payload");
+
+    // Open: the new window binds the token and hears the payload.
+    let cards = f.open(&f.cards).await;
+    assert!(f.host.bind_intent(&cards, &token).await);
+    let delivered = of_type(&f.drain(&cards).await, "intent.deliver");
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        delivered[0]["delivery"]["payload"],
+        json!({"pubkey": "abc"})
+    );
+    assert_eq!(delivered[0]["delivery"]["sender"], key_of(&f.feed));
+}
+
+/// Accepted, then the caller's window closes: the payload still reaches the
+/// napplet once it is added — delivery does not depend on the source.
+#[tokio::test]
+async fn an_accepted_hint_outlives_the_callers_window() {
+    let f = fixture().await;
+    let (feed, _) = hint_cards(&f).await;
+    f.host.close(&feed);
+    add_cards(&f).await;
+    let token = f
+        .review
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .intent_token
+        .clone();
+    assert!(!token.is_empty());
+    let cards = f.open(&f.cards).await;
+    assert!(f.host.bind_intent(&cards, &token).await);
+    assert_eq!(of_type(&f.drain(&cards).await, "intent.deliver").len(), 1);
+}
+
+/// The review that was put up is gone — replaced by another, say — when the
+/// napplet is installed some other way: the request is dropped. No window
+/// opens and no other review gets the payload.
+#[tokio::test]
+async fn an_added_hint_without_its_review_is_dropped() {
+    let f = fixture().await;
+    let (feed, _) = hint_cards(&f).await;
+    show_review(
+        &f,
+        &format!(
+            "{}:other",
+            nostr::Keys::generate().public_key().to_bech32().unwrap()
+        ),
+    );
+    add_cards(&f).await;
+    assert!(open_command(&f.drain(&feed).await).is_none());
+    assert!(f
+        .review
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .intent_token
+        .is_empty());
+    assert_eq!(f.host.pending_intent_count(), 0);
+}
+
+/// The review is closed without adding the app: the request is resolved as
+/// if there had been no hint — here, the one installed handler.
+#[tokio::test]
+async fn a_declined_hint_falls_back_to_what_is_installed() {
+    let f = fixture().await;
+    let newapp = NappletAddr {
+        author: nostr::Keys::generate().public_key(),
+        d_tag: Some("newapp".into()),
+        relays: Vec::new(),
+    };
+    f.hints.0.lock().unwrap().insert(
+        address_of(&newapp),
+        vec![Archetype {
+            slug: "profile".into(),
+            convention: PROFILE.into(),
+            params: Vec::new(),
+        }],
+    );
+    let feed = f.open(&f.feed).await;
+    let out = f
+        .invoke(
+            &feed,
+            json!({"archetype": "profile", "handlerHint": hint_for(&newapp)}),
+        )
+        .await;
+    let review = out
+        .iter()
+        .find_map(|f| match f {
+            ToShell::ReviewNapplet { pointer } => Some(pointer.clone()),
+            _ => None,
+        })
+        .unwrap();
+    f.host.review_closed(&review).await;
+    let frames = f.drain(&feed).await;
+    let (pointer, _) = open_command(&frames).expect("the installed handler is opened");
+    assert_eq!(pointer, key_of(&f.profiles));
+    assert!(of_type(&frames, "intent.invoke.result").is_empty());
+}
+
+/// A hint that is not found, or whose manifest does not take the request,
+/// is no reason to fail: the request resolves without it.
+#[tokio::test]
+async fn an_unusable_hint_is_ignored() {
+    let f = fixture().await;
+    let feed = f.open(&f.feed).await;
+    let unknown = NappletAddr {
+        author: nostr::Keys::generate().public_key(),
+        d_tag: Some("nowhere".into()),
+        relays: Vec::new(),
+    };
+    let out = f
+        .invoke(
+            &feed,
+            json!({"archetype": "profile", "handlerHint": hint_for(&unknown)}),
+        )
+        .await;
+    assert_eq!(open_command(&out).unwrap().0, key_of(&f.profiles));
+
+    // Found, but it only edits profiles.
+    f.hints.0.lock().unwrap().insert(
+        address_of(&unknown),
+        vec![Archetype {
+            slug: "profile".into(),
+            convention: "napplet:profile/edit".into(),
+            params: Vec::new(),
+        }],
+    );
+    let out = f
+        .invoke(
+            &feed,
+            json!({"archetype": "profile", "handlerHint": hint_for(&unknown)}),
+        )
+        .await;
+    assert_eq!(open_command(&out).unwrap().0, key_of(&f.profiles));
+
+    // Nothing installed and nothing usable recommended: no handler.
+    let out = f
+        .invoke(
+            &feed,
+            json!({"archetype": "pet", "handlerHint": hint_for(&unknown)}),
+        )
+        .await;
+    assert_eq!(
+        of_type(&out, "intent.invoke.result")[0]["result"]["error"],
+        NO_HANDLER
+    );
+}
+
+/// A delivery's `sender` is the calling napplet's catalog identifier for the
+/// current binding, and its `d` tag for the first draft's `inc.event`.
+#[tokio::test]
+async fn a_sender_is_named_both_ways() {
+    let f = fixture().await;
+    let feed = f.open(&f.feed).await;
+    let profiles = f.open(&f.profiles).await;
+    f.subscribe(&profiles, PROFILE).await;
+    let out = f.invoke(&feed, json!({"archetype": "profile"})).await;
+    let (_, token) = open_command(&out).unwrap();
+    assert!(f.host.bind_intent(&profiles, &token).await);
+    let frames = f.drain(&profiles).await;
+    assert_eq!(
+        of_type(&frames, "intent.deliver")[0]["delivery"]["sender"],
+        key_of(&f.feed)
+    );
+    assert_eq!(of_type(&frames, "inc.event")[0]["sender"], "feed");
+}
+
+async fn launch(f: &Fixture, session: &str, address: &str) -> Vec<ToShell> {
+    // Clear the per-window cooldown, as `Fixture::invoke` does.
+    f.host
+        .sweep_intents(Instant::now() + INVOKE_COOLDOWN + Duration::from_millis(1));
+    f.send(
+        session,
+        json!({"type": "intent.launch", "id": "l1",
+               "target": {"address": address, "relays": ["wss://relay.example"]}}),
+    )
+    .await
+}
+
+fn notes() -> NappletAddr {
+    NappletAddr {
+        author: nostr::Keys::generate().public_key(),
+        d_tag: Some("notes".into()),
+        relays: Vec::new(),
+    }
+}
+
+/// `intent.launch` of a napplet that is not installed: its review goes up
+/// over the caller, which hears `ok` with the target's catalog identifier.
+/// A default for a role the target might fill changes nothing.
+#[tokio::test]
+async fn launch_reviews_a_napplet_that_is_not_installed() {
+    let f = fixture().await;
+    f.both(Some(&f.profiles));
+    let feed = f.open(&f.feed).await;
+    let notes = notes();
+    let out = launch(&f, &feed, &address_of(&notes)).await;
+    let parsed = NappletAddr::parse(&review_command(&out).expect("the review is put up")).unwrap();
+    assert_eq!(parsed.author, notes.author);
+    assert_eq!(parsed.d_tag.as_deref(), Some("notes"));
+    assert_eq!(parsed.relays, vec!["wss://relay.example"]);
+    assert!(open_command(&out).is_none());
+    assert_eq!(
+        of_type(&out, "intent.launch.result")[0]["result"],
+        json!({"ok": true, "handler": key_of(&notes)})
+    );
+}
+
+/// `intent.launch` of an installed napplet — with no role at all — opens it,
+/// with no token and nothing delivered.
+#[tokio::test]
+async fn launch_opens_an_installed_napplet() {
+    let f = fixture().await;
+    let feed = f.open(&f.feed).await;
+    let notes = notes();
+    f.intents.0.lock().unwrap().installed = BTreeMap::from([(
+        address_of(&notes),
+        InstalledNapplet {
+            pointer: "naddr1notes".into(),
+            title: "Notes".into(),
+        },
+    )]);
+    let out = launch(&f, &feed, &address_of(&notes)).await;
+    assert!(
+        matches!(out.first(), Some(ToShell::OpenNapplet { pointer, token, .. })
+            if pointer == "naddr1notes" && token.is_empty()),
+        "{out:?}"
+    );
+    assert_eq!(
+        of_type(&out, "intent.launch.result")[0]["result"]["ok"],
+        true
+    );
+    assert_eq!(f.host.pending_intent_count(), 0);
+}
+
+/// Installed or not, a launch passes the same gate: inside the review
+/// cooldown both are refused alike, so the answer never says which.
+#[tokio::test]
+async fn launch_does_not_say_what_is_installed() {
+    let f = fixture().await;
+    let feed = f.open(&f.feed).await;
+    let installed = notes();
+    f.intents.0.lock().unwrap().installed = BTreeMap::from([(
+        address_of(&installed),
+        InstalledNapplet {
+            pointer: "naddr1notes".into(),
+            title: "Notes".into(),
+        },
+    )]);
+    let absent = format!(
+        "35129:{}:absent",
+        nostr::Keys::generate().public_key().to_hex()
+    );
+    assert_eq!(
+        of_type(&launch(&f, &feed, &absent).await, "intent.launch.result")[0]["result"]["ok"],
+        true
+    );
+    for target in [address_of(&installed), absent.clone()] {
+        assert_eq!(
+            of_type(&launch(&f, &feed, &target).await, "intent.launch.result")[0]["result"],
+            json!({"ok": false, "error": nap_intent::LAUNCH_REJECTED}),
+            "{target}"
+        );
+    }
+}
+
+/// A root napplet (kind 15129) can be launched too.
+#[tokio::test]
+async fn launch_names_a_root_napplet() {
+    let f = fixture().await;
+    let feed = f.open(&f.feed).await;
+    let author = nostr::Keys::generate().public_key();
+    let out = launch(&f, &feed, &format!("15129:{}:", author.to_hex())).await;
+    let review = out.iter().find_map(|f| match f {
+        ToShell::ReviewNapplet { pointer } => Some(pointer.clone()),
+        _ => None,
+    });
+    let parsed = NappletAddr::parse(&review.unwrap()).unwrap();
+    assert_eq!(parsed.author, author);
+    assert_eq!(parsed.d_tag, None);
+    assert_eq!(
+        of_type(&out, "intent.launch.result")[0]["result"]["handler"],
+        author.to_bech32().unwrap()
+    );
+}
+
+/// The catalog lists every installed napplet by coordinate, roles or not:
+/// named ones as `35129:<hex>:<d>`, root ones as `15129:<hex>:`.
+#[test]
+fn the_catalog_knows_every_installed_napplet() {
+    let npub = nostr::Keys::generate().public_key().to_bech32().unwrap();
+    let mut plain = library_item(&npub, "plain", None);
+    plain.title = "Plain".into();
+    let mut root = library_item(&npub, "", None);
+    root.d_tag = None;
+    let catalog = catalog_from(&[plain, root], &BTreeMap::new());
+    let hex = nostr::PublicKey::parse(&npub).unwrap().to_hex();
+    let app = &catalog.installed[&format!("35129:{hex}:plain")];
+    assert_eq!(app.title, "Plain");
+    assert_eq!(app.pointer, format!("{npub}:plain"));
+    assert!(catalog.installed.contains_key(&format!("15129:{hex}:")));
 }

@@ -11,7 +11,11 @@
 //! outcome ends at something the user answers:
 //!
 //! - `https:` / `http:` go to the system browser.
-//! - `nostr:naddr1…` (or `napplet:naddr1…`) naming a **napplet** manifest
+//! - **Deprecated:** `nostr:naddr1…` (or `napplet:naddr1…`) naming a
+//!   **napplet** manifest. Use NAP-INTENT `intent.launch(naddr)` (proposed
+//!   in napplet/naps#148), which opens the app if it is installed and offers
+//!   it for install if not. Kept for napplets running on Myco without
+//!   `launch`; the host logs every use at warn. Such a link
 //!   (kinds 35129 / 15129 / 5129) opens Myco's install review for it, over the
 //!   running napplet. Never an install: the user confirms on the review sheet
 //!   (napplet-runtime §7.7).
@@ -65,7 +69,8 @@ pub enum LinkTarget {
     /// it, trimmed.
     Web(String),
     /// A napplet pointer — the bare `naddr1…`, lower-cased — for install
-    /// review.
+    /// review. Deprecated in favour of NAP-INTENT `intent.launch`; see the
+    /// module docs.
     Napplet(String),
     /// A `napplet.link`: open whatever handles this role, as NAP-INTENT
     /// would.

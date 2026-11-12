@@ -128,7 +128,7 @@ fun AppsScreen(
     state: AppState,
     client: AppCoreClient,
     onLaunchNsite: (host: String, title: String) -> Unit,
-    onLaunchNapplet: (pointer: String, title: String) -> Unit,
+    onLaunchNapplet: (pointer: String, title: String, intentToken: String) -> Unit,
     onPinNappletToHome: (pointer: String, title: String) -> Unit,
     onPinToHome: (host: String, title: String) -> Unit,
     onScanned: (String) -> Unit,
@@ -222,7 +222,7 @@ fun AppsScreen(
                     // as a broken app.
                     status = state.nappletStatus[entry.item.urlHost],
                     modifier = Modifier.animateItem(),
-                    onClick = { onLaunchNapplet(entry.item.nappletPointer, entry.item.title) },
+                    onClick = { onLaunchNapplet(entry.item.nappletPointer, entry.item.title, "") },
                     onLongClick = { nappletSheetFor = entry.item },
                 )
             }
@@ -336,7 +336,7 @@ fun AppsScreen(
             onOpen = {
                 val (pointer, title) = nappletLaunchTarget(review, state.library)
                 client.dispatch(NativeActions.dismissNappletReview())
-                onLaunchNapplet(pointer, title)
+                onLaunchNapplet(pointer, title, review.intentToken)
             },
             onDismiss = { client.dispatch(NativeActions.dismissNappletReview()) },
         )
@@ -359,7 +359,7 @@ fun AppsScreen(
                 },
                 onOpen = {
                     nappletSheetFor = null
-                    onLaunchNapplet(item.nappletPointer, item.title)
+                    onLaunchNapplet(item.nappletPointer, item.title, "")
                 },
                 onShare = {
                     // Same surface an nsite share uses: a QR, and an NDEF tag

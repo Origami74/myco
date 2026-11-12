@@ -78,6 +78,9 @@ pub struct Archetype {
     pub slug: String,
     /// The queryless payload identity, `napplet:<archetype>/<intent>`.
     pub convention: String,
+    /// The parameter names the `i` tag advertises, in tag order. Names only:
+    /// never types, required fields or kind constraints.
+    pub params: Vec<String>,
 }
 
 /// One `["i", <convention>, <param>…]` advertisement, as published. Eligible
@@ -356,6 +359,7 @@ fn eligible_contracts(roles: &[String], intents: &[IntentAdvert]) -> Vec<Archety
             roles.iter().any(|r| r == archetype).then(|| Archetype {
                 slug: archetype.to_string(),
                 convention: i.convention.clone(),
+                params: i.params.clone(),
             })
         })
         .collect()
