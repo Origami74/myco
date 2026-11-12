@@ -115,9 +115,10 @@ import java.io.ByteArrayInputStream
  * - `open-napplet` — start (or bring forward) the handler's own window with a
  *   delivery token. That window hands the token to Rust with its session —
  *   at open, or in [onNewIntent] when its task already existed — and Rust
- *   delivers the payload once the handler listens. With `afterReview`, the
- *   handler is an app the request recommended and the user just added from
- *   the review over this window: it opens without a second ask.
+ *   delivers the payload once the handler listens. An app a request
+ *   recommended and the user then added from a review gets its token on
+ *   that review instead (`NappletReview.intentToken`): the sheet's Open
+ *   passes it, so nothing opens without that tap.
  * - `open-nsite` — Myco's own handler for the `nsite` role: follow the same
  *   `myco://app/<host>` path a deep link takes.
  *
@@ -411,15 +412,14 @@ class NappletActivity : ComponentActivity() {
         when (obj.optString("channel")) {
             "open-external" -> openLink(obj.optString("url"))
             "review-napplet" -> reviewNapplet(obj.optString("pointer"))
-            "open-napplet" -> {
-                val target = IntentOpen(
+            "open-napplet" -> openIntentTarget(
+                IntentOpen(
                     title = obj.optString("title").ifEmpty { "another app" },
                     pointer = obj.optString("pointer"),
                     token = obj.optString("token"),
                     nsiteHost = "",
-                )
-                if (obj.optBoolean("afterReview")) openAfterReview(target) else openIntentTarget(target)
-            }
+                ),
+            )
             "open-nsite" -> openIntentTarget(
                 IntentOpen(title = "this site in Myco", pointer = "", token = "", nsiteHost = obj.optString("host")),
             )
@@ -482,24 +482,6 @@ class NappletActivity : ComponentActivity() {
     private fun openIntentTarget(target: IntentOpen) {
         if (target.pointer.isEmpty() && target.nsiteHost.isEmpty()) return
         if (recentGesture()) launchIntentTarget(target) else pendingOpen = target
-    }
-
-    /**
-     * NAP-INTENT recommended an app that wasn't installed, and the user just
-     * added it from the review sheet over this window. That Add was the
-     * answer: open it with its payload, and take the finished sheet down.
-     */
-    private fun openAfterReview(target: IntentOpen) {
-        if (target.pointer.isEmpty()) return
-        // The sheet up here is that app's: the core sends this only once the
-        // app it put the review up for is in the Library. The polled copy
-        // may not say "added" yet, so it isn't asked.
-        if (review != null) {
-            reviewWatch?.cancel()
-            review = null
-            act(NativeActions.dismissNappletReview())
-        }
-        launchIntentTarget(target)
     }
 
     private fun launchIntentTarget(target: IntentOpen) {
@@ -596,7 +578,9 @@ class NappletActivity : ComponentActivity() {
                 runCatching { client.state().library }.getOrDefault(emptyList())
             }
             val (pointer, title) = nappletLaunchTarget(added, library)
-            startActivity(intent(this@NappletActivity, pointer, title))
+            // A NAP-INTENT payload waiting for this app, if a request
+            // recommended it: delivered once it opens.
+            startActivity(intent(this@NappletActivity, pointer, title, added.intentToken))
         }
     }
 

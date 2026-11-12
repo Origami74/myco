@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   install it.** A napplet opening a role (NAP-INTENT) can name an app with
   `napplet:<role>/open#naddr1…`. If it's installed, it opens (your default
   app for the role still wins). If it isn't, Myco shows its install review
-  over the asking app; once you tap Add it opens with what was asked for, and
-  if you close the review, the request goes to what you already have.
+  over the asking app; after Add, its Open starts it with what was asked
+  for, and if you close the review, the request goes to what you already
+  have.
 - **Open or install one specific app.** `intent.launch(naddr)` (proposed as
   [napplet/naps#148](https://github.com/napplet/naps/pull/148)) opens the app
   the `naddr` names if it's installed, and shows its install review if not.

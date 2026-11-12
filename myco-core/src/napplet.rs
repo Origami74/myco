@@ -378,38 +378,52 @@ impl LinkGate {
                 if NappletAddr::parse(pointer).is_err() {
                     return Err(INVALID_URL);
                 }
-                // One question at a time, over this window: the review this
-                // window opened — loading or waiting for an answer — is on
-                // screen above the napplet, and a napplet's say-so never
-                // replaces it. One queued anywhere else (the Apps screen,
-                // another napplet's window) is not in front of the user, so
-                // it does not refuse this link; the new review replaces it.
-                // An install already downloading does, wherever it started:
-                // its sheet has to be there to say how the download went. An
-                // added review is a confirmation, not a question, and never
-                // refuses.
-                if let Some(slot) = &self.review {
-                    if let Some(open) = slot.lock().unwrap().as_ref().filter(|r| !r.added) {
-                        if open.installing {
-                            return Err(LINK_BUSY_ADDING);
-                        }
-                        let owner = self.review_owner.lock().unwrap();
-                        if owner
-                            .as_ref()
-                            .is_some_and(|(s, p)| s == session && *p == open.pointer)
-                        {
-                            return Err(LINK_BUSY_REVIEW_OPEN);
-                        }
-                    }
-                }
-                if within(&self.last_review, REVIEW_LINK_COOLDOWN) {
-                    return Err(LINK_BUSY_TRY_AGAIN);
-                }
-                *self.review_owner.lock().unwrap() = Some((session.to_string(), pointer.clone()));
-                Ok(Some(ToShell::ReviewNapplet {
-                    pointer: pointer.clone(),
-                }))
+                self.gate_review(session, now)?;
+                Ok(Some(self.put_review(session, pointer)))
             }
+        }
+    }
+
+    /// Whether the window of `session` may put a review up now, and if so,
+    /// start the cooldown.
+    ///
+    /// One question at a time, over this window: the review this window
+    /// opened — loading or waiting for an answer — is on screen above the
+    /// napplet, and a napplet's say-so never replaces it. One queued anywhere
+    /// else (the Apps screen, another napplet's window) is not in front of the
+    /// user, so it does not refuse this link; the new review replaces it. An
+    /// install already downloading does, wherever it started: its sheet has
+    /// to be there to say how the download went. An added review is a
+    /// confirmation, not a question, and never refuses.
+    fn gate_review(&self, session: &str, now: std::time::Instant) -> Result<(), &'static str> {
+        if let Some(slot) = &self.review {
+            if let Some(open) = slot.lock().unwrap().as_ref().filter(|r| !r.added) {
+                if open.installing {
+                    return Err(LINK_BUSY_ADDING);
+                }
+                let owner = self.review_owner.lock().unwrap();
+                if owner
+                    .as_ref()
+                    .is_some_and(|(s, p)| s == session && *p == open.pointer)
+                {
+                    return Err(LINK_BUSY_REVIEW_OPEN);
+                }
+            }
+        }
+        let mut last = self.last_review.lock().unwrap();
+        if last.is_some_and(|t| now.saturating_duration_since(t) < REVIEW_LINK_COOLDOWN) {
+            return Err(LINK_BUSY_TRY_AGAIN);
+        }
+        *last = Some(now);
+        Ok(())
+    }
+
+    /// The review for `pointer`, owned by the window of `session`. Gated by
+    /// [`LinkGate::gate_review`] first.
+    fn put_review(&self, session: &str, pointer: &str) -> ToShell {
+        *self.review_owner.lock().unwrap() = Some((session.to_string(), pointer.to_string()));
+        ToShell::ReviewNapplet {
+            pointer: pointer.to_string(),
         }
     }
 }
@@ -486,6 +500,42 @@ impl NappletHost {
             Some(review) => Ok(review),
             None => Err(INVALID_URL),
         }
+    }
+
+    /// NAP-INTENT `launch`'s gate: the review rules, applied whether or not
+    /// the target is installed, so the answer never says which.
+    pub(crate) fn gate_launch(
+        &self,
+        session: &str,
+        now: std::time::Instant,
+    ) -> Result<(), &'static str> {
+        self.links.gate_review(session, now)
+    }
+
+    /// Put the review for `pointer` up over the window of `session`, after
+    /// [`NappletHost::gate_launch`] admitted it.
+    pub(crate) fn launch_review(&self, session: &str, pointer: &str) -> ToShell {
+        self.links.put_review(session, pointer)
+    }
+
+    /// Hand a NAP-INTENT delivery `token` to the review now showing for the
+    /// napplet at `addr`: its Open starts the napplet with it. False when the
+    /// review slot shows anything else — the user is no longer looking at
+    /// that napplet's sheet.
+    pub(crate) fn attach_review_token(&self, addr: &NappletAddr, token: &str) -> bool {
+        let Some(slot) = &self.links.review else {
+            return false;
+        };
+        let mut slot = slot.lock().unwrap();
+        let Some(review) = slot.as_mut() else {
+            return false;
+        };
+        let shows = NappletAddr::parse(&review.pointer)
+            .is_ok_and(|r| r.author == addr.author && r.d_tag == addr.d_tag);
+        if shows {
+            review.intent_token = token.to_string();
+        }
+        shows
     }
 
     /// Refuse NAP-LINK reviews while `slot` holds one — the slot the app's
@@ -1994,6 +2044,12 @@ fn reviewed_grants(reviewed: &[String]) -> Vec<String> {
 pub struct NappletReview {
     /// How to open it again: `naddr…` or `<npub>:<dtag>`.
     pub pointer: String,
+    /// A NAP-INTENT delivery waiting for this napplet: set once a napplet a
+    /// request recommended was added from this review. The sheet's Open
+    /// passes it to the window it starts, which binds it and receives the
+    /// payload. Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub intent_token: String,
     /// The fetch is still running. Set the moment the user asks, so the screen
     /// opens immediately and says so, rather than leaving them watching a grid
     /// that has not changed while several relays are tried.
@@ -2936,6 +2992,7 @@ mod tests {
             manifest: None,
             error: String::new(),
             holder: None,
+            intent_token: String::new(),
         });
         let out = host
             .frame(&session, &link_frame(&format!("nostr:{}", napplet_naddr())))
@@ -2973,6 +3030,7 @@ mod tests {
             manifest: None,
             error: String::new(),
             holder: None,
+            intent_token: String::new(),
         })));
         let (host, session) = linked_host(&["link"], slot.clone()).await;
         let next = napplet_naddr();
@@ -3051,6 +3109,7 @@ mod tests {
             manifest: None,
             error: String::new(),
             holder: None,
+            intent_token: String::new(),
         }
     }
 

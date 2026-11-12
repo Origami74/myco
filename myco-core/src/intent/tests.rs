@@ -35,6 +35,8 @@ struct Fixture {
     host: NappletHost,
     intents: Arc<TestIntents>,
     hints: Arc<TestHints>,
+    /// The app-wide review slot, as `AppRuntime` shares it.
+    review: crate::napplet::ReviewSlot,
     feed: NappletAddr,
     profiles: NappletAddr,
     cards: NappletAddr,
@@ -173,10 +175,14 @@ async fn fixture() -> Fixture {
     ctx.intents = intents.clone();
     let mut addrs = addrs.into_iter();
     let hints = Arc::new(TestHints::default());
+    let review: crate::napplet::ReviewSlot = Arc::new(Mutex::new(None));
     let fixture = Fixture {
-        host: NappletHost::new(ctx).with_hint_resolver(hints.clone()),
+        host: NappletHost::new(ctx)
+            .with_hint_resolver(hints.clone())
+            .with_review_slot(review.clone()),
         intents,
         hints,
+        review,
         feed: addrs.next().unwrap(),
         profiles: addrs.next().unwrap(),
         cards: addrs.next().unwrap(),
@@ -1038,87 +1044,164 @@ async fn an_installed_hint_is_opened_unless_there_is_a_default() {
     assert_eq!(open_command(&out).unwrap().0, key_of(&f.profiles));
 }
 
-/// A napplet the hint names that is not installed: its review goes up over
-/// the caller, which hears `ok` at once; once added, it is opened with the
-/// payload, without a second question.
-#[tokio::test]
-async fn an_uninstalled_hint_is_offered_and_opened_once_added() {
-    let f = fixture().await;
-    let newapp = NappletAddr {
-        author: nostr::Keys::generate().public_key(),
-        d_tag: Some("newapp".into()),
-        relays: Vec::new(),
-    };
+/// What the window host does with a `review-napplet`: fetch it, so the
+/// app-wide slot shows that napplet's review.
+fn show_review(f: &Fixture, pointer: &str) {
+    *f.review.lock().unwrap() = Some(crate::napplet::NappletReview {
+        pointer: pointer.to_string(),
+        intent_token: String::new(),
+        loading: false,
+        installing: false,
+        added: false,
+        installed: false,
+        ready: false,
+        unreviewed: Vec::new(),
+        update_available: false,
+        already_installed: false,
+        grants: Vec::new(),
+        title: String::new(),
+        description: String::new(),
+        requires: Vec::new(),
+        optional: Vec::new(),
+        unsupported: Vec::new(),
+        icon: None,
+        error: String::new(),
+        holder: None,
+        manifest: None,
+    });
+}
+
+fn review_command(frames: &[ToShell]) -> Option<String> {
+    frames.iter().find_map(|f| match f {
+        ToShell::ReviewNapplet { pointer } => Some(pointer.clone()),
+        _ => None,
+    })
+}
+
+/// Only `profiles` is installed; `cards` is recommended. Myco looks its
+/// manifest up, puts its review up over the caller and answers `ok` at once.
+/// Returns the caller's window and the review's pointer.
+async fn hint_cards(f: &Fixture) -> (String, String) {
     f.hints.0.lock().unwrap().insert(
-        address_of(&newapp),
-        vec![Archetype {
-            slug: "profile".into(),
-            convention: PROFILE.into(),
-            params: Vec::new(),
-        }],
+        address_of(&f.cards),
+        vec![handler_for(&f.cards, "Cards").archetypes[0].clone()],
     );
     let feed = f.open(&f.feed).await;
     let out = f
         .invoke(
             &feed,
             json!({"archetype": "profile", "payload": {"pubkey": "abc"},
-                   "handlerHint": hint_for(&newapp)}),
+                   "handlerHint": hint_for(&f.cards)}),
         )
         .await;
     assert!(
         open_command(&out).is_none(),
         "profiles is not opened instead"
     );
-    let results = of_type(&out, "intent.invoke.result");
     assert_eq!(
-        results[0]["result"],
+        of_type(&out, "intent.invoke.result")[0]["result"],
         json!({"ok": true, "archetype": "profile", "action": "open", "handled": true,
-               "handler": key_of(&newapp), "convention": PROFILE})
+               "handler": key_of(&f.cards), "convention": PROFILE})
     );
-    let review = out
-        .iter()
-        .find_map(|f| match f {
-            ToShell::ReviewNapplet { pointer } => Some(pointer.clone()),
-            _ => None,
-        })
-        .expect("the review is put up");
+    let review = review_command(&out).expect("the review is put up");
     let parsed = NappletAddr::parse(&review).unwrap();
-    assert_eq!(parsed.author, newapp.author);
-    assert_eq!(parsed.d_tag.as_deref(), Some("newapp"));
+    assert_eq!(parsed.author, f.cards.author);
+    assert_eq!(parsed.d_tag.as_deref(), Some("cards"));
     assert_eq!(parsed.relays, vec!["wss://relay.example"]);
+    show_review(f, &review);
+    (feed, review)
+}
 
-    // The user adds it: the Library changes.
-    let mut handlers = vec![
-        handler_for(&f.profiles, "Profiles"),
-        handler_for(&newapp, "New app"),
-    ];
-    handlers.extend(builtin_handlers());
-    *f.intents.0.lock().unwrap() = IntentCatalogSnapshot {
-        handlers,
-        ..IntentCatalogSnapshot::default()
-    };
+/// The user adds `cards` from its review: the Library changes.
+async fn add_cards(f: &Fixture) {
+    f.both(None);
     f.host.intents_changed().await;
+}
+
+/// A recommended napplet that is not installed: once the user adds it from
+/// its review, the payload waits on that review's Open — nothing opens by
+/// itself — and reaches the napplet when it opens with the token.
+#[tokio::test]
+async fn an_added_hint_gets_its_payload_through_the_reviews_open() {
+    let f = fixture().await;
+    let (feed, _) = hint_cards(&f).await;
+    add_cards(&f).await;
+
     let frames = f.drain(&feed).await;
-    let opened = frames.iter().find_map(|f| match f {
-        ToShell::OpenNapplet {
-            pointer,
-            token,
-            after_review,
-            ..
-        } => Some((pointer.clone(), token.clone(), *after_review)),
-        _ => None,
-    });
-    let (pointer, token, after_review) = opened.expect("the new app is opened");
-    assert_eq!(pointer, key_of(&newapp));
-    assert!(after_review, "the Add was the user's answer");
+    assert!(open_command(&frames).is_none(), "nothing opens by itself");
     assert!(
         of_type(&frames, "intent.invoke.result").is_empty(),
         "the caller was answered once, already"
     );
-    // Closing the finished review changes nothing more.
-    f.host.review_closed(&review).await;
-    assert!(open_command(&f.drain(&feed).await).is_none());
+    let token = f
+        .review
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .intent_token
+        .clone();
+    assert!(!token.is_empty(), "the review's Open carries the payload");
+
+    // Open: the new window binds the token and hears the payload.
+    let cards = f.open(&f.cards).await;
+    assert!(f.host.bind_intent(&cards, &token).await);
+    let delivered = of_type(&f.drain(&cards).await, "intent.deliver");
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        delivered[0]["delivery"]["payload"],
+        json!({"pubkey": "abc"})
+    );
+    assert_eq!(delivered[0]["delivery"]["sender"], key_of(&f.feed));
+}
+
+/// Accepted, then the caller's window closes: the payload still reaches the
+/// napplet once it is added — delivery does not depend on the source.
+#[tokio::test]
+async fn an_accepted_hint_outlives_the_callers_window() {
+    let f = fixture().await;
+    let (feed, _) = hint_cards(&f).await;
+    f.host.close(&feed);
+    add_cards(&f).await;
+    let token = f
+        .review
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .intent_token
+        .clone();
     assert!(!token.is_empty());
+    let cards = f.open(&f.cards).await;
+    assert!(f.host.bind_intent(&cards, &token).await);
+    assert_eq!(of_type(&f.drain(&cards).await, "intent.deliver").len(), 1);
+}
+
+/// The review that was put up is gone — replaced by another, say — when the
+/// napplet is installed some other way: the request is dropped. No window
+/// opens and no other review gets the payload.
+#[tokio::test]
+async fn an_added_hint_without_its_review_is_dropped() {
+    let f = fixture().await;
+    let (feed, _) = hint_cards(&f).await;
+    show_review(
+        &f,
+        &format!(
+            "{}:other",
+            nostr::Keys::generate().public_key().to_bech32().unwrap()
+        ),
+    );
+    add_cards(&f).await;
+    assert!(open_command(&f.drain(&feed).await).is_none());
+    assert!(f
+        .review
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .intent_token
+        .is_empty());
+    assert_eq!(f.host.pending_intent_count(), 0);
 }
 
 /// The review is closed without adding the app: the request is resolved as
@@ -1240,29 +1323,25 @@ async fn launch(f: &Fixture, session: &str, address: &str) -> Vec<ToShell> {
     .await
 }
 
-/// `intent.launch`: the napplet the coordinate names opens if it is
-/// installed — role or no role — and its install review goes up over the
-/// caller if not. No other napplet is ever opened, and the caller hears
-/// `ok` with the target's catalog identifier.
-#[tokio::test]
-async fn launch_opens_or_reviews_exactly_the_named_napplet() {
-    let f = fixture().await;
-    // A default for the role the target also fills changes nothing.
-    f.both(Some(&f.profiles));
-    let feed = f.open(&f.feed).await;
-    let notes = NappletAddr {
+fn notes() -> NappletAddr {
+    NappletAddr {
         author: nostr::Keys::generate().public_key(),
         d_tag: Some("notes".into()),
         relays: Vec::new(),
-    };
+    }
+}
 
-    // Not installed: the review, and `ok`.
+/// `intent.launch` of a napplet that is not installed: its review goes up
+/// over the caller, which hears `ok` with the target's catalog identifier.
+/// A default for a role the target might fill changes nothing.
+#[tokio::test]
+async fn launch_reviews_a_napplet_that_is_not_installed() {
+    let f = fixture().await;
+    f.both(Some(&f.profiles));
+    let feed = f.open(&f.feed).await;
+    let notes = notes();
     let out = launch(&f, &feed, &address_of(&notes)).await;
-    let review = out.iter().find_map(|f| match f {
-        ToShell::ReviewNapplet { pointer } => Some(pointer.clone()),
-        _ => None,
-    });
-    let parsed = NappletAddr::parse(&review.expect("the review is put up")).unwrap();
+    let parsed = NappletAddr::parse(&review_command(&out).expect("the review is put up")).unwrap();
     assert_eq!(parsed.author, notes.author);
     assert_eq!(parsed.d_tag.as_deref(), Some("notes"));
     assert_eq!(parsed.relays, vec!["wss://relay.example"]);
@@ -1271,8 +1350,15 @@ async fn launch_opens_or_reviews_exactly_the_named_napplet() {
         of_type(&out, "intent.launch.result")[0]["result"],
         json!({"ok": true, "handler": key_of(&notes)})
     );
+}
 
-    // Installed, with no role at all: opened, no token, nothing delivered.
+/// `intent.launch` of an installed napplet — with no role at all — opens it,
+/// with no token and nothing delivered.
+#[tokio::test]
+async fn launch_opens_an_installed_napplet() {
+    let f = fixture().await;
+    let feed = f.open(&f.feed).await;
+    let notes = notes();
     f.intents.0.lock().unwrap().installed = BTreeMap::from([(
         address_of(&notes),
         InstalledNapplet {
@@ -1282,7 +1368,7 @@ async fn launch_opens_or_reviews_exactly_the_named_napplet() {
     )]);
     let out = launch(&f, &feed, &address_of(&notes)).await;
     assert!(
-        matches!(out.first(), Some(ToShell::OpenNapplet { pointer, token, after_review: false, .. })
+        matches!(out.first(), Some(ToShell::OpenNapplet { pointer, token, .. })
             if pointer == "naddr1notes" && token.is_empty()),
         "{out:?}"
     );
@@ -1291,6 +1377,37 @@ async fn launch_opens_or_reviews_exactly_the_named_napplet() {
         true
     );
     assert_eq!(f.host.pending_intent_count(), 0);
+}
+
+/// Installed or not, a launch passes the same gate: inside the review
+/// cooldown both are refused alike, so the answer never says which.
+#[tokio::test]
+async fn launch_does_not_say_what_is_installed() {
+    let f = fixture().await;
+    let feed = f.open(&f.feed).await;
+    let installed = notes();
+    f.intents.0.lock().unwrap().installed = BTreeMap::from([(
+        address_of(&installed),
+        InstalledNapplet {
+            pointer: "naddr1notes".into(),
+            title: "Notes".into(),
+        },
+    )]);
+    let absent = format!(
+        "35129:{}:absent",
+        nostr::Keys::generate().public_key().to_hex()
+    );
+    assert_eq!(
+        of_type(&launch(&f, &feed, &absent).await, "intent.launch.result")[0]["result"]["ok"],
+        true
+    );
+    for target in [address_of(&installed), absent.clone()] {
+        assert_eq!(
+            of_type(&launch(&f, &feed, &target).await, "intent.launch.result")[0]["result"],
+            json!({"ok": false, "error": nap_intent::LAUNCH_REJECTED}),
+            "{target}"
+        );
+    }
 }
 
 /// A root napplet (kind 15129) can be launched too.
@@ -1310,30 +1427,6 @@ async fn launch_names_a_root_napplet() {
     assert_eq!(
         of_type(&out, "intent.launch.result")[0]["result"]["handler"],
         author.to_bech32().unwrap()
-    );
-}
-
-/// A second review while the first is still settling is refused, without
-/// saying whether the napplet is installed.
-#[tokio::test]
-async fn a_launch_review_is_rate_limited() {
-    let f = fixture().await;
-    let feed = f.open(&f.feed).await;
-    let one = format!(
-        "35129:{}:one",
-        nostr::Keys::generate().public_key().to_hex()
-    );
-    let two = format!(
-        "35129:{}:two",
-        nostr::Keys::generate().public_key().to_hex()
-    );
-    assert_eq!(
-        of_type(&launch(&f, &feed, &one).await, "intent.launch.result")[0]["result"]["ok"],
-        true
-    );
-    assert_eq!(
-        of_type(&launch(&f, &feed, &two).await, "intent.launch.result")[0]["result"],
-        json!({"ok": false, "error": nap_intent::LAUNCH_REJECTED})
     );
 }
 

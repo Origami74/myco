@@ -43,10 +43,12 @@ prelude replaces `window.napplet.intent` with a binding that takes both:
 
 - A string starting `napplet:` is a URI. An archetype is a slug and never
   contains `:`, so the two cannot be confused.
-- A URI is normalized as the spec says: `?name=value` becomes a text payload
-  (nothing coerced, `+` stays `+`), and `#naddr1…` becomes `handlerHint`.
-- A malformed URI, a repeated query name, a query with an explicit payload, or
-  a bad fragment rejects the promise before anything is sent.
+- A URI is normalized exactly as `@napplet/nap` 0.38.1 does: `?name=value`
+  becomes a text payload (nothing coerced, `+` stays `+`, an empty `?` is an
+  empty payload), and `#naddr1…` becomes `handlerHint`.
+- A malformed URI or percent-encoding, a pair without `=`, a repeated name, a
+  query (even an empty one) with an explicit payload, or a bad fragment
+  rejects the promise before anything is sent.
 - `onDelivery` is added. Deliveries are held until a handler registers.
 - Invokes wait up to 5 minutes, not 30 s: the answer comes once the handler's
   window is open, which can wait on the user.
@@ -146,9 +148,15 @@ default or an explicit `choose`.
 3. Myco puts the app's **install review** over the caller's window, by
    NAP-LINK's rules (one review at a time, rate-limited).
 4. The caller hears `ok: true` at once, with the app's future `id` as
-   `handler`. The payload waits for up to **10 minutes**.
-5. **Added:** the app opens with the payload, without a second "Open …?"
-   (tapping Add was the answer), and the review sheet closes.
+   `handler`. That `handler` is provisional: if the user declines (step 6),
+   the spec's fallback can route the request to another app. The payload
+   waits for up to **10 minutes**, and it does not depend on the caller's
+   window staying open.
+5. **Added:** the payload goes onto that app's review (`intentToken`).
+   Nothing opens by itself: the sheet's **Open**, over the caller or on the
+   Apps screen, starts the app with the token and it receives the payload.
+   If that review is no longer the one showing (closed, or replaced by
+   another) when the app is installed, the request is dropped.
 6. **Closed without adding:** the request is resolved as if there had been no
    hint. The installed handler, or the chooser, gets it. If nothing takes it,
    it is dropped. The caller is not told again; the spec does not report
@@ -176,9 +184,10 @@ and no other app is ever opened.
 - Both answer `ok` with the app's catalog identifier.
 - A named (35129) or root (15129) app. A malformed target is
   `"invalid target"`.
-- A review that NAP-LINK's rules refuse (one already up, too soon after the
-  last) or a second launch within 750 ms is `"launch rejected"`. That error
-  never says whether the app is installed.
+- Every launch passes NAP-LINK's review gate first, installed target or not:
+  one of this window's reviews still up, or within 5 s of the last review or
+  launch, is `"launch rejected"`, as is a second launch within 750 ms. That
+  error never says whether the app is installed.
 - `launch` carries no payload. Data goes through `invoke`.
 
 AppStore's **Install** calls `launch` when `window.napplet.intent.launch`
@@ -224,7 +233,8 @@ The payload reaches the handler two ways, one for each draft:
   the handler subscribes to the convention's topic.
 - Both senders come from the caller's session, never from the caller.
 - A napplet that listens both ways hears the payload twice. Neither draft's
-  SDK does that.
+  SDK does that; a napplet built on both handles the duplicate itself. Myco
+  does not try to tell which one it uses.
 
 The `inc.event` timing is the hard part. Myco's prelude sends `shell.ready`
 before any napplet code runs, and the shim drops an `inc.event` for a topic
@@ -317,7 +327,7 @@ to the app that was opened. Both can be switched off per app.
 - Runtime: `nap/intent.rs` (validation, `LaunchRequest`, `resolve`, `hint_to_offer`,
   `contract_accepts`, `deliver_frame`, `IntentCatalog` seam on `NapContext`,
   `Outcome::Intent`), `nap/inc.rs`, `Session` topics, host commands
-  `open-napplet` (with `afterReview`), `open-nsite`, `choose-intent-handler`.
+  `open-napplet`, `open-nsite`, `choose-intent-handler`.
   The binding: `assets/myco-prelude.js` `installIntent`, tested by
   `tests/browser/intent.mjs`.
 - Core: `intent.rs` (`LibraryIntents`, backfill, `nsite_host`, the pending

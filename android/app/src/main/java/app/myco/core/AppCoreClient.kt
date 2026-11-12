@@ -115,6 +115,9 @@ data class NappletReview(
     val error: String,
     /** The peer who shared it, if any — so a retry tries their phone first again. */
     val holder: String? = null,
+    /** A NAP-INTENT delivery waiting for this app: Open passes it to the
+     *  window it starts. Empty when none. */
+    val intentToken: String = "",
 ) {
     companion object {
         /** Read one from the core's JSON: the state's `nappletReview`, or an open's `updateReview`. */
@@ -148,6 +151,7 @@ data class NappletReview(
             }.orEmpty(),
             error = json.optString("error"),
             holder = json.optString("holder").ifEmpty { null },
+            intentToken = json.optString("intentToken"),
         )
     }
 }

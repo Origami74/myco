@@ -1778,6 +1778,7 @@ impl AppRuntime {
                 icon: None,
                 error: message,
                 holder: holder_for_retry.clone(),
+                intent_token: String::new(),
                 manifest: None,
             });
         };
@@ -1863,6 +1864,7 @@ impl AppRuntime {
             grants: Vec::new(),
             error: String::new(),
             holder: holder.clone(),
+            intent_token: String::new(),
             manifest: None,
         });
 
@@ -1942,6 +1944,7 @@ impl AppRuntime {
                         grants,
                         error: String::new(),
                         holder: holder.clone(),
+                        intent_token: String::new(),
                         manifest: Some(event),
                     }
                 }
@@ -1969,6 +1972,7 @@ impl AppRuntime {
                         grants: Vec::new(),
                         error: e.to_string(),
                         holder: holder.clone(),
+                        intent_token: String::new(),
                         manifest: None,
                     }
                 }
@@ -3544,6 +3548,7 @@ fn update_review(
         grants,
         error: String::new(),
         holder: None,
+        intent_token: String::new(),
         manifest: None,
     }
 }
@@ -4341,6 +4346,7 @@ mod tests {
             icon: None,
             error: String::new(),
             holder: None,
+            intent_token: String::new(),
             manifest: None,
         };
         rt.napplet_updates
@@ -5267,6 +5273,7 @@ mod tests {
             grants: Vec::new(),
             error: String::new(),
             holder: None,
+            intent_token: String::new(),
             manifest: None,
         }
     }

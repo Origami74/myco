@@ -17,7 +17,9 @@ function harness() {
   };
   const context = vm.createContext({
     window, crypto, TextDecoder, Uint8Array, Promise, Set, Map, Object, Error,
-    JSON, setTimeout, clearTimeout, decodeURIComponent, Array, navigator: {},
+    JSON, clearTimeout, decodeURIComponent, Array, navigator: {},
+    // Unanswered calls must not keep the test process alive.
+    setTimeout: (fn, ms) => { const t = setTimeout(fn, ms); t.unref(); return t; },
     Navigator: function () {},
   });
   context.Navigator.prototype = {};
@@ -153,3 +155,20 @@ console.log('PASS: NAP-INTENT binding');
   assert.equal(h.posted.filter((m) => m.type === 'intent.launch').length, 1);
 }
 console.log('PASS: NAP-INTENT launch');
+
+// Normalization matches @napplet/nap 0.38.1 exactly.
+{
+  const h = harness();
+  const sent = () => h.posted.filter((m) => m.type === 'intent.invoke').at(-1)?.request;
+  h.napplet.intent.invoke('napplet:x/open?').catch(() => {});
+  assert.deepEqual(sent().payload, {}, 'an empty query is an empty payload');
+  h.napplet.intent.invoke('napplet:x/open?=v').catch(() => {});
+  assert.deepEqual(sent().payload, { '': 'v' }, 'an empty name is kept, as upstream');
+  const before = h.posted.length;
+  for (const bad of ['napplet:x/open?a', 'napplet:x/open?a=1&', 'napplet:x/open?a=%E0%A4%A']) {
+    await assert.rejects(h.napplet.intent.invoke(bad), bad);
+  }
+  await assert.rejects(h.napplet.intent.invoke('napplet:x/open?', { payload: {} }), 'a query, even empty, excludes a payload');
+  assert.equal(h.posted.length, before);
+}
+console.log('PASS: normalization parity');

@@ -388,6 +388,16 @@ pub(crate) fn hint_naddr(hint: &HandlerHint) -> Option<String> {
     )
 }
 
+/// The roles the catalog handler `key` declares.
+fn archetypes_of(catalog: &IntentCatalogSnapshot, key: &str) -> Vec<Archetype> {
+    catalog
+        .handlers
+        .iter()
+        .find(|h| h.key == key)
+        .map(|h| h.archetypes.clone())
+        .unwrap_or_default()
+}
+
 /// The catalog identifier the napplet a hint names will have once installed.
 fn hint_handler_key(hint: &HandlerHint) -> String {
     use nostr::nips::nip19::ToBech32;
@@ -424,6 +434,9 @@ struct PendingIntent {
     /// first-draft handler takes it as an `inc.event` when it subscribes.
     delivered: bool,
     created: Instant,
+    /// How long it may wait to be bound: [`PENDING_INTENT_TTL`], or
+    /// [`AWAITING_INSTALL_TTL`] once it rides on a review's Open.
+    ttl: Duration,
 }
 
 /// An "open with…" question waiting on the user.
@@ -580,12 +593,12 @@ impl NappletHost {
         if let (Resolution::Choose(options), Some(pick)) = (&resolution, pick) {
             return match options.iter().find(|(c, _)| c.key == pick) {
                 Some((candidate, convention)) => {
-                    self.intent_route(caller, sender, request, candidate, convention, now, false)
+                    self.intent_route(caller, sender, request, candidate, convention, now)
                 }
                 None => Err(Box::new((request, INVOKE_FAILED))),
             };
         }
-        self.route_resolution(caller, sender, request, resolution, now, false)
+        self.route_resolution(caller, sender, request, resolution, now)
     }
 
     /// Carry out a resolution: open the handler, or ask the user.
@@ -596,22 +609,13 @@ impl NappletHost {
         request: IntentRequest,
         resolution: Resolution,
         now: Instant,
-        after_review: bool,
     ) -> Result<Vec<ToShell>, Unrouted> {
         match resolution {
             Resolution::Refused(error) => Err(Box::new((request, error))),
             Resolution::Handler {
                 candidate,
                 convention,
-            } => self.intent_route(
-                caller,
-                sender,
-                request,
-                &candidate,
-                &convention,
-                now,
-                after_review,
-            ),
+            } => self.intent_route(caller, sender, request, &candidate, &convention, now),
             Resolution::Choose(options) => {
                 let token = new_token();
                 let candidates = options
@@ -710,8 +714,12 @@ impl NappletHost {
         Ok(vec![ToShell::to_napplet(accepted), review])
     }
 
-    /// Requests waiting on the install of a napplet the catalog now has:
-    /// route each to it, over the window that asked.
+    /// Requests waiting on the install of a napplet the catalog now has. The
+    /// payload is handed to that napplet's review — the sheet the user just
+    /// added it from — and goes to the napplet when the user taps its Open.
+    /// Nothing opens by itself. If the review showing is not that napplet's
+    /// any more (closed, or replaced by another), the request is dropped: it
+    /// was accepted, and failing after acceptance is the runtime's to decide.
     fn awaiting_installed(&self, catalog: &IntentCatalogSnapshot, now: Instant) {
         let ready: Vec<AwaitingInstall> = {
             let mut awaiting = self.intents.awaiting.lock().unwrap();
@@ -725,25 +733,64 @@ impl NappletHost {
             ready
         };
         for a in ready {
-            // Only the napplet the user just added: the request was accepted
-            // for it, and the review it was added from was its.
-            let resolution = match nap_intent::resolve(catalog, &a.request) {
-                Resolution::Choose(options) => options
-                    .into_iter()
-                    .find(|(c, _)| c.address.as_deref() == Some(a.hint.address.as_str()))
-                    .map(|(candidate, convention)| Resolution::Handler {
-                        candidate,
-                        convention,
-                    })
-                    .unwrap_or(Resolution::Refused(INVOKE_FAILED)),
-                other => other,
+            let hinted = catalog
+                .handlers
+                .iter()
+                .find(|h| h.address.as_deref() == Some(a.hint.address.as_str()))
+                .and_then(|_| {
+                    nap_intent::candidates(catalog, &a.request.archetype)
+                        .into_iter()
+                        .find(|c| c.address.as_deref() == Some(a.hint.address.as_str()))
+                });
+            let Some(candidate) = hinted else {
+                tracing::info!(hint = %a.hint.address, "added napplet cannot take the request; dropped");
+                continue;
             };
-            match self.route_resolution(&a.caller, &a.sender, a.request, resolution, now, true) {
-                Ok(frames) => self.send_to(&a.caller, frames),
-                Err(unrouted) => tracing::info!(
-                    error = unrouted.1,
-                    "installed intent handler could not be opened; dropped"
-                ),
+            let Some(convention) =
+                nap_intent::contract_accepts(&archetypes_of(catalog, &candidate.key), &a.request)
+            else {
+                tracing::info!(hint = %a.hint.address, "added napplet cannot take the request; dropped");
+                continue;
+            };
+            let frames = match self.intent_route(
+                &a.caller,
+                &a.sender,
+                a.request,
+                &candidate,
+                &convention,
+                now,
+            ) {
+                Ok(frames) => frames,
+                Err(unrouted) => {
+                    tracing::info!(
+                        error = unrouted.1,
+                        "added napplet could not be routed; dropped"
+                    );
+                    continue;
+                }
+            };
+            let Some(token) = frames.iter().find_map(|f| match f {
+                ToShell::OpenNapplet { token, .. } => Some(token.clone()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let addr = NappletAddr {
+                author: match nostr::PublicKey::from_hex(&a.hint.author) {
+                    Ok(pk) => pk,
+                    Err(_) => continue,
+                },
+                d_tag: Some(a.hint.d_tag.clone()),
+                relays: Vec::new(),
+            };
+            if self.attach_review_token(&addr, &token) {
+                tracing::info!(hint = %a.hint.address, "payload waits on the added napplet's Open");
+                if let Some(p) = self.intents.pending.lock().unwrap().get_mut(&token) {
+                    p.ttl = AWAITING_INSTALL_TTL;
+                }
+            } else {
+                tracing::info!(hint = %a.hint.address, "its review is gone; the accepted request is dropped");
+                self.intents.pending.lock().unwrap().remove(&token);
             }
         }
     }
@@ -787,7 +834,7 @@ impl NappletHost {
             tracing::info!(hint = %a.hint.address, "intent hint declined; resolving without it");
             a.request.hint = None;
             let resolution = nap_intent::resolve(&catalog, &a.request);
-            match self.route_resolution(&a.caller, &a.sender, a.request, resolution, now, false) {
+            match self.route_resolution(&a.caller, &a.sender, a.request, resolution, now) {
                 Ok(frames) => self.send_to(&a.caller, frames),
                 Err(unrouted) => tracing::info!(
                     error = unrouted.1,
@@ -857,11 +904,6 @@ impl NappletHost {
     /// and the caller hears back when the window binds the token. Refused,
     /// the request comes back with the reason, for the caller to answer in
     /// its own terms.
-    // Eight with `self`: each is a distinct part of one routing decision
-    // (who asked, who is told, what, to whom, on which convention, when, and
-    // whether the user already answered), and a bundle struct would only
-    // rename them.
-    #[allow(clippy::too_many_arguments)]
     fn intent_route(
         &self,
         caller: &str,
@@ -870,7 +912,6 @@ impl NappletHost {
         candidate: &Candidate,
         convention: &str,
         now: Instant,
-        after_review: bool,
     ) -> Result<Vec<ToShell>, Unrouted> {
         if candidate.key == MYCO_HANDLER_KEY {
             let Some(host) = nsite_host(request.payload.as_ref()) else {
@@ -918,13 +959,13 @@ impl NappletHost {
                 bound: None,
                 delivered: false,
                 created: now,
+                ttl: PENDING_INTENT_TTL,
             },
         );
         Ok(vec![ToShell::OpenNapplet {
             pointer: candidate.pointer.clone(),
             title: candidate.title.clone().unwrap_or_default(),
             token,
-            after_review,
         }])
     }
 
@@ -960,6 +1001,14 @@ impl NappletHost {
                 .map(|npub| handler_key(&npub, request.d_tag.as_deref()))
                 .unwrap_or_else(|| request.address.clone())
         };
+        // The same gate whether or not it is installed, so the answer never
+        // says which.
+        if let Err(why) = self.gate_launch(caller, now) {
+            tracing::info!(session = caller, why, "intent: launch not admitted");
+            return vec![ToShell::to_napplet(
+                request.failed(nap_intent::LAUNCH_REJECTED),
+            )];
+        }
         let catalog = self.ctx.intents.snapshot().await;
         let command = match catalog.installed.get(&request.address) {
             Some(app) => {
@@ -969,7 +1018,6 @@ impl NappletHost {
                     title: app.title.clone(),
                     // Nothing to deliver.
                     token: String::new(),
-                    after_review: false,
                 }
             }
             None => {
@@ -983,18 +1031,8 @@ impl NappletHost {
                         request.failed(nap_intent::INVALID_TARGET),
                     )];
                 };
-                match self.admit_review(caller, &pointer, now) {
-                    Ok(review) => {
-                        tracing::info!(session = caller, target = %request.address, "intent: launch offers install");
-                        review
-                    }
-                    Err(why) => {
-                        tracing::info!(session = caller, why, "intent: launch review not admitted");
-                        return vec![ToShell::to_napplet(
-                            request.failed(nap_intent::LAUNCH_REJECTED),
-                        )];
-                    }
-                }
+                tracing::info!(session = caller, target = %request.address, "intent: launch offers install");
+                self.launch_review(caller, &pointer)
             }
         };
         vec![command, ToShell::to_napplet(request.accepted(&handler))]
@@ -1041,7 +1079,6 @@ impl NappletHost {
                 candidate,
                 convention,
                 now,
-                false,
             ) {
                 Ok(frames) => frames,
                 Err(unrouted) => {
@@ -1076,7 +1113,7 @@ impl NappletHost {
             let Some(p) = pending.get_mut(token) else {
                 return false;
             };
-            if p.bound.is_some() || p.created.elapsed() > PENDING_INTENT_TTL {
+            if p.bound.is_some() || p.created.elapsed() > p.ttl {
                 return false;
             }
             if p.author != author || p.d_tag != d_tag {
@@ -1215,7 +1252,7 @@ impl NappletHost {
             let mut pending = self.intents.pending.lock().unwrap();
             let tokens: Vec<String> = pending
                 .iter()
-                .filter(|(_, p)| now.saturating_duration_since(p.created) > PENDING_INTENT_TTL)
+                .filter(|(_, p)| now.saturating_duration_since(p.created) > p.ttl)
                 .map(|(t, _)| t.clone())
                 .collect();
             tokens.iter().filter_map(|t| pending.remove(t)).collect()
@@ -1260,11 +1297,6 @@ impl NappletHost {
             .lock()
             .unwrap()
             .retain(|_, c| c.caller != session_id);
-        self.intents
-            .awaiting
-            .lock()
-            .unwrap()
-            .retain(|a| a.caller != session_id);
         self.intents.last_invoke.lock().unwrap().remove(session_id);
     }
 

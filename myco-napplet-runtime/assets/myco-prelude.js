@@ -610,27 +610,36 @@ var MycoPrelude = (function () {
     if (fragment !== null && options.handlerHint !== undefined) {
       throw new Error("Intent handler fragment cannot accompany an explicit handler hint");
     }
-    var m = /^napplet:([^/?#]+)\/([^/?#]+)(?:\?(.*))?$/.exec(rest);
-    if (!m) throw new Error("invalid convention URI");
-    var request = { archetype: m[1], action: m[2], convention: "napplet:" + m[1] + "/" + m[2] };
-    if (m[3] !== undefined && m[3] !== "") {
+    // As @napplet/nap's normalizeConventionUri (0.38.1), so a napplet sees
+    // the same payload, and the same errors, on any conformant binding.
+    decodeURIComponent(rest);
+    var q = rest.indexOf("?");
+    var convention = q >= 0 ? rest.slice(0, q) : rest;
+    var m = /^napplet:([^/?#]+)\/([^/?#]+)$/.exec(convention);
+    if (!m) throw new Error("Convention URI must use napplet:<archetype>/<intent> syntax");
+    var request = { archetype: m[1], action: m[2], convention: convention };
+    if (q < 0) {
+      if (options.payload !== undefined) request.payload = options.payload;
+    } else {
       if (options.payload !== undefined) {
-        throw new Error("Intent query parameters cannot accompany an explicit payload");
+        throw new Error("Convention URI queries cannot be combined with an explicit payload");
       }
       var payload = {};
-      var pairs = m[3].split("&");
-      for (var i = 0; i < pairs.length; i++) {
-        var eq = pairs[i].indexOf("=");
-        var name = decodeURIComponent(eq >= 0 ? pairs[i].slice(0, eq) : pairs[i]);
-        var value = eq >= 0 ? decodeURIComponent(pairs[i].slice(eq + 1)) : "";
-        if (Object.prototype.hasOwnProperty.call(payload, name)) {
-          throw new Error("Intent query parameter repeated: " + name);
+      var query = rest.slice(q + 1);
+      if (query) {
+        var pairs = query.split("&");
+        for (var i = 0; i < pairs.length; i++) {
+          var eq = pairs[i].indexOf("=");
+          if (eq < 0) throw new Error("Convention URI query parameters must use name=value form");
+          var name = decodeURIComponent(pairs[i].slice(0, eq));
+          var value = decodeURIComponent(pairs[i].slice(eq + 1));
+          if (Object.prototype.hasOwnProperty.call(payload, name)) {
+            throw new Error("Convention URI query parameter names must be unique");
+          }
+          payload[name] = value;
         }
-        payload[name] = value;
       }
       request.payload = payload;
-    } else if (options.payload !== undefined) {
-      request.payload = options.payload;
     }
     if (options.handler !== undefined) request.handler = options.handler;
     if (options.behavior !== undefined) request.behavior = options.behavior;
