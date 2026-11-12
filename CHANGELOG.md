@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-12
+
 ### Added
 
 - **Updates from your Circle.** Every phone keeps the newest Myco release APK
@@ -47,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Myco: the mesh traffic is unchanged.
 - **Smaller APK.** The Myco mark (launcher, splash, TV banner) is a WebP
   instead of a PNG: 1.3 MB to 0.3 MB.
+- **Built on newer fips.** A USB path is dropped the moment its cable is
+  pulled, so quick replugs no longer run out of room for a new one; a USB
+  link whose writes fail ends instead of hanging; and a peer that restarts
+  is dialled again over the network instead of only over the link it had.
 
 ### Fixed
 
