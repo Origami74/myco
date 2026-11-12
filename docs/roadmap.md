@@ -11,35 +11,26 @@ map, the [index](./README.md).
 
 ---
 
-## Status — 2026-10-23
+## Status — 2026-11-12
 
-**Shipped in v0.12.0 and v0.12.1** (2026-10-23; v0.12.1 is the same Myco on
-current fips; the [CHANGELOG](../CHANGELOG.md) and
+**Shipped in v0.13.0** (2026-11-12; the [CHANGELOG](../CHANGELOG.md) and
 [release notes](../RELEASE-NOTES.md) have the detail):
 
-- **Myco update notices.** A publisher-signed stable release on Zapstore is
-  found by a daily check, from Zapstore and from the Circle, so a mesh-only
-  phone hears of it from peers; one notification per version, opt-out in
-  Settings. Installing stays with Zapstore — N11 is the in-Myco path.
-- **Private data for napplets.** `relay.publishEncrypted` encrypts to the
-  user's own key (NIP-44, local key or Amber), and the user's own encrypted
-  events reach napplets in plaintext.
-- **`blossom-local` uploads.** A second NAP-UPLOAD rail keeps a file on this
-  phone for the mesh, with no internet or signature; a `blossom` upload that
-  fails offline keeps a copy too. Budgeted per napplet.
-- **Files you pick** (NAP-FS, picker subset), **`napplet.link` links** open
-  the right app, and **Android TV**.
-- **App menu and permissions.** A compact long-press menu, a copyable share
-  link, and permissions in Android-style groups with levels (acts as you,
-  sensitive, standard) and switches on the install sheet.
-- Fixes: offline install of a napplet already here, mesh subscriptions
-  getting every peer's answer, a refused publish answering `ok: false`,
-  Circle reach when the network's DNS isn't Myco's, and several redraw and
-  stall fixes.
+- **Updates from the Circle.** Phones keep the newest release APK and serve
+  it to paired phones over the mesh; it is checked against Zapstore's
+  publisher-signed file event and the release key, and Android asks before
+  installing (N11).
+- **Share Myco**, over a hotspot page or the Android share menu.
+- **No VPN needed.** Myco's own traffic runs on an in-app TCP/IP stack; the
+  VPN is opt-in, for other apps and the exit proxy.
+- **NAP-GAMEPAD** controller input for napplets.
+- Fixes: USB relink without a replug and on quick replugs, fewer USB
+  permission prompts, no stale USB lane, desktop fips discovering phones on
+  the LAN, napplets surviving rotation.
 
 ## Earlier releases
 
-**Shipped** (v0.11.0 — the USB lane (phone to phone and phone to desktop over a cable), a native TUN pump, napplets in the current NIP-5D format and their icons, `https:` resources, `mesh.blobs`, authors' Blossom server lists; v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
+**Shipped** (v0.12.0 and v0.12.1 — update notices, private data for napplets, `blossom-local` uploads, NAP-FS, `napplet.link`, Android TV, permission groups, current fips; v0.11.0 — the USB lane (phone to phone and phone to desktop over a cable), a native TUN pump, napplets in the current NIP-5D format and their icons, `https:` resources, `mesh.blobs`, authors' Blossom server lists; v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
 reads over a shared relay pool, Chronofeed and Simple Profile; v0.8.1 —
 local-first napplet reads, author relay lookup, relay skip list and selection; v0.8.0 — accounts, the AppStore napplet, updates over
 the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
