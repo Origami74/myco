@@ -206,7 +206,8 @@ fn deliver_pulled(
     }));
 }
 
-/// `mesh.blobs` — how many reachable mesh peers hold each named blob.
+/// `mesh.blobs` — how many places on the mesh hold each named blob: the
+/// reachable peers that do, plus this device if it does.
 ///
 /// The hashes are checked here, before anything is asked: each a sha256 in
 /// hex (read case-blind, answered lowercase), at most [`MAX_BLOB_HASHES`] of
@@ -223,7 +224,13 @@ async fn blobs(ctx: &NapContext, message: &Envelope) -> Envelope {
     };
     let mut blobs = serde_json::Map::new();
     for hash in &hashes {
-        let held = reach.holders.get(hash).copied().unwrap_or(0);
+        let mut held = reach.holders.get(hash).copied().unwrap_or(0);
+        // This device is part of the mesh it asks: a blob it holds, kept or
+        // cached, is one more place that serves it — and a `resource` read
+        // takes it from here before asking anyone. Read locally, never asked.
+        if ctx.blobs.has(hash).await || ctx.kept_blobs.has(hash).await {
+            held += 1;
+        }
         blobs.insert(hash.clone(), held.into());
     }
     message
@@ -892,6 +899,27 @@ mod tests {
             mesh.blob_asks(),
             vec![vec![HELD.to_string(), MISSING.to_string()]]
         );
+    }
+
+    /// This device counts as one more holder: a blob it holds — kept or
+    /// cached — is reachable here whether or not any peer has it, and adds to
+    /// what the peers hold.
+    #[tokio::test]
+    async fn blobs_counts_this_device_as_a_holder() {
+        let (ctx, mesh) = blobs_ctx();
+        let kept = ctx.kept_blobs.put(b"installed here").await.unwrap();
+        let cached = ctx.blobs.put(b"cached here").await.unwrap();
+        mesh.set_blob_holders(3, &[(cached.as_str(), 2)]);
+        let mut s = granted();
+        let out = call(&ctx, &mut s, blobs_call(json!([kept, cached, MISSING]))).await;
+        let r = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(r["peers"], 3);
+        assert_eq!(
+            r["blobs"],
+            json!({kept.clone(): 1, cached.clone(): 3, MISSING: 0}),
+            "here only: 1; here and two peers: 3; nowhere: 0"
+        );
+        assert!(r.get("local").is_none());
     }
 
     /// A miss is a zero, not an error and not a missing key.

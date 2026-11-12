@@ -95,7 +95,7 @@ Primitive references:
 | Field | Required | Type | Notes |
 |-------|----------|------|-------|
 | `peers` | yes | integer | Members that were asked: every paired member reachable right now. |
-| `blobs` | yes | object | Each asked hash (lowercase) → how many of those members hold it. `0` when none do. |
+| `blobs` | yes | object | Each asked hash (lowercase) → how many places on the mesh hold it: the members that do, plus this device if it holds it (kept or cached). `0` when none do. |
 
 `MeshSubscription` members:
 
@@ -112,7 +112,7 @@ Primitive references:
 
 **`subscribe(filters, options?)`** — Opens a live subscription. The shell registers the filters, answers with matching events already kept on this device, asks members up to `min(options.ttl, limits.subscribeTtl)` hops out for theirs, and sends `mesh.eose` once this device's backlog is done. Members' backlog streams in as `mesh.event` as it arrives, usually after `mesh.eose` but not necessarily. Every later matching event — published here or carried in from a member — is delivered the same way until the napplet closes the subscription or the shell does. Ephemeral events are never backlog: a subscription sees only those that arrive while it is open.
 
-**`blobs(hashes)`** — Asks the reachable members whether they hold each blob, and answers with a count per blob. It is for a napplet that wants to know what the people around it can serve — an app store showing only apps whose files a member's phone has. It asks only: the shell sends each member's blob store a `HEAD` for each hash and downloads nothing. It asks only the trusted mesh: never the internet, never a public server, never a stranger. A member that does not answer in time counts as not holding the blob.
+**`blobs(hashes)`** — Asks the reachable members whether they hold each blob, and answers with a count per blob. It is for a napplet that wants to know what the people around it can serve — an app store showing only apps whose files a member's phone has. It asks only: the shell sends each member's blob store a `HEAD` for each hash and downloads nothing. It asks only the trusted mesh: never the internet, never a public server, never a stranger. A member that does not answer in time counts as not holding the blob. This device is part of the mesh it asks: a blob it already holds counts as one more holder, read from its own store and asked of no one. A `resource` read takes it from here first anyway, so where a reachable blob lives makes no difference to the napplet.
 
 ## Wire Protocol
 

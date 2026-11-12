@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`mesh.blobs` counts this phone too.** A file this phone already holds
+  (installed or cached) counts as one more holder, as if a Circle phone had
+  it. AppStore's "Around you" now lists only apps whose files are reachable
+  here or on a nearby Circle phone, instead of every app the online feed
+  ever mentioned.
+
 - **NAP-INTENT names apps by publisher.** A candidate's `id`, a result's
   `handler` and a delivery's `sender` are `<npub>:<d>`, so two publishers'
   apps with the same `d` tag can't be mistaken for each other. Candidates
