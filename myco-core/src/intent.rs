@@ -44,8 +44,9 @@ use serde_json::Value;
 
 use myco_napplet_runtime::manifest::{Archetype, NappletManifest};
 use myco_napplet_runtime::nap::intent::{
-    self as nap_intent, Candidate, IntentCatalog, IntentCatalogSnapshot, IntentHandler,
-    IntentRequest, Resolution, INVOKE_FAILED, USER_CANCELLED,
+    self as nap_intent, Candidate, HandlerHint, InstalledNapplet, IntentCatalog,
+    IntentCatalogSnapshot, IntentHandler, IntentRequest, LaunchRequest, Resolution, INVOKE_FAILED,
+    USER_CANCELLED,
 };
 use myco_napplet_runtime::napplet_link::NappletLink;
 use myco_napplet_runtime::seams::Envelope;
@@ -96,16 +97,70 @@ pub fn handler_key(npub: &str, d_tag: Option<&str>) -> String {
     }
 }
 
+/// The coordinate the napplet by `npub` is published at: `35129:<hex>:<d>`
+/// for a named one — what a `handlerHint` or `intent.launch` names — and
+/// `15129:<hex>:` for a root one, which only `intent.launch` can name. `None`
+/// for an `npub` that does not decode.
+pub fn napplet_address(npub: &str, d_tag: Option<&str>) -> Option<String> {
+    use nostr::nips::nip19::FromBech32;
+    let author = nostr::PublicKey::from_bech32(npub).ok()?.to_hex();
+    Some(match d_tag.filter(|d| !d.is_empty()) {
+        Some(d) => format!("{}:{author}:{d}", nap_intent::HINT_KIND),
+        None => format!("{}:{author}:", nap_intent::ROOT_KIND),
+    })
+}
+
+/// Who sent a request, both ways a handler may be told: the catalog
+/// identifier the spec's `intent.deliver` carries, and the `d` tag a
+/// first-draft handler reads from its `inc.event`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Sender {
+    pub id: String,
+    pub d_tag: String,
+}
+
+impl Sender {
+    /// The napplet a session runs, as the runtime verified it: never
+    /// anything the napplet said about itself.
+    pub fn of(identity: &myco_napplet_runtime::session::NappletIdentity) -> Self {
+        use nostr::nips::nip19::ToBech32;
+        let npub = nostr::PublicKey::from_hex(&identity.author)
+            .ok()
+            .and_then(|pk| pk.to_bech32().ok());
+        let id = match npub {
+            Some(npub) => handler_key(&npub, Some(identity.d_tag.as_str())),
+            // A session without a manifest author (tests): its `d` is all
+            // there is.
+            None => identity.d_tag.clone(),
+        };
+        Self {
+            id,
+            d_tag: identity.d_tag.clone(),
+        }
+    }
+
+    /// A link from outside the app: Myco relayed it.
+    pub fn link() -> Self {
+        Self {
+            id: LINK_SENDER.to_string(),
+            d_tag: LINK_SENDER.to_string(),
+        }
+    }
+}
+
 /// Myco's own handlers.
 pub fn builtin_handlers() -> Vec<IntentHandler> {
     vec![IntentHandler {
         key: MYCO_HANDLER_KEY.to_string(),
         d_tag: MYCO_HANDLER_KEY.to_string(),
+        address: None,
         title: Some("Myco".to_string()),
         pointer: String::new(),
         archetypes: vec![Archetype {
             slug: NSITE_ARCHETYPE.to_string(),
             convention: NSITE_OPEN.to_string(),
+            // What [`nsite_host`] reads.
+            params: vec!["host".to_string(), "naddr".to_string(), "url".to_string()],
         }],
     }]
 }
@@ -132,6 +187,7 @@ pub fn catalog_from(
                 } else {
                     i.pointer.clone()
                 },
+                address: napplet_address(&i.author_npub, i.d_tag.as_deref()),
                 key,
                 d_tag,
                 title,
@@ -140,15 +196,36 @@ pub fn catalog_from(
                     .map(|a| Archetype {
                         slug: a.slug.clone(),
                         convention: a.convention.clone(),
+                        params: a.params.clone(),
                     })
                     .collect(),
             })
         })
         .collect();
     handlers.extend(builtin_handlers());
+    let installed = library
+        .iter()
+        .filter(|i| i.kind == LibraryKind::Napplet)
+        .filter_map(|i| {
+            let address = napplet_address(&i.author_npub, i.d_tag.as_deref())?;
+            let key = handler_key(&i.author_npub, i.d_tag.as_deref());
+            Some((
+                address,
+                InstalledNapplet {
+                    pointer: if i.pointer.is_empty() {
+                        key
+                    } else {
+                        i.pointer.clone()
+                    },
+                    title: i.title.clone(),
+                },
+            ))
+        })
+        .collect();
     IntentCatalogSnapshot {
         handlers,
         defaults: defaults.clone(),
+        installed,
     }
 }
 
@@ -268,19 +345,74 @@ fn new_token() -> String {
     hex::encode(bytes)
 }
 
+/// Where a hinted napplet's manifest is looked up: the runtime's sources —
+/// the hint's relays, the user's, peers nearby — under its network policy.
+/// The host only asks; it never dials.
+#[async_trait::async_trait]
+pub trait HintResolver: Send + Sync {
+    /// The dispatch contracts of the napplet `hint` names, from its manifest
+    /// once fetched and verified: signed by `hint.author`, kind
+    /// [`nap_intent::HINT_KIND`], exactly `hint.d_tag`. `None` when it cannot
+    /// be found or does not verify.
+    async fn contracts(&self, hint: &HandlerHint) -> Option<Vec<Archetype>>;
+}
+
+/// How long a hinted napplet's manifest may take to find before the request
+/// is resolved without it. The caller is waiting for its answer.
+pub const HINT_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long a request accepted for a napplet still to be installed waits for
+/// the user to finish adding it.
+pub const AWAITING_INSTALL_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// The `naddr` for a napplet coordinate and its relay hints, for the review
+/// sheet to fetch.
+fn coordinate_naddr(kind: u16, author: &str, d_tag: &str, relays: &[String]) -> Option<String> {
+    use nostr::nips::nip01::Coordinate;
+    use nostr::nips::nip19::{Nip19Coordinate, ToBech32};
+    let author = nostr::PublicKey::from_hex(author).ok()?;
+    let coordinate = Coordinate::new(nostr::Kind::from(kind), author).identifier(d_tag);
+    let relays: Vec<nostr::RelayUrl> = relays
+        .iter()
+        .filter_map(|r| nostr::RelayUrl::parse(r).ok())
+        .collect();
+    Nip19Coordinate::new(coordinate, relays).to_bech32().ok()
+}
+
+/// The `naddr` for a hint.
+pub(crate) fn hint_naddr(hint: &HandlerHint) -> Option<String> {
+    coordinate_naddr(
+        nap_intent::HINT_KIND,
+        &hint.author,
+        &hint.d_tag,
+        &hint.relays,
+    )
+}
+
+/// The catalog identifier the napplet a hint names will have once installed.
+fn hint_handler_key(hint: &HandlerHint) -> String {
+    use nostr::nips::nip19::ToBech32;
+    nostr::PublicKey::from_hex(&hint.author)
+        .ok()
+        .and_then(|pk| pk.to_bech32().ok())
+        .map(|npub| handler_key(&npub, Some(&hint.d_tag)))
+        .unwrap_or_else(|| hint.address.clone())
+}
+
 /// A payload on its way to a handler.
 struct PendingIntent {
     /// Which napplet may receive it: the manifest author (hex) and `d` tag
     /// (`""` for a root napplet) of the resolved handler.
     author: String,
     d_tag: String,
-    /// The handler's dTag, as the caller is told it.
+    /// The handler's catalog identifier, as the caller is told it.
     handler: String,
-    /// The convention — the INC topic it is delivered on.
+    archetype: String,
+    action: String,
+    /// The convention it is delivered on — also the INC topic a first-draft
+    /// handler listens on.
     convention: String,
     payload: Option<Value>,
-    /// The calling napplet's dTag: the delivery's `sender`.
-    sender: String,
+    sender: Sender,
     /// The calling window, which hears the result.
     caller: String,
     /// The call still to be answered — `Some` until the token is bound (or
@@ -288,15 +420,31 @@ struct PendingIntent {
     request: Option<IntentRequest>,
     /// The window the token was bound to.
     bound: Option<String>,
+    /// Sent as `intent.deliver`. Kept until it expires all the same: a
+    /// first-draft handler takes it as an `inc.event` when it subscribes.
+    delivered: bool,
     created: Instant,
 }
 
 /// An "open with…" question waiting on the user.
 struct PendingChoice {
     caller: String,
-    sender: String,
+    sender: Sender,
     request: IntentRequest,
     options: Vec<(Candidate, String)>,
+    created: Instant,
+}
+
+/// A request accepted for a hinted napplet that is not installed yet: its
+/// review is up over the caller's window. Routed when the napplet lands in
+/// the catalog; resolved without the hint if the user closes the review
+/// without adding it.
+struct AwaitingInstall {
+    caller: String,
+    sender: Sender,
+    /// Already answered ([`IntentRequest::accept`]).
+    request: IntentRequest,
+    hint: HandlerHint,
     created: Instant,
 }
 
@@ -305,13 +453,23 @@ struct PendingChoice {
 pub(crate) struct IntentDesk {
     pending: Mutex<HashMap<String, PendingIntent>>,
     choosers: Mutex<HashMap<String, PendingChoice>>,
+    awaiting: Mutex<Vec<AwaitingInstall>>,
     last_invoke: Mutex<HashMap<String, Instant>>,
     /// Availability per archetype as last pushed, for `intent.changed`.
     /// `None` until the first baseline.
     availability: Mutex<Option<BTreeMap<String, Value>>>,
+    /// Where hinted napplets are looked up. Without one, hints for napplets
+    /// that are not installed are ignored, as the spec allows.
+    resolver: RwLock<Option<Arc<dyn HintResolver>>>,
 }
 
 impl NappletHost {
+    /// Look hinted napplets up through `resolver`.
+    pub fn with_hint_resolver(self, resolver: Arc<dyn HintResolver>) -> Self {
+        *self.intents.resolver.write().unwrap() = Some(resolver);
+        self
+    }
+
     /// Frames for `session_id`'s own window, sent through its outbox.
     fn send_to(&self, session_id: &str, frames: Vec<ToShell>) {
         let outbox = {
@@ -342,7 +500,7 @@ impl NappletHost {
                 None => return Vec::new(),
             }
         };
-        let sender = session.lock().await.identity().d_tag.clone();
+        let sender = Sender::of(session.lock().await.identity());
 
         // One request per moment per window: an invoke opens windows and
         // puts sheets up, and a napplet looping on it must not.
@@ -369,7 +527,7 @@ impl NappletHost {
                     error,
                     "intent refused"
                 );
-                vec![ToShell::to_napplet(request.failed(error))]
+                reply(&request, request.failed(error))
             }
         }
     }
@@ -387,8 +545,8 @@ impl NappletHost {
     pub(crate) async fn intent_resolve(
         &self,
         caller: &str,
-        sender: &str,
-        request: IntentRequest,
+        sender: &Sender,
+        mut request: IntentRequest,
         now: Instant,
         pick: Option<&str>,
     ) -> Result<Vec<ToShell>, Unrouted> {
@@ -406,21 +564,55 @@ impl NappletHost {
         }
 
         let catalog = self.ctx.intents.snapshot().await;
-        match nap_intent::resolve(&catalog, &request) {
+        // A recommended napplet that is not here: offer to install it, over
+        // the caller's window. Anything that stops that — not found, not
+        // verified, cannot take the request, a sheet already up — resolves
+        // the request as if there had been no hint.
+        if caller != NO_WINDOW && pick.is_none() {
+            if let Some(hint) = nap_intent::hint_to_offer(&catalog, &request).cloned() {
+                match self.offer_hint(caller, sender, request, hint, now).await {
+                    Ok(frames) => return Ok(frames),
+                    Err(back) => request = *back,
+                }
+            }
+        }
+        let resolution = nap_intent::resolve(&catalog, &request);
+        if let (Resolution::Choose(options), Some(pick)) = (&resolution, pick) {
+            return match options.iter().find(|(c, _)| c.key == pick) {
+                Some((candidate, convention)) => {
+                    self.intent_route(caller, sender, request, candidate, convention, now, false)
+                }
+                None => Err(Box::new((request, INVOKE_FAILED))),
+            };
+        }
+        self.route_resolution(caller, sender, request, resolution, now, false)
+    }
+
+    /// Carry out a resolution: open the handler, or ask the user.
+    fn route_resolution(
+        &self,
+        caller: &str,
+        sender: &Sender,
+        request: IntentRequest,
+        resolution: Resolution,
+        now: Instant,
+        after_review: bool,
+    ) -> Result<Vec<ToShell>, Unrouted> {
+        match resolution {
             Resolution::Refused(error) => Err(Box::new((request, error))),
             Resolution::Handler {
                 candidate,
                 convention,
-            } => self.intent_route(caller, sender, request, &candidate, &convention, now),
+            } => self.intent_route(
+                caller,
+                sender,
+                request,
+                &candidate,
+                &convention,
+                now,
+                after_review,
+            ),
             Resolution::Choose(options) => {
-                if let Some(pick) = pick {
-                    return match options.iter().find(|(c, _)| c.key == pick) {
-                        Some((candidate, convention)) => {
-                            self.intent_route(caller, sender, request, candidate, convention, now)
-                        }
-                        None => Err(Box::new((request, INVOKE_FAILED))),
-                    };
-                }
                 let token = new_token();
                 let candidates = options
                     .iter()
@@ -443,7 +635,7 @@ impl NappletHost {
                         token,
                         PendingChoice {
                             caller: caller.to_string(),
-                            sender: sender.to_string(),
+                            sender: sender.clone(),
                             request,
                             options,
                             created: now,
@@ -451,6 +643,156 @@ impl NappletHost {
                     );
                 }
                 Ok(vec![command])
+            }
+        }
+    }
+
+    /// Offer the hinted napplet for install: find and verify its manifest,
+    /// check its contracts take the request, put its review up over the
+    /// caller's window, and accept the request — the caller hears `ok` now,
+    /// and the payload waits for the install ([`AwaitingInstall`]). Gives the
+    /// request back, unanswered, when any step fails.
+    async fn offer_hint(
+        &self,
+        caller: &str,
+        sender: &Sender,
+        mut request: IntentRequest,
+        hint: HandlerHint,
+        now: Instant,
+    ) -> Result<Vec<ToShell>, Box<IntentRequest>> {
+        let resolver = self.intents.resolver.read().unwrap().clone();
+        let Some(resolver) = resolver else {
+            return Err(Box::new(request));
+        };
+        let contracts =
+            match tokio::time::timeout(HINT_FETCH_TIMEOUT, resolver.contracts(&hint)).await {
+                Ok(Some(contracts)) => contracts,
+                Ok(None) => {
+                    tracing::info!(hint = %hint.address, "intent hint not found or not verified");
+                    return Err(Box::new(request));
+                }
+                Err(_) => {
+                    tracing::info!(hint = %hint.address, "intent hint lookup timed out");
+                    return Err(Box::new(request));
+                }
+            };
+        let Some(convention) = nap_intent::contract_accepts(&contracts, &request) else {
+            tracing::info!(hint = %hint.address, "intent hint cannot take this request");
+            return Err(Box::new(request));
+        };
+        let Some(pointer) = hint_naddr(&hint) else {
+            return Err(Box::new(request));
+        };
+        if self.intents.awaiting.lock().unwrap().len() >= MAX_PENDING_INTENTS {
+            return Err(Box::new(request));
+        }
+        let review = match self.admit_review(caller, &pointer, now) {
+            Ok(review) => review,
+            Err(why) => {
+                tracing::info!(session = caller, why, "intent hint review not admitted");
+                return Err(Box::new(request));
+            }
+        };
+        tracing::info!(
+            session = caller,
+            hint = %hint.address,
+            %convention,
+            "intent: offering the recommended handler for install"
+        );
+        let accepted = request.accept(&hint_handler_key(&hint), &convention);
+        self.intents.awaiting.lock().unwrap().push(AwaitingInstall {
+            caller: caller.to_string(),
+            sender: sender.clone(),
+            request,
+            hint,
+            created: now,
+        });
+        Ok(vec![ToShell::to_napplet(accepted), review])
+    }
+
+    /// Requests waiting on the install of a napplet the catalog now has:
+    /// route each to it, over the window that asked.
+    fn awaiting_installed(&self, catalog: &IntentCatalogSnapshot, now: Instant) {
+        let ready: Vec<AwaitingInstall> = {
+            let mut awaiting = self.intents.awaiting.lock().unwrap();
+            let (ready, waiting) = awaiting.drain(..).partition(|a| {
+                catalog
+                    .handlers
+                    .iter()
+                    .any(|h| h.address.as_deref() == Some(a.hint.address.as_str()))
+            });
+            *awaiting = waiting;
+            ready
+        };
+        for a in ready {
+            // Only the napplet the user just added: the request was accepted
+            // for it, and the review it was added from was its.
+            let resolution = match nap_intent::resolve(catalog, &a.request) {
+                Resolution::Choose(options) => options
+                    .into_iter()
+                    .find(|(c, _)| c.address.as_deref() == Some(a.hint.address.as_str()))
+                    .map(|(candidate, convention)| Resolution::Handler {
+                        candidate,
+                        convention,
+                    })
+                    .unwrap_or(Resolution::Refused(INVOKE_FAILED)),
+                other => other,
+            };
+            match self.route_resolution(&a.caller, &a.sender, a.request, resolution, now, true) {
+                Ok(frames) => self.send_to(&a.caller, frames),
+                Err(unrouted) => tracing::info!(
+                    error = unrouted.1,
+                    "installed intent handler could not be opened; dropped"
+                ),
+            }
+        }
+    }
+
+    /// The install review for `pointer` was closed. A request waiting on that
+    /// napplet goes to it if it was added; if not, it is resolved as though
+    /// it had never named one — what is installed, or the user's choice — and
+    /// dropped when nothing here takes it. The caller was answered long ago
+    /// and hears nothing more.
+    pub async fn review_closed(&self, pointer: &str) {
+        let Ok(addr) = NappletAddr::parse(pointer) else {
+            return;
+        };
+        let Some(d_tag) = addr.d_tag.as_deref() else {
+            return;
+        };
+        let address = format!("{}:{}:{d_tag}", nap_intent::HINT_KIND, addr.author.to_hex());
+        let closed: Vec<AwaitingInstall> = {
+            let mut awaiting = self.intents.awaiting.lock().unwrap();
+            let (closed, open) = awaiting.drain(..).partition(|a| a.hint.address == address);
+            *awaiting = open;
+            closed
+        };
+        if closed.is_empty() {
+            return;
+        }
+        let catalog = self.ctx.intents.snapshot().await;
+        let now = Instant::now();
+        if catalog
+            .handlers
+            .iter()
+            .any(|h| h.address.as_deref() == Some(address.as_str()))
+        {
+            // Added, and the sheet closed before the Library change was
+            // heard: route it now.
+            self.intents.awaiting.lock().unwrap().extend(closed);
+            self.awaiting_installed(&catalog, now);
+            return;
+        }
+        for mut a in closed {
+            tracing::info!(hint = %a.hint.address, "intent hint declined; resolving without it");
+            a.request.hint = None;
+            let resolution = nap_intent::resolve(&catalog, &a.request);
+            match self.route_resolution(&a.caller, &a.sender, a.request, resolution, now, false) {
+                Ok(frames) => self.send_to(&a.caller, frames),
+                Err(unrouted) => tracing::info!(
+                    error = unrouted.1,
+                    "nothing installed takes the declined request; dropped"
+                ),
             }
         }
     }
@@ -491,7 +833,7 @@ impl NappletHost {
         let request = IntentRequest::from_link(&link);
         let pick = pick.filter(|p| !p.is_empty());
         match self
-            .intent_resolve(NO_WINDOW, LINK_SENDER, request, now, pick)
+            .intent_resolve(NO_WINDOW, &Sender::link(), request, now, pick)
             .await
         {
             Ok(frames) => {
@@ -515,14 +857,20 @@ impl NappletHost {
     /// and the caller hears back when the window binds the token. Refused,
     /// the request comes back with the reason, for the caller to answer in
     /// its own terms.
+    // Eight with `self`: each is a distinct part of one routing decision
+    // (who asked, who is told, what, to whom, on which convention, when, and
+    // whether the user already answered), and a bundle struct would only
+    // rename them.
+    #[allow(clippy::too_many_arguments)]
     fn intent_route(
         &self,
         caller: &str,
-        sender: &str,
+        sender: &Sender,
         request: IntentRequest,
         candidate: &Candidate,
         convention: &str,
         now: Instant,
+        after_review: bool,
     ) -> Result<Vec<ToShell>, Unrouted> {
         if candidate.key == MYCO_HANDLER_KEY {
             let Some(host) = nsite_host(request.payload.as_ref()) else {
@@ -542,29 +890,33 @@ impl NappletHost {
             return Err(Box::new((request, INVOKE_FAILED)));
         };
         let mut pending = self.intents.pending.lock().unwrap();
-        if pending.len() >= MAX_PENDING_INTENTS {
+        // Payloads already handed over as `intent.deliver` linger only for
+        // a first-draft handler's subscribe; they do not hold up new ones.
+        if pending.values().filter(|p| !p.delivered).count() >= MAX_PENDING_INTENTS {
             return Err(Box::new((request, INTENT_BUSY)));
         }
         let token = new_token();
         tracing::info!(
             session = caller,
-            handler = %candidate.d_tag,
+            handler = %candidate.key,
             %convention,
             "intent: opening the handler"
         );
-        let payload = request.payload.clone();
         pending.insert(
             token.clone(),
             PendingIntent {
                 author: addr.author.to_hex(),
                 d_tag: addr.d_tag.clone().unwrap_or_default(),
-                handler: candidate.d_tag.clone(),
+                handler: candidate.key.clone(),
+                archetype: request.archetype.clone(),
+                action: request.action.clone(),
                 convention: convention.to_string(),
-                payload,
-                sender: sender.to_string(),
+                payload: request.payload.clone(),
+                sender: sender.clone(),
                 caller: caller.to_string(),
                 request: Some(request),
                 bound: None,
+                delivered: false,
                 created: now,
             },
         );
@@ -572,7 +924,80 @@ impl NappletHost {
             pointer: candidate.pointer.clone(),
             title: candidate.title.clone().unwrap_or_default(),
             token,
+            after_review,
         }])
+    }
+
+    /// The host's half of `intent.launch` from the window `caller`: open the
+    /// one napplet the request names if it is installed, else put its install
+    /// review over the caller — the review a NAP-LINK `nostr:naddr1…` puts up,
+    /// by the same rules. No role, default or chooser applies, and no other
+    /// napplet is ever opened. Adding from the review is the user's answer,
+    /// and the sheet then offers Open.
+    pub(crate) async fn intent_launch(
+        &self,
+        caller: &str,
+        request: LaunchRequest,
+        now: Instant,
+    ) -> Vec<ToShell> {
+        {
+            let mut last = self.intents.last_invoke.lock().unwrap();
+            if last
+                .get(caller)
+                .is_some_and(|t| now.saturating_duration_since(*t) < INVOKE_COOLDOWN)
+            {
+                return vec![ToShell::to_napplet(
+                    request.failed(nap_intent::LAUNCH_REJECTED),
+                )];
+            }
+            last.insert(caller.to_string(), now);
+        }
+        let handler = {
+            use nostr::nips::nip19::ToBech32;
+            nostr::PublicKey::from_hex(&request.author)
+                .ok()
+                .and_then(|pk| pk.to_bech32().ok())
+                .map(|npub| handler_key(&npub, request.d_tag.as_deref()))
+                .unwrap_or_else(|| request.address.clone())
+        };
+        let catalog = self.ctx.intents.snapshot().await;
+        let command = match catalog.installed.get(&request.address) {
+            Some(app) => {
+                tracing::info!(session = caller, target = %request.address, "intent: launching");
+                ToShell::OpenNapplet {
+                    pointer: app.pointer.clone(),
+                    title: app.title.clone(),
+                    // Nothing to deliver.
+                    token: String::new(),
+                    after_review: false,
+                }
+            }
+            None => {
+                let Some(pointer) = coordinate_naddr(
+                    request.kind,
+                    &request.author,
+                    request.d_tag.as_deref().unwrap_or(""),
+                    &request.relays,
+                ) else {
+                    return vec![ToShell::to_napplet(
+                        request.failed(nap_intent::INVALID_TARGET),
+                    )];
+                };
+                match self.admit_review(caller, &pointer, now) {
+                    Ok(review) => {
+                        tracing::info!(session = caller, target = %request.address, "intent: launch offers install");
+                        review
+                    }
+                    Err(why) => {
+                        tracing::info!(session = caller, why, "intent: launch review not admitted");
+                        return vec![ToShell::to_napplet(
+                            request.failed(nap_intent::LAUNCH_REJECTED),
+                        )];
+                    }
+                }
+            }
+        };
+        vec![command, ToShell::to_napplet(request.accepted(&handler))]
     }
 
     /// The archetype an open chooser asks about — for the reducer, which
@@ -616,6 +1041,7 @@ impl NappletHost {
                 candidate,
                 convention,
                 now,
+                false,
             ) {
                 Ok(frames) => frames,
                 Err(unrouted) => {
@@ -630,7 +1056,7 @@ impl NappletHost {
 
     /// Bind the payload `token` names to the window `session_id`, which the
     /// window host opened (or brought forward) for it. Answers the caller and
-    /// delivers at once if the napplet already listens. Refused — false, and
+    /// delivers at once if the napplet is ready for it. Refused — false, and
     /// nothing delivered — for an unknown or expired token, and for a window
     /// of any napplet other than the one the request resolved to.
     pub async fn bind_intent(&self, session_id: &str, token: &str) -> bool {
@@ -674,7 +1100,8 @@ impl NappletHost {
         if let Some((caller, result)) = answer {
             self.send_to(&caller, vec![ToShell::to_napplet(result)]);
         }
-        let now = self.intent_deliveries(session_id).await;
+        let mut now = self.intent_ready_deliveries(session_id).await;
+        now.extend(self.intent_deliveries(session_id).await);
         self.send_to(session_id, now);
         true
     }
@@ -690,9 +1117,47 @@ impl NappletHost {
         }
     }
 
+    /// The payloads bound to `session_id` not yet handed over, as
+    /// `intent.deliver` — once its napplet has finished its handshake, so
+    /// the binding that holds a delivery for `onDelivery` is installed. Each
+    /// is marked delivered and sent once.
+    pub(crate) async fn intent_ready_deliveries(&self, session_id: &str) -> Vec<ToShell> {
+        let session = {
+            let sessions = self.sessions.lock().unwrap();
+            match sessions.get(session_id) {
+                Some(live) => live.session.clone(),
+                None => return Vec::new(),
+            }
+        };
+        if !session.lock().await.is_established() {
+            return Vec::new();
+        }
+        let mut pending = self.intents.pending.lock().unwrap();
+        pending
+            .values_mut()
+            .filter(|p| p.bound.as_deref() == Some(session_id) && !p.delivered)
+            .map(|p| {
+                p.delivered = true;
+                tracing::info!(
+                    session = session_id,
+                    convention = %p.convention,
+                    sender = %p.sender.id,
+                    "intent delivered"
+                );
+                ToShell::to_napplet(nap_intent::deliver_frame(
+                    &p.sender.id,
+                    &p.archetype,
+                    &p.action,
+                    &p.convention,
+                    p.payload.as_ref(),
+                ))
+            })
+            .collect()
+    }
+
     /// The payloads bound to `session_id` whose topic it now listens on, as
-    /// `inc.event` frames — each removed as it is handed over, so it is
-    /// delivered once.
+    /// the first draft's `inc.event` frames — each removed as it is handed
+    /// over, so it is delivered this way once.
     pub(crate) async fn intent_deliveries(&self, session_id: &str) -> Vec<ToShell> {
         let waiting: Vec<(String, String)> = self
             .intents
@@ -729,12 +1194,12 @@ impl NappletHost {
                 tracing::info!(
                     session = session_id,
                     topic = %p.convention,
-                    sender = %p.sender,
-                    "intent payload delivered"
+                    sender = %p.sender.d_tag,
+                    "intent payload delivered as inc.event"
                 );
                 ToShell::to_napplet(myco_napplet_runtime::nap::inc::event_frame(
                     &p.convention,
-                    &p.sender,
+                    &p.sender.d_tag,
                     p.payload.as_ref(),
                 ))
             })
@@ -742,8 +1207,9 @@ impl NappletHost {
     }
 
     /// Drop what has waited too long: a payload past [`PENDING_INTENT_TTL`]
-    /// (its caller, if never answered, hears [`INVOKE_FAILED`]) and a chooser
-    /// past [`CHOOSER_TTL`].
+    /// (its caller, if never answered, hears [`INVOKE_FAILED`]), a chooser
+    /// past [`CHOOSER_TTL`], and a request awaiting an install past
+    /// [`AWAITING_INSTALL_TTL`].
     pub(crate) fn sweep_intents(&self, now: Instant) {
         let expired: Vec<PendingIntent> = {
             let mut pending = self.intents.pending.lock().unwrap();
@@ -755,7 +1221,9 @@ impl NappletHost {
             tokens.iter().filter_map(|t| pending.remove(t)).collect()
         };
         for mut p in expired {
-            tracing::info!(topic = %p.convention, bound = ?p.bound, "intent payload expired");
+            if !p.delivered {
+                tracing::info!(topic = %p.convention, bound = ?p.bound, "intent payload expired");
+            }
             if let Some(request) = p.request.take() {
                 self.send_to(&p.caller, reply(&request, request.failed(INVOKE_FAILED)));
             }
@@ -765,6 +1233,13 @@ impl NappletHost {
             .lock()
             .unwrap()
             .retain(|_, c| now.saturating_duration_since(c.created) <= CHOOSER_TTL);
+        self.intents.awaiting.lock().unwrap().retain(|a| {
+            let keep = now.saturating_duration_since(a.created) <= AWAITING_INSTALL_TTL;
+            if !keep {
+                tracing::info!(hint = %a.hint.address, "intent awaiting install expired");
+            }
+            keep
+        });
         self.intents
             .last_invoke
             .lock()
@@ -785,6 +1260,11 @@ impl NappletHost {
             .lock()
             .unwrap()
             .retain(|_, c| c.caller != session_id);
+        self.intents
+            .awaiting
+            .lock()
+            .unwrap()
+            .retain(|a| a.caller != session_id);
         self.intents.last_invoke.lock().unwrap().remove(session_id);
     }
 
@@ -813,6 +1293,8 @@ impl NappletHost {
     /// to every open napplet granted `intent`.
     pub async fn intents_changed(&self) {
         let catalog = self.ctx.intents.snapshot().await;
+        // A napplet installed for a request waiting on it: open it.
+        self.awaiting_installed(&catalog, Instant::now());
         let now = availability_map(&catalog);
         let before = self
             .intents
@@ -892,8 +1374,8 @@ pub fn archetype_views(
     let catalog = catalog_from(library, defaults);
     nap_intent::archetypes(&catalog)
         .into_iter()
-        .map(|archetype| {
-            let candidates = nap_intent::candidates(&catalog, &archetype);
+        .map(|archetype| (nap_intent::candidates(&catalog, &archetype), archetype))
+        .map(|(candidates, archetype)| {
             let default_key = candidates
                 .iter()
                 .find(|c| c.is_default)

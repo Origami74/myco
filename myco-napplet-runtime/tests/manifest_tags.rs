@@ -94,11 +94,13 @@ fn parses_r_o_z_i_and_config() {
         vec![
             Archetype {
                 slug: "profile".into(),
-                convention: "napplet:profile/open".into()
+                convention: "napplet:profile/open".into(),
+                params: Vec::new(),
             },
             Archetype {
                 slug: "note".into(),
-                convention: "napplet:note/open".into()
+                convention: "napplet:note/open".into(),
+                params: Vec::new(),
             },
         ]
     );
@@ -179,7 +181,8 @@ fn intents_pair_with_roles_by_archetype_not_by_position() {
         m.archetypes,
         vec![Archetype {
             slug: "feed".into(),
-            convention: "napplet:feed/edit".into()
+            convention: "napplet:feed/edit".into(),
+            params: vec!["filters".into(), "relays".into()],
         }]
     );
 }

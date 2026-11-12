@@ -889,7 +889,9 @@ see what is on screen:
   seconds, otherwise after a one-tap "Open this link?" naming the real host. A
   `postMessage` carries no user gesture, so the recent touch stands in for one.
 - `nostr:` or `napplet:` + an `naddr` of kind 35129 / 15129 / 5129 →
-  `ToShell::ReviewNapplet`. The window dispatches the same `FetchNapplet` a scanned code
+  `ToShell::ReviewNapplet`. **Deprecated** as an install request in favour of
+  NAP-INTENT `intent.launch` ([NAP-INTENT](NAP-INTENT.md#launch-one-named-app)); kept
+  for napplets on Myco versions without `launch`, and logged at `warn` on every use. The window dispatches the same `FetchNapplet` a scanned code
   does and draws the existing install-review sheet (`NappletReviewSheet`, a Compose
   overlay on the napplet's window) **over the running napplet**, so the user keeps their
   place. Nothing on this path installs: "Add" on the sheet is the user's answer, which is

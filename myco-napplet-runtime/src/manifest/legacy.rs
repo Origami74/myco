@@ -207,5 +207,6 @@ fn parse_archetype(slice: &[String]) -> Result<Archetype> {
     Ok(Archetype {
         slug: slug.clone(),
         convention: convention.clone(),
+        params: Vec::new(),
     })
 }

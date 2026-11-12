@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **An app can recommend the app it wants to open, and Myco offers to
+  install it.** A napplet opening a role (NAP-INTENT) can name an app with
+  `napplet:<role>/open#naddr1…`. If it's installed, it opens (your default
+  app for the role still wins). If it isn't, Myco shows its install review
+  over the asking app; once you tap Add it opens with what was asked for, and
+  if you close the review, the request goes to what you already have.
+- **Open or install one specific app.** `intent.launch(naddr)` (proposed as
+  [napplet/naps#148](https://github.com/napplet/naps/pull/148)) opens the app
+  the `naddr` names if it's installed, and shows its install review if not.
+  It never opens a different app and carries no data.
+- **Apps built with the current NAP-INTENT SDK work.** `intent.open` and
+  `intent.invoke` take a convention URI (`napplet:profile/open?pubkey=…`), and
+  `intent.onDelivery` receives the payload as `intent.deliver`. Apps built
+  with the older SDK (`open(role, payload)`, payload as an `inc.event`) work
+  unchanged.
+
+### Deprecated
+
+- **Installing through `link.open("nostr:naddr…")`.** Use
+  `intent.launch(naddr)`. Myco still opens the install review for the link,
+  for napplets running on Myco versions without `launch`, and logs a warning
+  naming the napplet each time it is used.
+
+### Changed
+
+- **NAP-INTENT names apps by publisher.** A candidate's `id`, a result's
+  `handler` and a delivery's `sender` are `<npub>:<d>`, so two publishers'
+  apps with the same `d` tag can't be mistaken for each other. Candidates
+  also list their `contracts` with parameter names. The older `dTag` field is
+  still sent.
+- **A default app that can't do what was asked is passed over** instead of
+  failing the request, and a request whose convention names a different role
+  or action is refused as `invalid convention`.
+
 ## [0.13.0] - 2026-11-12
 
 ### Added

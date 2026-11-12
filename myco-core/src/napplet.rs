@@ -470,6 +470,24 @@ impl NappletHost {
         fresh
     }
 
+    /// Admit an install review for `pointer` over the window of `session`,
+    /// by NAP-LINK's rules — one question at a time, rate-limited — for a
+    /// NAP-INTENT hint naming a napplet that is not installed.
+    pub(crate) fn admit_review(
+        &self,
+        session: &str,
+        pointer: &str,
+        now: std::time::Instant,
+    ) -> Result<ToShell, &'static str> {
+        match self
+            .links
+            .admit(session, &LinkTarget::Napplet(pointer.to_string()), now)?
+        {
+            Some(review) => Ok(review),
+            None => Err(INVALID_URL),
+        }
+    }
+
     /// Refuse NAP-LINK reviews while `slot` holds one — the slot the app's
     /// review sheet is drawn from.
     pub fn with_review_slot(mut self, slot: ReviewSlot) -> Self {
@@ -820,6 +838,29 @@ impl NappletHost {
             let now = std::time::Instant::now();
             return match self.links.admit(session_id, &request.target, now) {
                 Ok(Some(command)) => {
+                    if let LinkTarget::Napplet(pointer) = &request.target {
+                        // Deprecated: install through NAP-LINK. Kept for
+                        // napplets (and AppStore builds) that run on Myco
+                        // without `intent.launch`. Logged at warn so a
+                        // napplet still relying on it shows up.
+                        let napplet = self
+                            .sessions
+                            .lock()
+                            .unwrap()
+                            .get(session_id)
+                            .map(|live| live.session.clone());
+                        let caller = match napplet {
+                            Some(s) => s.lock().await.identity().d_tag.clone(),
+                            None => String::new(),
+                        };
+                        tracing::warn!(
+                            session = session_id,
+                            napplet = %caller,
+                            %pointer,
+                            "deprecated: link.open(\"nostr:naddr…\") as an install request; \
+                             use intent.launch(naddr) (napplet/naps#148)"
+                        );
+                    }
                     tracing::info!(session = session_id, ?command, "napplet link admitted");
                     vec![command, ToShell::to_napplet(request.opened())]
                 }
@@ -839,6 +880,11 @@ impl NappletHost {
         // NAP-INTENT: validated by the runtime, resolved and opened here. The
         // result may come later — when the handler's window binds the token.
         let out = match out {
+            Outcome::Launch(request) => {
+                return self
+                    .intent_launch(session_id, request, std::time::Instant::now())
+                    .await
+            }
             Outcome::Intent(request) => {
                 return self
                     .intent_invoke(session_id, request, std::time::Instant::now())
@@ -865,6 +911,12 @@ impl NappletHost {
         if message.msg_type == "inc.subscribe" {
             replies.extend(self.intent_deliveries(session_id).await);
         }
+        // A handler opened for an intent has finished its handshake: its
+        // binding is installed and holds the delivery for `onDelivery`.
+        // After `shell.init`, so the napplet has its environment first.
+        if message.msg_type == "shell.ready" {
+            replies.extend(self.intent_ready_deliveries(session_id).await);
+        }
         replies
     }
 
@@ -890,7 +942,7 @@ impl NappletHost {
                 None => return Vec::new(),
             }
         };
-        let sender = session.lock().await.identity().d_tag.clone();
+        let sender = crate::intent::Sender::of(session.lock().await.identity());
         let intent = myco_napplet_runtime::nap::intent::IntentRequest::from_link(link);
         match self
             .intent_resolve(session_id, &sender, intent, now, None)

@@ -99,11 +99,18 @@ pub enum ToShell {
     /// back, and the runtime delivers the payload once the napplet listens.
     /// The token names a pending delivery and nothing else: it grants
     /// nothing, and an unknown or expired one binds to nothing.
-    #[serde(rename = "open-napplet")]
+    ///
+    /// `after_review` is set when the handler was installed for this request
+    /// a moment ago, from the review sheet over the calling window: tapping
+    /// its Add was the user's answer, so the window opens the handler without
+    /// asking again, and takes the finished review down.
+    #[serde(rename = "open-napplet", rename_all = "camelCase")]
     OpenNapplet {
         pointer: String,
         title: String,
         token: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        after_review: bool,
     },
     /// Open the nsite whose host label is `host`, through Myco's own nsite
     /// opener (`myco://app/<host>`): NAP-INTENT's built-in handler for the
@@ -281,10 +288,22 @@ mod tests {
                 pointer: "npub1x:profiles".into(),
                 title: "Profiles".into(),
                 token: "t1".into(),
+                after_review: false,
             })
             .unwrap(),
             serde_json::json!({"channel": "open-napplet", "pointer": "npub1x:profiles",
                                "title": "Profiles", "token": "t1"})
+        );
+        assert_eq!(
+            serde_json::to_value(ToShell::OpenNapplet {
+                pointer: "npub1x:profiles".into(),
+                title: "Profiles".into(),
+                token: "t1".into(),
+                after_review: true,
+            })
+            .unwrap(),
+            serde_json::json!({"channel": "open-napplet", "pointer": "npub1x:profiles",
+                               "title": "Profiles", "token": "t1", "afterReview": true})
         );
         assert_eq!(
             serde_json::to_value(ToShell::OpenNsite {

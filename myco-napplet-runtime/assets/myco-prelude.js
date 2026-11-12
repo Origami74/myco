@@ -26,6 +26,13 @@
 // - `window.napplet.fs.pickFile` / `pickFiles` / `pickSaveFile` — replaced
 //   for the same reason (NAP-FS, napplet/naps PR #88): the answer comes once
 //   the user has chosen a file in the system picker, which can take a while.
+// - `window.napplet.intent` — replaced whole (NAP-INTENT). The vendored build
+//   has the first draft's `open(archetype, payload, options)`; the current
+//   draft's binding takes a convention URI, `open("napplet:profile/open?…")`,
+//   with an optional `#naddr1…` recommending a handler, and adds
+//   `onDelivery`. Published napplets use both, so this takes both. It also
+//   adds `launch(naddr)` (napplet/naps#148): open, or offer to install, one
+//   named napplet.
 //
 // Same wire as everything else: flat NIP-5D envelopes posted to the parent
 // frame, results correlated by `id`, pushes routed by `subId`. Nothing here is
@@ -70,6 +77,7 @@ var MycoPrelude = (function () {
     if (domains.has("resource") && napplet.resource) installResourceKeep(napplet, routers);
     if (domains.has("upload") && napplet.upload) installUploadUpload(napplet, routers);
     if (domains.has("fs") && napplet.fs) installFsPick(napplet, routers);
+    if (domains.has("intent")) installIntent(napplet, routers);
     return napplet;
   }
 
@@ -465,6 +473,283 @@ var MycoPrelude = (function () {
       value: Object.freeze({ info: info, publish: publish, subscribe: subscribe, blobs: blobs }),
       enumerable: true, configurable: false, writable: false
     });
+  }
+
+  // --- NAP-INTENT: both generations of the binding ---------------------------
+  //
+  // Current draft:  invoke(uri, options?) / open(uri, options?), where `uri`
+  //                 is `napplet:<archetype>/<intent>[?name=value…][#naddr1…]`;
+  //                 options are `payload`, `handler`, `behavior`, `handlerHint`.
+  // First draft:    invoke({ archetype, action?, convention?, payload?, … }) /
+  //                 open(archetype, payload?, options?).
+  //
+  // An archetype is a slug and never contains `:`, so a string starting
+  // `napplet:` is a URI and anything else the first draft. Both send the
+  // same `intent.invoke`; the runtime answers with a result carrying both
+  // drafts' fields (`handled` and `windowId` beside `handler`). Every
+  // invalid URI is a rejected promise, not a throw: a first-draft caller
+  // never expected one.
+  //
+  // `intent.deliver` is held until an `onDelivery` handler exists, then
+  // handed to it; a first-draft handler takes the same payload as an
+  // `inc.event` on the convention's topic, which the runtime sends as well.
+  //
+  // Waits `SIGNING_TIMEOUT_MS`: a request is answered once the handler's
+  // window is open, which may wait on the user confirming it.
+  var BECH32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+  function bech32Words(text) {
+    var lower = text.toLowerCase();
+    if (lower !== text && text.toUpperCase() !== text) throw new Error("mixed-case bech32");
+    var sep = lower.lastIndexOf("1");
+    if (sep < 1 || sep + 7 > lower.length) throw new Error("malformed bech32");
+    var hrp = lower.slice(0, sep);
+    var words = [];
+    for (var i = sep + 1; i < lower.length; i++) {
+      var v = BECH32.indexOf(lower.charAt(i));
+      if (v === -1) throw new Error("malformed bech32");
+      words.push(v);
+    }
+    var GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+    var chk = 1;
+    function step(v) {
+      var top = chk >>> 25;
+      chk = ((chk & 0x1ffffff) << 5) ^ v;
+      for (var g = 0; g < 5; g++) if ((top >>> g) & 1) chk ^= GEN[g];
+    }
+    for (var h = 0; h < hrp.length; h++) step(hrp.charCodeAt(h) >>> 5);
+    step(0);
+    for (h = 0; h < hrp.length; h++) step(hrp.charCodeAt(h) & 31);
+    for (h = 0; h < words.length; h++) step(words[h]);
+    if (chk !== 1) throw new Error("bad bech32 checksum");
+    return { hrp: hrp, words: words.slice(0, -6) };
+  }
+
+  function wordsToBytes(words) {
+    var acc = 0, bits = 0, out = [];
+    for (var i = 0; i < words.length; i++) {
+      acc = (acc << 5) | words[i];
+      bits += 5;
+      while (bits >= 8) {
+        bits -= 8;
+        out.push((acc >>> bits) & 0xff);
+      }
+    }
+    if (bits >= 5 || ((acc << (8 - bits)) & 0xff)) throw new Error("bad bech32 padding");
+    return out;
+  }
+
+  function hex(bytes) {
+    return bytes.map(function (b) { return (b < 16 ? "0" : "") + b.toString(16); }).join("");
+  }
+
+  // A hint's address must be a named napplet: kind 35129, a lowercase-hex
+  // pubkey, a non-empty `d` kept exactly as written.
+  function validHint(hint) {
+    if (typeof hint !== "object" || hint === null ||
+        typeof hint.address !== "string" || !/^35129:[0-9a-f]{64}:[\s\S]+$/.test(hint.address)) {
+      throw new Error("Intent handler hint requires a named napplet coordinate");
+    }
+    if (hint.relays !== undefined &&
+        !(Array.isArray(hint.relays) && hint.relays.every(function (r) { return typeof r === "string"; }))) {
+      throw new Error("Intent handler relay hints must be strings");
+    }
+    var out = { address: hint.address };
+    if (hint.relays && hint.relays.length) out.relays = hint.relays.slice();
+    return out;
+  }
+
+  // A bare `naddr1…` → `{ kind, address: "<kind>:<hex>:<d>", relays }`.
+  function decodeNaddr(text) {
+    if (typeof text !== "string" || text.indexOf("naddr1") !== 0) throw new Error("expected a bare naddr");
+    var decoded = bech32Words(text);
+    if (decoded.hrp !== "naddr") throw new Error("expected a bare naddr");
+    var bytes = wordsToBytes(decoded.words);
+    var d = null, author = null, kind = null, relays = [];
+    for (var i = 0; i + 2 <= bytes.length;) {
+      var t = bytes[i], l = bytes[i + 1], v = bytes.slice(i + 2, i + 2 + l);
+      if (v.length < l) throw new Error("malformed naddr");
+      i += 2 + l;
+      var text = new TextDecoder().decode(new Uint8Array(v));
+      if (t === 0 && d === null) d = text;
+      else if (t === 1) relays.push(text);
+      else if (t === 2 && author === null && l === 32) author = hex(v);
+      else if (t === 3 && kind === null && l === 4) kind = ((v[0] << 24) | (v[1] << 16) | (v[2] << 8) | v[3]) >>> 0;
+    }
+    if (d === null || author === null || kind === null) throw new Error("malformed naddr");
+    return { kind: kind, d: d, address: kind + ":" + author + ":" + d, relays: relays };
+  }
+
+  // `#naddr1…` → `{ address: "35129:<hex>:<d>", relays }`.
+  function hintFromNaddr(fragment) {
+    var n;
+    try { n = decodeNaddr(fragment); } catch (e) {
+      throw new Error("Intent handler fragment must be a bare naddr");
+    }
+    return validHint({ address: n.address, relays: n.relays });
+  }
+
+  // `launch`'s target: a named napplet (35129, non-empty `d`) or a root one
+  // (15129, empty `d`).
+  function launchTarget(naddr) {
+    var n = decodeNaddr(naddr);
+    if (!((n.kind === 35129 && n.d !== "") || (n.kind === 15129 && n.d === ""))) {
+      throw new Error("intent.launch requires a napplet coordinate");
+    }
+    var target = { address: n.address };
+    if (n.relays.length) target.relays = n.relays;
+    return target;
+  }
+
+  // A convention URI → the normalized wire request.
+  function normalizeUri(uri, options) {
+    options = options || {};
+    var hash = uri.indexOf("#");
+    var fragment = hash >= 0 ? uri.slice(hash + 1) : null;
+    var rest = hash >= 0 ? uri.slice(0, hash) : uri;
+    if (fragment !== null && options.handlerHint !== undefined) {
+      throw new Error("Intent handler fragment cannot accompany an explicit handler hint");
+    }
+    var m = /^napplet:([^/?#]+)\/([^/?#]+)(?:\?(.*))?$/.exec(rest);
+    if (!m) throw new Error("invalid convention URI");
+    var request = { archetype: m[1], action: m[2], convention: "napplet:" + m[1] + "/" + m[2] };
+    if (m[3] !== undefined && m[3] !== "") {
+      if (options.payload !== undefined) {
+        throw new Error("Intent query parameters cannot accompany an explicit payload");
+      }
+      var payload = {};
+      var pairs = m[3].split("&");
+      for (var i = 0; i < pairs.length; i++) {
+        var eq = pairs[i].indexOf("=");
+        var name = decodeURIComponent(eq >= 0 ? pairs[i].slice(0, eq) : pairs[i]);
+        var value = eq >= 0 ? decodeURIComponent(pairs[i].slice(eq + 1)) : "";
+        if (Object.prototype.hasOwnProperty.call(payload, name)) {
+          throw new Error("Intent query parameter repeated: " + name);
+        }
+        payload[name] = value;
+      }
+      request.payload = payload;
+    } else if (options.payload !== undefined) {
+      request.payload = options.payload;
+    }
+    if (options.handler !== undefined) request.handler = options.handler;
+    if (options.behavior !== undefined) request.behavior = options.behavior;
+    if (fragment !== null) request.handlerHint = hintFromNaddr(fragment);
+    else if (options.handlerHint !== undefined) request.handlerHint = validHint(options.handlerHint);
+    return request;
+  }
+
+  // A first-draft request object → the wire request, as the first draft's
+  // binding sent it.
+  function legacyRequest(req) {
+    if (typeof req !== "object" || req === null) throw new Error("invalid intent request");
+    var out = {};
+    for (var k in req) if (Object.prototype.hasOwnProperty.call(req, k)) out[k] = req[k];
+    if (out.handlerHint !== undefined) out.handlerHint = validHint(out.handlerHint);
+    return out;
+  }
+
+  function isUri(value) {
+    return typeof value === "string" && value.indexOf("napplet:") === 0;
+  }
+
+  function installIntent(napplet, routers) {
+    var request = requester(routers, [
+      "intent.invoke.result", "intent.available.result", "intent.handlers.result",
+      "intent.launch.result"
+    ]);
+    var changedHandlers = new Set();
+    var deliveryHandlers = new Set();
+    var deliveries = [];
+
+    routers.push(function (msg) {
+      if (msg.type === "intent.changed") {
+        if (!msg.availability) return;
+        changedHandlers.forEach(function (h) { h(msg.availability); });
+      } else if (msg.type === "intent.deliver") {
+        var d = msg.delivery;
+        if (typeof d !== "object" || d === null || typeof d.sender !== "string" || !d.sender) return;
+        var m = typeof d.convention === "string" ? /^napplet:([^/?#]+)\/([^/?#]+)$/.exec(d.convention) : null;
+        if (!m || m[1] !== d.archetype || m[2] !== d.action) return;
+        if (deliveryHandlers.size === 0) deliveries.push(d);
+        else deliveryHandlers.forEach(function (h) { h(d); });
+      }
+    });
+
+    function send(wire) {
+      return request({ type: "intent.invoke", request: wire }, function (msg, resolve, reject) {
+        var r = msg.result;
+        if (typeof r === "object" && r !== null && typeof r.ok === "boolean") resolve(r);
+        else reject(new Error(msg.error || "invalid intent.invoke.result"));
+      }, SIGNING_TIMEOUT_MS);
+    }
+
+    function attempt(build) {
+      var wire;
+      try { wire = build(); } catch (e) { return Promise.reject(e); }
+      return send(wire);
+    }
+
+    var intent = {
+      invoke: function (target, options) {
+        return attempt(function () {
+          return isUri(target) ? normalizeUri(target, options) : legacyRequest(target);
+        });
+      },
+      open: function (target, payloadOrOptions, legacyOptions) {
+        return attempt(function () {
+          if (isUri(target)) {
+            var wire = normalizeUri(target, payloadOrOptions);
+            if (wire.action !== "open") throw new Error("intent.open requires the open URI action");
+            return wire;
+          }
+          var opts = legacyOptions || {};
+          var out = { archetype: target, action: "open" };
+          if (payloadOrOptions !== undefined) out.payload = payloadOrOptions;
+          for (var k in opts) if (Object.prototype.hasOwnProperty.call(opts, k)) out[k] = opts[k];
+          return legacyRequest(out);
+        });
+      },
+      // Open the one napplet `naddr` names, or have the shell offer it for
+      // install. No payload: data goes through `invoke`.
+      launch: function (naddr, options) {
+        var message;
+        try {
+          message = { type: "intent.launch", target: launchTarget(naddr) };
+          if (options && options.behavior !== undefined) message.behavior = options.behavior;
+        } catch (e) {
+          return Promise.reject(e);
+        }
+        return request(message, function (msg, resolve, reject) {
+          var r = msg.result;
+          if (typeof r === "object" && r !== null && typeof r.ok === "boolean") resolve(r);
+          else reject(new Error(msg.error || "invalid intent.launch.result"));
+        }, SIGNING_TIMEOUT_MS);
+      },
+      available: function (archetype) {
+        return request({ type: "intent.available", archetype: archetype }, function (msg, resolve, reject) {
+          if (msg.availability !== undefined) resolve(msg.availability);
+          else reject(new Error(msg.error || "intent availability unavailable"));
+        });
+      },
+      handlers: function () {
+        return request({ type: "intent.handlers" }, function (msg, resolve, reject) {
+          if (msg.handlers !== undefined) resolve(msg.handlers);
+          else reject(new Error(msg.error || "intent handlers unavailable"));
+        });
+      },
+      onChanged: function (handler) {
+        changedHandlers.add(handler);
+        return { close: function () { changedHandlers.delete(handler); } };
+      },
+      onDelivery: function (handler) {
+        deliveryHandlers.add(handler);
+        var held = deliveries.splice(0);
+        for (var i = 0; i < held.length; i++) handler(held[i]);
+        return { close: function () { deliveryHandlers.delete(handler); } };
+      }
+    };
+    napplet.intent = intent;
   }
 
   // --- NAP-LOCAL -------------------------------------------------------------
