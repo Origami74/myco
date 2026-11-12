@@ -92,7 +92,6 @@ impl Fixture {
             defaults: default
                 .map(|a| BTreeMap::from([("profile".to_string(), key_of(a))]))
                 .unwrap_or_default(),
-            ..IntentCatalogSnapshot::default()
         };
     }
 
@@ -1352,29 +1351,22 @@ async fn launch_reviews_a_napplet_that_is_not_installed() {
     );
 }
 
-/// `intent.launch` of an installed napplet — with no role at all — opens it,
-/// with no token and nothing delivered.
+/// `intent.launch` of an installed napplet — with no role at all — puts its
+/// review up too: the sheet says it is installed and offers Open, so opening
+/// is the user's tap. Nothing opens by itself and nothing is delivered.
 #[tokio::test]
-async fn launch_opens_an_installed_napplet() {
+async fn launch_of_an_installed_napplet_shows_its_review() {
     let f = fixture().await;
     let feed = f.open(&f.feed).await;
     let notes = notes();
-    f.intents.0.lock().unwrap().installed = BTreeMap::from([(
-        address_of(&notes),
-        InstalledNapplet {
-            pointer: "naddr1notes".into(),
-            title: "Notes".into(),
-        },
-    )]);
+    f.intents.0.lock().unwrap().handlers = vec![handler_for(&notes, "Notes")];
     let out = launch(&f, &feed, &address_of(&notes)).await;
-    assert!(
-        matches!(out.first(), Some(ToShell::OpenNapplet { pointer, token, .. })
-            if pointer == "naddr1notes" && token.is_empty()),
-        "{out:?}"
-    );
+    assert!(open_command(&out).is_none(), "{out:?}");
+    let parsed = NappletAddr::parse(&review_command(&out).expect("its review")).unwrap();
+    assert_eq!(parsed.author, notes.author);
     assert_eq!(
-        of_type(&out, "intent.launch.result")[0]["result"]["ok"],
-        true
+        of_type(&out, "intent.launch.result")[0]["result"],
+        json!({"ok": true, "handler": key_of(&notes)})
     );
     assert_eq!(f.host.pending_intent_count(), 0);
 }
@@ -1386,13 +1378,7 @@ async fn launch_does_not_say_what_is_installed() {
     let f = fixture().await;
     let feed = f.open(&f.feed).await;
     let installed = notes();
-    f.intents.0.lock().unwrap().installed = BTreeMap::from([(
-        address_of(&installed),
-        InstalledNapplet {
-            pointer: "naddr1notes".into(),
-            title: "Notes".into(),
-        },
-    )]);
+    f.intents.0.lock().unwrap().handlers = vec![handler_for(&installed, "Notes")];
     let absent = format!(
         "35129:{}:absent",
         nostr::Keys::generate().public_key().to_hex()
@@ -1428,21 +1414,4 @@ async fn launch_names_a_root_napplet() {
         of_type(&out, "intent.launch.result")[0]["result"]["handler"],
         author.to_bech32().unwrap()
     );
-}
-
-/// The catalog lists every installed napplet by coordinate, roles or not:
-/// named ones as `35129:<hex>:<d>`, root ones as `15129:<hex>:`.
-#[test]
-fn the_catalog_knows_every_installed_napplet() {
-    let npub = nostr::Keys::generate().public_key().to_bech32().unwrap();
-    let mut plain = library_item(&npub, "plain", None);
-    plain.title = "Plain".into();
-    let mut root = library_item(&npub, "", None);
-    root.d_tag = None;
-    let catalog = catalog_from(&[plain, root], &BTreeMap::new());
-    let hex = nostr::PublicKey::parse(&npub).unwrap().to_hex();
-    let app = &catalog.installed[&format!("35129:{hex}:plain")];
-    assert_eq!(app.title, "Plain");
-    assert_eq!(app.pointer, format!("{npub}:plain"));
-    assert!(catalog.installed.contains_key(&format!("15129:{hex}:")));
 }

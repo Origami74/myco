@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **AppStore's Install on an app you already have shows its sheet with
+  Open.** `intent.launch` opened an installed app directly, which did
+  nothing visible when that app was already open (or was AppStore itself),
+  and a quick second tap then failed with "Could not start the install".
+  It now always shows the app's review: **Open** when installed, the install
+  review when not.
+
 ### Added
 
 - **An app can recommend the app it wants to open, and Myco offers to
