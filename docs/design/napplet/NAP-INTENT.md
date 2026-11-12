@@ -74,8 +74,6 @@ is its own change.
   `napplet:nsite/open`, titled "Myco". It opens the site the payload names
   (`host` label, else `naddr` of kind 35128/15128, else `url`) through the
   same path a `myco://app/<host>` link takes.
-- The catalog also lists **every installed napplet by coordinate**, roles or
-  not (`35129:<hex>:<d>`, root `15129:<hex>:`), for `launch`.
 
 `available()` and `handlers()` answer from this catalog, so an app that is
 not running is found.
@@ -178,10 +176,12 @@ and no other app is ever opened.
      "result": { "ok": true, "handler": "npub1…:chess" } }
 ```
 
-- **Installed** (any role or none): its window opens. Nothing is delivered.
-- **Not installed:** its install review goes up over the caller, by
-  NAP-LINK's rules. After Add, the sheet offers Open.
-- Both answer `ok` with the app's catalog identifier.
+- Myco puts that app's **review** over the caller, by NAP-LINK's rules, and
+  answers `ok`. For an installed app (any role or none) the sheet says so and
+  offers **Open**; for one that is not, it is the install review, and after
+  Add it offers Open too. Opening is always the user's tap, and the caller
+  cannot tell which case it was. Nothing is delivered. The answer carries
+  the app's catalog identifier.
 - A named (35129) or root (15129) app. A malformed target is
   `"invalid target"`.
 - Every launch passes NAP-LINK's review gate first, installed target or not:

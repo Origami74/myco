@@ -44,9 +44,8 @@ use serde_json::Value;
 
 use myco_napplet_runtime::manifest::{Archetype, NappletManifest};
 use myco_napplet_runtime::nap::intent::{
-    self as nap_intent, Candidate, HandlerHint, InstalledNapplet, IntentCatalog,
-    IntentCatalogSnapshot, IntentHandler, IntentRequest, LaunchRequest, Resolution, INVOKE_FAILED,
-    USER_CANCELLED,
+    self as nap_intent, Candidate, HandlerHint, IntentCatalog, IntentCatalogSnapshot,
+    IntentHandler, IntentRequest, LaunchRequest, Resolution, INVOKE_FAILED, USER_CANCELLED,
 };
 use myco_napplet_runtime::napplet_link::NappletLink;
 use myco_napplet_runtime::seams::Envelope;
@@ -203,29 +202,9 @@ pub fn catalog_from(
         })
         .collect();
     handlers.extend(builtin_handlers());
-    let installed = library
-        .iter()
-        .filter(|i| i.kind == LibraryKind::Napplet)
-        .filter_map(|i| {
-            let address = napplet_address(&i.author_npub, i.d_tag.as_deref())?;
-            let key = handler_key(&i.author_npub, i.d_tag.as_deref());
-            Some((
-                address,
-                InstalledNapplet {
-                    pointer: if i.pointer.is_empty() {
-                        key
-                    } else {
-                        i.pointer.clone()
-                    },
-                    title: i.title.clone(),
-                },
-            ))
-        })
-        .collect();
     IntentCatalogSnapshot {
         handlers,
         defaults: defaults.clone(),
-        installed,
     }
 }
 
@@ -969,12 +948,13 @@ impl NappletHost {
         }])
     }
 
-    /// The host's half of `intent.launch` from the window `caller`: open the
-    /// one napplet the request names if it is installed, else put its install
-    /// review over the caller — the review a NAP-LINK `nostr:naddr1…` puts up,
-    /// by the same rules. No role, default or chooser applies, and no other
-    /// napplet is ever opened. Adding from the review is the user's answer,
-    /// and the sheet then offers Open.
+    /// The host's half of `intent.launch` from the window `caller`: put the
+    /// review for the one napplet the request names over the caller — the
+    /// review a NAP-LINK `nostr:naddr1…` puts up, by the same rules. For an
+    /// installed napplet it says so and offers **Open**; for one that is not,
+    /// it is the install review. Either way the user's tap opens or installs
+    /// it, and the caller cannot tell which it was. No role, default or
+    /// chooser applies, and no other napplet is ever opened.
     pub(crate) async fn intent_launch(
         &self,
         caller: &str,
@@ -993,6 +973,22 @@ impl NappletHost {
             }
             last.insert(caller.to_string(), now);
         }
+        let Some(pointer) = coordinate_naddr(
+            request.kind,
+            &request.author,
+            request.d_tag.as_deref().unwrap_or(""),
+            &request.relays,
+        ) else {
+            return vec![ToShell::to_napplet(
+                request.failed(nap_intent::INVALID_TARGET),
+            )];
+        };
+        if let Err(why) = self.gate_launch(caller, now) {
+            tracing::info!(session = caller, why, "intent: launch not admitted");
+            return vec![ToShell::to_napplet(
+                request.failed(nap_intent::LAUNCH_REJECTED),
+            )];
+        }
         let handler = {
             use nostr::nips::nip19::ToBech32;
             nostr::PublicKey::from_hex(&request.author)
@@ -1001,41 +997,11 @@ impl NappletHost {
                 .map(|npub| handler_key(&npub, request.d_tag.as_deref()))
                 .unwrap_or_else(|| request.address.clone())
         };
-        // The same gate whether or not it is installed, so the answer never
-        // says which.
-        if let Err(why) = self.gate_launch(caller, now) {
-            tracing::info!(session = caller, why, "intent: launch not admitted");
-            return vec![ToShell::to_napplet(
-                request.failed(nap_intent::LAUNCH_REJECTED),
-            )];
-        }
-        let catalog = self.ctx.intents.snapshot().await;
-        let command = match catalog.installed.get(&request.address) {
-            Some(app) => {
-                tracing::info!(session = caller, target = %request.address, "intent: launching");
-                ToShell::OpenNapplet {
-                    pointer: app.pointer.clone(),
-                    title: app.title.clone(),
-                    // Nothing to deliver.
-                    token: String::new(),
-                }
-            }
-            None => {
-                let Some(pointer) = coordinate_naddr(
-                    request.kind,
-                    &request.author,
-                    request.d_tag.as_deref().unwrap_or(""),
-                    &request.relays,
-                ) else {
-                    return vec![ToShell::to_napplet(
-                        request.failed(nap_intent::INVALID_TARGET),
-                    )];
-                };
-                tracing::info!(session = caller, target = %request.address, "intent: launch offers install");
-                self.launch_review(caller, &pointer)
-            }
-        };
-        vec![command, ToShell::to_napplet(request.accepted(&handler))]
+        tracing::info!(session = caller, target = %request.address, "intent: launch shows its review");
+        vec![
+            self.launch_review(caller, &pointer),
+            ToShell::to_napplet(request.accepted(&handler)),
+        ]
     }
 
     /// The archetype an open chooser asks about — for the reducer, which

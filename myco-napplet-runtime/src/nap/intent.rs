@@ -129,17 +129,6 @@ pub struct IntentHandler {
 pub struct IntentCatalogSnapshot {
     pub handlers: Vec<IntentHandler>,
     pub defaults: BTreeMap<String, String>,
-    /// Every installed named napplet, role or not, by its `35129:<hex>:<d>`
-    /// coordinate: what a shell handler that opens a napplet by hint needs.
-    pub installed: BTreeMap<String, InstalledNapplet>,
-}
-
-/// An installed napplet, as the host opens it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct InstalledNapplet {
-    /// See [`IntentHandler::pointer`].
-    pub pointer: String,
-    pub title: String,
 }
 
 /// Where NAP-INTENT reads the installed-napplet catalog from. Implemented by
@@ -939,7 +928,6 @@ mod tests {
     fn catalog(handlers: Vec<IntentHandler>, defaults: &[(&str, &str)]) -> IntentCatalogSnapshot {
         IntentCatalogSnapshot {
             handlers,
-            installed: BTreeMap::new(),
             defaults: defaults
                 .iter()
                 .map(|(a, k)| (a.to_string(), k.to_string()))
