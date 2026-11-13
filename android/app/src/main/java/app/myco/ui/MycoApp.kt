@@ -462,7 +462,14 @@ fun MycoApp(
                         id = entry.arguments?.getString("id").orEmpty(),
                         state = state,
                         client = client,
-                        onBack = { nav.popBackStack() },
+                        // Leaving pops back, and the page then notices the
+                        // neighborhood is gone and asks again: only pop while
+                        // a neighborhood page is actually on top.
+                        onBack = {
+                            if (nav.currentDestination?.route?.startsWith("neighborhood/") == true) {
+                                nav.popBackStack()
+                            }
+                        },
                         onSendFile = { npub ->
                             sendFileNpub = npub
                             pickFilesForPeer.launch(arrayOf("*/*"))
