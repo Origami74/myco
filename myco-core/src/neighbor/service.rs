@@ -102,7 +102,9 @@ impl LinkService {
             .link_urls(pk)
             .iter()
             .find_map(|url| check_http_auth(header, method, &format!("{url}/{rest}")))?;
-        self.links.by_peer(&signer).filter(|l| l.own_pk() == pk)
+        let link = self.links.by_peer(&signer).filter(|l| l.own_pk() == pk)?;
+        self.links.mark_seen(&link.id);
+        Some(link)
     }
 }
 

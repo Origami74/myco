@@ -324,7 +324,12 @@ pub enum Refused {
 pub struct Links {
     file: PathBuf,
     saved: Mutex<Saved>,
+    /// When each link last answered or called, this run only.
+    seen: Mutex<BTreeMap<String, std::time::Instant>>,
 }
+
+/// How long after the last exchange a link still counts as reachable.
+pub const REACHABLE_FOR: std::time::Duration = std::time::Duration::from_secs(120);
 
 impl Links {
     pub fn open(data_dir: &Path) -> Self {
@@ -336,6 +341,7 @@ impl Links {
         Self {
             file,
             saved: Mutex::new(saved),
+            seen: Mutex::default(),
         }
     }
 
@@ -351,6 +357,23 @@ impl Links {
             tracing::warn!(error = %e, "could not save links");
         }
         out
+    }
+
+    /// Record that `link_id` just answered or called.
+    pub fn mark_seen(&self, link_id: &str) {
+        self.seen
+            .lock()
+            .unwrap()
+            .insert(link_id.to_string(), std::time::Instant::now());
+    }
+
+    /// Whether `link_id` was in contact within [`REACHABLE_FOR`].
+    pub fn reachable(&self, link_id: &str) -> bool {
+        self.seen
+            .lock()
+            .unwrap()
+            .get(link_id)
+            .is_some_and(|t| t.elapsed() < REACHABLE_FOR)
     }
 
     pub fn all(&self) -> Vec<Link> {

@@ -528,16 +528,15 @@ impl PeerDirectory for CirclePeers {
             );
         }
         if let Some(links) = &self.links {
-            // Reachability over a link is learned on contact; until then it
-            // is reported as not reachable rather than promised.
+            // Reachable when the link was in contact lately.
             out.extend(
                 links
                     .carrying(neighborhood.id)
                     .into_iter()
                     .map(|l| PeerView {
+                        reachable: links.reachable(&l.id),
                         key: l.peer,
                         name: l.name,
-                        reachable: false,
                     }),
             );
         }

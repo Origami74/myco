@@ -97,8 +97,7 @@ pub fn build(records: &[Record], links: &Links, circle: &[CircleMember]) -> Neig
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("peer {}", &l.peer[..8])),
-            // Learned on contact; not tracked yet.
-            reachable: false,
+            reachable: links.reachable(&l.id),
             neighborhoods: l.neighborhoods.iter().map(|id| id.to_hex()).collect(),
             link_id: Some(l.id.clone()),
         }

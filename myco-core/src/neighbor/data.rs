@@ -227,10 +227,14 @@ impl Neighbors {
                 continue;
             }
             let event = event.clone();
+            let links = links.clone();
             tokio::spawn(async move {
                 match super::wire::send(&link, n, ttl, &event).await {
-                    Ok(true) => {}
-                    Ok(false) => tracing::debug!(link = %link.id, "peer did not take the event"),
+                    Ok(true) => links.mark_seen(&link.id),
+                    Ok(false) => {
+                        links.mark_seen(&link.id);
+                        tracing::debug!(link = %link.id, "peer did not take the event")
+                    }
                     Err(e) => tracing::debug!(link = %link.id, error = %e, "could not reach peer"),
                 }
             });
@@ -246,9 +250,11 @@ impl Neighbors {
         for link in links.carrying(n) {
             let filters = filters.clone();
             let scoped = self.scoped.clone();
+            let links = links.clone();
             tokio::spawn(async move {
                 match super::wire::pull(&link, n, &filters).await {
                     Ok(events) => {
+                        links.mark_seen(&link.id);
                         for event in events {
                             if !scoped.has(n, &event) {
                                 let _ = scoped.add(n, event).await;
