@@ -429,7 +429,7 @@ fun MycoApp(
         Surface(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.background) {
             // A neighborhood invitation from any tab's scan, a tap or a link.
             app.myco.neighbor.IncomingInvite.pending.value?.let { invite ->
-                app.myco.neighbor.JoinConfirmSheet(invite, client) {
+                app.myco.neighbor.JoinConfirmSheet(invite, client, state.ownNpub) {
                     app.myco.neighbor.IncomingInvite.pending.value = null
                 }
             }

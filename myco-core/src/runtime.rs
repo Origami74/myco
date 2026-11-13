@@ -1484,8 +1484,12 @@ impl AppRuntime {
                 self.link_ui.lock().unwrap().invite = None;
                 self.rev += 1;
             }
-            NativeAppAction::JoinLink { invite, accept } => {
-                self.join_link(invite, accept);
+            NativeAppAction::JoinLink {
+                invite,
+                accept,
+                name,
+            } => {
+                self.join_link(invite, accept, name);
                 self.rev += 1;
             }
             NativeAppAction::AnswerLinkNeighborhood {
@@ -1662,7 +1666,7 @@ impl AppRuntime {
         ui.status = String::new();
     }
 
-    fn join_link(&mut self, invite: String, accept: Vec<String>) {
+    fn join_link(&mut self, invite: String, accept: Vec<String>, name: Option<String>) {
         let (Some(svc), Some(n), Some(rt)) = (
             self.link_service.clone(),
             self.neighbors(),
@@ -1683,26 +1687,33 @@ impl AppRuntime {
         rt.spawn(async move {
             // Our offer names our link URL, which contains the new link key.
             let ours = |pk: &str| svc.offer(pk);
-            let status =
-                match crate::neighbor::service::join(&svc.links, &offer, accept, &ours).await {
-                    Ok(link) => {
-                        for shared in offer
-                            .n
-                            .iter()
-                            .filter(|s| link.neighborhoods.contains(&s.id))
-                        {
-                            n.adopt(shared);
-                        }
-                        format!(
-                            "Linked with {}.",
-                            link.name.as_deref().unwrap_or("a new peer")
-                        )
+            let status = match crate::neighbor::service::join(
+                &svc.links,
+                &offer,
+                accept,
+                &ours,
+                name.as_deref(),
+            )
+            .await
+            {
+                Ok(link) => {
+                    for shared in offer
+                        .n
+                        .iter()
+                        .filter(|s| link.neighborhoods.contains(&s.id))
+                    {
+                        n.adopt(shared);
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "link join failed");
-                        format!("Couldn't link: {e}")
-                    }
-                };
+                    format!(
+                        "Linked with {}.",
+                        link.name.as_deref().unwrap_or("a new peer")
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "link join failed");
+                    format!("Couldn't link: {e}")
+                }
+            };
             ui.lock().unwrap().status = status;
         });
     }

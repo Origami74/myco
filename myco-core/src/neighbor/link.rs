@@ -304,6 +304,9 @@ struct Invite {
     s: String,
     n: Vec<Shared>,
     exp: u64,
+    /// Our name, as the invitation gave it: also signed into our answer.
+    #[serde(default)]
+    from: Option<String>,
 }
 
 /// A join in progress, on the joiner's side.
@@ -312,6 +315,8 @@ pub struct Joining {
     keys: Keys,
     peer: String,
     accepted: Vec<NeighborhoodId>,
+    /// The inviter's name from the invitation, if their answer has none.
+    from: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -419,6 +424,19 @@ impl Links {
         neighborhoods: Vec<Shared>,
         ttl_secs: u64,
     ) -> LinkOffer {
+        self.invite_from(urls, neighborhoods, ttl_secs, None)
+    }
+
+    /// As [`Links::invite`], saying who it is from. The name goes only to
+    /// whoever gets the invitation: it is never advertised.
+    pub fn invite_from(
+        &self,
+        urls: Vec<String>,
+        neighborhoods: Vec<Shared>,
+        ttl_secs: u64,
+        from: Option<String>,
+    ) -> LinkOffer {
+        let from = from.map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
         let keys = Keys::generate();
         let s = format!("{}{}{}", token(), token(), token());
         let offer = LinkOffer {
@@ -428,7 +446,7 @@ impl Links {
             s: s.clone(),
             n: neighborhoods.clone(),
             exp: now() + ttl_secs,
-            from: None,
+            from: from.clone(),
         };
         self.change(|saved| {
             saved.invites.retain(|_, i| i.exp > now());
@@ -439,6 +457,7 @@ impl Links {
                     s,
                     n: neighborhoods,
                     exp: offer.exp,
+                    from,
                 },
             );
         });
@@ -487,7 +506,7 @@ impl Links {
             };
             saved.links.push(link.clone());
             let response = SetupResponse {
-                offer: sign_offer(&keys, our_offer, our_name),
+                offer: sign_offer(&keys, our_offer, our_name.or(invite.from.as_deref())),
                 n: carried.into_iter().collect(),
             };
             Ok((link, response))
@@ -528,6 +547,7 @@ impl Links {
                 keys,
                 peer: offer.pk.clone(),
                 accepted,
+                from: offer.from.clone(),
             },
         ))
     }
@@ -535,6 +555,7 @@ impl Links {
     /// The joiner's side, after the answer: store the link.
     pub fn finish(&self, joining: Joining, response: &SetupResponse) -> Result<Link, Refused> {
         let (_, name) = read_offer(&response.offer, &joining.peer).ok_or(Refused::BadOffer)?;
+        let name = name.or(joining.from);
         let carried: BTreeSet<NeighborhoodId> = response
             .n
             .iter()
@@ -726,6 +747,28 @@ mod tests {
         assert_eq!(a_link.name.as_deref(), Some("Bob"));
         assert_eq!(b_link.name.as_deref(), Some("Alice"));
         assert_eq!(a_link.services()[0].kind, "relay");
+    }
+
+    #[test]
+    fn names_travel_in_the_invitation_and_the_answer_only() {
+        let (a, b) = (Links::open(&dir()), Links::open(&dir()));
+        let url = "http://a.fips:4873/nh";
+        let offer = a.invite_from(
+            vec![url.into()],
+            vec![],
+            INVITE_TTL_SECS,
+            Some(" Alice ".into()),
+        );
+        assert_eq!(offer.from.as_deref(), Some("Alice"));
+        let (request, joining) =
+            Links::join(&offer, url, vec![], &|_| offer_content(), Some("Bob")).unwrap();
+        // The inviter answers with no name of its own: the invitation's is used.
+        let (a_link, response) = a
+            .accept(&offer.pk, url, &request, &offer_content(), None)
+            .unwrap();
+        assert_eq!(a_link.name.as_deref(), Some("Bob"));
+        let b_link = b.finish(joining, &response).unwrap();
+        assert_eq!(b_link.name.as_deref(), Some("Alice"));
     }
 
     #[test]

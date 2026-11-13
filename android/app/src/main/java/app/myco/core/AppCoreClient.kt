@@ -1416,8 +1416,10 @@ object NativeActions {
 
     fun clearLinkInvite(): JSONObject = JSONObject().put("type", "clear_link_invite")
 
-    fun joinLink(invite: String, accept: List<String>): JSONObject =
-        JSONObject().put("type", "join_link").put("invite", invite).put("accept", org.json.JSONArray(accept))
+    /** Join from an invitation, sending [name] to the inviter only. */
+    fun joinLink(invite: String, accept: List<String>, name: String): JSONObject =
+        JSONObject().put("type", "join_link").put("invite", invite)
+            .put("accept", org.json.JSONArray(accept)).put("name", name)
 
     fun answerLinkNeighborhood(linkId: String, neighborhood: String, accept: Boolean): JSONObject =
         JSONObject().put("type", "answer_link_neighborhood")

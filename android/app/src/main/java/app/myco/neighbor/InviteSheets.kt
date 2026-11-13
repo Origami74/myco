@@ -190,6 +190,11 @@ fun InviteSheet(
                             QrCodeCard(qr, contentDescription = "Invitation to $names", size = 210.dp)
                             Spacer(Modifier.height(10.dp))
                             Text(names, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+                            Text(
+                                "They'll see you as $from",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
                             val left = (preview?.exp ?: 0) - now
                             Text(
                                 if (left > 0) "Scan with Myco · works once · %d:%02d left".format(left / 60, left % 60)
@@ -267,7 +272,10 @@ fun JoinSheet(onScanned: (String) -> Unit, onDismiss: () -> Unit) {
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun JoinConfirmSheet(invite: InvitePreview, client: AppCoreClient, onDismiss: () -> Unit) {
+fun JoinConfirmSheet(invite: InvitePreview, client: AppCoreClient, ownNpub: String, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    // Sent to the inviter with the join, and to nobody else.
+    val myName = remember(ownNpub) { DeviceName.current(context, ownNpub) }
     val accept = remember(invite) { mutableStateListOf<String>().also { l -> invite.offered.forEach { l.add(it.id) } } }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
@@ -282,7 +290,7 @@ fun JoinConfirmSheet(invite: InvitePreview, client: AppCoreClient, onDismiss: ()
                 modifier = Modifier.align(Alignment.CenterHorizontally),
             )
             Text(
-                "Pick what to join. You'll be connected with them.",
+                "Pick what to join. They'll see you as $myName.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -327,7 +335,7 @@ fun JoinConfirmSheet(invite: InvitePreview, client: AppCoreClient, onDismiss: ()
             val chosen = invite.offered.filter { it.id in accept }
             Button(
                 onClick = {
-                    client.dispatch(NativeActions.joinLink(invite.raw, accept.toList()))
+                    client.dispatch(NativeActions.joinLink(invite.raw, accept.toList(), myName))
                     onDismiss()
                 },
                 enabled = invite.offered.isEmpty() || chosen.isNotEmpty(),

@@ -99,9 +99,10 @@ impl LinkService {
         from: Option<String>,
     ) -> LinkOffer {
         // The URLs depend on the new key, so invite with none and fill them in.
-        let mut offer = self.links.invite(Vec::new(), neighborhoods, ttl_secs);
+        let mut offer = self
+            .links
+            .invite_from(Vec::new(), neighborhoods, ttl_secs, from);
         offer.link = self.link_urls(&offer.pk);
-        offer.from = from.filter(|f| !f.trim().is_empty());
         offer
     }
 
@@ -371,10 +372,12 @@ pub async fn join(
     offer: &LinkOffer,
     accept: Vec<NeighborhoodId>,
     ours: &(dyn Fn(&str) -> OfferContent + Sync),
+    our_name: Option<&str>,
 ) -> anyhow::Result<Link> {
     let mut last = anyhow::anyhow!("the invitation names no link URL");
     for url in &offer.link {
-        let Some((request, joining)) = Links::join(offer, url, accept.clone(), ours, None) else {
+        let Some((request, joining)) = Links::join(offer, url, accept.clone(), ours, our_name)
+        else {
             anyhow::bail!("the invitation has expired");
         };
         let sent = match client_for(url).post(&format!("{url}/setup")) {

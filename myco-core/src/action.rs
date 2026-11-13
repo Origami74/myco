@@ -275,7 +275,13 @@ pub enum NativeAppAction {
     /// Join a link from a scanned invitation, taking `accept` of the
     /// neighborhoods it offers. Spawn-not-block; the outcome lands in
     /// `neighborhoods.status`.
-    JoinLink { invite: String, accept: Vec<String> },
+    JoinLink {
+        invite: String,
+        accept: Vec<String>,
+        /// Our name, sent to the inviter only.
+        #[serde(default)]
+        name: Option<String>,
+    },
     /// Answer a neighborhood a peer wants to add to a link.
     AnswerLinkNeighborhood {
         link_id: String,

@@ -34,7 +34,6 @@ fun applyDeviceName(
     DeviceName.set(context, name)
     val resolved = DeviceName.current(context, ownNpub)
     client.dispatch(NativeActions.setDeviceName(resolved))
-    BleRadio.localName = resolved
     // Harmless to re-assert, and it is what the advertised name is keyed on —
     // a radio that came up before the identity was ready has none yet.
     BleRadio.localNodeAddrHex = client.state().nodeAddrHex
@@ -55,7 +54,6 @@ fun applyDeviceName(
 fun publishProvisionalName(client: AppCoreClient, ownNpub: String): String {
     val name = DeviceName.generated(ownNpub)
     client.dispatch(NativeActions.setDeviceName(name))
-    BleRadio.localName = name
     BleRadio.localNodeAddrHex = client.state().nodeAddrHex
     return name
 }

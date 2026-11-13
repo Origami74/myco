@@ -475,16 +475,11 @@ class BleRadio(context: Context) {
         // <6-byte node_addr prefix><UTF-8 name>. Both or neither: a name with
         // nobody attached to it is unattributable, and an address with no name
         // says nothing the peer row did not already know.
-        val nodePrefix = localNodeAddrHex?.let { hexPrefix(it, NODE_PREFIX_BYTES) }
-        val nameBytes = localName?.let { truncateUtf8(it, MAX_NAME_BYTES) }
-        val scanResponse = if (nodePrefix != null && nameBytes != null) {
-            AdvertiseData.Builder()
-                .setIncludeDeviceName(false)
-                .addServiceData(NAME_SD_PARCEL_UUID, nodePrefix + nameBytes)
-                .build()
-        } else {
-            null
-        }
+        // No name goes out over Bluetooth any more: a name is shared only
+        // inside a neighborhood invitation, with the person it is for. Older
+        // builds still advertise theirs; those are read, never sent.
+        val nodePrefix: ByteArray? = null
+        val scanResponse: AdvertiseData? = null
         val cb = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
                 advertiseRetries = 0
