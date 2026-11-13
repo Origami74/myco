@@ -415,24 +415,44 @@ fn services(offer: &Offer) -> Vec<String> {
     out
 }
 
-/// Every paired device carries Everyone.
-pub struct CirclePeers(pub Arc<crate::content::Content>);
+/// Who carries what on this device: every paired device carries Everyone,
+/// and each link carries the neighborhoods agreed on it.
+pub struct CirclePeers {
+    pub content: Arc<crate::content::Content>,
+    pub links: Option<Arc<super::link::Links>>,
+}
 
 impl PeerDirectory for CirclePeers {
     fn peers(&self, neighborhood: &Record) -> Vec<PeerView> {
-        if neighborhood.role != Role::Everyone {
-            return Vec::new();
+        let mut out = Vec::new();
+        if neighborhood.role == Role::Everyone {
+            let live = self.content.reachable_npubs();
+            out.extend(
+                self.content
+                    .circle_snapshot()
+                    .into_iter()
+                    .map(|c| PeerView {
+                        reachable: live.contains(&c.npub),
+                        name: (!c.name.is_empty()).then_some(c.name),
+                        key: c.npub,
+                    }),
+            );
         }
-        let live = self.0.reachable_npubs();
-        self.0
-            .circle_snapshot()
-            .into_iter()
-            .map(|c| PeerView {
-                reachable: live.contains(&c.npub),
-                name: (!c.name.is_empty()).then_some(c.name),
-                key: c.npub,
-            })
-            .collect()
+        if let Some(links) = &self.links {
+            // Reachability over a link is learned on contact; until then it
+            // is reported as not reachable rather than promised.
+            out.extend(
+                links
+                    .carrying(neighborhood.id)
+                    .into_iter()
+                    .map(|l| PeerView {
+                        key: l.peer,
+                        name: l.name,
+                        reachable: false,
+                    }),
+            );
+        }
+        out
     }
 }
 

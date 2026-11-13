@@ -25,6 +25,7 @@ pub mod data;
 pub mod host;
 pub mod id;
 pub mod link;
+pub mod service;
 pub mod store;
 
 pub use carrier::MeshCarrier;

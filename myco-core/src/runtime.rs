@@ -284,6 +284,9 @@ pub struct AppRuntime {
     /// go through it so they fan out to the Circle exactly as a socket-borne
     /// event does.
     relay_hub: Arc<std::sync::Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
+    /// Neighborhood links and the service that sets them up (`/nh` on the
+    /// auth plane). `None` when the runtime failed to start.
+    link_service: Option<crate::neighbor::service::LinkService>,
     /// A fetched napplet awaiting the user's answer on install review. Written
     /// by the fetch task, cleared when the user installs or dismisses.
     napplet_review: Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
@@ -356,6 +359,20 @@ impl AppRuntime {
         // FIPS's effective IPv6 MTU (transport_mtu - 77). The VpnService sets this
         // on the TUN and the MSS clamp derives from it, so packets fit the mesh.
         identity.fips_mtu = node.effective_ipv6_mtu();
+        // NAP-NEIGHBOR's links, reached at this device's FIPS address. A Tor or
+        // public base joins `bases` when the user turns one on.
+        let link_service = {
+            let npub = &identity.own_npub;
+            crate::neighbor::service::LinkService {
+                links: Arc::new(crate::neighbor::link::Links::open(Path::new(data_dir))),
+                bases: vec![format!(
+                    "http://{npub}.fips:{}",
+                    crate::auth_service::AUTH_PORT
+                )],
+                relay_url: format!("ws://{npub}.fips:4870"),
+                blossom_url: format!("http://{npub}.fips:24243"),
+            }
+        };
         // Myco's own sockets reach the mesh through a userspace stack on the
         // node's address, so they need no VpnService (see `mesh_net`). Started
         // before the servers below, which listen on it.
@@ -578,8 +595,11 @@ impl AppRuntime {
             let (listeners, unreachable) = crate::mesh_net::peer_listeners(port);
             for listener in listeners {
                 let content_for_auth = content.clone();
+                let links = Some(link_service.clone());
                 rt.spawn(async move {
-                    if let Err(e) = crate::auth_service::serve_on(content_for_auth, listener).await
+                    if let Err(e) =
+                        crate::auth_service::serve_with_links(content_for_auth, links, listener)
+                            .await
                     {
                         tracing::error!(error = %e, "auth service exited");
                     }
@@ -779,6 +799,7 @@ impl AppRuntime {
             napplet_mesh_limits: Arc::new(std::sync::RwLock::new(settings.napplet_mesh_limits())),
             intent_defaults: Arc::new(std::sync::RwLock::new(settings.intent_defaults.clone())),
             relay_hub,
+            link_service: Some(link_service),
             pending_relay_url: settings.relay_url().unwrap_or_default(),
             pending_blossom_url: settings.blossom_url().unwrap_or_default(),
             aware_data_paths: settings.aware_data_paths,
@@ -1002,6 +1023,7 @@ impl AppRuntime {
                 crate::settings_store::Settings::default().napplet_mesh_limits(),
             )),
             relay_hub: Arc::new(std::sync::Mutex::new(None)),
+            link_service: None,
             rev: 0,
             error: msg.to_string(),
             pending_relay_url: String::new(),
@@ -2349,7 +2371,10 @@ impl AppRuntime {
                     neighbor: Arc::new(crate::neighbor::Neighbors::open(
                         Path::new(&self.data_dir),
                         crate::neighbor::Seams {
-                            peers: Arc::new(crate::neighbor::CirclePeers(content.clone())),
+                            peers: Arc::new(crate::neighbor::CirclePeers {
+                                content: content.clone(),
+                                links: self.link_service.as_ref().map(|s| s.links.clone()),
+                            }),
                             asker: Arc::new(crate::neighbor::NoAsker),
                             carrier: Arc::new(crate::neighbor::MeshCarrier {
                                 mesh: mesh.clone(),

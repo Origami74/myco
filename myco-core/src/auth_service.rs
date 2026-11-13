@@ -122,14 +122,29 @@ pub async fn serve_on<L>(content: Arc<Content>, listener: L) -> anyhow::Result<(
 where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
+    serve_with_links(content, None, listener).await
+}
+
+/// As [`serve_on`], with the neighborhood link service under `/nh` beside
+/// pairing: the link handshake is bootstrap too, so it lives on the plane
+/// that is open before any link exists. See [`crate::neighbor::service`].
+pub async fn serve_with_links<L>(
+    content: Arc<Content>,
+    links: Option<crate::neighbor::service::LinkService>,
+    listener: L,
+) -> anyhow::Result<()>
+where
+    L: axum::serve::Listener<Addr = SocketAddr>,
+{
     let state = AuthState {
         content,
         limiter: Arc::new(Limiter::default()),
     };
-    let app = Router::new()
-        .route("/pair", post(pair))
-        .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(state);
+    let mut app = Router::new().route("/pair", post(pair)).with_state(state);
+    if let Some(links) = links {
+        app = app.merge(crate::neighbor::service::routes(links));
+    }
+    let app = app.layer(DefaultBodyLimit::max(MAX_BODY));
     axum::serve(
         axum::serve::ListenerExt::tap_io(listener, |_: &mut L::Io| {}),
         app.into_make_service_with_connect_info::<SocketAddr>(),

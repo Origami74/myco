@@ -260,6 +260,9 @@ pub struct Link {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub created: u64,
+    /// Neighborhoods the peer asked to add, waiting for this side's user.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<Shared>,
 }
 
 impl Link {
@@ -443,6 +446,7 @@ impl Links {
                 peer_offer: Some(request.offer.clone()),
                 name,
                 created: now(),
+                pending: Vec::new(),
             };
             saved.links.push(link.clone());
             let response = SetupResponse {
@@ -506,6 +510,7 @@ impl Links {
             peer_offer: Some(response.offer.clone()),
             name,
             created: now(),
+            pending: Vec::new(),
         };
         self.change(|saved| saved.links.push(link.clone()));
         Ok(link)
@@ -525,6 +530,25 @@ impl Links {
                 link.neighborhoods.remove(id);
             }
             Some(link.neighborhoods.clone())
+        })
+    }
+
+    /// Hold neighborhoods the peer asked to add until this side's user
+    /// answers. Ones the link already carries are not held. Returns every
+    /// id now waiting.
+    pub fn hold_pending(&self, link_id: &str, add: Vec<Shared>) -> Vec<NeighborhoodId> {
+        self.change(|saved| {
+            let Some(link) = saved.links.iter_mut().find(|l| l.id == link_id) else {
+                return Vec::new();
+            };
+            for shared in add {
+                let known = link.neighborhoods.contains(&shared.id)
+                    || link.pending.iter().any(|p| p.id == shared.id);
+                if !known {
+                    link.pending.push(shared);
+                }
+            }
+            link.pending.iter().map(|p| p.id).collect()
         })
     }
 
