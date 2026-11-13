@@ -141,11 +141,12 @@ fn failed(message: &Envelope, error: NeighborError) -> Envelope {
     message.to_error(error.as_str())
 }
 
-/// A request the NAP's types can't hold. The NAP names no error for it, so
-/// this says what was wrong rather than borrowing one that means something
-/// else.
+/// A request the NAP's types can't hold: the NAP's `"invalid"`. What was
+/// wrong goes to the log, not the wire — the error is a code a napplet
+/// matches on, as in NAP-NAVIGATION (napplet/naps#126).
 fn invalid(message: &Envelope, why: &str) -> Envelope {
-    message.to_error(format!("invalid request: {why}"))
+    tracing::info!(r#type = %message.msg_type, why, "neighbor: invalid request");
+    message.to_error(NeighborError::Invalid.as_str())
 }
 
 fn neighborhood_of(message: &Envelope) -> Result<&str, &'static str> {
@@ -353,8 +354,7 @@ mod tests {
             ),
         ] {
             let r = one(&ctx, &mut s, call(t, fields)).await;
-            let err = r["error"].as_str().unwrap_or_default();
-            assert!(err.starts_with("invalid request: "), "{t}: {r}");
+            assert_eq!(r["error"], "invalid", "{t}: {r}");
         }
         assert!(host.calls().is_empty(), "nothing reached the host");
     }

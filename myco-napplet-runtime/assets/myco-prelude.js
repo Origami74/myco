@@ -359,7 +359,7 @@ var MycoPrelude = (function () {
   // --- NAP-NEIGHBOR ----------------------------------------------------------
   // Neighborhoods and their `neighborhood:` addresses. Every call answers
   // with a result or rejects with the NAP's error string ("unsupported",
-  // "denied", "cancelled", "not found"). `create`, `invite`, `leave` and
+  // "denied", "cancelled", "not found", "invalid"). `create`, `invite`, `leave` and
   // `setOffer` put a prompt in front of the user, so they wait as long as a
   // signed publish does.
   function installNeighbor(napplet, routers) {

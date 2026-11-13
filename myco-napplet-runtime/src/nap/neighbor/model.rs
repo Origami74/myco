@@ -194,6 +194,8 @@ pub enum NeighborError {
     Cancelled,
     /// Unknown or ungranted neighborhood or peer id.
     NotFound,
+    /// A malformed request: a missing field, or one of the wrong type.
+    Invalid,
 }
 
 impl NeighborError {
@@ -203,6 +205,7 @@ impl NeighborError {
             Self::Denied => "denied",
             Self::Cancelled => "cancelled",
             Self::NotFound => "not found",
+            Self::Invalid => "invalid",
         }
     }
 }
