@@ -1,6 +1,5 @@
 package app.myco.neighbor
 
-import android.content.Intent
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +21,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -32,6 +32,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -55,44 +56,48 @@ import app.myco.ui.screens.ScanPanel
 import app.myco.ui.screens.ShareLinkRow
 
 /**
- * **Invite people** — the "Share this app" sheet's shape. Pick which
- * neighborhoods the invitation carries (chips), then: a QR panel with the
- * link to copy or send, and tap-phones-together, which presents the same
- * invitation over NFC while the sheet is up. [byLink] leads with sending the
- * link instead, for someone who isn't here. Shows how long it still works,
- * waits visibly, and closes with "<name> joined" once someone does.
+ * **Invite** — one sheet, no steps before the code: it opens on the
+ * neighborhood you invited to last (or the one you came from), with chips to
+ * switch or add more, and shows the QR, the link to copy or send, and
+ * tap-phones-together all at once. With no neighborhood yet it asks for a
+ * name first and goes straight to the code. Counts down while it works,
+ * waits visibly, and closes with "<name> joined".
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun InviteSheet(
     state: AppState,
     client: AppCoreClient,
-    byLink: Boolean,
-    preselect: String?,
+    /** The neighborhoods it starts out carrying; empty means the last used. */
+    preselect: List<String>,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("neighbors", android.content.Context.MODE_PRIVATE) }
     val from = remember(state.ownNpub) { DeviceName.current(context, state.ownNpub) }
-    val choices = state.neighborhoods.list.filter { !it.everyone }
+    val choices = state.neighborhoods.list
     val picked = remember {
         mutableStateListOf<String>().also { l ->
-            (preselect ?: choices.firstOrNull()?.id)?.let { l.add(it) }
+            val last = prefs.getString("last_invite", null)?.split(',').orEmpty()
+            val start = preselect.ifEmpty { last.filter { id -> choices.any { it.id == id } } }
+            l.addAll(start.ifEmpty { listOfNotNull(choices.firstOrNull()?.id) })
         }
     }
     // A fresh one-time invitation whenever what it carries changes.
     LaunchedEffect(picked.toList()) {
-        if (picked.isNotEmpty()) client.dispatch(NativeActions.createLinkInvite(picked.toList(), from))
-        else client.dispatch(NativeActions.clearLinkInvite())
+        if (picked.isNotEmpty()) {
+            client.dispatch(NativeActions.createLinkInvite(picked.toList(), from))
+            prefs.edit().putString("last_invite", picked.joinToString(",")).apply()
+        } else {
+            client.dispatch(NativeActions.clearLinkInvite())
+        }
     }
     val uri = state.neighborhoods.invite.takeIf { picked.isNotEmpty() }
     val preview = remember(uri) { uri?.let { InvitePreview.read(it) } }
-    if (!byLink) {
-        DisposableEffect(uri) {
-            if (uri != null) PairPresent.beginRaw(uri)
-            onDispose { PairPresent.stop() }
-        }
+    DisposableEffect(uri) {
+        if (uri != null) PairPresent.beginRaw(uri)
+        onDispose { PairPresent.stop() }
     }
-    // Ticks the countdown.
     var now by remember { mutableLongStateOf(System.currentTimeMillis() / 1000) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -114,6 +119,18 @@ fun InviteSheet(
         client.dispatch(NativeActions.clearLinkInvite())
         onDismiss()
     }
+    var newName by remember { mutableStateOf("") }
+    var adding by remember { mutableStateOf(false) }
+    val create = {
+        val name = newName.trim()
+        if (name.isNotEmpty()) {
+            val before = choices.map { it.id }.toSet()
+            val after = client.dispatch(NativeActions.createNeighborhood(name, false)).neighborhoods.list
+            after.firstOrNull { it.id !in before }?.let { picked.add(it.id) }
+            newName = ""
+            adding = false
+        }
+    }
     val names = choices.filter { it.id in picked }.joinToString(", ") { it.name }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = dismiss, sheetState = sheetState) {
@@ -121,18 +138,27 @@ fun InviteSheet(
             modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text(
-                if (byLink) "Send an invite" else "Invite in person",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-            )
+            Text("Invite", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(12.dp))
-            Text(
-                "To",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            if (choices.isEmpty() || adding) {
+                // Nothing to invite to yet: name one, and the code follows.
+                OutlinedTextField(
+                    value = newName,
+                    onValueChange = { newName = it },
+                    label = { Text("Neighborhood name") },
+                    placeholder = { Text("Household, Sports club…") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = create, enabled = newName.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
+                    Text("Create and show code")
+                }
+                if (choices.isNotEmpty()) {
+                    TextButton(onClick = { adding = false }) { Text("Cancel") }
+                }
+                return@Column
+            }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 for (n in choices) {
                     FilterChip(
@@ -141,6 +167,7 @@ fun InviteSheet(
                         label = { Text(n.name) },
                     )
                 }
+                FilterChip(selected = false, onClick = { adding = true }, label = { Text("+ New") })
             }
             Spacer(Modifier.height(8.dp))
             Surface(
@@ -155,57 +182,35 @@ fun InviteSheet(
                 ) {
                     when {
                         picked.isEmpty() -> Text("Pick at least one neighborhood.", Modifier.padding(24.dp))
-                        uri == null -> Box(Modifier.size(if (byLink) 48.dp else 210.dp), contentAlignment = Alignment.Center) {
+                        uri == null -> Box(Modifier.size(210.dp), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator()
                         }
-                        !byLink -> {
+                        else -> {
                             val qr = remember(uri) { NsiteShare.qrBitmap(uri) }
                             QrCodeCard(qr, contentDescription = "Invitation to $names", size = 210.dp)
+                            Spacer(Modifier.height(10.dp))
+                            Text(names, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+                            val left = (preview?.exp ?: 0) - now
+                            Text(
+                                if (left > 0) "Scan with Myco · works once · %d:%02d left".format(left / 60, left % 60)
+                                else "Expired — tap a chip to renew",
+                                color = if (left > 0) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFFB45309),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            ShareLinkRow(uri = uri, title = "Join $names")
                         }
-                    }
-                    if (uri != null) {
-                        Spacer(Modifier.height(10.dp))
-                        Text(names, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            if (byLink) "They open it in Myco to join" else "Scan with Myco to join",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        val left = (preview?.exp ?: 0) - now
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            if (left > 0) "Works once · %d:%02d left".format(left / 60, left % 60) else "Expired — pick again to renew",
-                            color = Color(0xFFB45309),
-                            fontWeight = FontWeight.Bold,
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                        Spacer(Modifier.height(12.dp))
-                        ShareLinkRow(uri = uri, title = "Join $names")
                     }
                 }
             }
             Spacer(Modifier.height(12.dp))
-            if (byLink && uri != null) {
-                Button(
-                    onClick = {
-                        val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, uri)
-                        context.startActivity(Intent.createChooser(send, "Send invite"))
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Send invite…") }
-            } else if (!byLink) {
-                TapCard("Or tap phones together", "Hold the backs together — no scan needed")
-            }
+            TapCard("Or tap phones together", "Hold the backs together — no scan needed")
             if (uri != null) {
                 Spacer(Modifier.height(12.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                     CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.size(10.dp))
-                    Text(
-                        if (byLink) "Waiting for them to open it…" else "Waiting for them to scan…",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    Text("Waiting for them to join…", style = MaterialTheme.typography.bodyMedium)
                 }
             }
         }

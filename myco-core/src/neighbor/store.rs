@@ -49,8 +49,8 @@ impl Default for Policy {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Grants {
-    /// Every napplet with the `neighbor` domain. Everyone starts this way, so
-    /// what NAP-MESH reached stays reachable.
+    /// Every napplet with the `neighbor` domain. Only the dropped Everyone
+    /// neighborhood was granted this way; kept so old files still read.
     #[serde(default)]
     pub all: bool,
     /// Napplet keys (see [`napplet_key`]).
@@ -70,7 +70,9 @@ impl Grants {
 pub enum Role {
     /// An ordinary neighborhood.
     Plain,
-    /// The one the Circle became; carried by every paired peer.
+    /// The Circle, once wrapped as a neighborhood. No longer carried: kept
+    /// so old `neighborhoods.json` files still read, and dropped on open
+    /// ([`Store::drop_everyone`]).
     Everyone,
 }
 
@@ -104,28 +106,6 @@ impl Record {
             offer: default_offer(),
             muted: BTreeSet::new(),
             grants: Grants::default(),
-        }
-    }
-
-    /// The Circle, as a neighborhood: random id, every napplet, and the offer
-    /// the Circle makes today.
-    pub fn everyone() -> Self {
-        Self {
-            role: Role::Everyone,
-            offer: Offer {
-                relay_read: true,
-                relay_write: true,
-                relay_own: true,
-                blob_read: true,
-                blob_write: true,
-                blob_own: true,
-                services: Vec::new(),
-            },
-            grants: Grants {
-                all: true,
-                napplets: BTreeSet::new(),
-            },
-            ..Self::new(NeighborhoodId::random(), "Everyone", false)
         }
     }
 }
@@ -193,18 +173,12 @@ impl Store {
         self.neighborhoods.iter_mut().find(|r| r.id == id)
     }
 
-    pub fn everyone(&self) -> Option<&Record> {
-        self.neighborhoods.iter().find(|r| r.role == Role::Everyone)
-    }
-
-    /// Add Everyone if this device has none — first launch, or the first
-    /// launch after the Circle became a neighborhood. Returns whether it did.
-    pub fn ensure_everyone(&mut self) -> bool {
-        if self.everyone().is_some() {
-            return false;
-        }
-        self.neighborhoods.insert(0, Record::everyone());
-        true
+    /// Drop the Everyone neighborhood an older version kept for the Circle.
+    /// Returns whether there was one.
+    pub fn drop_everyone(&mut self) -> bool {
+        let before = self.neighborhoods.len();
+        self.neighborhoods.retain(|r| r.role != Role::Everyone);
+        self.neighborhoods.len() != before
     }
 }
 
@@ -253,14 +227,26 @@ mod tests {
     }
 
     #[test]
-    fn everyone_is_added_once_and_offers_what_the_circle_did() {
-        let mut s = Store::default();
-        assert!(s.ensure_everyone());
-        assert!(!s.ensure_everyone());
-        let e = s.everyone().unwrap();
-        assert!(e.grants.all);
-        assert!(e.offer.relay_own && e.offer.blob_own && e.offer.blob_write);
-        assert_eq!(e.policy, Policy::default());
+    fn an_old_everyone_record_is_dropped() {
+        let club = Record::new(NeighborhoodId::random(), "Club", false);
+        // As an older version wrote it.
+        let old = serde_json::json!({
+            "neighborhoods": [
+                {
+                    "id": NeighborhoodId::random(),
+                    "name": "Everyone",
+                    "autoAccept": false,
+                    "role": "everyone",
+                    "offer": default_offer(),
+                    "grants": { "all": true },
+                },
+                club,
+            ],
+        });
+        let mut s: Store = serde_json::from_value(old).unwrap();
+        assert!(s.drop_everyone());
+        assert_eq!(s.neighborhoods, [club]);
+        assert!(!s.drop_everyone());
     }
 
     #[test]
@@ -280,7 +266,8 @@ mod tests {
     fn saves_and_loads() {
         let file = path(&dir());
         let mut s = Store::default();
-        s.ensure_everyone();
+        s.neighborhoods
+            .push(Record::new(NeighborhoodId::random(), "Club", false));
         s.tokens
             .entry("a:chat".into())
             .or_default()

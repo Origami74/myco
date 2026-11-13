@@ -597,6 +597,10 @@ impl AppRuntime {
             // servers matter — without it a stranger cannot pair at all, and the
             // relay and Blossom gates below have no exceptions to let them in.
             // See `reference/thinning-custom-relay.md` (D6).
+            // Neighborhood links: check on each peer so "here now" is true.
+            rt.spawn(crate::neighbor::service::keep_in_touch(
+                link_service.links.clone(),
+            ));
             let port = crate::auth_service::AUTH_PORT;
             let (listeners, unreachable) = crate::mesh_net::peer_listeners(port);
             for listener in listeners {
@@ -1627,22 +1631,7 @@ impl AppRuntime {
                 .neighborhoods
             }
         };
-        let circle: Vec<crate::neighbor::view::CircleMember> = match &self.content {
-            Some(content) => {
-                let live = content.reachable_npubs();
-                content
-                    .circle_snapshot()
-                    .into_iter()
-                    .map(|c| crate::neighbor::view::CircleMember {
-                        reachable: live.contains(&c.npub),
-                        name: c.name,
-                        npub: c.npub,
-                    })
-                    .collect()
-            }
-            None => Vec::new(),
-        };
-        let mut view = crate::neighbor::view::build(&records, &svc.links, &circle);
+        let mut view = crate::neighbor::view::build(&records, &svc.links);
         let ui = self.link_ui.lock().unwrap();
         view.invite = ui.invite.clone();
         view.status = ui.status.clone();
@@ -2645,8 +2634,8 @@ impl AppRuntime {
                     self.node_live.clone(),
                 ));
 
-            // NAP-NEIGHBOR: neighborhoods other than Everyone keep their
-            // events here, apart from the user's own relay.
+            // NAP-NEIGHBOR: neighborhoods keep their events here, apart from
+            // the user's own relay.
             let neighborhood_store: Arc<dyn nsite_deck::RelayBackend> =
                 match myco_relay::RelayStore::open(
                     Path::new(&self.data_dir).join("neighborhood-relay"),
@@ -2672,16 +2661,10 @@ impl AppRuntime {
             let neighbors = Arc::new(crate::neighbor::Neighbors::open(
                 Path::new(&self.data_dir),
                 crate::neighbor::Seams {
-                    peers: Arc::new(crate::neighbor::CirclePeers {
-                        content: content.clone(),
-                        links: self.link_service.as_ref().map(|s| s.links.clone()),
-                    }),
+                    peers: Arc::new(crate::neighbor::LinkPeers(
+                        self.link_service.as_ref().map(|s| s.links.clone()),
+                    )),
                     asker: Arc::new(crate::neighbor::NoAsker),
-                    carrier: Arc::new(crate::neighbor::MeshCarrier {
-                        mesh: mesh.clone(),
-                        content: content.clone(),
-                        hub: self.relay_hub.clone(),
-                    }),
                     scoped_store: neighborhood_store,
                     scoped_blobs: neighborhood_blobs,
                     links: self.link_service.as_ref().map(|s| s.links.clone()),
@@ -2717,9 +2700,9 @@ impl AppRuntime {
                     // service, so the pool, offline-only and the internet
                     // breaker are decided in one place.
                     sink: outbox.clone(),
-                    mesh: mesh.clone(),
-                    // NAP-NEIGHBOR: the Circle is Everyone; nothing a napplet
-                    // asks to change goes through until the shell can ask.
+                    mesh,
+                    // NAP-NEIGHBOR: nothing a napplet asks to change goes
+                    // through until the shell can ask.
                     neighbor: neighbors.clone(),
                     outbox: outbox.clone(),
                     lanes: outbox,

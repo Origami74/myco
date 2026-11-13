@@ -43,14 +43,11 @@ internal fun withNames(people: List<NeighborhoodsState.PeerNode>): String? {
 }
 
 /** A neighborhood's kind, in words. */
-internal fun kindOf(n: NeighborhoodsState.Neighborhood): String = when {
-    n.everyone -> "Paired before neighborhoods"
-    n.autoAccept -> "Open · anyone nearby with the name"
-    else -> "Invite only"
-}
+internal fun kindOf(n: NeighborhoodsState.Neighborhood): String =
+    if (n.autoAccept) "Open · anyone nearby with the name" else "Invite only"
 
-/** The display name for a neighborhood: Everyone reads as "Paired devices". */
-internal fun titleOf(n: NeighborhoodsState.Neighborhood): String = if (n.everyone) "Paired devices" else n.name
+/** The display name for a neighborhood. */
+internal fun titleOf(n: NeighborhoodsState.Neighborhood): String = n.name
 
 /**
  * How far posts go, as three presets in place of hop counts.

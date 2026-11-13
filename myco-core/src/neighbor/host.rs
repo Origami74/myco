@@ -11,11 +11,10 @@ use myco_napplet_runtime::nap::neighbor::{
 use myco_napplet_runtime::NappletIdentity;
 
 use super::id::NeighborhoodId;
-use super::store::{self, napplet_key, Record, Role, Store};
+use super::store::{self, napplet_key, Record, Store};
 
 /// One of the user's peers, as the device knows them. `key` is whatever the
-/// device reaches them by — today the paired device npub; a link key once
-/// links exist.
+/// device reaches them by: the peer's key on the link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerView {
     pub key: String,
@@ -23,8 +22,7 @@ pub struct PeerView {
     pub reachable: bool,
 }
 
-/// Who carries which neighborhood. Today only Everyone has peers: every
-/// paired device.
+/// Who carries which neighborhood: the links it was agreed on.
 pub trait PeerDirectory: Send + Sync {
     fn peers(&self, neighborhood: &Record) -> Vec<PeerView>;
 }
@@ -70,11 +68,9 @@ pub struct Neighbors {
     store: Mutex<Store>,
     peers: Arc<dyn PeerDirectory>,
     asker: Arc<dyn Asker>,
-    /// Everyone's transport.
-    pub(super) carrier: Arc<dyn super::carrier::Carrier>,
-    /// Every other neighborhood's events.
+    /// Neighborhood events and blobs, each in its scope.
     pub(super) scoped: Arc<super::data::Scoped>,
-    /// Links, which carry every neighborhood but Everyone.
+    /// Links, which carry the neighborhoods.
     pub(super) links: Option<Arc<super::link::Links>>,
 }
 
@@ -82,8 +78,7 @@ pub struct Neighbors {
 pub struct Seams {
     pub peers: Arc<dyn PeerDirectory>,
     pub asker: Arc<dyn Asker>,
-    pub carrier: Arc<dyn super::carrier::Carrier>,
-    /// Where neighborhood events other than Everyone's are stored.
+    /// Where neighborhood events are stored.
     pub scoped_store: Arc<dyn nsite_deck::RelayBackend>,
     /// Where their blobs are stored.
     pub scoped_blobs: Arc<dyn nsite_deck::BlobStore>,
@@ -100,12 +95,12 @@ pub struct Target {
 }
 
 impl Neighbors {
-    /// Open `neighborhoods.json` under `data_dir`, adding Everyone if it is
-    /// not there yet.
+    /// Open `neighborhoods.json` under `data_dir`, dropping the Everyone
+    /// neighborhood an older version kept for the Circle.
     pub fn open(data_dir: &std::path::Path, seams: Seams) -> Self {
         let file = store::path(data_dir);
         let mut s = store::load(&file);
-        if s.ensure_everyone() {
+        if s.drop_everyone() {
             if let Err(e) = store::save(&file, &s) {
                 tracing::warn!(error = %e, "could not save neighborhoods");
             }
@@ -115,7 +110,6 @@ impl Neighbors {
             store: Mutex::new(s),
             peers: seams.peers,
             asker: seams.asker,
-            carrier: seams.carrier,
             scoped: Arc::new(super::data::Scoped::open(
                 data_dir,
                 seams.scoped_store,
@@ -277,12 +271,11 @@ impl Neighbors {
         });
     }
 
-    /// Forget a neighborhood (never Everyone). Returns whether it was known.
+    /// Forget a neighborhood. Returns whether it was known.
     pub fn forget(&self, id: NeighborhoodId) -> bool {
         self.change(|s| {
             let before = s.neighborhoods.len();
-            s.neighborhoods
-                .retain(|r| r.id != id || r.role == Role::Everyone);
+            s.neighborhoods.retain(|r| r.id != id);
             s.neighborhoods.len() != before
         })
     }
@@ -424,11 +417,6 @@ impl NeighborHost for Neighbors {
     ) -> Result<(), NeighborError> {
         let key = napplet_key(napplet);
         let record = self.granted(&key, neighborhood)?;
-        // Everyone is the Circle: leaving it is unpairing everyone, which is
-        // the Neighbors tab's to do, not an app's.
-        if record.role == Role::Everyone {
-            return Err(NeighborError::Denied);
-        }
         let ask = Ask::Leave {
             napplet: key,
             name: record.name.clone(),
@@ -504,43 +492,25 @@ fn services(offer: &Offer) -> Vec<String> {
     out
 }
 
-/// Who carries what on this device: every paired device carries Everyone,
-/// and each link carries the neighborhoods agreed on it.
-pub struct CirclePeers {
-    pub content: Arc<crate::content::Content>,
-    pub links: Option<Arc<super::link::Links>>,
-}
+/// Who carries what on this device: each link carries the neighborhoods
+/// agreed on it.
+pub struct LinkPeers(pub Option<Arc<super::link::Links>>);
 
-impl PeerDirectory for CirclePeers {
+impl PeerDirectory for LinkPeers {
     fn peers(&self, neighborhood: &Record) -> Vec<PeerView> {
-        let mut out = Vec::new();
-        if neighborhood.role == Role::Everyone {
-            let live = self.content.reachable_npubs();
-            out.extend(
-                self.content
-                    .circle_snapshot()
-                    .into_iter()
-                    .map(|c| PeerView {
-                        reachable: live.contains(&c.npub),
-                        name: (!c.name.is_empty()).then_some(c.name),
-                        key: c.npub,
-                    }),
-            );
-        }
-        if let Some(links) = &self.links {
-            // Reachable when the link was in contact lately.
-            out.extend(
-                links
-                    .carrying(neighborhood.id)
-                    .into_iter()
-                    .map(|l| PeerView {
-                        reachable: links.reachable(&l.id),
-                        key: l.peer,
-                        name: l.name,
-                    }),
-            );
-        }
-        out
+        let Some(links) = &self.0 else {
+            return Vec::new();
+        };
+        // Reachable when the link was in contact lately.
+        links
+            .carrying(neighborhood.id)
+            .into_iter()
+            .map(|l| PeerView {
+                reachable: links.reachable(&l.id),
+                key: l.peer,
+                name: l.name,
+            })
+            .collect()
     }
 }
 
@@ -549,14 +519,11 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    /// The same peers in every neighborhood.
     struct Fixed(Vec<PeerView>);
     impl PeerDirectory for Fixed {
-        fn peers(&self, r: &Record) -> Vec<PeerView> {
-            if r.role == Role::Everyone {
-                self.0.clone()
-            } else {
-                Vec::new()
-            }
+        fn peers(&self, _: &Record) -> Vec<PeerView> {
+            self.0.clone()
         }
     }
 
@@ -569,14 +536,10 @@ mod tests {
         }
     }
 
-    pub(in crate::neighbor) fn seams(
-        peers: Arc<dyn PeerDirectory>,
-        asker: Arc<dyn Asker>,
-    ) -> Seams {
+    fn seams(peers: Arc<dyn PeerDirectory>, asker: Arc<dyn Asker>) -> Seams {
         Seams {
             peers,
             asker,
-            carrier: Arc::new(super::super::carrier::testing::MemCarrier::default()),
             scoped_store: Arc::new(nsite_deck::testing::MemRelay::new()),
             scoped_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             links: None,
@@ -613,12 +576,28 @@ mod tests {
         id
     }
 
+    fn new(name: &str, auto_accept: bool) -> CreateRequest {
+        CreateRequest {
+            name: name.into(),
+            auto_accept,
+        }
+    }
+
+    /// `napplet` starts a neighborhood called `name`; the prompt it took is
+    /// forgotten.
+    async fn club(n: &Neighbors, asker: &Answer, napplet: &str, name: &str) -> Neighborhood {
+        let nb = n.create(&app(napplet), new(name, false)).await.unwrap();
+        asker.1.lock().unwrap().clear();
+        nb
+    }
+
     #[tokio::test]
-    async fn everyone_is_listed_to_every_napplet_with_its_peers() {
-        let (n, _, _) = open(true);
+    async fn a_neighborhood_is_listed_to_its_napplet_with_its_peers() {
+        let (n, asker, _) = open(true);
+        club(&n, &asker, "chat", "Club").await;
         let list = n.list(&app("chat")).await;
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].name, "Everyone");
+        assert_eq!(list[0].name, "Club");
         assert_eq!((list[0].peers, list[0].reachable), (2, 1));
         let peers = n.peers(&app("chat"), &list[0].id).await.unwrap();
         assert_eq!(peers[0].name.as_deref(), Some("Bob"));
@@ -630,21 +609,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_neighborhood_until_one_is_made() {
+        let (n, _, _) = open(true);
+        assert!(n.records().is_empty());
+        assert!(n.list(&app("chat")).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_old_everyone_is_dropped_on_open() {
+        let d = dir();
+        let mut old = Record::new(NeighborhoodId::random(), "Everyone", false);
+        old.role = store::Role::Everyone;
+        old.grants.all = true;
+        let club = Record::new(NeighborhoodId::random(), "Club", false);
+        let s = Store {
+            neighborhoods: vec![old, club.clone()],
+            ..Store::default()
+        };
+        store::save(&store::path(&d), &s).unwrap();
+        let asker = Arc::new(Answer(AtomicBool::new(true), Mutex::new(Vec::new())));
+        let n = Neighbors::open(&d, seams(Arc::new(Fixed(Vec::new())), asker));
+        assert_eq!(n.records(), std::slice::from_ref(&club));
+        assert_eq!(
+            store::load(&store::path(&d)).neighborhoods,
+            [club],
+            "and saved without it"
+        );
+    }
+
+    #[tokio::test]
     async fn ids_are_per_napplet_and_stable_across_reopen() {
         let (n, asker, d) = open(true);
+        n.create(&app("chat"), new("Lowlands", true)).await.unwrap();
+        n.create(&app("map"), new("Lowlands", true)).await.unwrap();
         let a = n.list(&app("chat")).await[0].id.clone();
         let b = n.list(&app("map")).await[0].id.clone();
         assert_ne!(a, b, "two napplets cannot correlate ids");
         assert_eq!(n.list(&app("chat")).await[0].id, a);
         let again = Neighbors::open(&d, seams(Arc::new(Fixed(Vec::new())), asker));
         assert_eq!(again.list(&app("chat")).await[0].id, a);
-        assert_eq!(again.records().len(), 1, "Everyone not added twice");
+        assert_eq!(again.records().len(), 1);
     }
 
     #[tokio::test]
     async fn another_napplets_id_and_address_mean_nothing() {
-        let (n, _, _) = open(true);
-        let theirs = n.list(&app("chat")).await.remove(0);
+        let (n, asker, _) = open(true);
+        let theirs = club(&n, &asker, "chat", "Club").await;
         assert_eq!(
             n.peers(&app("map"), &theirs.id).await.unwrap_err(),
             NeighborError::NotFound
@@ -656,24 +666,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_peer_address_resolves_to_that_peer() {
-        let (n, _, _) = open(true);
-        let nb = n.list(&app("chat")).await.remove(0);
+        let (n, asker, _) = open(true);
+        let nb = club(&n, &asker, "chat", "Club").await;
         let bob = n.peers(&app("chat"), &nb.id).await.unwrap().remove(0);
         let t = n
             .resolve(&app("chat"), bob.address.as_deref().unwrap())
             .unwrap();
         assert_eq!(t.peer.as_deref(), Some("npub1bob"));
         // A peer token under another neighborhood's token resolves to nothing.
-        let other = n
-            .create(
-                &app("chat"),
-                CreateRequest {
-                    name: "Club".into(),
-                    auto_accept: false,
-                },
-            )
-            .await
-            .unwrap();
+        let other = club(&n, &asker, "chat", "Other").await;
         let mixed = address::format(
             &address::parse(other.address.as_deref().unwrap())
                 .unwrap()
@@ -686,22 +687,12 @@ mod tests {
     #[tokio::test]
     async fn create_asks_and_grants_only_the_caller() {
         let (n, asker, _) = open(true);
-        let club = n
-            .create(
-                &app("chat"),
-                CreateRequest {
-                    name: " Club ".into(),
-                    auto_accept: false,
-                },
-            )
-            .await
-            .unwrap();
+        let club = n.create(&app("chat"), new(" Club ", false)).await.unwrap();
         assert_eq!(club.name, "Club");
         assert!(matches!(asker.1.lock().unwrap()[0], Ask::Create { .. }));
-        assert_eq!(n.list(&app("chat")).await.len(), 2);
-        assert_eq!(
-            n.list(&app("map")).await.len(),
-            1,
+        assert_eq!(n.list(&app("chat")).await.len(), 1);
+        assert!(
+            n.list(&app("map")).await.is_empty(),
             "map wasn't granted Club"
         );
     }
@@ -709,19 +700,15 @@ mod tests {
     #[tokio::test]
     async fn new_neighborhoods_with_one_name_stay_apart_but_auto_accepted_ones_meet() {
         let (n, _, _) = open(true);
-        let new = |name: &str, auto| CreateRequest {
-            name: name.into(),
-            auto_accept: auto,
-        };
         n.create(&app("chat"), new("Home", false)).await.unwrap();
         n.create(&app("chat"), new("Home", false)).await.unwrap();
         n.create(&app("chat"), new("Lowlands", true)).await.unwrap();
         n.create(&app("map"), new("lowlands", true)).await.unwrap();
         let names: Vec<_> = n.records().into_iter().map(|r| r.name).collect();
-        assert_eq!(names, ["Everyone", "Home", "Home", "Lowlands"]);
+        assert_eq!(names, ["Home", "Home", "Lowlands"]);
         assert_eq!(
             n.list(&app("map")).await.len(),
-            2,
+            1,
             "map joined the same Lowlands"
         );
     }
@@ -729,34 +716,24 @@ mod tests {
     #[tokio::test]
     async fn a_declined_prompt_changes_nothing() {
         let (n, _, _) = open(false);
-        let r = n
-            .create(
-                &app("chat"),
-                CreateRequest {
-                    name: "Club".into(),
-                    auto_accept: false,
-                },
-            )
-            .await;
+        let r = n.create(&app("chat"), new("Club", false)).await;
         assert_eq!(r.unwrap_err(), NeighborError::Cancelled);
-        assert_eq!(n.records().len(), 1);
+        assert!(n.records().is_empty());
     }
 
     #[tokio::test]
-    async fn everyone_cannot_be_left_from_an_app() {
+    async fn leaving_asks_and_forgets() {
         let (n, asker, _) = open(true);
-        let e = n.list(&app("chat")).await.remove(0);
-        assert_eq!(
-            n.leave(&app("chat"), &e.id).await.unwrap_err(),
-            NeighborError::Denied
-        );
-        assert!(asker.1.lock().unwrap().is_empty(), "not even asked");
+        let nb = club(&n, &asker, "chat", "Club").await;
+        n.leave(&app("chat"), &nb.id).await.unwrap();
+        assert!(matches!(asker.1.lock().unwrap()[0], Ask::Leave { .. }));
+        assert!(n.records().is_empty());
     }
 
     #[tokio::test]
     async fn narrowing_an_offer_needs_no_prompt_but_widening_does() {
         let (n, asker, _) = open(true);
-        let e = n.list(&app("chat")).await.remove(0);
+        let e = club(&n, &asker, "chat", "Club").await;
         let narrow = Offer {
             relay_read: true,
             ..Offer::default()
@@ -777,12 +754,24 @@ mod tests {
 
     #[tokio::test]
     async fn mute_is_kept_per_neighborhood() {
-        let (n, _, _) = open(true);
-        let e = n.list(&app("chat")).await.remove(0);
+        let (n, asker, _) = open(true);
+        let e = club(&n, &asker, "chat", "Club").await;
+        club(&n, &asker, "chat", "Other").await;
         let author = nostr::Keys::generate().public_key();
         n.mute(&app("chat"), &e.id, author, true).await.unwrap();
         assert!(n.records()[0].muted.contains(&author.to_hex()));
+        assert!(n.records()[1].muted.is_empty());
         n.mute(&app("chat"), &e.id, author, false).await.unwrap();
         assert!(n.records()[0].muted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn blob_hops_are_kept_per_neighborhood() {
+        let (n, asker, _) = open(true);
+        club(&n, &asker, "chat", "Club").await;
+        let id = n.records()[0].id;
+        assert_eq!(n.records()[0].policy.blob_hops, 0, "0 by default");
+        n.set_blob_hops(id, 2);
+        assert_eq!(n.records()[0].policy.blob_hops, 2);
     }
 }

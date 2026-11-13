@@ -451,10 +451,6 @@ fun MycoApp(
                         client,
                         onOpenNeighborhood = { id -> nav.navigate("neighborhood/$id") },
                         onScanned = onScanned,
-                        onSendFile = { npub ->
-                            sendFileNpub = npub
-                            pickFilesForPeer.launch(arrayOf("*/*"))
-                        },
                     )
                 }
                 composable("neighborhood/{id}") { entry ->
@@ -469,10 +465,6 @@ fun MycoApp(
                             if (nav.currentDestination?.route?.startsWith("neighborhood/") == true) {
                                 nav.popBackStack()
                             }
-                        },
-                        onSendFile = { npub ->
-                            sendFileNpub = npub
-                            pickFilesForPeer.launch(arrayOf("*/*"))
                         },
                     )
                 }

@@ -12,7 +12,6 @@ use myco_napplet_runtime::NappletIdentity;
 use nostr::{EventBuilder, Filter, Keys, Kind};
 use tower::ServiceExt as _;
 
-use super::carrier::testing::MemCarrier;
 use super::host::{Ask, Asker, Neighbors, PeerDirectory, PeerView, Seams};
 use super::link::{Links, SetupResponse, Shared};
 use super::service::{routes, LinkService};
@@ -51,7 +50,6 @@ async fn device() -> Device {
         Seams {
             peers: Arc::new(Nobody),
             asker: Arc::new(Yes),
-            carrier: Arc::new(MemCarrier::default()),
             scoped_store: Arc::new(nsite_deck::testing::MemRelay::new()),
             scoped_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             links: Some(links.clone()),

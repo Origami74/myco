@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -69,21 +70,18 @@ fun NeighborsScreen(
     onOpenNeighborhood: (String) -> Unit,
     /** MainActivity's router for scanned, tapped and pasted codes. */
     onScanned: (String) -> Unit,
-    /** Pick files and offer them to a paired device (by npub). */
-    onSendFile: (String) -> Unit,
 ) {
     val nh = state.neighborhoods
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("neighbors", android.content.Context.MODE_PRIVATE) }
-    var noticeSeen by remember { mutableStateOf(prefs.getBoolean("circle_notice_seen", false)) }
+    var noticeSeen by remember { mutableStateOf(prefs.getBoolean("circle_removed_seen", false)) }
     var showMap by remember { mutableStateOf(false) }
     var person by remember { mutableStateOf<String?>(null) }
-    var adding by remember { mutableStateOf(false) }
-    var flow by remember { mutableStateOf<AddFlow?>(null) }
+    var inviting by remember { mutableStateOf(false) }
+    var joining by remember { mutableStateOf(false) }
 
     val here = nh.hereNow()
-    val groups = nh.list.filter { !it.everyone }
-    val paired = nh.list.firstOrNull { it.everyone }
+    val groups = nh.list
 
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
@@ -94,18 +92,25 @@ fun NeighborsScreen(
             item {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("Neighbors", style = MaterialTheme.typography.displaySmall, modifier = Modifier.weight(1f))
-                    HereChip(here.size)
+                    // Joining is its own thing, always one tap away.
+                    OutlinedButton(onClick = { joining = true }) {
+                        Icon(Icons.Filled.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Join")
+                    }
                 }
+            }
+            item { HereChip(here.size)
             }
 
             if (!noticeSeen) {
                 item {
                     Banner(
-                        title = "The Circle is now Neighbors",
-                        body = "Your paired devices are under Paired devices. New people join by invitation: tap Add people.",
+                        title = "The Circle is gone",
+                        body = "People now connect through neighborhoods. Tap Invite to show a code, or Join to scan one.",
                         action = "Got it",
                         onAction = {
-                            prefs.edit().putBoolean("circle_notice_seen", true).apply()
+                            prefs.edit().putBoolean("circle_removed_seen", true).apply()
                             noticeSeen = true
                         },
                     )
@@ -164,9 +169,9 @@ fun NeighborsScreen(
                 item {
                     Banner(
                         title = "Start your first neighborhood",
-                        body = "A household, a club, a trip. Then invite people to it — in person or with a link.",
+                        body = "A household, a club, a trip. Name it and show the code — or tap Join if someone invited you.",
                         action = "Start one",
-                        onAction = { flow = AddFlow.New },
+                        onAction = { inviting = true },
                     )
                 }
             } else if (showMap) {
@@ -187,70 +192,31 @@ fun NeighborsScreen(
                 items(groups, key = { it.id }) { n -> NeighborhoodCard(n, nh) { onOpenNeighborhood(n.id) } }
             }
 
-            if (paired != null && nh.peopleIn(paired.id).isNotEmpty()) {
-                item {
-                    Surface(
-                        shape = RoundedCornerShape(18.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        modifier = Modifier.fillMaxWidth().clickable { onOpenNeighborhood(paired.id) },
-                    ) {
-                        Column(Modifier.padding(16.dp)) {
-                            Text("Paired devices", fontWeight = FontWeight.Bold)
-                            Text(
-                                withNames(nh.peopleIn(paired.id)) ?: "",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
-            }
             if (nh.status.isNotEmpty()) {
                 item { Text(nh.status, style = MaterialTheme.typography.bodySmall) }
             }
         }
 
         ExtendedFloatingActionButton(
-            onClick = { adding = true },
+            onClick = { inviting = true },
             icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-            text = { Text("Add people") },
+            text = { Text("Invite") },
             containerColor = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary,
             modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp),
         )
     }
 
-    if (adding) {
-        AddPeopleSheet(
-            hasNeighborhoods = groups.isNotEmpty(),
-            onPick = { adding = false; flow = it },
-            onDismiss = { adding = false },
-        )
+    if (inviting) {
+        InviteSheet(state = state, client = client, preselect = emptyList(), onDismiss = { inviting = false })
     }
-    when (val f = flow) {
-        AddFlow.InPerson, AddFlow.ByLink -> InviteSheet(
-            state = state,
-            client = client,
-            byLink = f == AddFlow.ByLink,
-            preselect = null,
-            onDismiss = { flow = null },
-        )
-        AddFlow.Join -> JoinSheet(onScanned = onScanned, onDismiss = { flow = null })
-        AddFlow.New -> NewNeighborhoodDialog(
-            client = client,
-            onCreated = { id -> flow = null; if (id != null) onOpenNeighborhood(id) },
-            onDismiss = { flow = null },
-        )
-        null -> {}
+    if (joining) {
+        JoinSheet(onScanned = onScanned, onDismiss = { joining = false })
     }
     nh.peers.firstOrNull { it.key == person }?.let { p ->
-        PersonSheet(p, nh, client, onSendFile = { person = null; onSendFile(p.key) }, onDismiss = { person = null })
+        PersonSheet(p, nh, client, onDismiss = { person = null })
     }
 }
-
-/** The ways into Add people. */
-internal enum class AddFlow { InPerson, ByLink, Join, New }
 
 @Composable
 private fun HereChip(count: Int) {
@@ -329,89 +295,6 @@ private fun NeighborhoodCard(n: NeighborhoodsState.Neighborhood, nh: Neighborhoo
     }
 }
 
-/** **Add people**: ask about the situation, not the mechanism. */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun AddPeopleSheet(hasNeighborhoods: Boolean, onPick: (AddFlow) -> Unit, onDismiss: () -> Unit) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(
-            Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text("Add people", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text("How are you meeting them?", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            // Inviting needs a neighborhood to invite to; without one, start there.
-            val inviteFlow: (AddFlow) -> Unit = { if (hasNeighborhoods) onPick(it) else onPick(AddFlow.New) }
-            Option("They're with me", "Show a code, or tap phones together · works offline", primary = true) {
-                inviteFlow(AddFlow.InPerson)
-            }
-            Option("Send an invite link", "By message · works once, for 15 minutes") { inviteFlow(AddFlow.ByLink) }
-            Option("I got an invite", "Scan it, tap phones, or paste it") { onPick(AddFlow.Join) }
-            HorizontalDivider(Modifier.padding(vertical = 4.dp))
-            Row(
-                Modifier.fillMaxWidth().clickable { onPick(AddFlow.New) }.padding(vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Start a new neighborhood", fontWeight = FontWeight.Bold)
-                    Text("A household, a club, a trip…", style = MaterialTheme.typography.bodySmall)
-                }
-                Text("›", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
-            }
-        }
-    }
-}
-
-@Composable
-private fun Option(title: String, subtitle: String, primary: Boolean = false, onClick: () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(18.dp),
-        color = if (primary) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-    ) {
-        Column(Modifier.padding(18.dp)) {
-            Text(title, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall)
-        }
-    }
-}
-
-/** Name a new neighborhood; on create, hands back its id to open its page. */
-@Composable
-internal fun NewNeighborhoodDialog(client: AppCoreClient, onCreated: (String?) -> Unit, onDismiss: () -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var open by remember { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("New neighborhood") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Open to anyone nearby")
-                        Text(
-                            "Anyone using this exact name joins it — for a festival or a city. Leave off for people you invite.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(checked = open, onCheckedChange = { open = it })
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(enabled = name.isNotBlank(), onClick = {
-                val before = client.state().neighborhoods.list.map { it.id }.toSet()
-                val after = client.dispatch(NativeActions.createNeighborhood(name, open)).neighborhoods.list
-                onCreated(after.firstOrNull { it.id !in before }?.id ?: after.firstOrNull { it.name == name.trim() }?.id)
-            }) { Text("Create") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
 /** One person: here or not, the neighborhoods you share, and what you can do. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -419,7 +302,6 @@ internal fun PersonSheet(
     p: NeighborhoodsState.PeerNode,
     nh: NeighborhoodsState,
     client: AppCoreClient,
-    onSendFile: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var confirm by remember { mutableStateOf(false) }
@@ -440,10 +322,7 @@ internal fun PersonSheet(
                     )
                 }
             }
-            if (linkId == null) {
-                Text("A device you paired with before neighborhoods.", style = MaterialTheme.typography.bodySmall)
-                Button(onClick = onSendFile, modifier = Modifier.fillMaxWidth()) { Text("Send a file") }
-            } else {
+            if (linkId != null) {
                 Label("YOU SHARE")
                 if (p.neighborhoods.isEmpty()) Text("Nothing yet.", style = MaterialTheme.typography.bodySmall)
                 for (id in p.neighborhoods) {
@@ -452,7 +331,7 @@ internal fun PersonSheet(
                         TextButton(onClick = { client.dispatch(NativeActions.dropFromLink(linkId, id)) }) { Text("Remove") }
                     }
                 }
-                val others = nh.list.filter { !it.everyone && it.id !in p.neighborhoods }
+                val others = nh.list.filter { it.id !in p.neighborhoods }
                 if (others.isNotEmpty()) {
                     Label("ADD TO")
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -315,6 +315,39 @@ async fn relay_session(
     }
 }
 
+// --- presence -------------------------------------------------------------------
+
+/// How often each link is checked on.
+pub const PRESENCE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Keep links' presence current: every [`PRESENCE_EVERY`], ask each peer for
+/// its offer. An answer means they're here now (see `Links::reachable`), and
+/// it refreshes their name and endpoints. Runs for the life of the runtime.
+pub async fn keep_in_touch(links: Arc<Links>) {
+    let mut tick = tokio::time::interval(PRESENCE_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        for link in links.all() {
+            let links = links.clone();
+            tokio::spawn(async move {
+                let Ok(resp) = call(&link, reqwest::Method::GET, "offer", None).await else {
+                    return;
+                };
+                if !resp.status().is_success() {
+                    return;
+                }
+                links.mark_seen(&link.id);
+                if let Ok(bytes) = resp.bytes().await {
+                    if let Ok(offer) = serde_json::from_slice::<nostr::Event>(&bytes) {
+                        links.update_offer(&link.id, offer);
+                    }
+                }
+            });
+        }
+    }
+}
+
 // --- the joining side ----------------------------------------------------------
 
 /// The client a URL is reached with: the mesh for `.fips`, the internet

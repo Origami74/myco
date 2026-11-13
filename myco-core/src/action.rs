@@ -301,8 +301,7 @@ pub enum NativeAppAction {
     },
     /// The user's local name for a neighborhood.
     RenameNeighborhood { neighborhood: String, name: String },
-    /// Stop carrying a neighborhood on every link, and forget it. Not
-    /// Everyone: that is the Circle, left by unpairing.
+    /// Stop carrying a neighborhood on every link, and forget it.
     LeaveNeighborhood { neighborhood: String },
     /// Stop carrying one neighborhood on one link, telling the peer.
     DropFromLink {

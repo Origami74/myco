@@ -4,7 +4,7 @@
 use serde::Serialize;
 
 use super::link::Links;
-use super::store::{Record, Role};
+use super::store::Record;
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,7 +16,7 @@ pub struct NeighborhoodsView {
     pub invite: Option<String>,
     /// The last link action's outcome, for a line of text.
     pub status: String,
-    /// Everyone the user is connected to, with the neighborhoods each
+    /// The peers the user is linked with, with the neighborhoods each
     /// carries: the map's nodes.
     pub peers: Vec<PeerNode>,
 }
@@ -29,16 +29,9 @@ pub struct PeerNode {
     pub reachable: bool,
     /// Neighborhood ids this peer carries with the user.
     pub neighborhoods: Vec<String>,
-    /// The link, when the peer is a link rather than a paired Circle member.
+    /// The link this peer is reached over.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_id: Option<String>,
-}
-
-/// A paired Circle member, as the map shows them.
-pub struct CircleMember {
-    pub npub: String,
-    pub name: String,
-    pub reachable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,7 +40,6 @@ pub struct NeighborhoodView {
     pub id: String,
     pub name: String,
     pub auto_accept: bool,
-    pub everyone: bool,
     /// Links carrying it.
     pub links: usize,
     pub publish_hops: u8,
@@ -74,24 +66,11 @@ pub struct PendingView {
     pub name: String,
 }
 
-pub fn build(records: &[Record], links: &Links, circle: &[CircleMember]) -> NeighborhoodsView {
+pub fn build(records: &[Record], links: &Links) -> NeighborhoodsView {
     let all = links.all();
-    let everyone = records
+    let peers = all
         .iter()
-        .find(|r| r.role == Role::Everyone)
-        .map(|r| r.id.to_hex());
-    let mut peers: Vec<PeerNode> = circle
-        .iter()
-        .map(|c| PeerNode {
-            key: c.npub.clone(),
-            name: c.name.clone(),
-            reachable: c.reachable,
-            neighborhoods: everyone.iter().cloned().collect(),
-            link_id: None,
-        })
-        .collect();
-    peers.extend(all.iter().map(|l| {
-        PeerNode {
+        .map(|l| PeerNode {
             key: l.peer.clone(),
             name: l
                 .name
@@ -100,8 +79,8 @@ pub fn build(records: &[Record], links: &Links, circle: &[CircleMember]) -> Neig
             reachable: links.reachable(&l.id),
             neighborhoods: l.neighborhoods.iter().map(|id| id.to_hex()).collect(),
             link_id: Some(l.id.clone()),
-        }
-    }));
+        })
+        .collect();
     NeighborhoodsView {
         peers,
         list: records
@@ -110,7 +89,6 @@ pub fn build(records: &[Record], links: &Links, circle: &[CircleMember]) -> Neig
                 id: r.id.to_hex(),
                 name: r.name.clone(),
                 auto_accept: r.auto_accept,
-                everyone: r.role == Role::Everyone,
                 links: all
                     .iter()
                     .filter(|l| l.neighborhoods.contains(&r.id))

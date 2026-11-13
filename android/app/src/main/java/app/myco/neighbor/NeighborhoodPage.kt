@@ -59,7 +59,6 @@ fun NeighborhoodPage(
     state: AppState,
     client: AppCoreClient,
     onBack: () -> Unit,
-    onSendFile: (String) -> Unit,
 ) {
     val nh = state.neighborhoods
     val n = nh.list.firstOrNull { it.id == id }
@@ -89,16 +88,15 @@ fun NeighborhoodPage(
                     Text(titleOf(n), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold)
                     Text(kindOf(n), style = MaterialTheme.typography.bodyMedium)
                 }
-                if (!n.everyone) {
-                    Button(
-                        onClick = { inviting = true },
-                        colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = Color.White),
-                    ) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("Invite")
-                    }
+                Button(
+                    onClick = { inviting = true },
+                    colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = Color.White),
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Invite")
                 }
+
             }
         }
 
@@ -128,13 +126,12 @@ fun NeighborhoodPage(
                     }
                 }
             }
-            if (!n.everyone) {
-                Text(
-                    "People they invite can reach you through them too — you only see who you're connected with.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Text(
+                "People they invite can reach you through them too — you only see who you're connected with.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
 
             HorizontalDivider(Modifier.padding(vertical = 4.dp))
             Label("HOW FAR POSTS GO")
@@ -169,26 +166,25 @@ fun NeighborhoodPage(
             }
             if (more) MoreSettings(n, client)
 
-            if (!n.everyone) {
-                Spacer(Modifier.height(12.dp))
-                TextButton(onClick = { leaving = true }) {
-                    Text("Leave ${n.name}", color = MaterialTheme.colorScheme.error)
-                }
-                Text(
-                    "Asks first. What you received stays on your phone.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            Spacer(Modifier.height(12.dp))
+            TextButton(onClick = { leaving = true }) {
+                Text("Leave ${n.name}", color = MaterialTheme.colorScheme.error)
             }
+            Text(
+                "Asks first. What you received stays on your phone.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             Spacer(Modifier.height(24.dp))
         }
     }
 
     if (inviting) {
-        InviteSheet(state = state, client = client, byLink = false, preselect = n.id, onDismiss = { inviting = false })
+        InviteSheet(state = state, client = client, preselect = listOf(n.id), onDismiss = { inviting = false })
     }
     nh.peers.firstOrNull { it.key == person }?.let { p ->
-        PersonSheet(p, nh, client, onSendFile = { person = null; onSendFile(p.key) }, onDismiss = { person = null })
+        PersonSheet(p, nh, client, onDismiss = { person = null })
     }
     if (leaving) {
         AlertDialog(
@@ -211,19 +207,18 @@ fun NeighborhoodPage(
 private fun MoreSettings(n: NeighborhoodsState.Neighborhood, client: AppCoreClient) {
     var name by remember(n.id) { mutableStateOf(n.name) }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (!n.everyone) {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text("Your name for it") },
-                supportingText = { Text("Only on your phone. Others keep their own name for it.") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            if (name.isNotBlank() && name.trim() != n.name) {
-                TextButton(onClick = { client.dispatch(NativeActions.renameNeighborhood(n.id, name)) }) { Text("Save name") }
-            }
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            label = { Text("Your name for it") },
+            supportingText = { Text("Only on your phone. Others keep their own name for it.") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (name.isNotBlank() && name.trim() != n.name) {
+            TextButton(onClick = { client.dispatch(NativeActions.renameNeighborhood(n.id, name)) }) { Text("Save name") }
         }
+
         Choice(
             "Catch up from",
             "When you open an app, ask for what you missed from",
