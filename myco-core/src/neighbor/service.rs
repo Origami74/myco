@@ -207,6 +207,11 @@ async fn neighborhoods(
         .set_neighborhoods(&link.id, &[], &change.remove)
         .unwrap_or_default();
     let pending = svc.links.hold_pending(&link.id, change.add);
+    // They took away the last thing we shared: the connection is over.
+    if now.is_empty() && pending.is_empty() {
+        svc.links.end(&link.id);
+        tracing::info!(link = %link.id, "link ended: nothing left to share");
+    }
     axum::Json(Changed {
         n: now.into_iter().collect(),
         pending,
@@ -329,7 +334,12 @@ pub async fn keep_in_touch(links: Arc<Links>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        for link in links.all() {
+        // Only connections that still share something are anyone's business.
+        for link in links
+            .all()
+            .into_iter()
+            .filter(|l| !l.neighborhoods.is_empty())
+        {
             let links = links.clone();
             tokio::spawn(async move {
                 let Ok(resp) = call(&link, reqwest::Method::GET, "offer", None).await else {
@@ -603,6 +613,22 @@ mod tests {
         assert!(changed.n.is_empty(), "home removed");
         assert_eq!(changed.pending, [club.id], "club waits for the user");
         assert!(svc.links.all()[0].neighborhoods.is_empty());
+    }
+
+    #[tokio::test]
+    async fn removing_the_last_neighborhood_ends_the_link() {
+        let svc = service();
+        let home = home();
+        let bob = linked(&svc, &home).await;
+        let path = format!("/nh/{}/neighborhoods", bob.peer);
+        let change = Change {
+            add: Vec::new(),
+            remove: vec![home.id],
+        };
+        let auth = http_auth(&bob.keys(), "POST", &format!("{BASE}{path}"));
+        let (status, _) = send(&svc, post_json(&path, &change, Some(auth))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(svc.links.all().is_empty(), "nothing shared, so no link");
     }
 
     #[tokio::test]

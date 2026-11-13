@@ -1805,7 +1805,16 @@ impl AppRuntime {
         let Some(link) = svc.links.all().into_iter().find(|l| l.id == link_id) else {
             return;
         };
-        svc.links.set_neighborhoods(&link_id, &[], &[id]);
+        let left = svc
+            .links
+            .set_neighborhoods(&link_id, &[], &[id])
+            .unwrap_or_default();
+        // A connection exists through what it carries: with nothing left,
+        // end it rather than keep a stranger "here now".
+        if left.is_empty() && link.pending.is_empty() {
+            self.end_link(link_id);
+            return;
+        }
         // Best effort: they also stop when we refuse their traffic for it.
         rt.spawn(async move {
             let change = crate::neighbor::service::Change {
