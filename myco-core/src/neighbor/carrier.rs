@@ -28,6 +28,10 @@ pub trait Carrier: Send + Sync {
     async fn pull(&self, filters: &[Filter], hops: u8) -> anyhow::Result<PulledEvents>;
     /// A blob from this device, else from Circle peers (`peer`: only that one).
     async fn blob(&self, sha256: &str, peer: Option<&str>) -> Option<Vec<u8>>;
+    /// Keep a blob on this device.
+    async fn keep_blob(&self, bytes: &[u8]) -> anyhow::Result<()>;
+    /// Push a kept blob to peers, `hops` rings out. Returns how many took it.
+    async fn push_blob(&self, bytes: &[u8], hops: u8) -> usize;
 }
 
 /// The Circle's mesh, as the napplet host already reaches it.
@@ -114,6 +118,56 @@ impl Carrier for MeshCarrier {
         }
         None
     }
+
+    async fn keep_blob(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        self.content.blobs().put(bytes).await.map(|_| ())
+    }
+
+    /// `PUT /upload` to every reachable Circle member's Blossom, which takes
+    /// it only if that peer granted us blob writes. One ring only: a peer's
+    /// Blossom keeps what it is given and passes nothing on, so further rings
+    /// wait for links, where the receiver forwards under its own policy.
+    async fn push_blob(&self, bytes: &[u8], hops: u8) -> usize {
+        use futures_util::StreamExt as _;
+        if hops == 0 {
+            return 0;
+        }
+        if hops > 1 {
+            tracing::debug!(hops, "blob push: one ring until links forward");
+        }
+        let bytes = bytes.to_vec();
+        let pushes: futures_util::stream::FuturesUnordered<_> = self
+            .content
+            .reachable_npubs()
+            .into_iter()
+            .map(|npub| {
+                let bytes = bytes.clone();
+                async move { put_to_peer(&npub, bytes).await }
+            })
+            .collect();
+        pushes.filter(|ok| std::future::ready(*ok)).count().await
+    }
+}
+
+/// `PUT` a blob to one peer's Blossom over the mesh.
+async fn put_to_peer(npub: &str, bytes: Vec<u8>) -> bool {
+    let client = crate::http::shared_mesh();
+    let url = format!("http://{npub}.fips:24243/upload");
+    let sent = match client.put(&url) {
+        Ok(req) => req.body(bytes).send().await,
+        Err(_) => return false,
+    };
+    match sent {
+        Ok(resp) if resp.status().is_success() => true,
+        Ok(resp) => {
+            tracing::debug!(%npub, status = %resp.status(), "blob push refused");
+            false
+        }
+        Err(e) => {
+            tracing::debug!(%npub, error = %e, "blob push failed");
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -129,6 +183,7 @@ pub mod testing {
         pub flooded: Mutex<Vec<(Event, u8)>>,
         pub sent: Mutex<Vec<(String, Event)>>,
         pub blobs: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+        pub pushed: Mutex<Vec<u8>>,
     }
 
     #[async_trait]
@@ -161,6 +216,19 @@ pub mod testing {
         }
         async fn blob(&self, sha256: &str, _peer: Option<&str>) -> Option<Vec<u8>> {
             self.blobs.lock().unwrap().get(sha256).cloned()
+        }
+        async fn keep_blob(&self, bytes: &[u8]) -> anyhow::Result<()> {
+            let sha = nsite_deck::sha256_hex(bytes);
+            self.blobs.lock().unwrap().insert(sha, bytes.to_vec());
+            Ok(())
+        }
+        async fn push_blob(&self, _bytes: &[u8], hops: u8) -> usize {
+            self.pushed.lock().unwrap().push(hops);
+            if hops == 0 {
+                0
+            } else {
+                1
+            }
         }
     }
 }

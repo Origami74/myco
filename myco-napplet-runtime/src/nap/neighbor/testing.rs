@@ -141,6 +141,19 @@ impl NeighborData for MemNeighbors {
         })
     }
 
+    async fn upload(
+        &self,
+        _napplet: &NappletIdentity,
+        address: &str,
+        bytes: Vec<u8>,
+        sha256: &str,
+    ) -> Result<(), NeighborError> {
+        self.addressed(address)?;
+        self.record(format!("upload {sha256}"));
+        self.blobs.lock().unwrap().insert(sha256.to_string(), bytes);
+        Ok(())
+    }
+
     async fn blob(
         &self,
         _napplet: &NappletIdentity,

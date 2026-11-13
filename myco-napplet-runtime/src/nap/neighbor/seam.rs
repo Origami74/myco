@@ -131,6 +131,20 @@ pub trait NeighborData: Send + Sync {
         Err(NeighborError::NotFound)
     }
 
+    /// Keep a blob in the scope `address` names (a neighborhood; a peer
+    /// address is refused), and carry it on as that neighborhood's policy
+    /// says. `sha256` is already the bytes' hash.
+    async fn upload(
+        &self,
+        napplet: &NappletIdentity,
+        address: &str,
+        bytes: Vec<u8>,
+        sha256: &str,
+    ) -> Result<(), NeighborError> {
+        let _ = (napplet, address, bytes, sha256);
+        Err(NeighborError::NotFound)
+    }
+
     /// Fetch a blob from the scope `address` names. `Ok(None)` when nobody
     /// there has it. The caller verifies the hash.
     async fn blob(

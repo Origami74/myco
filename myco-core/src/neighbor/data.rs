@@ -30,8 +30,10 @@ use super::store::{Record, Role};
 /// and a live feed of new ones.
 pub struct Scoped {
     pub store: Arc<dyn RelayBackend>,
+    pub blobs: Arc<dyn nsite_deck::BlobStore>,
     file: PathBuf,
-    /// Event id (hex) → the neighborhoods it was published or received in.
+    /// Event id (hex), or `blob:<sha256>` → the neighborhoods it was
+    /// published or received in.
     scopes: Mutex<BTreeMap<String, BTreeSet<NeighborhoodId>>>,
     live: broadcast::Sender<(NeighborhoodId, Event)>,
 }
@@ -40,7 +42,11 @@ pub struct Scoped {
 pub const SCOPES_FILE: &str = "neighborhood-scopes.json";
 
 impl Scoped {
-    pub fn open(data_dir: &Path, store: Arc<dyn RelayBackend>) -> Self {
+    pub fn open(
+        data_dir: &Path,
+        store: Arc<dyn RelayBackend>,
+        blobs: Arc<dyn nsite_deck::BlobStore>,
+    ) -> Self {
         let file = data_dir.join(SCOPES_FILE);
         let scopes = std::fs::read(&file)
             .ok()
@@ -48,6 +54,7 @@ impl Scoped {
             .unwrap_or_default();
         Self {
             store,
+            blobs,
             file,
             scopes: Mutex::new(scopes),
             live: broadcast::channel(256).0,
@@ -56,14 +63,35 @@ impl Scoped {
 
     async fn add(&self, id: NeighborhoodId, event: Event) -> anyhow::Result<()> {
         self.store.publish(event.clone()).await?;
-        {
-            let mut scopes = self.scopes.lock().unwrap();
-            scopes.entry(event.id.to_hex()).or_default().insert(id);
-            let tmp = self.file.with_extension("json.tmp");
-            std::fs::write(&tmp, serde_json::to_vec(&*scopes)?)?;
-            std::fs::rename(&tmp, &self.file)?;
-        }
+        self.scope(id, event.id.to_hex())?;
         let _ = self.live.send((id, event));
+        Ok(())
+    }
+
+    async fn add_blob(&self, id: NeighborhoodId, bytes: &[u8], sha256: &str) -> anyhow::Result<()> {
+        self.blobs.put(bytes).await?;
+        self.scope(id, format!("blob:{sha256}"))
+    }
+
+    async fn blob(&self, id: NeighborhoodId, sha256: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let scoped = self
+            .scopes
+            .lock()
+            .unwrap()
+            .get(&format!("blob:{sha256}"))
+            .is_some_and(|s| s.contains(&id));
+        if !scoped {
+            return Ok(None);
+        }
+        self.blobs.get(sha256).await
+    }
+
+    fn scope(&self, id: NeighborhoodId, key: String) -> anyhow::Result<()> {
+        let mut scopes = self.scopes.lock().unwrap();
+        scopes.entry(key).or_default().insert(id);
+        let tmp = self.file.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&*scopes)?)?;
+        std::fs::rename(&tmp, &self.file)?;
         Ok(())
     }
 
@@ -96,6 +124,26 @@ impl Scoped {
                 }
             }
         }))
+    }
+}
+
+/// A blob store that keeps nothing: what neighborhood uploads get when their
+/// store could not be opened. Uploads then fail rather than land elsewhere.
+pub struct NoBlobs;
+
+#[async_trait]
+impl nsite_deck::BlobStore for NoBlobs {
+    async fn has(&self, _sha256_hex: &str) -> bool {
+        false
+    }
+    async fn get(&self, _sha256_hex: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    async fn put(&self, _bytes: &[u8]) -> anyhow::Result<String> {
+        anyhow::bail!("no neighborhood blob store on this device")
+    }
+    async fn wipe(&self) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -198,11 +246,43 @@ impl NeighborData for Neighbors {
         sha256: &str,
     ) -> Result<Option<Vec<u8>>, NeighborError> {
         let (target, record) = self.target(napplet, address)?;
-        match record.role {
-            Role::Everyone => Ok(self.carrier.blob(sha256, target.peer.as_deref()).await),
-            // Nothing uploads into a neighborhood yet.
-            Role::Plain => Ok(None),
+        match (record.role, target.peer) {
+            (Role::Everyone, peer) => Ok(self.carrier.blob(sha256, peer.as_deref()).await),
+            (Role::Plain, None) => self.scoped.blob(record.id, sha256).await.map_err(failed),
+            (Role::Plain, Some(_)) => Err(NeighborError::NotFound),
         }
+    }
+
+    /// Kept here in the neighborhood's scope, then pushed `blob_hops` out
+    /// (0 by default: peers fetch it when they want it).
+    async fn upload(
+        &self,
+        napplet: &NappletIdentity,
+        address: &str,
+        bytes: Vec<u8>,
+        sha256: &str,
+    ) -> Result<(), NeighborError> {
+        let (target, record) = self.target(napplet, address)?;
+        if target.peer.is_some() {
+            return Err(NeighborError::NotFound);
+        }
+        let hops = record.policy.blob_hops;
+        match record.role {
+            Role::Everyone => {
+                self.carrier.keep_blob(&bytes).await.map_err(failed)?;
+                if hops > 0 {
+                    let took = self.carrier.push_blob(&bytes, hops).await;
+                    tracing::info!(sha256, hops, took, "neighborhood blob pushed");
+                }
+            }
+            // No links yet, so nobody to push to: kept here.
+            Role::Plain => self
+                .scoped
+                .add_blob(record.id, &bytes, sha256)
+                .await
+                .map_err(failed)?,
+        }
+        Ok(())
     }
 }
 
@@ -246,6 +326,7 @@ mod tests {
                 asker: Arc::new(Yes),
                 carrier: carrier.clone(),
                 scoped_store: Arc::new(nsite_deck::testing::MemRelay::new()),
+                scoped_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
             },
         );
         (n, carrier)
@@ -389,7 +470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blobs_come_from_everyone_and_not_from_plain_neighborhoods_yet() {
+    async fn everyone_blobs_come_from_the_mesh_and_stay_out_of_other_neighborhoods() {
         let (n, carrier) = open();
         let (everyone, club) = addresses(&n).await;
         carrier.blobs.lock().unwrap().insert("ab".into(), vec![1]);
@@ -398,6 +479,37 @@ mod tests {
             Some(vec![1])
         );
         assert_eq!(n.blob(&app(), &club, "ab").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn an_upload_is_kept_in_its_scope_only() {
+        let (n, carrier) = open();
+        let (everyone, club) = addresses(&n).await;
+        let bytes = b"club picture".to_vec();
+        let sha = nsite_deck::sha256_hex(&bytes);
+        n.upload(&app(), &club, bytes.clone(), &sha).await.unwrap();
+        assert_eq!(n.blob(&app(), &club, &sha).await.unwrap(), Some(bytes));
+        assert_eq!(n.blob(&app(), &everyone, &sha).await.unwrap(), None);
+        assert!(carrier.pushed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn blobs_are_pushed_only_when_the_neighborhood_says_so() {
+        let (n, carrier) = open();
+        let (everyone, _) = addresses(&n).await;
+        let bytes = b"photo".to_vec();
+        let sha = nsite_deck::sha256_hex(&bytes);
+        n.upload(&app(), &everyone, bytes.clone(), &sha)
+            .await
+            .unwrap();
+        assert!(
+            carrier.pushed.lock().unwrap().is_empty(),
+            "0 hops by default"
+        );
+
+        n.set_blob_hops(n.records()[0].id, 2);
+        n.upload(&app(), &everyone, bytes, &sha).await.unwrap();
+        assert_eq!(*carrier.pushed.lock().unwrap(), [2]);
     }
 
     #[tokio::test]

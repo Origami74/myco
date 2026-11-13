@@ -27,6 +27,11 @@ pub struct Policy {
     pub backlog_hops: u8,
     /// Whether events from others are passed on.
     pub pass_on: bool,
+    /// Hops an uploaded blob is pushed. 0: kept here, and peers fetch it when
+    /// they want it. Blobs are heavy, so pushing is for neighborhoods like
+    /// the user's own devices.
+    #[serde(default)]
+    pub blob_hops: u8,
 }
 
 impl Default for Policy {
@@ -35,6 +40,7 @@ impl Default for Policy {
             publish_hops: 3,
             backlog_hops: 2,
             pass_on: true,
+            blob_hops: 0,
         }
     }
 }

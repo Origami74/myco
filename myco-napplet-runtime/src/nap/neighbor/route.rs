@@ -301,4 +301,50 @@ mod tests {
         let r = send(&ctx, &mut s, get(&other)).await;
         assert_eq!(r[0]["type"], "resource.bytes.error");
     }
+
+    fn upload(destination: Value) -> Envelope {
+        use base64::Engine as _;
+        let data =
+            base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nneighborhood");
+        Envelope::new("upload.upload").with_id("u1").with_field(
+            "request",
+            json!({"dataBase64": data, "destination": destination}),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_upload_into_a_neighborhood_is_kept_there_and_readable_back() {
+        let (ctx, host) = ctx();
+        let mut s = session(&["neighbor", "upload", "resource"]);
+        let r = send(&ctx, &mut s, upload(json!(HOME))).await;
+        let result = &r[0]["result"];
+        assert_eq!(result["ok"], true, "{}", r[0]);
+        assert_eq!(result["rail"], "blossom-neighborhood");
+        let sha = result["sha256"].as_str().unwrap().to_string();
+        assert!(host.calls().contains(&format!("upload {sha}")));
+
+        let get = Envelope::new("resource.bytes").with_id("b1").with_field(
+            "url",
+            format!("blossom:{sha}.png?xs=neighborhood%3A%2F%2Fh2c"),
+        );
+        let r = send(&ctx, &mut s, get).await;
+        assert_eq!(r[0]["type"], "resource.bytes.result", "{}", r[0]);
+    }
+
+    #[tokio::test]
+    async fn an_upload_destination_must_be_a_granted_address() {
+        let (ctx, host) = ctx();
+        let mut s = session(&["upload"]);
+        let r = send(&ctx, &mut s, upload(json!(HOME))).await;
+        assert_eq!(r[0]["result"]["error"], "policy denied", "{}", r[0]);
+
+        let mut s = session(&["neighbor", "upload"]);
+        let r = send(&ctx, &mut s, upload(json!("https://blossom.example"))).await;
+        assert!(
+            r[0]["error"].is_string(),
+            "a server is never named: {}",
+            r[0]
+        );
+        assert!(host.calls().is_empty());
+    }
 }

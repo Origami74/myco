@@ -2308,6 +2308,17 @@ impl AppRuntime {
                     }
                 };
 
+            let neighborhood_blobs: Arc<dyn nsite_deck::BlobStore> =
+                match myco_blossom::FsBlobStore::open(
+                    Path::new(&self.data_dir).join("neighborhood-blobs"),
+                ) {
+                    Ok(store) => Arc::new(store),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "neighborhood blob store unavailable");
+                        Arc::new(crate::neighbor::data::NoBlobs)
+                    }
+                };
+
             let outbox = Arc::new(crate::outbox::OutboxService::new(
                 content.relay(),
                 self.relay_hub.clone(),
@@ -2346,6 +2357,7 @@ impl AppRuntime {
                                 hub: self.relay_hub.clone(),
                             }),
                             scoped_store: neighborhood_store,
+                            scoped_blobs: neighborhood_blobs,
                         },
                     )),
                     outbox: outbox.clone(),

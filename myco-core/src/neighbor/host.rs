@@ -83,6 +83,8 @@ pub struct Seams {
     pub carrier: Arc<dyn super::carrier::Carrier>,
     /// Where neighborhood events other than Everyone's are stored.
     pub scoped_store: Arc<dyn nsite_deck::RelayBackend>,
+    /// Where their blobs are stored.
+    pub scoped_blobs: Arc<dyn nsite_deck::BlobStore>,
 }
 
 /// Where an address points, for the lanes that route it (phase 3).
@@ -110,7 +112,7 @@ impl Neighbors {
             peers: seams.peers,
             asker: seams.asker,
             carrier: seams.carrier,
-            scoped: super::data::Scoped::open(data_dir, seams.scoped_store),
+            scoped: super::data::Scoped::open(data_dir, seams.scoped_store, seams.scoped_blobs),
         }
     }
 
@@ -205,6 +207,15 @@ impl Neighbors {
             neighborhood: id,
             peer,
         })
+    }
+
+    /// Set how far a neighborhood pushes uploaded blobs. The Neighbors tab's.
+    pub fn set_blob_hops(&self, id: NeighborhoodId, hops: u8) {
+        self.change(|s| {
+            if let Some(r) = s.get_mut(id) {
+                r.policy.blob_hops = hops;
+            }
+        });
     }
 
     /// The neighborhoods on this device, for the shell's own UI.
@@ -459,6 +470,7 @@ mod tests {
             asker,
             carrier: Arc::new(super::super::carrier::testing::MemCarrier::default()),
             scoped_store: Arc::new(nsite_deck::testing::MemRelay::new()),
+            scoped_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
         }
     }
 

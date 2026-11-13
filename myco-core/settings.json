@@ -1,0 +1,10 @@
+{
+  "customRelayUrl": "ws://10.0.0.5:4869",
+  "customBlossomUrl": null,
+  "awareDataPaths": 8,
+  "nappletMeshPublishTtl": null,
+  "nappletMeshSubscribeTtl": null,
+  "eventCacheBytes": null,
+  "blobCacheBytes": null,
+  "intentDefaults": {}
+}
