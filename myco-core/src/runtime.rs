@@ -287,6 +287,11 @@ pub struct AppRuntime {
     /// Neighborhood links and the service that sets them up (`/nh` on the
     /// auth plane). `None` when the runtime failed to start.
     link_service: Option<crate::neighbor::service::LinkService>,
+    /// The device's neighborhoods, built with the napplet host (see
+    /// [`AppRuntime::neighbors`]).
+    neighbors: Option<Arc<crate::neighbor::Neighbors>>,
+    /// The link screen's open invitation and last status line.
+    link_ui: Arc<std::sync::Mutex<crate::neighbor::view::NeighborhoodsView>>,
     /// A fetched napplet awaiting the user's answer on install review. Written
     /// by the fetch task, cleared when the user installs or dismisses.
     napplet_review: Arc<std::sync::Mutex<Option<crate::napplet::NappletReview>>>,
@@ -800,6 +805,8 @@ impl AppRuntime {
             intent_defaults: Arc::new(std::sync::RwLock::new(settings.intent_defaults.clone())),
             relay_hub,
             link_service: Some(link_service),
+            neighbors: None,
+            link_ui: Arc::default(),
             pending_relay_url: settings.relay_url().unwrap_or_default(),
             pending_blossom_url: settings.blossom_url().unwrap_or_default(),
             aware_data_paths: settings.aware_data_paths,
@@ -1024,6 +1031,8 @@ impl AppRuntime {
             )),
             relay_hub: Arc::new(std::sync::Mutex::new(None)),
             link_service: None,
+            neighbors: None,
+            link_ui: Arc::default(),
             rev: 0,
             error: msg.to_string(),
             pending_relay_url: String::new(),
@@ -1451,6 +1460,54 @@ impl AppRuntime {
                 self.start_speedtest(npub);
                 self.rev += 1;
             }
+            NativeAppAction::CreateNeighborhood { name, auto_accept } => {
+                if let Some(n) = self.neighbors() {
+                    if !name.trim().is_empty() {
+                        n.create_local(&name, auto_accept);
+                    }
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::CreateLinkInvite { neighborhoods } => {
+                self.create_link_invite(neighborhoods);
+                self.rev += 1;
+            }
+            NativeAppAction::ClearLinkInvite => {
+                self.link_ui.lock().unwrap().invite = None;
+                self.rev += 1;
+            }
+            NativeAppAction::JoinLink { invite, accept } => {
+                self.join_link(invite, accept);
+                self.rev += 1;
+            }
+            NativeAppAction::AnswerLinkNeighborhood {
+                link_id,
+                neighborhood,
+                accept,
+            } => {
+                self.answer_link_neighborhood(&link_id, &neighborhood, accept);
+                self.rev += 1;
+            }
+            NativeAppAction::ShareOnLink {
+                link_id,
+                neighborhood,
+            } => {
+                self.share_on_link(link_id, neighborhood);
+                self.rev += 1;
+            }
+            NativeAppAction::EndLink { link_id } => {
+                self.end_link(link_id);
+                self.rev += 1;
+            }
+            NativeAppAction::SetNeighborhoodBlobHops { neighborhood, hops } => {
+                if let (Some(n), Some(id)) = (
+                    self.neighbors(),
+                    crate::neighbor::NeighborhoodId::from_hex(&neighborhood),
+                ) {
+                    n.set_blob_hops(id, hops);
+                }
+                self.rev += 1;
+            }
             NativeAppAction::ShareFile {
                 path,
                 name,
@@ -1504,6 +1561,185 @@ impl AppRuntime {
                 self.rev += 1;
             }
         }
+    }
+
+    // --- neighborhoods ------------------------------------------------------
+
+    /// The device's neighborhoods, building the napplet host (which owns
+    /// them) on first use.
+    fn neighbors(&mut self) -> Option<Arc<crate::neighbor::Neighbors>> {
+        if self.neighbors.is_none() {
+            let _ = self.napplet_context();
+        }
+        self.neighbors.clone()
+    }
+
+    fn neighborhoods_view(&self) -> crate::neighbor::view::NeighborhoodsView {
+        let Some(svc) = &self.link_service else {
+            return Default::default();
+        };
+        let records = match &self.neighbors {
+            Some(n) => n.records(),
+            // Not built yet: read what is on disk rather than build it from a
+            // state read.
+            None => {
+                crate::neighbor::store::load(&crate::neighbor::store::path(Path::new(
+                    &self.data_dir,
+                )))
+                .neighborhoods
+            }
+        };
+        let mut view = crate::neighbor::view::build(&records, &svc.links);
+        let ui = self.link_ui.lock().unwrap();
+        view.invite = ui.invite.clone();
+        view.status = ui.status.clone();
+        view
+    }
+
+    fn link_status(&self, status: impl Into<String>) {
+        self.link_ui.lock().unwrap().status = status.into();
+    }
+
+    fn create_link_invite(&mut self, ids: Vec<String>) {
+        let (Some(svc), Some(n)) = (self.link_service.clone(), self.neighbors()) else {
+            return;
+        };
+        let records = n.records();
+        let shared: Vec<crate::neighbor::link::Shared> = ids
+            .iter()
+            .filter_map(|h| crate::neighbor::NeighborhoodId::from_hex(h))
+            .filter_map(|id| records.iter().find(|r| r.id == id))
+            .map(|r| crate::neighbor::link::Shared {
+                id: r.id,
+                name: r.name.clone(),
+            })
+            .collect();
+        let offer = svc.invite(shared, crate::neighbor::link::INVITE_TTL_SECS);
+        let mut ui = self.link_ui.lock().unwrap();
+        ui.invite = Some(offer.encode());
+        ui.status = String::new();
+    }
+
+    fn join_link(&mut self, invite: String, accept: Vec<String>) {
+        let (Some(svc), Some(n), Some(rt)) = (
+            self.link_service.clone(),
+            self.neighbors(),
+            self.rt.as_ref(),
+        ) else {
+            return;
+        };
+        let Some(offer) = crate::neighbor::link::LinkOffer::decode(&invite) else {
+            self.link_status("That isn't a link invitation.");
+            return;
+        };
+        let accept: Vec<crate::neighbor::NeighborhoodId> = accept
+            .iter()
+            .filter_map(|h| crate::neighbor::NeighborhoodId::from_hex(h))
+            .collect();
+        self.link_status("Linking…");
+        let ui = self.link_ui.clone();
+        rt.spawn(async move {
+            // Our offer names our link URL, which contains the new link key.
+            let ours = |pk: &str| svc.offer(pk);
+            let status =
+                match crate::neighbor::service::join(&svc.links, &offer, accept, &ours).await {
+                    Ok(link) => {
+                        for shared in offer
+                            .n
+                            .iter()
+                            .filter(|s| link.neighborhoods.contains(&s.id))
+                        {
+                            n.adopt(shared);
+                        }
+                        format!(
+                            "Linked with {}.",
+                            link.name.as_deref().unwrap_or("a new peer")
+                        )
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "link join failed");
+                        format!("Couldn't link: {e}")
+                    }
+                };
+            ui.lock().unwrap().status = status;
+        });
+    }
+
+    fn answer_link_neighborhood(&mut self, link_id: &str, neighborhood: &str, accept: bool) {
+        let (Some(svc), Some(n), Some(id)) = (
+            self.link_service.clone(),
+            self.neighbors(),
+            crate::neighbor::NeighborhoodId::from_hex(neighborhood),
+        ) else {
+            return;
+        };
+        if let Some(shared) = svc.links.resolve_pending(link_id, id, accept) {
+            if accept {
+                n.adopt(&shared);
+            }
+        }
+    }
+
+    fn share_on_link(&mut self, link_id: String, neighborhood: String) {
+        let (Some(svc), Some(n), Some(rt)) = (
+            self.link_service.clone(),
+            self.neighbors(),
+            self.rt.as_ref(),
+        ) else {
+            return;
+        };
+        let Some(id) = crate::neighbor::NeighborhoodId::from_hex(&neighborhood) else {
+            return;
+        };
+        let Some(record) = n.records().into_iter().find(|r| r.id == id) else {
+            return;
+        };
+        let Some(link) = svc.links.all().into_iter().find(|l| l.id == link_id) else {
+            return;
+        };
+        // Carried on our side now; theirs once their user agrees.
+        svc.links.set_neighborhoods(&link_id, &[id], &[]);
+        let ui = self.link_ui.clone();
+        rt.spawn(async move {
+            let change = crate::neighbor::service::Change {
+                add: vec![crate::neighbor::link::Shared {
+                    id,
+                    name: record.name.clone(),
+                }],
+                remove: Vec::new(),
+            };
+            let body = serde_json::to_value(&change).ok();
+            let status = match crate::neighbor::service::call(
+                &link,
+                reqwest::Method::POST,
+                "neighborhoods",
+                body,
+            )
+            .await
+            {
+                Ok(r) if r.status().is_success() => {
+                    format!("Offered {} — waiting for them.", record.name)
+                }
+                Ok(r) => format!("They refused ({}).", r.status()),
+                Err(e) => format!("Couldn't reach them: {e}"),
+            };
+            ui.lock().unwrap().status = status;
+        });
+    }
+
+    fn end_link(&mut self, link_id: String) {
+        let (Some(svc), Some(rt)) = (self.link_service.clone(), self.rt.as_ref()) else {
+            return;
+        };
+        let Some(link) = svc.links.all().into_iter().find(|l| l.id == link_id) else {
+            return;
+        };
+        svc.links.end(&link_id);
+        // Best effort: they learn now if reachable, otherwise when their
+        // requests start being refused.
+        rt.spawn(async move {
+            let _ = crate::neighbor::service::call(&link, reqwest::Method::POST, "end", None).await;
+        });
     }
 
     /// Spawn a peer speedtest (spawn-not-block; the result is observed via the
@@ -2341,6 +2577,25 @@ impl AppRuntime {
                     }
                 };
 
+            let neighbors = Arc::new(crate::neighbor::Neighbors::open(
+                Path::new(&self.data_dir),
+                crate::neighbor::Seams {
+                    peers: Arc::new(crate::neighbor::CirclePeers {
+                        content: content.clone(),
+                        links: self.link_service.as_ref().map(|s| s.links.clone()),
+                    }),
+                    asker: Arc::new(crate::neighbor::NoAsker),
+                    carrier: Arc::new(crate::neighbor::MeshCarrier {
+                        mesh: mesh.clone(),
+                        content: content.clone(),
+                        hub: self.relay_hub.clone(),
+                    }),
+                    scoped_store: neighborhood_store,
+                    scoped_blobs: neighborhood_blobs,
+                },
+            ));
+            self.neighbors = Some(neighbors.clone());
+
             let outbox = Arc::new(crate::outbox::OutboxService::new(
                 content.relay(),
                 self.relay_hub.clone(),
@@ -2366,25 +2621,9 @@ impl AppRuntime {
                     // breaker are decided in one place.
                     sink: outbox.clone(),
                     mesh: mesh.clone(),
-                    // NAP-NEIGHBOR: the Circle is Everyone; nothing can be
-                    // created or changed until the shell can ask the user.
-                    neighbor: Arc::new(crate::neighbor::Neighbors::open(
-                        Path::new(&self.data_dir),
-                        crate::neighbor::Seams {
-                            peers: Arc::new(crate::neighbor::CirclePeers {
-                                content: content.clone(),
-                                links: self.link_service.as_ref().map(|s| s.links.clone()),
-                            }),
-                            asker: Arc::new(crate::neighbor::NoAsker),
-                            carrier: Arc::new(crate::neighbor::MeshCarrier {
-                                mesh: mesh.clone(),
-                                content: content.clone(),
-                                hub: self.relay_hub.clone(),
-                            }),
-                            scoped_store: neighborhood_store,
-                            scoped_blobs: neighborhood_blobs,
-                        },
-                    )),
+                    // NAP-NEIGHBOR: the Circle is Everyone; nothing a napplet
+                    // asks to change goes through until the shell can ask.
+                    neighbor: neighbors.clone(),
                     outbox: outbox.clone(),
                     lanes: outbox,
                     // A blob a napplet fetches from elsewhere is cached, not
@@ -3017,6 +3256,7 @@ impl AppRuntime {
                 .map(|c| c.update_check_snapshot())
                 .unwrap_or_default(),
             speedtest: self.speedtest.lock().unwrap().clone(),
+            neighborhoods: self.neighborhoods_view(),
             file_transfers: self
                 .content
                 .as_ref()

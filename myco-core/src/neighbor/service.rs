@@ -230,7 +230,7 @@ pub async fn join(
     links: &Links,
     offer: &LinkOffer,
     accept: Vec<NeighborhoodId>,
-    ours: &OfferContent,
+    ours: &(dyn Fn(&str) -> OfferContent + Sync),
 ) -> anyhow::Result<Link> {
     let mut last = anyhow::anyhow!("the invitation names no link URL");
     for url in &offer.link {
@@ -349,8 +349,14 @@ mod tests {
             &std::env::temp_dir().join(format!("myco-linksvc-bob-{}", super::super::id::token())),
         );
         let url = &offer.link[0];
-        let (request, joining) =
-            Links::join(&offer, url, vec![home.id], &OfferContent::default(), None).unwrap();
+        let (request, joining) = Links::join(
+            &offer,
+            url,
+            vec![home.id],
+            &|_| OfferContent::default(),
+            None,
+        )
+        .unwrap();
         let (status, body) = send(
             svc,
             post_json(&format!("/nh/{}/setup", offer.pk), &request, None),
@@ -387,7 +393,7 @@ mod tests {
             &offer,
             "http://elsewhere.example/nh/x",
             vec![],
-            &OfferContent::default(),
+            &|_| OfferContent::default(),
             None,
         )
         .unwrap();

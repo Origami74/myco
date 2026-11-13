@@ -538,6 +538,8 @@ data class AppState(
     val updateCheck: UpdateCheck = UpdateCheck(),
     val fileTransfers: List<FileTransfer> = emptyList(),
     val speedtest: SpeedtestStatus = SpeedtestStatus(),
+    /** Neighborhoods and links (NAP-NEIGHBOR). */
+    val neighborhoods: app.myco.neighbor.NeighborhoodsState = app.myco.neighbor.NeighborhoodsState(),
     /** Merged per-identity peer diagnostics rows (DIAG-01/03/04/06). Built once
      *  in Rust; the UI renders this directly, it never re-joins blePeers/circle. */
     val peers: List<PeerDiagnostic> = emptyList(),
@@ -928,6 +930,7 @@ data class AppState(
                     )
                 } ?: UpdateCheck(),
                 fileTransfers = fileTransfers,
+                neighborhoods = app.myco.neighbor.NeighborhoodsState.parse(o.optJSONObject("neighborhoods")),
                 peers = peerDiagnostics,
             )
         }
@@ -1401,6 +1404,32 @@ object NativeActions {
      *  see the chosen name. The app owns the value and re-applies it on launch. */
     fun setDeviceName(name: String): JSONObject =
         JSONObject().put("type", "set_device_name").put("name", name)
+
+    // --- neighborhoods (NAP-NEIGHBOR) ---
+
+    fun createNeighborhood(name: String, autoAccept: Boolean): JSONObject =
+        JSONObject().put("type", "create_neighborhood").put("name", name).put("autoAccept", autoAccept)
+
+    fun createLinkInvite(neighborhoods: List<String>): JSONObject =
+        JSONObject().put("type", "create_link_invite").put("neighborhoods", org.json.JSONArray(neighborhoods))
+
+    fun clearLinkInvite(): JSONObject = JSONObject().put("type", "clear_link_invite")
+
+    fun joinLink(invite: String, accept: List<String>): JSONObject =
+        JSONObject().put("type", "join_link").put("invite", invite).put("accept", org.json.JSONArray(accept))
+
+    fun answerLinkNeighborhood(linkId: String, neighborhood: String, accept: Boolean): JSONObject =
+        JSONObject().put("type", "answer_link_neighborhood")
+            .put("linkId", linkId).put("neighborhood", neighborhood).put("accept", accept)
+
+    fun shareOnLink(linkId: String, neighborhood: String): JSONObject =
+        JSONObject().put("type", "share_on_link").put("linkId", linkId).put("neighborhood", neighborhood)
+
+    fun endLink(linkId: String): JSONObject =
+        JSONObject().put("type", "end_link").put("linkId", linkId)
+
+    fun setNeighborhoodBlobHops(neighborhood: String, hops: Int): JSONObject =
+        JSONObject().put("type", "set_neighborhood_blob_hops").put("neighborhood", neighborhood).put("hops", hops)
 
     /** Dev-menu speedtest: round-trip a payload through `npub`'s mesh Blossom. */
     fun speedtestPeer(npub: String): JSONObject =

@@ -259,6 +259,34 @@ pub enum NativeAppAction {
     /// in `speedtest`. `npub` is the target peer's device identity.
     SpeedtestPeer { npub: String },
 
+    // --- neighborhoods (NAP-NEIGHBOR) ---
+    /// Start a neighborhood, or with `auto_accept` join the one of that name.
+    CreateNeighborhood { name: String, auto_accept: bool },
+    /// Make a one-time link invitation carrying these neighborhood ids (hex);
+    /// it appears as `neighborhoods.invite`, encoded for a QR code.
+    CreateLinkInvite { neighborhoods: Vec<String> },
+    /// Drop the shown invitation (it still expires on its own).
+    ClearLinkInvite,
+    /// Join a link from a scanned invitation, taking `accept` of the
+    /// neighborhoods it offers. Spawn-not-block; the outcome lands in
+    /// `neighborhoods.status`.
+    JoinLink { invite: String, accept: Vec<String> },
+    /// Answer a neighborhood a peer wants to add to a link.
+    AnswerLinkNeighborhood {
+        link_id: String,
+        neighborhood: String,
+        accept: bool,
+    },
+    /// Offer one of our neighborhoods on an existing link.
+    ShareOnLink {
+        link_id: String,
+        neighborhood: String,
+    },
+    /// End a link, telling the peer when they can be reached.
+    EndLink { link_id: String },
+    /// How far a neighborhood pushes uploaded blobs (0: not at all).
+    SetNeighborhoodBlobHops { neighborhood: String, hops: u8 },
+
     // --- native paired-peer file transfer ---
     /// Encrypt a local file and send a private offer to a Circle peer. The
     /// Android side copies a content URI into its private outbox first, then

@@ -458,13 +458,14 @@ impl Links {
     }
 
     /// The joiner's side, before the request is sent: a fresh link key, the
-    /// proof for `url`, and our offer. `accept` is which offered
-    /// neighborhoods to take.
+    /// proof for `url`, and our offer, made by `our_offer` from the new key
+    /// (our link URL contains it). `accept` is which offered neighborhoods
+    /// to take.
     pub fn join(
         offer: &LinkOffer,
         url: &str,
         accept: Vec<NeighborhoodId>,
-        our_offer: &OfferContent,
+        our_offer: &dyn Fn(&str) -> OfferContent,
         our_name: Option<&str>,
     ) -> Option<(SetupRequest, Joining)> {
         if offer.exp <= now() {
@@ -477,11 +478,12 @@ impl Links {
             .into_iter()
             .filter(|id| offer.n.iter().any(|n| n.id == *id))
             .collect();
+        let signed = sign_offer(&keys, &our_offer(&pk), our_name);
         let request = SetupRequest {
             proof: proof(&s, &offer.pk, &pk, url),
             pk,
             n: accepted.clone(),
-            offer: sign_offer(&keys, our_offer, our_name),
+            offer: signed,
         };
         Some((
             request,
@@ -549,6 +551,25 @@ impl Links {
                 }
             }
             link.pending.iter().map(|p| p.id).collect()
+        })
+    }
+
+    /// Answer a pending addition: carried on yes, dropped either way.
+    /// Returns the neighborhood when it was pending.
+    pub fn resolve_pending(
+        &self,
+        link_id: &str,
+        id: NeighborhoodId,
+        accept: bool,
+    ) -> Option<Shared> {
+        self.change(|saved| {
+            let link = saved.links.iter_mut().find(|l| l.id == link_id)?;
+            let at = link.pending.iter().position(|p| p.id == id)?;
+            let shared = link.pending.remove(at);
+            if accept {
+                link.neighborhoods.insert(id);
+            }
+            Some(shared)
         })
     }
 
@@ -637,8 +658,14 @@ mod tests {
         let offer = a.invite(vec![url.into()], vec![home.clone(), club], INVITE_TTL_SECS);
         // Through the QR and back.
         let offer = LinkOffer::decode(&offer.encode()).unwrap();
-        let (request, joining) =
-            Links::join(&offer, url, vec![home.id], &offer_content(), Some("Bob")).unwrap();
+        let (request, joining) = Links::join(
+            &offer,
+            url,
+            vec![home.id],
+            &|_| offer_content(),
+            Some("Bob"),
+        )
+        .unwrap();
         let (a_link, response) = a
             .accept(&offer.pk, url, &request, &offer_content(), Some("Alice"))
             .unwrap();
@@ -663,7 +690,7 @@ mod tests {
         let (a, _) = (Links::open(&dir()), ());
         let url = "http://a.fips:4873/nh";
         let offer = a.invite(vec![url.into()], vec![], INVITE_TTL_SECS);
-        let (request, _) = Links::join(&offer, url, vec![], &offer_content(), None).unwrap();
+        let (request, _) = Links::join(&offer, url, vec![], &|_| offer_content(), None).unwrap();
         assert!(a
             .accept(&offer.pk, url, &request, &offer_content(), None)
             .is_ok());
@@ -683,7 +710,7 @@ mod tests {
             &offer,
             "http://evil.example/nh",
             vec![],
-            &offer_content(),
+            &|_| offer_content(),
             None,
         )
         .unwrap();
@@ -692,7 +719,8 @@ mod tests {
                 .unwrap_err(),
             Refused::BadProof
         );
-        let (mut request, _) = Links::join(&offer, url, vec![], &offer_content(), None).unwrap();
+        let (mut request, _) =
+            Links::join(&offer, url, vec![], &|_| offer_content(), None).unwrap();
         request.pk = Keys::generate().public_key().to_hex();
         assert_eq!(
             a.accept(&offer.pk, url, &request, &offer_content(), None)
@@ -706,10 +734,10 @@ mod tests {
         let a = Links::open(&dir());
         let url = "http://a.fips:4873/nh";
         let offer = a.invite(vec![url.into()], vec![], 0);
-        assert!(Links::join(&offer, url, vec![], &offer_content(), None).is_none());
+        assert!(Links::join(&offer, url, vec![], &|_| offer_content(), None).is_none());
         let mut fresh = offer.clone();
         fresh.exp = now() + 60;
-        let (request, _) = Links::join(&fresh, url, vec![], &offer_content(), None).unwrap();
+        let (request, _) = Links::join(&fresh, url, vec![], &|_| offer_content(), None).unwrap();
         assert_eq!(
             a.accept(&offer.pk, url, &request, &offer_content(), None)
                 .unwrap_err(),
@@ -722,7 +750,8 @@ mod tests {
         let a = Links::open(&dir());
         let url = "http://a.fips:4873/nh";
         let offer = a.invite(vec![url.into()], vec![], INVITE_TTL_SECS);
-        let (mut request, _) = Links::join(&offer, url, vec![], &offer_content(), None).unwrap();
+        let (mut request, _) =
+            Links::join(&offer, url, vec![], &|_| offer_content(), None).unwrap();
         request.offer = sign_offer(&Keys::generate(), &offer_content(), None);
         assert_eq!(
             a.accept(&offer.pk, url, &request, &offer_content(), None)
@@ -737,7 +766,7 @@ mod tests {
         let a = Links::open(&d);
         let url = "http://a.fips:4873/nh";
         let offer = a.invite(vec![url.into()], vec![], INVITE_TTL_SECS);
-        let (request, _) = Links::join(&offer, url, vec![], &offer_content(), None).unwrap();
+        let (request, _) = Links::join(&offer, url, vec![], &|_| offer_content(), None).unwrap();
         let (link, _) = a
             .accept(&offer.pk, url, &request, &offer_content(), None)
             .unwrap();

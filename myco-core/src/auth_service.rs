@@ -118,6 +118,7 @@ struct AuthState {
 
 /// Serve the auth plane on an already-bound listener: a kernel socket, or the
 /// mesh stack's (see [`crate::mesh_net`]).
+#[cfg(test)]
 pub async fn serve_on<L>(content: Arc<Content>, listener: L) -> anyhow::Result<()>
 where
     L: axum::serve::Listener<Addr = SocketAddr>,

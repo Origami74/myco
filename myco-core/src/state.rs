@@ -95,6 +95,8 @@ pub struct AppState {
     pub update_check: crate::content::UpdateCheckView,
     /// Result of the dev-menu peer speedtest (a Blossom upload+download round-trip).
     pub speedtest: SpeedtestView,
+    /// Neighborhoods and links (NAP-NEIGHBOR).
+    pub neighborhoods: crate::neighbor::view::NeighborhoodsView,
     /// Native paired-peer file transfers, including incoming offers awaiting
     /// the user's accept/deny decision.
     pub file_transfers: Vec<crate::file_transfer::FileTransferView>,

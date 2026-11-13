@@ -209,6 +209,34 @@ impl Neighbors {
         })
     }
 
+    /// Start or join a neighborhood from the shell's own UI: the user is
+    /// already the one asking, so no prompt. Granted to no napplet.
+    pub fn create_local(&self, name: &str, auto_accept: bool) -> Record {
+        let name = name.trim().to_string();
+        self.change(|s| {
+            let id = if auto_accept {
+                NeighborhoodId::from_name(&name)
+            } else {
+                NeighborhoodId::random()
+            };
+            if s.get(id).is_none() {
+                s.neighborhoods.push(Record::new(id, &name, auto_accept));
+            }
+            s.get(id).cloned().expect("just ensured")
+        })
+    }
+
+    /// Carry a neighborhood someone shared over a link: known from now on,
+    /// under the name it was shared with. Granted to no napplet.
+    pub fn adopt(&self, shared: &super::link::Shared) {
+        self.change(|s| {
+            if s.get(shared.id).is_none() {
+                s.neighborhoods
+                    .push(Record::new(shared.id, &shared.name, false));
+            }
+        });
+    }
+
     /// Set how far a neighborhood pushes uploaded blobs. The Neighbors tab's.
     pub fn set_blob_hops(&self, id: NeighborhoodId, hops: u8) {
         self.change(|s| {

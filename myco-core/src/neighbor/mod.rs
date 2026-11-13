@@ -27,6 +27,8 @@ pub mod id;
 pub mod link;
 pub mod service;
 pub mod store;
+pub mod view;
 
 pub use carrier::MeshCarrier;
 pub use host::{CirclePeers, Neighbors, NoAsker, Seams};
+pub use id::NeighborhoodId;
