@@ -11,6 +11,8 @@
 //!   grants, and each napplet's tokens.
 //! - [`data`] — the data plane: Everyone over the Circle's mesh
 //!   ([`carrier`]), every other neighborhood in its own scoped store.
+//! - [`link`] — links: link keys, the one-time-secret setup, signed offers,
+//!   NIP-98 checks, `links.json`.
 //! - [`host`] — [`Neighbors`], the [`NeighborHost`](myco_napplet_runtime::NeighborHost)
 //!   napplets talk to, and the seams it reaches peers and the user through.
 //!
@@ -22,6 +24,7 @@ pub mod carrier;
 pub mod data;
 pub mod host;
 pub mod id;
+pub mod link;
 pub mod store;
 
 pub use carrier::MeshCarrier;
