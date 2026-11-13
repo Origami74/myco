@@ -1428,6 +1428,19 @@ object NativeActions {
     fun endLink(linkId: String): JSONObject =
         JSONObject().put("type", "end_link").put("linkId", linkId)
 
+    fun setNeighborhoodPolicy(neighborhood: String, publishHops: Int, backlogHops: Int, passOn: Boolean): JSONObject =
+        JSONObject().put("type", "set_neighborhood_policy").put("neighborhood", neighborhood)
+            .put("publishHops", publishHops).put("backlogHops", backlogHops).put("passOn", passOn)
+
+    fun renameNeighborhood(neighborhood: String, name: String): JSONObject =
+        JSONObject().put("type", "rename_neighborhood").put("neighborhood", neighborhood).put("name", name)
+
+    fun leaveNeighborhood(neighborhood: String): JSONObject =
+        JSONObject().put("type", "leave_neighborhood").put("neighborhood", neighborhood)
+
+    fun dropFromLink(linkId: String, neighborhood: String): JSONObject =
+        JSONObject().put("type", "drop_from_link").put("linkId", linkId).put("neighborhood", neighborhood)
+
     fun setNeighborhoodBlobHops(neighborhood: String, hops: Int): JSONObject =
         JSONObject().put("type", "set_neighborhood_blob_hops").put("neighborhood", neighborhood).put("hops", hops)
 

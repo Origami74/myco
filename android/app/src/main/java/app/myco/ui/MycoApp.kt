@@ -118,7 +118,8 @@ import kotlinx.coroutines.withContext
 
 /**
  * The consumer shell: a bottom-nav app over four surfaces — **Apps** (the nsite
- * launcher), **Circle** (paired peers), **Settings**, and **Dev** (diagnostics).
+ * launcher), **Neighbors** (neighborhoods; the Circle opens from Everyone),
+ * **Settings**, and **Dev** (diagnostics).
  * The Rust `AppState` is polled once a second here and handed down to every tab,
  * so all screens share one read: the tabs get its [forShell] projection, and
  * the diagnostics screens the full snapshot through [LocalLiveState].
@@ -127,7 +128,7 @@ private data class Tab(val route: String, val label: String, val icon: ImageVect
 
 private val TABS = listOf(
     Tab("apps", "Apps", Icons.Filled.GridView),
-    Tab("circle", "Circle", Icons.Filled.People),
+    Tab("neighbors", "Neighbors", Icons.Filled.People),
     Tab("settings", "Settings", Icons.Filled.Settings),
     Tab("dev", "Dev", Icons.Filled.Terminal),
 )
@@ -364,7 +365,8 @@ fun MycoApp(
             tab.route == "settings" &&
                 (bleExhausted || radioAlert || backendErrors(state).isNotEmpty() || softwareUpdateState.availableTag != null)
             ) ||
-            (tab.route == "circle" && state.pendingPairRequests.isNotEmpty())
+            (tab.route == "neighbors" &&
+                (state.pendingPairRequests.isNotEmpty() || state.neighborhoods.links.any { it.pending.isNotEmpty() }))
         if (badged) {
             BadgedBox(badge = { Badge() }) {
                 Icon(tab.icon, contentDescription = tab.label)
@@ -435,6 +437,15 @@ fun MycoApp(
                         onScanned = onScanned,
                     )
                 }
+                composable("neighbors") {
+                    app.myco.neighbor.NeighborsScreen(
+                        state,
+                        client,
+                        onOpenCircle = { nav.navigate("circle") },
+                    )
+                }
+                // The Circle screen, opened from Everyone: pairing, tap to
+                // connect, nearby people, the hotspot and file sharing.
                 composable("circle") {
                     CircleScreen(
                         state,

@@ -246,6 +246,47 @@ impl Neighbors {
         });
     }
 
+    /// Set a neighborhood's reach. The Neighbors tab's.
+    pub fn set_policy(
+        &self,
+        id: NeighborhoodId,
+        publish_hops: u8,
+        backlog_hops: u8,
+        pass_on: bool,
+    ) {
+        self.change(|s| {
+            if let Some(r) = s.get_mut(id) {
+                r.policy.publish_hops = publish_hops.min(7);
+                r.policy.backlog_hops = backlog_hops.min(7);
+                r.policy.pass_on = pass_on;
+            }
+        });
+    }
+
+    /// Rename a neighborhood locally; the id, and everyone else's name for
+    /// it, are unchanged.
+    pub fn rename(&self, id: NeighborhoodId, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.change(|s| {
+            if let Some(r) = s.get_mut(id) {
+                r.name = name.to_string();
+            }
+        });
+    }
+
+    /// Forget a neighborhood (never Everyone). Returns whether it was known.
+    pub fn forget(&self, id: NeighborhoodId) -> bool {
+        self.change(|s| {
+            let before = s.neighborhoods.len();
+            s.neighborhoods
+                .retain(|r| r.id != id || r.role == Role::Everyone);
+            s.neighborhoods.len() != before
+        })
+    }
+
     /// Set how far a neighborhood pushes uploaded blobs. The Neighbors tab's.
     pub fn set_blob_hops(&self, id: NeighborhoodId, hops: u8) {
         self.change(|s| {

@@ -12,7 +12,18 @@ data class NeighborhoodsState(
     val invite: String? = null,
     /** The last link action's outcome. */
     val status: String = "",
+    /** Everyone the user is connected to: the map's nodes. */
+    val peers: List<PeerNode> = emptyList(),
 ) {
+    data class PeerNode(
+        val key: String,
+        val name: String,
+        val reachable: Boolean,
+        val neighborhoods: List<String>,
+        /** Set for a link; null for a paired Circle member. */
+        val linkId: String?,
+    )
+
     data class Neighborhood(
         val id: String,
         val name: String,
@@ -22,6 +33,7 @@ data class NeighborhoodsState(
         val publishHops: Int,
         val backlogHops: Int,
         val blobHops: Int,
+        val passOn: Boolean = true,
     )
 
     data class Pending(val id: String, val name: String)
@@ -49,6 +61,7 @@ data class NeighborhoodsState(
                         publishHops = it.optInt("publishHops"),
                         backlogHops = it.optInt("backlogHops"),
                         blobHops = it.optInt("blobHops"),
+                        passOn = it.optBoolean("passOn", true),
                     )
                 },
                 links = o.optJSONArray("links").objects().map { l ->
@@ -62,6 +75,15 @@ data class NeighborhoodsState(
                     )
                 },
                 invite = o.optString("invite").takeIf { it.isNotEmpty() },
+                peers = o.optJSONArray("peers").objects().map {
+                    PeerNode(
+                        key = it.optString("key"),
+                        name = it.optString("name"),
+                        reachable = it.optBoolean("reachable"),
+                        neighborhoods = it.optJSONArray("neighborhoods").strings(),
+                        linkId = it.optString("linkId").takeIf { s -> s.isNotEmpty() },
+                    )
+                },
                 status = o.optString("status"),
             )
         }

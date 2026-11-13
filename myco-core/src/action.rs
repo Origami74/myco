@@ -286,6 +286,24 @@ pub enum NativeAppAction {
     EndLink { link_id: String },
     /// How far a neighborhood pushes uploaded blobs (0: not at all).
     SetNeighborhoodBlobHops { neighborhood: String, hops: u8 },
+    /// A neighborhood's reach: publish and backlog hops, and whether others'
+    /// events are passed on.
+    SetNeighborhoodPolicy {
+        neighborhood: String,
+        publish_hops: u8,
+        backlog_hops: u8,
+        pass_on: bool,
+    },
+    /// The user's local name for a neighborhood.
+    RenameNeighborhood { neighborhood: String, name: String },
+    /// Stop carrying a neighborhood on every link, and forget it. Not
+    /// Everyone: that is the Circle, left by unpairing.
+    LeaveNeighborhood { neighborhood: String },
+    /// Stop carrying one neighborhood on one link, telling the peer.
+    DropFromLink {
+        link_id: String,
+        neighborhood: String,
+    },
 
     // --- native paired-peer file transfer ---
     /// Encrypt a local file and send a private offer to a Circle peer. The

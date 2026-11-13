@@ -113,7 +113,7 @@ private fun Neighborhoods(nh: NeighborhoodsState, client: AppCoreClient) {
 }
 
 @Composable
-private fun Invite(nh: NeighborhoodsState, client: AppCoreClient) {
+internal fun Invite(nh: NeighborhoodsState, client: AppCoreClient) {
     val context = LocalContext.current
     val invite = nh.invite
     if (invite != null) {
@@ -151,7 +151,7 @@ private fun Invite(nh: NeighborhoodsState, client: AppCoreClient) {
 }
 
 @Composable
-private fun Join(client: AppCoreClient) {
+internal fun Join(client: AppCoreClient) {
     var preview by remember { mutableStateOf<InvitePreview?>(null) }
     var pasted by remember { mutableStateOf("") }
     val accept = remember { mutableStateListOf<String>() }

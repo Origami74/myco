@@ -1500,6 +1500,40 @@ impl AppRuntime {
                 self.end_link(link_id);
                 self.rev += 1;
             }
+            NativeAppAction::SetNeighborhoodPolicy {
+                neighborhood,
+                publish_hops,
+                backlog_hops,
+                pass_on,
+            } => {
+                if let (Some(n), Some(id)) = (
+                    self.neighbors(),
+                    crate::neighbor::NeighborhoodId::from_hex(&neighborhood),
+                ) {
+                    n.set_policy(id, publish_hops, backlog_hops, pass_on);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::RenameNeighborhood { neighborhood, name } => {
+                if let (Some(n), Some(id)) = (
+                    self.neighbors(),
+                    crate::neighbor::NeighborhoodId::from_hex(&neighborhood),
+                ) {
+                    n.rename(id, &name);
+                }
+                self.rev += 1;
+            }
+            NativeAppAction::LeaveNeighborhood { neighborhood } => {
+                self.leave_neighborhood(&neighborhood);
+                self.rev += 1;
+            }
+            NativeAppAction::DropFromLink {
+                link_id,
+                neighborhood,
+            } => {
+                self.drop_from_link(link_id, neighborhood);
+                self.rev += 1;
+            }
             NativeAppAction::SetNeighborhoodBlobHops { neighborhood, hops } => {
                 if let (Some(n), Some(id)) = (
                     self.neighbors(),
@@ -1590,7 +1624,22 @@ impl AppRuntime {
                 .neighborhoods
             }
         };
-        let mut view = crate::neighbor::view::build(&records, &svc.links);
+        let circle: Vec<crate::neighbor::view::CircleMember> = match &self.content {
+            Some(content) => {
+                let live = content.reachable_npubs();
+                content
+                    .circle_snapshot()
+                    .into_iter()
+                    .map(|c| crate::neighbor::view::CircleMember {
+                        reachable: live.contains(&c.npub),
+                        name: c.name,
+                        npub: c.npub,
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        let mut view = crate::neighbor::view::build(&records, &svc.links, &circle);
         let ui = self.link_ui.lock().unwrap();
         view.invite = ui.invite.clone();
         view.status = ui.status.clone();
@@ -1725,6 +1774,45 @@ impl AppRuntime {
                 Err(e) => format!("Couldn't reach them: {e}"),
             };
             ui.lock().unwrap().status = status;
+        });
+    }
+
+    fn leave_neighborhood(&mut self, neighborhood: &str) {
+        let (Some(svc), Some(n), Some(id)) = (
+            self.link_service.clone(),
+            self.neighbors(),
+            crate::neighbor::NeighborhoodId::from_hex(neighborhood),
+        ) else {
+            return;
+        };
+        let carrying: Vec<String> = svc.links.carrying(id).into_iter().map(|l| l.id).collect();
+        for link_id in carrying {
+            self.drop_from_link(link_id, neighborhood.to_string());
+        }
+        n.forget(id);
+    }
+
+    fn drop_from_link(&mut self, link_id: String, neighborhood: String) {
+        let (Some(svc), Some(rt)) = (self.link_service.clone(), self.rt.as_ref()) else {
+            return;
+        };
+        let Some(id) = crate::neighbor::NeighborhoodId::from_hex(&neighborhood) else {
+            return;
+        };
+        let Some(link) = svc.links.all().into_iter().find(|l| l.id == link_id) else {
+            return;
+        };
+        svc.links.set_neighborhoods(&link_id, &[], &[id]);
+        // Best effort: they also stop when we refuse their traffic for it.
+        rt.spawn(async move {
+            let change = crate::neighbor::service::Change {
+                add: Vec::new(),
+                remove: vec![id],
+            };
+            let body = serde_json::to_value(&change).ok();
+            let _ =
+                crate::neighbor::service::call(&link, reqwest::Method::POST, "neighborhoods", body)
+                    .await;
         });
     }
 
