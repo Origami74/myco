@@ -11,7 +11,17 @@ use async_trait::async_trait;
 use super::model::{
     CreateRequest, InviteResult, NeighborError, NeighborInfo, Neighborhood, Offer, Peer,
 };
+use crate::seams::PulledEvents;
 use crate::session::NappletIdentity;
+
+/// What a subscription on an address starts with.
+pub struct Feed {
+    /// What this device already holds in that scope, matching the filters.
+    pub backlog: Vec<nostr::Event>,
+    /// Everything after: peers' backlog, then new events in the scope, until
+    /// the stream ends or the subscription is closed (dropping it stops it).
+    pub live: PulledEvents,
+}
 
 /// The device's neighborhoods, behind NAP-NEIGHBOR.
 ///
@@ -19,7 +29,7 @@ use crate::session::NappletIdentity;
 /// [`list`](NeighborHost::list) defaults to `unsupported`, so a host offers
 /// exactly what it implements, and [`info`](NeighborHost::info) must say so.
 #[async_trait]
-pub trait NeighborHost: Send + Sync {
+pub trait NeighborHost: NeighborData {
     /// Features and service names. Read per call.
     async fn info(&self) -> NeighborInfo;
 
@@ -93,6 +103,47 @@ pub trait NeighborHost: Send + Sync {
     }
 }
 
+/// The data plane: what `relay`, `outbox` and `resource` do with an address.
+/// Separate from [`NeighborHost`]'s management half only in purpose — one
+/// host implements both.
+#[async_trait]
+pub trait NeighborData: Send + Sync {
+    /// Publish a signed event into the scope `address` names: the
+    /// neighborhood, or that one peer.
+    async fn publish(
+        &self,
+        napplet: &NappletIdentity,
+        address: &str,
+        event: nostr::Event,
+    ) -> Result<(), NeighborError> {
+        let _ = (napplet, address, event);
+        Err(NeighborError::NotFound)
+    }
+
+    /// Read the scope `address` names: what is held here, then what arrives.
+    async fn subscribe(
+        &self,
+        napplet: &NappletIdentity,
+        address: &str,
+        filters: Vec<nostr::Filter>,
+    ) -> Result<Feed, NeighborError> {
+        let _ = (napplet, address, filters);
+        Err(NeighborError::NotFound)
+    }
+
+    /// Fetch a blob from the scope `address` names. `Ok(None)` when nobody
+    /// there has it. The caller verifies the hash.
+    async fn blob(
+        &self,
+        napplet: &NappletIdentity,
+        address: &str,
+        sha256: &str,
+    ) -> Result<Option<Vec<u8>>, NeighborError> {
+        let _ = (napplet, address, sha256);
+        Err(NeighborError::NotFound)
+    }
+}
+
 /// A device with no neighborhoods: no features, nothing listed. What a host
 /// passes until it implements NAP-NEIGHBOR.
 pub struct NoNeighborhoods;
@@ -107,3 +158,6 @@ impl NeighborHost for NoNeighborhoods {
         Vec::new()
     }
 }
+
+#[async_trait]
+impl NeighborData for NoNeighborhoods {}

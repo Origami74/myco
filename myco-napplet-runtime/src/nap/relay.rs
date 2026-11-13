@@ -205,6 +205,12 @@ async fn subscribe(
             .and_then(|o| o.get("relay"))
             .and_then(|v| v.as_str())
     });
+    // A `neighborhood:` address is the host's, not a lane: caught before
+    // validation, which would refuse its scheme (NAP-NEIGHBOR).
+    if let Some(addr) = named.filter(|u| crate::nap::neighbor::address::is_address(u)) {
+        let addr = addr.to_string();
+        return crate::nap::neighbor::route::subscribe(ctx, session, &sub_id, filters, &addr).await;
+    }
     let target = match named {
         Some(url) => match crate::nap::outbox::validate_relay_url(url) {
             Ok(lane) => Some(lane),

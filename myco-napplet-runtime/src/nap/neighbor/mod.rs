@@ -30,6 +30,7 @@
 
 pub mod address;
 pub mod model;
+pub mod route;
 pub mod seam;
 
 #[cfg(any(test, feature = "testing"))]
@@ -39,7 +40,7 @@ pub use model::{
     CreateRequest, Feature, InviteResult, InviteStatus, LinkClass, NeighborError, NeighborEvent,
     NeighborInfo, Neighborhood, NeighborhoodChange, Offer, Peer, PeerChange,
 };
-pub use seam::{NeighborHost, NoNeighborhoods};
+pub use seam::{Feed, NeighborData, NeighborHost, NoNeighborhoods};
 
 use crate::dispatch::NapContext;
 use crate::seams::Envelope;

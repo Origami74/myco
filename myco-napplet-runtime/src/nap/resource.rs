@@ -142,7 +142,7 @@ async fn bytes(ctx: &NapContext, session: &Session, message: &Envelope) -> Envel
     let Some(url) = message.field("url").and_then(|v| v.as_str()) else {
         return error_for(message, "invalid-request", Some("bytes needs a url"));
     };
-    match fetch(ctx, session.identity(), url).await {
+    match fetch(ctx, session, url).await {
         Ok(Fetched { mime, sha, .. }) => {
             record(session, &sha);
             message
@@ -196,7 +196,7 @@ async fn bytes_many(ctx: &NapContext, session: &Session, message: &Envelope) -> 
             }));
             continue;
         }
-        let item = match fetch(ctx, session.identity(), &url).await {
+        let item = match fetch(ctx, session, &url).await {
             Ok(Fetched { mime, len, sha }) => {
                 record(session, &sha);
                 total += len;
@@ -311,18 +311,20 @@ impl Failure {
 }
 
 /// Resolve one URL, by its scheme.
-async fn fetch(ctx: &NapContext, napplet: &NappletIdentity, url: &str) -> Result<Fetched, Failure> {
+async fn fetch(ctx: &NapContext, session: &Session, url: &str) -> Result<Fetched, Failure> {
     if scheme_of(url).eq_ignore_ascii_case("https") {
-        fetch_https(ctx, napplet, url).await
+        fetch_https(ctx, session.identity(), url).await
     } else {
-        fetch_blossom(ctx, url).await
+        fetch_blossom(ctx, session, url).await
     }
 }
 
 /// Resolve one `blossom:` URL: parse, local store, fetcher, verify, store,
 /// classify.
-async fn fetch_blossom(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> {
+async fn fetch_blossom(ctx: &NapContext, session: &Session, url: &str) -> Result<Fetched, Failure> {
     let (sha, hints) = parse_blossom_url(url)?;
+    // `xs` naming a `neighborhood:` address: the host's, never a server.
+    let addresses = neighborhood_hints(url);
 
     // Size before read: the local store may hold an nsite asset far over the
     // cap (Blossom accepts uploads to 64 MiB), and a `bytesMany` naming it a
@@ -348,6 +350,33 @@ async fn fetch_blossom(ctx: &NapContext, url: &str) -> Result<Fetched, Failure> 
         .map_err(|e| Failure::new("network-error", format!("local store: {e}")))?;
     let raw = match stored {
         Some(raw) => raw,
+        // An address hint is authoritative: the napplet asked for the blob
+        // from that neighborhood, so its hash is not shown to anyone else.
+        None if !addresses.is_empty() => {
+            let granted = session.is_granted("neighbor");
+            let fetched = crate::nap::neighbor::route::blob(
+                ctx,
+                session.identity(),
+                granted,
+                &addresses,
+                &sha,
+            )
+            .await
+            .ok_or(Failure {
+                code: "not-found",
+                message: None,
+            })?;
+            if fetched.len() > MAX_BYTES {
+                return Err(Failure::new(
+                    "too-large",
+                    format!("{} bytes, cap is {MAX_BYTES}", fetched.len()),
+                ));
+            }
+            if let Err(e) = ctx.blobs.put(&fetched).await {
+                tracing::warn!(sha = %sha, error = %e, "resource: could not store a fetched blob");
+            }
+            fetched
+        }
         None => {
             let fetched = ctx
                 .fetcher
@@ -762,6 +791,26 @@ fn blob_hints(query: &str) -> crate::seams::BlobHints {
         }
     }
     hints
+}
+
+/// The `xs` values in a `blossom:` URL that are `neighborhood:` addresses,
+/// percent-decoded. [`hint_server`] refuses their scheme, so they never reach
+/// the fetcher as servers.
+fn neighborhood_hints(url: &str) -> Vec<String> {
+    let Some((_, query)) = url.split_once('?') else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for pair in query.split('&') {
+        if let Some(("xs", value)) = pair.split_once('=') {
+            let value = percent_decode(value);
+            if crate::nap::neighbor::address::is_address(&value) && !out.contains(&value) {
+                out.push(value);
+            }
+        }
+    }
+    out.truncate(MAX_HINTS);
+    out
 }
 
 /// A server hint as a base URL, or `None` if it is not one. Only a host

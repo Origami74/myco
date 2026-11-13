@@ -309,7 +309,7 @@ async fn publish(
     message: &Envelope,
 ) -> Envelope {
     let options = options_of(message);
-    let explicit = match hint_lanes(options) {
+    let (explicit, addresses) = match hint_lanes_and_addresses(options) {
         Ok(hints) => hints,
         Err(e) => return failed(message, e),
     };
@@ -352,9 +352,17 @@ async fn publish(
         Err(e) => return failed(message, e),
     };
 
-    let (stored, relays) = publish_to_quorum(ctx, lanes, &signed, &required).await;
+    let (stored, mut relays) = publish_to_quorum(ctx, lanes, &signed, &required).await;
     if !stored {
         return failed(message, "could not store the event");
+    }
+    // NAP-NEIGHBOR: each address is reported like a relay, under the address
+    // the napplet named.
+    for (addr, r) in crate::nap::neighbor::route::publish(ctx, session, &addresses, &signed).await {
+        if let Err(e) = &r {
+            tracing::info!(error = %e, "neighborhood publish refused");
+        }
+        relays.insert(addr, serde_json::Value::Bool(r.is_ok()));
     }
 
     let id = signed.id.to_hex();
@@ -485,14 +493,30 @@ fn dedupe(lanes: impl IntoIterator<Item = RelayLane>) -> Vec<RelayLane> {
 /// ten is already more than any real list.
 pub const MAX_HINT_RELAYS: usize = 10;
 
-/// `options.relays`, validated. A napplet may name relays; it may not make the
-/// shell connect to a loopback or private-network address, and it may not
-/// name so many that one call opens thousands of sockets.
+/// `options.relays` for a read. `neighborhood:` addresses are read with
+/// `relay.subscribe`, which keeps a neighborhood's view apart; a read that
+/// merges lanes cannot, so it refuses them rather than ignore them.
 fn hint_lanes(
     options: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Vec<RelayLane>, String> {
+    let (lanes, addresses) = hint_lanes_and_addresses(options)?;
+    if !addresses.is_empty() {
+        return Err(
+            "neighborhood addresses are read with relay.subscribe, not outbox reads".to_string(),
+        );
+    }
+    Ok(lanes)
+}
+
+/// `options.relays`, validated, with `neighborhood:` addresses set apart for
+/// the host. A napplet may name relays; it may not make the shell connect to
+/// a loopback or private-network address, and it may not name so many that
+/// one call opens thousands of sockets. Addresses count toward that cap.
+fn hint_lanes_and_addresses(
+    options: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<(Vec<RelayLane>, Vec<String>), String> {
     let Some(raw) = options.and_then(|o| o.get("relays")) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let Some(items) = raw.as_array() else {
         return Err("relays must be a list of URLs".to_string());
@@ -501,13 +525,20 @@ fn hint_lanes(
         return Err(format!("at most {MAX_HINT_RELAYS} relays may be named"));
     }
     let mut out = Vec::with_capacity(items.len());
+    let mut addresses = Vec::new();
     for item in items {
         let Some(url) = item.as_str() else {
             return Err("relays must be a list of URLs".to_string());
         };
+        if crate::nap::neighbor::address::is_address(url) {
+            if !addresses.iter().any(|a| a == url) {
+                addresses.push(url.to_string());
+            }
+            continue;
+        }
         out.push(validate_relay_url(url)?);
     }
-    Ok(out)
+    Ok((out, addresses))
 }
 
 /// Accept `ws://` and `wss://` URLs to public hosts and to `.fips` mesh

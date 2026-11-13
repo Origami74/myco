@@ -8,7 +8,7 @@ use super::model::{
     CreateRequest, Feature, InviteResult, InviteStatus, NeighborError, NeighborInfo, Neighborhood,
     Offer, Peer,
 };
-use super::seam::NeighborHost;
+use super::seam::{Feed, NeighborData, NeighborHost};
 use crate::session::NappletIdentity;
 
 /// A fixed set of neighborhoods and peers, the same for every napplet, that
@@ -20,6 +20,10 @@ pub struct MemNeighbors {
     pub peers: Vec<(String, Peer)>,
     /// Answer every prompt with "no".
     pub decline: bool,
+    /// Blobs any known address serves, by sha256.
+    pub blobs: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    /// What was published, per address.
+    pub published: Mutex<Vec<(String, nostr::Event)>>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -59,6 +63,8 @@ impl MemNeighbors {
                 },
             )],
             decline: false,
+            blobs: Mutex::default(),
+            published: Mutex::default(),
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -86,6 +92,64 @@ impl MemNeighbors {
         } else {
             Ok(())
         }
+    }
+}
+
+impl MemNeighbors {
+    /// Whether `addr` names one of the fixed neighborhoods.
+    fn addressed(&self, addr: &str) -> Result<(), NeighborError> {
+        let t = super::address::parse(addr).ok_or(NeighborError::NotFound)?;
+        self.known(&t.neighborhood)
+    }
+}
+
+#[async_trait]
+impl NeighborData for MemNeighbors {
+    async fn publish(
+        &self,
+        _napplet: &NappletIdentity,
+        address: &str,
+        event: nostr::Event,
+    ) -> Result<(), NeighborError> {
+        self.addressed(address)?;
+        self.published
+            .lock()
+            .unwrap()
+            .push((address.to_string(), event));
+        Ok(())
+    }
+
+    /// The backlog is what was published to the same address; nothing live.
+    async fn subscribe(
+        &self,
+        _napplet: &NappletIdentity,
+        address: &str,
+        _filters: Vec<nostr::Filter>,
+    ) -> Result<Feed, NeighborError> {
+        self.addressed(address)?;
+        let backlog = self
+            .published
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(a, _)| a == address)
+            .map(|(_, e)| e.clone())
+            .collect();
+        Ok(Feed {
+            backlog,
+            live: Box::pin(futures_util::stream::empty()),
+        })
+    }
+
+    async fn blob(
+        &self,
+        _napplet: &NappletIdentity,
+        address: &str,
+        sha256: &str,
+    ) -> Result<Option<Vec<u8>>, NeighborError> {
+        self.addressed(address)?;
+        self.record(format!("blob {sha256}"));
+        Ok(self.blobs.lock().unwrap().get(sha256).cloned())
     }
 }
 
