@@ -73,7 +73,9 @@ pub struct Neighbors {
     /// Everyone's transport.
     pub(super) carrier: Arc<dyn super::carrier::Carrier>,
     /// Every other neighborhood's events.
-    pub(super) scoped: super::data::Scoped,
+    pub(super) scoped: Arc<super::data::Scoped>,
+    /// Links, which carry every neighborhood but Everyone.
+    pub(super) links: Option<Arc<super::link::Links>>,
 }
 
 /// What [`Neighbors::open`] reaches the world through.
@@ -85,6 +87,8 @@ pub struct Seams {
     pub scoped_store: Arc<dyn nsite_deck::RelayBackend>,
     /// Where their blobs are stored.
     pub scoped_blobs: Arc<dyn nsite_deck::BlobStore>,
+    /// Links, if this device has them.
+    pub links: Option<Arc<super::link::Links>>,
 }
 
 /// Where an address points, for the lanes that route it (phase 3).
@@ -112,7 +116,12 @@ impl Neighbors {
             peers: seams.peers,
             asker: seams.asker,
             carrier: seams.carrier,
-            scoped: super::data::Scoped::open(data_dir, seams.scoped_store, seams.scoped_blobs),
+            scoped: Arc::new(super::data::Scoped::open(
+                data_dir,
+                seams.scoped_store,
+                seams.scoped_blobs,
+            )),
+            links: seams.links,
         }
     }
 
@@ -242,6 +251,17 @@ impl Neighbors {
         self.change(|s| {
             if let Some(r) = s.get_mut(id) {
                 r.policy.blob_hops = hops;
+            }
+        });
+    }
+
+    /// Grant a neighborhood to a napplet, for tests.
+    #[cfg(test)]
+    pub fn grant_for_test(&self, id: NeighborhoodId, napplet: &NappletIdentity) {
+        let key = napplet_key(napplet);
+        self.change(|s| {
+            if let Some(r) = s.get_mut(id) {
+                r.grants.napplets.insert(key);
             }
         });
     }
@@ -519,6 +539,7 @@ mod tests {
             carrier: Arc::new(super::super::carrier::testing::MemCarrier::default()),
             scoped_store: Arc::new(nsite_deck::testing::MemRelay::new()),
             scoped_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
+            links: None,
         }
     }
 

@@ -95,6 +95,11 @@ impl Scoped {
         Ok(())
     }
 
+    /// Whether `event` is already kept in neighborhood `id`.
+    pub fn has(&self, id: NeighborhoodId, event: &Event) -> bool {
+        self.holds(id, event)
+    }
+
     fn holds(&self, id: NeighborhoodId, event: &Event) -> bool {
         self.scopes
             .lock()
@@ -163,6 +168,98 @@ impl Neighbors {
             .ok_or(NeighborError::NotFound)?;
         Ok((target, record))
     }
+
+    fn record(&self, n: NeighborhoodId) -> Option<Record> {
+        self.records().into_iter().find(|r| r.id == n)
+    }
+
+    /// Whether `n` is a neighborhood this device carries over links.
+    pub fn carries(&self, n: NeighborhoodId) -> bool {
+        self.record(n).is_some_and(|r| r.role == Role::Plain)
+    }
+
+    /// What a linked peer's `REQ` in `n` is answered with.
+    pub async fn link_backlog(&self, n: NeighborhoodId, filters: &[Filter]) -> Vec<Event> {
+        let Some(record) = self.record(n) else {
+            return Vec::new();
+        };
+        let keep = unmuted(&record);
+        self.scoped
+            .backlog(n, filters)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| keep(e))
+            .collect()
+    }
+
+    /// An event a linked peer sent into `n` with `ttl` hops left: checked,
+    /// kept once, and passed on to the other links carrying `n` while hops
+    /// and policy allow. `true` when it was taken (new or already held).
+    pub async fn receive(&self, n: NeighborhoodId, event: Event, from_link: &str, ttl: u8) -> bool {
+        let Some(record) = self.record(n) else {
+            return false;
+        };
+        if record.role != Role::Plain || event.verify().is_err() || !unmuted(&record)(&event) {
+            return false;
+        }
+        if self.scoped.has(n, &event) {
+            return true;
+        }
+        if self.scoped.add(n, event.clone()).await.is_err() {
+            return false;
+        }
+        if ttl > 0 && record.policy.pass_on {
+            let hops = (ttl - 1).min(record.policy.publish_hops);
+            self.forward(n, event, Some(from_link), hops);
+        }
+        true
+    }
+
+    /// Send `event` into `n` on every link carrying it but `except`, each
+    /// peer allowed `ttl` more hops. Spawned: a slow peer holds up nobody.
+    fn forward(&self, n: NeighborhoodId, event: Event, except: Option<&str>, ttl: u8) {
+        let Some(links) = &self.links else {
+            return;
+        };
+        for link in links.carrying(n) {
+            if Some(link.id.as_str()) == except {
+                continue;
+            }
+            let event = event.clone();
+            tokio::spawn(async move {
+                match super::wire::send(&link, n, ttl, &event).await {
+                    Ok(true) => {}
+                    Ok(false) => tracing::debug!(link = %link.id, "peer did not take the event"),
+                    Err(e) => tracing::debug!(link = %link.id, error = %e, "could not reach peer"),
+                }
+            });
+        }
+    }
+
+    /// Ask every link carrying `n` for what matches; what comes back is kept
+    /// in `n` and reaches live subscribers. Not passed on.
+    fn pull_links(&self, n: NeighborhoodId, filters: Vec<Filter>) {
+        let Some(links) = &self.links else {
+            return;
+        };
+        for link in links.carrying(n) {
+            let filters = filters.clone();
+            let scoped = self.scoped.clone();
+            tokio::spawn(async move {
+                match super::wire::pull(&link, n, &filters).await {
+                    Ok(events) => {
+                        for event in events {
+                            if !scoped.has(n, &event) {
+                                let _ = scoped.add(n, event).await;
+                            }
+                        }
+                    }
+                    Err(e) => tracing::debug!(link = %link.id, error = %e, "pull failed"),
+                }
+            });
+        }
+    }
 }
 
 /// Drop events by muted authors.
@@ -186,17 +283,46 @@ impl NeighborData for Neighbors {
     ) -> Result<(), NeighborError> {
         let (target, record) = self.target(napplet, address)?;
         match (record.role, target.peer) {
-            (Role::Everyone, Some(peer)) => self.carrier.send_to(&peer, event).await,
-            (Role::Everyone, None) => {
-                self.carrier
-                    .publish(event, record.policy.publish_hops)
-                    .await
+            (Role::Everyone, Some(peer)) => {
+                self.carrier.send_to(&peer, event).await.map_err(failed)
             }
-            // No links yet, so no peers to send to: kept in its scope here.
-            (Role::Plain, Some(_)) => return Err(NeighborError::NotFound),
-            (Role::Plain, None) => self.scoped.add(record.id, event).await,
+            (Role::Everyone, None) => self
+                .carrier
+                .publish(event, record.policy.publish_hops)
+                .await
+                .map_err(failed),
+            // To that one peer, with no hops to pass it on.
+            (Role::Plain, Some(peer)) => {
+                let link = self
+                    .links
+                    .as_ref()
+                    .and_then(|l| l.by_peer(&peer))
+                    .filter(|l| l.neighborhoods.contains(&record.id))
+                    .ok_or(NeighborError::NotFound)?;
+                self.scoped
+                    .add(record.id, event.clone())
+                    .await
+                    .map_err(failed)?;
+                let n = record.id;
+                tokio::spawn(async move {
+                    if let Err(e) = super::wire::send(&link, n, 0, &event).await {
+                        tracing::debug!(error = %e, "could not reach the peer");
+                    }
+                });
+                Ok(())
+            }
+            (Role::Plain, None) => {
+                self.scoped
+                    .add(record.id, event.clone())
+                    .await
+                    .map_err(failed)?;
+                let hops = record.policy.publish_hops;
+                if hops > 0 {
+                    self.forward(record.id, event, None, hops - 1);
+                }
+                Ok(())
+            }
         }
-        .map_err(failed)
     }
 
     async fn subscribe(
@@ -228,7 +354,12 @@ impl NeighborData for Neighbors {
                     .backlog(record.id, &filters)
                     .await
                     .map_err(failed)?;
+                // Subscribed before the pull starts, so nothing it brings is
+                // missed.
                 let live = self.scoped.feed(record.id);
+                if record.policy.backlog_hops > 0 {
+                    self.pull_links(record.id, filters.clone());
+                }
                 Ok(Feed {
                     backlog: backlog.into_iter().filter(|e| keep(e)).collect(),
                     live: Box::pin(live.filter(move |e| std::future::ready(keep(e)))),
@@ -327,6 +458,7 @@ mod tests {
                 carrier: carrier.clone(),
                 scoped_store: Arc::new(nsite_deck::testing::MemRelay::new()),
                 scoped_blobs: Arc::new(nsite_deck::testing::MemBlobs::new()),
+                links: None,
             },
         );
         (n, carrier)

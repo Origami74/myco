@@ -370,6 +370,7 @@ impl AppRuntime {
             let npub = &identity.own_npub;
             crate::neighbor::service::LinkService {
                 links: Arc::new(crate::neighbor::link::Links::open(Path::new(data_dir))),
+                neighbors: Arc::default(),
                 bases: vec![format!(
                     "http://{npub}.fips:{}",
                     crate::auth_service::AUTH_PORT
@@ -2592,9 +2593,14 @@ impl AppRuntime {
                     }),
                     scoped_store: neighborhood_store,
                     scoped_blobs: neighborhood_blobs,
+                    links: self.link_service.as_ref().map(|s| s.links.clone()),
                 },
             ));
             self.neighbors = Some(neighbors.clone());
+            // The link relay can answer now.
+            if let Some(svc) = &self.link_service {
+                let _ = svc.neighbors.set(neighbors.clone());
+            }
 
             let outbox = Arc::new(crate::outbox::OutboxService::new(
                 content.relay(),

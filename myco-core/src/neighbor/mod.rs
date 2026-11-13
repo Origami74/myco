@@ -28,6 +28,10 @@ pub mod link;
 pub mod service;
 pub mod store;
 pub mod view;
+pub mod wire;
+
+#[cfg(test)]
+mod e2e;
 
 pub use carrier::MeshCarrier;
 pub use host::{CirclePeers, Neighbors, NoAsker, Seams};

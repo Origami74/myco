@@ -37,6 +37,9 @@ use super::link::{
 #[derive(Clone)]
 pub struct LinkService {
     pub links: Arc<Links>,
+    /// The device's neighborhoods, once the napplet host has built them.
+    /// Until then the link relay answers 503.
+    pub neighbors: Arc<std::sync::OnceLock<Arc<super::Neighbors>>>,
     /// This device's bases, e.g. `http://<npub>.fips:4873`. The first is the
     /// one invitations name first.
     pub bases: Vec<String>,
@@ -65,13 +68,14 @@ impl LinkService {
                 own: false,
             })
             .collect();
-        services.push(Service {
+        // The link relay: this link's own door, scoped by `?n=`.
+        services.extend(self.bases.iter().map(|b| Service {
             kind: "relay".into(),
-            url: self.relay_url.clone(),
+            url: format!("{}/nh/{pk}/relay", b.replacen("http", "ws", 1)),
             read: true,
             write: true,
             own: false,
-        });
+        }));
         services.push(Service {
             kind: "blossom".into(),
             url: self.blossom_url.clone(),
@@ -108,6 +112,7 @@ pub fn routes(service: LinkService) -> Router {
         .route("/nh/{pk}/offer", get(offer))
         .route("/nh/{pk}/neighborhoods", post(neighborhoods))
         .route("/nh/{pk}/end", post(end))
+        .route("/nh/{pk}/relay", get(relay))
         .with_state(service)
 }
 
@@ -206,6 +211,95 @@ async fn end(
     svc.links.end(&link.id);
     tracing::info!(link = %link.id, "link ended by the peer");
     StatusCode::NO_CONTENT.into_response()
+}
+
+// --- the link relay -----------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct Scope {
+    n: String,
+    #[serde(default)]
+    ttl: u8,
+}
+
+/// `GET /nh/{pk}/relay?n=…&ttl=…`: a NIP-01 WebSocket scoped to one
+/// neighborhood the link carries. Signed (NIP-98) over the URL in http form.
+async fn relay(
+    State(svc): State<LinkService>,
+    Path(pk): Path<String>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    axum::extract::Query(scope): axum::extract::Query<Scope>,
+    headers: HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let rest = format!("relay?{}", query.unwrap_or_default());
+    let Some(link) = svc.authorized(&headers, "GET", &pk, &rest) else {
+        return refused();
+    };
+    let Some(n) = NeighborhoodId::from_hex(&scope.n) else {
+        return refused();
+    };
+    let Some(neighbors) = svc.neighbors.get().cloned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    if !link.neighborhoods.contains(&n) || !neighbors.carries(n) {
+        return refused();
+    }
+    ws.on_upgrade(move |socket| relay_session(socket, neighbors, link, n, scope.ttl))
+}
+
+async fn relay_session(
+    mut socket: axum::extract::ws::WebSocket,
+    neighbors: Arc<super::Neighbors>,
+    link: Link,
+    n: NeighborhoodId,
+    ttl: u8,
+) {
+    use axum::extract::ws::Message;
+    while let Some(Ok(frame)) = socket.recv().await {
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let Ok(serde_json::Value::Array(msg)) = serde_json::from_str::<serde_json::Value>(&text)
+        else {
+            continue;
+        };
+        let replies: Vec<serde_json::Value> = match msg.first().and_then(|v| v.as_str()) {
+            Some("EVENT") => {
+                let Some(event) = msg
+                    .get(1)
+                    .and_then(|v| serde_json::from_value::<nostr::Event>(v.clone()).ok())
+                else {
+                    continue;
+                };
+                let id = event.id.to_hex();
+                let took = neighbors.receive(n, event, &link.id, ttl).await;
+                vec![serde_json::json!(["OK", id, took, ""])]
+            }
+            Some("REQ") => {
+                let sub = msg.get(1).cloned().unwrap_or_default();
+                let filters: Vec<nostr::Filter> = msg
+                    .iter()
+                    .skip(2)
+                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                    .collect();
+                let mut out: Vec<serde_json::Value> = neighbors
+                    .link_backlog(n, &filters)
+                    .await
+                    .into_iter()
+                    .map(|e| serde_json::json!(["EVENT", sub, e]))
+                    .collect();
+                out.push(serde_json::json!(["EOSE", sub]));
+                out
+            }
+            _ => Vec::new(),
+        };
+        for reply in replies {
+            if socket.send(Message::text(reply.to_string())).await.is_err() {
+                return;
+            }
+        }
+    }
 }
 
 // --- the joining side ----------------------------------------------------------
@@ -317,6 +411,7 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         LinkService {
             links: Arc::new(Links::open(&d)),
+            neighbors: Arc::default(),
             bases: vec![BASE.into()],
             relay_url: "ws://alice.fips:4870".into(),
             blossom_url: "http://alice.fips:24243".into(),
@@ -382,6 +477,15 @@ mod tests {
         assert!(bob.neighborhoods.contains(&home.id));
         let kinds: Vec<_> = bob.services().into_iter().map(|s| s.kind).collect();
         assert_eq!(kinds, ["link", "relay", "blossom"]);
+        let relay = bob
+            .services()
+            .into_iter()
+            .find(|s| s.kind == "relay")
+            .unwrap();
+        assert_eq!(
+            relay.url,
+            format!("ws://alice.fips:4873/nh/{}/relay", bob.peer)
+        );
         assert_eq!(svc.links.all().len(), 1);
     }
 
