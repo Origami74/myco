@@ -105,6 +105,8 @@ data class InvitePreview(
     val raw: String,
     val from: String,
     val offered: List<NeighborhoodsState.Pending>,
+    /** Unix seconds after which it no longer works. */
+    val exp: Long = 0,
 ) {
     companion object {
         const val PREFIX = "myco://link/"
@@ -119,6 +121,7 @@ data class InvitePreview(
             InvitePreview(
                 raw = t,
                 from = o.optString("from"),
+                exp = o.optLong("exp"),
                 offered = (0 until n.length()).mapNotNull { n.optJSONObject(it) }.map {
                     NeighborhoodsState.Pending(it.optString("id"), it.optString("name"))
                 },

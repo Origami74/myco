@@ -350,7 +350,11 @@ fun MycoApp(
     // The full-screen pairing / Add surfaces hide the tab bar.
     val showTabs = current?.destination?.route != "qr"
     val tabs = if (developerMode) TABS else TABS.filterNot { it.route == "dev" }
-    val isSelected = { tab: Tab -> current?.destination?.hierarchy?.any { it.route == tab.route } == true }
+    val isSelected = { tab: Tab ->
+        current?.destination?.hierarchy?.any { it.route == tab.route } == true ||
+            // A neighborhood's page belongs to the Neighbors tab.
+            (tab.route == "neighbors" && current?.destination?.route?.startsWith("neighborhood/") == true)
+    }
     val select = { tab: Tab ->
         nav.navigate(tab.route) {
             popUpTo(nav.graph.findStartDestination().id) { saveState = true }
@@ -445,7 +449,20 @@ fun MycoApp(
                     app.myco.neighbor.NeighborsScreen(
                         state,
                         client,
+                        onOpenNeighborhood = { id -> nav.navigate("neighborhood/$id") },
                         onScanned = onScanned,
+                        onSendFile = { npub ->
+                            sendFileNpub = npub
+                            pickFilesForPeer.launch(arrayOf("*/*"))
+                        },
+                    )
+                }
+                composable("neighborhood/{id}") { entry ->
+                    app.myco.neighbor.NeighborhoodPage(
+                        id = entry.arguments?.getString("id").orEmpty(),
+                        state = state,
+                        client = client,
+                        onBack = { nav.popBackStack() },
                         onSendFile = { npub ->
                             sendFileNpub = npub
                             pickFilesForPeer.launch(arrayOf("*/*"))
