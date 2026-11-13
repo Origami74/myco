@@ -101,9 +101,7 @@ import app.myco.ui.screens.PairConnectedDialog
 import app.myco.ui.screens.PairPendingDialog
 import app.myco.ui.screens.PeerShareSheet
 import app.myco.ui.screens.AppsScreen
-import app.myco.ui.screens.CircleScreen
 import app.myco.ui.screens.DevScreen
-import app.myco.ui.screens.QrScreen
 import app.myco.update.rememberSoftwareUpdates
 import app.myco.update.SoftwareUpdateBanner
 import app.myco.ui.screens.SettingsScreen
@@ -447,19 +445,9 @@ fun MycoApp(
                     app.myco.neighbor.NeighborsScreen(
                         state,
                         client,
-                        onOpenCircle = { nav.navigate("circle") },
                         onScanned = onScanned,
-                    )
-                }
-                // The Circle screen, opened from Everyone: pairing, tap to
-                // connect, nearby people, the hotspot and file sharing.
-                composable("circle") {
-                    CircleScreen(
-                        state,
-                        client,
-                        onOpenQr = { nav.navigate("qr") },
-                        onSendFile = { peer ->
-                            sendFileNpub = peer.npub
+                        onSendFile = { npub ->
+                            sendFileNpub = npub
                             pickFilesForPeer.launch(arrayOf("*/*"))
                         },
                     )
@@ -492,13 +480,6 @@ fun MycoApp(
                     )
                 }
                 composable("dev") { DevScreen(client) }
-                composable("qr") {
-                    QrScreen(
-                        state = state,
-                        onScanned = { text -> nav.popBackStack(); onScanned(text) },
-                        onBack = { nav.popBackStack() },
-                    )
-                }
             }
         }
         } // Row

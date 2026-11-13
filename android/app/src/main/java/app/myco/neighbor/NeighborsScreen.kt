@@ -53,10 +53,14 @@ import app.myco.ui.SectionCard
 fun NeighborsScreen(
     state: AppState,
     client: AppCoreClient,
-    onOpenCircle: () -> Unit,
     /** MainActivity's router for scanned, tapped and pasted `myco://` codes. */
     onScanned: (String) -> Unit,
+    /** Pick files and offer them to a paired device (by npub). */
+    onSendFile: (String) -> Unit,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember { context.getSharedPreferences("neighbors", android.content.Context.MODE_PRIVATE) }
+    var noticeSeen by remember { mutableStateOf(prefs.getBoolean("circle_notice_seen", false)) }
     val nh = state.neighborhoods
     var hood by remember { mutableStateOf<String?>(null) }
     var peer by remember { mutableStateOf<String?>(null) }
@@ -71,6 +75,24 @@ fun NeighborsScreen(
     ) {
         item {
             Text("Neighbors", style = MaterialTheme.typography.displaySmall)
+        }
+        if (!noticeSeen) {
+            item {
+                SectionCard {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("The Circle is now Neighbors", fontWeight = FontWeight.Bold)
+                        Text(
+                            "Everyone you paired with is in Everyone, as before. New people join a " +
+                                "neighborhood with an invitation: tap a neighborhood, then Invite someone.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        TextButton(onClick = {
+                            prefs.edit().putBoolean("circle_notice_seen", true).apply()
+                            noticeSeen = true
+                        }) { Text("Got it") }
+                    }
+                }
+            }
         }
         item {
             SectionCard {
@@ -134,7 +156,6 @@ fun NeighborsScreen(
                 n,
                 nh,
                 client,
-                onOpenCircle = { hood = null; onOpenCircle() },
                 onInvite = { hood = null; inviting = n.id },
                 onClose = { hood = null },
             )
@@ -142,7 +163,13 @@ fun NeighborsScreen(
     }
     nh.peers.firstOrNull { it.key == peer }?.let { p ->
         ModalBottomSheet(onDismissRequest = { peer = null }) {
-            PeerSheet(p, nh, client, onOpenCircle = { peer = null; onOpenCircle() }, onClose = { peer = null })
+            PeerSheet(
+                p,
+                nh,
+                client,
+                onSendFile = { peer = null; onSendFile(p.key) },
+                onClose = { peer = null },
+            )
         }
     }
     if (adding) {
@@ -172,7 +199,6 @@ private fun NeighborhoodSheet(
     n: NeighborhoodsState.Neighborhood,
     nh: NeighborhoodsState,
     client: AppCoreClient,
-    onOpenCircle: () -> Unit,
     onInvite: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -185,7 +211,12 @@ private fun NeighborhoodSheet(
         Text(n.name, style = MaterialTheme.typography.headlineSmall)
         Text(describe(n, nh), color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (n.everyone) {
-            Button(onClick = onOpenCircle) { Text("Pair, tap to connect, nearby & files") }
+            Text(
+                "The devices you paired with before neighborhoods. New people join by invitation " +
+                    "to another neighborhood.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         OutlinedTextField(
@@ -262,9 +293,10 @@ private fun PeerSheet(
     p: NeighborhoodsState.PeerNode,
     nh: NeighborhoodsState,
     client: AppCoreClient,
-    onOpenCircle: () -> Unit,
+    onSendFile: () -> Unit,
     onClose: () -> Unit,
 ) {
+    var removing by remember { mutableStateOf(false) }
     Column(
         Modifier.padding(horizontal = 20.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -277,7 +309,11 @@ private fun PeerSheet(
         val linkId = p.linkId
         if (linkId == null) {
             Text("Paired with you: in Everyone.")
-            Button(onClick = onOpenCircle) { Text("Open in Circle") }
+            Button(onClick = onSendFile) { Text("Send a file") }
+            HorizontalDivider()
+            TextButton(onClick = { removing = true }) {
+                Text("Remove from Everyone", color = MaterialTheme.colorScheme.error)
+            }
         } else {
             Text("Carried with them", fontWeight = FontWeight.Bold)
             for (id in p.neighborhoods) {
@@ -300,6 +336,21 @@ private fun PeerSheet(
             }) { Text("End link", color = MaterialTheme.colorScheme.error) }
         }
         Spacer(Modifier.size(24.dp))
+    }
+    if (removing) {
+        AlertDialog(
+            onDismissRequest = { removing = false },
+            title = { Text("Remove ${p.name}?") },
+            text = { Text("They leave Everyone on this phone. To connect again, invite them to a neighborhood.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    client.dispatch(NativeActions.removeFromCircle(p.key))
+                    removing = false
+                    onClose()
+                }) { Text("Remove") }
+            },
+            dismissButton = { TextButton(onClick = { removing = false }) { Text("Cancel") } },
+        )
     }
 }
 
