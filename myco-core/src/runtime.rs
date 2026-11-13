@@ -2319,6 +2319,7 @@ impl AppRuntime {
                     // breaker are decided in one place.
                     sink: outbox.clone(),
                     mesh,
+                    neighbor: std::sync::Arc::new(myco_napplet_runtime::NoNeighborhoods),
                     outbox: outbox.clone(),
                     lanes: outbox,
                     // A blob a napplet fetches from elsewhere is cached, not

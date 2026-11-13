@@ -74,6 +74,7 @@ private val PART_TIER = mapOf(
     "outbox" to Tier.ActsAsYou,
     "upload" to Tier.ActsAsYou,
     "mesh" to Tier.Sensitive,
+    "neighbor" to Tier.Sensitive,
     "fs" to Tier.Sensitive,
     "notify" to Tier.Sensitive,
 )
@@ -100,9 +101,9 @@ private val GROUPS = listOf(
     ),
     PermissionGroup(
         "Nearby devices", Icons.Filled.WifiTethering,
-        "Post to and read from phones nearby.",
+        "Post to and read from phones nearby and your neighborhoods.",
         note = "Can read the private data your apps keep on this phone.",
-        domains = listOf("mesh"),
+        domains = listOf("mesh", "neighbor"),
     ),
     PermissionGroup(
         "Files & media", Icons.Filled.Folder,

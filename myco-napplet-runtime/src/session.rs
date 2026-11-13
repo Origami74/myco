@@ -29,8 +29,8 @@ use crate::seams::{ScopeOwner, WorkScope};
 /// yet must not be advertised, or `shell.supports()` lies and the napplet takes
 /// a branch that cannot work.
 pub const IMPLEMENTED_DOMAINS: &[&str] = &[
-    "shell", "identity", "relay", "mesh", "outbox", "local", "resource", "link", "theme", "inc",
-    "intent", "upload", "fs", "gamepad",
+    "shell", "identity", "relay", "mesh", "neighbor", "outbox", "local", "resource", "link",
+    "theme", "inc", "intent", "upload", "fs", "gamepad",
 ];
 
 /// Domains every napplet gets, grant or no grant.
@@ -76,6 +76,12 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// per app. Take it out of the defaults once the tooling keeps extension
 /// domains.
 ///
+/// `neighbor` is a default for the same tooling reason as `mesh`, and it
+/// grants little by itself: a napplet sees only the neighborhoods the user
+/// picked for it (and, with the proximity extension, `nearby`, which anyone
+/// in range can read anyway). Each neighborhood is its own grant, held by the
+/// host, not here.
+///
 /// `inc` and `intent` cost nothing to grant either. `intent` asks the shell to
 /// open another napplet by role, and where it goes is the user's decision: a
 /// default the user set, the only app installed for the role, or the chooser
@@ -90,7 +96,7 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// it from here therefore needs a migration that drops `mesh` from `granted`
 /// where it was never reviewed.
 pub const DEFAULT_GRANTS: &[&str] = &[
-    "identity", "inc", "intent", "link", "local", "mesh", "relay", "resource", "theme",
+    "identity", "inc", "intent", "link", "local", "mesh", "neighbor", "relay", "resource", "theme",
 ];
 
 /// The most live subscriptions one session may hold, across `relay`, `mesh`

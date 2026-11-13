@@ -64,6 +64,7 @@ pub use manifest::{
 pub use nap::deliveries_for;
 pub use nap::fs::{PickMode, PickRequest, PickedHandle, PickedStore};
 pub use nap::intent::{IntentCatalog, IntentCatalogSnapshot, IntentHandler, NoIntents};
+pub use nap::neighbor::{NeighborHost, NoNeighborhoods};
 pub use napplet_link::NappletLink;
 pub use prelude::{
     render_for as render_prelude, PRELUDE_GLOBAL, SIGNING_TIMEOUT, SUPPLEMENT_GLOBAL,

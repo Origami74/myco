@@ -14,12 +14,15 @@ class PermissionGroupsTest {
         assertEquals(
             listOf(
                 "Post as you" to listOf("relay"),
-                "Nearby devices" to listOf("mesh"),
+                "Nearby devices" to listOf("mesh", "neighbor"),
                 "Files & media" to listOf("resource", "local"),
                 "Profile" to listOf("identity"),
                 "Apps & links" to listOf("intent", "inc", "link"),
             ),
-            grouped("identity", "inc", "intent", "link", "local", "mesh", "relay", "resource", "theme", "shell"),
+            grouped(
+                "identity", "inc", "intent", "link", "local", "mesh", "neighbor", "relay", "resource",
+                "theme", "shell",
+            ),
         )
     }
 
@@ -40,6 +43,7 @@ class PermissionGroupsTest {
         assertEquals(Tier.ActsAsYou, tierOf(listOf("resource", "fs", "upload")))
         assertEquals(Tier.ActsAsYou, tierOf(listOf("relay")))
         assertEquals(Tier.Sensitive, tierOf(listOf("mesh")))
+        assertEquals(Tier.Sensitive, tierOf(listOf("neighbor")))
         assertEquals(Tier.Standard, tierOf(listOf("identity")))
         // Unknown is treated as sensitive, not waved through as standard.
         assertEquals(Tier.Sensitive, tierOf(listOf("wallet")))

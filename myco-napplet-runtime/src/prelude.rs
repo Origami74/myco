@@ -188,6 +188,29 @@ mod tests {
         }
     }
 
+    /// NAP-NEIGHBOR is not in the vendored build: the supplement installs it,
+    /// sends every operation, and routes the pushed event.
+    #[test]
+    fn the_supplement_installs_neighbor() {
+        assert!(SUPPLEMENT_IIFE.contains(r#"domains.has("neighbor")"#));
+        for wire in [
+            "neighbor.info",
+            "neighbor.list",
+            "neighbor.peers",
+            "neighbor.create",
+            "neighbor.invite",
+            "neighbor.leave",
+            "neighbor.setOffer",
+            "neighbor.mute",
+        ] {
+            assert!(
+                SUPPLEMENT_IIFE.contains(&format!(r#"type: "{wire}""#)),
+                "the supplement never sends {wire}"
+            );
+        }
+        assert!(SUPPLEMENT_IIFE.contains(r#""neighbor.event""#));
+    }
+
     /// The supplement's timer is the constant the host checks its signing
     /// bound against — they cannot drift apart.
     #[test]

@@ -17,6 +17,7 @@ pub mod intent;
 pub mod link;
 pub mod local;
 pub mod mesh;
+pub mod neighbor;
 pub mod outbox;
 pub mod relay;
 pub mod resource;

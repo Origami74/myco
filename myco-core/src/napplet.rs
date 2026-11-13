@@ -2500,6 +2500,7 @@ mod tests {
                 MemRelay::new(),
             ))),
             mesh: test_mesh(),
+            neighbor: std::sync::Arc::new(myco_napplet_runtime::NoNeighborhoods),
             outbox: test_outbox(),
             lanes: test_outbox(),
             blobs: blobs.clone(),

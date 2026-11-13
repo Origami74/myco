@@ -11,6 +11,8 @@
 // - `window.napplet.mesh` — NAP-MESH (`docs/design/napplet/NAP-MESH.md`),
 //   Myco's own domain, which the vendored installer filters out because it is
 //   not in the upstream registry yet.
+// - `window.napplet.neighbor` — NAP-NEIGHBOR (napplet/naps#146), not in the
+//   vendored build yet.
 // - `window.napplet.local` — NAP-LOCAL (`docs/design/napplet/NAP-LOCAL.md`),
 //   Myco's keep-on-this-device domain, filtered out for the same reason; and
 //   `window.napplet.resource.keep`, its blob half, added to the vendored
@@ -73,6 +75,7 @@ var MycoPrelude = (function () {
     if (domains.has("gamepad")) installGamepad(napplet, routers);
     if (domains.has("outbox") && napplet.outbox) installOutboxPublish(napplet, routers);
     if (domains.has("mesh")) installMesh(napplet, routers);
+    if (domains.has("neighbor")) installNeighbor(napplet, routers);
     if (domains.has("local")) installLocal(napplet, routers);
     if (domains.has("resource") && napplet.resource) installResourceKeep(napplet, routers);
     if (domains.has("upload") && napplet.upload) installUploadUpload(napplet, routers);
@@ -351,6 +354,96 @@ var MycoPrelude = (function () {
     napplet.fs.pickFile = picker("fs.pickFile");
     napplet.fs.pickFiles = picker("fs.pickFiles");
     napplet.fs.pickSaveFile = picker("fs.pickSaveFile");
+  }
+
+  // --- NAP-NEIGHBOR ----------------------------------------------------------
+  // Neighborhoods and their `neighborhood:` addresses. Every call answers
+  // with a result or rejects with the NAP's error string ("unsupported",
+  // "denied", "cancelled", "not found"). `create`, `invite`, `leave` and
+  // `setOffer` put a prompt in front of the user, so they wait as long as a
+  // signed publish does.
+  function installNeighbor(napplet, routers) {
+    var pending = new Map();
+    var handlers = new Set();
+
+    function request(message, project, timeoutMs) {
+      var id = crypto.randomUUID();
+      message.id = id;
+      return new Promise(function (resolve, reject) {
+        var timeout = setTimeout(function () {
+          if (pending.delete(id)) reject(new Error(message.type + " timed out"));
+        }, timeoutMs || REQUEST_TIMEOUT_MS);
+        pending.set(id, { resolve: resolve, reject: reject, timeout: timeout, project: project });
+        window.parent.postMessage(message, "*");
+      });
+    }
+
+    routers.push(function (msg) {
+      if (msg.type.indexOf("neighbor.") !== 0) return;
+      if (msg.type === "neighbor.event") {
+        handlers.forEach(function (cb) {
+          try { cb(msg.event); } catch (e) { console.error("neighbor event handler threw", e); }
+        });
+        return;
+      }
+      if (typeof msg.id !== "string") return;
+      var p = pending.get(msg.id);
+      if (!p) return;
+      pending.delete(msg.id);
+      clearTimeout(p.timeout);
+      if (typeof msg.error === "string") {
+        p.reject(new Error(msg.error));
+        return;
+      }
+      p.resolve(p.project(msg));
+    });
+
+    function field(name) {
+      return function (msg) { return msg[name]; };
+    }
+    function nothing() { return undefined; }
+
+    napplet.neighbor = {
+      info: function () {
+        return request({ type: "neighbor.info" }, field("info"));
+      },
+      list: function () {
+        return request({ type: "neighbor.list" }, function (msg) { return msg.neighborhoods || []; });
+      },
+      peers: function (neighborhood) {
+        return request({ type: "neighbor.peers", neighborhood: neighborhood }, function (msg) {
+          return msg.peers || [];
+        });
+      },
+      create: function (req) {
+        return request({ type: "neighbor.create", request: req }, field("neighborhood"), SIGNING_TIMEOUT_MS);
+      },
+      invite: function (neighborhood, candidates) {
+        var message = { type: "neighbor.invite", neighborhood: neighborhood };
+        if (Array.isArray(candidates)) message.candidates = candidates.slice();
+        return request(message, field("result"), SIGNING_TIMEOUT_MS);
+      },
+      leave: function (neighborhood) {
+        return request({ type: "neighbor.leave", neighborhood: neighborhood }, nothing, SIGNING_TIMEOUT_MS);
+      },
+      setOffer: function (neighborhood, offer) {
+        return request(
+          { type: "neighbor.setOffer", neighborhood: neighborhood, offer: offer },
+          field("offer"),
+          SIGNING_TIMEOUT_MS
+        );
+      },
+      mute: function (neighborhood, author, muted) {
+        return request(
+          { type: "neighbor.mute", neighborhood: neighborhood, author: author, muted: !!muted },
+          nothing
+        );
+      },
+      onEvent: function (cb) {
+        handlers.add(cb);
+        return { close: function () { handlers.delete(cb); } };
+      },
+    };
   }
 
   // --- NAP-MESH --------------------------------------------------------------

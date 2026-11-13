@@ -226,6 +226,7 @@ mod tests {
             signer: Arc::new(AbsentSigner),
             relay: relay.clone(),
             sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
+            neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             mesh: Arc::new(crate::testing::MemMesh::new(
                 relay.clone(),
                 crate::seams::MeshLimits {
@@ -323,6 +324,7 @@ mod tests {
             signer: Arc::new(TestSigner::with_keys(keys)),
             relay: relay.clone(),
             sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
+            neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             mesh: Arc::new(crate::testing::MemMesh::new(
                 relay.clone(),
                 crate::seams::MeshLimits {
@@ -356,6 +358,7 @@ mod tests {
             signer: Arc::new(TestSigner::with_keys(keys.clone())),
             relay: relay.clone(),
             sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
+            neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             mesh: Arc::new(crate::testing::MemMesh::new(
                 relay.clone(),
                 crate::seams::MeshLimits {
@@ -426,6 +429,7 @@ mod tests {
             signer: Arc::new(TestSigner::with_keys(keys)),
             relay: relay.clone(),
             sink: Arc::new(crate::seams::StoreOnlySink(relay.clone())),
+            neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             mesh: Arc::new(crate::testing::MemMesh::new(
                 relay.clone(),
                 crate::seams::MeshLimits {

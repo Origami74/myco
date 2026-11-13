@@ -44,6 +44,9 @@ pub struct NapContext {
     /// Hop-limited publish and pull over the mesh, behind NAP-MESH. See
     /// [`MeshSink`].
     pub mesh: Arc<dyn MeshSink>,
+    /// The device's neighborhoods, behind NAP-NEIGHBOR. See
+    /// [`nap::neighbor::NeighborHost`].
+    pub neighbor: Arc<dyn nap::neighbor::NeighborHost>,
     /// NIP-65 relay planning, behind NAP-OUTBOX. See [`OutboxResolver`].
     pub outbox: Arc<dyn OutboxResolver>,
     /// Lane I/O for NAP-OUTBOX. See [`LaneTransport`].
@@ -252,6 +255,7 @@ pub async fn dispatch(ctx: &NapContext, session: &mut Session, message: &Envelop
         "identity" => Outcome::Reply(nap::identity::handle(ctx, message).await),
         "relay" => Outcome::Reply(nap::relay::handle(ctx, session, message).await),
         "mesh" => Outcome::Reply(nap::mesh::handle(ctx, session, message).await),
+        "neighbor" => Outcome::Reply(nap::neighbor::handle(ctx, session, message).await),
         "outbox" => Outcome::Reply(nap::outbox::handle(ctx, session, message).await),
         "local" => Outcome::Reply(nap::local::handle(ctx, session, message).await),
         "resource" => Outcome::Reply(nap::resource::handle(ctx, session, message).await),
