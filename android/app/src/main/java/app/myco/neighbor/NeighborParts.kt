@@ -27,11 +27,15 @@ import androidx.compose.ui.unit.dp
 
 /** The people you're connected with in a neighborhood. */
 internal fun NeighborhoodsState.peopleIn(id: String): List<NeighborhoodsState.PeerNode> =
-    peers.filter { id in it.neighborhoods }
+    peers.filter { id in it.neighborhoods }.distinctBy { it.name.trim().lowercase() }
 
-/** Everyone reachable right now, once each. */
+/**
+ * Everyone reachable right now, once each. The same person invited to two
+ * neighborhoods twice has two links (link keys don't correlate, by design),
+ * so they're folded by name for display.
+ */
 internal fun NeighborhoodsState.hereNow(): List<NeighborhoodsState.PeerNode> =
-    peers.filter { it.reachable }.distinctBy { it.key }
+    peers.filter { it.reachable }.distinctBy { it.name.trim().lowercase() }
 
 /** "With Bob, Mia + 2", or null when you're not connected with anyone in it. */
 internal fun withNames(people: List<NeighborhoodsState.PeerNode>): String? {

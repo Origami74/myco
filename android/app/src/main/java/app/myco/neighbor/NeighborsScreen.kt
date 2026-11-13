@@ -25,11 +25,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
+import app.myco.ui.ScreenHeader
 
 /**
  * The **Neighbors** tab. Top to bottom: who's here now, shares waiting for
@@ -89,19 +90,8 @@ fun NeighborsScreen(
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Neighbors", style = MaterialTheme.typography.displaySmall, modifier = Modifier.weight(1f))
-                    // Joining is its own thing, always one tap away.
-                    OutlinedButton(onClick = { joining = true }) {
-                        Icon(Icons.Filled.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Join")
-                    }
-                }
-            }
-            item { HereChip(here.size)
-            }
+            // The mesh pill on top, as on Settings.
+            item { ScreenHeader("Neighbors", state) }
 
             if (!noticeSeen) {
                 item {
@@ -197,14 +187,28 @@ fun NeighborsScreen(
             }
         }
 
-        ExtendedFloatingActionButton(
-            onClick = { inviting = true },
-            icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-            text = { Text("Invite") },
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp),
-        )
+        // Join and Invite, side by side at the bottom.
+        Row(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            OutlinedButton(
+                onClick = { joining = true },
+                modifier = Modifier.weight(1f).height(56.dp),
+            ) {
+                Icon(Icons.Filled.QrCodeScanner, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Join")
+            }
+            Button(
+                onClick = { inviting = true },
+                modifier = Modifier.weight(1f).height(56.dp),
+            ) {
+                Icon(Icons.Filled.PersonAdd, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Invite")
+            }
+        }
     }
 
     if (inviting) {
@@ -215,23 +219,6 @@ fun NeighborsScreen(
     }
     nh.peers.firstOrNull { it.key == person }?.let { p ->
         PersonSheet(p, nh, client, onDismiss = { person = null })
-    }
-}
-
-@Composable
-private fun HereChip(count: Int) {
-    val on = count > 0
-    Surface(shape = RoundedCornerShape(50), color = if (on) Color(0xFFD1FAE5) else MaterialTheme.colorScheme.surfaceVariant) {
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(8.dp).background(if (on) Color(0xFF22C55E) else Color(0xFF94A3B8), CircleShape))
-            Spacer(Modifier.width(6.dp))
-            Text(
-                if (on) "$count here now" else "Nobody here now",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Bold,
-                color = if (on) Color(0xFF064E3B) else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
     }
 }
 
