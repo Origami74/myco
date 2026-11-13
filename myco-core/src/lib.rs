@@ -50,6 +50,10 @@ mod mesh_relay;
 // holds one session per open napplet window. See
 // `docs/design/napplet/napplet-runtime.md`.
 mod napplet;
+// NAP-NEIGHBOR's host side: neighborhoods, their store, and the seam napplets
+// reach them through.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod neighbor;
 // NAP-FS: the host's half of a pick — the window host's picker, and the
 // descriptors it hands back.
 mod fs_pick;

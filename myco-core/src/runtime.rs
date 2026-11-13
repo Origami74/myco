@@ -2319,7 +2319,13 @@ impl AppRuntime {
                     // breaker are decided in one place.
                     sink: outbox.clone(),
                     mesh,
-                    neighbor: std::sync::Arc::new(myco_napplet_runtime::NoNeighborhoods),
+                    // NAP-NEIGHBOR: the Circle is Everyone; nothing can be
+                    // created or changed until the shell can ask the user.
+                    neighbor: Arc::new(crate::neighbor::Neighbors::open(
+                        Path::new(&self.data_dir),
+                        Arc::new(crate::neighbor::CirclePeers(content.clone())),
+                        Arc::new(crate::neighbor::NoAsker),
+                    )),
                     outbox: outbox.clone(),
                     lanes: outbox,
                     // A blob a napplet fetches from elsewhere is cached, not
