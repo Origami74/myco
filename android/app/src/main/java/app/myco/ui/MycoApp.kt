@@ -709,11 +709,6 @@ val LocalMeshControl = androidx.compose.runtime.compositionLocalOf { MeshControl
 fun PeersPill(state: AppState) {
     val mesh = LocalMeshControl.current
     val connected = state.blePeers.count { it.connected }
-    // Reachability is "we hold a live mesh relay to them", not "they are an
-    // adjacent node" — a Circle member many hops away is just as reachable, and
-    // counting only direct peers showed 0 while sync was working fine.
-    val reachable = state.reachableNpubs.size
-    val circle = state.circle.size
     var sheetOpen by remember { mutableStateOf(false) }
 
     if (sheetOpen) {
@@ -794,22 +789,10 @@ fun PeersPill(state: AppState) {
                 modifier = Modifier
                     .clickable(
                         onClick = { sheetOpen = true },
-                        onClickLabel = "Show mesh and circle status",
+                        onClickLabel = "Show mesh status",
                     )
                     .padding(start = 2.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
             ) {
-                PillDivider()
-                // Circle: reachable now / total paired.
-                Icon(
-                    Icons.Filled.People,
-                    contentDescription = "Circle reachable / total",
-                    modifier = Modifier.size(18.dp),
-                )
-                Text(
-                    "$reachable/$circle",
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleSmall,
-                )
                 PillDivider()
                 // Live mesh peers, coloured by how much mesh you actually have:
                 // none is a fault (and pulses, since it is the one state you

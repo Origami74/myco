@@ -99,100 +99,11 @@ fun MeshStatusSheet(meshEnabled: Boolean, onDismiss: () -> Unit) {
                 )
             }
 
-            CircleSection(state, nowMs)
-            Spacer(Modifier.height(10.dp))
             MeshSection(state, meshEnabled, awareSupported, apWifi.browsing, apWifi.connected, nowMs)
         }
     }
 }
 
-// ----- Circle -----
-
-/**
- * Who you're paired with, online first.
- *
- * Ordering is reachable-then-name, never last-heard: a Circle of five phones in
- * one room re-ranks on every poll if the order carries any live measurement,
- * and a list that reshuffles under your thumb is unreadable. Two buckets and an
- * alphabetical sort inside each is stable for as long as reachability is.
- *
- * Nothing spells out "reachable" or "offline" — the dot's colour is the whole
- * status, and repeating it in words on every row was noise. Offline members
- * collapse behind one line, because the answer they give ("still paired, not
- * here") is the same for all of them and does not need five rows.
- */
-@Composable
-private fun CircleSection(state: AppState, nowMs: Long) {
-    val (online, offline) = state.circle
-        .sortedBy { it.name.ifEmpty { it.npub }.lowercase() }
-        .partition { it.npub in state.reachableNpubs }
-    GroupLabel("CIRCLE — ${online.size}/${state.circle.size} REACHABLE")
-    if (state.circle.isEmpty()) {
-        Hint("Nobody paired yet. Pair a device from the Circle tab.")
-        return
-    }
-    // Survives the 1Hz tick — this is a list you open and then read.
-    var showOffline by rememberSaveable { mutableStateOf(false) }
-    SectionCard {
-        online.forEachIndexed { i, member ->
-            if (i > 0) Divider()
-            CircleLine(state, member, StatusReachable, nowMs)
-        }
-        if (offline.isEmpty()) {
-            if (online.isEmpty()) EmptyRow("nobody reachable right now")
-            return@SectionCard
-        }
-        if (online.isNotEmpty()) Divider()
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { showOffline = !showOffline }
-                .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                StatusDot(StatusAlone, size = 8)
-                Text(
-                    "${offline.size} offline",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                if (showOffline) "\u2303" else "\u2304",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
-        if (showOffline) {
-            offline.forEach { member ->
-                Divider()
-                CircleLine(state, member, StatusAlone, nowMs)
-            }
-        }
-    }
-}
-
-/**
- * One Circle member. Reachability is the Circle's own fact (a live mesh relay
- * at any hop count); the peer row, when there is one, supplies the link
- * numbers. A member reachable over several hops has no direct peer row at all,
- * and that is not a fault — the row simply carries no numbers.
- */
-@Composable
-private fun CircleLine(state: AppState, member: CircleContact, dot: Color, nowMs: Long) {
-    val peer = state.peers.firstOrNull { it.npub == member.npub && it.npub.isNotEmpty() }
-    PeerLine(
-        name = sheetLabel(state, member.npub),
-        dot = dot,
-        peer = peer,
-        nowMs = nowMs,
-    )
-}
 
 @Composable
 private fun EmptyRow(text: String) {
