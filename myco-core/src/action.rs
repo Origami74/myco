@@ -264,7 +264,12 @@ pub enum NativeAppAction {
     CreateNeighborhood { name: String, auto_accept: bool },
     /// Make a one-time link invitation carrying these neighborhood ids (hex);
     /// it appears as `neighborhoods.invite`, encoded for a QR code.
-    CreateLinkInvite { neighborhoods: Vec<String> },
+    CreateLinkInvite {
+        neighborhoods: Vec<String>,
+        /// Who is inviting, shown on the other phone.
+        #[serde(default)]
+        from: Option<String>,
+    },
     /// Drop the shown invitation (it still expires on its own).
     ClearLinkInvite,
     /// Join a link from a scanned invitation, taking `accept` of the

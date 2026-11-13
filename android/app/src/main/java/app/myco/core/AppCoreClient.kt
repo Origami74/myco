@@ -1410,8 +1410,9 @@ object NativeActions {
     fun createNeighborhood(name: String, autoAccept: Boolean): JSONObject =
         JSONObject().put("type", "create_neighborhood").put("name", name).put("autoAccept", autoAccept)
 
-    fun createLinkInvite(neighborhoods: List<String>): JSONObject =
-        JSONObject().put("type", "create_link_invite").put("neighborhoods", org.json.JSONArray(neighborhoods))
+    fun createLinkInvite(neighborhoods: List<String>, from: String): JSONObject =
+        JSONObject().put("type", "create_link_invite")
+            .put("neighborhoods", org.json.JSONArray(neighborhoods)).put("from", from)
 
     fun clearLinkInvite(): JSONObject = JSONObject().put("type", "clear_link_invite")
 

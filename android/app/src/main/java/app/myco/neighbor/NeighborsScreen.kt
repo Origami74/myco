@@ -40,9 +40,7 @@ import androidx.compose.ui.unit.dp
 import app.myco.core.AppCoreClient
 import app.myco.core.AppState
 import app.myco.core.NativeActions
-import app.myco.share.NsiteShare
 import app.myco.ui.SectionCard
-import app.myco.ui.screens.QrCodeCard
 
 /**
  * The **Neighbors** tab: the user's neighborhoods as a map, then as a list.
@@ -52,12 +50,19 @@ import app.myco.ui.screens.QrCodeCard
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NeighborsScreen(state: AppState, client: AppCoreClient, onOpenCircle: () -> Unit) {
+fun NeighborsScreen(
+    state: AppState,
+    client: AppCoreClient,
+    onOpenCircle: () -> Unit,
+    /** MainActivity's router for scanned, tapped and pasted `myco://` codes. */
+    onScanned: (String) -> Unit,
+) {
     val nh = state.neighborhoods
     var hood by remember { mutableStateOf<String?>(null) }
     var peer by remember { mutableStateOf<String?>(null) }
     var adding by remember { mutableStateOf(false) }
     var joining by remember { mutableStateOf(false) }
+    var inviting by remember { mutableStateOf<String?>(null) }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -124,11 +129,15 @@ fun NeighborsScreen(state: AppState, client: AppCoreClient, onOpenCircle: () -> 
     }
 
     nh.list.firstOrNull { it.id == hood }?.let { n ->
-        ModalBottomSheet(onDismissRequest = {
-            hood = null
-            client.dispatch(NativeActions.clearLinkInvite())
-        }) {
-            NeighborhoodSheet(n, nh, client, onOpenCircle = { hood = null; onOpenCircle() }, onClose = { hood = null })
+        ModalBottomSheet(onDismissRequest = { hood = null }) {
+            NeighborhoodSheet(
+                n,
+                nh,
+                client,
+                onOpenCircle = { hood = null; onOpenCircle() },
+                onInvite = { hood = null; inviting = n.id },
+                onClose = { hood = null },
+            )
         }
     }
     nh.peers.firstOrNull { it.key == peer }?.let { p ->
@@ -140,13 +149,10 @@ fun NeighborsScreen(state: AppState, client: AppCoreClient, onOpenCircle: () -> 
         NewNeighborhoodDialog(client, onDone = { adding = false })
     }
     if (joining) {
-        ModalBottomSheet(onDismissRequest = { joining = false }) {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Join with an invitation", style = MaterialTheme.typography.titleLarge)
-                Join(client)
-                Spacer(Modifier.size(24.dp))
-            }
-        }
+        JoinSheet(onScanned = onScanned, onDismiss = { joining = false })
+    }
+    nh.list.firstOrNull { it.id == inviting }?.let { n ->
+        InviteSheet(n, state, client, onDismiss = { inviting = null })
     }
 }
 
@@ -167,6 +173,7 @@ private fun NeighborhoodSheet(
     nh: NeighborhoodsState,
     client: AppCoreClient,
     onOpenCircle: () -> Unit,
+    onInvite: () -> Unit,
     onClose: () -> Unit,
 ) {
     var name by remember(n.id) { mutableStateOf(n.name) }
@@ -218,21 +225,7 @@ private fun NeighborhoodSheet(
         if (!n.everyone) {
             HorizontalDivider()
             Text("Share", fontWeight = FontWeight.Bold)
-            val invite = nh.invite
-            if (invite != null) {
-                val bitmap = remember(invite) { NsiteShare.qrBitmap(invite) }
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    QrCodeCard(bitmap, "Invitation to ${n.name}", size = 220.dp)
-                }
-                Text(
-                    "Scan with Myco: Neighbors → Join. Works once, for 15 minutes.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            } else {
-                Button(onClick = { client.dispatch(NativeActions.createLinkInvite(listOf(n.id))) }) {
-                    Text("Invite someone")
-                }
-            }
+            Button(onClick = onInvite) { Text("Invite someone") }
             val elsewhere = nh.links.filter { n.id !in it.neighborhoods }
             if (elsewhere.isNotEmpty()) {
                 Text("Or offer it to someone you're already linked with:", style = MaterialTheme.typography.bodySmall)

@@ -1556,6 +1556,11 @@ class MainActivity : ComponentActivity() {
     /** A scanned QR is a `myco://pair/…` pairing code, a `myco://share/…` shared
      *  nsite, or a raw nsite link. */
     private fun handleScannedText(text: String) {
+        // A neighborhood invitation: confirm first, then join.
+        app.myco.neighbor.InvitePreview.read(text)?.let { invite ->
+            app.myco.neighbor.IncomingInvite.pending.value = invite
+            return
+        }
         NsiteShare.parsePairUri(text)?.let { pair ->
             // Mutual pairing: send a request to the scanned device; it pops up there
             // to accept, and only then do both sides add each other.

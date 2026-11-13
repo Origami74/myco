@@ -88,9 +88,20 @@ impl LinkService {
 
     /// Start a link carrying `neighborhoods`, for a QR or link.
     pub fn invite(&self, neighborhoods: Vec<Shared>, ttl_secs: u64) -> LinkOffer {
+        self.invite_from(neighborhoods, ttl_secs, None)
+    }
+
+    /// As [`LinkService::invite`], saying who it is from.
+    pub fn invite_from(
+        &self,
+        neighborhoods: Vec<Shared>,
+        ttl_secs: u64,
+        from: Option<String>,
+    ) -> LinkOffer {
         // The URLs depend on the new key, so invite with none and fill them in.
         let mut offer = self.links.invite(Vec::new(), neighborhoods, ttl_secs);
         offer.link = self.link_urls(&offer.pk);
+        offer.from = from.filter(|f| !f.trim().is_empty());
         offer
     }
 

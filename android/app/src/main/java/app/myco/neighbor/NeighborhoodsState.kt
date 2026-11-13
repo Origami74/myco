@@ -97,22 +97,41 @@ data class NeighborhoodsState(
 }
 
 /**
- * A scanned link invitation, read just far enough to show what it offers.
- * The core checks everything again; this is only for the picker.
+ * A neighborhood invitation, `myco://link/<base64url(json)>` like the pair
+ * and share codes, read just far enough to show what it offers and who
+ * from. The core checks everything again.
  */
-data class InvitePreview(val raw: String, val offered: List<NeighborhoodsState.Pending>) {
+data class InvitePreview(
+    val raw: String,
+    val from: String,
+    val offered: List<NeighborhoodsState.Pending>,
+) {
     companion object {
+        const val PREFIX = "myco://link/"
+
         fun read(text: String): InvitePreview? = runCatching {
-            val bytes = Base64.decode(text.trim(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+            val t = text.trim()
+            if (!t.startsWith(PREFIX)) return null
+            val bytes = Base64.decode(t.removePrefix(PREFIX), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
             val o = JSONObject(String(bytes))
             if (o.optInt("v") != 1) return null
             val n = o.optJSONArray("n") ?: JSONArray()
             InvitePreview(
-                raw = text.trim(),
+                raw = t,
+                from = o.optString("from"),
                 offered = (0 until n.length()).mapNotNull { n.optJSONObject(it) }.map {
                     NeighborhoodsState.Pending(it.optString("id"), it.optString("name"))
                 },
             )
         }.getOrNull()
     }
+}
+
+/**
+ * An invitation that arrived by scan, tap or link, waiting for the user to
+ * confirm. Set from `MainActivity.handleScannedText`; the confirm sheet is
+ * drawn at the app root, so it shows over whichever tab is open.
+ */
+object IncomingInvite {
+    val pending = androidx.compose.runtime.mutableStateOf<InvitePreview?>(null)
 }

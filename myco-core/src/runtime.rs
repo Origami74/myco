@@ -1469,8 +1469,11 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
-            NativeAppAction::CreateLinkInvite { neighborhoods } => {
-                self.create_link_invite(neighborhoods);
+            NativeAppAction::CreateLinkInvite {
+                neighborhoods,
+                from,
+            } => {
+                self.create_link_invite(neighborhoods, from);
                 self.rev += 1;
             }
             NativeAppAction::ClearLinkInvite => {
@@ -1650,7 +1653,7 @@ impl AppRuntime {
         self.link_ui.lock().unwrap().status = status.into();
     }
 
-    fn create_link_invite(&mut self, ids: Vec<String>) {
+    fn create_link_invite(&mut self, ids: Vec<String>, from: Option<String>) {
         let (Some(svc), Some(n)) = (self.link_service.clone(), self.neighbors()) else {
             return;
         };
@@ -1664,7 +1667,7 @@ impl AppRuntime {
                 name: r.name.clone(),
             })
             .collect();
-        let offer = svc.invite(shared, crate::neighbor::link::INVITE_TTL_SECS);
+        let offer = svc.invite_from(shared, crate::neighbor::link::INVITE_TTL_SECS, from);
         let mut ui = self.link_ui.lock().unwrap();
         ui.invite = Some(offer.encode());
         ui.status = String::new();

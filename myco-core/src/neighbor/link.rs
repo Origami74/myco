@@ -61,18 +61,31 @@ pub struct LinkOffer {
     pub n: Vec<Shared>,
     /// Unix seconds; the secret is refused after this.
     pub exp: u64,
+    /// Who is inviting, as they want to be called. A display hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
+/// The link form of an invitation, for QR codes, NFC and messages, like
+/// `myco://pair/…` and `myco://share/…`.
+pub const INVITE_PREFIX: &str = "myco://link/";
+
 impl LinkOffer {
-    /// Compact text for a QR code or a link: base64url of the JSON.
+    /// The invitation as a link: `myco://link/<base64url of the JSON>`.
     pub fn encode(&self) -> String {
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(self).expect("serializes"))
+        format!(
+            "{INVITE_PREFIX}{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(self).expect("serializes"))
+        )
     }
 
+    /// Read an invitation, as a link or as the bare payload.
     pub fn decode(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let payload = text.strip_prefix(INVITE_PREFIX).unwrap_or(text);
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(text.trim())
+            .decode(payload)
             .ok()?;
         let offer: Self = serde_json::from_slice(&bytes).ok()?;
         (offer.v == 1).then_some(offer)
@@ -415,6 +428,7 @@ impl Links {
             s: s.clone(),
             n: neighborhoods.clone(),
             exp: now() + ttl_secs,
+            from: None,
         };
         self.change(|saved| {
             saved.invites.retain(|_, i| i.exp > now());
@@ -679,8 +693,14 @@ mod tests {
         };
         let url = "http://a.fips:4873/nh";
         let offer = a.invite(vec![url.into()], vec![home.clone(), club], INVITE_TTL_SECS);
-        // Through the QR and back.
-        let offer = LinkOffer::decode(&offer.encode()).unwrap();
+        // Through the QR and back, as a link and bare.
+        let link = offer.encode();
+        assert!(link.starts_with("myco://link/"));
+        assert_eq!(
+            LinkOffer::decode(link.strip_prefix(INVITE_PREFIX).unwrap()),
+            Some(offer.clone())
+        );
+        let offer = LinkOffer::decode(&link).unwrap();
         let (request, joining) = Links::join(
             &offer,
             url,

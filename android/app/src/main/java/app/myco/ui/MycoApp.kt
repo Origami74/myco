@@ -425,6 +425,12 @@ fun MycoApp(
             }
         }
         Surface(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.background) {
+            // A neighborhood invitation from any tab's scan, a tap or a link.
+            app.myco.neighbor.IncomingInvite.pending.value?.let { invite ->
+                app.myco.neighbor.JoinConfirmSheet(invite, client) {
+                    app.myco.neighbor.IncomingInvite.pending.value = null
+                }
+            }
             NavHost(navController = nav, startDestination = "apps") {
                 composable("apps") {
                     AppsScreen(
@@ -442,6 +448,7 @@ fun MycoApp(
                         state,
                         client,
                         onOpenCircle = { nav.navigate("circle") },
+                        onScanned = onScanned,
                     )
                 }
                 // The Circle screen, opened from Everyone: pairing, tap to

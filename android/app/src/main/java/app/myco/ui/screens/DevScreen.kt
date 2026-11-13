@@ -140,8 +140,6 @@ fun DevScreen(client: AppCoreClient) {
 
         PendingPairingsCard(devState, firstReadLanded)
 
-        app.myco.neighbor.LinksCard(devState, client)
-
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 DevCard("NODE & FIPS") {
