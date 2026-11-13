@@ -2287,12 +2287,26 @@ impl AppRuntime {
                 account.bridge(),
             ));
 
-            let mesh = Arc::new(crate::napplet::NappletMeshSink::new(
-                self.relay_hub.clone(),
-                content.clone(),
-                self.napplet_mesh_limits.clone(),
-                self.node_live.clone(),
-            ));
+            let mesh: Arc<dyn myco_napplet_runtime::MeshSink> =
+                Arc::new(crate::napplet::NappletMeshSink::new(
+                    self.relay_hub.clone(),
+                    content.clone(),
+                    self.napplet_mesh_limits.clone(),
+                    self.node_live.clone(),
+                ));
+
+            // NAP-NEIGHBOR: neighborhoods other than Everyone keep their
+            // events here, apart from the user's own relay.
+            let neighborhood_store: Arc<dyn nsite_deck::RelayBackend> =
+                match myco_relay::RelayStore::open(
+                    Path::new(&self.data_dir).join("neighborhood-relay"),
+                ) {
+                    Ok(store) => Arc::new(store),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "neighborhood store unavailable; kept in memory");
+                        Arc::new(myco_relay::RelayStore::in_memory())
+                    }
+                };
 
             let outbox = Arc::new(crate::outbox::OutboxService::new(
                 content.relay(),
@@ -2318,13 +2332,21 @@ impl AppRuntime {
                     // service, so the pool, offline-only and the internet
                     // breaker are decided in one place.
                     sink: outbox.clone(),
-                    mesh,
+                    mesh: mesh.clone(),
                     // NAP-NEIGHBOR: the Circle is Everyone; nothing can be
                     // created or changed until the shell can ask the user.
                     neighbor: Arc::new(crate::neighbor::Neighbors::open(
                         Path::new(&self.data_dir),
-                        Arc::new(crate::neighbor::CirclePeers(content.clone())),
-                        Arc::new(crate::neighbor::NoAsker),
+                        crate::neighbor::Seams {
+                            peers: Arc::new(crate::neighbor::CirclePeers(content.clone())),
+                            asker: Arc::new(crate::neighbor::NoAsker),
+                            carrier: Arc::new(crate::neighbor::MeshCarrier {
+                                mesh: mesh.clone(),
+                                content: content.clone(),
+                                hub: self.relay_hub.clone(),
+                            }),
+                            scoped_store: neighborhood_store,
+                        },
                     )),
                     outbox: outbox.clone(),
                     lanes: outbox,

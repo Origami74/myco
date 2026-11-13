@@ -70,6 +70,19 @@ pub struct Neighbors {
     store: Mutex<Store>,
     peers: Arc<dyn PeerDirectory>,
     asker: Arc<dyn Asker>,
+    /// Everyone's transport.
+    pub(super) carrier: Arc<dyn super::carrier::Carrier>,
+    /// Every other neighborhood's events.
+    pub(super) scoped: super::data::Scoped,
+}
+
+/// What [`Neighbors::open`] reaches the world through.
+pub struct Seams {
+    pub peers: Arc<dyn PeerDirectory>,
+    pub asker: Arc<dyn Asker>,
+    pub carrier: Arc<dyn super::carrier::Carrier>,
+    /// Where neighborhood events other than Everyone's are stored.
+    pub scoped_store: Arc<dyn nsite_deck::RelayBackend>,
 }
 
 /// Where an address points, for the lanes that route it (phase 3).
@@ -83,11 +96,7 @@ pub struct Target {
 impl Neighbors {
     /// Open `neighborhoods.json` under `data_dir`, adding Everyone if it is
     /// not there yet.
-    pub fn open(
-        data_dir: &std::path::Path,
-        peers: Arc<dyn PeerDirectory>,
-        asker: Arc<dyn Asker>,
-    ) -> Self {
+    pub fn open(data_dir: &std::path::Path, seams: Seams) -> Self {
         let file = store::path(data_dir);
         let mut s = store::load(&file);
         if s.ensure_everyone() {
@@ -98,8 +107,10 @@ impl Neighbors {
         Self {
             file,
             store: Mutex::new(s),
-            peers,
-            asker,
+            peers: seams.peers,
+            asker: seams.asker,
+            carrier: seams.carrier,
+            scoped: super::data::Scoped::open(data_dir, seams.scoped_store),
         }
     }
 
@@ -439,6 +450,18 @@ mod tests {
         }
     }
 
+    pub(in crate::neighbor) fn seams(
+        peers: Arc<dyn PeerDirectory>,
+        asker: Arc<dyn Asker>,
+    ) -> Seams {
+        Seams {
+            peers,
+            asker,
+            carrier: Arc::new(super::super::carrier::testing::MemCarrier::default()),
+            scoped_store: Arc::new(nsite_deck::testing::MemRelay::new()),
+        }
+    }
+
     fn dir() -> PathBuf {
         let d = std::env::temp_dir().join(format!("myco-neighbors-{}", super::super::id::token()));
         std::fs::create_dir_all(&d).unwrap();
@@ -460,7 +483,7 @@ mod tests {
                 reachable: false,
             },
         ]));
-        (Neighbors::open(&d, peers, asker.clone()), asker, d)
+        (Neighbors::open(&d, seams(peers, asker.clone())), asker, d)
     }
 
     fn app(d: &str) -> NappletIdentity {
@@ -492,7 +515,7 @@ mod tests {
         let b = n.list(&app("map")).await[0].id.clone();
         assert_ne!(a, b, "two napplets cannot correlate ids");
         assert_eq!(n.list(&app("chat")).await[0].id, a);
-        let again = Neighbors::open(&d, Arc::new(Fixed(Vec::new())), asker);
+        let again = Neighbors::open(&d, seams(Arc::new(Fixed(Vec::new())), asker));
         assert_eq!(again.list(&app("chat")).await[0].id, a);
         assert_eq!(again.records().len(), 1, "Everyone not added twice");
     }
