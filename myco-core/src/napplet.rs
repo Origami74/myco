@@ -1833,158 +1833,6 @@ impl myco_napplet_runtime::seams::BlobFetcher for BlossomFetcher {
     }
 }
 
-/// NAP-MESH's seam over the device's mesh: hop-limited publish through the
-/// [`RelayHub`](crate::mesh_relay::RelayHub), backlog pull through the Circle
-/// relay pool, and the user's caps from settings.
-///
-/// The caps are read per call from a lock the settings action writes, so a
-/// user lowering "how far apps reach" is obeyed by the very next publish —
-/// there is no per-napplet copy to go stale.
-pub struct NappletMeshSink {
-    hub: Arc<Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
-    content: Arc<crate::content::Content>,
-    limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
-    node_live: Arc<std::sync::atomic::AtomicBool>,
-    /// `mesh.blobs`, with its memory of what each peer holds — shared by
-    /// every napplet window, as the peers are.
-    blobs: crate::mesh_blobs::MeshBlobs,
-}
-
-impl NappletMeshSink {
-    pub fn new(
-        hub: Arc<Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
-        content: Arc<crate::content::Content>,
-        limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
-        node_live: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Self {
-        let blobs = crate::mesh_blobs::MeshBlobs::new(Arc::new(crate::mesh_blobs::HttpProbe::new(
-            content.clone(),
-        )));
-        Self {
-            hub,
-            content,
-            limits,
-            node_live,
-            blobs,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl myco_napplet_runtime::seams::MeshSink for NappletMeshSink {
-    async fn limits(&self) -> myco_napplet_runtime::MeshLimits {
-        *self.limits.read().unwrap()
-    }
-
-    async fn reach(&self) -> anyhow::Result<myco_napplet_runtime::MeshReach> {
-        Ok(myco_napplet_runtime::MeshReach {
-            online: self.node_live.load(std::sync::atomic::Ordering::Relaxed),
-            peers: self.content.reachable_npubs().len(),
-        })
-    }
-
-    async fn publish(&self, event: nostr::Event, ttl: u8) -> anyhow::Result<()> {
-        // Clamped again here, whatever the caller did: the seam is the last
-        // place a budget passes before it reaches the mesh, and the cap is the
-        // user's promise, not the runtime crate's.
-        let ttl = ttl.min(self.limits.read().unwrap().publish_ttl);
-        let hub = self.hub.lock().unwrap().clone();
-        match hub {
-            Some(hub) => {
-                hub.accept_local_with_ttl(event, Some(ttl)).await?;
-                Ok(())
-            }
-            // No hub is the host-build and pre-start case; the event is
-            // stored and goes no further, which is what `ttl` 0 means anyway.
-            None => self.content.relay().publish(event).await,
-        }
-    }
-
-    /// Kept and flooded again even when already seen — the hub's seen-set
-    /// would otherwise stop a rebroadcast at this phone. Peers' own seen-sets
-    /// still end the flood.
-    async fn rebroadcast(&self, event: nostr::Event, ttl: u8) -> anyhow::Result<()> {
-        // Only what the push plane floods at all: not manifests (their own
-        // interest-aware path) and not gift wraps (addressed to one phone).
-        let kind = event.kind.as_u16();
-        if !crate::gossip::is_gossip_eligible(kind) || kind == 1059 {
-            anyhow::bail!("kind {kind} is not passed on over the mesh");
-        }
-        let ttl = ttl.min(self.limits.read().unwrap().publish_ttl);
-        let hub = self.hub.lock().unwrap().clone();
-        match hub {
-            Some(hub) => hub.rebroadcast_local(event, ttl).await,
-            None => self.content.relay().publish(event).await,
-        }
-    }
-
-    async fn pull(
-        &self,
-        filters: Vec<serde_json::Value>,
-        ttl: u8,
-    ) -> anyhow::Result<myco_napplet_runtime::PulledEvents> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let rx: myco_napplet_runtime::PulledEvents =
-            Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|event| (event, rx))
-            }));
-        let ttl = ttl.min(self.limits.read().unwrap().subscribe_ttl);
-        if ttl == 0 {
-            return Ok(rx);
-        }
-        let hub = self.hub.lock().unwrap().clone();
-        let Some(hub) = hub else {
-            // Nothing to pull through: the stream ends with nothing in it.
-            return Ok(rx);
-        };
-        let content = self.content.clone();
-        // Spawned: a peer two hops out answers in seconds, and the napplet's
-        // next call must not queue behind it. What arrives is accepted into
-        // the hub, which wakes every other subscriber on this device with what
-        // is new, and handed back on `tx` to the subscription that asked,
-        // repeats included: the hub's live stream drops a repeat, and an event
-        // seen once and since evicted would otherwise reach nobody.
-        tokio::spawn(async move {
-            // `ttl` counts rings of peers beyond this device, as a publish's
-            // budget does. The envelope carries the budget the *receiver* may
-            // spend, so the first ring is asked with one less: 1 asks direct
-            // peers and stops, 2 lets them ask theirs.
-            let meta = crate::mesh_wire::MeshMeta::pull(
-                ttl - 1,
-                crate::mesh_wire::new_query_id(),
-                crate::content::PULL_BUDGET_MS,
-            );
-            // Each event is accepted as a peer sends it, so the napplet sees
-            // the nearest peer's answer without waiting for the farthest.
-            let mut events = content.pull_from_peers_stream(filters, meta, None);
-            let mut fresh = 0usize;
-            while let Some(event) = events.recv().await {
-                match hub.accept_pulled(event.clone()).await {
-                    Ok(true) => fresh += 1,
-                    Ok(false) => {}
-                    Err(e) => tracing::debug!(error = %e, "napplet mesh pull: could not store"),
-                }
-                // The subscription may be gone; the pull still fills the cache.
-                let _ = tx.send(event);
-            }
-            tracing::debug!(ttl, fresh, "napplet mesh pull finished");
-        });
-        Ok(rx)
-    }
-
-    /// Over the mesh only, `HEAD` only; see [`crate::mesh_blobs`]. With the
-    /// node down there is nobody to ask, and the answer says so (`peers` 0).
-    async fn blob_holders(&self, hashes: &[String]) -> Option<myco_napplet_runtime::BlobReach> {
-        if !self.node_live.load(std::sync::atomic::Ordering::Relaxed) {
-            return Some(myco_napplet_runtime::BlobReach {
-                peers: 0,
-                holders: hashes.iter().map(|h| (h.clone(), 0)).collect(),
-            });
-        }
-        Some(self.blobs.ask(hashes).await)
-    }
-}
-
 /// What installing a napplet would grant it: what it declared it needs, plus
 /// the defaults every napplet gets, narrowed to what this build can actually
 /// do.
@@ -2406,7 +2254,7 @@ mod tests {
         assert!(!effective_grants(&[]).contains(&"upload".to_string()));
         assert!(effective_grants(&["upload".into()]).contains(&"upload".to_string()));
 
-        let requires: Vec<String> = vec!["mesh".into(), "outbox".into(), "upload".into()];
+        let requires: Vec<String> = vec!["neighbor".into(), "outbox".into(), "upload".into()];
         let installed_before = crate::content::NappletGrants {
             granted: effective_grants(&[]),
             denied: Vec::new(),
@@ -2428,6 +2276,20 @@ mod tests {
             ..installed_before
         };
         assert!(unreviewed_domains(&denied, &requires).is_empty());
+    }
+
+    /// NAP-MESH is gone: a manifest that still declares `mesh` is not granted
+    /// it and is not asked about it — an unknown domain, like any other.
+    #[test]
+    fn a_declared_mesh_is_neither_granted_nor_reviewed() {
+        let requires: Vec<String> = vec!["mesh".into(), "relay".into()];
+        assert!(!effective_grants(&requires).contains(&"mesh".to_string()));
+        let grants = crate::content::NappletGrants {
+            granted: vec!["mesh".into()],
+            denied: Vec::new(),
+            reviewed: Vec::new(),
+        };
+        assert!(!unreviewed_domains(&grants, &requires).contains(&"mesh".to_string()));
     }
 
     /// A [`PeerSource`] over in-memory stores — "somewhere else", with no
@@ -2491,7 +2353,7 @@ mod tests {
     }
 
     /// A context over in-memory seams for `relay` and `blobs`, with nothing
-    /// behind the mesh, the outbox or the fetcher.
+    /// behind the outbox or the fetcher.
     pub(super) fn test_ctx(relay: Arc<dyn RelayBackend>, blobs: Arc<dyn BlobStore>) -> NapContext {
         NapContext {
             signer: Arc::new(myco_napplet_runtime::testing::TestSigner::new()),
@@ -2499,7 +2361,6 @@ mod tests {
             sink: Arc::new(myco_napplet_runtime::seams::StoreOnlySink(Arc::new(
                 MemRelay::new(),
             ))),
-            mesh: test_mesh(),
             neighbor: std::sync::Arc::new(myco_napplet_runtime::NoNeighborhoods),
             outbox: test_outbox(),
             lanes: test_outbox(),
@@ -2519,17 +2380,6 @@ mod tests {
         Arc::new(myco_napplet_runtime::testing::OutboxFixture::new(Arc::new(
             MemRelay::new(),
         )))
-    }
-
-    /// A mesh with nothing behind it, for tests that are not about the mesh.
-    pub(super) fn test_mesh() -> Arc<myco_napplet_runtime::testing::MemMesh> {
-        Arc::new(myco_napplet_runtime::testing::MemMesh::new(
-            Arc::new(MemRelay::new()),
-            myco_napplet_runtime::MeshLimits {
-                publish_ttl: 3,
-                subscribe_ttl: 2,
-            },
-        ))
     }
 
     async fn host_with_fixture() -> (NappletHost, NappletAddr) {
@@ -3486,12 +3336,12 @@ mod tests {
         );
     }
 
-    /// `mesh` became a default after napplets were already installed. One the
-    /// user never decided on picks it up at its next open, silently — there
-    /// is no sheet for a default. One where the user switched `mesh` off keeps
-    /// it off: a default does not overrule a decision.
+    /// `neighbor` became a default after napplets were already installed. One
+    /// the user never decided on picks it up at its next open, silently —
+    /// there is no sheet for a default. One where the user switched `neighbor`
+    /// off keeps it off: a default does not overrule a decision.
     #[tokio::test]
-    async fn a_new_mesh_default_does_not_overrule_a_switched_off_mesh() {
+    async fn a_new_default_does_not_overrule_a_switched_off_domain() {
         let (host, addr) = host_with_fixture().await; // declares shell, relay
 
         let never_decided = crate::content::NappletGrants {
@@ -3500,18 +3350,18 @@ mod tests {
             reviewed: vec!["shell".into(), "relay".into()],
         };
         let opened = host.open_with(&addr, Some(never_decided)).await.unwrap();
-        assert!(opened.granted().contains(&"mesh".to_string()));
+        assert!(opened.granted().contains(&"neighbor".to_string()));
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
 
         let switched_off = crate::content::NappletGrants {
             granted: vec!["shell".into(), "relay".into()],
-            denied: vec!["mesh".into()],
+            denied: vec!["neighbor".into()],
             reviewed: vec!["shell".into(), "relay".into()],
         };
         let opened = host.open_with(&addr, Some(switched_off)).await.unwrap();
         assert!(
-            !opened.granted().contains(&"mesh".to_string()),
-            "the new default overruled a mesh the user switched off"
+            !opened.granted().contains(&"neighbor".to_string()),
+            "the new default overruled a domain the user switched off"
         );
         assert!(opened.granted().contains(&"relay".to_string()));
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
@@ -3856,10 +3706,10 @@ mod tests {
         let keys = nostr::Keys::generate();
         let v1 = version(&keys, 1_000, "v1", &["theme"]);
         let v2 = version(&keys, 2_000, "v2", &["outbox", "theme"]);
-        seed(&phone, &v1, &["mesh", "outbox", "theme"]).await;
+        seed(&phone, &v1, &["neighbor", "outbox", "theme"]).await;
         update_to(&phone, &v2).await;
 
-        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let table = defaults_table(&keys.public_key(), &["neighbor", "outbox", "theme"]);
         let opened = open_as_device(&phone, &addr_of(&v2), table).await;
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
         assert!(opened.granted().contains(&"outbox".to_string()));
@@ -3875,7 +3725,7 @@ mod tests {
         let v1 = version(&keys, 1_000, "v1", &["outbox", "theme"]);
         seed(&phone, &v1, &[]).await;
 
-        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let table = defaults_table(&keys.public_key(), &["neighbor", "outbox", "theme"]);
         let opened = open_as_device(&phone, &addr_of(&v1), table).await;
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
         assert!(opened.granted().contains(&"outbox".to_string()));
@@ -3889,10 +3739,10 @@ mod tests {
         let keys = nostr::Keys::generate();
         let v1 = version(&keys, 1_000, "v1", &[]);
         let v2 = version(&keys, 2_000, "v2", &["outbox"]);
-        seed(&phone, &v1, &["mesh"]).await;
+        seed(&phone, &v1, &["neighbor"]).await;
         update_to(&phone, &v2).await;
 
-        let table = defaults_table(&keys.public_key(), &["mesh"]);
+        let table = defaults_table(&keys.public_key(), &["neighbor"]);
         let opened = open_as_device(&phone, &addr_of(&v2), table).await;
         assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
         assert!(!opened.granted().contains(&"outbox".to_string()));
@@ -3911,7 +3761,7 @@ mod tests {
         seed(&phone, &v1, &[]).await;
         update_to(&phone, &v2).await;
 
-        let table = defaults_table(&vetted.public_key(), &["mesh", "outbox", "theme"]);
+        let table = defaults_table(&vetted.public_key(), &["neighbor", "outbox", "theme"]);
         let opened = open_as_device(&phone, &addr_of(&v2), table).await;
         assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
         assert!(!opened.granted().contains(&"outbox".to_string()));
@@ -4066,7 +3916,7 @@ mod tests {
         install(&phone, &v1, &["theme"]).await;
         update_to(&phone, &v2).await;
 
-        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let table = defaults_table(&keys.public_key(), &["neighbor", "outbox", "theme"]);
         let opened = open_as_device(&phone, &addr_of(&v2), table).await;
         assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
     }
@@ -4078,7 +3928,7 @@ mod tests {
         let phone = phone("preinstalled-denied");
         let keys = nostr::Keys::generate();
         let v1 = version(&keys, 1_000, "v1", &["outbox", "theme"]);
-        seed(&phone, &v1, &["mesh", "outbox", "theme"]).await;
+        seed(&phone, &v1, &["neighbor", "outbox", "theme"]).await;
         let npub = keys.public_key().to_bech32().unwrap();
         let mut grants = phone
             .content
@@ -4089,7 +3939,7 @@ mod tests {
             .content
             .set_napplet_grants(&npub, Some("fixture"), grants);
 
-        let table = defaults_table(&keys.public_key(), &["mesh", "outbox", "theme"]);
+        let table = defaults_table(&keys.public_key(), &["neighbor", "outbox", "theme"]);
         let opened = open_as_device(&phone, &addr_of(&v1), table).await;
         assert!(!opened.granted().contains(&"outbox".to_string()));
         assert!(opened.unreviewed.is_empty(), "{:?}", opened.unreviewed);
@@ -4175,8 +4025,8 @@ mod tests {
         assert_eq!(outcome, crate::content::NappletPush::Relayed);
         assert!(forwarded.is_empty(), "a spent budget was forwarded");
 
-        // Published here: the default budget, or the one a napplet chose
-        // through NAP-MESH — where 0 means this phone only.
+        // Published here: the default budget, or an explicit one — where 0
+        // means this phone only.
         let local = |ttl| crate::mesh_relay::Inbound {
             origin: crate::mesh_relay::Origin::Local,
             event_ttl: ttl,
@@ -4191,7 +4041,7 @@ mod tests {
         );
         let v4 = version(&keys, 4_000, "Version four", &["relay"]);
         let (_, forwarded) = push(&phone, &v4, local(Some(0)), &[]).await;
-        assert!(forwarded.is_empty(), "a NAP-MESH ttl of 0 left the phone");
+        assert!(forwarded.is_empty(), "a ttl of 0 left the phone");
     }
 
     /// An older version is a downgrade or a replay: it is not fetched, not
@@ -4554,13 +4404,13 @@ mod tests {
             r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
         )
         .await;
-        let ask = r#"{"channel":"napplet","message":{"type":"mesh.info","id":"m1"}}"#;
+        let ask = r#"{"channel":"napplet","message":{"type":"theme.get","id":"m1"}}"#;
 
-        // `mesh` is a default grant (for now), so switch it off here first.
+        // `theme` is a default grant, so switch it off here first.
         host.apply_grants(&addr.author, Some("fixture"), vec![])
             .await;
         let other_author = nostr::Keys::generate().public_key();
-        host.apply_grants(&other_author, Some("fixture"), vec!["mesh".into()])
+        host.apply_grants(&other_author, Some("fixture"), vec!["theme".into()])
             .await;
         let out = host.frame(&opened.session_id, ask).await;
         let ToShell::Napplet { message } = &out[0] else {
@@ -4583,10 +4433,10 @@ mod tests {
             r#"{"channel":"napplet","message":{"type":"shell.ready"}}"#,
         )
         .await;
-        let ask = r#"{"channel":"napplet","message":{"type":"mesh.info","id":"m1"}}"#;
+        let ask = r#"{"channel":"napplet","message":{"type":"theme.get","id":"m1"}}"#;
 
-        // `mesh` is a default grant (for now): switched off on the sheet, it
-        // is refused at once.
+        // `theme` is a default grant: switched off on the sheet, it is
+        // refused at once.
         host.apply_grants(&addr.author, Some("fixture"), vec![])
             .await;
         let out = host.frame(&opened.session_id, ask).await;
@@ -4595,10 +4445,10 @@ mod tests {
         };
         assert!(
             message.field("error").is_some(),
-            "mesh was served after being switched off"
+            "theme was served after being switched off"
         );
 
-        host.apply_grants(&addr.author, Some("fixture"), vec!["mesh".into()])
+        host.apply_grants(&addr.author, Some("fixture"), vec!["theme".into()])
             .await;
         let out = host.frame(&opened.session_id, ask).await;
         let ToShell::Napplet { message } = &out[0] else {
@@ -4608,7 +4458,7 @@ mod tests {
             message.field("error").is_none(),
             "the switch did not reach the window"
         );
-        assert!(message.field("limits").is_some());
+        assert!(message.field("theme").is_some());
 
         host.apply_grants(&addr.author, Some("fixture"), vec![])
             .await;

@@ -6,14 +6,12 @@
 //! into the shell: the napplet hands over filters and intent, the shell
 //! resolves the relays, asks them, deduplicates by id and says how sure it is.
 //!
-//! ## The three lanes
+//! ## The two lanes
 //!
-//! A plan is a list of [`RelayLane`]s — this device's relay, a Circle peer's
-//! relay over the mesh, or an internet relay — because a NIP-65 list can name
-//! `ws://<npub>.fips:4870` beside `wss://` relays and the outbox model works
-//! unmodified (design §7.4). A mesh lane here is a *directed* connection to
-//! one peer's relay. It is not the flood: that is NAP-MESH's, behind its own
-//! grant and a hop budget, and nothing in this domain reaches it.
+//! A plan is a list of [`RelayLane`]s — this device's relay, or an internet
+//! relay. A `.fips` URL (a peer's relay over the mesh) is refused: what people
+//! nearby share travels through NAP-NEIGHBOR, and nothing in this domain
+//! reaches a peer.
 //!
 //! ## What is awaited and what is not
 //!
@@ -39,9 +37,7 @@ use nostr::{Event, EventId, Filter, PublicKey};
 
 use crate::dispatch::NapContext;
 use crate::nap::relay::{event_json, filters_from, signed_or_template};
-use crate::seams::{
-    is_mesh_relay_url, mesh_relay_npub, mesh_relay_url, Direction, Envelope, RelayLane, RelayPlan,
-};
+use crate::seams::{Direction, Envelope, RelayLane, RelayPlan};
 use crate::session::Session;
 
 /// How long a read waits for its lanes when the napplet did not say.
@@ -53,8 +49,7 @@ const PUBLISH_TIMEOUT: Duration = Duration::from_secs(8);
 /// napplet is told it succeeded. The rest keep going in the background: one
 /// slow relay out of five used to hold every "Published" for the full
 /// timeout. Two, not one, so a success means the event is findable from more
-/// than a single server — or, for a mesh lane, handed to more than one
-/// Circle member's connection.
+/// than a single server.
 const PUBLISH_QUORUM: usize = 2;
 /// How long the answer waits for the `toInboxes` relays. NAP-OUTBOX makes
 /// each a required target whose failure must be reported, so the answer
@@ -64,8 +59,8 @@ const PUBLISH_QUORUM: usize = 2;
 /// hold "Published" for the full [`PUBLISH_TIMEOUT`] on the slowest of them,
 /// and for every one of the user's own outbox relays too.
 const INBOX_WAIT: Duration = Duration::from_secs(3);
-/// Bounds on a napplet-supplied `timeoutMs`: below the floor a relay across
-/// the mesh cannot answer, above the ceiling the session loop is hostage.
+/// Bounds on a napplet-supplied `timeoutMs`: below the floor a distant relay
+/// cannot answer, above the ceiling the session loop is hostage.
 const MIN_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -541,9 +536,9 @@ fn hint_lanes_and_addresses(
     Ok((out, addresses))
 }
 
-/// Accept `ws://` and `wss://` URLs to public hosts and to `.fips` mesh
-/// peers; refuse anything that would point the shell at itself or at a
-/// private network.
+/// Accept `ws://` and `wss://` URLs to public hosts; refuse anything that
+/// would point the shell at itself, at a private network, or at a `.fips`
+/// mesh peer.
 ///
 /// Parsed by the `url` crate — the same parser the WebSocket client uses —
 /// so the host *we* judge is the host *it* dials. Hand-splitting the
@@ -552,9 +547,7 @@ fn hint_lanes_and_addresses(
 /// parser also normalises `127.1`, `2130706433`, `0x7f000001` and
 /// `0177.0.0.1` to `127.0.0.1` before we look, so no shorthand slips past.
 ///
-/// An Internet lane keeps the URL as given; a `.fips` lane is rebuilt from
-/// its npub and never carries the napplet's string (see [`mesh_relay_npub`]).
-/// What a public *name* resolves to is checked again at the dial site, since
+/// The lane keeps the URL as given. What a public *name* resolves to is checked again at the dial site, since
 /// resolving is the dialler's, not this crate's.
 pub fn validate_relay_url(url: &str) -> Result<RelayLane, String> {
     use nostr::types::url::Host;
@@ -563,21 +556,13 @@ pub fn validate_relay_url(url: &str) -> Result<RelayLane, String> {
     if !matches!(parsed.scheme(), "ws" | "wss") {
         return Err(format!("relay URL must be ws:// or wss://: {url}"));
     }
-    // Classified leniently (a `?`, `#` or `@` glued to the host counts too)
-    // so a malformed `.fips` URL is refused here, with the mesh shape named
-    // as the reason, rather than falling through to the Internet branch.
-    let looks_mesh = is_mesh_relay_url(url)
-        || matches!(parsed.host(), Some(Host::Domain(d)) if d.ends_with(".fips"));
-    if looks_mesh {
-        // Never carry the string as given: the lane holds the canonical
-        // `ws://<npub>.fips:4870` rebuilt from the npub, so no userinfo, port
-        // or path a napplet wrote can reach the peer pool.
-        let npub = mesh_relay_npub(url).ok_or_else(|| {
-            "mesh relay URL must be ws://<npub>.fips:4870 with no userinfo or path".to_string()
-        })?;
-        return Ok(RelayLane::Mesh {
-            url: mesh_relay_url(&npub),
-        });
+    // A `.fips` name is a peer's relay over the mesh, which no napplet
+    // reaches through this domain. Refused before the userinfo check so the
+    // reason names the mesh; `@` userinfo glued to a `.fips` label is
+    // refused there too.
+    if matches!(parsed.host(), Some(Host::Domain(d)) if d.trim_end_matches('.').ends_with(".fips"))
+    {
+        return Err(format!("mesh relay URLs are not supported: {url}"));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(format!("relay URL must not carry userinfo: {url}"));
@@ -1173,47 +1158,27 @@ mod tests {
                 url: "wss://relay.damus.io".into()
             }
         );
-        assert_eq!(
-            validate_relay_url("ws://npub1abc.fips:4870").unwrap(),
-            RelayLane::Mesh {
-                url: "ws://npub1abc.fips:4870".into()
-            }
-        );
 
-        // A `.fips` URL is only ever the canonical `ws://<npub>.fips:4870`.
-        // `ws://npub1peer.fips:4870@evil.example/` is userinfo on
-        // `evil.example` to the WebSocket client; a wrong port points the
-        // pool at the peer's Blossom and mutes the peer; a path or query is
-        // nothing a mesh relay has. All refused, never fall through to
-        // Internet (H2 of the PR #52 review).
+        // A `.fips` URL is a peer's relay over the mesh: never a lane, and
+        // never fallen through to Internet (H2 of the PR #52 review).
         for bad in [
-            "ws://npub1peer.fips:4870@evil.example/",
+            "ws://npub1abc.fips:4870",
+            "ws://npub1peer.fips",
             "ws://npub1peer.fips:24243",
             "ws://npub1peer.fips:4870/path",
             "ws://npub1peer.fips?x=1",
             "ws://npub1peer.fips#frag",
-            "ws://user@npub1peer.fips:4870",
             "ws://evil.fips:4870",
-            "ws://npub1-peer.fips:4870",
+            "wss://npub1peer.fips",
         ] {
             let err = validate_relay_url(bad).unwrap_err();
-            assert!(
-                err.contains("ws://<npub>.fips:4870"),
-                "{bad} gave the wrong error: {err}"
-            );
+            assert!(err.contains("mesh"), "{bad} gave the wrong error: {err}");
         }
-        for (loose, canonical) in [
-            ("ws://npub1peer.fips", "ws://npub1peer.fips:4870"),
-            ("ws://npub1peer.fips:4870/", "ws://npub1peer.fips:4870"),
-            ("ws://npub1peer.fips/", "ws://npub1peer.fips:4870"),
+        for bad in [
+            "ws://npub1peer.fips:4870@evil.example/",
+            "ws://user@npub1peer.fips:4870",
         ] {
-            assert_eq!(
-                validate_relay_url(loose).unwrap(),
-                RelayLane::Mesh {
-                    url: canonical.into()
-                },
-                "{loose} should be rebuilt as {canonical}"
-            );
+            assert!(validate_relay_url(bad).is_err(), "{bad} was accepted");
         }
     }
 

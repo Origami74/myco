@@ -12,39 +12,24 @@ import java.security.SecureRandom
 
 /**
  * Build + encode the **share-an-nsite** payload: a single QR that carries the
- * nsite id *and* this device's pairing info, so the scanning device can open the
- * nsite and — if not already paired — pair with the sharer in one scan.
+ * nsite id *and* this device's npub, so the scanning device can fetch the nsite
+ * from the sharer in one scan.
  *
  * Payload: `myco://share/<base64url(json)>` where the JSON is
  * `{ v, nsite, npub, name, secret }`:
  * - `nsite`  — the `<host>` label to open (`npub1…` root, or `<pubkeyB36><dTag>`).
- * - `npub`   — the **sharer's device** npub (the mesh/pairing identity).
+ * - `npub`   — the **sharer's device** npub (the mesh identity; the holder).
  * - `name`   — a human label for the sharer's device.
- * - `secret` — a one-time `pairSecret` the scanner echoes back over the Noise
- *   channel to complete the mandatory mutual handshake (the matching/handshake is
- *   the P3 receive side; this is the generate side).
+ * - `secret` — a one-time secret. Pairing is gone, so nothing checks it now;
+ *   kept so older builds still read the payload.
  */
 object NsiteShare {
     const val SCHEME = "myco"
     const val SHARE_PREFIX = "myco://share/"
     const val PAIR_PREFIX = "myco://pair/"
 
-    /** A device-only pairing payload (no nsite): `myco://pair/<base64url(json)>`
-     *  with `{ v, npub, name, secret }` — the "My code" QR on the Pair screen. */
-    fun buildPairUri(deviceNpub: String, deviceName: String, pairSecret: String): String {
-        val json = JSONObject()
-            .put("v", 1)
-            .put("npub", deviceNpub)
-            .put("name", deviceName)
-            .put("secret", pairSecret)
-        val b64 = Base64.encodeToString(
-            json.toString().toByteArray(Charsets.UTF_8),
-            Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP,
-        )
-        return "$PAIR_PREFIX$b64"
-    }
-
-    /** The decoded contents of a `myco://pair/…` QR. */
+    /** The decoded contents of a `myco://pair/…` QR from an older Myco: read
+     *  only to say it is no longer used. */
     data class PairInfo(val npub: String, val name: String, val secret: String)
 
     /** Decode a scanned `myco://pair/<base64url(json)>` URI, or null if malformed. */

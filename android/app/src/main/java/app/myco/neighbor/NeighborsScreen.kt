@@ -329,29 +329,25 @@ internal fun PersonSheet(
                     Text("They'll be asked first.", style = MaterialTheme.typography.bodySmall)
                 }
             }
-            HorizontalDivider()
-            TextButton(onClick = { confirm = true }) {
-                Text(if (linkId == null) "Remove ${p.name}" else "Disconnect from ${p.name}", color = MaterialTheme.colorScheme.error)
+            if (linkId != null) {
+                HorizontalDivider()
+                TextButton(onClick = { confirm = true }) {
+                    Text("Disconnect from ${p.name}", color = MaterialTheme.colorScheme.error)
+                }
             }
         }
     }
-    if (confirm) {
+    if (confirm && linkId != null) {
         AlertDialog(
             onDismissRequest = { confirm = false },
-            title = { Text(if (linkId == null) "Remove ${p.name}?" else "Disconnect from ${p.name}?") },
-            text = {
-                Text(
-                    if (linkId == null) "They leave your paired devices. To connect again, invite them to a neighborhood."
-                    else "You stop sharing every neighborhood with them. What you received stays on your phone.",
-                )
-            },
+            title = { Text("Disconnect from ${p.name}?") },
+            text = { Text("You stop sharing every neighborhood with them. What you received stays on your phone.") },
             confirmButton = {
                 TextButton(onClick = {
-                    if (linkId == null) client.dispatch(NativeActions.removeFromCircle(p.key))
-                    else client.dispatch(NativeActions.endLink(linkId))
+                    client.dispatch(NativeActions.endLink(linkId))
                     confirm = false
                     onDismiss()
-                }) { Text(if (linkId == null) "Remove" else "Disconnect") }
+                }) { Text("Disconnect") }
             },
             dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
         )

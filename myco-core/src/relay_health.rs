@@ -1088,7 +1088,6 @@ pub(crate) mod tests {
             content.relay(),
             std::sync::Arc::new(std::sync::Mutex::new(None)),
             content,
-            "npub1me".to_string(),
         )
         .allowing_private_dials();
         for _ in 0..4 {

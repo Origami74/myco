@@ -20,7 +20,7 @@ data class NeighborhoodsState(
         val name: String,
         val reachable: Boolean,
         val neighborhoods: List<String>,
-        /** Set for a link; null for a paired Circle member. */
+        /** The link this peer is on; null when the core reports none. */
         val linkId: String?,
     )
 
@@ -34,6 +34,8 @@ data class NeighborhoodsState(
         val backlogHops: Int,
         val blobHops: Int,
         val passOn: Boolean = true,
+        /** Fetch and serve apps, updates and files with the people here. */
+        val apps: Boolean = true,
     )
 
     data class Pending(val id: String, val name: String)
@@ -62,6 +64,7 @@ data class NeighborhoodsState(
                         backlogHops = it.optInt("backlogHops"),
                         blobHops = it.optInt("blobHops"),
                         passOn = it.optBoolean("passOn", true),
+                        apps = it.optBoolean("apps", true),
                     )
                 },
                 links = o.optJSONArray("links").objects().map { l ->
@@ -97,8 +100,8 @@ data class NeighborhoodsState(
 }
 
 /**
- * A neighborhood invitation, `myco://link/<base64url(json)>` like the pair
- * and share codes, read just far enough to show what it offers and who
+ * A neighborhood invitation, `myco://link/<base64url(json)>` like the share
+ * codes, read just far enough to show what it offers and who
  * from. The core checks everything again.
  */
 data class InvitePreview(

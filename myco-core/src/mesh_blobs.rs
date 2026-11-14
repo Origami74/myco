@@ -1,10 +1,9 @@
-//! `mesh.blobs`: which blobs the Circle's Blossom stores hold, asked over the
-//! mesh with a `HEAD` and nothing more.
+//! Which app peers' Blossom stores hold a blob, asked over the mesh with a
+//! `HEAD` and nothing more.
 //!
-//! A napplet asks "can the phones around me serve these files?" — an app
-//! store hiding apps whose `index.html` nobody nearby has. The answer is a
-//! count per blob, built from one BUD-01 `HEAD /<sha256>` per reachable
-//! Circle member, at `http://<npub>.fips:24243`, the address
+//! [`crate::release_apk`] asks before it downloads the release APK from a
+//! phone nearby: one BUD-01 `HEAD /<sha256>` per reachable app peer, at
+//! `http://<npub>.fips:24243`, the address
 //! [`BlossomFetcher`](crate::napplet::BlossomFetcher) downloads from.
 //!
 //! ## What it never does
@@ -16,9 +15,8 @@
 //!
 //! ## How it is bounded
 //!
-//! A napplet may call this on a timer, for up to
-//! [`MAX_BLOB_HASHES`](myco_napplet_runtime::MAX_BLOB_HASHES) blobs, with
-//! every blob costing one request per peer — over BLE as often as not. So:
+//! Every blob costs one request per peer — over BLE as often as not — and a
+//! release check runs again and again. So:
 //!
 //! - **An answer is remembered** per (peer, blob): a hit for
 //!   [`HIT_REMEMBERED`], a miss for the shorter [`MISS_REMEMBERED`] (a peer
@@ -30,12 +28,11 @@
 //! - **One deadline per call** ([`CALL_DEADLINE`]). What has not answered by
 //!   then counts as not held and is not remembered, so the next call asks.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
-use myco_napplet_runtime::BlobReach;
 
 /// How long a peer holding a blob is believed without asking again.
 pub const HIT_REMEMBERED: Duration = Duration::from_secs(60);
@@ -46,8 +43,7 @@ pub const MISS_REMEMBERED: Duration = Duration::from_secs(20);
 pub const CONCURRENCY: usize = 6;
 /// How long one `HEAD` gets.
 pub const HEAD_TIMEOUT: Duration = Duration::from_secs(4);
-/// How long one `mesh.blobs` call gets, all together. Well inside the
-/// prelude's 30 s request timeout.
+/// How long one call gets, all together.
 pub const CALL_DEADLINE: Duration = Duration::from_secs(12);
 /// The most (peer, blob) answers remembered; past it the expired go, then
 /// all of them.
@@ -57,7 +53,7 @@ const MAX_REMEMBERED: usize = 8192;
 /// be tested with no mesh; [`HttpProbe`] is the real one.
 #[async_trait::async_trait]
 pub trait Probe: Send + Sync {
-    /// The npubs of the Circle members reachable right now.
+    /// The npubs of the app peers reachable right now.
     fn peers(&self) -> Vec<String>;
     /// Whether `npub`'s Blossom holds `sha256_hex`: `Ok(false)` for a clear
     /// "no", `Err` for no answer at all.
@@ -86,7 +82,7 @@ impl Default for Bounds {
     }
 }
 
-/// The bounded, remembering asker behind `mesh.blobs`.
+/// The bounded, remembering asker.
 pub struct MeshBlobs {
     probe: Arc<dyn Probe>,
     bounds: Bounds,
@@ -107,24 +103,8 @@ impl MeshBlobs {
         }
     }
 
-    /// How many reachable peers hold each of `hashes`.
-    pub async fn ask(&self, hashes: &[String]) -> BlobReach {
-        let (peers, held) = self.held(hashes).await;
-        let mut holders: BTreeMap<String, usize> = hashes.iter().map(|h| (h.clone(), 0)).collect();
-        for (_, hash) in held {
-            if let Some(count) = holders.get_mut(&hash) {
-                *count += 1;
-            }
-        }
-        BlobReach {
-            peers: peers.len(),
-            holders,
-        }
-    }
-
     /// The reachable peers that hold `sha256_hex`, by npub — for a caller
-    /// about to download it from one of them (`release_apk`). Same bounds
-    /// and memory as [`MeshBlobs::ask`].
+    /// about to download it from one of them (`release_apk`).
     pub async fn holders(&self, sha256_hex: &str) -> Vec<String> {
         let (_, held) = self.held(&[sha256_hex.to_string()]).await;
         held.into_iter().map(|(npub, _)| npub).collect()
@@ -186,7 +166,7 @@ impl MeshBlobs {
                         None => break,
                     },
                     _ = &mut deadline => {
-                        tracing::debug!("mesh.blobs: call deadline reached");
+                        tracing::debug!("mesh blobs: call deadline reached");
                         break;
                     }
                 }
@@ -240,7 +220,7 @@ pub fn head_url(npub: &str, sha256_hex: &str) -> anyhow::Result<String> {
     ))
 }
 
-/// The real probe: the Circle members in reach, asked over the mesh.
+/// The real probe: the app peers in reach, asked over the mesh.
 pub struct HttpProbe {
     content: Arc<crate::content::Content>,
     http: crate::http::HttpClient,
@@ -353,6 +333,27 @@ mod tests {
         }
     }
 
+    /// How many asked peers there were, and how many hold each of `hashes`.
+    struct Reach {
+        peers: usize,
+        holders: std::collections::BTreeMap<String, usize>,
+    }
+
+    async fn ask(blobs: &MeshBlobs, hashes: &[String]) -> Reach {
+        let (peers, held) = blobs.held(hashes).await;
+        let mut holders: std::collections::BTreeMap<String, usize> =
+            hashes.iter().map(|h| (h.clone(), 0)).collect();
+        for (_, hash) in held {
+            if let Some(count) = holders.get_mut(&hash) {
+                *count += 1;
+            }
+        }
+        Reach {
+            peers: peers.len(),
+            holders,
+        }
+    }
+
     fn hashes(list: &[&str]) -> Vec<String> {
         list.iter().map(|h| h.to_string()).collect()
     }
@@ -386,7 +387,7 @@ mod tests {
                 .holding("p3", A),
         );
         let blobs = MeshBlobs::with_bounds(probe.clone(), quick());
-        let reach = blobs.ask(&hashes(&[A, B])).await;
+        let reach = ask(&blobs, &hashes(&[A, B])).await;
         assert_eq!(reach.peers, 3);
         assert_eq!(reach.holders[A], 2);
         assert_eq!(reach.holders[B], 0);
@@ -397,7 +398,7 @@ mod tests {
     async fn no_peers_is_zero_everywhere_and_asks_nobody() {
         let probe = Arc::new(FakeProbe::new(&[]));
         let blobs = MeshBlobs::with_bounds(probe.clone(), quick());
-        let reach = blobs.ask(&hashes(&[A])).await;
+        let reach = ask(&blobs, &hashes(&[A])).await;
         assert_eq!(reach.peers, 0);
         assert_eq!(reach.holders[A], 0);
         assert!(probe.asks().is_empty());
@@ -408,8 +409,8 @@ mod tests {
     async fn answers_are_remembered() {
         let probe = Arc::new(FakeProbe::new(&["p1", "p2"]).holding("p1", A));
         let blobs = MeshBlobs::with_bounds(probe.clone(), quick());
-        blobs.ask(&hashes(&[A, B])).await;
-        let reach = blobs.ask(&hashes(&[A, B])).await;
+        ask(&blobs, &hashes(&[A, B])).await;
+        let reach = ask(&blobs, &hashes(&[A, B])).await;
         assert_eq!(reach.holders[A], 1);
         assert_eq!(probe.asks().len(), 4, "the second call asked again");
     }
@@ -423,9 +424,9 @@ mod tests {
             ..quick()
         };
         let blobs = MeshBlobs::with_bounds(probe.clone(), bounds);
-        blobs.ask(&hashes(&[A, B])).await;
+        ask(&blobs, &hashes(&[A, B])).await;
         tokio::time::sleep(Duration::from_millis(60)).await;
-        blobs.ask(&hashes(&[A, B])).await;
+        ask(&blobs, &hashes(&[A, B])).await;
         let asks = probe.asks();
         assert_eq!(asks.iter().filter(|(_, h)| h == A).count(), 1);
         assert_eq!(asks.iter().filter(|(_, h)| h == B).count(), 2);
@@ -449,7 +450,7 @@ mod tests {
             .chain([A.to_string()])
             .collect();
         let started = Instant::now();
-        let reach = blobs.ask(&many).await;
+        let reach = ask(&blobs, &many).await;
         assert_eq!(reach.holders[A], 1);
         let gone = probe.asks().iter().filter(|(p, _)| p == "gone").count();
         assert_eq!(gone, 1, "the silent peer was asked {gone} times");
@@ -464,7 +465,7 @@ mod tests {
         let probe = Arc::new(FakeProbe::new(&peer_refs));
         let blobs = MeshBlobs::with_bounds(probe.clone(), quick());
         let many: Vec<String> = (0..20).map(|i| format!("{i:064x}")).collect();
-        blobs.ask(&many).await;
+        ask(&blobs, &many).await;
         assert_eq!(probe.asks().len(), 100);
         assert!(probe.most_in_flight.load(Ordering::SeqCst) <= CONCURRENCY);
     }
@@ -481,10 +482,10 @@ mod tests {
         };
         let blobs = MeshBlobs::with_bounds(probe.clone(), bounds);
         let started = Instant::now();
-        let reach = blobs.ask(&hashes(&[A])).await;
+        let reach = ask(&blobs, &hashes(&[A])).await;
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(reach.holders[A], 0);
-        blobs.ask(&hashes(&[A])).await;
+        ask(&blobs, &hashes(&[A])).await;
         assert_eq!(probe.asks().len(), 2);
     }
 

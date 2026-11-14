@@ -21,7 +21,7 @@ use futures_util::future::join_all;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nostr::nips::nip19::{FromBech32, ToBech32};
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag};
+use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey};
 use nsite_deck::gateway::{self, Readiness};
 use nsite_deck::seams::{BlobStore, PeerSource, RelayBackend};
 use nsite_deck::{sync, GatewayResponse, SiteAddr, SyncOutcome};
@@ -264,27 +264,24 @@ impl NappletGrants {
     }
 }
 
-/// A **Circle** contact: a paired peer whose device we can pull nsites from over
-/// the mesh — your circle doubles as the set of relays we fetch from. Added when
-/// you scan someone's share QR. Persisted to `circle.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A peer this device shares apps with: the device behind a neighborhood
+/// link, in a neighborhood with **Apps** on. Not persisted — the runtime
+/// derives the set from the links and the neighborhoods' settings
+/// ([`Content::set_app_peers`]), so leaving a neighborhood or turning Apps
+/// off takes the peer out at once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CircleContact {
-    /// The contact's device npub (their mesh/pairing identity).
+pub struct AppPeer {
+    /// The peer's device npub, from the `.fips` address in its link offer.
     pub npub: String,
-    /// A human label for the contact (from the share QR; a placeholder for now).
+    /// The name the peer gave in the invitation.
     pub name: String,
-    pub added_at: u64,
-    /// What this peer may do to us. Not exposed in the UI yet — every peer gets
-    /// the defaults — but stored per peer so turning a knob later is a UI change
-    /// rather than a storage migration.
+    /// What this peer may do to us.
     #[serde(default)]
     pub perms: PeerPerms,
 }
 
-/// Per-peer permissions: what a **paired** peer is allowed to do against this
-/// node. Pairing itself is not covered here — that is the auth plane's job, and
-/// it happens before any of these apply.
+/// Per-peer permissions: what an app peer is allowed to do against this node.
 ///
 /// Read every flag as a grant *we* make to *them*. "Multihop" is ambiguous on
 /// its own, so it means specifically whether their traffic travels further
@@ -292,7 +289,7 @@ pub struct CircleContact {
 /// per-peer ttl clamps rather than a separate check, so they reuse the machinery
 /// the push and pull planes already have. See
 /// `reference/thinning-custom-relay.md` (D10).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerPerms {
     /// May open a `REQ` and receive our stored events.
@@ -379,58 +376,6 @@ impl CacheView {
     }
 }
 
-/// An incoming pairing request awaiting the user's accept/decline (surfaced to the
-/// UI as a pop-up). The requester scanned our QR; `secret` is the one-time value
-/// from that QR, echoed back to prove they actually saw it.
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairRequestView {
-    pub npub: String,
-    pub name: String,
-    pub secret: String,
-}
-
-/// An invite we sent that hasn't been accepted yet.
-///
-/// A pair request is delivered over the mesh, so it can fail simply because
-/// there is no route to that peer *yet* — a bump between two phones that have
-/// not met on the mesh is the normal case. Recording it means we can say
-/// "waiting" instead of silently dropping it, and refuse to send a second one
-/// for the same peer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OutboundPairView {
-    pub npub: String,
-    pub name: String,
-    /// Unix seconds when we first tried, so the UI can age it.
-    pub since: u64,
-}
-
-/// How long an invite stays valid as proof that we asked to pair.
-///
-/// An accept is only honoured while the matching invite is outstanding, so this
-/// bounds how long a captured accept could be replayed back at us — and stops
-/// invites nobody ever answered accumulating as standing authorisations.
-const INVITE_VALID_SECS: u64 = 7 * 24 * 60 * 60;
-
-/// Mutual-pairing handshake events, POSTed point-to-point to a peer's **auth
-/// service** at `:4873` (never gossiped, and never stored — the relay refuses
-/// these kinds from every source). Signed by the **device** key, which is the
-/// pairing identity, and carrying a NIP-40 expiry the auth service checks on
-/// receipt. See `docs/design/core/identity-pairing.md`.
-pub const KIND_PAIR_REQUEST: u16 = 9101;
-pub const KIND_PAIR_ACCEPT: u16 = 9102;
-/// Sent when a peer forgets you, so both sides drop the pairing symmetrically.
-pub const KIND_PAIR_REMOVE: u16 = 9103;
-const PAIR_TTL_SECS: u64 = 120;
-
-/// Retry budget for delivering a pair request/accept to a peer's relay. A
-/// just-paired BLE session can take tens of seconds to stabilise, so we re-dial
-/// (re-signing each time) until it acks. ~15 × 4s ≈ a 1-minute window, well under
-/// the [`PAIR_TTL_SECS`] expiration of any single (re-signed) event.
-const PAIR_DIAL_ATTEMPTS: usize = 15;
-const PAIR_DIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(4);
-
 /// Time budget stamped on a pull this node originates. Relative, and only bounds
 /// how long a node downstream holds query state — late results are not an error,
 /// they simply arrive to whoever is still listening
@@ -455,32 +400,27 @@ const PULL_REMEMBER_BATCH: usize = 32;
 /// long to notice.
 pub(crate) const INTERNET_DOWN_FOR: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The mesh access gate backing the relay + Blossom servers: content (reads, chat,
-/// manifests, blobs) is restricted to **paired** (Circle) peers, and what a paired
-/// peer may do is its own [`PeerPerms`] record.
+/// The mesh access gate backing the relay + Blossom servers: content (reads,
+/// manifests, blobs) is restricted to app peers — linked devices in
+/// neighborhoods with Apps on — and what one may do is its [`PeerPerms`].
 ///
-/// There are **no exceptions**. Pairing used to need one — an unpaired peer had
-/// to be able to publish the handshake kinds to bootstrap — but that now happens
-/// on the auth plane (`crate::auth_service`), so the content ports can simply
-/// require membership (`reference/thinning-custom-relay.md`, D6).
-///
-/// Holds the [`Content`] so the live Circle is consulted per request: adding a
-/// peer, removing one, or changing a permission takes effect immediately.
+/// Holds the [`Content`] so the live set is consulted per request: a peer
+/// leaving a neighborhood, or Apps turned off, takes effect immediately.
 // Constructed by the Android runtime's mesh relay wiring; the host build has
 // no mesh socket to gate.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub struct CircleGate {
+pub struct AppPeerGate {
     content: Arc<Content>,
 }
 
-impl CircleGate {
+impl AppPeerGate {
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub fn new(content: Arc<Content>) -> Self {
         Self { content }
     }
 }
 
-impl crate::mesh_relay::PeerGate for CircleGate {
+impl crate::mesh_relay::PeerGate for AppPeerGate {
     fn may_read(&self, ip: IpAddr) -> bool {
         self.content.perms_for_ip(ip).is_some_and(|p| p.relay_read)
     }
@@ -492,13 +432,7 @@ impl crate::mesh_relay::PeerGate for CircleGate {
         self.content.perms_for_ip(ip).is_some()
     }
 
-    fn may_publish(&self, ip: IpAddr, kind: u16) -> bool {
-        // Pairing kinds are auth-plane control traffic, not content. They are
-        // refused here from every source, paired or not, so nothing writes them
-        // into a store that may not even be ours (D6).
-        if kind == KIND_PAIR_REQUEST || kind == KIND_PAIR_ACCEPT || kind == KIND_PAIR_REMOVE {
-            return false;
-        }
+    fn may_publish(&self, ip: IpAddr, _kind: u16) -> bool {
         self.content.perms_for_ip(ip).is_some_and(|p| p.relay_write)
     }
 
@@ -583,10 +517,6 @@ pub struct Content {
     cache_relay: Arc<dyn RelayBackend>,
     /// The shell's event cache, apart from the relay (`myco-cache`).
     event_cache: Arc<myco_cache::EventCache>,
-    /// The relay hub, once the runtime has built it: what a pull hands its
-    /// events to so live subscriptions see them as they land. Weak — the hub
-    /// holds this `Content` through its gossiper and gate.
-    hub: Mutex<Option<std::sync::Weak<crate::mesh_relay::RelayHub>>>,
     /// The custom relay, when one is configured — kept so its reachability can
     /// be reported. A backend that has gone away otherwise looks like an app
     /// with no content, every site missing and no explanation.
@@ -615,7 +545,7 @@ pub struct Content {
     /// set to the IP online-fallback source in M3, the FIPS source in P3.
     source: Mutex<Option<Arc<dyn PeerSource>>>,
     /// "Mesh-only": when true, `open_site` never uses the IP online fallback —
-    /// it pulls only over the mesh (holder + connected Circle peers). Lets you
+    /// it pulls only over the mesh (holder + connected app peers). Lets you
     /// verify the mesh path even when this device has internet (e.g. a hotspot).
     offline_only: AtomicBool,
     /// When the internet last looked down from here, as a moment until which
@@ -627,11 +557,11 @@ pub struct Content {
     /// catalog is the Library, so a write may change what an archetype
     /// resolves to. One waiter; a write while nobody waits leaves a permit.
     library_changed: Arc<tokio::sync::Notify>,
-    /// The Circle: paired peers we pull from over the mesh. Persisted.
-    circle: Mutex<Vec<CircleContact>>,
-    circle_path: PathBuf,
+    /// App peers: linked devices in neighborhoods with Apps on. Set by the
+    /// runtime from the links, never persisted.
+    app_peers: Mutex<Vec<AppPeer>>,
     /// npubs of currently-connected mesh peers, refreshed by the runtime each poll.
-    /// `open_site` pulls from connected Circle members (bounded to who's reachable,
+    /// `open_site` pulls from connected app peers (bounded to who's reachable,
     /// so it never blocks on an offline contact's connect timeout).
     connected_peers: Mutex<Vec<String>>,
     /// host_label -> current sync status (drives the FFI `siteStatus`).
@@ -645,36 +575,13 @@ pub struct Content {
     /// has is asked about every [`LOADING_RETRY_EVERY`] rather than on every
     /// one-second reload.
     loading_retries: Mutex<HashMap<String, std::time::Instant>>,
-    /// The device's Nostr keypair (the pairing identity), used to sign pair
-    /// request/accept events. Set once at startup from the persisted nsec.
     /// The device keypair. Behind an `Arc` because a remote blob store needs it
     /// to sign BUD-01 upload authorizations, and it is set after construction.
     device_keys: Arc<Mutex<Option<Keys>>>,
-    /// User-chosen device label (memorable name). Set by the app on launch and on
-    /// rename; stamped on outgoing pair events so peers show the chosen name.
-    /// Falls back to a name derived from the npub when unset.
-    device_name_override: Mutex<Option<String>>,
-    /// Incoming pair requests awaiting the user's accept/decline (UI pop-up).
-    pending_pairs: Mutex<Vec<PairRequestView>>,
-    /// Invites we sent that are still unanswered (see [`OutboundPairView`]).
-    /// Invites we have sent and not yet had answered. **Persisted**, because an
-    /// accept is only honoured against one of these — an in-memory-only record
-    /// would refuse a legitimate accept that arrives after a restart.
-    outbound_pairs: Mutex<Vec<OutboundPairView>>,
-    outbound_pairs_path: PathBuf,
     /// Persistent WS connections to peers' relays, so chat fan-out and manifest
     /// fetches don't pay a fresh connect per message (slow over BLE). `Arc` so a
     /// mesh `PeerSource` can borrow the same pool for its manifest REQs.
     peer_relays: Arc<crate::peer_relay::PeerRelayPool>,
-    /// Raw filters of the subscriptions in-app clients currently have open on our
-    /// loopback relay, keyed by the relay's per-connection sub key. Fed by the relay
-    /// via the gossiper hooks; the core stores them **verbatim** (it never interprets
-    /// kinds). On a Circle peer reappearing, these are replayed to it to pull the
-    /// backlog the client missed — see [`Content::resync_from_peer`].
-    active_local_subs: Mutex<HashMap<String, Vec<serde_json::Value>>>,
-    /// The set of Circle peers the pool last reported as connected — diffed each
-    /// keepwarm tick to spot the absent→present (reappeared) edge.
-    prev_pool_connected: Mutex<HashSet<String>>,
     /// host_label -> a newer version being staged (downloaded) before activation.
     /// See `docs/design/nsite/nsite-updates.md` §2. P-U1: staged outside the relay store;
     /// activation stores the manifest (making it the served version).
@@ -730,7 +637,7 @@ pub struct Content {
 /// straight through to the relay. This is what keeps a working app serving while a
 /// newer manifest is still downloading. See `docs/design/nsite/nsite-updates.md` §1.
 ///
-/// The Circle-facing relay reads through the same view ([`Content::pinned_relay`]),
+/// The app peer-facing relay reads through the same view ([`Content::pinned_relay`]),
 /// so a peer asking for an installed app's manifest gets the version this phone
 /// has the files for, not a newer one kept in the store without them.
 #[derive(Clone)]
@@ -751,7 +658,7 @@ impl RelayBackend for ActiveBackend {
     /// has a slot-shaped read to override — everything goes through `query` now.
     /// A pinned event shares its slot with the one it replaces (same kind,
     /// author, and `d` tag), but not its `created_at`, id or other tags, so a
-    /// Circle peer's `since`, `ids` or tag filter can match the newer version
+    /// app peer's `since`, `ids` or tag filter can match the newer version
     /// and not the pin. The pin is served only when it matches the request
     /// itself; otherwise the slot answers nothing, as a relay holding only the
     /// pin would.
@@ -977,10 +884,11 @@ impl Content {
         let blobs_local = custom_blobs.is_none().then_some(embedded_blobs);
         let library_path = data_dir.join("library.json");
         let library = load_library(&library_path);
-        let outbound_pairs_path = data_dir.join("outbound_pairs.json");
-        let outbound_pairs = load_outbound_pairs(&outbound_pairs_path);
-        let circle_path = data_dir.join("circle.json");
-        let circle = load_circle(&circle_path);
+        // The app peer and its pairing handshake are gone; neighborhoods
+        // replaced them. Their files go with them.
+        for old in ["circle.json", "outbound_pairs.json"] {
+            let _ = std::fs::remove_file(data_dir.join(old));
+        }
         let active_path = data_dir.join("active.json");
         let active_manifests = load_active(&active_path);
         let file_transfers_path = data_dir.join("file_transfers.json");
@@ -1008,21 +916,13 @@ impl Content {
             library: Mutex::new(library),
             library_path,
             library_changed: Arc::new(tokio::sync::Notify::new()),
-            circle: Mutex::new(circle),
-            circle_path,
+            app_peers: Mutex::new(Vec::new()),
             connected_peers: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
             forgotten: Mutex::new(std::collections::HashSet::new()),
             loading_retries: Mutex::new(HashMap::new()),
             device_keys: device_keys.clone(),
-            device_name_override: Mutex::new(None),
-            pending_pairs: Mutex::new(Vec::new()),
-            outbound_pairs: Mutex::new(outbound_pairs),
-            outbound_pairs_path,
             peer_relays: Arc::new(crate::peer_relay::PeerRelayPool::new()),
-            hub: Mutex::new(None),
-            active_local_subs: Mutex::new(HashMap::new()),
-            prev_pool_connected: Mutex::new(HashSet::new()),
             pending_updates: Mutex::new(HashMap::new()),
             update_check: Mutex::new(UpdateCheckView::default()),
             update_gate: Mutex::new(crate::update_gate::UpdateGate::default()),
@@ -1234,7 +1134,7 @@ impl Content {
         self.blob_cache.save_snapshot().await;
     }
 
-    /// The store as the Circle sees it: an installed app's manifest slot reads
+    /// The store as app peers sees it: an installed app's manifest slot reads
     /// as its **pinned** version, the one this phone has the files for, even
     /// when a newer one sits in the store. Everything else passes through.
     pub fn pinned_relay(&self) -> Arc<dyn RelayBackend> {
@@ -1442,7 +1342,7 @@ impl Content {
             };
 
         // Ordered sources: the mesh holder first (pull from whoever shared it),
-        // then any currently-connected Circle member (your paired peers double as
+        // then any currently-connected app peer (your app peers double as
         // relays), then the public IP online fallback.
         let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
         let mut tried: HashSet<String> = HashSet::new();
@@ -1454,11 +1354,11 @@ impl Content {
                 }
             }
         }
-        for npub in self.circle_npubs() {
+        for npub in self.app_peer_npubs() {
             if tried.insert(npub.clone()) {
                 match crate::ip_source::mesh_source_for(self.peer_relays.clone(), &npub) {
                     Ok(mesh) => sources.push(Arc::new(mesh)),
-                    Err(e) => tracing::warn!(error = %e, npub, "skipping circle mesh source"),
+                    Err(e) => tracing::warn!(error = %e, npub, "skipping app peer mesh source"),
                 }
             }
         }
@@ -2043,51 +1943,46 @@ impl Content {
         out
     }
 
-    // --- circle (paired peers we pull from) ---
+    // --- app peers (linked devices in neighborhoods with Apps on) ---
 
-    /// Add (or rename) a paired peer in the Circle. Idempotent by npub.
-    pub fn add_to_circle(&self, npub: &str, name: &str) {
-        if npub.is_empty() {
-            return;
-        }
-        // Whether they accepted ours or we accepted theirs, any invite we were
-        // holding for this peer is answered — and spent, so it stops being an
-        // authorisation for a second accept.
-        self.drop_invite(npub);
-        let mut circle = self.circle.lock().unwrap();
-        if let Some(c) = circle.iter_mut().find(|c| c.npub == npub) {
-            if !name.is_empty() {
-                c.name = name.to_string();
+    /// Replace the app peers. A peer new to the set gets its dial backoff
+    /// cleared, so the next keepwarm tick reaches it at once.
+    pub fn set_app_peers(&self, peers: Vec<AppPeer>) {
+        let mut cur = self.app_peers.lock().unwrap();
+        for p in &peers {
+            if !cur.iter().any(|c| c.npub == p.npub) {
+                self.peer_relays.reset_backoff(&p.npub);
             }
-        } else {
-            circle.push(CircleContact {
-                npub: npub.to_string(),
-                name: name.to_string(),
-                added_at: now_secs(),
-                perms: PeerPerms::default(),
-            });
         }
-        let snapshot = circle.clone();
-        drop(circle);
-        save_circle(&self.circle_path, &snapshot);
+        *cur = peers;
     }
 
-    /// Forget a peer (remove from the Circle).
-    pub fn remove_from_circle(&self, npub: &str) {
-        let mut circle = self.circle.lock().unwrap();
-        circle.retain(|c| c.npub != npub);
-        let snapshot = circle.clone();
-        drop(circle);
-        save_circle(&self.circle_path, &snapshot);
+    pub fn app_peers_snapshot(&self) -> Vec<AppPeer> {
+        self.app_peers.lock().unwrap().clone()
     }
 
-    pub fn circle_snapshot(&self) -> Vec<CircleContact> {
-        self.circle.lock().unwrap().clone()
+    #[cfg(test)]
+    pub(crate) fn add_app_peer_for_test(&self, npub: &str, name: &str) {
+        let mut peers = self.app_peers_snapshot();
+        peers.push(AppPeer {
+            npub: npub.to_string(),
+            name: name.to_string(),
+            perms: PeerPerms::default(),
+        });
+        self.set_app_peers(peers);
+    }
+
+    fn is_app_peer(&self, npub: &str) -> bool {
+        self.app_peers
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.npub == npub)
     }
 
     /// Record which mesh peers are *directly* connected right now (called by the
     /// runtime from the node's peer snapshot). This is only an edge detector for
-    /// dial backoff — nothing gates on it, because whether a Circle member is a
+    /// dial backoff — nothing gates on it, because whether a app peer is a
     /// direct neighbour or twenty hops away is FIPS's business, not ours.
     pub fn set_connected_peers(&self, npubs: Vec<String>) {
         let mut cur = self.connected_peers.lock().unwrap();
@@ -2101,14 +1996,14 @@ impl Content {
         *cur = npubs;
     }
 
-    /// Every Circle member's npub. Hop count is deliberately not a factor: FIPS
+    /// Every app peer's npub. Hop count is deliberately not a factor: FIPS
     /// routes to a mesh address whether the peer is adjacent or many hops away,
     /// so a routed `ws://<npub>.fips:4870` dial reaches any of them. A member
     /// who is genuinely offline costs one bounded dial (the callers time out)
     /// and is then held off by the per-peer backoff in [`crate::peer_relay`].
     /// See `docs/design/core/event-gossip.md`.
-    pub fn circle_npubs(&self) -> Vec<String> {
-        self.circle
+    pub fn app_peer_npubs(&self) -> Vec<String> {
+        self.app_peers
             .lock()
             .unwrap()
             .iter()
@@ -2117,7 +2012,7 @@ impl Content {
     }
 
     /// The permissions granted to the peer at `ip`, or `None` if `ip` is not a
-    /// current Circle member. One lookup answers both "are they paired" and "what
+    /// current app peer. One lookup answers both "are they paired" and "what
     /// may they do", so the access checks never consult two sources that could
     /// disagree. See `reference/thinning-custom-relay.md` (D10).
     ///
@@ -2127,7 +2022,7 @@ impl Content {
     /// which is exactly the source address the mesh sockets see.
     pub fn perms_for_ip(&self, ip: IpAddr) -> Option<PeerPerms> {
         let IpAddr::V6(v6) = ip else { return None };
-        self.circle
+        self.app_peers
             .lock()
             .unwrap()
             .iter()
@@ -2163,7 +2058,7 @@ impl Content {
     /// `syncing` (an attempt is in flight). Skipping the in-flight ones is what lets
     /// a caller poll this every tick without piling on duplicate syncs — it re-tries
     /// roughly once per attempt-duration. Used to pull from a holder that just became
-    /// reachable (a sharer who paired) or any newly-connected Circle peer.
+    /// reachable (a sharer who paired) or any newly-connected app peer.
     pub fn retriable_library_addrs(&self) -> Vec<SiteAddr> {
         // Snapshot the library first (releasing its lock) before taking `sites`, so
         // the two mutexes are never held nested.
@@ -2180,13 +2075,13 @@ impl Content {
             .collect()
     }
 
-    /// Circle members we hold a live mesh relay connection to right now. The
+    /// app peers we hold a live mesh relay connection to right now. The
     /// keepwarm tick keeps one open per member, so this reflects who is
     /// actually reachable — at any hop count — rather than who happens to be
     /// an adjacent node.
     pub fn reachable_npubs(&self) -> Vec<String> {
         let live = self.peer_relays.connected_npubs();
-        self.circle
+        self.app_peers
             .lock()
             .unwrap()
             .iter()
@@ -2195,393 +2090,19 @@ impl Content {
             .collect()
     }
 
-    // --- pairing (mutual handshake over the mesh) ---
+    // --- device identity ---
 
-    /// Set the device keypair (the pairing identity) from the persisted nsec.
+    /// Set the device keypair from the persisted nsec.
     pub fn set_device_keys(&self, nsec: &str) {
         match Keys::parse(nsec) {
             Ok(keys) => *self.device_keys.lock().unwrap() = Some(keys),
-            Err(e) => tracing::warn!(error = %e, "pairing: bad device nsec"),
+            Err(e) => tracing::warn!(error = %e, "content: bad device nsec"),
         }
-    }
-
-    pub fn pending_pairs_snapshot(&self) -> Vec<PairRequestView> {
-        self.pending_pairs.lock().unwrap().clone()
-    }
-
-    /// Override the device label shown to peers (the app's memorable name). Empty
-    /// clears the override (falls back to the npub-derived name).
-    pub fn set_device_name(&self, name: &str) {
-        let trimmed = name.trim();
-        *self.device_name_override.lock().unwrap() = if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        };
-    }
-
-    /// Our own device label, sent to the peer so their pop-up / Circle entry has a
-    /// name. Prefers the user-chosen override, else a name derived from the npub.
-    fn device_name(&self) -> String {
-        if let Some(name) = self.device_name_override.lock().unwrap().clone() {
-            if !name.trim().is_empty() {
-                return name;
-            }
-        }
-        let npub = self
-            .device_keys
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|k| k.public_key().to_bech32().ok())
-            .unwrap_or_default();
-        short_name(&npub)
-    }
-
-    /// Route an incoming pair event (the gossiper hands us the pair kinds; they are
-    /// point-to-point and never gossiped). A **request** surfaces a pop-up; an
-    /// **accept** means a peer accepted *our* request → add them to the Circle.
-    /// Returns whether the event was acted on. `false` means it was refused —
-    /// the caller answers the sender accordingly.
-    pub fn handle_pair_event(self: &Arc<Self>, event: &Event) -> bool {
-        let Ok(from) = event.pubkey.to_bech32();
-        let name = tag_value(event, "n").unwrap_or_else(|| short_name(&from));
-
-        // Addressed to us? Every pair event names its target in a `p` tag, and
-        // the signature covers it. Without this check an event addressed to
-        // someone else can be captured and replayed at us, and it verifies
-        // perfectly — the signature says who wrote it, never who it was for.
-        if !self.is_addressed_to_us(event) {
-            tracing::warn!(from = %from, "pair: refused, not addressed to this device");
-            return false;
-        }
-
-        match event.kind.as_u16() {
-            KIND_PAIR_REQUEST => {
-                tracing::info!(from = %from, "pair: request received (awaiting accept)");
-                let secret = tag_value(event, "secret").unwrap_or_default();
-                let mut pending = self.pending_pairs.lock().unwrap();
-                if !pending.iter().any(|p| p.npub == from) {
-                    pending.push(PairRequestView {
-                        npub: from,
-                        name,
-                        secret,
-                    });
-                }
-            }
-            KIND_PAIR_ACCEPT => {
-                // An accept is only meaningful as the answer to an invite we
-                // sent. Without this, anyone could sign one and add themselves
-                // to the Circle unprompted — which grants relay read/write,
-                // blob reads, and multihop forwarding. The signature proves who
-                // sent it, not that we ever asked.
-                if !self.has_outstanding_invite(&from) {
-                    tracing::warn!(
-                        from = %from,
-                        "pair: refused an accept we never invited"
-                    );
-                    return false;
-                }
-                tracing::info!(from = %from, "pair: our request accepted — added to circle");
-                self.add_to_circle(&from, &name);
-                self.pending_pairs
-                    .lock()
-                    .unwrap()
-                    .retain(|p| p.npub != from);
-                // They are a reachable source *now*, so retry anything still
-                // waiting on a holder rather than idling until the next
-                // connected-peer poll edge.
-                for addr in self.retriable_library_addrs() {
-                    let content = self.clone();
-                    let holder = from.clone();
-                    tokio::spawn(async move { content.open_site(addr, Some(holder)).await });
-                }
-            }
-            KIND_PAIR_REMOVE => {
-                tracing::info!(from = %from, "pair: peer unpaired — removing from circle");
-                self.remove_from_circle(&from);
-                self.pending_pairs
-                    .lock()
-                    .unwrap()
-                    .retain(|p| p.npub != from);
-            }
-            _ => return false,
-        }
-        true
-    }
-
-    /// Does this pair event name **us** in its `p` tag?
-    ///
-    /// `false` when the device key is not loaded yet: we cannot tell, and
-    /// guessing in the permissive direction is what this check exists to stop.
-    fn is_addressed_to_us(&self, event: &Event) -> bool {
-        let Some(keys) = self.device_keys.lock().unwrap().clone() else {
-            return false;
-        };
-        tag_value(event, "p").is_some_and(|target| target == keys.public_key().to_hex())
-    }
-
-    /// Is there an invite to `npub` still outstanding — and recent enough to
-    /// still count? Invites are persisted, so this survives a restart between
-    /// sending the request and the peer answering it.
-    fn has_outstanding_invite(&self, npub: &str) -> bool {
-        let now = now_secs();
-        self.outbound_pairs
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|p| p.npub == npub && now.saturating_sub(p.since) <= INVITE_VALID_SECS)
-    }
-
-    /// Scanned a peer's QR: send a signed pair request to their mesh relay. We do
-    /// not add them yet — only a mutual accept pairs both sides.
-    /// Invite a peer to pair, at most once.
-    ///
-    /// Two things are deliberately *not* done again. Someone already in the
-    /// Circle needs no invite — sharing an app with them used to send one every
-    /// time, which they then had to accept for a relationship they already had.
-    /// And an invite still waiting for an answer is not re-sent: delivery rides
-    /// the mesh, so a bump between two phones that have not met yet fails until
-    /// a route exists, and bumping again should not queue a second request.
-    ///
-    /// The record outlives the send, so the invite reads as *waiting* rather
-    /// than disappearing when it could not be delivered. It clears when they
-    /// accept (either direction — see [`Self::add_to_circle`]).
-    pub async fn send_pair_request(&self, target_npub: &str, name: &str, secret: &str) {
-        if self.is_in_circle(target_npub) {
-            tracing::debug!(target_npub, "pair: already in the Circle, no invite sent");
-            return;
-        }
-        {
-            let mut outbound = self.outbound_pairs.lock().unwrap();
-            if outbound.iter().any(|p| p.npub == target_npub) {
-                tracing::debug!(target_npub, "pair: invite already waiting, not re-sending");
-                return;
-            }
-            outbound.push(OutboundPairView {
-                npub: target_npub.to_string(),
-                name: name.to_string(),
-                since: now_secs(),
-            });
-            let snapshot = outbound.clone();
-            drop(outbound);
-            // Persisted before the dial: the accept can arrive after a restart,
-            // and it is only honoured against a recorded invite.
-            save_outbound_pairs(&self.outbound_pairs_path, &snapshot);
-        }
-        self.dial_pair_event(target_npub, KIND_PAIR_REQUEST, secret)
-            .await;
-    }
-
-    /// Invites we sent that are still unanswered.
-    pub fn outbound_pairs_snapshot(&self) -> Vec<OutboundPairView> {
-        self.outbound_pairs.lock().unwrap().clone()
-    }
-
-    /// Drop a waiting invite — the user withdrew it, or it is being retried.
-    pub fn forget_outbound_pair(&self, npub: &str) {
-        self.drop_invite(npub);
-    }
-
-    /// Forget an invite, on disk as well as in memory. One place, so an invite
-    /// cannot survive on disk as a standing authorisation after being answered.
-    fn drop_invite(&self, npub: &str) {
-        let snapshot = {
-            let mut outbound = self.outbound_pairs.lock().unwrap();
-            outbound.retain(|p| p.npub != npub);
-            outbound.clone()
-        };
-        save_outbound_pairs(&self.outbound_pairs_path, &snapshot);
-    }
-
-    fn is_in_circle(&self, npub: &str) -> bool {
-        self.circle.lock().unwrap().iter().any(|c| c.npub == npub)
-    }
-
-    /// Accept an incoming request: add the requester to our Circle and send them a
-    /// signed accept so they add us too.
-    pub async fn accept_pair_request(&self, npub: &str, name: &str) {
-        self.add_to_circle(npub, name);
-        self.pending_pairs
-            .lock()
-            .unwrap()
-            .retain(|p| p.npub != npub);
-        self.dial_pair_event(npub, KIND_PAIR_ACCEPT, "").await;
-    }
-
-    /// Decline an incoming request (drop it; no signal back).
-    pub fn decline_pair_request(&self, npub: &str) {
-        self.pending_pairs
-            .lock()
-            .unwrap()
-            .retain(|p| p.npub != npub);
-    }
-
-    /// Tell a peer we've forgotten them, so they drop us from their Circle too.
-    /// Best-effort and **fire-once**: it only lands if they're reachable within the
-    /// dial window (the local removal already happened synchronously in
-    /// `remove_from_circle`). If they're offline it is not re-sent later, so their
-    /// Circle keeps a stale entry for us until they forget us or we re-pair. A
-    /// durable handshake (queue + ack) is a possible later improvement.
-    pub async fn send_unpair(&self, npub: &str) {
-        self.dial_pair_event(npub, KIND_PAIR_REMOVE, "").await;
-    }
-
-    /// Build + sign a pair event and POST it to the target's **auth service**,
-    /// **retrying** until it acks or we give up. A freshly-paired BLE session is
-    /// flaky (handshake collisions, "connection not ready"), so a single
-    /// fire-and-forget dial often misses — leaving the Circles asymmetric, which the
-    /// access gate then turns into a hard "can't see their apps" failure. Each
-    /// attempt rebuilds (re-signs) the event so its NIP-40 expiration stays fresh
-    /// across the retry window.
-    ///
-    /// This goes to `:4873`, not the relay: pairing creates the circle that gates
-    /// the content ports, so it does not travel on them
-    /// (`reference/thinning-custom-relay.md`, D6). Unlike a relay `OK`, the
-    /// response distinguishes *delivered and waiting on them* from *never reached
-    /// them*, so a pending request stops the retry loop instead of burning the
-    /// whole window on a peer who already has it.
-    async fn dial_pair_event(&self, target_npub: &str, kind: u16, secret: &str) {
-        let Some(keys) = self.device_keys.lock().unwrap().clone() else {
-            tracing::warn!("pairing: device keys not set");
-            return;
-        };
-        let name = self.device_name();
-        // Bind only to validate the npub; the dial is by name (see below).
-        let _peer = match fips::PeerIdentity::from_npub(target_npub) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(target_npub, error = %e, "pairing: bad target npub");
-                return;
-            }
-        };
-        let url = crate::ip_source::mesh_auth_url(target_npub);
-        for attempt in 0..PAIR_DIAL_ATTEMPTS {
-            if attempt > 0 {
-                tokio::time::sleep(PAIR_DIAL_RETRY_DELAY).await;
-            }
-            let Some(event) = build_pair_event(&keys, kind, target_npub, &name, secret) else {
-                tracing::warn!(target_npub, "pairing: could not build event");
-                return;
-            };
-            match crate::ip_source::post_pair_event(
-                &url,
-                &event,
-                std::time::Duration::from_secs(10),
-            )
-            .await
-            {
-                crate::ip_source::PairDelivery::Accepted(status) => {
-                    tracing::info!(target = %target_npub, kind, attempt, status, "pair: delivered");
-                    return;
-                }
-                // They answered and said no. Retrying cannot change that, and
-                // hammering a peer that already refused is exactly what the
-                // retry loop must not do.
-                crate::ip_source::PairDelivery::Refused(status) => {
-                    tracing::warn!(target = %target_npub, kind, status, "pair: refused by peer");
-                    return;
-                }
-                crate::ip_source::PairDelivery::Unreachable => {
-                    tracing::debug!(target = %target_npub, kind, attempt, "pair: not delivered, retrying");
-                }
-            }
-        }
-        tracing::warn!(
-            target = %target_npub,
-            kind,
-            "pair: gave up delivering after retries (session never came up)"
-        );
-    }
-
-    // --- local subscription registry (recreated against reappearing peers) ---
-
-    /// The relay reports a local (in-app) client opening a `REQ`. We keep its raw
-    /// filters — **without interpreting them** — so we can recreate the subscription
-    /// against Circle peers as they (re)appear. Called from the gossiper hook.
-    pub fn record_local_sub(&self, key: String, filters: Vec<serde_json::Value>) {
-        self.active_local_subs.lock().unwrap().insert(key, filters);
-    }
-
-    /// The relay reports a local client's subscription closing (`CLOSE` or the
-    /// connection dropping).
-    pub fn drop_local_sub(&self, key: &str) {
-        self.active_local_subs.lock().unwrap().remove(key);
-    }
-
-    // --- backlog resync (the read counterpart of fan-out) ---
-
-    /// Recreate every open local subscription against `npub`'s relay: replay each
-    /// client's filters to the peer and fold its matching events into our store, so
-    /// a freshly-reachable Circle peer delivers the backlog our clients missed while
-    /// it was away. myco is filter-agnostic here — it just re-runs whatever the
-    /// in-app clients are subscribed to; it has no notion of chat vs anything else.
-    /// Best-effort and hard-bounded. Runs on the pool's (re)connect edge — so it
-    /// covers a Circle peer reachable only multi-hop, which the direct-neighbour
-    /// snapshot never surfaced.
-    pub async fn resync_from_peer(&self, npub: &str) {
-        let subs = {
-            let guard = self.active_local_subs.lock().unwrap();
-            if guard.is_empty() {
-                return;
-            }
-            guard.values().cloned().collect::<Vec<_>>()
-        };
-        let Ok(_peer) = fips::PeerIdentity::from_npub(npub) else {
-            return;
-        };
-        let url = crate::ip_source::mesh_relay_url(npub);
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
-        let hub = self.hub();
-        // Every open subscription at once, each event taken as the peer sends
-        // it — through the hub, so the client whose subscription this is sees
-        // what it missed without asking again.
-        let (tx, mut merged) = tokio::sync::mpsc::unbounded_channel();
-        for filters in subs {
-            let mut events = self.peer_relays.request_stream(npub, &url, filters, None);
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                while let Some(ev) = events.recv().await {
-                    if tx.send(ev).is_err() {
-                        return;
-                    }
-                }
-            });
-        }
-        drop(tx);
-        let mut stored = 0u32;
-        while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, merged.recv()).await {
-            // Signatures were checked by the pool at ingress. Backlog, not a
-            // keep: the cache, bar the kinds kept as seen.
-            let accepted = match &hub {
-                Some(hub) => hub.accept_pulled(ev).await.is_ok(),
-                None => self.cache_relay.publish(ev).await.is_ok(),
-            };
-            if accepted {
-                stored += 1;
-            }
-        }
-        if stored > 0 {
-            tracing::debug!(npub, stored, "resynced backlog from reappeared peer");
-        }
-    }
-
-    /// Hand pulls the relay hub, so what they bring reaches live
-    /// subscriptions. Called once, when the runtime builds the hub.
-    pub fn set_hub(&self, hub: &Arc<crate::mesh_relay::RelayHub>) {
-        *self.hub.lock().unwrap() = Some(Arc::downgrade(hub));
-    }
-
-    fn hub(&self) -> Option<Arc<crate::mesh_relay::RelayHub>> {
-        self.hub.lock().unwrap().as_ref().and_then(|h| h.upgrade())
     }
 
     /// One keepwarm pass (driven by a runtime tick): ensure a live pooled connection
-    /// to every Circle member — so a dropped connection is respawned promptly, not
-    /// lazily on the next outbound frame — and, for each member the pool has just
-    /// (re)connected (absent→present since last pass), spawn a backlog resync. This
-    /// is what restores a Circle relay link **mutually and fast** after a mesh flap,
-    /// regardless of where the peer sits in the mesh.
+    /// to every app peer, so a dropped connection is respawned promptly rather
+    /// than lazily on the next outbound frame, wherever the peer sits in the mesh.
     pub fn keepwarm_tick(self: &Arc<Self>) {
         // Cheap, and the only clock the transfer state machine has.
         self.sweep_file_transfers();
@@ -2608,8 +2129,7 @@ impl Content {
                 }
             });
         }
-        let circle: HashSet<String> = self.circle_npubs().into_iter().collect();
-        for npub in &circle {
+        for npub in &self.app_peer_npubs() {
             if fips::PeerIdentity::from_npub(npub).is_ok() {
                 // Teach the node this npub's address→pubkey mapping first. We
                 // dial a raw `fd00::` literal below, which skips DNS — and
@@ -2621,17 +2141,6 @@ impl Content {
                 self.peer_relays.ensure(npub, &url);
             }
         }
-        let now = self.peer_relays.connected_npubs();
-        let mut prev = self.prev_pool_connected.lock().unwrap();
-        // Newly-connected Circle members → recreate their subscriptions.
-        for npub in now.difference(&prev) {
-            if circle.contains(npub) {
-                let me = self.clone();
-                let npub = npub.clone();
-                tokio::spawn(async move { me.resync_from_peer(&npub).await });
-            }
-        }
-        *prev = now;
     }
 
     // --- native paired-peer file transfer ---
@@ -2657,8 +2166,8 @@ impl Content {
         mime: String,
         target_npub: String,
     ) -> anyhow::Result<()> {
-        if !self.is_in_circle(&target_npub) {
-            anyhow::bail!("file share target is not in the Circle");
+        if !self.is_app_peer(&target_npub) {
+            anyhow::bail!("file share target is not an app peer");
         }
         let keys = self
             .device_keys
@@ -2698,7 +2207,7 @@ impl Content {
         let now = file_transfer::now_secs();
         let expires_at = now + file_transfer::OFFER_TTL_SECS;
         let peer_name = self
-            .circle_snapshot()
+            .app_peers_snapshot()
             .into_iter()
             .find(|p| p.npub == target_npub)
             .map(|p| p.name)
@@ -2793,7 +2302,7 @@ impl Content {
     }
 
     /// Called by the mesh gossiper for every newly-arrived gift wrap. Invalid,
-    /// expired, non-file, and non-Circle messages are ignored.
+    /// expired, non-file, and non-app peer messages are ignored.
     pub async fn handle_file_event(self: &Arc<Self>, event: &Event) {
         if event.kind != Kind::GiftWrap {
             return;
@@ -2817,8 +2326,8 @@ impl Content {
             return;
         }
         let sender_npub = unwrapped.sender.to_bech32().unwrap_or_default();
-        if !self.is_in_circle(&sender_npub) {
-            tracing::warn!(sender = %sender_npub, "file message from non-Circle sender ignored");
+        if !self.is_app_peer(&sender_npub) {
+            tracing::warn!(sender = %sender_npub, "file message from a non-app-peer sender ignored");
             return;
         }
         let own_npub = match keys.public_key().to_bech32() {
@@ -2869,7 +2378,7 @@ impl Content {
                     }
                 }
                 let peer_name = self
-                    .circle_snapshot()
+                    .app_peers_snapshot()
                     .into_iter()
                     .find(|p| p.npub == sender_npub)
                     .map(|p| p.name)
@@ -3132,7 +2641,7 @@ impl Content {
                 keys.public_key().to_bech32()?,
             )
         };
-        // A paired peer still only gets to send what it said it would send. The
+        // A app peer still only gets to send what it said it would send. The
         // ceiling is the size declared in `ready` (or the absolute package cap
         // when a pre-upgrade record carries none), enforced first against the
         // advertised length and then again while the body streams in, so an
@@ -3227,7 +2736,7 @@ impl Content {
         idle: Duration,
         still_wanted: &(dyn Fn() -> bool + Sync),
     ) -> anyhow::Result<Vec<u8>> {
-        // A Circle peer's Blossom: the client reaches the mesh and nothing
+        // A app peer's Blossom: the client reaches the mesh and nothing
         // else, whatever URL the offer carried.
         let client = crate::http::HttpClient::mesh(
             reqwest::Client::builder().connect_timeout(Duration::from_secs(15)),
@@ -3297,7 +2806,7 @@ impl Content {
     }
 
     /// Whether `transfer_id` is one we finished **with this peer**. Matching on
-    /// the id alone would answer any Circle member who guessed it.
+    /// the id alone would answer any app peer who guessed it.
     pub(crate) fn was_completed_incoming(&self, transfer_id: &str, peer_npub: &str) -> bool {
         self.completed_incoming
             .lock()
@@ -3321,8 +2830,8 @@ impl Content {
         let content = serde_json::to_string(&message)?;
         let event = EventBuilder::private_msg(&keys, *target, content, std::iter::empty()).await?;
         let event_json = serde_json::to_value(event)?;
-        // TTL 0 means store and handle at the addressed Circle relay, without
-        // flooding a private file-control message to every Circle member.
+        // TTL 0 means store and handle at the addressed app peer relay, without
+        // flooding a private file-control message to every app peer.
         let frame = crate::mesh_wire::wrap(
             &crate::mesh_wire::MeshMeta::push(0),
             serde_json::json!(["EVENT", event_json]),
@@ -3524,8 +3033,8 @@ impl Content {
         };
         let Ok(own_npub) = keys.public_key().to_bech32();
         // Taken before the transfer lock, never under it: every other path
-        // takes the Circle lock first.
-        let circle: HashSet<String> = self.circle_npubs().into_iter().collect();
+        // takes app peers lock first.
+        let circle: HashSet<String> = self.app_peer_npubs().into_iter().collect();
         let mut out = Vec::new();
         let snapshot = {
             let mut records = self.file_transfers.lock().unwrap();
@@ -3537,7 +3046,7 @@ impl Content {
                     continue;
                 }
                 // Removing someone stops us talking to them. Their side drops a
-                // message from a non-Circle sender anyway; retrying at a person
+                // message from a non-app peer sender anyway; retrying at a person
                 // just removed is the part that would be wrong.
                 if !circle.contains(&r.view.peer_npub) {
                     continue;
@@ -3704,7 +3213,7 @@ impl Content {
 
     /// Queue a pre-built relay frame (`["EVENT", {…}]`) to a peer's relay over a
     /// persistent pooled connection (no per-message connect). `npub` is the target
-    /// Circle peer. Non-blocking.
+    /// app peer. Non-blocking.
     pub fn gossip_to_peer(&self, npub: &str, frame: String) {
         let Ok(_peer) = fips::PeerIdentity::from_npub(npub) else {
             return;
@@ -3731,7 +3240,7 @@ impl Content {
         out
     }
 
-    /// Pull plane: forward a REQ's filters to connected Circle peers and
+    /// Pull plane: forward a REQ's filters to connected app peers and
     /// hand on each matching event the moment a peer sends it — every peer's
     /// answer merged into one stream, which ends when the last peer is done.
     /// `meta` is the incoming envelope, already decremented, so the hop
@@ -3754,7 +3263,7 @@ impl Content {
         // All filters ride in one REQ per peer over the shared connection (the relay
         // any-matches across them), so a pull is a single round-trip, not one socket
         // per filter.
-        for npub in self.circle_npubs() {
+        for npub in self.app_peer_npubs() {
             let Ok(peer) = fips::PeerIdentity::from_npub(&npub) else {
                 continue;
             };
@@ -3878,7 +3387,7 @@ impl Content {
             "authors": authors,
         });
         let mesh_peers: Vec<(String, String)> = self
-            .circle_npubs()
+            .app_peer_npubs()
             .into_iter()
             .filter_map(|npub| {
                 fips::PeerIdentity::from_npub(&npub).ok()?; // validate
@@ -4135,7 +3644,7 @@ impl Content {
         // Pull blobs from connected mesh peers first (closer/faster, and the only
         // option under mesh-only), then the online fallback unless mesh-only.
         let mut sources: Vec<Arc<dyn PeerSource>> = Vec::new();
-        for npub in self.circle_npubs() {
+        for npub in self.app_peer_npubs() {
             if let Ok(m) = crate::ip_source::mesh_source_for(self.peer_relays.clone(), &npub) {
                 sources.push(Arc::new(m));
             }
@@ -4239,9 +3748,9 @@ impl Content {
     /// How many hops a pushed manifest — an nsite's or a napplet's — may still
     /// travel from here. 0 means stop here.
     ///
-    /// Mirrors chat: a local publish originates at the default — or at the
-    /// budget a napplet chose through NAP-MESH, where `Some(0)` means "store
-    /// here, send nowhere" — and a mesh push at the ttl that rode in, clamped
+    /// Mirrors chat: a local publish originates at the default — or at an
+    /// explicit budget, where `Some(0)` means "store here, send nowhere" —
+    /// and a mesh push at the ttl that rode in, clamped
     /// so a peer can't over-extend us. The same per-peer clamp the chat push
     /// plane applies: a peer we have not granted multihop writes still gets
     /// its manifest stored and served here, it simply travels no further
@@ -4340,7 +3849,7 @@ impl Content {
     }
 
     /// Send a manifest this device just brought in by an update check to the
-    /// Circle: we now hold its bytes, so we are a source for the next hop.
+    /// app peer: we now hold its bytes, so we are a source for the next hop.
     /// Originates at the default budget, like any local publish.
     pub fn forward_updated_manifest(&self, manifest: &Event) {
         self.forward_manifest(
@@ -4500,7 +4009,7 @@ impl Content {
     /// with the same `created_at`, is accepted. Returns whether it pinned.
     ///
     /// Every napplet pin goes through here ([`crate::napplet::ManifestStore`]).
-    /// Two versions downloading at once — a push from the Circle and the
+    /// Two versions downloading at once — a push from app peers and the
     /// update check, say — must not leave the older one served because it
     /// finished last, and a window opening must not re-pin what it resolved
     /// over a newer version pinned meanwhile. Equal is allowed because the
@@ -4529,7 +4038,7 @@ impl Content {
         true
     }
 
-    /// Fan a manifest to connected Circle peers over the push plane (carrying a
+    /// Fan a manifest to connected app peers over the push plane (carrying a
     /// decremented hop budget), split-horizon. `exclude` is the peer it came from.
     fn forward_manifest(&self, manifest: &Event, out_ttl: u8, exclude: Option<IpAddr>) {
         let ev_json = match serde_json::to_value(manifest) {
@@ -4543,7 +4052,7 @@ impl Content {
             &crate::mesh_wire::MeshMeta::push(out_ttl),
             serde_json::json!(["EVENT", ev_json]),
         );
-        for npub in self.circle_npubs() {
+        for npub in self.app_peer_npubs() {
             let ip = match fips::PeerIdentity::from_npub(&npub) {
                 Ok(p) => IpAddr::V6(p.address().to_ipv6()),
                 Err(_) => continue,
@@ -4616,7 +4125,7 @@ impl Content {
     /// nsites (Settings → Storage → "Clear local database"). The served manifest version of
     /// each pinned site and every blob it references survive, so installed apps keep
     /// working offline; everything else — unpinned opened sites and staged
-    /// updates — is dropped. Identity and Circle are untouched.
+    /// updates — is dropped. Identity and app peer are untouched.
     ///
     /// `keep_author` is the user key's pubkey, when there is one: its kind 0,
     /// kind 10002 and kind 10050 survive too. They were published once, at first napplet
@@ -4677,7 +4186,7 @@ impl Content {
             }
         }
 
-        // The release APK this phone carries for its Circle, and the signed
+        // The release APK this phone carries for its app peers, and the signed
         // events that vouch for it.
         let (release_events, release_apk) = crate::release_apk::kept_release(self).await;
         keep_events.extend(release_events.iter().map(|id| id.to_bytes()));
@@ -5055,54 +4564,6 @@ pub(crate) fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// First value of the first tag named `name` (e.g. `["n", "Alice"]` → "Alice").
-fn tag_value(event: &Event, name: &str) -> Option<String> {
-    event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        (s.first().map(String::as_str) == Some(name))
-            .then(|| s.get(1).cloned())
-            .flatten()
-    })
-}
-
-/// A short device label from an npub (`Myco-xxxxxx`), the placeholder until a
-/// memorable name lands.
-fn short_name(npub: &str) -> String {
-    format!(
-        "Myco-{}",
-        npub.trim_start_matches("npub1")
-            .chars()
-            .take(6)
-            .collect::<String>()
-    )
-}
-
-/// Build + sign a pair-request/accept event (device key), addressed to
-/// `target_npub` via a `p` tag, carrying our `n` name, the one-time `secret`
-/// (request only), and a short NIP-40 expiration.
-pub(crate) fn build_pair_event(
-    keys: &Keys,
-    kind: u16,
-    target_npub: &str,
-    our_name: &str,
-    secret: &str,
-) -> Option<Event> {
-    let target = PublicKey::from_bech32(target_npub).ok()?;
-    let exp = (now_secs() + PAIR_TTL_SECS).to_string();
-    let mut tags = vec![
-        Tag::parse(["p", &target.to_hex()]).ok()?,
-        Tag::parse(["n", our_name]).ok()?,
-        Tag::parse(["expiration", &exp]).ok()?,
-    ];
-    if !secret.is_empty() {
-        tags.push(Tag::parse(["secret", secret]).ok()?);
-    }
-    EventBuilder::new(Kind::from(kind), "")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .ok()
-}
-
 fn load_library(path: &Path) -> Vec<LibraryItem> {
     std::fs::read(path)
         .ok()
@@ -5111,20 +4572,6 @@ fn load_library(path: &Path) -> Vec<LibraryItem> {
 }
 
 fn save_library(path: &Path, items: &[LibraryItem]) {
-    if let Ok(json) = serde_json::to_vec(items) {
-        let tmp = path.with_extension("json.tmp");
-        let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
-    }
-}
-
-fn load_outbound_pairs(path: &Path) -> Vec<OutboundPairView> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|raw| serde_json::from_slice(&raw).ok())
-        .unwrap_or_default()
-}
-
-fn save_outbound_pairs(path: &Path, items: &[OutboundPairView]) {
     if let Ok(json) = serde_json::to_vec(items) {
         let tmp = path.with_extension("json.tmp");
         let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
@@ -5171,20 +4618,6 @@ fn save_completed_incoming(path: &Path, items: &VecDeque<(String, String)>) {
     }
 }
 
-fn load_circle(path: &Path) -> Vec<CircleContact> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|raw| serde_json::from_slice(&raw).ok())
-        .unwrap_or_default()
-}
-
-fn save_circle(path: &Path, items: &[CircleContact]) {
-    if let Ok(json) = serde_json::to_vec(items) {
-        let tmp = path.with_extension("json.tmp");
-        let _ = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, path));
-    }
-}
-
 /// What became of a napplet manifest pushed to this device. See
 /// [`Content::handle_napplet_manifest`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5213,7 +4646,7 @@ impl crate::napplet::ManifestStore for Content {
     }
 
     /// A napplet's pin never moves back: every napplet pin — open, install,
-    /// "Download again", the update check, a push from the Circle — goes
+    /// "Download again", the update check, a push from app peers — goes
     /// through [`Content::set_active_if_newer`]. See there for why.
     ///
     /// A napplet pin that moved also rewrites the installed entry's
@@ -5432,25 +4865,6 @@ mod tests {
     /// must never read as a grant, so serde's default has to be `false` rather
     /// than `bool::default()` by accident (`reference/thinning-custom-relay.md`,
     /// D10).
-    #[test]
-    fn a_pre_permissions_circle_loads_with_upload_denied() {
-        let legacy = r#"[{"npub":"npub1abc","name":"Old Phone","addedAt":1}]"#;
-        let loaded: Vec<CircleContact> = serde_json::from_str(legacy).unwrap();
-
-        assert_eq!(loaded.len(), 1);
-        let p = &loaded[0].perms;
-        assert!(!p.blossom_write, "upload must not be granted by omission");
-        assert!(p.blossom_read, "reads stay on for an existing peer");
-        assert!(p.relay_read && p.relay_write);
-        assert!(p.relay_read_multihop && p.relay_write_multihop);
-    }
-
-    /// The content layer works with the store swapped for a relay we do not own.
-    ///
-    /// This is what every phase before it was for: the same import, gateway read
-    /// and library behaviour, with events living on a relay Myco only reaches
-    /// over NIP-01. It also pins what the Storage screen is told — the usage
-    /// counts stop describing what serves, and say so.
     #[tokio::test]
     async fn content_runs_on_a_relay_it_does_not_own() {
         // A relay that is emphatically not ours: its own store, its own socket.
@@ -5554,61 +4968,11 @@ mod tests {
 
     /// The content ports have no exceptions left.
     ///
-    /// Pairing kinds used to be the one thing an unpaired peer could publish to
+    /// Pairing kinds used to be the one thing an unapp peer could publish to
     /// the relay, and the event landed in the store as a side effect. Both are
     /// now refused: the handshake belongs to the auth plane, so a stranger has no
     /// write path into a store that may not even be ours
     /// (`reference/thinning-custom-relay.md`, D6).
-    #[test]
-    fn the_relay_gate_refuses_pairing_kinds_from_everyone() {
-        use crate::mesh_relay::PeerGate;
-
-        let dir = tmp("gate-no-exceptions");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Arc::new(Content::open(&dir).unwrap());
-
-        // A paired peer, so this is not simply "unpaired is refused".
-        let peer = Keys::generate();
-        let peer_npub = peer.public_key().to_bech32().unwrap();
-        content.add_to_circle(&peer_npub, "Peer");
-        let ip = IpAddr::V6(
-            fips::PeerIdentity::from_npub(&peer_npub)
-                .unwrap()
-                .address()
-                .to_ipv6(),
-        );
-
-        let gate = CircleGate::new(content.clone());
-        assert!(gate.may_publish(ip, 9), "ordinary content still flows");
-        for kind in [KIND_PAIR_REQUEST, KIND_PAIR_ACCEPT, KIND_PAIR_REMOVE] {
-            assert!(
-                !gate.may_publish(ip, kind),
-                "kind {kind} is auth-plane traffic and must not reach the relay"
-            );
-        }
-
-        // And an unpaired stranger gets nothing at all.
-        let stranger = Keys::generate().public_key().to_bech32().unwrap();
-        let stranger_ip = IpAddr::V6(
-            fips::PeerIdentity::from_npub(&stranger)
-                .unwrap()
-                .address()
-                .to_ipv6(),
-        );
-        assert!(!gate.may_read(stranger_ip));
-        assert!(!gate.may_publish(stranger_ip, KIND_PAIR_REQUEST));
-        assert!(!gate.may_publish(stranger_ip, 9));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A peer denied multihop writes must not have its **manifests** relayed
-    /// either.
-    ///
-    /// The chat push plane consulted the grant; the manifest push plane did not,
-    /// so the same permission was enforced on one plane and ignored on the other.
-    /// Both clamps read the same record, so testing the record is what pins the
-    /// invariant (`reference/thinning-custom-relay.md`, D10).
     #[test]
     fn revoking_multihop_writes_covers_both_push_planes() {
         let dir = tmp("multihop-clamp");
@@ -5617,7 +4981,7 @@ mod tests {
 
         let peer = Keys::generate();
         let npub = peer.public_key().to_bech32().unwrap();
-        content.add_to_circle(&npub, "Peer");
+        content.add_app_peer_for_test(&npub, "Peer");
         let ip = IpAddr::V6(
             fips::PeerIdentity::from_npub(&npub)
                 .unwrap()
@@ -5632,7 +4996,7 @@ mod tests {
 
         // Revoke it the way the UI eventually will.
         {
-            let mut circle = content.circle.lock().unwrap();
+            let mut circle = content.app_peers.lock().unwrap();
             circle[0].perms.relay_write_multihop = false;
         }
         assert!(
@@ -5663,7 +5027,7 @@ mod tests {
 
         let peer = Keys::generate();
         let npub = peer.public_key().to_bech32().unwrap();
-        content.add_to_circle(&npub, "Peer");
+        content.add_app_peer_for_test(&npub, "Peer");
         let ip = IpAddr::V6(
             fips::PeerIdentity::from_npub(&npub)
                 .unwrap()
@@ -5705,7 +5069,9 @@ mod tests {
             "a granted peer's push was not passed on"
         );
 
-        content.circle.lock().unwrap()[0].perms.relay_write_multihop = false;
+        content.app_peers.lock().unwrap()[0]
+            .perms
+            .relay_write_multihop = false;
         let (outcome, forwarded) = push(2_000).await;
         assert_eq!(outcome, NappletPush::Relayed);
         assert!(
@@ -5900,7 +5266,7 @@ mod tests {
         let content = Content::open(&dir).unwrap();
         content.set_device_keys(&Keys::generate().secret_key().to_bech32().unwrap());
         let peer = Keys::generate().public_key().to_bech32().unwrap();
-        content.add_to_circle(&peer, "peer");
+        content.add_app_peer_for_test(&peer, "peer");
         let now = 1_000_000;
         let mut offered = incoming_record("offered", now + 60);
         offered.view.direction = "outgoing".to_string();
@@ -5922,7 +5288,7 @@ mod tests {
         expired.view.status = "accepted".to_string();
         expired.view.peer_npub = peer.clone();
         expired.view.updated_at = now - 30;
-        // Removed from the Circle mid-transfer: we stop talking to them.
+        // Removed from app peers mid-transfer: we stop talking to them.
         let removed_peer = Keys::generate().public_key().to_bech32().unwrap();
         let mut removed = incoming_record("removed", now + 60);
         removed.view.status = "accepted".to_string();
@@ -6349,132 +5715,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn circle_add_remove_persists_and_filters_to_connected() {
-        let dir = tmp("circle");
-        let _ = std::fs::remove_dir_all(&dir);
-        {
-            let content = Content::open(&dir).unwrap();
-            content.add_to_circle("npub1alice", "Alice");
-            content.add_to_circle("npub1bob", "Bob");
-            content.add_to_circle("npub1alice", "Alice 2"); // idempotent by npub (rename)
-            let snap = content.circle_snapshot();
-            assert_eq!(snap.len(), 2, "two distinct contacts");
-            assert_eq!(
-                snap.iter().find(|c| c.npub == "npub1alice").unwrap().name,
-                "Alice 2",
-                "re-adding renames in place"
-            );
-
-            // Every Circle member is a target regardless of hop count: only Bob is
-            // a direct neighbour, but Alice is still reachable multi-hop and must
-            // remain a pull/discovery/chat target. FIPS decides how to get there.
-            content.set_connected_peers(vec!["npub1bob".to_string()]);
-            let all = content.circle_npubs();
-            assert_eq!(all.len(), 2);
-            assert!(all.contains(&"npub1alice".to_string()));
-            assert!(all.contains(&"npub1bob".to_string()));
-
-            content.remove_from_circle("npub1bob");
-            assert_eq!(content.circle_snapshot().len(), 1);
-        }
-        // Persists across a reopen (restart).
-        let content = Content::open(&dir).unwrap();
-        let snap = content.circle_snapshot();
-        assert_eq!(snap.len(), 1);
-        assert_eq!(snap[0].npub, "npub1alice");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn device_name_uses_override_then_falls_back() {
-        let dir = tmp("devname");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
-
-        // The npub-derived fallback before any override is set.
-        let fallback = content.device_name();
-        content.set_device_name("green sammy");
-        assert_eq!(content.device_name(), "green sammy", "override wins");
-        // Clearing the override (blank) restores the fallback.
-        content.set_device_name("   ");
-        assert_eq!(content.device_name(), fallback, "blank clears the override");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn an_invite_is_sent_once_and_never_to_an_existing_member() {
-        let dir = tmp("invite-once");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
-        let peer = "npub1mqelkzqp4659fws35h2wvr7z9caka5ml8qddj3ssnwaulwpxdd9sdc3esw";
-
-        // No route exists in a unit test, so the dial fails — the point is that
-        // the invite is *remembered* rather than lost with it.
-        content.send_pair_request(peer, "them", "s1").await;
-        assert_eq!(
-            content.outbound_pairs_snapshot().len(),
-            1,
-            "invite is recorded"
-        );
-
-        // Bumping again must not queue a second one.
-        content.send_pair_request(peer, "them", "s2").await;
-        assert_eq!(
-            content.outbound_pairs_snapshot().len(),
-            1,
-            "a waiting invite is not re-sent"
-        );
-
-        // Accepting clears it, and they are then in the Circle...
-        content.add_to_circle(peer, "them");
-        assert!(
-            content.outbound_pairs_snapshot().is_empty(),
-            "accepting clears it"
-        );
-
-        // ...so sharing an app with them sends nothing.
-        content.send_pair_request(peer, "them", "s3").await;
-        assert!(
-            content.outbound_pairs_snapshot().is_empty(),
-            "no invite to someone already in the Circle"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn pair_remove_event_drops_peer_from_circle() {
-        use nostr::Keys;
-        let dir = tmp("unpair");
-        let _ = std::fs::remove_dir_all(&dir);
-        let content = Content::open(&dir).unwrap();
-
-        // This device's own identity: a pair event is only honoured if it names
-        // us, so the test has to have one.
-        let us = Keys::generate();
-        content.set_device_keys(&us.secret_key().to_bech32().unwrap());
-        let us_npub = us.public_key().to_bech32().unwrap();
-
-        let peer = Keys::generate();
-        let peer_npub = peer.public_key().to_bech32().unwrap();
-        let content = Arc::new(content);
-        content.add_to_circle(&peer_npub, "Peer");
-        assert_eq!(content.circle_snapshot().len(), 1);
-
-        // The peer signs a PAIR_REMOVE addressed to us; handling it drops them.
-        let event = build_pair_event(&peer, KIND_PAIR_REMOVE, &us_npub, "Peer", "")
-            .expect("build pair-remove event");
-        assert!(content.handle_pair_event(&event));
-        assert!(
-            content.circle_snapshot().is_empty(),
-            "peer removed on unpair"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
     async fn open_site_without_source_is_unreachable() {
         let dir = tmp("nosrc");
         let _ = std::fs::remove_dir_all(&dir);
@@ -6742,7 +5982,7 @@ pub(crate) mod library_kind_tests {
         assert_eq!(served.status, 200);
         assert_eq!(served.body, b"<h1>v1</h1>");
 
-        // A Circle peer asking over the wire gets v1 too — the version whose
+        // A app peer asking over the wire gets v1 too — the version whose
         // files this phone can hand over.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -6926,7 +6166,7 @@ pub(crate) mod library_kind_tests {
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(Content::open(&dir).unwrap());
 
-        // A Circle member whose relay (a mock on loopback) holds a profile
+        // A app peer whose relay (a mock on loopback) holds a profile
         // and a note.
         let peer = nostr::Keys::generate();
         let peer_npub = peer.public_key().to_bech32().unwrap();
@@ -6938,7 +6178,7 @@ pub(crate) mod library_kind_tests {
             .sign_with_keys(&author)
             .unwrap();
         let url = mesh_peer_holding(vec![profile.clone(), note.clone()]).await;
-        content.add_to_circle(&peer_npub, "peer");
+        content.add_app_peer_for_test(&peer_npub, "peer");
         content.peer_relays().redirect(&peer_npub, &url);
 
         let pulled = content

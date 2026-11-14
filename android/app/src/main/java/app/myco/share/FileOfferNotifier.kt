@@ -24,7 +24,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * Tells you a paired phone is offering you a file while Myco is not on screen.
+ * Tells you a neighbor is offering you a file while Myco is not on screen.
  *
  * An offer expires after ten minutes, so one that arrives while the app is in
  * the background is simply missed — the in-app banner only exists while
@@ -108,7 +108,7 @@ object FileOfferNotifier {
                 "Incoming files",
                 NotificationManager.IMPORTANCE_HIGH,
             )
-            channel.description = "A paired phone wants to send you a file"
+            channel.description = "A neighbor wants to send you a file"
             nm.createNotificationChannel(channel)
         }
         val open = Intent(context, MainActivity::class.java)
@@ -119,7 +119,7 @@ object FileOfferNotifier {
             open,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val peer = offer.peerName.ifBlank { "A paired phone" }
+        val peer = offer.peerName.ifBlank { "A neighbor" }
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle("$peer wants to send you a file")
             .setContentText("Tap to view")

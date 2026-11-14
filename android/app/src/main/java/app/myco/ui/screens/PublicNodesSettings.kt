@@ -55,7 +55,7 @@ internal fun PublicNodesSettings(client: AppCoreClient, onBack: () -> Unit) {
     SettingsColumn {
         SubHeader("Internet", onBack)
         Text(
-            "Reach your Circle when you're not in the same room. When this phone " +
+            "Reach your neighbors when you're not in the same room. When this phone " +
                 "is online, Myco also links to public mesh nodes on the internet, " +
                 "and your messages and apps travel through them.",
             style = MaterialTheme.typography.bodyMedium,

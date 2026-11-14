@@ -98,8 +98,8 @@ fun SoftwareUpdateSettings(updates: SoftwareUpdates, offlineOnly: Boolean) {
         Row(Modifier.fillMaxWidth()) {
             Column(Modifier.weight(1f)) {
                 Text("Automatic update checks")
-                Text(if (offlineOnly) "Mesh-only: asks your Circle, never the internet."
-                    else "Checks signed releases on Zapstore and your Circle daily, including in the background.",
+                Text(if (offlineOnly) "Mesh-only: asks your neighbors, never the internet."
+                    else "Checks signed releases on Zapstore and your neighbors daily, including in the background.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -116,9 +116,9 @@ fun SoftwareUpdateSettings(updates: SoftwareUpdates, offlineOnly: Boolean) {
         }
         message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         state.carried?.let { carried ->
-            // What this phone hands its Circle, update or not.
+            // What this phone hands its neighbors, update or not.
             Text(
-                "Carrying Myco ${carried.version} for your Circle (${carried.size / 1_048_576} MB)",
+                "Carrying Myco ${carried.version} for your neighbors (${carried.size / 1_048_576} MB)",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

@@ -1,22 +1,16 @@
 package app.myco.nfc
 
-import android.content.Context
 import androidx.compose.runtime.mutableStateOf
-import app.myco.share.NsiteShare
-import app.myco.share.PairSecrets
 
 /**
  * Process-global state for NFC "tap to connect". While **presenting**, this device
  * emulates an NDEF tag ([PairHostApduService] serves [payload]); the counterpart's
- * OS reads it. Presenting is scoped to the Circle tab.
+ * OS reads it. Presenting is scoped to the open invite or share sheet.
  *
- * **NFC exposure note.** While presenting, the emulated tag carries
- * `{npub, name, pairSecret}` and is readable by *any* NFC reader held to the phone
- * — not just another Myco device. That's acceptable: the npub and chosen name are
- * low-sensitivity (the npub is already public), and the `pairSecret` is single-use
- * (consumed on first accept, then rotated — see [PairSecrets]), so a captured tag
- * can't be replayed to pair. It is deliberately limited to the moments the user is
- * on the Circle tab, never the whole time the app is open. The one exception is
+ * **NFC exposure note.** While presenting, the emulated tag is readable by *any*
+ * NFC reader held to the phone — not just another Myco device. It is deliberately
+ * limited to the moments an invite or share sheet is open, never the whole time
+ * the app is open. The one exception is
  * the file-share hotspot's page URL ([beginUrl]): it presents for as long as the
  * hotspot runs, which is fine — the URL is only reachable by devices the user
  * just let onto that hotspot, and every transfer is gated on the owner anyway.
@@ -26,22 +20,19 @@ import app.myco.share.PairSecrets
  * vs. prompt) recompose the instant it changes.
  */
 object PairPresent {
-    /** The `myco://pair/...` URI currently being emulated, or null when not presenting. */
+    /** The `myco://…` URI currently being emulated, or null when not presenting. */
     val payload = mutableStateOf<String?>(null)
 
     /** While the file-share hotspot runs, it owns the NFC surface outright:
      *  the tag serves the page's `http://…` address (the reader's OS opens it
      *  in the browser; no Myco needed on that side) — and until that address
-     *  is known it serves *nothing*, never the pairing payload. Pairing by
-     *  bump is disabled for the whole hotspot session and resumes when it
-     *  stops. */
+     *  is known it serves *nothing*. */
     private val hotspotActiveState = mutableStateOf(false)
     private val urlOverride = mutableStateOf<String?>(null)
 
     private val pairPresenting = mutableStateOf(false)
 
-    /** True while the hotspot owns the NFC surface — read by the tag-dispatch
-     *  paths to drop a peer's `myco://pair` tag instead of pairing on it. */
+    /** True while the hotspot owns the NFC surface. */
     val hotspotActive: Boolean get() = hotspotActiveState.value
 
     /** True while we're emulating a card. Read it from composition to observe flips. */
@@ -55,52 +46,37 @@ object PairPresent {
     @Volatile
     var onChanged: (() -> Unit)? = null
 
-    /** Begin presenting: mint a fresh single-use secret and build the payload. */
-    fun begin(context: Context, ownNpub: String, deviceName: String) {
-        rotate(context, ownNpub, deviceName)
-        pairPresenting.value = true
-        onChanged?.invoke()
-    }
-
     /** Begin presenting a prebuilt payload verbatim (e.g. a `myco://share/…` URI
-     *  carrying an nsite). Unlike [begin], the caller owns the secret — used by the
-     *  share-an-app surface, which mints its own one-time secret in the share URI. */
+     *  carrying an nsite, or a `myco://link/…` invitation). */
     fun beginRaw(uri: String) {
         payload.value = uri
         pairPresenting.value = true
         onChanged?.invoke()
     }
 
-    /** Mint a new single-use secret and rebuild the presented payload (called after
-     *  a tap is consumed, so the same code can't pair twice). */
-    fun rotate(context: Context, ownNpub: String, deviceName: String) {
-        payload.value = NsiteShare.buildPairUri(ownNpub, deviceName, PairSecrets.issue(context))
-    }
-
-    /** The hotspot is starting: take the NFC surface away from pairing now,
-     *  before the page URL is even known — a bump in that window must hand
-     *  over nothing rather than a pair code. */
+    /** The hotspot is starting: take the NFC surface now, before the page URL
+     *  is even known — a bump in that window must hand over nothing. */
     fun beginHotspot() {
         hotspotActiveState.value = true
         onChanged?.invoke()
     }
 
-    /** Present `uri` to every bump until [stopUrl] — outlives the Circle tab. */
+    /** Present `uri` to every bump until [stopUrl] — outlives any sheet. */
     fun beginUrl(uri: String) {
         hotspotActiveState.value = true
         urlOverride.value = uri
         onChanged?.invoke()
     }
 
-    /** The hotspot stopped: hand the NFC surface back to pairing. */
+    /** The hotspot stopped: hand the NFC surface back. */
     fun stopUrl() {
         hotspotActiveState.value = false
         urlOverride.value = null
         onChanged?.invoke()
     }
 
-    /** Stop pair-presentment (leaving the Circle tab). A hotspot URL keeps
-     *  presenting — its lifetime belongs to the hotspot, not the tab. */
+    /** Stop presenting (the sheet closed). A hotspot URL keeps presenting —
+     *  its lifetime belongs to the hotspot, not the sheet. */
     fun stop() {
         pairPresenting.value = false
         payload.value = null

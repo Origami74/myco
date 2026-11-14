@@ -1,4 +1,4 @@
-//! Myco's own release APK, carried by the Circle so a phone updates from the
+//! Myco's own release APK, carried by app peers so a phone updates from the
 //! phones around it (roadmap N11, the "updates from phones nearby" half).
 //!
 //! A release is two publisher-signed Zapstore events: the announcement
@@ -8,12 +8,12 @@
 //! come from anywhere — every source is checked against the signed hash.
 //!
 //! [`prepare`] makes this phone hold the newest release APK in its kept
-//! Blossom store, where the Circle can fetch it like any kept blob:
+//! Blossom store, where app peers can fetch it like any kept blob:
 //!
 //! 1. **Already kept** — nothing to do.
 //! 2. **This phone runs it** — the installed APK hashes to the signed sha256
 //!    (a phone updated through Zapstore), so it is copied in for free.
-//! 3. **A Circle peer holds it** — the peers [`crate::mesh_blobs`] finds
+//! 3. **An app peer holds it** — the peers [`crate::mesh_blobs`] finds
 //!    holding it, one at a time, through [`IpPeerSource`] with its zstd
 //!    variant (about 40% of the size: the APK stores its native library
 //!    uncompressed).
@@ -186,8 +186,8 @@ fn file_filter(announcement: &Event) -> Option<serde_json::Value> {
 }
 
 /// The release file for the newest kept announcement: the file event from the
-/// kept relay, else the Circle, else (when `online`) Zapstore. A file event
-/// found elsewhere is kept, so this phone answers its Circle in turn.
+/// kept relay, else app peers, else (when `online`) Zapstore. A file event
+/// found elsewhere is kept, so this phone answers its app peers in turn.
 async fn release_file(
     content: &Arc<Content>,
     online: bool,
@@ -344,7 +344,7 @@ fn remember_peer_failure(npub: &str, sha256: &str) {
         .insert((npub.to_string(), sha256.to_string()), Instant::now());
 }
 
-/// The release from a Circle peer's Blossom. Only peers `mesh_blobs` finds
+/// The release from an app peer's Blossom. Only peers `mesh_blobs` finds
 /// holding it are asked, one at a time (racing a 10 MB body across every
 /// peer would fetch it from all of them, over BLE), starting at a rotating
 /// offset so one bad peer is not always first; a peer that fails is skipped

@@ -1,4 +1,4 @@
-//! Pure merge of the peer/advert/circle/pairing snapshots into one ordered,
+//! Pure merge of the peer/advert/app peer snapshots into one ordered,
 //! npub-or-address-keyed `peers` array (D-19, DIAG-01/03/04/06).
 //!
 //! No I/O, no locks, no [`crate::runtime::AppRuntime`] dependency — everything
@@ -9,7 +9,7 @@
 //! Merge order follows RESEARCH.md's Pitfall 4: npub-first grouping silently
 //! loses the "seen but not yet resolved" rows D-09 requires. The base
 //! identity set is built from the radio-side peer views first (npub may be
-//! empty), adverts are unioned in second, and only then is Circle/pairing
+//! empty), adverts are unioned in second, and only then is app peer
 //! data left-joined by npub onto the rows that have one.
 
 use std::collections::HashMap;
@@ -18,7 +18,7 @@ use crate::control_client::PeerView;
 
 use crate::ble_diag::{BlePeerAttempts, MAX_ATTEMPTS_PER_PEER};
 
-use crate::content::{CircleContact, OutboundPairView, PairRequestView};
+use crate::content::AppPeer;
 use crate::state::{BleAdvert, BlePeer, PeerAttemptView, PeerDiagnosticView, PeerPathView};
 
 /// D-11 ordering weight for a row's `state` — lower sorts first.
@@ -27,7 +27,7 @@ fn peer_state_rank(state: &str) -> u8 {
         "connected" => 0,
         "reachable-via-relay" => 1,
         "seen-unidentified" => 2,
-        "paired-offline" => 3,
+        "app-peer-offline" => 3,
         // "unreachable" and any state string this module never emits.
         _ => 4,
     }
@@ -50,7 +50,7 @@ fn order_transports(mut transports: Vec<String>) -> Vec<String> {
 
 /// Truncate a peer-supplied string to at most `max_chars` characters, on a
 /// UTF-8 char boundary, before it crosses the FFI (T-01-02: an oversized
-/// Circle/display name must not reach a fixed-width Dev-tab row).
+/// app peer/display name must not reach a fixed-width Dev-tab row).
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     match s.char_indices().nth(max_chars) {
         Some((byte_idx, _)) => s[..byte_idx].to_string(),
@@ -71,7 +71,7 @@ fn short(s: &str) -> String {
     }
 }
 
-/// Merge every peer/advert/circle/pairing snapshot into one ordered,
+/// Merge every peer/advert/app peer snapshot into one ordered,
 /// npub-or-address-keyed `peers` array. See the module doc for merge order.
 ///
 /// `lane_by_npub` is a lane-origin override (npub → observed lane, e.g.
@@ -92,7 +92,7 @@ fn short(s: &str) -> String {
 /// name. Joining on the node address rather than the BLE address is what lets a
 /// peer discovered over BLE but *carried* over the LAN lane still show the name
 /// it chose. The value is unauthenticated (see [`crate::advert_names`]) and is
-/// therefore only ever surfaced as a fallback below the Circle/pairing names.
+/// therefore only ever surfaced as a fallback below the app peer names.
 ///
 /// `ble_attempts` is the per-peer BLE connect-attempt log, keyed by BLE
 /// address. It supplies three things: the role/discovery/outcome history joined
@@ -108,9 +108,7 @@ pub fn merge_peers(
     peer_views: &[PeerView],
     ble_peers: &[BlePeer],
     ble_adverts: &[BleAdvert],
-    circle: &[CircleContact],
-    pending_pairs: &[PairRequestView],
-    outbound_pairs: &[OutboundPairView],
+    app_peers: &[AppPeer],
     reachable_npubs: &[String],
     lane_by_npub: &HashMap<String, String>,
     advert_names: &HashMap<String, String>,
@@ -225,7 +223,7 @@ pub fn merge_peers(
             name,
             // Only "connected" is decided here (the one state a row can
             // already know for certain); every other state is assigned in
-            // step 5 once Circle/pairing/reachability data has been joined.
+            // step 5 once app peer/reachability data has been joined.
             state: if bp.connected {
                 "connected".to_string()
             } else {
@@ -240,8 +238,7 @@ pub fn merge_peers(
             srtt_ms,
             rssi: bp.rssi,
             psm: bp.psm,
-            pair_state: String::new(),
-            in_circle: false,
+            app_peer: false,
             role: String::new(),
             discovery_ms: 0,
             send_drops: 0,
@@ -295,8 +292,7 @@ pub fn merge_peers(
                 srtt_ms: None,
                 rssi: Some(adv.rssi),
                 psm: adv.psm,
-                pair_state: String::new(),
-                in_circle: false,
+                app_peer: false,
                 role: String::new(),
                 discovery_ms: 0,
                 send_drops: 0,
@@ -305,21 +301,15 @@ pub fn merge_peers(
         }
     }
 
-    // Step 3: union in every npub that appears only in the Circle, the
-    // incoming pair requests or the outbound invites, so a pairing with no
-    // radio contact yet still has a row.
+    // Step 3: union in every app peer, so one with no radio contact yet
+    // still has a row.
     let mut known_npubs: std::collections::HashSet<String> = rows
         .iter()
         .filter(|r| !r.npub.is_empty())
         .map(|r| r.npub.clone())
         .collect();
     let mut extra_npubs: Vec<String> = Vec::new();
-    for npub in circle
-        .iter()
-        .map(|c| &c.npub)
-        .chain(pending_pairs.iter().map(|p| &p.npub))
-        .chain(outbound_pairs.iter().map(|o| &o.npub))
-    {
+    for npub in app_peers.iter().map(|c| &c.npub) {
         if known_npubs.insert(npub.clone()) {
             extra_npubs.push(npub.clone());
         }
@@ -341,8 +331,7 @@ pub fn merge_peers(
             srtt_ms: None,
             rssi: None,
             psm: 0,
-            pair_state: String::new(),
-            in_circle: false,
+            app_peer: false,
             role: String::new(),
             discovery_ms: 0,
             send_drops: 0,
@@ -350,15 +339,13 @@ pub fn merge_peers(
         });
     }
 
-    // Step 4: left-join Circle name, pair state and relay reachability onto
-    // rows that have an npub. This module never reads
-    // `PairRequestView`'s one-time credential field — only `npub`/`name`.
+    // Step 4: left-join the app peer's name onto rows that have an npub.
     for row in rows.iter_mut() {
         if row.npub.is_empty() {
             continue;
         }
-        if let Some(c) = circle.iter().find(|c| c.npub == row.npub) {
-            row.in_circle = true;
+        if let Some(c) = app_peers.iter().find(|c| c.npub == row.npub) {
+            row.app_peer = true;
             if row.name.is_empty() {
                 row.name = if c.name.is_empty() {
                     short(&row.npub)
@@ -367,15 +354,6 @@ pub fn merge_peers(
                 };
             }
         }
-        let incoming = pending_pairs.iter().any(|p| p.npub == row.npub);
-        let outbound = outbound_pairs.iter().any(|o| o.npub == row.npub);
-        row.pair_state = match (incoming, outbound) {
-            (true, true) => "incoming-waiting+outbound-waiting".to_string(),
-            (true, false) => "incoming-waiting".to_string(),
-            (false, true) => "outbound-waiting".to_string(),
-            (false, false) if row.in_circle => "paired".to_string(),
-            (false, false) => String::new(),
-        };
         row.also_reachable_via = order_transports(std::mem::take(&mut row.also_reachable_via));
     }
 
@@ -389,8 +367,8 @@ pub fn merge_peers(
             "reachable-via-relay".to_string()
         } else if row.npub.is_empty() {
             "seen-unidentified".to_string()
-        } else if row.in_circle || !row.pair_state.is_empty() {
-            "paired-offline".to_string()
+        } else if row.app_peer {
+            "app-peer-offline".to_string()
         } else {
             "unreachable".to_string()
         };
@@ -511,28 +489,11 @@ mod tests {
         }
     }
 
-    fn circle(npub: &str, name: &str) -> CircleContact {
-        CircleContact {
+    fn circle(npub: &str, name: &str) -> AppPeer {
+        AppPeer {
             perms: Default::default(),
             npub: npub.to_string(),
             name: name.to_string(),
-            added_at: 0,
-        }
-    }
-
-    fn pending(npub: &str, name: &str) -> PairRequestView {
-        PairRequestView {
-            npub: npub.to_string(),
-            name: name.to_string(),
-            ..Default::default()
-        }
-    }
-
-    fn outbound(npub: &str, name: &str) -> OutboundPairView {
-        OutboundPairView {
-            npub: npub.to_string(),
-            name: name.to_string(),
-            since: 0,
         }
     }
 
@@ -559,8 +520,6 @@ mod tests {
             &[view, ip],
             &peers,
             &adverts,
-            &[],
-            &[],
             &[],
             &[],
             &HashMap::new(),
@@ -600,8 +559,6 @@ mod tests {
             &[],
             &[],
             &[],
-            &[],
-            &[],
             &HashMap::new(),
             &names,
             &[],
@@ -624,7 +581,7 @@ mod tests {
 
     /// The ping the status panel shows is the peer's MMP SRTT, carried through
     /// untouched. A row with no `PeerView` behind it (a Circle member who is
-    /// merely paired-offline) carries `None` rather than inheriting anyone's.
+    /// merely app-peer-offline) carries `None` rather than inheriting anyone's.
     #[test]
     fn srtt_rides_the_peer_view_onto_the_row() {
         let mut view = pv("a1", "npub1connected", true, 1_000, "udp");
@@ -636,8 +593,6 @@ mod tests {
             &peers,
             &[],
             &members,
-            &[],
-            &[],
             &[],
             &HashMap::new(),
             &HashMap::new(),
@@ -659,8 +614,6 @@ mod tests {
             &[],
             &members,
             &[],
-            &[],
-            &[],
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -670,7 +623,7 @@ mod tests {
         assert_eq!(out[0].npub, "npub1connected");
         assert_eq!(out[0].state, "connected");
         assert_eq!(out[1].npub, "npub2offline");
-        assert_eq!(out[1].state, "paired-offline");
+        assert_eq!(out[1].state, "app-peer-offline");
     }
 
     #[test]
@@ -683,8 +636,6 @@ mod tests {
         let out = merge_peers(
             &views,
             &peers,
-            &[],
-            &[],
             &[],
             &[],
             &[],
@@ -707,8 +658,6 @@ mod tests {
         let out = merge_peers(
             &views,
             &peers,
-            &[],
-            &[],
             &[],
             &[],
             &[],
@@ -752,8 +701,6 @@ mod tests {
             &[],
             &members,
             &[],
-            &[],
-            &[],
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -764,8 +711,6 @@ mod tests {
             &peers_b,
             &[],
             &members,
-            &[],
-            &[],
             &[],
             &HashMap::new(),
             &HashMap::new(),
@@ -790,8 +735,6 @@ mod tests {
             &[],
             &[],
             &[],
-            &[],
-            &[],
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -813,8 +756,6 @@ mod tests {
             &[],
             &[],
             std::slice::from_ref(&advert),
-            &[],
-            &[],
             &[],
             &[],
             &HashMap::new(),
@@ -849,8 +790,6 @@ mod tests {
             &adverts,
             &[],
             &[],
-            &[],
-            &[],
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -874,16 +813,14 @@ mod tests {
             &[],
             &members,
             &[],
-            &[],
-            &[],
             &HashMap::new(),
             &HashMap::new(),
             &[],
             0,
         );
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].state, "paired-offline");
-        assert!(out[0].in_circle);
+        assert_eq!(out[0].state, "app-peer-offline");
+        assert!(out[0].app_peer);
     }
 
     #[test]
@@ -895,8 +832,6 @@ mod tests {
             &[],
             &[],
             &members,
-            &[],
-            &[],
             &reachable,
             &HashMap::new(),
             &HashMap::new(),
@@ -905,48 +840,6 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].state, "reachable-via-relay");
-    }
-
-    #[test]
-    fn pending_pair_only_npub_has_incoming_waiting_pair_state() {
-        let pending_pairs = vec![pending("npub-inbound", "Requester")];
-        let out = merge_peers(
-            &[],
-            &[],
-            &[],
-            &[],
-            &pending_pairs,
-            &[],
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            0,
-        );
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].pair_state, "incoming-waiting");
-    }
-
-    #[test]
-    fn npub_with_incoming_and_outbound_pair_produces_one_row_naming_both() {
-        let pending_pairs = vec![pending("npub-both", "Requester")];
-        let outbound_pairs = vec![outbound("npub-both", "Requester")];
-        let out = merge_peers(
-            &[],
-            &[],
-            &[],
-            &[],
-            &pending_pairs,
-            &outbound_pairs,
-            &[],
-            &HashMap::new(),
-            &HashMap::new(),
-            &[],
-            0,
-        );
-        assert_eq!(out.len(), 1, "one row, not two");
-        assert!(out[0].pair_state.contains("incoming-waiting"));
-        assert!(out[0].pair_state.contains("outbound-waiting"));
     }
 
     #[test]
@@ -960,8 +853,6 @@ mod tests {
             &[],
             &[],
             &members,
-            &[],
-            &[],
             &[],
             &HashMap::new(),
             &HashMap::new(),
@@ -986,8 +877,6 @@ mod tests {
             &[],
             &members,
             &[],
-            &[],
-            &[],
             &HashMap::new(),
             &HashMap::new(),
             &[],
@@ -1000,8 +889,6 @@ mod tests {
     #[test]
     fn empty_inputs_produce_empty_vec_not_panic() {
         let out = merge_peers(
-            &[],
-            &[],
             &[],
             &[],
             &[],
@@ -1059,8 +946,6 @@ mod tests {
             &[],
             &[],
             &[],
-            &[],
-            &[],
             &lane_by_npub,
             &HashMap::new(),
             &[],
@@ -1094,8 +979,6 @@ mod tests {
             &[],
             &[],
             &[],
-            &[],
-            &[],
             &lane_by_npub,
             &HashMap::new(),
             &[],
@@ -1119,8 +1002,6 @@ mod tests {
         let out = merge_peers(
             &views,
             &peers,
-            &[],
-            &[],
             &[],
             &[],
             &[],
@@ -1153,8 +1034,6 @@ mod tests {
             &[],
             &[],
             &[],
-            &[],
-            &[],
             &lane_by_npub,
             &HashMap::new(),
             &[],
@@ -1182,8 +1061,6 @@ mod tests {
             &[],
             &[],
             &[],
-            &[],
-            &[],
             &lane_by_npub,
             &HashMap::new(),
             &[],
@@ -1205,8 +1082,6 @@ mod tests {
         let out = merge_peers(
             &views,
             &peers,
-            &[],
-            &[],
             &[],
             &[],
             &[],
@@ -1248,8 +1123,6 @@ mod tests {
             &[],
             &[],
             &[],
-            &[],
-            &[],
             &HashMap::new(),
             &HashMap::new(),
             &recorded,
@@ -1283,8 +1156,6 @@ mod tests {
         let out = merge_peers(
             &views,
             &peers,
-            &[],
-            &[],
             &[],
             &[],
             &[],
@@ -1334,8 +1205,6 @@ mod tests {
             &adverts,
             &[],
             &[],
-            &[],
-            &[],
             &HashMap::new(),
             &HashMap::new(),
             &recorded,
@@ -1366,8 +1235,6 @@ mod tests {
             &views,
             &peers,
             &adverts,
-            &[],
-            &[],
             &[],
             &[],
             &HashMap::new(),

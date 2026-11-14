@@ -281,7 +281,7 @@ private fun StepContent(
                 )
             }
             Title("What should people call you?")
-            Body("Phones you pair with see this name.")
+            Body("People you invite see this name.")
             Spacer(Modifier.height(16.dp))
             NameField(name, onSaveName)
         }

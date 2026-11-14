@@ -47,7 +47,7 @@ val ACTIVE_TRANSFER_STATUSES = setOf("offered", "accepted", "ready", "downloadin
 /** Terminal states that carry something the user still needs to see. */
 private val REPORTABLE_STATUSES = setOf("failed", "denied", "cancelled")
 
-/** Whether this row is worth showing in the Circle tab's transfer section. */
+/** Whether this transfer is still in flight. */
 fun FileTransfer.isLive(): Boolean = status in ACTIVE_TRANSFER_STATUSES
 
 fun FileTransfer.needsAttention(): Boolean = status in REPORTABLE_STATUSES
@@ -78,7 +78,7 @@ fun FileOfferBanner(
         // Kept after the offer clears so the exit animation has something to
         // draw; `visible` is what actually decides whether it is on screen.
         val shown = offer ?: return@AnimatedVisibility
-        val peer = shown.peerName.ifBlank { "A paired phone" }
+        val peer = shown.peerName.ifBlank { "A neighbor" }
         Surface(
             modifier = Modifier
                 .statusBarsPadding()
@@ -136,10 +136,8 @@ fun FileOfferLayer(
 }
 
 /**
- * One transfer as it appears in the Circle tab, next to pairing requests —
- * transfers are the other thing that happens between two paired phones, and
- * like a pending invite they need somewhere durable to live once whatever
- * surface started them is gone.
+ * One transfer as a card: transfers need somewhere durable to live once
+ * whatever surface started them is gone.
  *
  * A live transfer offers cancel; a finished one that went wrong offers dismiss.
  */

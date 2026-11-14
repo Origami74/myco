@@ -15,16 +15,16 @@
 //! Two things the vendored build does not carry are supplied by Myco's own
 //! supplement (`assets/myco-prelude.js`), installed right after it: the
 //! napplet-side half of NAP-SHELL (`shell.supports()` and `shell.services`,
-//! which the vendored shim has no `shell` domain for), and NAP-MESH, which the
-//! vendored installer filters out because it is not in the upstream registry.
-//! The supplement takes the same domain list, so the two cannot disagree.
+//! which the vendored shim has no `shell` domain for), and the Myco domains
+//! the vendored installer filters out because they are not in the upstream
+//! registry (NAP-NEIGHBOR, NAP-LOCAL). The supplement takes the same domain
+//! list, so the two cannot disagree.
 //!
 //! The supplement also replaces one vendored function, `outbox.publish`, with
 //! a copy that posts the same envelope and resolves the same result object but
 //! waits [`SIGNING_TIMEOUT`] instead of the vendored 30 s — a publish is signed
-//! first, and with a signer app that is a person approving it. `mesh.publish`
-//! gets the same wait. (`relay.publish` needs nothing: the vendored one has no
-//! timer.) NAP-FS's three pickers get it too: they answer once a person has
+//! first, and with a signer app that is a person approving it.
+//! (`relay.publish` needs nothing: the vendored one has no timer.) NAP-FS's three pickers get it too: they answer once a person has
 //! chosen a file.
 //!
 //! ## Every API is injected, always
@@ -52,13 +52,13 @@ const PRELUDE_IIFE: &str = include_str!("../assets/vendor/napplet-shim-prelude.g
 /// The global the vendored IIFE defines.
 pub const PRELUDE_GLOBAL: &str = "NappletShimPrelude";
 
-/// Myco's supplement: NAP-SHELL's napplet side, and NAP-MESH.
+/// Myco's supplement: NAP-SHELL's napplet side, and the Myco-only domains.
 const SUPPLEMENT_IIFE: &str = include_str!("../assets/myco-prelude.js");
 
 /// The global the supplement defines.
 pub const SUPPLEMENT_GLOBAL: &str = "MycoPrelude";
 
-/// How long the prelude's publishes (`outbox.publish`, `mesh.publish`) wait
+/// How long the prelude's signed requests (`outbox.publish` and the like) wait
 /// for their result before rejecting with "timed out" — the supplement's
 /// `SIGNING_TIMEOUT_MS`, mirrored here so the host's own signing bound can be
 /// checked against it. It is a backstop for a runtime that never answers:
@@ -150,42 +150,26 @@ mod tests {
     /// live before the reply it invites.
     #[test]
     fn the_supplement_runs_after_the_vendored_installer_and_before_ready() {
-        let out = render(&["mesh".to_string(), "shell".to_string()]);
+        let out = render(&["neighbor".to_string(), "shell".to_string()]);
         let vendored = out.rfind(&format!("{PRELUDE_GLOBAL}.install(")).unwrap();
         let define = out.find(&format!("var {SUPPLEMENT_GLOBAL}")).unwrap();
         let supplement = out
             .rfind(&format!(
-                "{SUPPLEMENT_GLOBAL}.install({{\"domains\":[\"mesh\",\"shell\"]}})"
+                "{SUPPLEMENT_GLOBAL}.install({{\"domains\":[\"neighbor\",\"shell\"]}})"
             ))
             .unwrap();
         let ready = out.rfind("shell.ready").unwrap();
         assert!(vendored < define && define < supplement && supplement < ready);
     }
 
-    /// What the supplement is for: the two namespaces the vendored build lacks.
+    /// What the supplement is for: NAP-SHELL's napplet side, which the
+    /// vendored build lacks — and no NAP-MESH, which is gone.
     #[test]
-    fn the_supplement_installs_shell_and_mesh() {
+    fn the_supplement_installs_shell_and_no_mesh() {
         assert!(SUPPLEMENT_IIFE.contains("installShell("));
-        assert!(SUPPLEMENT_IIFE.contains("installMesh("));
-        assert!(SUPPLEMENT_IIFE.contains(r#"domains.has("mesh")"#));
-        for wire in [
-            "mesh.info",
-            "mesh.publish",
-            "mesh.subscribe",
-            "mesh.close",
-            "mesh.blobs",
-        ] {
-            assert!(
-                SUPPLEMENT_IIFE.contains(&format!(r#"type: "{wire}""#)),
-                "the supplement never sends {wire}"
-            );
-        }
-        for push in ["mesh.event", "mesh.eose", "mesh.closed", "shell.init"] {
-            assert!(
-                SUPPLEMENT_IIFE.contains(&format!(r#""{push}""#)),
-                "the supplement never routes {push}"
-            );
-        }
+        assert!(SUPPLEMENT_IIFE.contains(r#""shell.init""#));
+        assert!(!SUPPLEMENT_IIFE.contains("installMesh("));
+        assert!(!SUPPLEMENT_IIFE.contains(r#"type: "mesh."#));
     }
 
     /// NAP-NEIGHBOR is not in the vendored build: the supplement installs it,
@@ -221,7 +205,7 @@ mod tests {
 
     /// A publish waits on signing, which with a signer app is a person
     /// approving it: the vendored `outbox.publish` gives up after 30 s, so the
-    /// supplement replaces it, and `mesh.publish` gets the same wait.
+    /// supplement replaces it.
     #[test]
     fn publishes_wait_the_signing_timeout() {
         assert!(SUPPLEMENT_IIFE.contains(r#"domains.has("outbox") && napplet.outbox"#));

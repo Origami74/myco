@@ -8,9 +8,6 @@
 //   has no `shell` domain, so without this `shell.supports()` — the spec's
 //   discovery mechanism — is undefined for every domain.
 // - `window.napplet.gamepad` — NAP-GAMEPAD cached controller snapshots.
-// - `window.napplet.mesh` — NAP-MESH (`docs/design/napplet/NAP-MESH.md`),
-//   Myco's own domain, which the vendored installer filters out because it is
-//   not in the upstream registry yet.
 // - `window.napplet.neighbor` — NAP-NEIGHBOR (napplet/naps#146), not in the
 //   vendored build yet.
 // - `window.napplet.local` — NAP-LOCAL (`docs/design/napplet/NAP-LOCAL.md`),
@@ -74,7 +71,6 @@ var MycoPrelude = (function () {
     installShell(napplet, domains, routers);
     if (domains.has("gamepad")) installGamepad(napplet, routers);
     if (domains.has("outbox") && napplet.outbox) installOutboxPublish(napplet, routers);
-    if (domains.has("mesh")) installMesh(napplet, routers);
     if (domains.has("neighbor")) installNeighbor(napplet, routers);
     if (domains.has("local")) installLocal(napplet, routers);
     if (domains.has("resource") && napplet.resource) installResourceKeep(napplet, routers);
@@ -444,128 +440,6 @@ var MycoPrelude = (function () {
         return { close: function () { handlers.delete(cb); } };
       },
     };
-  }
-
-  // --- NAP-MESH --------------------------------------------------------------
-  function installMesh(napplet, routers) {
-    var pending = new Map();
-    var subscriptions = new Map();
-
-    function post(message) {
-      window.parent.postMessage(message, "*");
-    }
-
-    function request(message, project, timeoutMs) {
-      var id = crypto.randomUUID();
-      message.id = id;
-      return new Promise(function (resolve, reject) {
-        var timeout = setTimeout(function () {
-          if (pending.delete(id)) reject(new Error(message.type + " timed out"));
-        }, timeoutMs || REQUEST_TIMEOUT_MS);
-        pending.set(id, { resolve: resolve, reject: reject, timeout: timeout, project: project });
-        post(message);
-      });
-    }
-
-    routers.push(function (msg) {
-      if (msg.type.indexOf("mesh.") !== 0) return;
-      if (msg.type === "mesh.event" || msg.type === "mesh.eose" || msg.type === "mesh.closed") {
-        var sub = subscriptions.get(msg.subId);
-        if (!sub) return;
-        if (msg.type === "mesh.event") sub.emit("event", msg.result);
-        else if (msg.type === "mesh.eose") sub.emit("eose", msg.ttl);
-        else { sub.emit("closed", msg.reason); subscriptions.delete(msg.subId); }
-        return;
-      }
-      if (typeof msg.id !== "string") return;
-      var p = pending.get(msg.id);
-      if (!p) return;
-      pending.delete(msg.id);
-      clearTimeout(p.timeout);
-      if (typeof msg.error === "string" && msg.type !== "mesh.publish.result") {
-        p.reject(new Error(msg.error));
-        return;
-      }
-      p.resolve(p.project(msg));
-    });
-
-    function info() {
-      return request({ type: "mesh.info" }, function (msg) {
-        return { online: !!msg.online, peers: msg.peers | 0, limits: msg.limits || {} };
-      });
-    }
-
-    // A publish failure is a result with `ok: false`, not a rejection — the
-    // napplet reads one field to branch on, as NAP-RELAY has it. Signed
-    // first, so it waits as long as an outbox publish does.
-    function publish(template, options) {
-      var message = { type: "mesh.publish", event: template };
-      if (options && options.ttl !== undefined) message.ttl = options.ttl;
-      return request(message, function (msg) {
-        var out = { ok: !!msg.ok };
-        if (msg.event !== undefined) out.event = msg.event;
-        if (msg.eventId !== undefined) out.eventId = msg.eventId;
-        if (msg.ttl !== undefined) out.ttl = msg.ttl;
-        if (msg.error !== undefined) out.error = msg.error;
-        return out;
-      }, SIGNING_TIMEOUT_MS);
-    }
-
-    // How many reachable peers hold each blob: `{ peers, blobs: { <sha256>: n } }`.
-    // Rejects with the shell's reason (too many hashes, not granted).
-    function blobs(hashes) {
-      return request({ type: "mesh.blobs", hashes: Array.isArray(hashes) ? hashes.slice() : [] }, function (msg) {
-        return { peers: msg.peers | 0, blobs: msg.blobs || {} };
-      });
-    }
-
-    function subscribe(filters, options) {
-      var subId = crypto.randomUUID();
-      var handlers = { event: new Set(), eose: new Set(), closed: new Set() };
-      var handle = {
-        id: subId,
-        on: function (name, cb) {
-          var set = handlers[name];
-          if (!set) throw new Error("unknown mesh subscription event: " + name);
-          set.add(cb);
-          return { close: function () { set.delete(cb); } };
-        },
-        close: function () {
-          if (!subscriptions.delete(subId)) return;
-          post({ type: "mesh.close", subId: subId });
-        },
-        emit: function (name, value) {
-          handlers[name].forEach(function (cb) {
-            try { cb(value); } catch (e) { console.error("mesh subscription handler threw", e); }
-          });
-        }
-      };
-      subscriptions.set(subId, handle);
-      var message = {
-        type: "mesh.subscribe",
-        subId: subId,
-        filters: Array.isArray(filters) ? filters : [filters]
-      };
-      if (options && options.ttl !== undefined) message.ttl = options.ttl;
-      // A subscribe has no `.result`; its answer is the stream. The `id` is
-      // still sent so a refusal (`mesh.subscribe.result` carrying `error`)
-      // has something to correlate with, and surfaces as `closed`.
-      var id = crypto.randomUUID();
-      message.id = id;
-      pending.set(id, {
-        resolve: function () {},
-        reject: function (err) { handle.emit("closed", err.message); subscriptions.delete(subId); },
-        timeout: setTimeout(function () { pending.delete(id); }, REQUEST_TIMEOUT_MS),
-        project: function () {}
-      });
-      post(message);
-      return { id: subId, on: handle.on, close: handle.close };
-    }
-
-    Object.defineProperty(napplet, "mesh", {
-      value: Object.freeze({ info: info, publish: publish, subscribe: subscribe, blobs: blobs }),
-      enumerable: true, configurable: false, writable: false
-    });
   }
 
   // --- NAP-INTENT: both generations of the binding ---------------------------

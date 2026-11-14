@@ -963,7 +963,7 @@ impl PublicNodes {
                 .filter(|p| p.connected && !p.npub.is_empty())
                 .map(|p| p.npub.clone())
                 .collect();
-            let circle: HashSet<String> = content.circle_npubs().into_iter().collect();
+            let circle: HashSet<String> = content.app_peer_npubs().into_iter().collect();
 
             let plan = self.plan(now_ms(), gate, &connected, &circle);
             if plan.fetch {

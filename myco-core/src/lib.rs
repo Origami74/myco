@@ -57,8 +57,9 @@ mod neighbor;
 // NAP-FS: the host's half of a pick — the window host's picker, and the
 // descriptors it hands back.
 mod fs_pick;
-// NAP-MESH `mesh.blobs`: which blobs the Circle's Blossom stores hold, asked
-// with a bounded, remembered `HEAD` per peer over the mesh.
+// Which app peers' Blossom stores hold a blob, asked with a bounded,
+// remembered `HEAD` per peer over the mesh — how `release_apk` finds a peer
+// to download the release from.
 mod mesh_blobs;
 // NAP-UPLOAD: a napplet's bytes onto the user's Blossom servers, signed as
 // the user. Spec: napplet/naps PR #33; Myco's choices in

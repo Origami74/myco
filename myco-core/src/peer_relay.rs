@@ -2,7 +2,8 @@
 //! relays — **one socket per peer**, shared by both propagation planes:
 //!
 //! - **push** ([`PeerRelayPool::send`]): fan an `["EVENT", …]` frame to a peer
-//!   (fire-and-forget) — the multi-hop flood of `docs/design/core/event-gossip.md`.
+//!   (fire-and-forget) — manifest forwarding and file transfer between app
+//!   peers.
 //! - **pull** ([`PeerRelayPool::request_stream`]): open a `REQ` and hand on
 //!   each matching event the moment it arrives, until `EOSE`/`CLOSED`, then
 //!   close the subscription. [`PeerRelayPool::request`] collects that stream
@@ -160,9 +161,9 @@ pub struct PeerRelayPool {
     dial_backoff: BackoffMap,
     /// Whether every dial goes to `ip_source::mesh_relay_url(npub)` regardless
     /// of the URL handed in. Always on in the app: the pool's connection *is*
-    /// the peer to everything upstream (keepwarm, gossip fan-out, Mesh-lane
-    /// publishes), so a URL that came from a napplet or a relay list must
-    /// never pick where it goes. Off only in host tests, which dial mock
+    /// the peer to everything upstream (keepwarm, manifest forwarding, file
+    /// transfer), so a URL handed in from elsewhere must never pick where it
+    /// goes. Off only in host tests, which dial mock
     /// relays on `127.0.0.1` under placeholder npubs.
     canonical_urls: bool,
     /// Test-only: where a peer's canonical `.fips` URL really goes — a mock

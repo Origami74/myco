@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Groups
@@ -78,7 +79,8 @@ private fun Reach.short(): String = when (this) {
 /**
  * One neighborhood, in the app sheet's style: tile, name and a status line;
  * an icon row (rename, reach, files); the people you're connected with as
- * faces; how far posts go as three icons; Leave as a red row; Invite pinned
+ * faces; how far posts go as three icons; whether apps come from here as a
+ * switch; Leave as a red row; Invite pinned
  * at the bottom. Finer settings open in their own small sheets.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -170,6 +172,29 @@ fun NeighborhoodPage(id: String, state: AppState, client: AppCoreClient, onBack:
                                 }
                             }
                         }
+                    }
+                }
+
+                // Apps: fetch and serve apps, updates and files with the people here.
+                Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Filled.Apps, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Apps", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Get apps and updates from people here",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = n.apps,
+                            onCheckedChange = { client.dispatch(NativeActions.setNeighborhoodApps(n.id, it)) },
+                        )
                     }
                 }
 

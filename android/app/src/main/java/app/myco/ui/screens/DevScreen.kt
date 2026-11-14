@@ -138,8 +138,6 @@ fun DevScreen(client: AppCoreClient) {
 
         RadioSelfCheckCard(devState, awareSupported, awareAvailable, locationOn)
 
-        PendingPairingsCard(devState, firstReadLanded)
-
         SelectionContainer {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 DevCard("NODE & FIPS") {
@@ -290,57 +288,17 @@ private fun RadioSelfCheckCard(
 }
 
 /**
- * Incoming pair requests and outbound invites, so a pairing that is waiting is
- * visible rather than inferred from its absence elsewhere (DIAG-06).
- *
- * Requester names arrive from an untrusted mesh peer, so they go through the
- * same shortening helper as every other peer-supplied string; the npub is the
- * row's identity and the name is decoration beside it, never in its place.
- */
-@Composable
-private fun PendingPairingsCard(state: AppState, firstReadLanded: Boolean) {
-    val incoming = state.pendingPairRequests
-    val outbound = state.outboundPairs
-    DevCard("PENDING PAIRINGS (${incoming.size + outbound.size})") {
-        if (incoming.isEmpty() && outbound.isEmpty()) {
-            // Same rule as the peer list: do not claim there are no pending
-            // requests until this screen has actually read once.
-            EmptyLine(if (firstReadLanded) "none" else "reading…")
-        } else {
-            incoming.forEach { PairingRow("incoming", it.npub, it.name) }
-            outbound.forEach { PairingRow("outbound", it.npub, it.name) }
-        }
-    }
-}
-
-/** One pending-pairing row: direction, then the shortened npub with any name. */
-@Composable
-private fun PairingRow(direction: String, npub: String, name: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-    ) {
-        Text(direction, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
-        Text(
-            if (name.isEmpty()) short(npub) else "${short(name)}  ${short(npub)}",
-            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-        )
-    }
-}
-
-/**
- * This device's own identity: the npub peers address it by, and the Circle name
- * they see it as (DIAG-07). Either value being empty renders an em-dash — never
+ * This device's own identity: the npub peers address it by, and the name
+ * neighborhood invitations carry (DIAG-07). Either value being empty renders an em-dash — never
  * a blank card, never a placeholder sentinel.
  */
 @Composable
 private fun IdentityCard(state: AppState) {
     val context = LocalContext.current
-    val circleName = if (state.ownNpub.isEmpty()) "" else DeviceName.current(context, state.ownNpub)
+    val deviceName = if (state.ownNpub.isEmpty()) "" else DeviceName.current(context, state.ownNpub)
     DevCard("IDENTITY") {
         KeyVal("own npub", state.ownNpub.ifEmpty { "—" }.let { if (it == "—") it else short(it) })
-        KeyVal("circle name", circleName.ifEmpty { "—" }.let { if (it == "—") it else short(it) })
+        KeyVal("device name", deviceName.ifEmpty { "—" }.let { if (it == "—") it else short(it) })
     }
 }
 
@@ -385,7 +343,7 @@ private fun KeyValTri(label: String, state: Boolean?, yes: String, no: String) {
  * A peer throughput test: pick a connected, handshaken peer and round-trip a
  * ~1 MiB payload through its mesh Blossom (PUT then GET), showing up/down
  * throughput (kbps under 1 Mbps, Mbps above).
- * Only works against a paired peer (their Blossom gates non-loopback by Circle).
+ * Only works against an app peer (their Blossom gates non-loopback by app peers).
  */
 @Composable
 private fun SpeedtestCard(state: AppState, client: AppCoreClient) {
@@ -526,7 +484,7 @@ private fun PeerDiagnosticRow(peer: PeerDiagnostic, expanded: Boolean, onToggle:
     val dotColor = when (peer.state) {
         "connected" -> StatusConnected
         "reachable-via-relay" -> StatusReachable
-        "paired-offline" -> StatusThin
+        "app-peer-offline" -> StatusThin
         "unreachable" -> StatusAlone
         // "seen-unidentified" and any unrecognized state: neutral, matching
         // the pre-existing "○ seen" convention.

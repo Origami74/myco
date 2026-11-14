@@ -29,8 +29,8 @@ use crate::seams::{ScopeOwner, WorkScope};
 /// yet must not be advertised, or `shell.supports()` lies and the napplet takes
 /// a branch that cannot work.
 pub const IMPLEMENTED_DOMAINS: &[&str] = &[
-    "shell", "identity", "relay", "mesh", "neighbor", "outbox", "local", "resource", "link",
-    "theme", "inc", "intent", "upload", "fs", "gamepad",
+    "shell", "identity", "relay", "neighbor", "outbox", "local", "resource", "link", "theme",
+    "inc", "intent", "upload", "fs", "gamepad",
 ];
 
 /// Domains every napplet gets, grant or no grant.
@@ -67,19 +67,13 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// the device's own nsites, and with a custom backend they are that server.
 /// Keeps are permanent and unquota'd, which is why it can be switched off.
 ///
-/// `mesh` is a default **for now**, not by design. The upstream napplet
+/// `neighbor` is a default **for now**, not by design. The upstream napplet
 /// tooling (the Vite plugin and `napplet deploy`) keeps only the upstream NAP
 /// domains in a manifest's `requires` and drops Myco-only ones, so no napplet
-/// published with it can *ask* for `mesh` — and a grant that can only come
-/// from `requires` could never be given. It is still shown on the install
-/// sheet, capped by the user's "App reach" setting, and can be switched off
-/// per app. Take it out of the defaults once the tooling keeps extension
-/// domains.
-///
-/// `neighbor` is a default for the same tooling reason as `mesh`, and it
-/// grants little by itself: a napplet sees only the neighborhoods the user
-/// picked for it (and, with the proximity extension, `nearby`, which anyone
-/// in range can read anyway). Each neighborhood is its own grant, held by the
+/// published with it can *ask* for `neighbor` — and a grant that can only
+/// come from `requires` could never be given. It grants little by itself: a
+/// napplet sees only the neighborhoods the user picked for it (and, with the
+/// proximity extension, `nearby`, which anyone in range can read anyway). Each neighborhood is its own grant, held by the
 /// host, not here.
 ///
 /// `inc` and `intent` cost nothing to grant either. `intent` asks the shell to
@@ -90,17 +84,16 @@ pub const MANDATORY_DOMAINS: &[&str] = &["shell"];
 /// hears only what the shell routes to it. Napplets cannot message each other
 /// with it yet (`inc.emit` goes nowhere; see `nap::inc`).
 ///
-/// Taking it out will not take it back. Every napplet opened meanwhile has
-/// `mesh` persisted in its Library `granted` list (widened at open, silently —
-/// a default gets no sheet), and a stored grant is honoured as given. Removing
-/// it from here therefore needs a migration that drops `mesh` from `granted`
-/// where it was never reviewed.
+/// A domain this build no longer implements (NAP-MESH's `mesh`, which
+/// napplets opened before it was removed still have in their stored
+/// `granted` list) is never offered: a session serves only what is in both
+/// [`IMPLEMENTED_DOMAINS`] and the grant.
 pub const DEFAULT_GRANTS: &[&str] = &[
-    "identity", "inc", "intent", "link", "local", "mesh", "neighbor", "relay", "resource", "theme",
+    "identity", "inc", "intent", "link", "local", "neighbor", "relay", "resource", "theme",
 ];
 
-/// The most live subscriptions one session may hold, across `relay`, `mesh`
-/// and `outbox`. See [`Session::subscribe_in`].
+/// The most live subscriptions one session may hold, across `relay` and
+/// `outbox`. See [`Session::subscribe_in`].
 pub const MAX_SUBSCRIPTIONS: usize = 64;
 
 /// The most NAP-UPLOAD results one session remembers for `upload.status`.
@@ -289,7 +282,7 @@ pub struct Session {
     /// has anywhere to be delivered, however well the rest of the system
     /// carries it.
     ///
-    /// Keyed by domain as well as id because `relay` and `mesh` subscriptions
+    /// Keyed by domain as well as id because `relay` and `outbox` subscriptions
     /// are delivered as different message types and gated on different grants,
     /// and a napplet may reuse a `subId` across the two — the spec scopes ids
     /// per domain, not per session.

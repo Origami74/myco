@@ -100,11 +100,6 @@ pub enum NativeAppAction {
         domain: String,
         allowed: bool,
     },
-    /// Cap how far a napplet may reach over the mesh (NAP-MESH): the most hops
-    /// a `mesh.publish` and a `mesh.subscribe` backlog pull may ask for.
-    /// Values above what the mesh honours are stored as the maximum. Takes
-    /// effect on a napplet's next call, not its next launch.
-    SetNappletMeshReach { publish_ttl: u8, subscribe_ttl: u8 },
     /// Close the install-review screen without installing. The fetched bytes
     /// stay cached; no grant is written, so the napplet has nothing.
     DismissNappletReview,
@@ -176,31 +171,6 @@ pub enum NativeAppAction {
     /// at the next launch.
     SetCacheLimits { event_bytes: u64, blob_bytes: u64 },
 
-    // --- circle (paired peers) ---
-    /// Add a paired peer to the **Circle**: the contact list of devices we pull
-    /// nsites from over the mesh. Dispatched when a share QR is scanned. `npub` is
-    /// the peer's device identity; `name` a human label from the QR.
-    AddToCircle { npub: String, name: String },
-    /// Forget a peer (remove from the Circle).
-    RemoveFromCircle { npub: String },
-
-    // --- mutual pairing ---
-    /// Scanned a peer's pairing QR: send them a signed pair request over the mesh
-    /// (to their relay). Pairs nobody yet — only a mutual accept adds both sides.
-    /// `npub`/`name` are the scanned peer's; `secret` is the QR's one-time value.
-    SendPairRequest {
-        npub: String,
-        name: String,
-        secret: String,
-    },
-    /// Accept an incoming pair request: add the requester to the Circle and signal
-    /// them (a pair-accept) so they add us back.
-    AcceptPairRequest { npub: String, name: String },
-    /// Dismiss an incoming pair request without pairing.
-    DeclinePairRequest { npub: String },
-    /// Withdraw an invite we sent that is still waiting, so it can be sent again.
-    CancelPairInvite { npub: String },
-
     /// Toggle "mesh-only": when enabled, never use the public IP relay/Blossom
     /// fallback — pull only over the mesh. Lets you verify the mesh path even
     /// when this device has internet (e.g. it's acting as a hotspot).
@@ -249,11 +219,6 @@ pub enum NativeAppAction {
     /// the number available at the one moment it is needed.
     SetAwareDataPaths { count: u8 },
 
-    /// Set this device's human label (memorable name). Stamped on outgoing pair
-    /// request/accept events so peers show the name the user chose. The Android
-    /// app owns the value (persisted there) and re-applies it on launch.
-    SetDeviceName { name: String },
-
     /// Dev-menu speedtest against a mesh peer: PUT a fresh payload to the peer's
     /// Blossom and GET it back, timing each leg. Spawn-not-block; the result lands
     /// in `speedtest`. `npub` is the target peer's device identity.
@@ -297,6 +262,8 @@ pub enum NativeAppAction {
     EndLink { link_id: String },
     /// How far a neighborhood pushes uploaded blobs (0: not at all).
     SetNeighborhoodBlobHops { neighborhood: String, hops: u8 },
+    /// Whether Myco fetches apps and updates from a neighborhood's people.
+    SetNeighborhoodApps { neighborhood: String, enabled: bool },
     /// A neighborhood's reach: publish and backlog hops, and whether others'
     /// events are passed on.
     SetNeighborhoodPolicy {

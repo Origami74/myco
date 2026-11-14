@@ -9,7 +9,7 @@
 //! Reading it back, the runtime decrypts an event for a napplet when it is
 //! the user's own event, its signature verifies, and its content is a NIP-44
 //! payload the user encrypted to themselves. Any kind, any napplet that
-//! reads events (`relay`, `outbox`, `mesh`), whichever app wrote it:
+//! reads events (`relay`, `outbox`), whichever app wrote it:
 //! NAP-RELAY's "the shell MUST decrypt incoming encrypted events; napplets
 //! receive plaintext content". Which kinds a protocol keeps
 //! private (NIP-78 app data, say) is that protocol's business, not the

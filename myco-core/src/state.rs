@@ -47,8 +47,6 @@ pub struct AppState {
     /// Whether each installed napplet can open right now — the tile's dim
     /// state. Keyed by the Library entry's `urlHost`.
     pub napplet_status: Vec<crate::content::NappletStatusView>,
-    /// The user's cap on how far napplets reach over the mesh (NAP-MESH).
-    pub napplet_mesh_reach: NappletMeshReachView,
     /// NAP-INTENT: every archetype something installed can handle, with its
     /// candidates and the user's default — Settings › Default apps.
     pub intent_handlers: Vec<crate::intent::IntentArchetypeView>,
@@ -60,20 +58,15 @@ pub struct AppState {
     pub napplet_domains: Vec<String>,
     /// Local relay/Blossom counts (for the developer screen + cache view).
     pub cache: crate::content::CacheView,
-    /// The user's **Circle**: paired peers we pull nsites from over the mesh.
-    pub circle: Vec<crate::content::CircleContact>,
-    /// Circle members we currently hold a live mesh relay connection to. This
+    /// App peers: linked devices in neighborhoods with Apps on, which this
+    /// device fetches apps and updates from and serves its own to.
+    pub app_peers: Vec<crate::content::AppPeer>,
+    /// App peers we currently hold a live mesh relay connection to. This
     /// is the honest "reachable" signal: it means bytes are flowing to them
     /// right now, whether they are a direct neighbour or many hops away. The
     /// direct-peer table ([`AppState::ble_peers`]) is *not* a substitute — it
     /// only ever names adjacent nodes.
     pub reachable_npubs: Vec<String>,
-    /// Invites we sent that nobody has accepted yet. Kept so the UI can say an
-    /// invite is *waiting* — a bump with no mesh route between the two phones
-    /// cannot be delivered at the time it is made.
-    pub outbound_pairs: Vec<crate::content::OutboundPairView>,
-    /// Incoming pair requests awaiting accept/decline (the UI shows a pop-up).
-    pub pending_pair_requests: Vec<crate::content::PairRequestView>,
     /// "Mesh-only": the IP online fallback is disabled (pull only over the mesh).
     pub offline_only: bool,
     /// Public internet mesh nodes (N10): the opt-in, why it is idle if it is,
@@ -103,16 +96,14 @@ pub struct AppState {
     /// The merged per-identity peer diagnostics view (DIAG-01/03/04/06):
     /// one row per known peer, covering every state from `connected` through
     /// `unreachable`, built once here rather than re-derived client-side from
-    /// `ble_peers` / `ble_adverts` / `circle` / `reachable_npubs`.
+    /// `ble_peers` / `ble_adverts` / `app_peers` / `reachable_npubs`.
     pub peers: Vec<PeerDiagnosticView>,
 }
 
 /// One merged, npub-or-address-keyed peer diagnostics row for the Dev tab
 /// (DIAG-01/03/04/06). `key` is the `npub` when resolved, else the
 /// `node_addr_hex`, else the raw BLE address — so a device seen only as an
-/// unresolved advert still gets a stable row (D-09). This is a rendering
-/// surface: it deliberately does NOT carry the one-time pairing credential
-/// value that [`crate::content::PairRequestView`] holds.
+/// unresolved advert still gets a stable row (D-09).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerDiagnosticView {
@@ -126,11 +117,11 @@ pub struct PeerDiagnosticView {
     /// Raw BLE address (`adapter/AA:BB:..`); empty unless this row was seen or
     /// attributed as a scan advert.
     pub ble_addr: String,
-    /// Best-known display label (Circle name or peer-advertised display name),
+    /// Best-known display label (app peer name or peer-advertised display name),
     /// truncated to at most 64 characters before it crosses the FFI.
     pub name: String,
     /// One of `connected`, `reachable-via-relay`, `seen-unidentified`,
-    /// `paired-offline`, `unreachable`.
+    /// `app-peer-offline`, `unreachable`.
     pub state: String,
     /// Transport currently carrying this row, when connected (`ble`, `aware`,
     /// `usb`, `udp`, `tcp`); empty when not connected.
@@ -157,9 +148,7 @@ pub struct PeerDiagnosticView {
     /// response; empty when it has advertised none or was not found over BLE.
     ///
     /// **Unauthenticated** — a plaintext broadcast anyone in range can forge.
-    /// It exists so a device you have never paired with can still show the name
-    /// its owner chose, and it must always rank *below* any name learned from
-    /// signed pair traffic, never above.
+    /// It ranks *below* any name learned from a neighborhood invitation.
     pub advertised_name: String,
     /// Smoothed round-trip time over this peer's link, milliseconds, as MMP
     /// measured it. `None` when there is no measurement — an unmeasured link
@@ -171,10 +160,8 @@ pub struct PeerDiagnosticView {
     /// Advertised listener PSM from the most recent scan advert attributed to
     /// this row; `0` when none.
     pub psm: u16,
-    /// One of `""`, `incoming-waiting`, `outbound-waiting` or `paired`.
-    pub pair_state: String,
-    /// Whether this npub is a member of the user's Circle.
-    pub in_circle: bool,
+    /// Whether this npub is an app peer.
+    pub app_peer: bool,
     /// BLE role this device chose for the most recent recorded attempt against
     /// this peer: `central`, `peripheral`, or empty when nothing has been
     /// recorded. Never a guess — an empty string means "no attempt recorded",
@@ -220,17 +207,6 @@ pub struct AccountView {
     pub signer_package: String,
     /// Why the last login failed; empty otherwise.
     pub error: String,
-}
-
-/// The NAP-MESH caps as the Settings screen shows them: the current values and
-/// the most each may be set to.
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct NappletMeshReachView {
-    pub publish_ttl: u8,
-    pub publish_max: u8,
-    pub subscribe_ttl: u8,
-    pub subscribe_max: u8,
 }
 
 /// One transport path to a peer, as fips's multi-path layer tracks it.
@@ -299,7 +275,7 @@ pub struct SpeedtestView {
     pub up_mbps: f64,
     /// Download (peer → this device) throughput, megabits per second.
     pub down_mbps: f64,
-    /// Non-empty if the last run failed (e.g. peer unreachable / not paired).
+    /// Non-empty if the last run failed (e.g. peer unreachable / not an app peer).
     pub error: String,
     /// Bumped on each completed run (success or failure).
     pub generation: u64,

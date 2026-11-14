@@ -302,9 +302,6 @@ pub struct AppRuntime {
     /// sheet is drawn over the napplet's window, not queued on the Apps
     /// screen, and it must not hold the slot NAP-LINK admission reads.
     napplet_updates: NappletUpdates,
-    /// The user's NAP-MESH caps, shared with the napplet mesh sink so a change
-    /// takes effect on a napplet's next call rather than its next launch.
-    napplet_mesh_limits: Arc<std::sync::RwLock<myco_napplet_runtime::MeshLimits>>,
     /// NAP-INTENT default handlers, from settings — shared with the catalog
     /// so a default the user sets routes the very next invoke.
     intent_defaults: crate::intent::IntentDefaults,
@@ -498,7 +495,7 @@ impl AppRuntime {
             crate::public_nodes::PublicNodeSettings::load(Path::new(data_dir)),
         ));
 
-        // Serve the relay + Blossom over the mesh so paired peers can pull this
+        // Serve the relay + Blossom over the mesh so app peers can pull this
         // device's nsites at ws://<npub>.fips:4870 / http://<npub>.fips:24243.
         // Bound IPV6_V6ONLY (the mesh is IPv6-only) so `[::]:port` doesn't collide
         // with another app squatting on `127.0.0.1:port`; a port already in use
@@ -518,7 +515,7 @@ impl AppRuntime {
                                      // embedded store. With a custom server configured there is nothing
                                      // local to serve — peers reach that server by its own URL, not
                                      // through us — so the listener is simply not bound.
-                                     // Read through the blob cache too, so a paired peer can pull what
+                                     // Read through the blob cache too, so an app peer can pull what
                                      // this phone fetched but did not keep.
                                      // Written as cache too: a peer's upload is passing through, and
                                      // is bounded by the cache budget like a peer's pushed events.
@@ -531,11 +528,11 @@ impl AppRuntime {
             // (docs/design/core/event-gossip.md).
             let gossiper: Arc<dyn crate::mesh_relay::Gossiper> =
                 Arc::new(crate::gossip::MeshGossiper::new(content.clone()));
-            // Restrict mesh access to paired (Circle) peers — only the pairing
-            // handshake is open, so strangers can request to pair but can't read or
-            // push content. Loopback (the in-app WebView) always bypasses the gate.
+            // Restrict mesh access to app peers — linked devices in
+            // neighborhoods with Apps on. Loopback (the in-app WebView) always
+            // bypasses the gate.
             let gate: Arc<dyn crate::mesh_relay::PeerGate> =
-                Arc::new(crate::content::CircleGate::new(content.clone()));
+                Arc::new(crate::content::AppPeerGate::new(content.clone()));
             let hub = crate::mesh_relay::RelayHub::with_cache(
                 content.pinned_relay(),
                 content.cache_relay(),
@@ -546,7 +543,6 @@ impl AppRuntime {
             // through a capability has no socket to arrive on, and it must
             // still reach this device's subscriptions and the mesh.
             *relay_hub.lock().unwrap() = Some(hub.clone());
-            content.set_hub(&hub);
 
             // Where peers reach the relay: the mesh stack, or a kernel socket
             // with no stack (see `mesh_net::peer_listeners`).
@@ -592,25 +588,24 @@ impl AppRuntime {
                     );
                 }
             }
-            // The auth plane: the one port open to peers we have never met, and
-            // the only way into the Circle. It has to bind before the content
-            // servers matter — without it a stranger cannot pair at all, and the
-            // relay and Blossom gates below have no exceptions to let them in.
-            // See `reference/thinning-custom-relay.md` (D6).
+            // The auth plane: the one port open to peers we have never met,
+            // carrying the link handshake. The relay and Blossom gates below
+            // admit only app peers, so without it nobody new could link.
             // Neighborhood links: check on each peer so "here now" is true.
             rt.spawn(crate::neighbor::service::keep_in_touch(
                 link_service.links.clone(),
             ));
+            rt.spawn(crate::neighbor::apps::keep_current(
+                link_service.links.clone(),
+                link_service.neighbors.clone(),
+                content.clone(),
+            ));
             let port = crate::auth_service::AUTH_PORT;
             let (listeners, unreachable) = crate::mesh_net::peer_listeners(port);
             for listener in listeners {
-                let content_for_auth = content.clone();
-                let links = Some(link_service.clone());
+                let links = link_service.clone();
                 rt.spawn(async move {
-                    if let Err(e) =
-                        crate::auth_service::serve_with_links(content_for_auth, links, listener)
-                            .await
-                    {
+                    if let Err(e) = crate::auth_service::serve(links, listener).await {
                         tracing::error!(error = %e, "auth service exited");
                     }
                 });
@@ -619,9 +614,9 @@ impl AppRuntime {
                 add_warning(
                     &mut mesh_warning,
                     format!(
-                        "Another app is using port {port} — Myco can't accept pairing \
-                         requests, so new peers won't be able to pair with this \
-                         device. ({e})"
+                        "Another app is using port {port} — Myco can't accept \
+                         invitations, so new people won't be able to join your \
+                         neighborhoods. ({e})"
                     ),
                 );
             }
@@ -630,13 +625,11 @@ impl AppRuntime {
                     tracing::info!("blossom: not serving, a custom blob store is configured");
                 }
                 Some(blobs) => {
-                    // Same paired-only gate for blobs: a mesh source must be a
-                    // current Circle member (loopback bypasses). Pairing never
-                    // touches Blossom, so there's no handshake exception here.
+                    // Same app-peer gate for blobs: a mesh source must be a
+                    // current app peer (loopback bypasses). Reads are granted
+                    // to every app peer; uploads are not, so the two are
+                    // answered from different flags on the peer's permissions.
                     let content_for_blob = content.clone();
-                    // Reads are granted to every paired peer; uploads are not, so
-                    // the two are answered from different flags on the peer's own
-                    // permission record (D10).
                     let access: myco_blossom::server::AccessFn = Arc::new(move |ip, op| match op {
                         myco_blossom::server::BlobOp::Read => content_for_blob.may_read_blobs(ip),
                         myco_blossom::server::BlobOp::Write => {
@@ -787,7 +780,8 @@ impl AppRuntime {
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     loop {
                         tick.tick().await;
-                        if node_live.load(Ordering::Relaxed) && !content.circle_npubs().is_empty() {
+                        if node_live.load(Ordering::Relaxed) && !content.app_peer_npubs().is_empty()
+                        {
                             for addr in content.retriable_library_addrs() {
                                 let content = content.clone();
                                 tokio::spawn(async move { content.open_site(addr, None).await });
@@ -806,7 +800,6 @@ impl AppRuntime {
             account: Some(account),
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
             napplet_updates: Default::default(),
-            napplet_mesh_limits: Arc::new(std::sync::RwLock::new(settings.napplet_mesh_limits())),
             intent_defaults: Arc::new(std::sync::RwLock::new(settings.intent_defaults.clone())),
             relay_hub,
             link_service: Some(link_service),
@@ -1031,9 +1024,6 @@ impl AppRuntime {
             napplet_review: Arc::new(std::sync::Mutex::new(None)),
             napplet_updates: Default::default(),
             intent_defaults: Default::default(),
-            napplet_mesh_limits: Arc::new(std::sync::RwLock::new(
-                crate::settings_store::Settings::default().napplet_mesh_limits(),
-            )),
             relay_hub: Arc::new(std::sync::Mutex::new(None)),
             link_service: None,
             neighbors: None,
@@ -1074,6 +1064,9 @@ impl AppRuntime {
             NativeAppAction::Tick => self.rev += 1,
             NativeAppAction::StartNode => {
                 self.start_node();
+                // The neighborhoods open with the node: app peers come from
+                // them, and nothing else opens them until a napplet asks.
+                self.refresh_app_peers();
                 self.rev += 1;
             }
             NativeAppAction::StopNode => {
@@ -1278,46 +1271,6 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
-            NativeAppAction::AddToCircle { npub, name } => {
-                if let Some(content) = &self.content {
-                    content.add_to_circle(&npub, &name);
-                }
-                self.rev += 1;
-            }
-            NativeAppAction::RemoveFromCircle { npub } => {
-                if let Some(content) = &self.content {
-                    content.remove_from_circle(&npub);
-                }
-                // Best-effort: tell the peer so they drop us too (if reachable).
-                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    rt.spawn(async move { content.send_unpair(&npub).await });
-                }
-                self.rev += 1;
-            }
-            NativeAppAction::SendPairRequest { npub, name, secret } => {
-                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    rt.spawn(async move { content.send_pair_request(&npub, &name, &secret).await });
-                }
-                self.rev += 1;
-            }
-            NativeAppAction::CancelPairInvite { npub } => {
-                if let Some(content) = self.content.as_ref() {
-                    content.forget_outbound_pair(&npub);
-                }
-                self.rev += 1;
-            }
-            NativeAppAction::AcceptPairRequest { npub, name } => {
-                if let (Some(content), Some(rt)) = (self.content.clone(), self.rt.as_ref()) {
-                    rt.spawn(async move { content.accept_pair_request(&npub, &name).await });
-                }
-                self.rev += 1;
-            }
-            NativeAppAction::DeclinePairRequest { npub } => {
-                if let Some(content) = &self.content {
-                    content.decline_pair_request(&npub);
-                }
-                self.rev += 1;
-            }
             NativeAppAction::SetOfflineOnly { enabled } => {
                 if let Some(content) = &self.content {
                     content.set_offline_only(enabled);
@@ -1363,33 +1316,6 @@ impl AppRuntime {
                 allowed,
             } => {
                 self.set_napplet_grant(&pointer, &domain, allowed);
-                self.rev += 1;
-            }
-            NativeAppAction::SetNappletMeshReach {
-                publish_ttl,
-                subscribe_ttl,
-            } => {
-                let mut settings = crate::settings_store::load(Path::new(&self.data_dir));
-                settings.napplet_mesh_publish_ttl =
-                    Some(publish_ttl.min(crate::settings_store::NAPPLET_MESH_PUBLISH_MAX));
-                settings.napplet_mesh_subscribe_ttl =
-                    Some(subscribe_ttl.min(crate::settings_store::NAPPLET_MESH_SUBSCRIBE_MAX));
-                let limits = settings.napplet_mesh_limits();
-                match crate::settings_store::save(Path::new(&self.data_dir), &settings) {
-                    Ok(()) => {
-                        // Live at once: the sink reads this per call.
-                        *self.napplet_mesh_limits.write().unwrap() = limits;
-                        tracing::info!(
-                            publish = limits.publish_ttl,
-                            subscribe = limits.subscribe_ttl,
-                            "settings: napplet mesh reach saved"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "settings: could not save napplet mesh reach");
-                        self.error = format!("Could not save the mesh reach setting: {e}");
-                    }
-                }
                 self.rev += 1;
             }
             NativeAppAction::SetCustomRelay { url } => {
@@ -1455,12 +1381,6 @@ impl AppRuntime {
                 }
                 self.rev += 1;
             }
-            NativeAppAction::SetDeviceName { name } => {
-                if let Some(content) = &self.content {
-                    content.set_device_name(&name);
-                }
-                self.rev += 1;
-            }
             NativeAppAction::SpeedtestPeer { npub } => {
                 self.start_speedtest(npub);
                 self.rev += 1;
@@ -1509,6 +1429,7 @@ impl AppRuntime {
             }
             NativeAppAction::EndLink { link_id } => {
                 self.end_link(link_id);
+                self.refresh_app_peers();
                 self.rev += 1;
             }
             NativeAppAction::SetNeighborhoodPolicy {
@@ -1536,6 +1457,7 @@ impl AppRuntime {
             }
             NativeAppAction::LeaveNeighborhood { neighborhood } => {
                 self.leave_neighborhood(&neighborhood);
+                self.refresh_app_peers();
                 self.rev += 1;
             }
             NativeAppAction::DropFromLink {
@@ -1543,6 +1465,20 @@ impl AppRuntime {
                 neighborhood,
             } => {
                 self.drop_from_link(link_id, neighborhood);
+                self.refresh_app_peers();
+                self.rev += 1;
+            }
+            NativeAppAction::SetNeighborhoodApps {
+                neighborhood,
+                enabled,
+            } => {
+                if let (Some(n), Some(id)) = (
+                    self.neighbors(),
+                    crate::neighbor::NeighborhoodId::from_hex(&neighborhood),
+                ) {
+                    n.set_apps(id, enabled);
+                }
+                self.refresh_app_peers();
                 self.rev += 1;
             }
             NativeAppAction::SetNeighborhoodBlobHops { neighborhood, hops } => {
@@ -1613,6 +1549,19 @@ impl AppRuntime {
 
     /// The device's neighborhoods, building the napplet host (which owns
     /// them) on first use.
+    /// Recompute the app peers from the links and neighborhoods now, rather
+    /// than at the next tick of [`crate::neighbor::apps::keep_current`].
+    fn refresh_app_peers(&mut self) {
+        let (Some(n), Some(svc), Some(content)) = (
+            self.neighbors(),
+            self.link_service.clone(),
+            self.content.clone(),
+        ) else {
+            return;
+        };
+        crate::neighbor::apps::refresh(&n, &svc.links, &content);
+    }
+
     fn neighbors(&mut self) -> Option<Arc<crate::neighbor::Neighbors>> {
         if self.neighbors.is_none() {
             let _ = self.napplet_context();
@@ -2646,14 +2595,6 @@ impl AppRuntime {
                 account.bridge(),
             ));
 
-            let mesh: Arc<dyn myco_napplet_runtime::MeshSink> =
-                Arc::new(crate::napplet::NappletMeshSink::new(
-                    self.relay_hub.clone(),
-                    content.clone(),
-                    self.napplet_mesh_limits.clone(),
-                    self.node_live.clone(),
-                ));
-
             // NAP-NEIGHBOR: neighborhoods keep their events here, apart from
             // the user's own relay.
             let neighborhood_store: Arc<dyn nsite_deck::RelayBackend> =
@@ -2700,7 +2641,6 @@ impl AppRuntime {
                 content.relay(),
                 self.relay_hub.clone(),
                 content.clone(),
-                self.identity.own_npub.clone(),
             ));
 
             // NAP-UPLOAD: signs as the same user, finds their servers through
@@ -2720,7 +2660,6 @@ impl AppRuntime {
                     // service, so the pool, offline-only and the internet
                     // breaker are decided in one place.
                     sink: outbox.clone(),
-                    mesh,
                     // NAP-NEIGHBOR: nothing a napplet asks to change goes
                     // through until the shell can ask.
                     neighbor: neighbors.clone(),
@@ -3128,25 +3067,15 @@ impl AppRuntime {
         // (RESEARCH.md Pitfall 5) — fetched once here and reused for both the
         // peers merge below and the AppState fields further down, so the merge
         // adds no new lock acquisitions.
-        let circle = self
+        let app_peers = self
             .content
             .as_ref()
-            .map(|c| c.circle_snapshot())
+            .map(|c| c.app_peers_snapshot())
             .unwrap_or_default();
         let reachable_npubs = self
             .content
             .as_ref()
             .map(|c| c.reachable_npubs())
-            .unwrap_or_default();
-        let outbound_pairs = self
-            .content
-            .as_ref()
-            .map(|c| c.outbound_pairs_snapshot())
-            .unwrap_or_default();
-        let pending_pair_requests = self
-            .content
-            .as_ref()
-            .map(|c| c.pending_pairs_snapshot())
             .unwrap_or_default();
 
         // Lane-origin overrides (npub → observed lane, e.g. "aware" vs the
@@ -3186,9 +3115,7 @@ impl AppRuntime {
             &peer_views,
             &ble_peers,
             &ble_adverts,
-            &circle,
-            &pending_pair_requests,
-            &outbound_pairs,
+            &app_peers,
             &reachable_npubs,
             &lane_by_npub,
             &crate::advert_names::snapshot(),
@@ -3208,16 +3135,16 @@ impl AppRuntime {
 
             // Backlog resync is driven by the keepwarm loop's reconnect edge
             // (`Content::keepwarm_tick`), which recreates each in-app subscription
-            // against a Circle peer as it (re)appears — direct *or* multi-hop.
+            // against an app peer as it (re)appears — direct *or* multi-hop.
             if let Some(rt) = self.rt.as_ref() {
-                // Retry not-ready downloads whenever the Circle is non-empty.
+                // Retry not-ready downloads whenever there are app peers.
                 // open_site(_, None) tries every member — hop count is FIPS's
                 // problem, and an unreachable one costs a bounded dial then backs
                 // off — and `retriable_library_addrs` skips sites already syncing,
                 // so this re-tries about once per attempt-duration (not every
                 // poll), and keeps trying as a flaky session settles instead of
                 // firing once on the connect edge and going quiet.
-                if !content.circle_npubs().is_empty() {
+                if !content.app_peer_npubs().is_empty() {
                     for addr in content.retriable_library_addrs() {
                         let content = content.clone();
                         rt.spawn(async move { content.open_site(addr, None).await });
@@ -3244,15 +3171,6 @@ impl AppRuntime {
                 .collect(),
             account: self.account.as_ref().map(|a| a.view()).unwrap_or_default(),
             intent_handlers: self.intent_views(),
-            napplet_mesh_reach: {
-                let limits = *self.napplet_mesh_limits.read().unwrap();
-                crate::state::NappletMeshReachView {
-                    publish_ttl: limits.publish_ttl,
-                    publish_max: crate::settings_store::NAPPLET_MESH_PUBLISH_MAX,
-                    subscribe_ttl: limits.subscribe_ttl,
-                    subscribe_max: crate::settings_store::NAPPLET_MESH_SUBSCRIBE_MAX,
-                }
-            },
             identity: self.identity.clone(),
             node: NodeStatus {
                 running: self.node_running,
@@ -3317,10 +3235,8 @@ impl AppRuntime {
                 .as_ref()
                 .map(|c| c.cache_view())
                 .unwrap_or_else(CacheView::empty),
-            circle,
+            app_peers,
             reachable_npubs,
-            outbound_pairs,
-            pending_pair_requests,
             offline_only: self
                 .content
                 .as_ref()

@@ -32,6 +32,14 @@ pub struct Policy {
     /// the user's own devices.
     #[serde(default)]
     pub blob_hops: u8,
+    /// Whether Myco fetches apps and updates from people here, and serves
+    /// them its own. On by default.
+    #[serde(default = "yes")]
+    pub apps: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Policy {
@@ -41,6 +49,7 @@ impl Default for Policy {
             backlog_hops: 2,
             pass_on: true,
             blob_hops: 0,
+            apps: true,
         }
     }
 }

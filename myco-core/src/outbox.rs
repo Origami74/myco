@@ -1,19 +1,13 @@
 //! NAP-OUTBOX's two seams over Myco's world: relay plans from NIP-65 lists in
-//! the local store, and lane I/O over the store, the Circle relay pool and the
-//! internet.
+//! the local store, and lane I/O over the store and the internet.
 //!
-//! The three lanes are what make the outbox model work with no internet
-//! (design §7.4): a kind 10002 can name `ws://<npub>.fips:4870` beside `wss://`
-//! relays, and a napplet written for the open web reads a Circle member's
-//! notes from their phone across the room by the same NIP-65 logic it would
-//! use anywhere. A mesh lane is a directed connection to that one relay — the
-//! relay model — never the Circle flood, which is NAP-MESH's.
+//! Two lanes: this device's relay and internet relays. A `.fips` URL in a
+//! relay list (a peer's relay over the mesh) mints no lane — what people
+//! nearby share travels through NAP-NEIGHBOR, not through a napplet's relay
+//! plan.
 //!
 //! Policy, in one place:
 //!
-//! - A mesh relay is reachable only if its npub is a Circle member. Anyone
-//!   else's `.fips` URL in a relay list is dropped from the plan.
-//! - Our own mesh relay is never a lane: the local relay *is* it.
 //! - Internet relays are dropped when "offline only" is on.
 //! - An author with no relay list gets the configured relays, and the plan
 //!   says so (`missing_authors`, `source: fallback`).
@@ -33,8 +27,8 @@ use myco_napplet_runtime::seams::{
 use crate::content::Content;
 use crate::mesh_relay::RelayHub;
 
-/// How long a one-shot pull (a lane past the stream bound, a mesh lane's
-/// re-pull) waits for its lanes.
+/// How long a one-shot pull (a lane past the stream bound) waits for its
+/// lanes.
 const PULL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a plan waits for missing relay lists before falling back. Paid
@@ -45,8 +39,8 @@ const LIST_FETCH_TIMEOUT: Duration = crate::ip_source::LIST_FETCH_TIMEOUT;
 /// A subscription keeps at most this many relay connections open per
 /// napplet, and the whole app at most [`MAX_STREAMS`]. Lanes past either
 /// bound get a one-shot pull instead: they backfill, and live events reach
-/// the napplet through the lanes that do stream, the Circle flood, and its
-/// own next subscription.
+/// the napplet through the lanes that do stream and its own next
+/// subscription.
 const MAX_STREAMS_PER_NAPPLET: usize = 16;
 const MAX_STREAMS: usize = 64;
 
@@ -60,13 +54,6 @@ const STREAM_BACKOFF_FIRST: Duration = Duration::from_secs(5);
 const STREAM_BACKOFF_FIRST: Duration = Duration::from_millis(200);
 const STREAM_BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
 const STREAM_HEALTHY_AFTER: Duration = Duration::from_secs(60);
-
-/// A mesh lane has no REQ of its own to hold open — the Circle pool keeps
-/// one connection per peer and answers requests over it — so a
-/// subscription re-asks it this often, with up to a third again as jitter.
-/// Events a Circle member publishes reach this device through the flood
-/// anyway; this catches what arrived at their relay from elsewhere.
-const MESH_REPULL_EVERY: Duration = Duration::from_secs(45);
 
 /// On reconnecting, ask only for what is newer than this far before the
 /// last connection went down — clocks disagree, and a replayed event is
@@ -88,9 +75,6 @@ pub struct OutboxService {
     store: Arc<dyn RelayBackend>,
     hub: Arc<Mutex<Option<Arc<RelayHub>>>>,
     content: Arc<Content>,
-    /// This device's mesh npub, so its own `.fips` relay is recognised and
-    /// never dialled.
-    own_npub: String,
     /// The internet relays used as fallback and searched for relay lists.
     /// The defaults, unless a test says otherwise.
     configured: Vec<String>,
@@ -137,13 +121,11 @@ impl OutboxService {
         store: Arc<dyn RelayBackend>,
         hub: Arc<Mutex<Option<Arc<RelayHub>>>>,
         content: Arc<Content>,
-        own_npub: String,
     ) -> Self {
         Self {
             store: store.clone(),
             hub,
             content,
-            own_npub,
             configured: crate::ip_source::default_relays(),
             lists: Arc::new(crate::ip_source::AuthorOutbox::new(store.clone())),
             refreshing: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -191,7 +173,6 @@ impl OutboxService {
             store: self.store.clone(),
             hub: self.hub.clone(),
             content: self.content.clone(),
-            own_npub: self.own_npub.clone(),
             configured: self.configured.clone(),
             lists: self.lists.clone(),
             refreshing: self.refreshing.clone(),
@@ -273,9 +254,7 @@ impl OutboxService {
     /// - the configured relays and the indexers, through [`AuthorOutbox`] —
     ///   unless offline only or the internet looks down;
     /// - the relays the napplet named (`hints`), through the lanes, so a
-    ///   name that resolves to a private address is refused as always;
-    /// - every Circle member's mesh relay: the people around the user are
-    ///   exactly who would have seen a friend's list.
+    ///   name that resolves to a private address is refused as always.
     ///
     /// An author still without a list is remembered as a miss only when the
     /// napplet named no relays (they may be the only place it is) and every
@@ -295,15 +274,7 @@ impl OutboxService {
                 }
                 out
             };
-        let mut lanes: Vec<RelayLane> = hints.to_vec();
-        for npub in self.content.circle_npubs() {
-            if npub != self.own_npub {
-                lanes.push(RelayLane::Mesh {
-                    url: crate::ip_source::mesh_relay_url(&npub),
-                });
-            }
-        }
-        let lanes = remote_lanes(lanes);
+        let lanes = remote_lanes(hints.to_vec());
         let filters: Vec<Filter> = authors
             .chunks(crate::ip_source::LIST_AUTHORS_PER_FILTER)
             .map(|chunk| {
@@ -417,10 +388,6 @@ impl OutboxService {
         match lane {
             RelayLane::Local => true,
             RelayLane::Internet { .. } => !self.content.internet_looks_down(),
-            RelayLane::Mesh { url } => match mesh_relay_npub(url) {
-                Some(npub) => npub != self.own_npub && self.content.circle_npubs().contains(&npub),
-                None => false,
-            },
         }
     }
 
@@ -519,28 +486,6 @@ impl OutboxService {
         }
         match lane {
             RelayLane::Local => self.store.query(filters).await.ok(),
-            RelayLane::Mesh { url } => {
-                // The pool dials the URL rebuilt from the npub, never the
-                // lane's string: a mesh URL is an address *by name*, and the
-                // name is all that is taken from it.
-                let npub = mesh_relay_npub(url)?;
-                let raw: Vec<serde_json::Value> = filters
-                    .iter()
-                    .filter_map(|f| serde_json::to_value(f).ok())
-                    .collect();
-                let events = self
-                    .content
-                    .peer_relays()
-                    .request(
-                        &npub,
-                        &crate::ip_source::mesh_relay_url(&npub),
-                        raw,
-                        timeout,
-                    )
-                    .await;
-                // Verified by the pool at ingress.
-                Some(events)
-            }
             RelayLane::Internet { url } => {
                 // On the skip list: finished, nothing, at once — not even
                 // resolved. See `relay_health`.
@@ -593,23 +538,6 @@ impl OutboxService {
         }
         match lane {
             RelayLane::Local => self.accept_local(event.clone()).await.is_ok(),
-            RelayLane::Mesh { url } => {
-                let Some(npub) = mesh_relay_npub(url) else {
-                    return false;
-                };
-                let pool = self.content.peer_relays();
-                // The push plane is fire-and-forget over the pooled connection,
-                // so "accepted" can only honestly mean "there is a connection to
-                // put it on". A peer in dial backoff gets a false, not a queue.
-                if !pool.connected_npubs().contains(&npub) {
-                    return false;
-                }
-                let Ok(frame) = serde_json::to_string(&serde_json::json!(["EVENT", event])) else {
-                    return false;
-                };
-                pool.send(&npub, &crate::ip_source::mesh_relay_url(&npub), frame);
-                true
-            }
             RelayLane::Internet { url } => {
                 if crate::relay_health::is_skipped(url) {
                     return false;
@@ -724,9 +652,8 @@ const POOL_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// NAP-RELAY's `relay.publish` lands here: the shell's **relay pool** — this
 /// device's own relay, and the configured internet relays when reachable.
 ///
-/// Not the mesh. NAP-RELAY says relays, and the Circle flood is NAP-MESH's,
-/// with a hop budget the user caps — a `relay` grant must not be a back door
-/// to it. So the event is accepted unforwarded here and fanned out to the
+/// Not the mesh. NAP-RELAY says relays, and sharing with people nearby is
+/// NAP-NEIGHBOR's — a `relay` grant must not be a back door to it. So the event is accepted unforwarded here and fanned out to the
 /// internet lanes through the same [`LaneTransport`] NAP-OUTBOX uses, which
 /// is what applies offline-only and feeds the internet breaker.
 ///
@@ -866,8 +793,6 @@ impl OutboxService {
             let mut internet = Vec::new();
             for lane in listed.into_iter().filter(|l| self.allowed(l)) {
                 match lane {
-                    // Mesh lanes are the Circle's, one pooled connection per
-                    // peer: always kept.
                     RelayLane::Internet { url } if direction == Direction::Read => {
                         internet.push(url)
                     }
@@ -1483,47 +1408,12 @@ impl OutboxService {
             let opened = tokio::time::Instant::now();
             let asked = filters_since(&filters, since);
             // `since` moves only once everything stored up to now has been
-            // heard — EOSE on a stream, an answer from a mesh re-pull. A
+            // heard — EOSE on a stream. A
             // connection that failed, or dropped before EOSE, leaves it
             // where it was, so nothing stored meanwhile is skipped.
             let heard_all_from =
                 nostr::Timestamp::now() - Duration::from_secs(RECONNECT_OVERLAP_SECS);
             match &lane {
-                RelayLane::Mesh { url } => {
-                    // Each event lands as the peer sends it; a pull that ends
-                    // before its deadline heard the peer out.
-                    if self.allowed(&lane) {
-                        if let Some(npub) = mesh_relay_npub(url) {
-                            let raw: Vec<serde_json::Value> = asked
-                                .iter()
-                                .filter_map(|f| serde_json::to_value(f).ok())
-                                .collect();
-                            let mut events = self.content.peer_relays().request_stream(
-                                &npub,
-                                &crate::ip_source::mesh_relay_url(&npub),
-                                raw,
-                                None,
-                            );
-                            let deadline = tokio::time::Instant::now() + PULL_TIMEOUT;
-                            let heard_out = loop {
-                                match tokio::time::timeout_at(deadline, events.recv()).await {
-                                    Ok(Some(event)) => {
-                                        if matches_any(&asked, &event) {
-                                            self.keep_pulled(std::slice::from_ref(&event)).await;
-                                        }
-                                    }
-                                    Ok(None) => break true,
-                                    Err(_) => break false,
-                                }
-                            };
-                            if heard_out {
-                                since = Some(heard_all_from);
-                            }
-                        }
-                    }
-                    tokio::time::sleep(MESH_REPULL_EVERY + jitter(MESH_REPULL_EVERY / 3)).await;
-                    continue;
-                }
                 RelayLane::Internet { url } if self.allowed(&lane) => {
                     // `since` moves only once a connection saw EOSE; a
                     // connection that ended sooner falls through to the
@@ -1869,14 +1759,6 @@ impl LaneTransport for OutboxService {
     }
 }
 
-/// The npub in a mesh relay URL, `ws://<npub>.fips:4870` — and `None` for
-/// anything that is not exactly that shape. One strict parser, shared with
-/// the runtime crate, so the lane a napplet names and the URL the pool dials
-/// cannot disagree.
-pub(crate) fn mesh_relay_npub(url: &str) -> Option<String> {
-    myco_napplet_runtime::seams::mesh_relay_npub(url)
-}
-
 /// The lanes a kind 10002 names for `direction`: a `["r", url]` tag with no
 /// marker is both, `read` and `write` markers are one each. NIP-65's marker
 /// is from the author's point of view, so what *we* read from is what they
@@ -1884,8 +1766,8 @@ pub(crate) fn mesh_relay_npub(url: &str) -> Option<String> {
 ///
 /// Every URL goes through the same gate a napplet's `options.relays` does:
 /// a relay list is signed by its author, not trusted, and a hostile one
-/// naming `ws://npub1peer.fips:4870@evil.example/` or a loopback address
-/// must mint no lane at all.
+/// naming a loopback address must mint no lane at all. A `.fips` URL (a
+/// peer's relay over the mesh) mints none either.
 pub(crate) fn relay_list_lanes(list: &Event, direction: Direction) -> Vec<RelayLane> {
     relay_list_urls(list, direction)
         .into_iter()
@@ -1975,10 +1857,7 @@ fn relay_list_tags(outbox: &[&str], inbox: &[&str]) -> anyhow::Result<Vec<nostr:
 /// Deliberately **not** this device's mesh relay. `ws://<device-npub>.fips`
 /// names the device key, and this event is signed by the user key: putting the
 /// one inside the other would publish the link D3 exists to avoid — the social
-/// identity tied to the hardware, in a signed event anyone could keep. The
-/// people who can reach this device over the mesh are Circle members, and they
-/// already reach its relay by policy (`OutboxService::allowed`), which needs no
-/// tag to say so.
+/// identity tied to the hardware, in a signed event anyone could keep.
 pub fn own_relay_list(keys: &nostr::Keys) -> anyhow::Result<Event> {
     let tags = relay_list_tags(&USER_OUTBOX_RELAYS, &USER_INBOX_RELAYS)?;
     Ok(nostr::EventBuilder::new(Kind::RelayList, "")
@@ -2005,70 +1884,24 @@ mod tests {
     use myco_napplet_runtime::seams::LaneTransport;
     use nostr::{EventBuilder, Keys, Tag};
 
+    /// A relay list is signed, not trusted: a `.fips` URL (a peer's relay
+    /// over the mesh, or userinfo on an internet host to the WebSocket
+    /// client) and a loopback address mint no lane at all.
     #[test]
-    fn a_mesh_relay_url_names_its_npub() {
-        assert_eq!(
-            mesh_relay_npub("ws://npub1abc.fips:4870").as_deref(),
-            Some("npub1abc")
-        );
-        assert_eq!(
-            mesh_relay_npub("ws://npub1abc.fips").as_deref(),
-            Some("npub1abc")
-        );
-        assert_eq!(mesh_relay_npub("wss://relay.damus.io"), None);
-        assert_eq!(mesh_relay_npub("ws://evil.fips:4870"), None);
-    }
-
-    /// A relay list is signed, not trusted. A `.fips` URL with userinfo is
-    /// userinfo on an internet host to the WebSocket client, and a wrong port
-    /// is the peer's Blossom: neither may become a lane the pool would dial
-    /// as the peer's relay (H2 of the PR #52 review).
-    #[test]
-    fn a_hostile_relay_list_cannot_name_a_userinfo_mesh_url() {
+    fn a_relay_list_names_no_mesh_or_private_lane() {
         let keys = Keys::generate();
         let hostile = EventBuilder::new(Kind::RelayList, "")
             .tags([
                 Tag::parse(["r", "ws://npub1peer.fips:4870@evil.example/"]).unwrap(),
                 Tag::parse(["r", "ws://npub1peer.fips:24243"]).unwrap(),
                 Tag::parse(["r", "ws://npub1peer.fips:4870/path"]).unwrap(),
+                Tag::parse(["r", "ws://npub1peer.fips"]).unwrap(),
                 Tag::parse(["r", "ws://127.0.0.1:4870"]).unwrap(),
             ])
             .sign_with_keys(&keys)
             .unwrap();
         assert_eq!(relay_list_lanes(&hostile, Direction::Read), Vec::new());
         assert_eq!(relay_list_lanes(&hostile, Direction::Write), Vec::new());
-
-        let honest = EventBuilder::new(Kind::RelayList, "")
-            .tags([Tag::parse(["r", "ws://npub1peer.fips"]).unwrap()])
-            .sign_with_keys(&keys)
-            .unwrap();
-        assert_eq!(
-            relay_list_lanes(&honest, Direction::Read),
-            vec![RelayLane::Mesh {
-                url: crate::ip_source::mesh_relay_url("npub1peer")
-            }],
-            "a bare .fips host is rebuilt as the canonical URL"
-        );
-    }
-
-    /// The runtime crate's parser and the core's builder are the two halves
-    /// of one address; if either drifts, a lane the napplet named would not
-    /// be the URL the pool dials.
-    #[test]
-    fn mesh_url_round_trips_between_crates() {
-        use myco_napplet_runtime::seams;
-        assert_eq!(
-            seams::mesh_relay_npub(&crate::ip_source::mesh_relay_url("npub1x")).as_deref(),
-            Some("npub1x")
-        );
-        assert_eq!(
-            seams::mesh_relay_url("npub1x"),
-            crate::ip_source::mesh_relay_url("npub1x")
-        );
-        assert_eq!(
-            mesh_relay_npub("ws://npub1peer.fips:4870@evil.example/"),
-            None
-        );
     }
 
     /// NIP-65 markers are the author's; ours are the reverse.
@@ -2095,9 +1928,6 @@ mod tests {
                 RelayLane::Internet {
                     url: "wss://they-write.example".into()
                 },
-                RelayLane::Mesh {
-                    url: "ws://npub1peer.fips:4870".into()
-                },
             ]
         );
         let write = relay_list_lanes(&list, Direction::Write);
@@ -2109,9 +1939,6 @@ mod tests {
                 },
                 RelayLane::Internet {
                     url: "wss://they-read.example".into()
-                },
-                RelayLane::Mesh {
-                    url: "ws://npub1peer.fips:4870".into()
                 },
             ]
         );
@@ -2222,10 +2049,10 @@ mod tests {
         Arc::new(Content::open(&dir).unwrap())
     }
 
-    /// NAP-RELAY: a relay publish goes to the relay pool, not the Circle. The
+    /// NAP-RELAY: a relay publish goes to the relay pool, not the mesh. The
     /// event is stored, this phone's live subscriptions hear it, and the
     /// gossiper is never handed it — a `relay` grant is not a back door to
-    /// the mesh flood that NAP-MESH gates behind the user's cap.
+    /// the mesh.
     #[tokio::test]
     async fn a_relay_publish_is_stored_and_shown_here_but_never_flooded() {
         use crate::mesh_relay::{Gossiper, Inbound};
@@ -2245,13 +2072,8 @@ mod tests {
         let count = Arc::new(Count(std::sync::Mutex::new(0)));
         let hub = RelayHub::new(store.clone(), Some(count.clone()));
         let mut live = hub.live_events();
-        let svc = OutboxService::new(
-            store.clone(),
-            Arc::new(Mutex::new(Some(hub))),
-            content,
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials();
+        let svc = OutboxService::new(store.clone(), Arc::new(Mutex::new(Some(hub))), content)
+            .allowing_private_dials();
 
         let keys = Keys::generate();
         let event = EventBuilder::text_note("to my relays")
@@ -2291,7 +2113,6 @@ mod tests {
             store.clone(),
             Arc::new(Mutex::new(Some(hub.clone()))),
             content,
-            "npub1me".to_string(),
         )
         .with_configured_relays(vec![url])
         .allowing_private_dials();
@@ -2366,13 +2187,8 @@ mod tests {
         });
 
         let content = scratch_content("quorum");
-        let svc = OutboxService::new(
-            content.relay(),
-            Arc::new(Mutex::new(None)),
-            content,
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials();
+        let svc = OutboxService::new(content.relay(), Arc::new(Mutex::new(None)), content)
+            .allowing_private_dials();
         let event = EventBuilder::text_note("gg")
             .sign_with_keys(&Keys::generate())
             .unwrap();
@@ -2438,13 +2254,8 @@ mod tests {
         });
 
         let content = scratch_content("quorum-one");
-        let svc = OutboxService::new(
-            content.relay(),
-            Arc::new(Mutex::new(None)),
-            content,
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials();
+        let svc = OutboxService::new(content.relay(), Arc::new(Mutex::new(None)), content)
+            .allowing_private_dials();
         let event = EventBuilder::text_note("gg")
             .sign_with_keys(&Keys::generate())
             .unwrap();
@@ -2498,13 +2309,8 @@ mod tests {
         });
 
         let content = scratch_content("quorum-required");
-        let svc = OutboxService::new(
-            content.relay(),
-            Arc::new(Mutex::new(None)),
-            content,
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials();
+        let svc = OutboxService::new(content.relay(), Arc::new(Mutex::new(None)), content)
+            .allowing_private_dials();
         let event = EventBuilder::text_note("gg")
             .sign_with_keys(&Keys::generate())
             .unwrap();
@@ -2553,13 +2359,8 @@ mod tests {
         });
 
         let content = scratch_content("quorum-required-silent");
-        let svc = OutboxService::new(
-            content.relay(),
-            Arc::new(Mutex::new(None)),
-            content,
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials();
+        let svc = OutboxService::new(content.relay(), Arc::new(Mutex::new(None)), content)
+            .allowing_private_dials();
         let event = EventBuilder::text_note("gg")
             .sign_with_keys(&Keys::generate())
             .unwrap();
@@ -2604,14 +2405,9 @@ mod tests {
 
         let (remote, url) = mock_relay().await;
         let content = scratch_content("sink-pool");
-        let svc = OutboxService::new(
-            content.relay(),
-            Arc::new(Mutex::new(None)),
-            content.clone(),
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials()
-        .with_configured_relays(vec![url.clone()]);
+        let svc = OutboxService::new(content.relay(), Arc::new(Mutex::new(None)), content.clone())
+            .allowing_private_dials()
+            .with_configured_relays(vec![url.clone()]);
         let keys = Keys::generate();
         let event = EventBuilder::text_note("hello internet")
             .sign_with_keys(&keys)
@@ -2641,14 +2437,9 @@ mod tests {
 
         // An unreachable relay is a log line, not an error the napplet sees.
         content.set_offline_only(false);
-        let dead = OutboxService::new(
-            content.relay(),
-            Arc::new(Mutex::new(None)),
-            content,
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials()
-        .with_configured_relays(vec!["ws://127.0.0.1:1".to_string()]);
+        let dead = OutboxService::new(content.relay(), Arc::new(Mutex::new(None)), content)
+            .allowing_private_dials()
+            .with_configured_relays(vec!["ws://127.0.0.1:1".to_string()]);
         dead.accept(event).await.unwrap();
     }
 
@@ -2662,14 +2453,9 @@ mod tests {
         let content = Arc::new(Content::open(&dir).unwrap());
         let store = content.relay();
         let (_remote, url) = mock_relay().await;
-        let svc = OutboxService::new(
-            store.clone(),
-            Arc::new(Mutex::new(None)),
-            content.clone(),
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials()
-        .with_configured_relays(vec![url.clone()]);
+        let svc = OutboxService::new(store.clone(), Arc::new(Mutex::new(None)), content.clone())
+            .allowing_private_dials()
+            .with_configured_relays(vec![url.clone()]);
 
         let alice = Keys::generate();
         let list = EventBuilder::new(Kind::RelayList, "")
@@ -2693,7 +2479,7 @@ mod tests {
                     url: "wss://alice.example".into()
                 }
             ],
-            "a stranger's mesh relay and our own must be dropped"
+            "a mesh relay is never a lane, a stranger's or our own"
         );
 
         let nobody = Keys::generate();
@@ -2726,12 +2512,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(Content::open(&dir).unwrap());
         let store = content.relay();
-        let svc = OutboxService::new(
-            store.clone(),
-            Arc::new(Mutex::new(None)),
-            content.clone(),
-            "npub1me".to_string(),
-        );
+        let svc = OutboxService::new(store.clone(), Arc::new(Mutex::new(None)), content.clone());
 
         let me = Keys::generate();
         let writes = [
@@ -2779,14 +2560,9 @@ mod tests {
         let content = Arc::new(Content::open(&dir).unwrap());
         let store = content.relay();
         let (remote, url) = mock_relay().await;
-        let svc = OutboxService::new(
-            store.clone(),
-            Arc::new(Mutex::new(None)),
-            content.clone(),
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials()
-        .with_configured_relays(vec![url.clone()]);
+        let svc = OutboxService::new(store.clone(), Arc::new(Mutex::new(None)), content.clone())
+            .allowing_private_dials()
+            .with_configured_relays(vec![url.clone()]);
 
         // Alice's list lives only on the internet relay.
         let alice = Keys::generate();
@@ -2842,14 +2618,9 @@ mod tests {
         let content = Arc::new(Content::open(&dir).unwrap());
         let store = content.relay();
         let (remote, url) = mock_relay().await;
-        let svc = OutboxService::new(
-            store.clone(),
-            Arc::new(Mutex::new(None)),
-            content.clone(),
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials()
-        .with_configured_relays(vec![url.clone()]);
+        let svc = OutboxService::new(store.clone(), Arc::new(Mutex::new(None)), content.clone())
+            .allowing_private_dials()
+            .with_configured_relays(vec![url.clone()]);
 
         let alice = Keys::generate();
         let old = EventBuilder::new(Kind::RelayList, "")
@@ -2902,13 +2673,8 @@ mod tests {
         let store = content.relay();
         let hub = RelayHub::new(store.clone(), None);
         let mut live = hub.live_events();
-        let svc = OutboxService::new(
-            store.clone(),
-            Arc::new(Mutex::new(Some(hub))),
-            content,
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials();
+        let svc = OutboxService::new(store.clone(), Arc::new(Mutex::new(Some(hub))), content)
+            .allowing_private_dials();
 
         let remote = Arc::new(myco_relay::RelayStore::in_memory());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2963,13 +2729,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("myco-outbox-breaker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(Content::open(&dir).unwrap());
-        let svc = OutboxService::new(
-            content.relay(),
-            Arc::new(Mutex::new(None)),
-            content.clone(),
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials();
+        let svc = OutboxService::new(content.relay(), Arc::new(Mutex::new(None)), content.clone())
+            .allowing_private_dials();
         let dead = RelayLane::Internet {
             url: "ws://myco-breaker-test.invalid".to_string(),
         };
@@ -3018,7 +2779,6 @@ mod tests {
             store.clone(),
             Arc::new(Mutex::new(Some(hub.clone()))),
             content,
-            "npub1me".to_string(),
         )
         .with_configured_relays(configured)
         .allowing_private_dials();
@@ -3749,7 +3509,7 @@ mod tests {
     }
 
     /// An author whose relay list is only on an indexer — not on any
-    /// configured relay, not in the Circle — is planned onto the write
+    /// configured relay — is planned onto the write
     /// relays that list names.
     #[tokio::test]
     async fn a_list_found_only_on_an_indexer_plans_the_authors_relays() {
@@ -3959,13 +3719,8 @@ mod tests {
         crate::relay_health::current()
             .failed(&hung, crate::relay_health::Failure::Refused("HTTP 403"));
         let content = scratch_content("skipped-lane");
-        let svc = OutboxService::new(
-            content.relay(),
-            Arc::new(Mutex::new(None)),
-            content.clone(),
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials();
+        let svc = OutboxService::new(content.relay(), Arc::new(Mutex::new(None)), content.clone())
+            .allowing_private_dials();
 
         let started = std::time::Instant::now();
         let answers = svc
@@ -3997,13 +3752,8 @@ mod tests {
         crate::relay_health::reset();
         let (addr, _) = crate::relay_health::tests::answering(502).await;
         let content = scratch_content("breaker-502");
-        let svc = OutboxService::new(
-            content.relay(),
-            Arc::new(Mutex::new(None)),
-            content.clone(),
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials();
+        let svc = OutboxService::new(content.relay(), Arc::new(Mutex::new(None)), content.clone())
+            .allowing_private_dials();
         let answers = svc
             .query(
                 &[RelayLane::Internet {
@@ -4165,12 +3915,7 @@ mod tests {
     #[tokio::test]
     async fn an_internet_lane_that_resolves_private_is_not_dialled() {
         let content = scratch_content("private-dial");
-        let svc = OutboxService::new(
-            content.relay(),
-            Arc::new(Mutex::new(None)),
-            content,
-            "npub1me".to_string(),
-        );
+        let svc = OutboxService::new(content.relay(), Arc::new(Mutex::new(None)), content);
         let keys = Keys::generate();
         let note = EventBuilder::text_note("stays home")
             .sign_with_keys(&keys)
@@ -4243,13 +3988,8 @@ mod tests {
         let store = content.relay();
         let relay = content.relay_store().unwrap();
         let cache = content.event_cache();
-        let svc = OutboxService::new(
-            store.clone(),
-            Arc::new(Mutex::new(None)),
-            content,
-            "npub1me".to_string(),
-        )
-        .allowing_private_dials();
+        let svc = OutboxService::new(store.clone(), Arc::new(Mutex::new(None)), content)
+            .allowing_private_dials();
 
         let answers = svc
             .query(

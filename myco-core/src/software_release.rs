@@ -326,7 +326,7 @@ mod tests {
             serde_json::from_str(include_str!("software-release-fixture.json")).unwrap();
         let peer_npub = Keys::generate().public_key().to_bech32().unwrap();
         let url = crate::content::library_kind_tests::mesh_peer_holding(vec![real.clone()]).await;
-        content.add_to_circle(&peer_npub, "peer");
+        content.add_app_peer_for_test(&peer_npub, "peer");
         content.peer_relays().redirect(&peer_npub, &url);
 
         assert_eq!(check(Some(content.clone()), false).await.unwrap(), "0.11.0");

@@ -294,8 +294,8 @@ async fn publish(
     };
 
     // Accepted, not merely stored: this is what wakes local subscriptions and
-    // hands the event to the relay pool. The pool, not the mesh — flooding the
-    // Circle is NAP-MESH's, behind its own grant and the user's hop cap.
+    // hands the event to the relay pool. The pool, not the mesh — sharing
+    // with people nearby is NAP-NEIGHBOR's, behind its own grant.
     let sent = if as_is {
         ctx.sink.rebroadcast(signed.clone()).await
     } else {
@@ -371,8 +371,8 @@ async fn publish_encrypted(ctx: &NapContext, message: &Envelope) -> Envelope {
 
 /// Sign the `event` template on `message` as the user.
 ///
-/// Shared with NAP-MESH and NAP-OUTBOX, whose templates are NAP-RELAY's
-/// `EventTemplate` by declared wire dependency — one parser, so the three
+/// Shared with NAP-OUTBOX and NAP-LOCAL, whose templates are NAP-RELAY's
+/// `EventTemplate` by declared wire dependency — one parser, so the
 /// domains cannot disagree about what a napplet may and may not set. The rules
 /// are the module's: `kind`, `content` and `tags` are the napplet's; `pubkey`,
 /// `created_at`, `id` and `sig` are the runtime's — and the kinds in
@@ -1301,7 +1301,6 @@ mod tests {
             signer: base.signer.clone(),
             relay: base.relay.clone(),
             sink: sink.clone(),
-            mesh: base.mesh.clone(),
             neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             outbox: base.outbox.clone(),
             lanes: base.lanes.clone(),
@@ -1342,7 +1341,6 @@ mod tests {
             signer: base.signer.clone(),
             relay: base.relay.clone(),
             sink: sink.clone(),
-            mesh: base.mesh.clone(),
             neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             outbox: base.outbox.clone(),
             lanes: base.lanes.clone(),
@@ -1418,7 +1416,6 @@ mod tests {
             signer: base.signer.clone(),
             relay: base.relay.clone(),
             sink: sink.clone(),
-            mesh: base.mesh.clone(),
             neighbor: std::sync::Arc::new(crate::nap::neighbor::NoNeighborhoods),
             outbox: base.outbox.clone(),
             lanes: base.lanes.clone(),

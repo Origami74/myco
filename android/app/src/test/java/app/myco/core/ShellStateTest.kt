@@ -46,8 +46,7 @@ class ShellStateTest {
         srttMs = srtt,
         rssi = rssi,
         psm = 0x80,
-        pairState = "paired",
-        inCircle = true,
+        appPeer = true,
         role = "central",
         discoveryMs = drops * 3,
         sendDrops = drops,
@@ -58,7 +57,7 @@ class ShellStateTest {
     private fun snapshot(
         t: Long,
         peersOrder: Boolean = true,
-        circleName: String = "alice",
+        peerName: String = "alice",
         aliceState: String = "connected",
     ): AppState {
         val alice = peer("npub1alice", 1_000 + t, 10.0 + t, -60 - t.toInt(), t, 5 + t, state = aliceState)
@@ -92,9 +91,8 @@ class ShellStateTest {
                 eventCache = CacheTier(count = t, bytes = 50 * t, limit = 1_000_000),
                 blobCache = CacheTier(count = 2 * t, bytes = 70 * t, limit = 2_000_000),
             ),
-            circle = listOf(CircleContact("npub1alice", circleName, addedAt = 1)),
+            appPeers = listOf(AppPeer("npub1alice", peerName)),
             reachableNpubs = setOf("npub1alice"),
-            pendingPairRequests = emptyList(),
             offlineOnly = false,
             publicNodes = PublicNodes(
                 enabled = true,
@@ -121,10 +119,10 @@ class ShellStateTest {
 
     @Test
     fun aChangeTheShellDrawsStillShows() {
-        assertNotEquals(snapshot(t = 1).forShell(), snapshot(t = 1, circleName = "alicia").forShell())
+        assertNotEquals(snapshot(t = 1).forShell(), snapshot(t = 1, peerName = "alicia").forShell())
         assertNotEquals(
             snapshot(t = 1).forShell(),
-            snapshot(t = 2, aliceState = "paired-offline").forShell(),
+            snapshot(t = 2, aliceState = "app-peer-offline").forShell(),
         )
     }
 

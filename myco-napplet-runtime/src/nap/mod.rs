@@ -5,8 +5,8 @@
 //! Each is transport-neutral in the registry; what lands here is the runtime
 //! half of the web projection, reached through [`crate::dispatch`].
 //!
-//! `NAP-MESH` is Myco's own — the one capability with no standard equivalent,
-//! specified in the registry's form so it can be proposed there.
+//! `NAP-NEIGHBOR` and `NAP-LOCAL` are Myco's own, specified in the registry's
+//! form so they can be proposed there.
 
 pub mod encrypted;
 pub mod fs;
@@ -16,7 +16,6 @@ pub mod inc;
 pub mod intent;
 pub mod link;
 pub mod local;
-pub mod mesh;
 pub mod neighbor;
 pub mod outbox;
 pub mod relay;
@@ -92,14 +91,14 @@ pub(crate) fn newest_per_slot(events: impl IntoIterator<Item = Event>) -> Vec<Ev
 }
 
 /// The domains that keep live subscriptions, each delivering `<domain>.event`.
-const SUBSCRIBING_DOMAINS: [&str; 3] = ["relay", "mesh", "outbox"];
+const SUBSCRIBING_DOMAINS: [&str; 2] = ["relay", "outbox"];
 
 /// Every frame a session should receive for an arriving event, across the
-/// domains that subscribe: `relay.event`, `mesh.event` and `outbox.event`.
+/// domains that subscribe: `relay.event` and `outbox.event`.
 ///
 /// Called for every event this device accepts — its own publishes and anything
-/// carried here from a peer — so a subscription behaves the same whichever
-/// side of the mesh an event came from. Empty when nothing matches, which is
+/// carried here from a peer — so a subscription behaves the same wherever
+/// an event came from. Empty when nothing matches, which is
 /// the common case and deliberately cheap.
 pub fn deliveries_for(session: &Session, event: &Event) -> Vec<Envelope> {
     let frames: Vec<Envelope> = SUBSCRIBING_DOMAINS

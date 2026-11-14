@@ -196,7 +196,7 @@ class SoftwareUpdates private constructor(context: Context) {
             val online = !meshOnly && hasInternet()
             if (!online && core == 0L) {
                 if (force) mutableState.update { it.copy(message =
-                    if (meshOnly) "Start the mesh to ask your Circle for updates"
+                    if (meshOnly) "Start the mesh to ask your neighbors for updates"
                     else "Connect to the internet to check for updates") }
                 return@run
             }

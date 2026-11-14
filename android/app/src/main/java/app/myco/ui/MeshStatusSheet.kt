@@ -37,7 +37,6 @@ import androidx.compose.ui.unit.dp
 import app.myco.ap.ApRadio
 import app.myco.aware.AwareRadio
 import app.myco.core.AppState
-import app.myco.core.CircleContact
 import app.myco.core.PeerDiagnostic
 import app.myco.ui.theme.StatusAlone
 import app.myco.ui.theme.StatusConnected
@@ -48,9 +47,7 @@ import kotlinx.coroutines.delay
 /**
  * The panel behind the peers pill: what the mesh is actually doing, right now.
  *
- * Two questions, in the order they get asked. **Circle** answers "can I reach
- * my people" — the reason the mesh exists. **Mesh** answers "why not" — one
- * block per radio lane, each saying whether that lane is looking for anyone and
+ * One block per radio lane, each saying whether that lane is looking for anyone and
  * which peers it is currently carrying.
  *
  * Every number here is observed, never inferred: a lane whose scan state the
@@ -284,7 +281,7 @@ private fun LaneBlock(
 /**
  * A peer as this panel states it: who, then the three link numbers. With
  * `showPaths`, every lane fips holds a path on sits between them, the active
- * one lit and standbys faded — for the Circle list, where a peer has one row.
+ * one lit and standbys faded — for a list where a peer has one row.
  *
  * The dot is the status — there is no status word. Green/teal/red across a
  * short list reads faster than the same three labels repeated down it.
@@ -292,7 +289,7 @@ private fun LaneBlock(
  * `standby` fades the whole row: inside a lane block it means "this lane has
  * a path to the peer but is not the one carrying it right now".
  *
- * `peer` being null (a Circle member reachable over relay with no direct row)
+ * `peer` being null (a peer reachable over relay with no direct row)
  * collapses to the identity line alone — the numbers are link facts and there
  * is no link to state them about.
  */
@@ -382,7 +379,7 @@ private fun shortLabel(s: String): String =
  * The name a peer told us, else its npub — which [shortLabel] trims to
  * `npub1abcde…wxyz`. This panel is about links, and a link to a device that
  * never told us its name is better stated by its key than by the two-word
- * placeholder [peerLabel] uses on the Circle tab: the placeholder looks like
+ * placeholder [peerLabel] uses elsewhere: the placeholder looks like
  * something the owner chose, and here that reads as a claim.
  */
 private fun sheetLabel(state: AppState, npub: String): String =

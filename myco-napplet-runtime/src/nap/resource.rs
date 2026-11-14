@@ -554,8 +554,8 @@ impl std::fmt::Display for HttpsUrlRefusal {
 ///   `169.254.169.254` metadata address), unique-local, CGNAT;
 /// - a name for this device or the LAN: `localhost`, `.local`, a dotless
 ///   name a LAN's DNS answers, `.internal`, `.lan`, `.home.arpa`;
-/// - a `.fips` mesh name, which reaches a peer by its key and is NAP-MESH's
-///   and `blossom:`'s, not the open web's;
+/// - a `.fips` mesh name, which reaches a peer by its key and is
+///   `blossom:`'s, not the open web's;
 /// - over [`MAX_URL_LEN`] bytes.
 ///
 /// [`validate_relay_url`]: crate::nap::outbox::validate_relay_url

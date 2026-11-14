@@ -45,20 +45,6 @@ pub struct Settings {
     /// minSdk of 29), Wi-Fi off on every launch so far, or a host build.
     pub aware_data_paths: Option<u8>,
 
-    /// How many hops a napplet's `mesh.publish` may travel — the user's cap on
-    /// NAP-MESH. `None` means the default, [`crate::mesh_wire::EVENT_TTL`].
-    ///
-    /// Persisted rather than held in memory because it is a promise the user
-    /// made to themselves about what apps may do, and one that must not quietly
-    /// reset to the default on the next launch.
-    pub napplet_mesh_publish_ttl: Option<u8>,
-
-    /// How many hops a napplet's `mesh.subscribe` backlog pull may travel.
-    /// `None` means the default, [`crate::mesh_relay::MAX_REQ_TTL`] — lower
-    /// than the publish default, because a flooded read costs more than a
-    /// flooded write.
-    pub napplet_mesh_subscribe_ttl: Option<u8>,
-
     /// The shell event cache's budget in bytes. `None` means the default,
     /// [`myco_cache::DEFAULT_EVENT_CACHE_BYTES`]. Persisted because the cache
     /// is opened, and its map sized, at startup.
@@ -83,15 +69,6 @@ pub const CACHE_MIN_BYTES: u64 = 16 * 1024 * 1024;
 /// The most a cache budget may be set to.
 pub const CACHE_MAX_BYTES: u64 = myco_cache::events::MAX_BUDGET;
 
-/// The most a user may allow a napplet publish to travel: the same number the
-/// mesh clamps any forwarded event to, so a higher setting could never take
-/// effect past the first hop and would only mislead.
-pub const NAPPLET_MESH_PUBLISH_MAX: u8 = crate::mesh_wire::EVENT_TTL;
-
-/// The most a user may allow a napplet subscribe pull to travel, for the same
-/// reason.
-pub const NAPPLET_MESH_SUBSCRIBE_MAX: u8 = crate::mesh_relay::MAX_REQ_TTL;
-
 impl Settings {
     /// The configured relay, ignoring an empty value. Trimmed, because a URL
     /// pasted on a phone routinely arrives with whitespace attached.
@@ -104,24 +81,6 @@ impl Settings {
         trimmed(self.custom_blossom_url.as_deref())
     }
 
-    /// The user's NAP-MESH caps: what was set, or the defaults, never above
-    /// what the mesh itself would honour. A settings file edited by hand to
-    /// say 200 reads as the maximum rather than as a promise the mesh breaks.
-    pub fn napplet_mesh_limits(&self) -> myco_napplet_runtime::MeshLimits {
-        myco_napplet_runtime::MeshLimits {
-            publish_ttl: self
-                .napplet_mesh_publish_ttl
-                .unwrap_or(NAPPLET_MESH_PUBLISH_MAX)
-                .min(NAPPLET_MESH_PUBLISH_MAX),
-            subscribe_ttl: self
-                .napplet_mesh_subscribe_ttl
-                .unwrap_or(NAPPLET_MESH_SUBSCRIBE_MAX)
-                .min(NAPPLET_MESH_SUBSCRIBE_MAX),
-        }
-    }
-}
-
-impl Settings {
     /// The cache budgets: what was set, or the defaults, within
     /// [`CACHE_MIN_BYTES`]..=[`CACHE_MAX_BYTES`].
     pub fn cache_limits(&self) -> crate::content::CacheLimits {
@@ -257,37 +216,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The NAP-MESH caps: defaults are the mesh's own numbers, a stored value
-    /// is honoured, and a value above what the mesh would forward reads as the
-    /// maximum rather than as a promise the mesh breaks at the first hop.
-    #[test]
-    fn napplet_mesh_caps_default_and_clamp() {
-        let defaults = Settings::default().napplet_mesh_limits();
-        assert_eq!(defaults.publish_ttl, crate::mesh_wire::EVENT_TTL);
-        assert_eq!(defaults.subscribe_ttl, crate::mesh_relay::MAX_REQ_TTL);
-        assert!(
-            defaults.subscribe_ttl < defaults.publish_ttl,
-            "a flooded read should default lower than a flooded write"
-        );
-
-        let set = Settings {
-            napplet_mesh_publish_ttl: Some(1),
-            napplet_mesh_subscribe_ttl: Some(0),
-            ..Default::default()
-        }
-        .napplet_mesh_limits();
-        assert_eq!((set.publish_ttl, set.subscribe_ttl), (1, 0));
-
-        let wild = Settings {
-            napplet_mesh_publish_ttl: Some(200),
-            napplet_mesh_subscribe_ttl: Some(200),
-            ..Default::default()
-        }
-        .napplet_mesh_limits();
-        assert_eq!(wild.publish_ttl, NAPPLET_MESH_PUBLISH_MAX);
-        assert_eq!(wild.subscribe_ttl, NAPPLET_MESH_SUBSCRIBE_MAX);
-    }
-
     /// Intent defaults survive a restart, and a file from before they existed
     /// reads as none.
     #[test]
@@ -316,22 +244,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A file written while NAP-MESH's hop caps were a setting still loads:
+    /// the keys are ignored, not an error.
     #[test]
-    fn napplet_mesh_caps_round_trip() {
-        let dir = tmp_dir("mesh-caps");
+    fn a_file_with_the_old_mesh_caps_still_loads() {
+        let dir = tmp_dir("old-mesh-caps");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        save(
-            &dir,
-            &Settings {
-                napplet_mesh_publish_ttl: Some(2),
-                napplet_mesh_subscribe_ttl: Some(1),
-                ..Default::default()
-            },
+        std::fs::write(
+            path_in(&dir),
+            br#"{"customRelayUrl":"ws://x","nappletMeshPublishTtl":2,"nappletMeshSubscribeTtl":1}"#,
         )
         .unwrap();
-        let limits = load(&dir).napplet_mesh_limits();
-        assert_eq!((limits.publish_ttl, limits.subscribe_ttl), (2, 1));
+        assert_eq!(load(&dir).relay_url().as_deref(), Some("ws://x"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

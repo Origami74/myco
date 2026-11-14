@@ -73,7 +73,6 @@ private val PART_TIER = mapOf(
     "relay" to Tier.ActsAsYou,
     "outbox" to Tier.ActsAsYou,
     "upload" to Tier.ActsAsYou,
-    "mesh" to Tier.Sensitive,
     "neighbor" to Tier.Sensitive,
     "fs" to Tier.Sensitive,
     "notify" to Tier.Sensitive,
@@ -101,9 +100,9 @@ private val GROUPS = listOf(
     ),
     PermissionGroup(
         "Nearby devices", Icons.Filled.WifiTethering,
-        "Post to and read from phones nearby and your neighborhoods.",
+        "Post to and read from your neighborhoods.",
         note = "Can read the private data your apps keep on this phone.",
-        domains = listOf("mesh", "neighbor"),
+        domains = listOf("neighbor"),
     ),
     PermissionGroup(
         "Files & media", Icons.Filled.Folder,

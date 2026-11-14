@@ -143,8 +143,8 @@ fun AppsScreen(
     var confirmForgetNapplet by remember { mutableStateOf<LibraryItem?>(null) }
 
     // Share Myco: the choice sheet, and the hotspot sheet it leads to. The
-    // hotspot is the Circle tab's one (HotspotService owns it); this only
-    // opens it worded for handing over the app.
+    // hotspot is HotspotService's; this only opens it worded for handing
+    // over the app.
     var shareMyco by remember { mutableStateOf(false) }
     var mycoHotspot by remember { mutableStateOf(false) }
     val hotspot by HotspotService.view.collectAsState()
@@ -271,7 +271,7 @@ fun AppsScreen(
                 else asker?.explain(SystemAsk.Hotspot)
             },
             onStop = { HotspotService.stop(context) },
-            // Handing over the app, not files: the Circle tab's sheet adds those.
+            // Handing over the app, not files.
             onShareFiles = null,
             onDismiss = { mycoHotspot = false },
             forMyco = true,
@@ -308,7 +308,6 @@ fun AppsScreen(
     shareFor?.let { target ->
         ShareQrSheet(
             target = target,
-            pendingRequestCount = state.pendingPairRequests.size,
             onDismiss = { shareFor = null },
         )
     }
@@ -1352,7 +1351,6 @@ internal data class Capability(val title: String, val detail: String)
 internal fun capabilityWording(domain: String): Capability = when (domain) {
     "relay" -> Capability("Relays", "Read and post as you on your relays, without asking each time. It can also read the private data your apps keep encrypted there")
     "outbox" -> Capability("Outbox", "Post as you to your relays and to other people's, and read from theirs. It can also read the private data your apps keep encrypted there")
-    "mesh" -> Capability("Mesh", "Post as you to phones nearby, and read what they share, without asking each time. It can also read the private data your apps keep encrypted on this phone")
     "neighbor" -> Capability("Neighborhoods", "See the neighborhoods you pick for it, and people nearby, and reach them through your other permissions. It can ask you to start, share or leave a neighborhood")
     "local" -> Capability("Keep on this phone", "Keep notes, and things it showed you, on this phone")
     "identity" -> Capability("Identity", "See your name and profile")
@@ -1439,26 +1437,18 @@ private fun AppSheet(
 private class ShareTarget(val uri: String, val title: String)
 
 /**
- * The **Share an app** surface — a bottom sheet styled like the pair "My code"
- * panel: the share QR plus a prominent tap-phones-together prompt. While it's
+ * The **Share an app** surface — a bottom sheet: the share QR plus a prominent tap-phones-together prompt. While it's
  * visible the device presents the share URI over NFC ([PairPresent.beginRaw]),
  * so a phone tap shares the app exactly like a scan would.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismiss: () -> Unit) {
+private fun ShareQrSheet(target: ShareTarget, onDismiss: () -> Unit) {
     // Emulate an NDEF tag carrying the share URI for as long as the sheet is up.
-    // The reader phone's OS reads it → MainActivity.openSharedNsite (pair + pull).
+    // The reader phone's OS reads it → MainActivity.openSharedNsite (pull).
     DisposableEffect(target.uri) {
         PairPresent.beginRaw(target.uri)
         onDispose { PairPresent.stop() }
-    }
-    // The recipient tapping/scanning sends a pair request back to us. Once one
-    // lands, the share has gone through — drop the sheet and let the normal
-    // accept prompt take over (it's suppressed while we're presenting).
-    val baselineRequests = remember { pendingRequestCount }
-    LaunchedEffect(pendingRequestCount) {
-        if (pendingRequestCount > baselineRequests) onDismiss()
     }
     val qr = remember(target.uri) { NsiteShare.qrBitmap(target.uri) }
     // Open fully expanded (not the half-height detent) so the whole thing — QR plus
@@ -1486,7 +1476,7 @@ private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismis
                     Text(target.title, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        "Scan to open this app — and pair with this device",
+                        "Scan to open this app",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall,
                         textAlign = TextAlign.Center,
@@ -1499,7 +1489,7 @@ private fun ShareQrSheet(target: ShareTarget, pendingRequestCount: Int, onDismis
             }
             Spacer(Modifier.height(12.dp))
             // The headline action: just bump phones (no scanning needed). The
-            // breathing NFC bubble mirrors the Circle tab's tap-to-connect hint.
+            // breathing NFC bubble mirrors the invite sheet's tap-to-connect hint.
             Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),

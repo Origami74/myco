@@ -50,7 +50,7 @@ import app.myco.ble.BleRadio
 import app.myco.ble.BleService
 import app.myco.BuildConfig
 import app.myco.core.AppCoreClient
-import app.myco.core.CircleContact
+import app.myco.core.AppPeer
 import app.myco.core.FileTransfer
 import app.myco.core.MycoCore
 import app.myco.core.NativeActions
@@ -787,7 +787,7 @@ class MainActivity : ComponentActivity() {
 
     /**
      * The Name step's answer: the field's content on "Use this name". The
-     * same path the first-run name dialog took: published everywhere by
+     * same path the first-run name dialog took: kept by
      * [applyDeviceName], and remembered as answered.
      */
     private fun chooseName(picked: String) {
@@ -992,7 +992,7 @@ class MainActivity : ComponentActivity() {
         externalShareUris.value = uris
     }
 
-    private fun preparePeerShare(uris: List<Uri>, peer: CircleContact) {
+    private fun preparePeerShare(uris: List<Uri>, peer: AppPeer) {
         if (uris.isEmpty()) return
         lifecycleScope.launch(Dispatchers.IO) {
             val outbox = File(filesDir, "myco-share-outbox").apply { mkdirs() }
@@ -1018,7 +1018,7 @@ class MainActivity : ComponentActivity() {
             // Only a local failure is worth a toast. Whether the offer actually
             // reached the peer is not known yet — the dispatch only queues the
             // work — so claiming success here told the user a send had happened
-            // even when the frame was dropped. The share sheet and the Circle
+            // even when the frame was dropped. The share sheet and the Neighbors
             // tab report the real outcome from the transfer's own status.
             if (sent == 0) {
                 withContext(Dispatchers.Main) {
@@ -1114,10 +1114,10 @@ class MainActivity : ComponentActivity() {
             ?: "application/octet-stream"
     }
 
-    // --- NFC tap-to-pair (numo-style: we are the card; the other phone reads) ---
+    // --- NFC tap-to-share (numo-style: we are the card; the other phone reads) ---
     //
-    // While the QR/present screen is open we claim foreground HCE for the standard
-    // NDEF AID and emulate a URI tag (myco://pair/…). The *other* phone needs no
+    // While an invite or share sheet is open we claim foreground HCE for the standard
+    // NDEF AID and emulate a URI tag (myco://link/…, myco://share/…). The *other* phone needs no
     // special mode: its OS tag dispatch reads the URI and delivers it to us as an
     // NDEF_DISCOVERED intent (see the manifest filter) → handleScannedText.
 
@@ -1150,27 +1150,25 @@ class MainActivity : ComponentActivity() {
             setupNearbyBlocked.value = false
             afterNearbyStep()
         }
-        // Presenting is owned by the Circle screen (it's the only place we emulate a
-        // card). Here we just (re)apply the current presenting state — re-claiming
-        // the foreground HCE service after a background→foreground while on Circle.
+        // Presenting is owned by the invite and share sheets (the only places we
+        // emulate a card). Here we just (re)apply the current presenting state —
+        // re-claiming the foreground HCE service after a background→foreground.
         PairPresent.onChanged = { runOnUiThread { updateNfcPresent() } }
         updateNfcPresent()
         // Foreground reader mode is owned by the add-app sheet (a modal window where
         // passive NDEF dispatch can't reach us). Re-apply its current state here.
         NfcReader.onChanged = { runOnUiThread { updateNfcReader() } }
         updateNfcReader()
-        // (Re)assert our memorable name into the core so pair events carry it. Done
-        // here (not just onCreate) in case the device identity wasn't ready yet at
-        // first launch; set_device_name is idempotent.
+        // Re-apply our memorable name (and the radio's node address). Done here
+        // (not just onCreate) in case the device identity wasn't ready yet at
+        // first launch.
         core.state().ownNpub.takeIf { it.isNotEmpty() }?.let {
             // Re-assert rather than set: passing the stored override back
-            // through resolves to the same name, and every publish site is
-            // idempotent. This is the belt to the rename sites' braces, for a
-            // radio that started after the last rename.
+            // through resolves to the same name.
             val stored = getSharedPreferences("myco_prefs", MODE_PRIVATE)
                 .getString("device_name", "").orEmpty()
-            // No name chosen yet (the setup popup's last step): the radios may
-            // already be up, so publish the pseudonym, not the phone's own name.
+            // No name chosen yet (the setup popup's last step): keep the
+            // pseudonym, not the phone's own name.
             if (prefs.getBoolean(PREF_NAME_CHOSEN, false) || stored.isNotBlank()) {
                 applyDeviceName(this, core, it, stored)
             } else {
@@ -1197,7 +1195,7 @@ class MainActivity : ComponentActivity() {
     /** Claim (or release) foreground HCE for our NDEF service while presenting.
      *  We deliberately do NOT suppress polling: leaving the default poll+listen
      *  loop on means a presenting phone also *reads* the other phone's tag, so two
-     *  phones in the pairing flow pair symmetrically on a single bump. */
+     *  presenting phones exchange codes on a single bump. */
     private fun updateNfcPresent() {
         val adapter = nfcAdapter ?: return
         val cardEmu = runCatching { CardEmulation.getInstance(adapter) }.getOrNull() ?: return
@@ -1243,13 +1241,6 @@ class MainActivity : ComponentActivity() {
         // without this an unrelated URL tag would fall through to openNsite(). Raw
         // nsite links are entered via QR/paste, never NFC.
         if (uri.scheme != NsiteShare.SCHEME) return
-        // While the file-share hotspot runs, a bump's only job is handing over
-        // the page URL — reading the peer's pair tag here would start a pairing
-        // anyway, from this side. Drop exactly that; hotspot off, pairing resumes.
-        if (PairPresent.hotspotActive && NsiteShare.parsePairUri(uri.toString()) != null) {
-            android.util.Log.i("MycoNfc", "ignoring pair tag — hotspot owns NFC")
-            return
-        }
         runOnUiThread { handleScannedText(uri.toString()) }
     }
 
@@ -1553,7 +1544,7 @@ class MainActivity : ComponentActivity() {
 
     // --- share QR: scan (in-app PairScreen) + deep-link ---
 
-    /** A scanned QR is a `myco://pair/…` pairing code, a `myco://share/…` shared
+    /** A scanned QR is a neighborhood invitation, a `myco://share/…` shared
      *  nsite, or a raw nsite link. */
     private fun handleScannedText(text: String) {
         // A neighborhood invitation: confirm first, then join.
@@ -1561,11 +1552,10 @@ class MainActivity : ComponentActivity() {
             app.myco.neighbor.IncomingInvite.pending.value = invite
             return
         }
+        // A pairing code from an older Myco: pairing is gone, neighborhoods replaced it.
         NsiteShare.parsePairUri(text)?.let { pair ->
-            // Mutual pairing: send a request to the scanned device; it pops up there
-            // to accept, and only then do both sides add each other.
-            core.dispatch(NativeActions.sendPairRequest(pair.npub, pair.name, pair.secret))
-            Toast.makeText(this, "Pair request sent to ${pair.name}…", Toast.LENGTH_SHORT).show()
+            val who = pair.name.ifEmpty { "them" }
+            Toast.makeText(this, "That's an old pairing code. Ask $who for a neighborhood invite.", Toast.LENGTH_LONG).show()
             return
         }
         NsiteShare.parseShareUri(text)?.let { info ->
@@ -1624,16 +1614,6 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (data.scheme != NsiteShare.SCHEME) return
-        // The passive-dispatch twin of the reader-mode gate in handleNfcTag:
-        // while the hotspot owns NFC, a peer's pair tag delivered by the OS as
-        // an NDEF intent must not start a pairing. QR-scanned and browsed
-        // myco:// links arrive with other actions and stay unaffected.
-        if (intent.action == NfcAdapter.ACTION_NDEF_DISCOVERED &&
-            PairPresent.hotspotActive && NsiteShare.parsePairUri(data.toString()) != null
-        ) {
-            android.util.Log.i("MycoNfc", "ignoring pair tap — hotspot owns NFC")
-            return
-        }
         handleScannedText(data.toString())
     }
 
@@ -1686,7 +1666,7 @@ class MainActivity : ComponentActivity() {
      * download ring, same as any other incoming app.
      *
      * No holder is passed because the link carries none by design (see [MycoLink]);
-     * `open_site` falls through every Circle peer and then the public source anyway.
+     * `open_site` falls through every app peer and then the public source anyway.
      */
     private fun openAppLink(link: MycoLink.AppLink) {
         val site = core.state().sites.firstOrNull { it.host == link.host }
@@ -1765,21 +1745,15 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Receive a shared nsite: add the sharer to your Circle and kick off its sync.
-     * We do **not** open the fullscreen view here — the app appears in the Apps
-     * drawer with a download ring (iOS-install style) and opens when tapped. The
-     * sharer's device becomes a paired peer we pull from (holder = their npub).
+     * Receive a shared nsite: kick off its sync from the sharer's device
+     * (holder = their npub). We do **not** open the fullscreen view here — the
+     * app appears in the Apps drawer with a download ring (iOS-install style)
+     * and opens when tapped.
      */
     private fun openSharedNsite(info: NsiteShare.ShareInfo) {
-        if (info.npub.isNotEmpty()) {
-            // Mutual pairing: request to pair (the sharer accepts on their device);
-            // the nsite can still download from them as a holder meanwhile.
-            core.dispatch(NativeActions.sendPairRequest(info.npub, info.name, info.secret))
-        }
-
-        // A shared napplet is fetched and reviewed, never installed outright.
-        // Pairing and installing are separate decisions: accepting a tap from
-        // someone should not also hand their app permission to post as you.
+        // A shared napplet is fetched and reviewed, never installed outright:
+        // accepting a tap from someone should not also hand their app
+        // permission to post as you.
         if (info.isNapplet) {
             // Their device first, then the internet — a napplet handed over in
             // a room with no internet still has to arrive.

@@ -47,7 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.myco.core.AppState
-import app.myco.core.CircleContact
+import app.myco.core.AppPeer
 import app.myco.core.FileTransfer
 import app.myco.share.ExternalShare
 import app.myco.share.SharedItem
@@ -62,8 +62,8 @@ import app.myco.ui.transferStage
 
 /**
  * The in-app destination after someone chooses Myco in Android's Sharesheet.
- * It intentionally shows only Circle contacts: a radio-nearby stranger is not
- * a valid file destination until both phones have paired.
+ * It intentionally shows only app peers: a radio-nearby stranger is not a
+ * valid file destination until you share a neighborhood with Apps on.
  *
  * The send never leaves this sheet. Picking a peer swaps the list for that
  * transfer's progress in place, so the whole flow — choose, send, watch, done —
@@ -76,17 +76,17 @@ fun PeerShareSheet(
     state: AppState,
     uris: List<Uri>,
     onDismiss: () -> Unit,
-    onShare: (CircleContact) -> Unit,
+    onShare: (AppPeer) -> Unit,
     onCancelTransfer: (FileTransfer) -> Unit = {},
-    /** Peer chosen before the files were — from a contact's sheet on the Circle tab. */
+    /** Peer chosen before the files were. */
     preselectedNpub: String? = null,
 ) {
     val context = LocalContext.current
     val items = remember(uris) { uris.map { ExternalShare.describe(context, it) } }
     var selectedNpub by remember(uris) { mutableStateOf(preselectedNpub) }
     // Once a send starts, this is the peer whose progress the sheet follows.
-    var sendingTo by remember(uris) { mutableStateOf<CircleContact?>(null) }
-    val selected = state.circle.firstOrNull { it.npub == selectedNpub }
+    var sendingTo by remember(uris) { mutableStateOf<AppPeer?>(null) }
+    val selected = state.appPeers.firstOrNull { it.npub == selectedNpub }
 
     val target = sendingTo
     val sending = target?.let { peer ->
@@ -124,7 +124,7 @@ fun PeerShareSheet(
                     )
                     Text(
                         if (target == null) {
-                            "Choose a paired phone"
+                            "Choose a neighbor"
                         } else {
                             "to ${peerLabel(state, target.npub)}"
                         },
@@ -144,7 +144,7 @@ fun PeerShareSheet(
             if (target == null) {
                 SharedItemsCard(items)
                 Spacer(Modifier.height(20.dp))
-                PairedPhonePicker(
+                AppPeerPicker(
                     state = state,
                     selectedNpub = selectedNpub,
                     onSelect = { selectedNpub = it },
@@ -268,18 +268,17 @@ private fun SendingProgress(
 }
 
 /**
- * The paired phones, reachable ones first. Offline members collapse behind one
- * line — the same shape the status sheet's Circle list uses, and for the same
- * reason: they all say "still paired, not here", which does not need a row each.
+ * The app peers, reachable ones first. Offline ones collapse behind one line:
+ * they all say "not here", which does not need a row each.
  * A file cannot reach them anyway until they come back.
  */
 @Composable
-private fun PairedPhonePicker(
+private fun AppPeerPicker(
     state: AppState,
     selectedNpub: String?,
     onSelect: (String) -> Unit,
 ) {
-    val (online, offline) = state.circle
+    val (online, offline) = state.appPeers
         .sortedBy { it.name.ifEmpty { it.npub }.lowercase() }
         .partition { contact ->
             contact.npub in state.reachableNpubs ||
@@ -288,24 +287,24 @@ private fun PairedPhonePicker(
     var showOffline by rememberSaveable { mutableStateOf(false) }
 
     Text(
-        "YOUR PAIRED PHONES",
+        "YOUR NEIGHBORS",
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontWeight = FontWeight.Bold,
         style = MaterialTheme.typography.labelMedium,
     )
     Spacer(Modifier.height(8.dp))
 
-    if (state.circle.isEmpty()) {
+    if (state.appPeers.isEmpty()) {
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
             color = MaterialTheme.colorScheme.surfaceVariant,
         ) {
             Column(Modifier.padding(16.dp)) {
-                Text("No paired phones yet", fontWeight = FontWeight.Bold)
+                Text("No neighbors yet", fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Pair a phone in Circle first. It will appear here as a share destination.",
+                    "Invite someone to a neighborhood with Apps on. They will appear here as a share destination.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -410,7 +409,7 @@ private fun SharedItemsCard(items: List<SharedItem>) {
 @Composable
 private fun PeerShareRow(
     state: AppState,
-    contact: CircleContact,
+    contact: AppPeer,
     selected: Boolean,
     online: Boolean,
     onClick: () -> Unit,
@@ -448,7 +447,7 @@ private fun PeerShareRow(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        if (online) "online · ready to receive" else "paired · currently offline",
+                        if (online) "online · ready to receive" else "currently offline",
                         color = if (online) {
                             StatusConnected
                         } else {

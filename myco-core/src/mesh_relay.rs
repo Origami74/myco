@@ -156,7 +156,7 @@ pub trait PeerGate: Send + Sync {
 }
 
 /// How soon the same event may be passed on again through the same door (a
-/// napplet's mesh or relay rebroadcast). A rebroadcast needs no signature, so
+/// napplet's relay rebroadcast). A rebroadcast needs no signature, so
 /// nothing else paces a napplet that loops on one.
 pub(crate) const PASS_ON_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -392,19 +392,6 @@ impl RelayHub {
     /// Returns whether this was the first sighting. A repeat is stored (idempotent)
     /// and goes no further.
     pub async fn accept_local(self: &Arc<Self>, event: Event) -> anyhow::Result<bool> {
-        self.accept_local_with_ttl(event, None).await
-    }
-
-    /// As [`RelayHub::accept_local`], originating at `ttl` hops instead of the
-    /// default when one is given. This is NAP-MESH's entry: the one place a
-    /// local publish carries a chosen budget, already clamped by the caller to
-    /// the user's cap. `Some(0)` stores and shows the event here and sends it
-    /// nowhere.
-    pub async fn accept_local_with_ttl(
-        self: &Arc<Self>,
-        event: Event,
-        ttl: Option<u8>,
-    ) -> anyhow::Result<bool> {
         // Novelty first and independent of the store, exactly as the socket
         // path does it — see the `EVENT` handler.
         let first_sighting = self.seen.insert(&event);
@@ -419,7 +406,7 @@ impl RelayHub {
         if let Some(gossip) = self.gossip.clone() {
             let inbound = Inbound {
                 origin: Origin::Local,
-                event_ttl: ttl,
+                event_ttl: None,
                 sender: None,
             };
             // Spawned, so a slow or unreachable peer never holds up the
@@ -427,30 +414,6 @@ impl RelayHub {
             tokio::spawn(async move { gossip.on_event(event, inbound).await });
         }
         Ok(true)
-    }
-
-    /// Keep an event this device already has (or may have) seen and flood it
-    /// again at `ttl` hops: a napplet passing on something it was shown
-    /// (NAP-LOCAL). Unlike [`RelayHub::accept_local_with_ttl`] the seen-set
-    /// does not stop it here — that is the point — though it is still
-    /// recorded, so the copy peers echo back is not flooded a third time.
-    /// Live subscriptions are woken only on a first sighting.
-    pub async fn rebroadcast_local(self: &Arc<Self>, event: Event, ttl: u8) -> anyhow::Result<()> {
-        self.claim_pass_on(&event, "mesh")?;
-        let first_sighting = self.seen.insert(&event);
-        self.store.publish(event.clone()).await?;
-        if first_sighting {
-            let _ = self.live.send(event.clone());
-        }
-        if let Some(gossip) = self.gossip.clone() {
-            let inbound = Inbound {
-                origin: Origin::Local,
-                event_ttl: Some(ttl),
-                sender: None,
-            };
-            tokio::spawn(async move { gossip.on_event(event, inbound).await });
-        }
-        Ok(())
     }
 
     /// Whether a napplet may pass `event` on through `door` now, recording it
@@ -479,8 +442,8 @@ impl RelayHub {
     /// Accept an event without forwarding it: dedupe, store, and wake live
     /// subscriptions — nothing to the gossiper.
     ///
-    /// A napplet's `relay.publish` is bound for relays, not the Circle
-    /// (NAP-RELAY; the mesh is NAP-MESH's), and still has to reach this
+    /// A napplet's `relay.publish` is bound for relays, not the mesh
+    /// (NAP-RELAY), and still has to reach this
     /// phone's own subscriptions. It is this device's own event, so it is
     /// kept; backlog pulled from elsewhere goes through
     /// [`RelayHub::accept_pulled`] instead.
@@ -1127,11 +1090,11 @@ mod tests {
         );
     }
 
-    /// A napplet's NAP-MESH publish rides the same route as any local event,
-    /// but with the budget it chose: the gossiper sees a local origin carrying
-    /// an explicit ttl, and the live bus sees the event once.
+    /// A local publish rides the same route as any local event: the gossiper
+    /// sees a local origin at the default budget, and the live bus sees the
+    /// event once.
     #[tokio::test]
-    async fn a_local_publish_carries_its_chosen_hop_budget() {
+    async fn a_local_publish_reaches_the_gossiper_once() {
         use std::sync::Mutex;
 
         struct Capture(Mutex<Vec<Inbound>>);
@@ -1148,11 +1111,8 @@ mod tests {
         let mut live = hub.live_events();
 
         let keys = Keys::generate();
-        let msg = chat_event(&keys, "mesh", "two hops please");
-        assert!(hub
-            .accept_local_with_ttl(msg.clone(), Some(2))
-            .await
-            .unwrap());
+        let msg = chat_event(&keys, "mesh", "to the gossiper");
+        assert!(hub.accept_local(msg.clone()).await.unwrap());
         assert_eq!(live.recv().await.unwrap().id, msg.id);
 
         let seen = tokio::time::timeout(Duration::from_secs(2), async {
@@ -1166,10 +1126,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(seen.origin, Origin::Local);
-        assert_eq!(seen.event_ttl, Some(2));
+        assert_eq!(seen.event_ttl, None);
 
-        // A repeat is stored, not re-flooded, whatever budget it names.
-        assert!(!hub.accept_local_with_ttl(msg, Some(3)).await.unwrap());
+        // A repeat is stored, not re-flooded.
+        assert!(!hub.accept_local(msg).await.unwrap());
         assert_eq!(capture.0.lock().unwrap().len(), 1);
 
         // The plain path still originates at the default: no budget named.
@@ -1186,48 +1146,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(seen.event_ttl, None);
-    }
-
-    /// A napplet's rebroadcast floods an event the hub has already seen,
-    /// where a plain local accept of it goes nowhere.
-    #[tokio::test]
-    async fn a_rebroadcast_floods_a_seen_event_again() {
-        use std::sync::Mutex;
-
-        struct Count(Mutex<Vec<Option<u8>>>);
-        #[async_trait]
-        impl Gossiper for Count {
-            async fn on_event(&self, _event: Event, inbound: Inbound) {
-                self.0.lock().unwrap().push(inbound.event_ttl);
-            }
-        }
-
-        let store = Arc::new(nsite_deck::testing::MemRelay::new());
-        let count = Arc::new(Count(Mutex::new(Vec::new())));
-        let hub = RelayHub::new(store.clone(), Some(count.clone()));
-        let keys = Keys::generate();
-        let msg = chat_event(&keys, "mesh", "worth passing on");
-        assert!(hub
-            .accept_local_with_ttl(msg.clone(), Some(1))
-            .await
-            .unwrap());
-        assert!(!hub
-            .accept_local_with_ttl(msg.clone(), Some(1))
-            .await
-            .unwrap());
-        hub.rebroadcast_local(msg.clone(), 2).await.unwrap();
-        // Again at once is the cooldown's to refuse (see the test below).
-        assert!(hub.rebroadcast_local(msg.clone(), 3).await.is_err());
-        for _ in 0..100 {
-            if count.0.lock().unwrap().len() >= 2 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let mut seen = count.0.lock().unwrap().clone();
-        seen.sort();
-        assert_eq!(seen, vec![Some(1), Some(2)]);
-        assert_eq!(store.query(&[Filter::new()]).await.unwrap().len(), 1);
     }
 
     /// A napplet cannot pass on an event from a peer whose events stop here,
@@ -1263,21 +1181,17 @@ mod tests {
         let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
         handle_client_frame(&frame, &hub, Origin::Mesh, peer, 1, &mut subs, &out).await;
         assert!(
-            hub.rebroadcast_local(theirs.clone(), 2).await.is_err(),
+            hub.claim_pass_on(&theirs, "relays").is_err(),
             "a napplet carried on what the peer's grant stopped"
         );
 
         let local = chat_event(&keys, "mesh", "fine to pass on");
-        hub.rebroadcast_local(local.clone(), 2).await.unwrap();
-        assert!(hub.rebroadcast_local(local.clone(), 2).await.is_err());
-        assert!(
-            hub.claim_pass_on(&local, "relays").is_ok(),
-            "doors share a cooldown"
-        );
+        hub.claim_pass_on(&local, "relays").unwrap();
+        assert!(hub.claim_pass_on(&local, "relays").is_err());
     }
 
     /// Backlog pulled from a peer wakes this device's live subscriptions —
-    /// which is how a napplet's mesh subscription hears it — and is never
+    /// which is how a napplet's subscription hears it — and is never
     /// handed to the gossiper: a pull answer is not a push frame.
     #[tokio::test]
     async fn a_pulled_event_is_delivered_live_and_forwarded_nowhere() {

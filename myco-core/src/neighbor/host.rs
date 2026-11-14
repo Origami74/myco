@@ -289,6 +289,16 @@ impl Neighbors {
         });
     }
 
+    /// Turn Apps on or off for a neighborhood: whether Myco fetches apps and
+    /// updates from people here.
+    pub fn set_apps(&self, id: NeighborhoodId, on: bool) {
+        self.change(|s| {
+            if let Some(r) = s.get_mut(id) {
+                r.policy.apps = on;
+            }
+        });
+    }
+
     /// Grant a neighborhood to a napplet, for tests.
     #[cfg(test)]
     pub fn grant_for_test(&self, id: NeighborhoodId, napplet: &NappletIdentity) {

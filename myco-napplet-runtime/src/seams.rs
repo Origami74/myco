@@ -12,11 +12,8 @@
 //! - [`Signer`] — the user key, which never leaves Rust. A napplet asks for a
 //!   signature; it never sees a key, and there is no seam through which it
 //!   could.
-//! - [`OutboxResolver`] — which relays an event should reach, across the three
-//!   lanes (local, mesh, internet).
-//! - [`MeshSink`] — hop-limited publish and pull over the device's mesh,
-//!   behind NAP-MESH. The runtime never sees a radio or a peer address; it
-//!   hands over an event and a hop budget, and asks for backlog with one.
+//! - [`OutboxResolver`] — which relays an event should reach, across the two
+//!   lanes (local, internet).
 //! - [`UploadSink`] — puts bytes on the user's Blossom servers, behind
 //!   NAP-UPLOAD. The runtime never sees a server or the authorization.
 //! - [`PickedBytes`] — the bytes of one file the user picked for a napplet,
@@ -64,115 +61,27 @@ pub trait Signer: Send + Sync {
     }
 }
 
-/// One relay a napplet's traffic can travel over.
-///
-/// The three lanes exist because "offline" is the wrong frame in a mesh: a
-/// NIP-65 relay list can name `ws://<npub>.fips:4870` beside `wss://` internet
-/// relays, and the outbox model works unmodified (design §7.4). A napplet
-/// written for the open web works in a room with no internet.
-///
-/// A mesh lane is a *directed* connection to one peer's relay — the relay
-/// model, not the flood. Flooding the Circle with a hop budget is NAP-MESH's
-/// ([`MeshSink`]), behind its own grant.
+/// One relay a napplet's traffic can travel over: this device's own relay,
+/// or an internet relay. A peer's relay over the mesh is not a lane — what
+/// people nearby share travels through NAP-NEIGHBOR, never a napplet-named
+/// `.fips` URL.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RelayLane {
     /// The device's own embedded relay.
     Local,
-    /// A mesh peer's relay, addressed `ws://<npub>.fips:4870` and resolved over
-    /// FIPS on the Rust side — napplets never open sockets.
-    Mesh { url: String },
     /// An internet relay, when one is reachable.
     Internet { url: String },
 }
 
 impl RelayLane {
-    /// Classify a relay URL the way a NIP-65 list would be read: a `.fips`
-    /// host is a mesh peer, anything else is the internet. Local is never a
-    /// URL — it is this device, and nothing outside it can name it.
-    pub fn from_url(url: &str) -> Self {
-        if is_mesh_relay_url(url) {
-            Self::Mesh {
-                url: url.to_string(),
-            }
-        } else {
-            Self::Internet {
-                url: url.to_string(),
-            }
-        }
-    }
-
     /// The URL a napplet may be shown for this lane. `None` for the local
     /// relay, which has no address anyone else could use.
     pub fn url(&self) -> Option<&str> {
         match self {
             Self::Local => None,
-            Self::Mesh { url } | Self::Internet { url } => Some(url),
+            Self::Internet { url } => Some(url),
         }
     }
-}
-
-/// Whether `url` names a mesh peer's relay: a `ws://` URL whose host ends in
-/// `.fips`.
-///
-/// Deliberately lenient — this is the *classifier*, not the gate. A malformed
-/// `.fips` URL must land in the Mesh lane and be refused there by
-/// [`mesh_relay_npub`]; if it fell through to Internet, the runtime would dial
-/// whatever the URL's userinfo trick actually names.
-pub fn is_mesh_relay_url(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("ws://") else {
-        return false;
-    };
-    let host = rest.split(['/', ':', '?', '#']).next().unwrap_or("");
-    host.ends_with(".fips")
-}
-
-/// The mesh relay port every peer serves on.
-pub const MESH_RELAY_PORT: u16 = 4870;
-
-/// The one way a peer's mesh relay is addressed: `ws://<npub>.fips:4870`.
-///
-/// Byte-identical to the builder the core uses to dial — a mesh URL from
-/// outside (a napplet's `options.relays`, a kind 10002) is never dialled as
-/// given; its npub is taken by [`mesh_relay_npub`] and the URL rebuilt here.
-pub fn mesh_relay_url(npub: &str) -> String {
-    format!("ws://{npub}.fips:{MESH_RELAY_PORT}")
-}
-
-/// The npub a mesh relay URL names, if the URL is exactly the shape
-/// [`mesh_relay_url`] produces — `ws://<npub>.fips`, optionally `:4870`,
-/// optionally a bare `/`.
-///
-/// Strict on purpose. A URL is parsed by the WebSocket client, not by us, and
-/// `ws://npub1peer.fips:4870@evil.example/` parses as *userinfo* on
-/// `evil.example`: whoever got that string into the pool would own the
-/// peer's connection. So userinfo, any other port, any path, query or
-/// fragment, and any host label that is not `npub1[a-z0-9]*` are `None` —
-/// refused, never dialled.
-pub fn mesh_relay_npub(url: &str) -> Option<String> {
-    use nostr::types::url::Host;
-    let parsed = nostr::Url::parse(url).ok()?;
-    if parsed.scheme() != "ws" || !parsed.username().is_empty() || parsed.password().is_some() {
-        return None;
-    }
-    let Some(Host::Domain(host)) = parsed.host() else {
-        return None;
-    };
-    let npub = host.strip_suffix(".fips")?;
-    let is_npub_label = npub.starts_with("npub1")
-        && npub
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
-    if !is_npub_label {
-        return None;
-    }
-    if !matches!(parsed.port(), None | Some(MESH_RELAY_PORT)) {
-        return None;
-    }
-    if !matches!(parsed.path(), "" | "/") || parsed.query().is_some() || parsed.fragment().is_some()
-    {
-        return None;
-    }
-    Some(npub.to_string())
 }
 
 /// Which way a relay plan is for.
@@ -196,7 +105,8 @@ pub enum PlanSource {
     Nip65,
     /// Served from a cached relay list.
     Cache,
-    /// Shell policy — for Myco, a Circle member's mesh relay.
+    /// Shell policy — for Myco, the configured relays when no authors were
+    /// named.
     Policy,
     /// Configured relays, because NIP-65 data was absent.
     Fallback,
@@ -240,9 +150,8 @@ impl RelayPlan {
 /// NAP-OUTBOX's routing.
 ///
 /// The shell owns relay discovery, fallback and policy; a napplet only ever
-/// sees the resulting plan. What "policy" means here is Myco's: a Circle
-/// member is reachable at their mesh relay whether or not they have published
-/// a relay list, and a device with no internet has no fallback relays to offer.
+/// sees the resulting plan. What "policy" means here is Myco's: a device with
+/// no internet has no fallback relays to offer.
 #[async_trait]
 pub trait OutboxResolver: Send + Sync {
     /// The plan for `authors` in `direction`. An empty `authors` asks for the
@@ -616,7 +525,7 @@ pub fn remote_lanes(lanes: impl IntoIterator<Item = RelayLane>) -> Vec<RelayLane
 /// `blossom:` scheme.
 ///
 /// The local [`BlobStore`] is always asked first, by the handler; this is
-/// only ever reached on a miss. An implementation goes to the Circle's
+/// only ever reached on a miss. An implementation goes to app peers'
 /// Blossom stores over the mesh and to the public servers when reachable,
 /// and returns the bytes only if they hash to `sha256_hex`. What it returns
 /// is stored locally by the handler before delivery, so the next ask is
@@ -1024,11 +933,10 @@ impl std::fmt::Debug for PickedFile {
 /// pool. A napplet that only stored would have its event signed, saved, and
 /// invisible — nothing would redraw here and no relay would ever hear it.
 ///
-/// Relays, not the mesh. NAP-RELAY says "relay pool"; flooding the people
-/// nearby is [`MeshSink`]'s, behind its own grant and a hop budget the user
-/// caps. An implementation that fanned a relay publish out to the Circle would
-/// hand every `relay`-granted napplet the mesh without the review screen ever
-/// saying so.
+/// Relays, not the mesh. NAP-RELAY says "relay pool"; sharing with the people
+/// nearby is NAP-NEIGHBOR's, behind its own grant. An implementation that
+/// fanned a relay publish out to peers would hand every `relay`-granted
+/// napplet the mesh without the review screen ever saying so.
 #[async_trait]
 pub trait EventSink: Send + Sync {
     /// Take a signed event and do everything accepting it implies.
@@ -1062,127 +970,9 @@ impl EventSink for StoreOnlySink {
     }
 }
 
-/// How far a napplet may reach over the mesh: the hop budgets the user has
-/// capped publishes and subscribes at. See NAP-MESH (`docs/design/napplet/NAP-MESH.md`).
-///
-/// Two numbers rather than one because a flooded read costs more than a
-/// flooded write — every hop answers as well as forwards — so the user is
-/// given a separate, lower default for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MeshLimits {
-    /// Most hops a `mesh.publish` may ask for.
-    pub publish_ttl: u8,
-    /// Most hops a `mesh.subscribe` backlog pull may ask for.
-    pub subscribe_ttl: u8,
-}
-
-impl MeshLimits {
-    /// The hop budget a publish actually gets: what was asked, or the cap when
-    /// nothing was, and never more than the cap.
-    pub fn clamp_publish(&self, requested: Option<u8>) -> u8 {
-        requested.unwrap_or(self.publish_ttl).min(self.publish_ttl)
-    }
-
-    /// The hop budget a subscribe pull actually gets, by the same rule.
-    pub fn clamp_subscribe(&self, requested: Option<u8>) -> u8 {
-        requested
-            .unwrap_or(self.subscribe_ttl)
-            .min(self.subscribe_ttl)
-    }
-}
-
-/// Where a napplet's mesh traffic goes — the seam behind NAP-MESH.
-///
-/// Separate from [`EventSink`] because the two mean different things. A relay
-/// publish is "put this on my relays"; a mesh publish is "flood this to the
-/// people around me, this far". The hop budget is the whole difference, and it
-/// is the one thing a napplet may choose here that it may not choose anywhere
-/// else — within the user's cap, which the implementation enforces, not the
-/// napplet.
-#[async_trait]
-pub trait MeshSink: Send + Sync {
-    /// The user's current caps. Read per call, so a changed setting takes
-    /// effect on the next call rather than the next launch.
-    async fn limits(&self) -> MeshLimits;
-
-    /// Whether the mesh is up at all, and how many Circle peers are reachable
-    /// right now. Reported, not promised: a peer can leave between the answer
-    /// and the next publish.
-    async fn reach(&self) -> anyhow::Result<MeshReach>;
-
-    /// Store a signed event locally and flood it to Circle peers with `ttl`
-    /// hops of budget. `0` means store only. The caller has already clamped
-    /// `ttl` to [`MeshSink::limits`]; an implementation may clamp again but
-    /// must never raise it.
-    async fn publish(&self, event: Event, ttl: u8) -> anyhow::Result<()>;
-
-    /// As [`MeshSink::publish`], for an event the napplet was delivered and
-    /// publishes **as it is**: kept here and flooded again with `ttl` hops,
-    /// even though this device has seen (and may already have flooded) it.
-    /// The default publishes it.
-    async fn rebroadcast(&self, event: Event, ttl: u8) -> anyhow::Result<()> {
-        self.publish(event, ttl).await
-    }
-
-    /// Ask Circle peers, `ttl` hops out, for stored events matching `filters`.
-    /// `0` means ask nobody.
-    ///
-    /// Returns once the request is *under way*, not once peers have answered:
-    /// a peer two hops out may take seconds, and a napplet's other calls must
-    /// not queue behind it. What comes back is accepted into the local relay
-    /// by the implementation, and also handed to the caller on the returned
-    /// stream as each peer sends it; the stream ends when the pull is over.
-    ///
-    /// The stream is what reaches the subscription that asked. The local
-    /// relay's live stream carries only first sightings, so an event this
-    /// device saw once and has since let go of (evicted from the cache, or
-    /// never kept) would otherwise come back from a peer and reach nobody.
-    async fn pull(&self, filters: Vec<serde_json::Value>, ttl: u8) -> anyhow::Result<PulledEvents>;
-
-    /// How many reachable mesh peers hold each blob in `hashes` — the seam
-    /// behind `mesh.blobs`. `hashes` are already checked: lowercase sha256
-    /// hex, no duplicates, at most [`MAX_BLOB_HASHES`].
-    ///
-    /// Mesh only, and asking only: an implementation sends each peer's
-    /// Blossom a `HEAD` and nothing else. It never asks the internet or a
-    /// public server, and never downloads a body. It bounds the asking
-    /// itself (how many at once, how long each, a short memory per peer and
-    /// blob), because a napplet may call this on a timer.
-    ///
-    /// `None` means this shell cannot ask, and `mesh.blobs` says so. The
-    /// default.
-    async fn blob_holders(&self, _hashes: &[String]) -> Option<BlobReach> {
-        None
-    }
-}
-
-/// The most blobs one `mesh.blobs` call may ask about. Every hash costs one
-/// `HEAD` per peer, over BLE as often as not.
-pub const MAX_BLOB_HASHES: usize = 64;
-
-/// The events a [`MeshSink::pull`] brings back, as peers send them. Ends when
-/// the pull is over. A stream rather than a channel so this crate names no
-/// async runtime.
+/// A stream of events as they arrive — a live feed. Ends when its source
+/// does. A stream rather than a channel so this crate names no async runtime.
 pub type PulledEvents = futures_util::stream::BoxStream<'static, Event>;
-
-/// What [`MeshSink::blob_holders`] reports.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct BlobReach {
-    /// The mesh peers that were asked: every reachable Circle member.
-    pub peers: usize,
-    /// For each asked hash, how many of those peers hold it. A peer that did
-    /// not answer in time counts as not holding it.
-    pub holders: std::collections::BTreeMap<String, usize>,
-}
-
-/// What [`MeshSink::reach`] reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct MeshReach {
-    /// The mesh node is running.
-    pub online: bool,
-    /// Circle peers reachable right now.
-    pub peers: usize,
-}
 
 /// One message across the shell ↔ Rust channel: a capability call, its result,
 /// or a pushed subscription event.
