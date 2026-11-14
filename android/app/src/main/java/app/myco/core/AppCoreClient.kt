@@ -50,10 +50,6 @@ data class SiteStatus(
  * Carries what the napplet *asked for*, never what it was given — a grant
  * exists only once the user answers.
  */
-/**
- * The user's caps on NAP-MESH: the most hops a napplet's mesh publish and
- * mesh subscribe may ask for. `0` means this phone only.
- */
 /** One app that can handle an archetype (NAP-INTENT), for Settings › Default apps. */
 data class IntentCandidate(val key: String, val title: String, val pointer: String)
 
@@ -490,7 +486,6 @@ data class AppState(
     val nappletStatus: Map<String, NappletStatus> = emptyMap(),
     /** The logged-in user. */
     val account: AccountState = AccountState(),
-    /** How far napplets may reach over the mesh (NAP-MESH), and the most each cap may be. */
     /** Every capability Myco can grant a napplet, in sheet order. */
     val nappletDomains: List<String> = emptyList(),
     /** NAP-INTENT default apps, per archetype. */

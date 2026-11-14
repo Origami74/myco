@@ -1,12 +1,13 @@
 # Offline propagation
 
-> Status: built, with differences from the first draft noted inline. The
-> mechanism that shipped is the push/pull gossip in
-> [event-gossip.md](../core/event-gossip.md): manifests flood between Circle
-> members with a 3-hop budget (not 5), the seen-set is the loop guard, and
-> blobs stay pull-only. Negentropy / NIP-77 reconcile (§5) is **not built**;
-> backlog is recovered by re-running each open subscription against a Circle
-> member when they reappear. Open questions are marked **TBD / open**.
+> Status: built, with differences from the first draft noted inline. What
+> shipped: manifests are forwarded between **app peers** (linked devices in
+> neighborhoods with Apps on, see
+> [nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)) with a 3-hop budget
+> (not 5), the seen-set is the loop guard, and blobs stay pull-only
+> ([nsite-updates.md §4](./nsite-updates.md)). Negentropy / NIP-77 reconcile
+> (§5) and backlog resync are **not built**. Open questions are marked
+> **TBD / open**.
 
 The vision is nak's "Pillars of Propagation": small relays and Blossom blobs
 hopping over crappy links in all directions, surviving outages via local
@@ -92,10 +93,10 @@ new event kind**: a holder that wants to "announce" a site simply re-emits the
 author's manifest unchanged. Re-emitting an already-signed event relay-to-relay
 is normal relay behaviour, not authoring, and requires no holder signature.
 
-- Manifests flood outward with a hop budget: **3 hops** (`EVENT_TTL`), the
-  same budget as any gossiped event. Each forwarder decrements, and a spent
-  budget is stored but not forwarded; the seen-set, not the budget, is what
-  guarantees termination ([event-gossip.md §3](../core/event-gossip.md)).
+- Manifests flood outward with a hop budget: **3 hops** (`EVENT_TTL`). Each
+  forwarder decrements, and a spent budget is stored but not forwarded; the
+  seen-set, not the budget, is what guarantees termination
+  ([nsite-updates.md §4.1](./nsite-updates.md)).
 - **Only manifests propagate multi-hop. Blobs stay pull-only** — there is no
   TTL-flood of blobs.
 
@@ -108,8 +109,7 @@ inside `nsite-deck`. The propagator holds an internal **subscription** to the
 relevant relays (the local `myco-relay` plus the relays of connected peers) and,
 when it sees a manifest, **publishes** it — an `["EVENT", …]` to each
 `<peer>.fips:4870` relay, source excluded — so a manifest ripples outward one
-relay-hop at a time. "Connected peers" are your live FIPS links (directly paired
-peers and, transitively, their peers — §3). This is push-based: a node need not
+relay-hop at a time. What shipped sends to app peers only (§3). This is push-based: a node need not
 ask for a site to learn it exists; the propagator at a connected neighbour
 volunteers the manifest. The relay store, the sync engine, and the propagator
 share one event intake, so an event learned by any path is both stored locally
@@ -127,9 +127,8 @@ constant chatter, both **strictly neighbour-local (never relayed)**: (1) **eager
 reconcile on a new link** — fire a one-shot reconcile the moment a peer connects
 (bitchat sends a unicast sync ~5 s after a new neighbour appears); and (2) a slow
 **periodic neighbour reconcile** (bitchat ~30 s, bounded to ~100 recent items). See
-§5 for the negentropy mechanics. What shipped instead of both is simpler: the
-relay pool keeps one connection per Circle member and, on every (re)connect,
-replays each open local subscription against them (`resync_from_peer`).
+§5 for the negentropy mechanics. Neither shipped. An earlier build replayed open
+subscriptions against a peer on reconnect; that was removed with event gossip.
 
 ### Pull (fetch content on demand)
 
@@ -155,46 +154,20 @@ This split means a site can be *known to be available* across many hops cheaply
 (the manifest has flooded), while the bytes only ever traverse the one path a
 user actually needs, when they need it.
 
-## 3. Transitive peer discovery
+## 3. Who propagates to whom
 
-How does Alice come to receive manifests from nodes she never paired with? Via
-transitive discovery, authorized by a **mutual pairing**. See
-[diagrams/02-pairing-transitive-discovery.svg](../diagrams/02-pairing-transitive-discovery.svg).
+**Superseded.** This section used to describe transitive discovery over a mutual
+pairing graph (the Circle). Pairing is gone.
 
-- **Pairing.** Pairing is **handshake-mandatory and always mutual**. Scanning a
-  `myco://pair/<base64>` card (carrying `{ npub, name, pairSecret }`; no MAC/PSM —
-  those are learned over BLE adverts) does not merely grant fetch access: it
-  initiates the **invite-pairing handshake** against the inviter's on-device
-  `<npub>.fips` endpoint — the scanner echoes `pairSecret` back over that
-  Noise-encrypted channel and the inviter confirms — and completion makes **both**
-  devices a source for the other. The one-time `pairSecret` (a long random string)
-  authenticates the handshake but grants no membership or admin authority. A device's npub *is* its FIPS address, so once
-  paired Alice can reach Ben's relay (`:4870`) and Blossom (`:24243`) over the
-  mesh. This invite-pairing handshake ([identity-pairing.md § 6.1](../core/identity-pairing.md))
-  is the **only** pairing path. (The device key is only ever a mesh/relay address;
-  never an nsite author key.)
-- **Mutual pairing = authorization.** A mutual pairing authorizes Alice to **poll
-  Ben's collected peer list**. Ben, in effect, introduces his peers to Alice.
-- **Transitive reach.** Having learned Ben's peers (Carl, Dana, …), Alice can
-  now receive the manifests they hold and pull from them multi-hop over FIPS —
-  even though she paired only with Ben. Reach grows along the pairing graph, not
-  just the radio neighbourhood.
+Now:
 
-This is the social analogue of bitchat's neighbour-gossip TLV
-(bitchat's implementation),
-where a node advertises which peers it is directly connected to. Myco adapts
-the idea to *authorized* polling of a curated peer list rather than unsolicited
-topology gossip — pairing is the consent gate.
-
-Because every pairing is now mutual (handshake-mandatory), the **authorization to
-poll a paired peer's list exists in v1** — the consent gate is the completed
-handshake. The poll *mechanism* itself can still land later.
-
-**TBD / open:** the exact authorization mechanism. Is "Ben lets Alice poll his
-list" enforced (e.g. Ben only answers a peer-list query from npubs he has
-paired), advisory, or transitive-by-degree (can Alice reach Dana's peers too, or
-does reach stop at one hop past a pairing)? How is a pairing revoked, and does
-revocation prune transitively-learned peers?
+- **App peers.** Manifests go to, and blobs are pulled from, app peers: devices
+  this one has a link with, in a neighborhood with Apps on
+  ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)).
+- **Reach past one link** comes from the hop budget: an app peer forwards to its
+  own app peers, up to 3 hops. No peer list is polled.
+- **Setting up a link** is a one-time invitation (`myco://link/…`), not a pairing
+  card ([nap-neighbor/links.md](../nap-neighbor/links.md)).
 
 ## 4. Why any source is trustworthy
 
@@ -232,7 +205,7 @@ from bitchat (reference only).
 Each flooded manifest carries a hop budget (3, §2). Forwarders decrement and
 stop at zero. Probabilistic relay on large meshes (forward with probability
 < 1 to thin redundant copies, as bitchat's `PacketRelayManager` does) is
-**not built**: Circles are small and every member forwards.
+**not built**: app peer sets are small and every one forwards.
 A node never relays its own packets and never relays a packet already addressed
 to it.
 
@@ -339,21 +312,18 @@ and a cache is a first-class source.
   reading/caching interests to anyone within the 5-hop TTL radius. **TBD /
   open:** can a user propagate without making the set of manifests they replicate
   observable under their own (device) identity? Options to weigh: flood only to
-  paired peers, anonymous/aggregate hints, or opt-in "I am a public re-server"
+  app peers (what shipped), anonymous/aggregate hints, or opt-in "I am a public re-server"
   mode. This trades propagation reach against metadata privacy and is unresolved.
   Note this is purely about *which already-signed manifests a holder chooses to
   replicate* — no holder-authored event is involved.
 - **Optimistic sharing vs. spam / chatter.** Eagerly fanning out *every* manifest
   you hold maximizes discovery but risks flooding the mesh with chatter — the fine
-  line. Levers to weigh: scope the eager flood to your **circle / Library /
+  line. Levers to weigh: scope the eager flood to your **app peers / Library /
   recently-touched** manifests rather than everything held; TTL + dedup seen-set;
   **probabilistic relay** on larger meshes; a **recent-N retention bound** on what
   you re-announce (bitchat caps sync to ~100 recent); rate-limiting; and possibly
   **interest-based fanout** (only push a manifest a peer signalled interest in).
   Where to sit on the optimistic↔conservative axis is **TBD / open**.
-- **Transitive authorization depth & revocation.** See §3 — how far past a single
-  pairing does reach extend, and how is a pairing (and its transitively-learned
-  peers) revoked?
 - **Sync scope & cost on BLE.** Negentropy (NIP-77) reconcile cadence and
   `NEG-MSG` round size may need different parameters over FIPS L2CAP than over
   bitchat's GATT links; **TBD / open** pending the two-device demo.

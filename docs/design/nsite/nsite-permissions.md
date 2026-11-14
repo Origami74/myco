@@ -1,31 +1,31 @@
 # Permissions: per-peer grants and per-application capabilities
 
-> Status: **§2 (per-peer permissions) is built** — the record ships on every
-> Circle contact and is enforced on both content ports, though no UI exposes it
-> yet. **§3–§6 (per-application capabilities for nsites) are superseded**, not
+> Status: **§2 (per-peer permissions) is built** — the record is enforced on
+> both content ports for every app peer, always at its defaults, and no UI
+> exposes it. **§3–§6 (per-application capabilities for nsites) are superseded**, not
 > built: the per-app permission model shipped for **napplets** instead —
 > install review, a grant per capability domain, checked on every call,
 > switchable on the app's sheet — in
 > [../napplet/napplet-runtime.md](../napplet/napplet-runtime.md). An nsite
 > stays pure-static and gets nothing; the one thing an nsite can do today that
-> looks like a capability (publish to `ws://localhost:4870` and have it gossip
-> to the Circle) is being removed (roadmap N2). §3–§6 are kept as the record of
+> looks like a capability (publish to `ws://localhost:4870`) no longer reaches
+> anyone else: event gossip is gone, and only app manifests are forwarded
+> between app peers. §3–§6 are kept as the record of
 > why an `Origin`-keyed model was considered and where it would have bitten.
 
 An nsite is a static web app served from the local gateway
 ([nsite-layer.md](./nsite-layer.md)). Most just render; some want to do more —
-publish into the mesh ([event-gossip.md](../core/event-gossip.md)), read location, hold
-blobs.
+publish to people nearby, read location, hold blobs.
 
 There are two different permission questions here, and conflating them is the
 main thing this doc is trying to prevent.
 
 | Layer | Question it answers | Subject | Status |
 | --- | --- | --- | --- |
-| **Per-peer** (§2) | What may a paired *device* do to us? | A circle contact, identified by its mesh address | Built |
+| **Per-peer** (§2) | What may another *device* do to us? | An app peer, identified by its mesh address | Built |
 | **Per-application** (§3–§6) | What may an *app we run* do on our behalf? | An nsite, identified by its `siteKey` | Proposed |
 
-They are independent. A peer with full grants still cannot make our device gossip
+They are independent. A peer with full grants still cannot make our device publish
 a kind an app is not allowed to publish, and a fully-trusted app still cannot get
 data out of a peer that has revoked our reads.
 
@@ -46,19 +46,19 @@ The store behind it is a plain NIP-01 relay with no Myco concepts in it, and is
 meant to be swappable, so policy cannot live there.
 
 The blob plane is the same shape: `myco-blossom` is a generic BUD-01 store and
-takes an access function from `myco-core`, so it stays free of circle knowledge.
+takes an access function from `myco-core`, so it stays free of neighborhood knowledge.
 
-Pairing itself is enforced nowhere on the content path, because it does not travel
-there any more — it has its own service on `:4873`
-([identity-pairing.md](../core/identity-pairing.md)).
+Links are set up nowhere on the content path: link setup has its own service on
+`:4873` ([nap-neighbor/links.md](../nap-neighbor/links.md#the-link-service-4873)).
 
 ---
 
 ## 2. Per-peer permissions
 
-Paired used to be all-or-nothing: a peer in the circle could read everything,
-publish anything, and upload blobs. It is now six flags on the peer's circle
-record, persisted in `circle.json`.
+Who gets in is the **app peer** set: linked devices in neighborhoods with Apps on
+([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)), enforced by `AppPeerGate`.
+What an admitted peer may do is six flags (`PeerPerms` in `content.rs`). They are
+not persisted: every app peer gets the defaults, recomputed with the set.
 
 | Plane | Flag | Default | Meaning |
 | --- | --- | --- | --- |
@@ -74,7 +74,7 @@ whether *their* traffic travels further through *us* — not anything we send th
 
 ### 2.1 Two checks, not one
 
-- **At accept.** A peer that is not in the circle is refused **before the
+- **At accept.** A peer that is not an app peer is refused **before the
   WebSocket upgrade**, with a plain `403`. There are no exceptions on either
   content port. A stranger costs a TCP accept and one small response rather than
   an upgrade and a round of frames, which matters on a BLE link.
@@ -82,30 +82,25 @@ whether *their* traffic travels further through *us* — not anything we send th
   `REQ`, write against `EVENT`, and on Blossom the read/write split falls out of
   the HTTP method.
 
-Membership and flags are consulted **live** on every request, so adding a peer,
-removing one, or changing a grant takes effect immediately. Revocation also drops
+The set and flags are consulted **live** on every request, so a link ending, a
+neighborhood left, or Apps turned off takes effect immediately. Revocation also drops
 connections that are already open, rather than only blocking the next one.
 
 ### 2.2 The multihop flags are hop-budget clamps
 
 Neither multihop flag is a separate check. They are per-peer values for the hop
-budgets the push and pull planes already carry
-([event-gossip.md §3, §7](../core/event-gossip.md)):
+budget a `MESH` envelope carries (`mesh_wire.rs`):
 
-- `relayWriteMultihop` off → an inbound event's budget is treated as **0**: store
-  it, show it, never pass it on.
-- `relayReadMultihop` off → an inbound `REQ`'s budget is clamped to **0**: answer
-  from our own store, forward nothing.
-
-So `MAX_EVENT_TTL` and `MAX_REQ_TTL` stop being global constants and become
-per-peer ceilings, and the pull plane's amplification bound gets a per-peer dial.
+- `relayWriteMultihop` off → an inbound manifest's budget is treated as **0**:
+  store it, never pass it on ([nsite-updates.md §4](./nsite-updates.md)).
+- `relayReadMultihop` off → an inbound `REQ`'s budget is clamped to **0**. Inert
+  today: no peer `REQ` is forwarded any more.
 
 ### 2.3 Why Blossom write defaults off
 
 Uploads cost us disk, and nothing in normal operation needs them: propagation is
 pull-based, so peers fetch blobs from the holder rather than being handed them.
-Serde defaults are written so a missing field cannot silently grant it — an older
-`circle.json` loads with uploads off.
+Serde defaults are written so a missing field cannot silently grant it.
 
 The one casualty is the dev-menu peer speedtest, which works by `PUT`ting a
 payload to the target peer's Blossom. It is not exempted: it works only against a
@@ -114,8 +109,9 @@ report a generic failure.
 
 ### 2.4 Not in the UI yet
 
-Every peer gets the defaults. The record exists now so that turning a knob later
-is a UI change rather than a storage migration.
+Every app peer gets the defaults. Per-neighborhood offers
+([nap-neighbor/links.md](../nap-neighbor/links.md#offers)) are where such knobs are
+likelier to live now.
 
 ---
 
@@ -138,16 +134,20 @@ simply trusted. This is where it is added.
 
 ## 4. The capability record (proposed)
 
+> **Partly moot.** Local events are no longer fanned out to the mesh, so
+> `gossip-kinds` and `event-hops` have nothing to gate today. How far a post
+> travels is set per neighborhood
+> ([nap-neighbor/policy.md](../nap-neighbor/policy.md)).
+
 | Capability | v1 default | Meaning | Enforced at |
 | --- | --- | --- | --- |
 | `gossip-kinds` | **all kinds** | which event kinds may be fanned out to the mesh | proxy fan-out path, keyed by `Origin` |
-| `event-hops` | **3** | max reach for this app's pushed events — a per-app version of `MAX_EVENT_TTL` ([event-gossip.md §3](../core/event-gossip.md)) | proxy fan-out path |
+| `event-hops` | **3** | max reach for this app's pushed events — a per-app version of `EVENT_TTL` | proxy fan-out path |
 | `rate` | lenient (§5) | publish / subscribe rate caps | proxy ingress, per `Origin` |
 | `location` | *(future)* | geolocation, granted at a **chosen accuracy** (coarse → fine), e.g. for geohash rooms | WebView geolocation bridge (Kotlin) |
 | `blob-quota` | *(future)* | Blossom storage budget for app-authored blobs | Blossom `PUT` path |
 
-The hop default matches the protocol default in
-[event-gossip.md](../core/event-gossip.md); here it is the **per-app clamp**, so a
+The hop default matched the event-gossip default (gossip is since removed); here it is the **per-app clamp**, so a
 single app cannot exceed it even if its client asks for more.
 
 **There is no per-app pull-hop capability.** An nsite's `REQ` never fans out to
@@ -186,9 +186,9 @@ Rate limits aim to stop a runaway or malicious app from saturating a BLE link,
 Over-limit is **slow-down, not hard-fail** where possible (queue/delay rather
 than reject), so a chatty moment degrades gracefully instead of dropping messages.
 
-The auth service on `:4873` follows the same lenient spirit with its own limits,
-since it is the only port an unpaired device can reach
-([identity-pairing.md](../core/identity-pairing.md)).
+The link service on `:4873` follows the same lenient spirit with its own limits,
+since it is the only port a device that is not an app peer can reach
+([nap-neighbor/links.md](../nap-neighbor/links.md#the-link-service-4873)).
 
 ---
 
@@ -218,7 +218,7 @@ they probably want separate screens.
 - **Default-deny for unknown kinds?** Whether `gossip-kinds` should ever narrow
   from "all" to an allow-list for apps the user hasn't explicitly trusted.
   **TBD / open.**
-- **Trust tiers** — should a paired-circle app get a more generous record than a
+- **Trust tiers** — should an app shared by a neighbor get a more generous record than a
   freshly-installed one? Ties into [security.md](../core/security.md). **TBD / open.**
 - **Surfacing per-peer flags** — which of the six are worth showing a user at all,
   and what a sensible preset ("read-only peer", "no relaying") looks like.
@@ -228,12 +228,12 @@ they probably want separate screens.
 
 ## See also
 
-- [./event-gossip.md](../core/event-gossip.md) — the push and pull planes these clamp,
-  and the `MESH` envelope the hop budgets travel in.
+- [./nsite-updates.md](./nsite-updates.md) — manifest forwarding, the one plane
+  the multihop clamp still bites on.
 - [./nsite-layer.md](./nsite-layer.md) — the gateway, `siteKey` resolution, and
   the JS sandbox / capability open question (§7) this answers.
-- [./identity-pairing.md](../core/identity-pairing.md) — the auth service that creates
-  the circle these per-peer grants attach to.
+- [nap-neighbor/](../nap-neighbor/README.md) — links and app peers, the set
+  these per-peer grants attach to.
 - [./security.md](../core/security.md) — the trust model both layers sit inside.
 - [../../reference/thinning-custom-relay.md](../../../reference/thinning-custom-relay.md) —
   D10, where the per-peer flags were decided.

@@ -43,9 +43,9 @@
 //!   never a round's shared cutoff. 30 s, doubling, up to 5 min: a slow
 //!   relay is more often slow for a moment than gone.
 //! - **A success clears the entry.** Mesh successes (`.fips`, FIPS
-//!   `fd00::/8`, a Circle member's Blossom) do not count as "the phone is
+//!   `fd00::/8`, an app peer's Blossom) do not count as "the phone is
 //!   online": the mesh works with no internet at all.
-//! - **Never on it:** Circle members' relays and Blossom (the peer pool
+//! - **Never on it:** app peers' relays and Blossom (the peer pool
 //!   never consults it, and a mesh address reaching a shared helper is
 //!   exempt), and the custom relay or Blossom set in Storage (their
 //!   clients, `remote_backend` and `remote_blobs`, never consult it).
@@ -761,7 +761,7 @@ pub(crate) mod tests {
         assert!(listed(&h, R, t0 + Duration::from_secs(30)));
     }
 
-    /// Only an internet success says the phone is online: a Circle member's
+    /// Only an internet success says the phone is online: an app peer's
     /// relay or Blossom answering over the mesh does not.
     #[test]
     fn a_mesh_success_is_not_the_internet_working() {

@@ -28,6 +28,23 @@ map, the [index](./README.md).
   permission prompts, no stale USB lane, desktop fips discovering phones on
   the LAN, napplets surviving rotation.
 
+**Built since v0.13.0, not yet released** (on the `feat/nap-neighbor`
+branch; see the CHANGELOG's `[Unreleased]`):
+
+- **Neighborhoods replace the Circle.** Links set up from one-time
+  invitations (`myco://link/…` by QR, share link or NFC), a link key per
+  link, signed offers, the link service on `:4873`, traffic scoped per
+  neighborhood and passed on link to link, per-neighborhood reach and an
+  **Apps** switch. App peers (linked devices in neighborhoods with Apps on)
+  take over what the Circle did for apps, updates and files —
+  [nap-neighbor/](design/nap-neighbor/README.md).
+- **NAP-NEIGHBOR** for napplets
+  ([napplet/naps#146](https://github.com/napplet/naps/pull/146)), with
+  `neighborhood://` addresses for `relay`, `outbox`, `resource` and `upload`.
+- **Removed:** pairing (`myco://pair/`, kinds 9101–9103), the Circle (not
+  migrated: people re-invite), general event gossip and backlog resync,
+  outbox mesh lanes, NAP-MESH and the App reach setting.
+
 ## Earlier releases
 
 **Shipped** (v0.12.0 and v0.12.1 — update notices, private data for napplets, `blossom-local` uploads, NAP-FS, `napplet.link`, Android TV, permission groups, current fips; v0.11.0 — the USB lane (phone to phone and phone to desktop over a cable), a native TUN pump, napplets in the current NIP-5D format and their icons, `https:` resources, `mesh.blobs`, authors' Blossom server lists; v0.10.0 — NAP-UPLOAD, the setup popup and Settings › Permissions, mesh over public internet nodes, app links installing from phones nearby, the SOCKS5 full-tunnel exit; v0.9.1 — Composer and Noris, streamed napplet backlogs, a 22 MB APK; v0.9.0 — NAP-INTENT, the shell cache and NAP-LOCAL, streamed
@@ -39,23 +56,26 @@ the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
   phones per lane), the LAN lane (mDNS), TCP when online; multi-path per peer
   with standby links; an app-owned TUN scoped to Myco's uid; `.fips` DNS. The
   Dev tab shows every peer, lane, RTT and connect attempt.
-- **Pairing and the Circle.** Mutual, signed pairing by NFC bump or QR over
-  the auth service; single-use invite secrets; unpairing that reaches the other
-  phone; the Circle gate on the relay and Blossom; per-peer permissions stored
-  (no UI yet). Native encrypted file sharing between Circle members.
+- **Pairing and the Circle** (since replaced by neighborhoods). Mutual,
+  signed pairing by NFC bump or QR over the auth service; single-use invite
+  secrets; unpairing that reaches the other phone; the Circle gate on the
+  relay and Blossom; per-peer permissions stored (no UI yet). Native
+  encrypted file sharing between Circle members.
 - **nsites.** Paste a link or scan a share; holder-first pull over the mesh,
   then any Circle member, then the internet; staged updates; home-screen pins;
   deep links (`myco://app/<host>/<path>`); a custom relay
   or Blossom instead of the embedded ones.
-- **Gossip.** Hop-limited push (3) and pull (2) between Circle members, the
-  `MESH` envelope, seen-set loop safety, backlog replay on reconnect.
+- **Gossip** (since removed; neighborhoods carry events now). Hop-limited
+  push (3) and pull (2) between Circle members, the `MESH` envelope, seen-set
+  loop safety, backlog replay on reconnect.
 - **Napplets.** NIP-5D manifests fetched by `naddr` or shared by bump;
   verified resolve into a sandboxed iframe; install review and per-app
   permission switches; updates found by an automatic check and forwarded over
   the Circle (download-then-forward, pins never move back); back delivered as
   Escape. NAPs: `shell`, `identity`, `relay` (pool reads, relay-pool publish),
   `outbox` (NIP-65 plans over local/mesh/internet lanes), `mesh` (hop-limited
-  publish/subscribe, user-capped — Myco's own, [NAP-MESH](./design/napplet/NAP-MESH.md)),
+  publish/subscribe, user-capped — Myco's own NAP-MESH, since removed in
+  favour of [NAP-NEIGHBOR](https://github.com/napplet/naps/pull/146)),
   `resource` (`blossom:`, local store first, fetched blobs kept, and public
   `https:`; up to 64 MiB, delivered as bytes), `mesh.blobs` (which Circle
   phones in reach hold a file), `link`, `theme`, `local` (keep and pass on what
@@ -75,8 +95,7 @@ the Circle; v0.7.0 — the napplet runtime, file sharing, multi-path peering):
 **Not built**, from the first plan: NIP-77 negentropy reconcile; eviction of
 what the phone keeps (the shell cache evicts to its budget, but the local
 relay and Blossom only shrink when the user clears them); transitive
-peer-list polling (reach is the Circle, plus
-gossip hops); Linux interop (P6) as a tested pair; external-browser access
+peer-list polling (reach is now each neighborhood's links and hops); Linux interop (P6) as a tested pair; external-browser access
 (NAT46). All still on the list below.
 
 ---
@@ -89,6 +108,7 @@ Ordered by what unblocks what. Each is its own PR or short series.
 
 **Done** — built and tested across two networks;
 [design/fips/public-mesh-nodes.md](design/fips/public-mesh-nodes.md).
+Written before neighborhoods: read "Circle member" below as a linked peer.
 
 **Goal.** When a phone is online, it can also peer with public FIPS nodes
 over the internet, so Circle members who aren't in the same room still reach
@@ -147,10 +167,10 @@ declaring more puts only the new domains up for review.
 ### N11 — Share Myco itself
 
 **Built** — update notices: a publisher-signed release event is found on
-Zapstore or from the Circle and the phone is told (see Status); **Share Myco**
+Zapstore or from app peers and the phone is told (see Status); **Share Myco**
 on the Apps tab hands the installed APK to a phone without Myco, over a
 hotspot page or the Android share menu; and every phone carries the newest
-release APK for its Circle, so a paired phone updates over the mesh
+release APK for its app peers, so a linked phone updates over the mesh
 (`docs/design/core/software-updates.md`). Still to show on two phones: the
 exit criterion below.
 
@@ -167,7 +187,7 @@ a group that needs the internet.
   served from this phone over the shared Wi-Fi or a local hotspot. The page
   says how to allow the install and how to check it's genuine.
 - **Updates from phones nearby.** A phone with a newer Myco offers it to its
-  Circle over the mesh: the APK as a Blossom blob, announced by a signed
+  app peers over the mesh: the APK as a Blossom blob, announced by a signed
   release event. The receiver installs only if the APK's signing certificate
   matches its own (Android enforces this for updates anyway) and the release
   is signed by the Myco release key.
@@ -176,7 +196,8 @@ a group that needs the internet.
   that path off, depending on the store's rules.
 
 **Exit criterion.** In airplane mode, a phone without Myco installs it from a
-nearby phone and pairs; a paired phone on an older version updates from a
+nearby phone and joins a neighborhood; a linked phone on an older version
+updates from a
 newer one with no internet.
 
 ### N9 — An onboarding flow for permissions
@@ -267,7 +288,7 @@ Logging in with a pasted nsec makes `identity.getPublicKey()` return that key,
 and `relay.publish` signs with it.
 
 **Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.1
-(two identities) · [identity-pairing.md](./design/core/identity-pairing.md) §2 (storage).
+(two identities) · [identity.md](./design/core/identity.md) §2 (storage).
 
 ### N2 — Login with Amber
 
@@ -293,6 +314,11 @@ or in memory in Myco. Logout forgets the Amber pubkey.
 
 ### N3 — Drop mesh from nsites
 
+**Built** with neighborhoods (unreleased): local event gossip and REQ
+forwarding are gone, so what an nsite publishes on the loopback relay stays
+on this phone. Reaching people is a napplet's job, through NAP-NEIGHBOR.
+Still to check: the chat nsite in the demo set.
+
 **Goal.** An nsite talks to `ws://localhost:4870` like any relay; today an
 event it publishes there is also flooded to the Circle at the default hop
 budget, and its `REQ`s are recreated against Circle members. That made sense
@@ -302,11 +328,11 @@ socket **local-only**: nsite publishes are stored and shown here, forwarded
 nowhere; nsite subscriptions are not replayed to peers. Reaching the room is
 what a napplet is for.
 
-**Exit criterion.** An nsite's publish is not seen on a paired phone; a
-napplet's `mesh.publish` still is; the chat nsite in the demo set is either
+**Exit criterion.** An nsite's publish is not seen on a linked phone; a
+napplet's publish into a neighborhood still is; the chat nsite in the demo set is either
 ported to a napplet or documented as local-only.
 
-**Design docs.** [event-gossip.md](./design/core/event-gossip.md) §0, §2.6 ·
+**Design docs.** [nap-neighbor/](design/nap-neighbor/README.md) ·
 [nsite-permissions.md](./design/nsite/nsite-permissions.md) §3 (the `Origin`
 question this closes).
 
@@ -331,7 +357,8 @@ opens the napplet.
 
 **Done** — the AppStore napplet ships preinstalled (`DEFAULT_NAPPLETS`) and
 the native Discover tab is gone (v0.8.0, completed since); tested. It lists
-napplets from relays and from the phones around you (NAP-MESH), with stacks
+napplets from relays and from the phones around you (over NAP-MESH, which is
+since removed — "Around you" needs NAP-NEIGHBOR), with stacks
 (NIP-51 app sets), recommendations from people you follow and profiles;
 Install hands the app's `naddr` to Myco over NAP-LINK, which opens the
 install review.
@@ -353,7 +380,7 @@ Myco to fetch and review an app by pointer) that cannot skip the review
 screen.
 
 **Design docs.** [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2b
-(intents) · [NAP-MESH](./design/napplet/NAP-MESH.md) · [circle.md](./design/circle/circle.md).
+(intents) · [nap-neighbor/](design/nap-neighbor/README.md).
 
 ### N6 — Release the napplet runtime
 
@@ -427,7 +454,7 @@ its reads fell back to a one-shot pull instead of a live stream.
 - One-shot queries, manifest lookups, relay-list lookups and account publishes
   go through the same pool, so a warm connection serves all of them.
 - The relay skip list and the internet breaker sit in front of the pool.
-  Circle and custom relays keep their own connections.
+  Peers' mesh relays and custom relays keep their own connections.
 
 **Exit criterion.** On a device, AppStore at steady state holds at most one
 socket per relay it reads. It never logs `stream bound reached`. A reopen
@@ -446,32 +473,35 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Reclaiming event-cache disk sooner.** The shell cache evicts to its
   budget, but LMDB never shrinks its file in place: space freed by eviction
   is reused, and after "Clear cache" the file shrinks only at the next start.
-- **Not serving the cache to the Circle.** A per-device setting, for someone
-  who does not want paired phones to enumerate what their apps read
+- **Not serving the cache to app peers.** A per-device setting, for someone
+  who does not want linked phones to enumerate what their apps read
   ([security.md](./design/core/security.md) §6).
 - **Pruning of kept events (profiles, relay lists, manifests).** The local
   relay keeps these kinds when a lookup sees them, and only "Clear local database"
   removes them. Bounded in practice by small, replaceable kinds, but not by a
   limit — [nsite-layer.md](./design/nsite/nsite-layer.md) §2.1, "Events kept
   as they pass".
-- **Set reconciliation (NIP-77 negentropy)** between Circle members, so backlog
-  catch-up is a sync rather than a replay of every open subscription —
+- **Set reconciliation (NIP-77 negentropy)** between links in a
+  neighborhood, so backlog catch-up is a sync rather than a replay —
   [propagation.md](./design/nsite/propagation.md) §5.
-- **Transitive reach.** Poll a Circle member's Circle (with their consent) so
-  discovery and pulls go past direct pairings —
-  [identity-pairing.md](./design/core/identity-pairing.md) §6.
+- **Neighborhood follow-ups.** Blobs over links (fetch from peers, and push
+  by the per-neighborhood blob hops), reading one peer's view, `neighbor.invite`
+  for napplets, granting existing neighborhoods to napplets, Tor or public
+  endpoints in offers, and the optional proximity extension (`nearby`) —
+  [nap-neighbor/](design/nap-neighbor/README.md).
 - **Peer permissions UI.** The per-peer record exists (`relay_write`,
-  `relay_read_multihop`, …) with defaults for everyone; a switch per Circle
-  member — [nsite-permissions.md](./design/nsite/nsite-permissions.md) §2.
+  `relay_read_multihop`, …) with defaults for everyone; a switch per app
+  peer — [nsite-permissions.md](./design/nsite/nsite-permissions.md) §2.
 - **Your own profile from your own relays.** The Settings profile is fetched
   from the default relays and the indexers, not the user's NIP-65 write
   relays — the last open part of
   [#67](https://github.com/Origami74/myco/issues/67).
 - **Blob privacy over the mesh.** Whether a napplet's `blossom:` miss should
-  ask every Circle member, or only the peer whose event referenced it —
+  ask every linked peer in a neighborhood, or only the peer whose event
+  referenced it —
   [napplet-runtime.md](./design/napplet/napplet-runtime.md) §7.11.
 - **One permission model for apps and peers.** Napplet grants (per capability,
-  per app) and Circle permissions (per peer) grew up apart. Bring them under
+  per app) and peer permissions (per peer) grew up apart. Bring them under
   one structure, and use it to answer what a blanket `relay` grant leaves
   open today: a napplet signs any kind as the user — profile (0), contacts
   (3), relay list (10002), deletions (5) — with no prompt. Sensitive
@@ -479,14 +509,11 @@ Each its own milestone with its own design pass. Roughly in order of pull.
   napplet naming its own relays (`options.relay`, conformant under shell
   policy — [napplet-runtime.md](./design/napplet/napplet-runtime.md) S2)
   may want an allowlist or a grant of its own.
-- **Mesh rate limits and a trust model.** A napplet with the `mesh` grant can
-  publish or pull as often as it likes; each pull is a Circle-wide flood at
-  the user's hop cap, and one misbehaving app saturates the BLE lane for the
-  room. Nsites can already do this through the loopback relay. A per-session
-  token bucket is the cheap fix; what the mesh should trust from whom — apps,
-  peers, peers' peers — is the design pass behind it. More urgent while
-  `mesh` is a default grant: every installed napplet has it unless switched
-  off ([napplet-runtime.md](./design/napplet/napplet-runtime.md) S3).
+- **Neighborhood rate limits.** A napplet granted a neighborhood can
+  publish or pull as often as it likes; each publish travels up to the
+  neighborhood's hops, and one misbehaving app can saturate the BLE lane for
+  the room. A per-session or per-link token bucket is the cheap fix
+  ([napplet-runtime.md](./design/napplet/napplet-runtime.md) S3).
 - **Open nsite windows and updates.** A napplet window keeps the version it
   opened and offers a restart when the served version moves on (v0.8.0); an
   open nsite window can mix old and new files when an update is applied — the
@@ -509,8 +536,8 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 - **Background subscriptions.** A Myco-side subscription that survives the
   napplet's window closing, so a doorbell can ring with the app closed. Needs
   the notification path (N4) and a battery story.
-- **Relay read-auth.** The relay is open-read to Circle members; NIP-42 `AUTH`
-  and per-peer read scoping would let a member hold private apps —
+- **Relay read-auth.** The mesh relay is open-read to app peers; per-link
+  auth and read scoping would let a peer hold private apps —
   [security.md](./design/core/security.md) §3.
 - **External browsers (NAT46 / `.nsite`).** Let system Chrome reach a site;
   the in-process gateway serves only Myco's own WebViews —
@@ -519,7 +546,7 @@ Each its own milestone with its own design pass. Roughly in order of pull.
   BLE pair; the per-peer PSM patch already makes it possible —
   [ble-interop.md](./design/fips/ble-interop.md).
 - **Multi-persona.** More than one device key per phone —
-  [identity-pairing.md](./design/core/identity-pairing.md) §3.
+  [identity.md](./design/core/identity.md) §3.
 - **Public-node peering** over the internet via FIPS discovery kinds —
   [nostr-kinds.md](./reference/nostr-kinds.md).
 
@@ -535,7 +562,7 @@ Each its own milestone with its own design pass. Roughly in order of pull.
 | P3 | pairing + sync over the mesh; Circle; discovery | v0.3 |
 | P3.5 | the consumer UI (bottom-nav shell, sheets, intro, names) | v0.4 |
 | P4 | the two-phone airplane-mode demo | v0.4 |
-| P5 | propagation at scale | partly: gossip planes, backlog replay; not eviction or negentropy |
+| P5 | propagation at scale | partly: gossip planes, backlog replay (since replaced by neighborhoods); not eviction or negentropy |
 | P6 | Linux interop | not as a tested pair |
 
 Beyond it: Wi-Fi Aware and the LAN lane (v0.5–0.6), multi-path (v0.6), file

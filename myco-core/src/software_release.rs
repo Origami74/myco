@@ -1,7 +1,6 @@
 //! Find and authenticate Myco's publisher-signed Zapstore announcements, from
-//! the Zapstore relay or from the Circle.
+//! the Zapstore relay or from app peers.
 use crate::content::Content;
-use crate::mesh_wire::{new_query_id, MeshMeta};
 use nostr::{Event, Filter, PublicKey};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -134,9 +133,9 @@ pub(crate) async fn from_zapstore(filter: serde_json::Value) -> anyhow::Result<V
 }
 
 /// Find the newest signed release this device can reach: the announcements
-/// it keeps, its Circle up to two hops out, and — when `online` — the
-/// Zapstore relay, asked side by side. The winner is kept, so this device
-/// answers its Circle's next check, mesh-only phones included. Every source
+/// it keeps, its app peers, and — when `online` — the Zapstore relay,
+/// asked side by side. The winner is kept, so this device answers its app
+/// peers' next check, mesh-only phones included. Every source
 /// is checked against the pinned publisher alike: a peer can withhold a
 /// release, not forge one.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -150,12 +149,7 @@ pub async fn check(content: Option<Arc<Content>>, online: bool) -> anyhow::Resul
             Ok(kept) => content.relay().query(&[kept]).await.unwrap_or_default(),
             Err(_) => Vec::new(),
         };
-        let meta = MeshMeta::pull(1, new_query_id(), crate::content::PULL_BUDGET_MS);
-        events.extend(
-            content
-                .pull_from_peers(vec![filter.clone()], meta, None)
-                .await,
-        );
+        events.extend(content.pull_from_peers(vec![filter.clone()]).await);
         events
     };
     let zapstore = async {
@@ -314,10 +308,10 @@ mod tests {
         assert!(newest(vec![metadata("99.0.0", "app.myco", "main")], now).is_none());
     }
 
-    /// A mesh-only phone learns of a release from its Circle, and keeps it to
-    /// answer its own Circle in turn.
+    /// A mesh-only phone learns of a release from its app peers, and keeps it
+    /// to answer its own app peers in turn.
     #[tokio::test]
-    async fn mesh_only_check_asks_the_circle_and_keeps_the_answer() {
+    async fn mesh_only_check_asks_app_peers_and_keeps_the_answer() {
         use nostr::nips::nip19::ToBech32;
         let dir = std::env::temp_dir().join(format!("myco-release-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

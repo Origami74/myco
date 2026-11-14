@@ -79,7 +79,7 @@ pub(crate) fn listen(port: u16) -> Option<io::Result<MeshListener>> {
 }
 
 /// A server's listener on the mesh stack. Hands axum each peer's mesh
-/// address, as a kernel listener would, so the Circle gate reads the same.
+/// address, as a kernel listener would, so the app peer gate reads the same.
 pub(crate) struct MeshListener(TcpListener);
 
 impl axum::serve::Listener for MeshListener {
@@ -652,7 +652,7 @@ mod tests {
     }
 
     /// A mesh HTTP client — reqwest, through the bridge — reaches an IPv6
-    /// server, the way a pairing POST reaches a peer's `[fd00::…]:4873`.
+    /// server, the way a link request reaches a peer's `[fd00::…]:4873`.
     #[tokio::test]
     async fn a_mesh_client_posts_through_the_bridge_over_ipv6() {
         use axum::routing::post;
@@ -743,7 +743,7 @@ mod tests {
     }
 
     /// A server on the mesh stack sees each peer by its mesh address, so the
-    /// Circle gate judges the right one — here Blossom's, which refuses a
+    /// app peer gate judges the right one — here Blossom's, which refuses a
     /// stranger.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_gate_sees_a_stack_peer_by_its_mesh_address() {

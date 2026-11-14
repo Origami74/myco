@@ -8,7 +8,7 @@
 //! `REQ`.
 //!
 //! **Nothing Myco-specific goes over this link.** No `MESH` envelope, no ttl, no
-//! circle. That is boundary 2 (`reference/thinning-custom-relay.md`), and it is
+//! app peers. That is boundary 2 (`reference/thinning-custom-relay.md`), and it is
 //! the reason an unmodified relay can serve here at all.
 //!
 //! One connection, held open and reopened on demand. The gateway hits the backend

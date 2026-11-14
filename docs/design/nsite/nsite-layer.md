@@ -12,7 +12,7 @@ including fully offline.
 
 It mirrors the model of the Go **nsite-deck** reference (its `sync-architecture.md`
 and `nsite-protocol.md`; not checked into this repo), re-implemented in Rust and
-re-pointed at Circle members over FIPS instead of public relays.
+re-pointed at app peers over FIPS instead of public relays.
 
 > Status: built. Two things differ from the design as first written: the
 > WebView host is `<host>.localhost`, not `<host>.nsite` (§3.2), and the
@@ -22,10 +22,11 @@ re-pointed at Circle members over FIPS instead of public relays.
 >
 > **Deprecated — the mesh ports (§5).** Pulling a site from a holder by dialling
 > their relay and Blossom over `.fips` (`<npub>.fips:4870` / `:24243`) works
-> today and will be **removed in a future version**, for both servers. Sync
-> between Circle members moves to a channel the Circle layer owns
-> ([circle.md](../circle/circle.md)); the relay and store stop being sockets
-> a peer can dial. §5 describes what ships now; nothing new should depend on
+> today and will be **removed in a future version**, for both servers. Today
+> only app peers may dial them
+> ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)); fetching apps is meant
+> to move to napplets over NAP-NEIGHBOR, and the relay and store then stop being
+> sockets a peer can dial. §5 describes what ships now; nothing new should depend on
 > it.
 
 See the component view ([diagrams/05-nsite-layer-architecture.svg](../diagrams/05-nsite-layer-architecture.svg))
@@ -79,7 +80,7 @@ blob store, or radio:
   Useful to anything that needs Blossom (notably: there is **no good Android
   Blossom app**, which is exactly why this is worth having standalone).
 - **`myco-core`** *(app crate)* — the thin Myco-specific glue: the FIPS
-  endpoint, `AndroidBleIo`, the JNI-JSON FFI reducer, identity/pairing, and the
+  endpoint, `AndroidBleIo`, the JNI-JSON FFI reducer, identity, neighborhoods and links, and the
   wiring that picks which backends to plug in.
 
 `nsite-deck` reaches everything outside itself through **four trait seams**,
@@ -144,13 +145,13 @@ Two components, deliberately separated.
 **The mesh relay proxy** ([`myco-core/src/mesh_relay.rs`](../../../myco-core/src/mesh_relay.rs))
 is the NIP-01 WebSocket front door. It serves the in-app WebView on
 `ws://localhost:4870` and mesh peers on `ws://[fd00::self]:4870`, and it is the
-only Myco-specific code on the content path: origin classification, the gossip
-seen-set, hop-budget stamping and clamping, split-horizon, pull fan-out, live
-subscription mirroring, and the circle access gate all live here.
+only Myco-specific code on the content path: origin classification, the
+seen-set, hop-budget clamping for forwarded manifests, live subscription
+mirroring, and the app peer access gate (`AppPeerGate`) all live here.
 
 **The store** ([`myco-relay`](../../../myco-relay/src/lib.rs)) is a plain NIP-01
 event store behind it. It holds **no Myco concepts** — no mesh, no ttl, no
-circles — and it has no socket of its own. It is the default backend, not "our
+neighborhoods — and it has no socket of its own. It is the default backend, not "our
 relay".
 
 #### The two boundaries
@@ -159,7 +160,7 @@ relay".
 | --- | --- |
 | nsite ↔ `ws://localhost:4870` | Plain NIP-01. No Myco verb, no Myco key, ever. |
 | proxy ↔ backing store | Plain NIP-01. This is what lets any relay sit there. |
-| proxy ↔ proxy over `.fips` | Plain NIP-01 or a `MESH` envelope ([event-gossip.md §2](../core/event-gossip.md)) |
+| proxy ↔ proxy over `.fips` | Plain NIP-01 or a `MESH` envelope (`mesh_wire.rs`; [nsite-updates.md §4](./nsite-updates.md)) |
 
 Concentrating the Myco-specific behaviour on the one link nobody else listens on
 is what makes the store replaceable. A `MESH` frame arriving on the loopback
@@ -240,7 +241,7 @@ Some events arrive from outside the local relay and would be asked for again:
 a profile a napplet looked up, a manifest the AppStore listed. The tap in
 [`keep_seen.rs`](../../../myco-core/src/keep_seen.rs) writes those into the
 local relay behind the lookup that found them. The next lookup answers
-locally, works offline, and a Circle peer asking this phone gets it too.
+locally, works offline, and an app peer asking this phone gets it too.
 
 **Which kinds.** Only these, all replaceable:
 
@@ -290,7 +291,7 @@ version whose files this phone does not have. Three things read through the
 pin instead of the store's newest:
 
 - the gateway, and a napplet's open (`ManifestStore::current`);
-- the Circle-facing relay (`Content::pinned_relay`, behind the mesh and
+- the app-peer-facing relay (`Content::pinned_relay`, behind the mesh and
   loopback sockets), so a peer asking for an installed app gets the version
   this phone can hand the files over for;
 - "Clear local database", which drops kept events with everything else unpinned and then puts
@@ -324,32 +325,31 @@ that serves endless fresh keys, can still add events. Per lookup:
 Nothing prunes kept events yet besides "Clear local database". Pruning them is on the
 roadmap ([roadmap.md](../../roadmap.md), Later: pruning of kept events).
 
-**Privacy.** The local relay is readable by Circle members. Kept events are
+**Privacy.** The local relay is readable by app peers. Kept events are
 public, signed data, and serving them helps propagation. But the set of
-profiles and apps this phone has looked up shows what the user browsed. The
-Circle is people the user paired with on purpose, and they can already read
-what a subscription pulled in, so this is accepted.
+profiles and apps this phone has looked up shows what the user browsed. App
+peers are people the user linked with on purpose, in a neighborhood with Apps
+on, so this is accepted.
 
-**Fanout to connected peers.** The store never fans out. Fanout is the proxy's
-gossiper: when an event is accepted for the first time, it is published onward to
-every circle peer except the one it came from, as a `MESH`-wrapped `["EVENT", …]`
-to each `<peer>.fips:4870`. This is what makes the "announce widely" half of
-propagation push-based and automatic instead of a flood the app has to
-orchestrate (see [./propagation.md §2](./propagation.md)). Constraints:
+**Fanout to connected peers.** The store never fans out, and neither does the
+proxy for events in general: event gossip is gone. The one thing still forwarded
+is an **app manifest** (nsite 15128/35128, napplet 15129/35129), by the proxy's
+hook (`MeshGossiper`) to every app peer except the one it came from, as a
+`MESH`-wrapped `["EVENT", …]` with a hop budget (default 3). See
+[nsite-updates.md §4](./nsite-updates.md). Constraints:
 
-- **Events fan out; blobs do not.** Only Nostr events (in practice the small,
-  self-authenticating manifests) are multiplexed. Blossom blobs are *not* events
-  and stay **pull-only** — fanning megabytes to N peers would saturate a BLE
-  link.
+- **Manifests fan out; blobs do not.** Blossom blobs are *not* events and stay
+  **pull-only** — fanning megabytes to N peers would saturate a BLE link.
 - **Source-excluded + de-duplicated.** The proxy's own seen-set, keyed by event
-  id, plus a hop budget (default 3) prevents echoing an event back to its sender
-  or re-flooding one already forwarded. The seen-set is the proxy's, **not** the
-  store's, so an id the store GCs at expiry does not look new again
-  ([event-gossip.md §4](../core/event-gossip.md)).
+  id, plus the hop budget prevents echoing a manifest back to its sender or
+  re-forwarding one already forwarded. The seen-set is the proxy's, **not** the
+  store's.
 - **Re-emitted unmodified.** Forwarded events keep the author's signature intact
   and are byte-for-byte canonical NIP-01; the hop budget rides beside them in the
-  envelope. Forwarding an already-signed event is normal publish behaviour, not
-  authoring.
+  envelope.
+
+What people share with each other now travels in neighborhoods, over links, on a
+separate scoped store ([nap-neighbor/data-plane.md](../nap-neighbor/data-plane.md)).
 
 See [diagrams/07-relay-mesh-fanout.svg](../diagrams/07-relay-mesh-fanout.svg).
 
@@ -365,17 +365,17 @@ gateway and sync need:
 - `PUT /upload` → store blob, key by `sha256(body)`.
 - `HEAD /<sha256>` → existence check.
 
-**No protocol fork anywhere on the blob plane.** There is no ttl, no gossip, and
+**No protocol fork anywhere on the blob plane.** There is no ttl, no forwarding, and
 no query semantics on blobs, so nothing needs a `MESH` envelope. Peers speak
 plain BUD-01 to us and we speak plain BUD-01 to the store. This is the one plane
 where both boundaries *and* the peer link are stock protocol.
 
 **Access, but no Myco knowledge in the crate.** The mesh-facing port is gated:
 loopback bypasses, and a mesh source must pass an access function supplied by
-`myco-core`, which answers from the circle and the peer's own permissions
+`myco-core`, which answers from the app peer set and the peer's own permissions
 ([nsite-permissions.md §2](./nsite-permissions.md)). The gate distinguishes reads
 from uploads, so `myco-blossom` stays a generic store that knows nothing about
-circles.
+neighborhoods.
 
 **Two implementations.** The filesystem store described here is the default;
 [`RemoteBlobStore`](../../../myco-core/src/remote_blobs.rs) reads through to an
@@ -436,7 +436,7 @@ ids), then the diff is fetched as usual; **blobs stay content-addressed
 pull-by-sha256 and are not part of reconciliation**. The `negentropy` Rust crate is
 already in the rust-nostr dependency graph (used by `nostr-relay-pool`), so this is
 a proven dependency, not new R&D. This is the **pull / catch-up** counterpart to the
-push-based propagator fanout (§2.1): the propagator gossips newly-accepted manifests
+push-based propagator fanout (§2.1): the proxy forwards newly-accepted manifests
 live; negentropy reconciles whatever was missed while disconnected or on first
 contact. A basic reconcile lands in **roadmap P3** (alongside fanout); scale
 hardening is **P5**.
@@ -620,7 +620,7 @@ directly from the reference and are a **proposed default** (tunable).
 
 > **Deprecated.** This section describes the mesh ports — dialling a holder's
 > relay and Blossom at `<npub>.fips:4870` / `:24243`. Both are scheduled for
-> removal; see the note at the top and [circle.md](../circle/circle.md).
+> removal; see the note at the top and [nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md).
 
 This is the one place Myco diverges substantially from nsite-deck. The Go
 sync engine fetches from **public** relays/Blossom over the internet; Myco
@@ -631,8 +631,8 @@ BLE.
 this order, stopping at the first hit:
 
 1. **Local relay + Blossom** — already held; serve direct (§4.2), no fetch.
-2. **FIPS peers** — a reachable holder over `.fips` (your circle and, transitively,
-   their peers; §5.1–5.2). The offline mesh path.
+2. **FIPS peers** — a reachable holder over `.fips` (your app peers;
+   §5.1–5.2). The offline mesh path.
 3. **Servers/relays the nsite event lists** — the manifest's `["server", …]` hints
    plus the author's NIP-65 `10002` relay list / BUD-03 `10063` Blossom servers.
    This is the **online fallback** (needs IP internet), so it is the **last resort**
@@ -793,10 +793,10 @@ reachable source.
 ### Discovery: "nsites around me"
 
 The native Discover tab and its `SearchNsites` action are **removed**. They
-queried each reachable Circle member's relay (`<npub_holder>.fips:4870`) for
+queried each reachable paired peer's relay (`<npub_holder>.fips:4870`) for
 kinds **15128 / 35128** and listed the results, one per site, newest first.
 Discovery now belongs to the preinstalled **AppStore napplet** (roadmap N5),
-which reaches the room through NAP-MESH like any other app. It lists napplets
+which is meant to reach people nearby through NAP-NEIGHBOR like any other app. It lists napplets
 only; listing nsites held around you is open work under N5. An nsite is still
 reached by a share, a scan, a link or a paste, and opening one runs the normal
 §4 sync/serve flow.
@@ -832,7 +832,7 @@ below governs the **Blossom blob store**.
   an nsite's JavaScript may call back into (e.g. query reachable peers, trigger
   a sync) is a later milestone and an explicit open design question (called out
   on [diagram 04](../diagrams/04-nsite-browse-flow.svg)). The per-application
-  capability model — gossip-kinds, TTL clamps, rate, location — is now sketched in
+  capability model — kinds, TTL clamps, rate, location — is now sketched in
   [nsite-permissions.md](./nsite-permissions.md) (v1 default-allow, enforced via
   the WebSocket `Origin`). **TBD / open.**
 - **htdocs serving cache** — the deferred path-named cache and its Android
@@ -844,11 +844,10 @@ below governs the **Blossom blob store**.
   `rusqlite` store sized to the tiny query surface Myco actually uses (§2.1).
   **TBD / open.**
 - **nsite-scoped propagation (capability-gated)** — whether the propagator's
-  fanout should be scoped per nsite / gated by a pairing capability rather than
-  flooding every accepted manifest to every connected peer. Tracked in
+  fanout should be scoped per nsite / gated by a capability rather than
+  forwarding every accepted manifest to every app peer. Tracked in
   [./propagation.md](./propagation.md)'s "nsite-scoped propagation
-  (capability-gated)" open question (ties into the mandatory mutual pairing
-  handshake, identity-pairing §6.1). **TBD / open.**
+  (capability-gated)" open question. **TBD / open.**
 
 ---
 

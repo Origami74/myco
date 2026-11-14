@@ -371,7 +371,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverScan(
 ///
 /// The value is an unauthenticated broadcast anyone in range can forge. It is
 /// stored as such; the display layer is what keeps it below every name learned
-/// from signed pair traffic.
+/// from a neighborhood invitation or link.
 #[no_mangle]
 pub extern "system" fn Java_app_myco_core_NativeCore_bleDeliverAdvertName(
     mut env: JNIEnv,

@@ -102,7 +102,7 @@ fn short(s: &str) -> String {
 /// build, where there is no radio.
 ///
 /// `now_ms` is reserved for future staleness-based state work and unused
-/// today (state is derived purely from connectivity/pairing facts, per D-10).
+/// today (state is derived purely from connectivity and app-peer facts, per D-10).
 #[allow(clippy::too_many_arguments)]
 pub fn merge_peers(
     peer_views: &[PeerView],
@@ -489,7 +489,7 @@ mod tests {
         }
     }
 
-    fn circle(npub: &str, name: &str) -> AppPeer {
+    fn app_peer(npub: &str, name: &str) -> AppPeer {
         AppPeer {
             perms: Default::default(),
             npub: npub.to_string(),
@@ -580,14 +580,14 @@ mod tests {
     }
 
     /// The ping the status panel shows is the peer's MMP SRTT, carried through
-    /// untouched. A row with no `PeerView` behind it (a Circle member who is
+    /// untouched. A row with no `PeerView` behind it (an app peer who is
     /// merely app-peer-offline) carries `None` rather than inheriting anyone's.
     #[test]
     fn srtt_rides_the_peer_view_onto_the_row() {
         let mut view = pv("a1", "npub1connected", true, 1_000, "udp");
         view.srtt_ms = Some(37.5);
         let peers = vec![bp("a1", "npub1connected", true)];
-        let members = vec![circle("npub2offline", "Offline Friend")];
+        let members = vec![app_peer("npub2offline", "Offline Friend")];
         let out = merge_peers(
             &[view],
             &peers,
@@ -604,10 +604,10 @@ mod tests {
     }
 
     #[test]
-    fn connected_sorts_before_paired_offline_regardless_of_last_heard() {
+    fn connected_sorts_before_app_peer_offline_regardless_of_last_heard() {
         let views = vec![pv("a1", "npub1connected", true, 1_000, "udp")];
         let peers = vec![bp("a1", "npub1connected", true)];
-        let members = vec![circle("npub2offline", "Offline Friend")];
+        let members = vec![app_peer("npub2offline", "Offline Friend")];
         let out = merge_peers(
             &views,
             &peers,
@@ -693,7 +693,7 @@ mod tests {
             bp("a1", "npub-a", true),
             bp("a2", "npub-b", false),
         ];
-        let members = vec![circle("npub-b", "Offline Friend")];
+        let members = vec![app_peer("npub-b", "Offline Friend")];
 
         let out_a = merge_peers(
             &views_a,
@@ -805,8 +805,8 @@ mod tests {
     }
 
     #[test]
-    fn circle_only_npub_with_no_radio_or_pairing_is_paired_offline() {
-        let members = vec![circle("npub-offline", "Friend")];
+    fn app_peer_only_npub_with_no_radio_is_app_peer_offline() {
+        let members = vec![app_peer("npub-offline", "Friend")];
         let out = merge_peers(
             &[],
             &[],
@@ -824,8 +824,8 @@ mod tests {
     }
 
     #[test]
-    fn circle_npub_in_reachable_npubs_is_reachable_via_relay() {
-        let members = vec![circle("npub-relay", "Friend")];
+    fn app_peer_npub_in_reachable_npubs_is_reachable_via_relay() {
+        let members = vec![app_peer("npub-relay", "Friend")];
         let reachable = vec!["npub-relay".to_string()];
         let out = merge_peers(
             &[],
@@ -843,8 +843,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_circle_name_falls_back_to_shortened_npub() {
-        let members = vec![circle(
+    fn empty_app_peer_name_falls_back_to_shortened_npub() {
+        let members = vec![app_peer(
             "npub1verylongidentifierthatexceedseighteenchars",
             "",
         )];
@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn long_name_is_truncated_to_64_chars() {
         let long_name = "x".repeat(200);
-        let members = vec![circle("npub-longname", &long_name)];
+        let members = vec![app_peer("npub-longname", &long_name)];
         let out = merge_peers(
             &[],
             &[],

@@ -104,7 +104,7 @@ just identity                                 # prints this host's device identi
 
 Host `cargo test` runs every crate against in-memory seams. It never sees
 `jni_abi.rs` or the radio bridges — those compile only for Android, so they are
-verified by the cross-compile below. Pairing, BLE, NFC and mesh behaviour
+verified by the cross-compile below. Neighborhood links, BLE, NFC and mesh behaviour
 regress only on phones.
 
 ### Android — the APK

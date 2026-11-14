@@ -572,8 +572,7 @@ impl AuthorOutbox {
             }
             let usable = match myco_napplet_runtime::nap::outbox::validate_relay_url(url) {
                 Ok(RelayLane::Internet { .. }) => true,
-                // A mesh relay is reached through the Circle pool, never by a
-                // public lookup.
+                // Only an internet relay is a public lookup.
                 Ok(_) => false,
                 Err(_) => {
                     !self.guard_private_dials
@@ -747,7 +746,7 @@ pub struct IpPeerSource {
     blossom_servers: Vec<String>,
     /// Every blob fetch goes through it, whoever named the server: the
     /// public internet only, unless this is a mesh source
-    /// ([`IpPeerSource::on_mesh`]), which reaches Circle peers only. See
+    /// ([`IpPeerSource::on_mesh`]), which reaches app peers only. See
     /// [`crate::http`].
     http: crate::http::HttpClient,
     timeout: Duration,
@@ -837,7 +836,7 @@ impl IpPeerSource {
         self
     }
 
-    /// A source that reaches Circle peers over the mesh, and nothing else:
+    /// A source that reaches app peers over the mesh, and nothing else:
     /// its blob client is [`crate::http::shared_mesh`], and it never asks a
     /// manifest's public `server` hints.
     pub fn on_mesh(mut self) -> Self {
@@ -1335,7 +1334,7 @@ pub fn mesh_source_for(
     .over_peer_relay(pool, holder_npub))
 }
 
-/// Several sources asked at once — the sharer and the Circle members in
+/// Several sources asked at once — the sharer and the app peers in
 /// reach — for one napplet or nsite slot, where the first good answer wins.
 ///
 /// Asking them in turn would cost a dead peer's whole timeout (20 s for a
@@ -1490,8 +1489,8 @@ impl PeerSource for FirstOf {
 /// the peer's Blossom (`http://[fd00::peer]:24243/upload`), then GET it back, timing
 /// each leg. Returns `(up_mbps, down_mbps)` — upload (this device → peer) and
 /// download (peer → this device) throughput in megabits per second. The whole call
-/// is bounded by `timeout`. The peer's Blossom gates non-loopback sources by Circle
-/// membership, so this only succeeds against a paired, reachable peer.
+/// is bounded by `timeout`. The peer's Blossom admits only its app peers from
+/// the mesh, so this only succeeds against a reachable app peer.
 ///
 /// Note: the payload is content-addressed and there is no Blossom DELETE, so a run
 /// leaves a `bytes`-sized blob on the peer until its next cache wipe — fine for the

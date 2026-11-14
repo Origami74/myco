@@ -1,11 +1,11 @@
 //! Public internet mesh nodes (roadmap N10).
 //!
 //! When the phone is online it can also peer with public FIPS nodes over the
-//! internet, so Circle members who are not in the same room still reach each
+//! internet, so neighbors who are not in the same room still reach each
 //! other through the mesh. A public node is an **ordinary mesh peer**: fips
-//! routes through it, nothing more. It is not a Circle member and the Circle
+//! routes through it, nothing more. It is not an app peer and the app peer
 //! gate does not change — it can carry our packets, it cannot read our relay,
-//! our Blossom or the contents of anything (every Circle session is end to end
+//! our Blossom or the contents of anything (every mesh session is end to end
 //! Noise above it).
 //!
 //! # Where the list comes from
@@ -43,7 +43,7 @@
 //! links are left to fips's own liveness rather than torn down.
 //!
 //! A public node never replaces a radio path: it is a different peer from
-//! any Circle member, so a member reachable over BLE, Aware or the LAN keeps
+//! any app peer, so an app peer reachable over BLE, Aware or the LAN keeps
 //! that direct link, and the internet lane's socket is a backup-role
 //! transport on a multi-path core.
 //!
@@ -694,8 +694,8 @@ impl PublicNodes {
     /// Decide what this tick does. Pure over the held state, the clock and
     /// the gate; records the dials it plans so the next tick sees them.
     ///
-    /// `connected` is the npubs fips reports connected; `circle` the user's
-    /// Circle, whose members are never disconnected from here even if one of
+    /// `connected` is the npubs fips reports connected; `app_peers` this
+    /// device's app peers, which are never disconnected from here even if one of
     /// them happens to run a public node. Only links this module dialled are
     /// ever disconnected: a peer that also advertises publicly but reached us
     /// another way (a LAN daemon, a radio) is not ours to drop.
@@ -704,7 +704,7 @@ impl PublicNodes {
         now_ms: u64,
         gate: Gate,
         connected: &HashSet<String>,
-        circle: &HashSet<String>,
+        app_peers: &HashSet<String>,
     ) -> TickPlan {
         let mut inner = self.lock();
         let inner = &mut *inner;
@@ -740,7 +740,7 @@ impl PublicNodes {
             plan.disconnect = public_connected
                 .iter()
                 .filter(|n| inner.dials.contains_key(n.as_str()))
-                .filter(|n| !circle.contains(n.as_str()))
+                .filter(|n| !app_peers.contains(n.as_str()))
                 .filter(|n| !enabled || !inner.settings.is_selected(n))
                 .map(|n| (*n).clone())
                 .collect();
@@ -963,9 +963,9 @@ impl PublicNodes {
                 .filter(|p| p.connected && !p.npub.is_empty())
                 .map(|p| p.npub.clone())
                 .collect();
-            let circle: HashSet<String> = content.app_peer_npubs().into_iter().collect();
+            let app_peers: HashSet<String> = content.app_peer_npubs().into_iter().collect();
 
-            let plan = self.plan(now_ms(), gate, &connected, &circle);
+            let plan = self.plan(now_ms(), gate, &connected, &app_peers);
             if plan.fetch {
                 self.fetch_adverts().await;
                 // A fresh read changes what can be dialled: go round again at
@@ -1591,15 +1591,15 @@ mod tests {
     }
 
     #[test]
-    fn switching_off_drops_public_links_but_never_a_circle_member() {
+    fn switching_off_drops_public_links_but_never_an_app_peer() {
         let (_d, nodes, picked) = dir_with(3);
         nodes.lock().settings.enabled = false;
         for npub in &picked {
             dialled(&nodes, npub);
         }
         let up: HashSet<String> = picked.iter().cloned().collect();
-        let circle: HashSet<String> = [picked[1].clone()].into();
-        let plan = nodes.plan(NOW * 1000, open_gate(), &up, &circle);
+        let app_peers: HashSet<String> = [picked[1].clone()].into();
+        let plan = nodes.plan(NOW * 1000, open_gate(), &up, &app_peers);
         let mut want = vec![picked[0].clone(), picked[2].clone()];
         want.sort();
         assert_eq!(plan.disconnect, want);

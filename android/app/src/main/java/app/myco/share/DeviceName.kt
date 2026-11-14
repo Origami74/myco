@@ -37,7 +37,7 @@ object DeviceName {
     //
     // 32 × 64 = 2048 combinations. The old 12 × 12 = 144 was the whole reason
     // duplicates turned up: by the birthday bound a room of 14 devices was
-    // already even money for a collision, and a Circle of 20 was near-certain.
+    // already even money for a collision, and a neighborhood of 20 was near-certain.
     // At 2048 the same bet needs ~53 devices.
     private val COLORS = listOf(
         "green", "blue", "amber", "violet", "teal", "coral",

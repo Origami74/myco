@@ -19,20 +19,21 @@ Everything in Myco sits in one of four layers. Each knows only the one below it.
 | # | Layer | Question it answers | Unit |
 | --- | --- | --- | --- |
 | 1 | **Apps** — nsites and napplets | What runs, and what may it do? | a manifest + its files |
-| 2 | **Circles and pairing** | Whom do I trust? | a Circle member |
+| 2 | **Neighborhoods and links** | Whom do I share with? | a link, a neighborhood |
 | 3 | **Relay and Blossom** | Where does data rest, and how does it spread? | an event, a blob |
 | 4 | **FIPS** | How do bytes get to another phone? | a peer, a link |
 
 Two confusions the layering exists to prevent:
 
-- **A peer is not a Circle member.** Layer 4 links to any FIPS node in range
-  and calls it a *peer*. Layer 2 *pairs* two people, by a signed handshake, and
-  calls the result a *Circle member*. Only Circle members may read your relay
-  and store. A peer can be connected and a stranger; a Circle member can be out
-  of range. See [Circles and pairing](#layer-2--circles-and-pairing).
+- **A FIPS peer is not a link.** Layer 4 connects to any FIPS node in range
+  and calls it a *peer*. Layer 2 sets up a *link* between two people, from a
+  one-time invitation. Only linked devices in a neighborhood with Apps on
+  (*app peers*) may read your relay and Blossom over the mesh. A FIPS peer can
+  be connected and a stranger; a linked person can be out of range. See
+  [Neighborhoods and links](#layer-2--neighborhoods-and-links).
 - **The device key is not the user key.** Layer 4's identity is the phone's;
-  layer 1's is the person's, as seen by napplets. Neither is an app author's
-  key. See [Three keys](#three-keys).
+  layer 1's is the person's, as seen by napplets. Each link has a key of its
+  own. None is an app author's key. See [Keys](#keys).
 
 ---
 
@@ -56,7 +57,7 @@ privileges beyond a browser's. Its identity is its **author key**.
 A NIP-5D manifest (kinds `5129` / `15129` / `35129`) over the same shape, whose
 content is a page Myco runs in a sandboxed iframe. A napplet has no network: it
 asks Myco for things through a capability seam (the **NAPs** — `relay`,
-`outbox`, `mesh`, `resource`, `identity`), and Myco does them on its behalf,
+`outbox`, `neighbor`, `resource`, `identity`), and Myco does them on its behalf,
 only where the user **granted** it. Its identity is its **aggregate hash** —
 every build is a different napplet. Design: [../napplet/napplet-runtime.md](../napplet/napplet-runtime.md).
 
@@ -77,28 +78,29 @@ used by the app; it survives only as the public gateways' suffix (`nsite.lol`).
 
 ---
 
-## Layer 2 — Circles and pairing
+## Layer 2 — Neighborhoods and links
 
-A **Circle** is this phone's list of paired people, persisted locally
-(`circle.json`). A **pairing** is a mutual, signed handshake between two Myco
-installs: one presents a one-time secret (NFC tag or QR), the other posts a
-signed **pair request** (kind `9101`) carrying it to the presenter's auth
-service at `<npub>.fips:4873`, and the presenter answers with a signed
-**pair accept** (`9102`). Forgetting a peer posts a **pair remove** (`9103`).
-Design: [identity-pairing.md](./identity-pairing.md).
+A **neighborhood** is a propagation channel ("Household", "Sports club"). It
+has no members and no admin. It is carried on **links**.
 
-Pairing is what admits a phone to the content ports. The relay and Blossom
-servers gate every mesh connection on Circle membership (the **Circle gate**),
-so a FIPS peer that is not paired can reach exactly one thing: the auth
-service, to ask to pair. A Circle member is also who Myco *pulls from* — apps,
-backlog, blobs — and who receives gossip.
+A **link** is a pairwise relationship between two devices, set up once from a
+one-time **invitation** (`myco://link/…`: QR, share link or NFC tap). Each
+side makes a **link key** for it. Each link carries the neighborhoods both
+sides agreed to; an event arriving on one link is passed on to the device's
+other links in that neighborhood, within local limits.
 
-**Not the same as a FIPS peer.** FIPS forms links with whatever compatible
-node is in range; that is transport, and it carries no trust. The Circle is a
-Myco-level decision, made by two people, stored on both phones — a *virtual*
-mesh over the physical one, built intentionally. The docs say *peer* for layer
-4 and *Circle member* or *paired* for layer 2. Design:
-[../circle/circle.md](../circle/circle.md).
+The link service runs on the auth plane, `<npub>.fips:4873/nh/…`. It is the
+only port a stranger can reach.
+
+An **app peer** is a linked device in a neighborhood with **Apps** on (the
+default). App peers are who Myco fetches apps, updates and the release APK
+from, and the only devices the mesh relay and Blossom admit (the **app peer
+gate**).
+
+**Not the same as a FIPS peer.** FIPS connects to whatever compatible node is
+in range; that is transport, and it carries no trust. A link is a decision two
+people make. The docs say *peer* for layer 4 and *link* or *app peer* for
+layer 2. Design: [nap-neighbor/](../nap-neighbor/README.md).
 
 ---
 
@@ -109,18 +111,17 @@ store (`http://localhost:24243`), in Rust, in-process. No external service is
 required. Everything an app reads or writes rests here: manifests, blobs, chat,
 napplet events, relay lists.
 
-Both are reachable by Circle members over the mesh at `<npub>.fips:4870` and
-`<npub>.fips:24243` today — the same numbers, so a peer dialling your `.fips`
-name lands on your loopback service. These **mesh ports are deprecated**: a
-Circle-owned channel will replace them ([../circle/circle.md](../circle/circle.md) §6).
-What does not change is that a phone is a **holder**: a device that has an
+Both are reachable by app peers over the mesh at `<npub>.fips:4870` and
+`<npub>.fips:24243` — the same numbers, so a peer dialling your `.fips` name
+lands on your loopback service. Neighborhood traffic does not use them: it has
+its own scoped store, reached through the link service on `:4873`
+([nap-neighbor/data-plane.md](../nap-neighbor/data-plane.md)). What does not change is that a phone is a **holder**: a device that has an
 author's signed events and blobs and re-serves them. A holder is not the
 author; re-serving signed events is ordinary relay behaviour.
 
-Between Circle members, events also travel by **gossip**: a hop-limited flood
-(push plane, default 3 hops) and a hop-limited backlog pull (pull plane, default
-2 hops), carried in a `MESH` envelope beside plain NIP-01. Design:
-[event-gossip.md](./event-gossip.md).
+Between app peers, nsite and napplet manifests are forwarded so updates
+spread ([../nsite/nsite-updates.md](../nsite/nsite-updates.md) §4). Other events
+travel only in neighborhoods.
 
 ---
 
@@ -140,13 +141,16 @@ fips owns the protocol), Wi-Fi Aware, the LAN, and — when a phone has internet
 
 ---
 
-## Three keys
+<a id="three-keys"></a>
+
+## Keys
 
 | Key | Layer | What it is | Where it appears |
 | --- | --- | --- | --- |
-| **device key** | 4 | this phone's Nostr keypair; generated on first launch (`identity.nsec`) | the mesh identity, link authentication, the relay/Blossom address `<npub>.fips`, pairing |
+| **device key** | 4 | this phone's Nostr keypair; generated on first launch (`identity.nsec`) | the mesh identity, FIPS link authentication, the relay/Blossom address `<npub>.fips` |
 | **user key** | 1 | the person's Nostr keypair as napplets see it — the account in Settings; a guest generated on first launch, with a guest profile (kind `0`) and relay lists (kinds `10002` and `10050`), or their own `nsec` or a signer app | what a napplet publishes *as*; `identity.getPublicKey()` |
 | **author key** | 1 | an app author's key, held elsewhere by external tooling | the nsite URL host, the `authors` filter in a query; never its secret |
+| **link key** | 2 | one keypair per link, generated at setup (`links.json`) | link setup, NIP-98 auth on the link service, signing offers |
 
 The device key never authors an app. The app never holds an author's secret
 and never signs for them. The user key is separate from the device key so that
@@ -159,7 +163,7 @@ layers:
 
 | Form | Value | Who uses it |
 | --- | --- | --- |
-| **npub** | bech32 secp256k1 public key | the UI, pairing payloads, Noise handshakes, the relay/Blossom address |
+| **npub** | bech32 secp256k1 public key | the UI, share payloads, Noise handshakes, the relay/Blossom address |
 | **node_addr** | `SHA256(npub)[0:16]` | FIPS routing (headers, spanning tree, bloom filters) |
 | **fd00:: IPv6** | `fd` ‖ `node_addr[0:15]` | ordinary IPv6 software, via the TUN |
 
@@ -174,7 +178,7 @@ identity of either endpoint. (See
 - **`.fips`** is the transport namespace: `<npub>.fips` → that phone's
   `fd00::` address (AAAA), answered by the node's own resolver through the TUN.
   IPv6 only, mesh only. This is what **sync** talks to — relay and Blossom
-  connections to Circle members. The WebView never resolves it.
+  connections to app peers, and the link service. The WebView never resolves it.
 - **`.localhost`** is the presentation namespace: what the WebView loads, served
   in-process by the gateway. It is not DNS at all.
 
@@ -212,26 +216,30 @@ is opened. Design: [../nsite/propagation.md](../nsite/propagation.md).
 | **manifest** | the signed event whose `path` tags map paths to blob hashes |
 | **blob** | a content-addressed file, by sha256 (Blossom BUD-01) |
 | **aggregate hash** | the hash over a manifest's `path` entries; an nsite's integrity check, a napplet's identity |
-| **NAP** | a napplet capability domain (`relay`, `outbox`, `mesh`, `resource`, `identity`, `shell`) from the [napplet registry](https://github.com/napplet/naps) |
+| **NAP** | a napplet capability domain (`relay`, `outbox`, `neighbor`, `resource`, `identity`, `shell`) from the [napplet registry](https://github.com/napplet/naps) |
 | **grant** | the user's permission for a napplet to use a NAP; written at install review or on the app's Manage permissions sheet |
 | **Apps** | the home grid of installed nsites and napplets (in code: the Library) |
-| **Circle** | this phone's list of paired people, persisted locally |
-| **Circle member / paired** | someone in the Circle; admitted to the relay and Blossom over the mesh |
-| **peer** | a FIPS node this phone has a link to; says nothing about trust |
-| **pairing** | the mutual signed handshake (kinds `9101`/`9102`/`9103`) over the auth service on `:4873` |
-| **Circle gate** | the check on every mesh connection to the relay or Blossom: paired, or refused |
+| **neighborhood** | a propagation channel carried on links; no members, no admin |
+| **link** | a pairwise relationship between two devices, set up from an invitation; carries neighborhoods |
+| **link key** | a keypair made for one link; neither the device key nor the user key |
+| **invitation** | a one-time `myco://link/…` payload (QR, share link, NFC) that sets up a link |
+| **offer** | a link-key-signed event (kind `37516`) listing what a device serves on a link |
+| **app peer** | a linked device in a neighborhood with Apps on; Myco fetches apps and updates from it |
+| **app peer gate** | the check on every mesh connection to the relay or Blossom: app peer, or refused |
+| **peer** | a FIPS node this phone has a transport link to; says nothing about trust |
+| **Circle, pairing** | removed; replaced by neighborhoods and links |
 | **holder** | a phone that has an author's events and blobs and re-serves them; reached at `<npub_holder>.fips` |
-| **device key** | this phone's keypair: mesh identity, link auth, `<npub>.fips`, pairing |
+| **device key** | this phone's keypair: mesh identity, FIPS link auth, `<npub>.fips` |
 | **user key** | the person's keypair for napplets: what they publish as |
 | **author key** | an app author's external key: the URL host and the `authors` filter; never held |
 | **node_addr** | `SHA256(npub)[0:16]`; the FIPS routing id |
 | **fd00:: IPv6** | `fd ‖ node_addr[0:15]`; the ULA overlay address via the TUN |
 | **`.fips`** | DNS → `fd00::` (AAAA); mesh sync only |
 | **`.localhost`** | what the WebView loads; answered in-process, not DNS |
-| **embedded relay** | in-process NIP-01 relay, `ws://localhost:4870`; `<npub>.fips:4870` to Circle members |
-| **embedded Blossom** | in-process blob store, `http://localhost:24243`; `<npub>.fips:24243` to Circle members |
+| **embedded relay** | in-process NIP-01 relay, `ws://localhost:4870`; `<npub>.fips:4870` to app peers |
+| **embedded Blossom** | in-process blob store, `http://localhost:24243`; `<npub>.fips:24243` to app peers |
 | **gateway** | the in-process resolver that answers a WebView's requests from relay + Blossom |
-| **gossip** | hop-limited flood (push) and backlog pull between Circle members, in a `MESH` envelope |
+| **link service** | the neighborhood protocol over HTTP, `/nh/{pk}/…` on `:4873` |
 | **lane** | one transport under FIPS: `ble`, `aware`, `udp` (LAN), `tcp` |
 | **FIPS mesh** | self-organizing, transport-agnostic, live-path-only routing |
 | **FMP / FSP** | FIPS Mesh Protocol (hop-by-hop, Noise IK) / FIPS Session Protocol (end-to-end, Noise XK) |

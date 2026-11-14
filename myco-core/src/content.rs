@@ -285,19 +285,17 @@ pub struct AppPeer {
 ///
 /// Read every flag as a grant *we* make to *them*. "Multihop" is ambiguous on
 /// its own, so it means specifically whether their traffic travels further
-/// through us — not anything we send them. Both multihop flags are expressed as
-/// per-peer ttl clamps rather than a separate check, so they reuse the machinery
-/// the push and pull planes already have. See
+/// through us — not anything we send them. See
 /// `reference/thinning-custom-relay.md` (D10).
+///
+/// A stored record may still carry `relayReadMultihop` from an older build;
+/// unknown fields are ignored, so it reads fine and is dropped on the next save.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerPerms {
     /// May open a `REQ` and receive our stored events.
     #[serde(default = "yes")]
     pub relay_read: bool,
-    /// Their `REQ` may be forwarded to our other peers (a hop-budget clamp).
-    #[serde(default = "yes")]
-    pub relay_read_multihop: bool,
     /// May publish events to us.
     #[serde(default = "yes")]
     pub relay_write: bool,
@@ -326,7 +324,6 @@ impl Default for PeerPerms {
     fn default() -> Self {
         Self {
             relay_read: yes(),
-            relay_read_multihop: yes(),
             relay_write: yes(),
             relay_write_multihop: yes(),
             blossom_read: yes(),
@@ -376,20 +373,12 @@ impl CacheView {
     }
 }
 
-/// Time budget stamped on a pull this node originates. Relative, and only bounds
-/// how long a node downstream holds query state — late results are not an error,
-/// they simply arrive to whoever is still listening
-/// (`reference/thinning-custom-relay.md`, D8).
-pub(crate) const PULL_BUDGET_MS: u32 = 10_000;
-
 /// At most this many authors' NIP-65 write relays, in total, join the default
 /// relays in an nsite update check — one combined REQ each, so the bound is
 /// on sockets, however many authors the Library holds.
 const UPDATE_CHECK_AUTHOR_RELAYS: usize = 12;
 
-/// Longest a single forwarded hop will wait on a peer, used when no budget rode
-/// in (an older peer, or a pull that never carried one). A budget that did
-/// arrive only ever shortens this.
+/// Longest [`Content::pull_from_peers`] waits on any one app peer.
 const PULL_HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// How many events passing through a pull are stored together.
@@ -438,13 +427,6 @@ impl crate::mesh_relay::PeerGate for AppPeerGate {
 
     fn may_forward(&self, ip: IpAddr) -> bool {
         self.content.may_forward_from(ip)
-    }
-
-    fn max_req_ttl(&self, ip: IpAddr) -> u8 {
-        match self.content.perms_for_ip(ip) {
-            Some(p) if p.relay_read_multihop => crate::mesh_relay::MAX_REQ_TTL,
-            _ => 0,
-        }
     }
 }
 
@@ -590,7 +572,7 @@ pub struct Content {
     update_check: Mutex<UpdateCheckView>,
     /// The throttle every update-check trigger goes through (`update_gate.rs`).
     update_gate: Mutex<crate::update_gate::UpdateGate>,
-    /// Native paired-peer file transfers. Metadata is persisted; file keys and
+    /// Native app peer file transfers. Metadata is persisted; file keys and
     /// encrypted outbox paths remain inside the app-private data directory.
     file_transfers: Mutex<Vec<FileTransferRecord>>,
     /// Incoming transfers this device finished, newest last, as `(id, peer)`.
@@ -884,7 +866,7 @@ impl Content {
         let blobs_local = custom_blobs.is_none().then_some(embedded_blobs);
         let library_path = data_dir.join("library.json");
         let library = load_library(&library_path);
-        // The app peer and its pairing handshake are gone; neighborhoods
+        // The Circle and its pairing handshake are gone; neighborhoods
         // replaced them. Their files go with them.
         for old in ["circle.json", "outbound_pairs.json"] {
             let _ = std::fs::remove_file(data_dir.join(old));
@@ -2001,7 +1983,7 @@ impl Content {
     /// so a routed `ws://<npub>.fips:4870` dial reaches any of them. A member
     /// who is genuinely offline costs one bounded dial (the callers time out)
     /// and is then held off by the per-peer backoff in [`crate::peer_relay`].
-    /// See `docs/design/core/event-gossip.md`.
+    /// See `docs/design/nap-neighbor/app-peers.md`.
     pub fn app_peer_npubs(&self) -> Vec<String> {
         self.app_peers
             .lock()
@@ -2012,7 +1994,7 @@ impl Content {
     }
 
     /// The permissions granted to the peer at `ip`, or `None` if `ip` is not a
-    /// current app peer. One lookup answers both "are they paired" and "what
+    /// current app peer. One lookup answers both "are they an app peer" and "what
     /// may they do", so the access checks never consult two sources that could
     /// disagree. See `reference/thinning-custom-relay.md` (D10).
     ///
@@ -2058,7 +2040,7 @@ impl Content {
     /// `syncing` (an attempt is in flight). Skipping the in-flight ones is what lets
     /// a caller poll this every tick without piling on duplicate syncs — it re-tries
     /// roughly once per attempt-duration. Used to pull from a holder that just became
-    /// reachable (a sharer who paired) or any newly-connected app peer.
+    /// reachable (the sharer) or any newly-connected app peer.
     pub fn retriable_library_addrs(&self) -> Vec<SiteAddr> {
         // Snapshot the library first (releasing its lock) before taking `sites`, so
         // the two mutexes are never held nested.
@@ -2143,7 +2125,7 @@ impl Content {
         }
     }
 
-    // --- native paired-peer file transfer ---
+    // --- native app peer file transfer ---
 
     /// Snapshot transfer rows for the FFI/UI. Secrets and local source paths
     /// never cross this boundary.
@@ -2301,8 +2283,9 @@ impl Content {
         result
     }
 
-    /// Called by the mesh gossiper for every newly-arrived gift wrap. Invalid,
-    /// expired, non-file, and non-app peer messages are ignored.
+    /// Called by the mesh relay hook (`MeshGossiper`) for every newly-arrived
+    /// gift wrap. Invalid, expired, non-file, and non-app peer messages are
+    /// ignored.
     pub async fn handle_file_event(self: &Arc<Self>, event: &Event) {
         if event.kind != Kind::GiftWrap {
             return;
@@ -3034,7 +3017,7 @@ impl Content {
         let Ok(own_npub) = keys.public_key().to_bech32();
         // Taken before the transfer lock, never under it: every other path
         // takes app peers lock first.
-        let circle: HashSet<String> = self.app_peer_npubs().into_iter().collect();
+        let app_peers: HashSet<String> = self.app_peer_npubs().into_iter().collect();
         let mut out = Vec::new();
         let snapshot = {
             let mut records = self.file_transfers.lock().unwrap();
@@ -3048,7 +3031,7 @@ impl Content {
                 // Removing someone stops us talking to them. Their side drops a
                 // message from a non-app peer sender anyway; retrying at a person
                 // just removed is the part that would be wrong.
-                if !circle.contains(&r.view.peer_npub) {
+                if !app_peers.contains(&r.view.peer_npub) {
                     continue;
                 }
                 let state = (r.view.direction.as_str(), r.view.status.as_str());
@@ -3222,70 +3205,32 @@ impl Content {
         self.peer_relays.send(npub, &url, frame);
     }
 
-    /// Pull plane, collected: every event [`Self::pull_from_peers_stream`]
-    /// brings, once every peer has finished or run out of budget. For a
-    /// caller that needs the whole answer; one that can use events as they
-    /// come takes the stream.
-    pub async fn pull_from_peers(
-        self: &Arc<Self>,
-        filters: Vec<serde_json::Value>,
-        meta: crate::mesh_wire::MeshMeta,
-        exclude: Option<std::net::IpAddr>,
-    ) -> Vec<Event> {
-        let mut events = self.pull_from_peers_stream(filters, meta, exclude);
-        let mut out = Vec::new();
-        while let Some(event) = events.recv().await {
-            out.push(event);
-        }
-        out
-    }
-
-    /// Pull plane: forward a REQ's filters to connected app peers and
-    /// hand on each matching event the moment a peer sends it — every peer's
-    /// answer merged into one stream, which ends when the last peer is done.
-    /// `meta` is the incoming envelope, already decremented, so the hop
-    /// budget and query id carry onward while the filters stay canonical
-    /// NIP-01. `exclude` is the requester's mesh address (split-horizon).
-    /// Each peer is bounded by the budget that arrived, so a dead relay can't
-    /// stall discovery — and the nearest peer's answer is never held for the
-    /// slowest's.
-    pub fn pull_from_peers_stream(
-        self: &Arc<Self>,
-        filters: Vec<serde_json::Value>,
-        meta: crate::mesh_wire::MeshMeta,
-        exclude: Option<std::net::IpAddr>,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        // The filters go out untouched — hops, query id, and budget ride the
-        // envelope. `meta` is the *incoming* one, already decremented, so the
-        // query id survives the hop and every node downstream serves it once.
-
-        // All filters ride in one REQ per peer over the shared connection (the relay
-        // any-matches across them), so a pull is a single round-trip, not one socket
-        // per filter.
+    /// Ask every connected app peer's relay for `filters` and collect what
+    /// they hold, once every peer has answered or [`PULL_HOP_TIMEOUT`] ran
+    /// out. Single hop: a plain NIP-01 `REQ`, answered from each peer's own
+    /// store and never passed further.
+    ///
+    /// All filters ride in one `REQ` per peer over the shared connection (the
+    /// relay any-matches across them), so this is a single round trip per
+    /// peer, and a dead relay costs at most the timeout. Events are verified
+    /// by the pool at ingress.
+    pub async fn pull_from_peers(self: &Arc<Self>, filters: Vec<serde_json::Value>) -> Vec<Event> {
+        let deadline = tokio::time::Instant::now() + PULL_HOP_TIMEOUT;
+        let mut asks = Vec::new();
         for npub in self.app_peer_npubs() {
-            let Ok(peer) = fips::PeerIdentity::from_npub(&npub) else {
-                continue;
-            };
-            let ip = std::net::IpAddr::V6(peer.address().to_ipv6());
-            if exclude == Some(ip) {
+            if fips::PeerIdentity::from_npub(&npub).is_err() {
                 continue;
             }
             let url = crate::ip_source::mesh_relay_url(&npub);
-            // Wait only as long as the budget that arrived allows, not a fresh
-            // full-length timer. Otherwise this hop's window sits *inside* the
-            // one above it, and a peer further out returns after the requester
-            // has already given up (D8).
-            let deadline = tokio::time::Instant::now() + meta.hop_timeout(PULL_HOP_TIMEOUT);
-            let mut events =
-                self.peer_relays
-                    .request_stream(&npub, &url, filters.clone(), Some(meta.clone()));
-            let (this, tx) = (self.clone(), tx.clone());
-            tokio::spawn(async move {
-                // Passing through on their way to whoever asked: keep the
-                // profiles, relay lists and manifests, and cache the rest, so
-                // the next ask stops here — in small batches, not an LMDB
-                // write per event. Verified by the pool at ingress.
+            let mut events = self
+                .peer_relays
+                .request_stream(&npub, &url, filters.clone());
+            let this = self.clone();
+            asks.push(tokio::spawn(async move {
+                // Keep the profiles, relay lists and manifests, and cache the
+                // rest, so the next ask stops here — in small batches, not an
+                // LMDB write per event.
+                let mut got = Vec::new();
                 let mut passing = Vec::new();
                 while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
                     passing.push(event.clone());
@@ -3293,14 +3238,17 @@ impl Content {
                         this.remember(&passing);
                         passing.clear();
                     }
-                    if tx.send(event).is_err() {
-                        break;
-                    }
+                    got.push(event);
                 }
                 this.remember(&passing);
-            });
+                got
+            }));
         }
-        rx
+        let mut out = Vec::new();
+        for ask in asks {
+            out.extend(ask.await.unwrap_or_default());
+        }
+        out
     }
 
     // --- nsite updates (docs/design/nsite/nsite-updates.md) ---
@@ -3374,9 +3322,8 @@ impl Content {
 
         // Query set, one combined REQ per relay read until EOSE
         // (docs/design/nsite/nsite-updates.md §3.2):
-        //  - connected peers' mesh relays, carrying one more hop so the check reaches
-        //    2 hops just like discovery (their peers' manifests come back too),
-        //    which rides the envelope rather than the filter;
+        //  - connected app peers' mesh relays, one hop: each answers from
+        //    its own store;
         //  - online relays, unless mesh-only is on.
         let mesh_filter = serde_json::json!({
             "kinds": [nsite_deck::KIND_ROOT, nsite_deck::KIND_NAMED],
@@ -3449,19 +3396,8 @@ impl Content {
         let mesh_q = mesh_peers.into_iter().map(|(npub, url)| {
             let f = mesh_filter.clone();
             async move {
-                let meta = crate::mesh_wire::MeshMeta::pull(
-                    1,
-                    crate::mesh_wire::new_query_id(),
-                    PULL_BUDGET_MS,
-                );
-                pool.request_with(
-                    &npub,
-                    &url,
-                    vec![f],
-                    Some(meta),
-                    std::time::Duration::from_secs(15),
-                )
-                .await
+                pool.request(&npub, &url, vec![f], std::time::Duration::from_secs(15))
+                    .await
             }
         });
         let online_q = online.into_iter().map(|url| {
@@ -3769,9 +3705,9 @@ impl Content {
         .min(peer_cap)
     }
 
-    /// A manifest landed in our relay over the mesh (a peer's push, forwarded by
-    /// the gossiper). Propagate it like any event (`docs/design/nsite/nsite-updates.md`
-    /// §4); if it's one of our installed sites, download its blobs from the sender
+    /// A manifest landed in our relay over the mesh (an app peer's push, handed
+    /// over by the mesh relay hook). Forward it to app peers
+    /// (`docs/design/nsite/nsite-updates.md` §4); if it's one of our installed sites, download its blobs from the sender
     /// and activate. Forwarding never waits on the download for sites we don't run.
     pub async fn on_manifest_event(self: Arc<Self>, event: Event, inbound: Inbound) {
         let d = event_d_tag(&event);
@@ -3867,7 +3803,7 @@ impl Content {
     ///
     /// Snapshots (`5129`) never come here — they are immutable builds that no
     /// Library entry resolves by, so there is nothing to update, and they stay
-    /// on the plain gossip path.
+    /// out of this path.
     pub async fn on_napplet_manifest_event(&self, event: Event, inbound: Inbound) {
         // A napplet is one `index.html`; nothing it may reference is bigger
         // than what a napplet may fetch by hash.
@@ -4044,7 +3980,7 @@ impl Content {
         let ev_json = match serde_json::to_value(manifest) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(error = %e, "manifest gossip: serialize failed");
+                tracing::warn!(error = %e, "manifest forward: serialize failed");
                 return;
             }
         };
@@ -4860,11 +4796,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A `circle.json` written before per-peer permissions existed must load with
-    /// the defaults — and crucially with `blossom.write` **off**. A missing field
-    /// must never read as a grant, so serde's default has to be `false` rather
-    /// than `bool::default()` by accident (`reference/thinning-custom-relay.md`,
-    /// D10).
+    /// With a custom relay the content layer publishes there, not to its own store.
     #[tokio::test]
     async fn content_runs_on_a_relay_it_does_not_own() {
         // A relay that is emphatically not ours: its own store, its own socket.
@@ -4966,13 +4898,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The content ports have no exceptions left.
-    ///
-    /// Pairing kinds used to be the one thing an unapp peer could publish to
-    /// the relay, and the event landed in the store as a side effect. Both are
-    /// now refused: the handshake belongs to the auth plane, so a stranger has no
-    /// write path into a store that may not even be ours
-    /// (`reference/thinning-custom-relay.md`, D6).
+    /// Revoking an app peer's multihop writes stops its events here, and a
+    /// stranger's are never forwarded.
     #[test]
     fn revoking_multihop_writes_covers_both_push_planes() {
         let dir = tmp("multihop-clamp");
@@ -4996,8 +4923,8 @@ mod tests {
 
         // Revoke it the way the UI eventually will.
         {
-            let mut circle = content.app_peers.lock().unwrap();
-            circle[0].perms.relay_write_multihop = false;
+            let mut app_peers = content.app_peers.lock().unwrap();
+            app_peers[0].perms.relay_write_multihop = false;
         }
         assert!(
             !content.may_forward_from(ip),
@@ -5088,7 +5015,6 @@ mod tests {
     fn default_permissions_are_open_except_uploads() {
         let p = PeerPerms::default();
         assert!(p.relay_read);
-        assert!(p.relay_read_multihop);
         assert!(p.relay_write);
         assert!(p.relay_write_multihop);
         assert!(p.blossom_read);
@@ -5317,7 +5243,7 @@ mod tests {
                 (peer.clone(), "accepted:accept".to_string()),
                 (peer, "offered:offer".to_string())
             ],
-            "only the rows waiting on the other side, with a peer still in the Circle, \
+            "only the rows waiting on the other side, with a peer still an app peer, \
              and only once they have stalled"
         );
         assert!(
@@ -5356,7 +5282,7 @@ mod tests {
         );
         assert!(
             !content.was_completed_incoming("t1", &other),
-            "another Circle member asking about the same id is not answered"
+            "another app peer asking about the same id is not answered"
         );
         // A restart between publishing the file and the sender giving up must
         // not cost them the rest of the offer TTL.
@@ -5462,7 +5388,7 @@ mod tests {
         // ...and only for the peer that made the offer.
         assert!(
             !content.transfer_in_state("t1", "incoming", "npub1other", &["accepted"]),
-            "a third Circle member cannot drive someone else's transfer",
+            "a third app peer cannot drive someone else's transfer",
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6002,7 +5928,7 @@ pub(crate) mod library_kind_tests {
         assert_eq!(
             answered.iter().map(|e| e.id).collect::<Vec<_>>(),
             [v1.manifest.id],
-            "the Circle relay offered a version without its files"
+            "the app peer's relay offered a version without its files"
         );
         // A filter only the newer version matches gets nothing, not a stale v1.
         let answered = crate::ip_source::query_relay(
@@ -6157,11 +6083,11 @@ pub(crate) mod library_kind_tests {
         url
     }
 
-    /// Events passing through on a multi-hop pull for a peer are remembered
-    /// here — the profiles kept in the relay, the notes in the cache — through
-    /// the real pull path over the peer pool.
+    /// Events pulled from an app peer are remembered here — the profiles kept
+    /// in the relay, the notes in the cache — through the real pull path over
+    /// the peer pool.
     #[tokio::test]
-    async fn a_multi_hop_pull_keeps_what_passes_through() {
+    async fn a_pull_from_peers_keeps_what_passes_through() {
         let dir = tmp("keep-seen-pull");
         let _ = std::fs::remove_dir_all(&dir);
         let content = Arc::new(Content::open(&dir).unwrap());
@@ -6182,11 +6108,9 @@ pub(crate) mod library_kind_tests {
         content.peer_relays().redirect(&peer_npub, &url);
 
         let pulled = content
-            .pull_from_peers(
-                vec![serde_json::json!({ "authors": [author.public_key().to_hex()] })],
-                crate::mesh_wire::MeshMeta::pull(0, crate::mesh_wire::new_query_id(), 5_000),
-                None,
-            )
+            .pull_from_peers(vec![
+                serde_json::json!({ "authors": [author.public_key().to_hex()] }),
+            ])
             .await;
         assert_eq!(pulled.len(), 2, "the pull did not reach the peer");
 

@@ -43,13 +43,14 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- In-app QR scanner (reads a share QR). -->
     <uses-permission android:name="android.permission.CAMERA" />
-    <!-- Install a Myco update the Circle carried (update/ReleaseInstaller):
+    <!-- Install a Myco update an app peer carried (update/ReleaseInstaller):
          publisher-signed, checked against the release key, and Android asks
          the user before each install. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <!-- NFC tap-to-pair: HCE presents this device's pair code; reader mode reads a
-         peer's. Both optional — the app falls back to QR/paste without NFC. -->
+    <!-- NFC tap-to-connect: HCE presents a neighborhood invite (myco://link/…) or a
+         share link while that sheet is open; reader mode reads a peer's. Both
+         optional — the app falls back to QR/paste without NFC. -->
     <uses-permission android:name="android.permission.NFC" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <uses-feature android:name="android.hardware.nfc.hce" android:required="false" />
@@ -95,8 +96,8 @@
                 <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
-            <!-- Receive a photo from Android's system Sharesheet, then let the
-                 user choose one of Myco's already-paired Circle peers. -->
+            <!-- Receive a file from Android's system Sharesheet, then let the
+                 user choose one of Myco's app peers to send it to. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -107,8 +108,8 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>
-            <!-- Handle scanned myco:// links (a share QR: open the nsite + carry the
-                 sharer's pairing info). BROWSABLE so a camera/QR scanner can hand
+            <!-- Handle scanned myco:// links (a share QR: open the nsite from the
+                 sharer, or a neighborhood invitation). BROWSABLE so a camera/QR scanner can hand
                  it to Myco. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -137,8 +138,9 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="napplet" />
             </intent-filter>
-            <!-- Tap-to-pair: the OS reads the presenter's NDEF URI tag and delivers
-                 the myco://pair link here (no reader mode needed on this side). -->
+            <!-- Tap-to-connect: the OS reads the presenter's NDEF URI tag and delivers
+                 its myco:// link (an invite or a share) here (no reader mode needed
+                 on this side). -->
             <intent-filter>
                 <action android:name="android.nfc.action.NDEF_DISCOVERED" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -249,14 +251,15 @@
             android:foregroundServiceType="connectedDevice" />
 
         <!-- File-share hotspot: a local-only hotspot plus the file web page it
-             serves to whoever joins (started from the Circle tab). -->
+             serves to whoever joins (started from Share Myco on the Apps tab). -->
         <service
             android:name=".hotspot.HotspotService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
-        <!-- HCE for NFC tap-to-pair: emulates a tag serving this device's
-             myco://pair code while the QR/present screen is open. -->
+        <!-- HCE for NFC tap-to-connect: emulates a tag serving the open invite
+             (myco://link/…) or share link while that sheet is open, or the
+             file-share hotspot's page URL while it runs. -->
         <service
             android:name=".nfc.PairHostApduService"
             android:exported="true"

@@ -7,15 +7,15 @@ package app.myco.share
  * is "open this app, at this route". Myco resolves the `<host>` half; everything after
  * it is opaque and handed to the nsite verbatim.
  *
- * **It carries no secrets.** No holder npub, no pairing secret, no token that
+ * **It carries no secrets.** No holder npub, no invitation secret, no token that
  * Myco interprets. A deep link travels through channels nobody controls — a chat
  * message, a printed QR, a URL bar, someone's screenshot — so anything in it is public
- * and replayable, which is the opposite of what a one-time pairing secret needs to be.
- * Pairing has its own carrier: the scanned/tapped `myco://pair/…` and `myco://share/…`
- * payloads in [NsiteShare], exchanged face to face.
+ * and replayable, which is the opposite of what a one-time invitation secret needs to be.
+ * Invitations have their own carrier (the Invite sheet's QR, link or NFC tap), and a
+ * shared app with its holder travels as `myco://share/…` in [NsiteShare].
  *
  * Losing the holder hint costs nothing: `Content::open_site` with `holder = None`
- * already tries every Circle peer in turn and then the public fallback, so a link with
+ * already tries every app peer in turn and then the public fallback, so a link with
  * no sharer attached still retrieves the app from whoever nearby happens to have it.
  *
  * Deliberately plain string parsing (no `android.net.Uri`), so it is a pure function

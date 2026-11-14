@@ -24,9 +24,9 @@ sync-over-FIPS), [../design/nsite/nsite-layer.md §3.2](../design/nsite/nsite-la
 
 | Service | Listen address | Default port | Reached by | Exposed over FIPS? |
 | --- | --- | --- | --- | --- |
-| Embedded Nostr relay | `127.0.0.1:4870` (loopback) **and** `[::]:4870` (mesh) — one hub, two sockets | **4870** | WebViews and napplets on loopback; Circle members over the mesh | **Yes** — at `<npub>.fips:4870`, Circle members only |
-| Auth service (pairing) | `[::]` (mesh only) | **4873** | peers asking to pair | **Yes** — at `<npub>.fips:4873`, and the only port open to a peer we have never met |
-| Embedded Blossom server | `[::]:24243` | **24243** | the gateway and sync in-process; Circle members over the mesh | **Yes** — at `<npub>.fips:24243`, Circle members only. Not bound at all when a custom Blossom is configured |
+| Embedded Nostr relay | `127.0.0.1:4870` (loopback) **and** `[::]:4870` (mesh) — one hub, two sockets | **4870** | WebViews and napplets on loopback; app peers over the mesh | **Yes** — at `<npub>.fips:4870`, app peers only |
+| Link service (neighborhoods) | `[::]` (mesh only) | **4873** | link setup from an invitation; linked peers (NIP-98) | **Yes** — at `<npub>.fips:4873/nh/…`, and the only port open to a device we have no link with |
+| Embedded Blossom server | `[::]:24243` | **24243** | the gateway and sync in-process; app peers over the mesh | **Yes** — at `<npub>.fips:24243`, app peers only. Not bound at all when a custom Blossom is configured |
 | Gateway | in-process — no socket | n/a | the app's own WebViews, via `shouldInterceptRequest` | **No** — it is not reachable at all |
 | `.fips` DNS | the TUN advertises `fd00::53`; queries are lifted out of the packet stream and answered by the node's resolver | n/a | every app on the phone (the TUN is scoped to Myco's uid) | n/a — it *produces* the addresses below |
 | FIPS IPv6 adapter | FSP port **256** (internal mesh port, not a localhost socket) | 256 | FIPS session layer | n/a — this is the mesh transport that *carries* IPv6 to `fd00::` |
@@ -38,19 +38,19 @@ and loopback binds use the *same* number, so a peer dialling `<npub>.fips:4870`
 lands on the same hub a WebView reaches at `127.0.0.1:4870`.
 
 > **Deprecated — the mesh ports.** Reaching a phone's relay at
-> `<npub>.fips:4870` and its Blossom at `<npub>.fips:24243` is how Circle
-> members sync today, and it is **going away**. Both mesh listeners will be
-> removed in a future version; what replaces them is a channel owned by the
-> Circle layer ([circle.md](../design/circle/circle.md)), so that the relay and
-> store are never a socket a peer dials. The loopback listeners stay. Until
-> then the rows above are accurate; do not build anything new on the `.fips`
-> ports.
+> `<npub>.fips:4870` and its Blossom at `<npub>.fips:24243` is how app peers
+> fetch apps and updates today, and it is **going away**. Neighborhood
+> traffic already runs over the link service on `:4873`
+> ([nap-neighbor/](../design/nap-neighbor/README.md)); Myco's own basics are
+> meant to follow, so the relay and store are never a socket a peer dials. The
+> loopback listeners stay. Until then the rows above are accurate; do not build
+> anything new on the `.fips` ports.
 >
 > **Bind address.** The relay hub serves two listeners — loopback for this
 > phone's WebViews and napplets, `[::]` for the mesh — and the Blossom server
-> one on `[::]`. Reaching either over the mesh still requires a Circle
-> membership: the gate is checked on every mesh connection, and loopback bypasses
-> it. See §1 and [nsite-permissions.md](../design/nsite/nsite-permissions.md).
+> one on `[::]`. Reaching either over the mesh requires being an app peer
+> (`AppPeerGate`): the gate is checked on every mesh connection, and loopback
+> bypasses it. See §1 and [nsite-permissions.md](../design/nsite/nsite-permissions.md).
 
 ---
 
@@ -72,21 +72,27 @@ lands on the same hub a WebView reaches at `127.0.0.1:4870`.
   See
   [../design/nsite/nsite-layer.md §5.2](../design/nsite/nsite-layer.md).
 
-## 1a. Auth service — `4873`
+## 1a. Link service — `4873`
 
 - **Listen:** `http://[::]:4873` on the mesh only (IPV6_V6ONLY, so it cannot
-  collide with a loopback squatter). There is no localhost listener: nothing on
-  this device needs to pair with itself.
-- **Route:** `POST /pair`, body a signed pairing event (kinds 9101 / 9102 /
-  9103). Answers `200 paired`, `202 pending` (a request waiting on the user), or
-  `403 declined`.
-- **Reached by:** any peer, paired or not. This is deliberate and it is the only
-  such port — pairing is what *creates* the circle that gates everything else,
-  so it cannot itself require membership.
+  collide with a loopback squatter). There is no localhost listener.
+- **Routes** (`{pk}` is this side's link key for the link):
 
-Because bootstrap lives here, the relay and Blossom ports have **no exceptions**:
-an unpaired peer is refused before the WebSocket upgrade, and the relay rejects
-the pairing kinds from every source so they never reach the event store.
+  ```text
+  POST /nh/{pk}/setup          one-time secret proof     -> offer, ids on the link
+  GET  /nh/{pk}/offer          NIP-98                    -> current offer
+  POST /nh/{pk}/neighborhoods  NIP-98  {add, remove}     -> ids, pending
+  POST /nh/{pk}/end            NIP-98                    -> 204
+  GET  /nh/{pk}/relay?n=&ttl=  NIP-98, WebSocket         -> NIP-01 scoped to n
+  ```
+
+- **Reached by:** anyone holding an invitation (`/setup`), then linked peers,
+  each request signed with their link key. Every refusal is a bare `403
+  refused`. Bodies are capped at 8 KiB.
+
+Because link setup lives here, the relay and Blossom ports have **no
+exceptions**: a device that is not an app peer is refused before the WebSocket
+upgrade. Design: [nap-neighbor/](../design/nap-neighbor/README.md).
 
 `4873` is the first number clear of everything already spoken for: `4869` is what
 public Nostr relays commonly take, `4870` is our relay, `4871` is the LAN / `!FIPS`
@@ -99,7 +105,7 @@ different things in one codebase is a trap for whoever next reads a packet
 capture or a `netstat`. It is a Myco constant rather than something negotiated;
 peers agree by running the same version.
 
-See [../design/core/identity-pairing.md](../design/core/identity-pairing.md) and
+See [nap-neighbor/](../design/nap-neighbor/README.md) and
 [../../reference/thinning-custom-relay.md](../../reference/thinning-custom-relay.md) (D6).
 
 ## 2. Embedded Blossom server — `24243`
@@ -141,7 +147,7 @@ the node's own — so the OS resolver's query packets are handed to the TUN pump
 
 | Query suffix | Record | Answer | Who uses it |
 | --- | --- | --- | --- |
-| `*.fips` | **AAAA** | `fd00::` ULA = `fd ‖ SHA256(npub)[0:15]`, answered by the **node's own resolver** (which also learns the peer's key while it is at it) | sync to Circle members; any app doing `curl http://<npub>.fips:port/` |
+| `*.fips` | **AAAA** | `fd00::` ULA = `fd ‖ SHA256(npub)[0:15]`, answered by the **node's own resolver** (which also learns the peer's key while it is at it) | sync from app peers; any app doing `curl http://<npub>.fips:port/` |
 | anything else | as upstream | relayed to the real resolvers (`setUpstreamDns`) and the reply spliced back into the TUN | every other name the phone looks up |
 
 - The TUN is **scoped to Myco's uid** (`addAllowedApplication`), routes only

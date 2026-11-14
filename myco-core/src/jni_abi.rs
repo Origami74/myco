@@ -844,8 +844,8 @@ pub extern "system" fn Java_app_myco_core_NativeCore_nappletClose(
     }
 }
 
-/// Make this phone hold the newest signed release APK for its Circle (see
-/// `release_apk`): kept already, its own installed APK, a Circle peer, or —
+/// Make this phone hold the newest signed release APK for its app peers (see
+/// `release_apk`): kept already, its own installed APK, an app peer, or —
 /// with `internet` — the release's own URLs. Returns the release as JSON
 /// (`version`, `version_code`, `sha256`, `size`, `source`); throws
 /// `IOException` with the reason it isn't held. Needs a running core.
@@ -931,7 +931,7 @@ pub extern "system" fn Java_app_myco_core_NativeCore_fetchSoftwareRelease(
     online: jboolean,
 ) -> jstring {
     let online = online != 0;
-    // With a running core the check also asks the Circle, on the core's runtime.
+    // With a running core the check also asks app peers, on the core's runtime.
     let context = unsafe { handle_ref(handle) }.and_then(|h| {
         let guard = h.rt.lock().unwrap_or_else(|p| p.into_inner());
         guard.gateway_context()

@@ -123,15 +123,14 @@ object NsiteShare {
         }.getOrNull()
     }
 
-    /** A one-time, long random pairing secret (URL-safe base64 of 24 bytes). */
+    /** A one-time, long random secret for the share payload (URL-safe base64 of 24 bytes). */
     fun newPairSecret(): String {
         val bytes = ByteArray(24)
         SecureRandom().nextBytes(bytes)
         return Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
     }
 
-    /** A short, stable-ish device label derived from the npub (placeholder until
-     *  the memorable color+name lands in P3 pairing). */
+    /** A short, stable-ish device label derived from the npub. */
     fun deviceName(ownNpub: String): String =
         "Myco-" + ownNpub.removePrefix("npub1").take(6)
 

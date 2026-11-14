@@ -25,9 +25,10 @@ decision of this doc:
 - **Myco the manager app** — its own home-screen icon, its own task. This is
   where you *manage* apps: add, remove, share, pin to the home screen, manage a
   napplet's permissions. Its UI is a bottom-nav shell: **Apps** (your installed
-  nsites and napplets in one grid), **Circle** (pair by bump or QR, see
-  [identity-pairing.md](./identity-pairing.md); your paired people; file
-  sharing), **Settings** (radios, storage, identity, app reach), and a
+  nsites and napplets in one grid), **Neighbors** (your neighborhoods and the
+  people you share them with; invite and join by QR, link or NFC tap, see
+  [nap-neighbor/](../nap-neighbor/README.md)), **Settings** (radios, storage,
+  identity), and a
   **Dev** tab. Finding new apps is the job of the preinstalled **AppStore**
   napplet, which opens from the Apps grid like any other app.
 - **Each nsite as its own fullscreen app** — launched *by* Myco but running in
@@ -124,9 +125,10 @@ Library, one nsite opening another, and a shared link:
 - **A shared link** (`myco://app/…` handed to you out of band) opens the site
   directly, the same way.
 
-This `myco://app/…` launch scheme is distinct from `myco://pair/…` (QR pairing,
-see [identity-pairing.md](./identity-pairing.md)) — same custom scheme, different
-host. Both are deep-link intent filters Myco registers.
+This `myco://app/…` launch scheme is distinct from `myco://link/…` (a
+neighborhood invitation, see [nap-neighbor/links.md](../nap-neighbor/links.md))
+and `myco://share/…` (an app shared face to face) — same custom scheme,
+different host.
 
 ---
 
@@ -214,8 +216,8 @@ cached") and the **local database** (what this phone keeps). Under **Cache**:
   or the internet has it. Blob space comes back at once; the event cache's
   database file shrinks at the next start.
 
-Two destructive actions follow, neither of which touches the device identity or
-the Circle, and both of which ask first:
+Two destructive actions follow, neither of which touches the device identity,
+neighborhoods or links, and both of which ask first:
 
 - **Clear local database** (`wipe_cache`) — reclaim space *without* breaking
   installed apps. It keeps every **pinned** Library entry working offline by
@@ -277,5 +279,5 @@ off the main thread. Closing the window closes the session. Design:
 - [nsite-layer.md](../nsite/nsite-layer.md) — the gateway that serves `http://<host>.localhost`.
 - [security.md](./security.md) — nsite sandbox, origin isolation, the
   impersonation/capability trust boundary.
-- [identity-pairing.md](./identity-pairing.md) — QR pairing (`myco://pair/…`),
+- [nap-neighbor/](../nap-neighbor/README.md) — invitations (`myco://link/…`),
   the other deep-link surface.

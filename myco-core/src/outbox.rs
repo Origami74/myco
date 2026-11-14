@@ -3868,7 +3868,7 @@ mod tests {
     }
 
     /// Through the plan: authors' relays are narrowed, while fallback lanes
-    /// for an author with no list, and mesh lanes, stay; a write plan
+    /// for an author with no list stay; a write plan
     /// (inbox delivery) is not narrowed at all.
     #[tokio::test]
     async fn a_read_plan_narrows_author_relays_and_keeps_the_rest() {

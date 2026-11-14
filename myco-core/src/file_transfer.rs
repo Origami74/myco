@@ -1,4 +1,4 @@
-//! Native paired-peer file transfer.
+//! Native file transfer between app peers.
 //!
 //! Control messages use a standard NIP-17 private-message rumor (kind 14)
 //! inside NIP-59's kind-13 seal and kind-1059 gift wrap. The gift-wrapped
@@ -18,7 +18,7 @@ pub const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 /// The largest encrypted package a `MAX_FILE_BYTES` plaintext can produce:
 /// the magic, the 24-byte nonce and the Poly1305 tag on top of the plaintext.
 /// The receiver refuses any blob larger than this **before** reading it, so a
-/// paired peer cannot answer a small offer with an unbounded body.
+/// peer cannot answer a small offer with an unbounded body.
 pub const MAX_PACKAGE_BYTES: u64 = MAX_FILE_BYTES as u64 + MAGIC.len() as u64 + 24 + 16;
 pub const OFFER_TTL_SECS: u64 = 10 * 60;
 /// How long a transfer may sit in one state before its pending control
@@ -33,7 +33,7 @@ pub const DOWNLOAD_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// mesh link that flaps mid-body comes back within seconds.
 pub const DOWNLOAD_ATTEMPTS: u32 = 4;
 pub const DOWNLOAD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
-/// How many transfers this device will track at once. A Circle member that
+/// How many transfers this device will track at once. An app peer that
 /// spams offers would otherwise grow `file_transfers.json` without bound; past
 /// this the oldest finished rows go first, and new offers are refused outright
 /// rather than evicting something the user still has to answer.
@@ -131,7 +131,7 @@ pub(crate) enum FileMessage {
 /// then offers "open with", so an installable package delivered under an
 /// innocent-looking name is one tap away from a sideload — and the accept
 /// prompt shows a filename, not a type. Nothing about sharing a file between
-/// two paired phones needs to move app packages, so they are refused at the
+/// two phones needs to move app packages, so they are refused at the
 /// boundary instead of being surfaced with a warning nobody reads.
 const BLOCKED_MIME: &[&str] = &[
     "application/vnd.android.package-archive",

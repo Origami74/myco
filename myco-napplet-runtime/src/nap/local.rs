@@ -4,7 +4,7 @@
 //! napplet that wants an event to stay asks for it here: `local.publish`
 //! stores it in this device's own relay, which nothing evicts, and publishes
 //! it nowhere else. Kept is not private: this device's relay is read by
-//! paired phones and by the device's own nsites, and with a custom relay
+//! app peers and by the device's own nsites, and with a custom relay
 //! configured it *is* that relay.
 //!
 //! - Given a **template**, the event is signed as the user and kept — a note

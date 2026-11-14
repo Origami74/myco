@@ -1,8 +1,8 @@
 //! The **user key**: the identity a napplet publishes as, and the account the
 //! Settings header shows.
 //!
-//! Deliberately not the device key. The device key signs mesh traffic, pairing
-//! and gossip — it *is* this phone on the mesh — and reusing it for social
+//! Deliberately not the device key. The device key signs mesh traffic and
+//! neighborhood links — it *is* this phone on the mesh — and reusing it for social
 //! events would tie everything a person says to the hardware they said it on,
 //! permanently and irrevocably. D3 splits them, and the Account page must keep
 //! them apart.

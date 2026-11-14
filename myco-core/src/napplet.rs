@@ -1189,7 +1189,7 @@ impl NappletHost {
     /// is current, and for a session that is not open.
     ///
     /// A window keeps the version it opened for its whole life (design doc
-    /// §7.2); an update check or a Circle push moves the pin under it. The
+    /// §7.2); an update check or an app peer's push moves the pin under it. The
     /// Activity asks this when the window comes back to the foreground, to
     /// offer a restart onto the new version. The served version is the pinned
     /// one, and a pin moves only once its bytes are here — so a restart this
@@ -1401,7 +1401,7 @@ impl NappletHost {
     /// Fetch whatever `source` has for `addr` and, if it is a newer version
     /// than the one served, bring it in — bytes first, so the served version
     /// moves only when the new one can open. Returns the manifest now served
-    /// when it moved, so the caller can pass it on to the Circle.
+    /// when it moved, so the caller can pass it on to app peers.
     ///
     /// The update path for napplets: the same [`NappletHost::ingest`] the first
     /// fetch used, gated on version. A source with nothing newer, or nothing at
@@ -1427,7 +1427,7 @@ impl NappletHost {
             return Ok(None);
         }
         // The source is untrusted and its answer is about to be passed on to
-        // the Circle: it must be this napplet, not whatever was asked for.
+        // app peers: it must be this napplet, not whatever was asked for.
         anyhow::ensure!(
             offered.pubkey == addr.author
                 && offered.kind.as_u16() == addr.kind()
@@ -1444,7 +1444,7 @@ impl NappletHost {
 
 /// Refresh every installed napplet from the public relays, in parallel.
 /// Returns the manifests that moved — for the update-check toast, and for the
-/// caller to pass on to the Circle as it does an nsite update — and how many
+/// caller to pass on to app peers as it does an nsite update — and how many
 /// were checked.
 ///
 /// Public relays only — the hints, the author's NIP-65 relays and the
@@ -1497,7 +1497,7 @@ struct SourceBlobs<'a> {
     /// round trip to bytes it holds. A local copy is used only when it
     /// hashes to the name asked for: a damaged one (disk corruption, a torn
     /// write) falls through to `source`, so Download again, updates and
-    /// Circle pushes can repair it instead of meeting the same bad bytes.
+    /// app peer pushes can repair it instead of meeting the same bad bytes.
     /// `resolve` re-hashes whatever comes back as well.
     local: &'a dyn BlobStore,
     source: &'a dyn PeerSource,
@@ -1544,7 +1544,7 @@ pub fn frames_as_json(frames: &[ToShell]) -> Vec<String> {
 }
 
 /// NAP-RESOURCE's fetcher: where a blob this device does not hold is looked
-/// for — the Circle's Blossom stores over the mesh and, when the internet is
+/// for — app peers' Blossom stores over the mesh and, when the internet is
 /// allowed, the servers the URL named, the author's servers (kind 10063, from
 /// what this device holds) and the public defaults, in that order.
 ///
@@ -1635,7 +1635,7 @@ impl BlossomFetcher {
         misses.insert(sha256_hex.to_string(), std::time::Instant::now());
     }
 
-    /// Every reachable Circle member at once; the first to bring it wins. A
+    /// Every reachable app peer at once; the first to bring it wins. A
     /// peer that does not hold it answers quickly with nothing, and a peer
     /// that is gone hits the bound.
     async fn ask_mesh(&self, sha256_hex: &str, max_bytes: usize) -> Option<Vec<u8>> {
@@ -3532,7 +3532,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A phone for the Circle-update tests: a real content layer (so pins,
+    /// A phone for the app peer update tests: a real content layer (so pins,
     /// the Library and the relay's slot rules are the device's) and a host
     /// serving through its pins. The data dir goes when the phone does.
     struct Phone {
@@ -3982,7 +3982,7 @@ mod tests {
         (outcome, forwarded.into_inner().unwrap())
     }
 
-    /// An installed napplet that hears of a newer version from a Circle peer
+    /// An installed napplet that hears of a newer version from an app peer
     /// fetches its bytes, verifies and pins them, and only then passes the
     /// manifest on — so the next phone can fetch the bytes from this one.
     /// The next launch opens the new version.
@@ -4203,7 +4203,7 @@ mod tests {
     }
 
     /// A window open on v1 is told once the served version has moved to v2 —
-    /// by a Circle push here, the update check the same way — and a window
+    /// by an app peer's push here, the update check the same way — and a window
     /// opened after that is current. A session that is gone has nothing to say.
     #[tokio::test]
     async fn an_open_window_learns_the_served_version_moved_on() {
@@ -4285,7 +4285,7 @@ mod tests {
         }
     }
 
-    /// The update check passes what it brings in on to the Circle, so it
+    /// The update check passes what it brings in on to app peers, so it
     /// must be the napplet asked for: a newer manifest for another author or
     /// another `d` tag is refused, and the served version stays.
     #[tokio::test]
@@ -4321,7 +4321,7 @@ mod tests {
         }
     }
 
-    /// An update from the Circle never widens what the napplet may do. The new
+    /// An update from an app peer never widens what the napplet may do. The new
     /// version declaring a domain the user never reviewed opens without it,
     /// and hands it back as unreviewed for the review sheet.
     #[tokio::test]
@@ -4341,7 +4341,7 @@ mod tests {
         assert_eq!(opened.title.as_deref(), Some("Version two"));
         assert!(
             !opened.granted().contains(&"outbox".to_string()),
-            "an update from the Circle granted itself a domain nobody reviewed"
+            "an update from an app peer granted itself a domain nobody reviewed"
         );
         assert_eq!(opened.unreviewed, vec!["outbox".to_string()]);
     }
@@ -5167,7 +5167,7 @@ mod tests {
         assert!(err.to_string().contains("35128"), "unexpected error: {err}");
     }
 
-    /// A Circle member in reach: holding `napplet`, or nothing at all.
+    /// An app peer in reach: holding `napplet`, or nothing at all.
     async fn nearby_peer(
         napplet: Option<&myco_napplet_runtime::testing::TestNapplet>,
     ) -> Box<dyn PeerSource> {
@@ -5189,7 +5189,7 @@ mod tests {
         Box::new(source)
     }
 
-    /// A peer that is in the Circle list but never answers — out of range
+    /// A peer that is in the app peer list but never answers — out of range
     /// since the list was read, or a link that stalls.
     struct Silent;
 
@@ -5275,7 +5275,7 @@ mod tests {
     /// test that needs a silent peer's answer fails instead of hanging.
     const NO_WAITING: std::time::Duration = std::time::Duration::from_secs(2);
 
-    /// A bare `naddr` names no sharer; a Circle member in reach that holds
+    /// A bare `naddr` names no sharer; an app peer in reach that holds
     /// the napplet is found, reviewed and installed from.
     #[tokio::test]
     async fn a_napplet_is_found_on_a_nearby_peer() {

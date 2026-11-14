@@ -3,7 +3,7 @@
 //! Myco's own basics — fetching an app a neighbor has, app and release
 //! updates — ride the neighborhoods that allow it (Apps, on by default). The
 //! peer set is every linked device in such a neighborhood, by the device npub
-//! in its link offer's `.fips` address. It replaces the Circle.
+//! in its link offer's `.fips` address.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;

@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Neighborhoods replace the Circle.** Start a neighborhood ("Household",
+  "Sports club") and invite people with a QR code, a share link or an NFC
+  tap. Each invitation sets up a link with its own key, used once. Posts
+  travel through a neighborhood as far as its **Posts reach** allows (Close,
+  Friends of friends, Wide). The **Neighbors** tab replaces the Circle tab.
+  Napplets reach neighborhoods through NAP-NEIGHBOR
+  ([napplet/naps#146](https://github.com/napplet/naps/pull/146)).
+- **Apps switch per neighborhood.** On by default: Myco fetches apps,
+  app updates, release APKs and files from people in that neighborhood, and
+  serves them its own. Only these devices can reach this phone's relay and
+  Blossom on the mesh.
 - **An app can recommend the app it wants to open, and Myco offers to
   install it.** A napplet opening a role (NAP-INTENT) can name an app with
   `napplet:<role>/open#naddr1…`. If it's installed, it opens (your default
@@ -42,14 +53,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for napplets running on Myco versions without `launch`, and logs a warning
   naming the napplet each time it is used.
 
+### Removed
+
+- **The Circle and pairing.** `myco://pair/` QR codes and tap-to-pair are
+  gone. An existing Circle is not carried over: invite people to a
+  neighborhood again.
+- **NAP-MESH** (the `mesh` domain). Use NAP-NEIGHBOR.
+- **The "App reach" setting.** Reach is set per neighborhood.
+- **Event gossip between phones.** Posts no longer spread to every nearby
+  phone; they travel only in neighborhoods.
+
 ### Changed
 
-- **`mesh.blobs` counts this phone too.** A file this phone already holds
-  (installed or cached) counts as one more holder, as if a Circle phone had
-  it. AppStore's "Around you" now lists only apps whose files are reachable
-  here or on a nearby Circle phone, instead of every app the online feed
-  ever mentioned.
-
+- **Bluetooth no longer advertises your device name.** Names travel only in
+  invitations, to the person invited.
 - **NAP-INTENT names apps by publisher.** A candidate's `id`, a result's
   `handler` and a delivery's `sender` are `<npub>:<d>`, so two publishers'
   apps with the same `d` tag can't be mistaken for each other. Candidates

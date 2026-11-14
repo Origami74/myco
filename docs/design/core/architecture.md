@@ -12,7 +12,7 @@ The structure of **Myco** on one phone: four layers, seven Rust crates in one
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Kotlin                                                               │
-│  MainActivity (Compose: Apps · Circle · Settings · Dev)              │
+│  MainActivity (Compose: Apps · Neighbors · Settings · Dev)           │
 │  NsiteActivity ──── one WebView per nsite, its own task              │
 │  NappletActivity ── one WebView per napplet: shell page + sandboxed  │
 │                     srcdoc iframe, capability channel to Rust        │
@@ -22,9 +22,9 @@ The structure of **Myco** on one phone: four layers, seven Rust crates in one
 │                                                                      │
 │  1 Apps        nsite-deck (gateway, sync)  myco-napplet-runtime      │
 │                                            (resolve, sandbox, NAPs)  │
-│  2 Circle      content.rs: Circle, pairing, the gate; auth_service   │
+│  2 Neighbors   neighbor/: links, link service, scoped data, app peers│
 │  3 Relay/Blob  myco-relay · myco-blossom · mesh_relay (proxy, hub)   │
-│                gossip · peer_relay (pool) · outbox lanes             │
+│                gossip (manifests) · peer_relay (pool) · outbox lanes │
 │  4 FIPS        the fips node · lanes: BLE bridge, Aware/LAN UDP,     │
 │                TCP · mesh stack (fips-host) · TUN bridge · .fips DNS │
 │                · control socket                                      │
@@ -41,7 +41,7 @@ Each layer talks only to the one below it. Layer 1 never names a radio; layer
 | Crate | Layer | Role | Reaches the world through |
 | --- | --- | --- | --- |
 | `myco-core` | all | the app crate and only cdylib: wires everything, owns identity, embeds the fips node, the JNI surface | — (it *is* the wiring) |
-| `myco-napplet-runtime` | 1 | the napplet host: NIP-5D manifest, verified resolve, the `srcdoc` artifact, the session and grants, one module per NAP | `Signer`, `EventSink`, `MeshSink`, `OutboxResolver`, `LaneTransport`, `BlobFetcher`, `NapTransport` |
+| `myco-napplet-runtime` | 1 | the napplet host: NIP-5D manifest, verified resolve, the `srcdoc` artifact, the session and grants, one module per NAP | `Signer`, `EventSink`, `NeighborHost`, `OutboxResolver`, `LaneTransport`, `BlobFetcher`, `NapTransport` |
 | `nsite-deck` | 1 | the nsite host: gateway (manifest → path → sha256 → serve), sync/import, propagator; the NIP-5A primitives napplets reuse | `RelayBackend`, `BlobStore`, `PeerSource`, `FanoutSink` |
 | `myco-relay` | 3 | embedded NIP-01 relay store: what this phone **keeps**, in LMDB via `nostr-lmdb`; expired events swept | implements `RelayBackend` |
 | `myco-blossom` | 3 | embedded Blossom store: sha256-named files, hash verified on write | implements `BlobStore` |
@@ -82,32 +82,38 @@ window and are drained by a long poll. Design:
 on its Manage permissions sheet; both write `granted` on the library entry, and
 nothing else does. A live window is told to relaunch when its grants change.
 
-### 2 — Circles and pairing
+### 2 — Neighborhoods and links
 
-`content.rs` holds the Circle (`circle.json`), the outbound-invite ledger, the
-issued-secret ledger and the per-peer permissions. `auth_service.rs` is the
-one port open to strangers (`:4873`): it takes signed pair requests, accepts and
-removals. The **Circle gate** (`PeerGate`) is consulted by the relay proxy and
-the Blossom server on every mesh connection; loopback bypasses it. Design:
-[identity-pairing.md](./identity-pairing.md), [security.md](./security.md).
+`myco-core/src/neighbor/` holds the neighborhoods (`neighborhoods.json`), the
+links and their link keys (`links.json`), the link service and the scoped
+data plane. `auth_service.rs` serves the link service on `:4873`, under
+`/nh/{pk}/…`: setup from a one-time invitation, offers, neighborhood changes,
+ending a link, and the scoped relay that carries neighborhood traffic.
+Design: [nap-neighbor/](../nap-neighbor/README.md), [security.md](./security.md).
+
+**App peers** are linked devices in neighborhoods with Apps on
+(`neighbor/apps.rs`, `Content::set_app_peers`). The **app peer gate**
+(`AppPeerGate`, a `PeerGate`) is consulted by the relay proxy and the Blossom
+server on every mesh connection; loopback bypasses it.
 
 This layer also decides *where content comes from*: the holder named in a share,
-then any reachable Circle member, then the internet — and, for napplets, which
-relays an author's events are read from (NIP-65 lists over the three lanes).
+then any reachable app peer, then the internet — and, for napplets, which
+relays an author's events are read from (NIP-65 lists over the local and
+internet lanes).
 
 ### 3 — Relay and Blossom
 
 `mesh_relay.rs` is a NIP-01 proxy in front of whatever `RelayBackend` is in
 use. It owns the mesh behaviour the store must not know about: the `MESH`
-envelope with its hop budget, the seen-set that makes flooding terminate, the
-query-id set that makes pulls answer once, the live bus that wakes this phone's
-subscriptions, and the gate. The same `RelayHub` serves two sockets — loopback
+envelope with its hop budget, the seen-set that makes forwarding terminate, the
+live bus that wakes this phone's subscriptions, and the gate. The same `RelayHub` serves two sockets — loopback
 `127.0.0.1:4870` for WebViews and `[::]:4870` for the mesh — so a WebView and a
-Circle member see one relay. `gossip.rs` implements the push plane (fan an
-accepted event to Circle members with a decremented budget) and the pull plane
-(forward a REQ with hops left). `peer_relay.rs` keeps one pooled WebSocket per
-Circle member at `ws://<npub>.fips:4870`. Blossom is served on `[::]:24243`
-behind the same gate. Design: [event-gossip.md](./event-gossip.md),
+app peer see one relay. `gossip.rs` acts only on Myco's own traffic between
+app peers: file-control messages, and nsite and napplet manifests, forwarded
+so updates spread. Other events are not gossiped; neighborhoods carry them.
+`peer_relay.rs` keeps one pooled WebSocket per app peer at
+`ws://<npub>.fips:4870`. Blossom is served on `[::]:24243` behind the same
+gate. Design: [../nsite/nsite-updates.md](../nsite/nsite-updates.md) §4,
 [../nsite/nsite-layer.md](../nsite/nsite-layer.md).
 
 #### Kept and cached
@@ -127,7 +133,7 @@ JSON: `nostr-lmdb` indexes cost several times the event itself, most of it
 per single-letter tag (`myco-cache/src/events.rs`, `disk_cost`). It evicts by
 segmented LRU: a new entry starts on probation and goes first, while an entry
 used a second time is protected, so a one-off scroll through a long feed
-cannot flush what the user keeps opening. Serving a napplet, a Circle peer or
+cannot flush what the user keeps opening. Serving a napplet, an app peer or
 the gateway counts as use; being re-seen does not.
 
 Private messages (NIP-04 DMs, NIP-17 seals, NIP-59 gift wraps) are never
@@ -144,7 +150,7 @@ replaceable slot, and fixes where a write goes: the **kept** view (what the
 hub, the gateway and the content layer use) drops the cache's copy of
 anything it keeps, and the **cache** view (pulls, mesh pushes, napplet blob
 fetches) sends `keep_seen`'s kinds to the relay and the rest to the cache.
-Circle peers read both through the same gate. A deletion (kind 5) passing
+App peers read both through the same gate. A deletion (kind 5) passing
 through is applied to the local relay too, where the events it names may be
 kept.
 
@@ -199,7 +205,7 @@ keeps the others as standbys.
 The IPv6 side is the node's app-owned TUN: two packet channels, no system
 device. Myco's own sockets terminate those packets in process, on a userspace
 TCP/IP stack (`fips-host`'s `netstack`, through `mesh_net.rs`). The relay,
-Blossom and pairing servers listen on it, and peer dials go out on it, so Myco
+Blossom and link service servers listen on it, and peer dials go out on it, so Myco
 needs no `VpnService`. See [../fips/mesh-stack.md](../fips/mesh-stack.md).
 
 A `VpnService` TUN routing `fd00::/8` runs only when the user lets other apps on
@@ -222,8 +228,8 @@ per-purpose entry points that need bytes or blocking: the napplet channel
 pump. All listed in [../../reference/ffi-surface.md](../../reference/ffi-surface.md).
 
 Kotlin owns: the UI, the WebViews, the radios, NFC, the optional `VpnService`, notifications,
-the share sheet. Rust owns: both identities, the Circle, the stores, the node,
-the gossip, every capability a napplet gets.
+the share sheet. Rust owns: the device and user keys, link keys, the
+neighborhoods, the stores, the node, every capability a napplet gets.
 
 ---
 
@@ -231,8 +237,8 @@ the gossip, every capability a napplet gets.
 
 - **No app authoring.** Myco never signs a manifest. Apps are built and
   published elsewhere; Myco holds and re-serves signed events.
-- **No membership authority.** A Circle is a local list on each phone; there
-  is no roster, admin, or join event. Two people pair; nobody approves it.
+- **No membership authority.** A neighborhood has no roster, admin, or join
+  event. Two people set up a link; nobody approves it.
 - **No exit node, no tunnel-all.** The TUN routes `fd00::/8` only, for Myco's
   uid only. (An experimental exit-node demo exists as a how-to, including a
   SOCKS5 full tunnel that claims the default routes while it is set; it is not

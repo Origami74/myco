@@ -45,7 +45,7 @@ data class SoftwareUpdateState(
     val checking: Boolean = false,
     val message: String? = null,
     val dismissedTag: String? = null,
-    /** The release APK this phone keeps for its Circle, if any. */
+    /** The release APK this phone keeps for its app peers, if any. */
     val carried: CarriedRelease? = null,
     val installing: Boolean = false,
     /** This Myco is release-signed: only such a build takes a release over itself. */
@@ -122,12 +122,12 @@ class SoftwareUpdates private constructor(context: Context) {
     }
 
     /**
-     * Keep the newest release APK for the Circle (and for this phone's own
+     * Keep the newest release APK for app peers (and for this phone's own
      * update), in the background: from this phone's installed APK when it is
-     * that release, else a Circle peer, else — with [internet], on an
+     * that release, else an app peer, else — with [internet], on an
      * unmetered connection outside mesh-only — the release's own download.
      *
-     * Started by every check, due or not (Circle members come and go), and
+     * Started by every check, due or not (app peers come and go), and
      * apart from it: a download over BLE takes minutes, and a slow peer must
      * not hold "Checking for updates…" or the next check. The core bounds a
      * carry ([release_apk::CARRY_DEADLINE]); one runs at a time, and a start
@@ -173,11 +173,11 @@ class SoftwareUpdates private constructor(context: Context) {
 
     suspend fun check(offlineOnly: Boolean, force: Boolean = false) = checks.run(force) {
         try {
-            // Mesh-only never reaches the internet, but the Circle can still answer.
+            // Mesh-only never reaches the internet, but app peers can still answer.
             val meshOnly = offlineOnly || softwareUpdatesOfflineOnly(context)
             if (!force && !prefs.getBoolean("automatic", AUTOMATIC_DEFAULT)) {
                 // Automatic checks off means nothing is asked of the internet;
-                // the Circle still gets this phone's copy.
+                // app peers still get this phone's copy.
                 startCarry(meshOnly, internet = false)
                 return@run
             }

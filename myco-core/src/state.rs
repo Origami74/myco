@@ -90,7 +90,7 @@ pub struct AppState {
     pub speedtest: SpeedtestView,
     /// Neighborhoods and links (NAP-NEIGHBOR).
     pub neighborhoods: crate::neighbor::view::NeighborhoodsView,
-    /// Native paired-peer file transfers, including incoming offers awaiting
+    /// Native app peer file transfers, including incoming offers awaiting
     /// the user's accept/deny decision.
     pub file_transfers: Vec<crate::file_transfer::FileTransferView>,
     /// The merged per-identity peer diagnostics view (DIAG-01/03/04/06):

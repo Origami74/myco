@@ -1,9 +1,9 @@
 # Run the two-device offline demo
 
-Two Android phones, both in airplane mode with Bluetooth on: pair them, share
-an app from one to the other, and open it — no internet, no Wi-Fi, no
+Two Android phones, both in airplane mode with Bluetooth on: link them in a
+neighborhood, share an app from one to the other, and open it — no internet, no Wi-Fi, no
 servers. This is the check that the whole stack works, and the manual test
-every mesh, pairing or BLE change needs before it ships (host `cargo test`
+every mesh, neighborhood or BLE change needs before it ships (host `cargo test`
 cannot see any of it).
 
 ---
@@ -50,19 +50,21 @@ progress ring until every file is local.
 
 Long-press the tile and **Add to Home screen** if you want the full effect.
 
-## Step 3 — Pair
+## Step 3 — Invite B to a neighborhood
 
-On both phones open the **Circle** tab.
+On both phones open the **Neighbors** tab. Wait until the mesh bar shows the
+other phone: B joins over the mesh, so it needs a route to A.
 
-- **Bump:** hold the phones back to back. Each presents its invite as an NFC
-  tag and reads the other's; both add each other and both show a toast. Done.
-- **QR:** on A tap **Show my code**; on B tap **Scan** and point at it. B sends
-  a signed pair request over the mesh to A; A, still on the Circle tab, accepts
-  it automatically because the code it just showed is the one being answered.
-  (Off the Circle tab, A gets an accept/ignore prompt instead.)
+- On **A** tap **Invite**, pick a neighborhood or **+ New** (say "Household"),
+  and keep the sheet open. It shows a QR code and a share link, and presents
+  the same `myco://link/…` invitation as an NFC tag.
+- On **B** tap **Join** and scan the code, or hold the phones together. B
+  shows who is inviting and to what; tick the neighborhood and **Join**.
 
-Either way the pairing is **mutual**: both phones list the other in Circle.
-The row shows the name from Step 1 and, when the mesh link is up, a lane icon.
+B sets up a link with A's link service (`<npubA>.fips:4873`). Both phones now
+list the neighborhood and each other under **People**, by the names from
+Step 1. Leave **Apps** on for the neighborhood (the default): that makes each
+phone an *app peer* of the other, which Step 5 needs.
 
 ## Step 4 — Go fully offline
 
@@ -70,8 +72,9 @@ On both phones: enable **airplane mode**, then turn **Bluetooth back on**
 (airplane mode switches it off). Wi-Fi and cellular stay off. If you left Wi-Fi
 Aware enabled, it does not need Wi-Fi to be on.
 
-Within a few seconds the Circle rows should show the BLE lane lit — the phones
-found each other's L2CAP listener from the scan advert and formed a Noise link.
+Within a few seconds the mesh bar should show the other phone over BLE — the
+phones found each other's L2CAP listener from the scan advert and formed a Noise
+link. Within 30 s the person shows under **Here now**.
 The Dev tab lists the peer with its transport, RTT and every path fips holds.
 
 ## Step 5 — Share the app
@@ -96,12 +99,7 @@ relay and Blossom.
   B's app still opens and its pages still load. Settings › Storage on B shows
   the event and blob counts that grew in Step 5.
 - **Logs.** `adb -s <B> logcat | grep myco` during Step 5 shows the pull from
-  `<npubA>.fips:4870` / `:24243`, and `accepted a mesh event` lines as gossip
-  arrives.
-
-For a napplet with `mesh` granted, the doorbell test: ring on A, `mesh.event`
-lands on B (logcat: `napplet published to the mesh` on A, `accepted a mesh
-event` on B).
+  `<npubA>.fips:4870` / `:24243`.
 
 ---
 
@@ -109,8 +107,9 @@ event` on B).
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| No lane icon on the Circle row | BLE off after airplane mode; phones too far; one phone's radio rejected the L2CAP listener | Toggle Bluetooth on; bring within ~1 m; check the Dev tab's attempt log (`connect-timeout`, `pool-rejected`) |
-| Pair request never accepted | A left the Circle tab before B scanned, so the request needs a manual accept | Look for the prompt on A; or re-show the code (it rotates) |
+| The other phone missing from the mesh bar | BLE off after airplane mode; phones too far; one phone's radio rejected the L2CAP listener | Toggle Bluetooth on; bring within ~1 m; check the Dev tab's attempt log (`connect-timeout`, `pool-rejected`) |
+| Join fails ("refused" or no answer) | No mesh route to A yet; the invitation expired (15 min) or was already used | Wait for the mesh bar to show A, then make a fresh invitation |
+| Share scanned, but A refuses the pull | Apps is off in every neighborhood the phones share, so B is not an app peer | Turn **Apps** on for the neighborhood on A |
 | Share scanned, ring never fills | No mesh route yet — the link came up after the pull started | Wait for the lane icon, then scan again; the pull retries the holder first |
 | "Couldn't find this app" on a napplet share | Same as above, or the sharer's link dropped mid-fetch | **Try again** on the sheet |
 | App opens but a napplet says a capability was refused | Not granted at install (declared nothing) | Long-press › **Permissions** |
@@ -126,7 +125,7 @@ event` on B).
 | --- | --- |
 | 1 | device identity (4), radios (4) |
 | 2 | nsite/napplet sync from the internet (1, 3) |
-| 3 | pairing over the auth service, the Circle (2) |
+| 3 | a link from a one-time invitation over the link service, a neighborhood, app peers (2) |
 | 4 | BLE L2CAP link, Noise, the TUN (4) |
 | 5 | share payload, holder-first pull over `.fips`, install review and grants (1, 2, 3) |
-| 6 | store-and-forward: B as a holder; discovery; gossip (3) |
+| 6 | store-and-forward: B as a holder (3) |

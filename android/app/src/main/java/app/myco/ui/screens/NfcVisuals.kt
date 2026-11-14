@@ -25,7 +25,7 @@ import androidx.compose.ui.unit.dp
 /**
  * The animated "tap to connect" NFC bubble — a filled circle whose two outer
  * contactless arcs breathe to draw a little attention without distracting. Shared
- * by the Circle tab's tap-to-connect hint and the share-an-app sheet, so both NFC
+ * by the invite sheets' tap card and the share-an-app sheets, so both NFC
  * surfaces read the same. Radii scale with [size], so callers can size it freely.
  */
 @Composable

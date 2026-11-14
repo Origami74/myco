@@ -35,8 +35,9 @@ cited inline.
 | `0` | profile metadata | Replaceable | napplet identity | **Published** — the user key's guest profile, on first launch (local relay, then the public relays) |
 | `10002` | NIP-65 relay list | Replaceable | napplet routing | **Published and read** — the user's own (the configured relays) on first launch; other authors' lists drive NAP-OUTBOX plans, fetched and cached when missing |
 | `10063` | BUD-03 user Blossom servers | Replaceable | discovery hint | **Read** — an app author's list rides along with its manifest lookup, a `blossom:` URL's `as=` author's is fetched when missing; kept in the local relay, tried after a manifest's `server` tags and before the defaults. The user's own drives NAP-UPLOAD |
-| `9101` / `9102` / `9103` | pair request / accept / remove | Regular | pairing (layer 2) | **Published and read** — signed by the device key, delivered to the peer's auth service `:4873`, never stored in the relay |
-| `14` in `13` in `1059` | NIP-17 rumor, NIP-59 seal and gift wrap | Regular | file sharing (layer 2) | **Published and read** — file offers and control messages between Circle members, gift-wrapped to the device key |
+| `37516` | neighborhood link offer (placeholder number) | Param-replaceable (`d` = `offer`) | neighborhoods (layer 2) | **Published and read** — signed by a link key, exchanged with one linked peer over the link service `:4873`, never stored in the relay |
+| `27235` | NIP-98 HTTP auth | Regular | neighborhoods (layer 2) | **Published and read** — signed by a link key on every link service request after setup; never stored |
+| `14` in `13` in `1059` | NIP-17 rumor, NIP-59 seal and gift wrap | Regular | file sharing (layer 2) | **Published and read** — file offers and control messages between app peers, gift-wrapped to the device key |
 | `24242` | Blossom auth | Regular | blob store | **Published** — authorises uploads to a custom Blossom server |
 | `37195` | FIPS overlay advert | Param-replaceable (`d`) | FIPS discovery | Future public peering |
 | `21059` | FIPS traversal signaling | Ephemeral | FIPS discovery | Future public peering |
@@ -246,8 +247,8 @@ author-signed manifests above:
   authoring. Because the bytes are unchanged, the author's signature stays
   valid. A holder re-emitting an author's manifest needs **no new kind and no
   holder signature**.
-- **"Announce widely"** = flood/replicate those manifest events across reachable
-  relays, with a hop budget of **TTL = 5** (a project default).
+- **"Announce widely"** = forward those manifest events between app peers'
+  relays (interest-checked; see [nsite-updates.md §4](../design/nsite/nsite-updates.md)), with a hop budget of **TTL = 5** (a project default).
 - **"Pull on demand"** = fetch the large content-addressed **blobs** (by sha256
   from Blossom) only when a site is actually opened — the manifest tells you
   *what* a site is; the blobs are deferred until needed.
@@ -266,20 +267,21 @@ manifests you choose to replicate* are all detailed in
 
 ---
 
-## Pairing and file-sharing kinds (layer 2)
+## Neighborhood and file-sharing kinds (layer 2)
 
-Layer 2 has its own small vocabulary, all signed by the **device key** and
-carried point-to-point, never gossiped:
+Layer 2 has its own small vocabulary, carried point-to-point, never passed on:
 
-| Kind | Name | Carried how |
-| --- | --- | --- |
-| `9101` | pair request — carries the one-time secret from the presented code and the sender's name | HTTP POST to `<npub>.fips:4873/pair`, Noise-encrypted to the presenter |
-| `9102` | pair accept — the presenter's answer, so the requester adds them back | the same service on the requester |
-| `9103` | pair remove — forgetting a peer tells them, so both sides stay symmetric | the same service |
-| `1059` (wrapping `13` wrapping `14`) | file offer / accept / decline / cancel / done, as NIP-17 private messages | the peer's relay over the mesh; the wrap keeps them unreadable to anyone else, and the hub stores them with a zero hop budget so they travel no further |
+| Kind | Name | Signed by | Carried how |
+| --- | --- | --- | --- |
+| `37516` | link offer — the endpoints one side serves on a link (`link`, `relay`, `blossom`, with read/write/own flags), optional `name` tag | the link key | in the `/setup` exchange, then `GET <npub>.fips:4873/nh/{pk}/offer` |
+| `27235` | NIP-98 auth for a link service request | the link key | `Authorization` header on `/nh/{pk}/…` |
+| `1059` (wrapping `13` wrapping `14`) | file offer / accept / decline / cancel / done, as NIP-17 private messages | the device key | an app peer's relay over the mesh; the wrap keeps them unreadable to anyone else, and the hub handles them without passing them on |
 
-Design: [identity-pairing.md](../design/core/identity-pairing.md) §6–7,
-`file_transfer.rs`.
+`37516` is a placeholder until the neighborhood protocol has a number.
+Kinds `9101` / `9102` / `9103` (pair request / accept / remove) are gone with
+pairing.
+
+Design: [nap-neighbor/](../design/nap-neighbor/README.md), `file_transfer.rs`.
 
 ## Napplet-published kinds (layer 1)
 
@@ -291,8 +293,8 @@ device — and a `3` follow list of three default accounts (`GUEST_FOLLOWS` in
 `account.rs`). The follow list is signed only when a guest is created; an
 existing or imported identity's is never written. Both go to the local relay at once and to the public relays when online.
 The picture upload is authorised by a `24242` (BUD-02) event signed by the same
-key. Whatever a napplet publishes through `relay`,
-`outbox` or `mesh` is signed by the same key with the kind the napplet chose.
+key. Whatever a napplet publishes through `relay`
+or `outbox` (including into a neighborhood) is signed by the same key with the kind the napplet chose.
 
 ## FIPS discovery kinds (future public-node peering)
 

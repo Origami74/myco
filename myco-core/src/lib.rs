@@ -11,7 +11,8 @@
 
 mod action;
 mod attempt_store;
-// The auth plane: the only port an unpaired peer can reach. Bound by the Android
+// The auth plane (the link service, `/nh`): the only port a device outside
+// our neighborhoods can reach. Bound by the Android
 // runtime, so it reads as dead on the host outside its own tests.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod auth_service;
@@ -28,7 +29,7 @@ pub(crate) mod file_transfer;
 // peer drainer, so it reads as dead on the host build (its own tests aside).
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod control_client;
-// The mesh gossiper is wired only into the Android relay server (runtime.rs); on
+// The mesh relay hook (file messages, app manifest forwarding) is wired only into the Android relay server (runtime.rs); on
 // the host it is exercised only by its own tests, so it reads as dead there.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod gossip;
@@ -117,7 +118,7 @@ mod platform_peers;
 // list, and the dials over the internet lane. The driver runs on Android only.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod public_nodes;
-// Myco's own release APK, carried by the Circle; driven from Android only.
+// Myco's own release APK, carried by app peers; driven from Android only.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod release_apk;
 mod runtime;
@@ -125,7 +126,7 @@ mod software_release;
 mod state;
 mod update_gate;
 // Myco's own sockets on the mesh: a userspace TCP/IP stack on the node's
-// address, so the relay, Blossom and pairing servers and their clients need no
+// address, so the relay, Blossom and link servers and their clients need no
 // VpnService. Started only on Android; the host reaches the mesh, if at all,
 // through a system TUN.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]

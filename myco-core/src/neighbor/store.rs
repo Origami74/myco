@@ -79,7 +79,7 @@ impl Grants {
 pub enum Role {
     /// An ordinary neighborhood.
     Plain,
-    /// The Circle, once wrapped as a neighborhood. No longer carried: kept
+    /// An older version's paired devices, wrapped as a neighborhood. No longer carried: kept
     /// so old `neighborhoods.json` files still read, and dropped on open
     /// ([`Store::drop_everyone`]).
     Everyone,
@@ -182,7 +182,7 @@ impl Store {
         self.neighborhoods.iter_mut().find(|r| r.id == id)
     }
 
-    /// Drop the Everyone neighborhood an older version kept for the Circle.
+    /// Drop the Everyone neighborhood an older version kept for its paired devices.
     /// Returns whether there was one.
     pub fn drop_everyone(&mut self) -> bool {
         let before = self.neighborhoods.len();

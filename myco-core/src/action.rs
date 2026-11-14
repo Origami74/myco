@@ -153,7 +153,7 @@ pub enum NativeAppAction {
         auto: bool,
     },
     /// Clear the local relay + Blossom + Library + site status (dev/test reset).
-    /// Content only — the device identity (and the Circle) are untouched.
+    /// Content only — the device identity (and neighborhoods) are untouched.
     WipeStores,
     /// Clear the local relay + Blossom **except** what backs pinned nsites, and
     /// the shell cache with it (Settings → Storage → "Clear local database",
@@ -282,8 +282,8 @@ pub enum NativeAppAction {
         neighborhood: String,
     },
 
-    // --- native paired-peer file transfer ---
-    /// Encrypt a local file and send a private offer to a Circle peer. The
+    // --- native app peer file transfer ---
+    /// Encrypt a local file and send a private offer to an app peer. The
     /// Android side copies a content URI into its private outbox first, then
     /// passes that filesystem path here.
     ShareFile {

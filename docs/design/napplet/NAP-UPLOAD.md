@@ -26,27 +26,47 @@ A napplet hands Myco a file. Myco puts it on the user's Blossom servers,
 signed as the user, and answers with the URL and NIP-94 tags. Doodle Duo uses
 it to post its score picture in a note.
 
-A napplet that wants the file only on this phone and its Circle (no
-internet, nothing public) asks for the `blossom-local` rail instead.
+A napplet that wants the file only on this phone (no internet, nothing
+public) asks for the `blossom-local` rail instead. One that wants it in a
+neighborhood names a `neighborhood:` address as `destination`.
 
 API, schemas, wire and error strings: see the spec.
 
 ## Rails
 
-Two rails, both Blossom. The spec lets a shell name its own rails.
+Three rails, all Blossom. The spec lets a shell name its own rails.
 
 | Rail | Where | `returns` | `enabled` |
 |---|---|---|---|
 | `blossom` (default) | the user's Blossom servers | `["https"]` | off while offline-only is on |
 | `blossom-local` | this device's own Blossom store | `["blossom"]` | always |
+| `blossom-neighborhood` | a neighborhood's scoped store | `["blossom"]` | listed where neighborhoods exist |
 
-- No rail means `blossom`. Any other (`nip96` included) gets
+- No rail means `blossom`, or `blossom-neighborhood` when a `destination`
+  is given. Any other (`nip96` included) gets
   `unsupported rail`.
 - `info` is advisory; nothing requires calling it first.
 - The napplet chooses; Myco never turns one into the other. A `blossom`
   upload is `complete` only with a URL a server confirmed, which anyone can
   open. A `blossom:` URL only comes from `blossom-local`, asked for on
   purpose.
+
+## Into a neighborhood
+
+`blossom-neighborhood` is Myco's own rail until
+[#33](https://github.com/napplet/naps/pull/33) gains a destination field.
+
+- `request.destination` must be a `neighborhood:` address the napplet got
+  from NAP-NEIGHBOR. Any other destination, or this rail without one, is
+  `invalid request`.
+- Needs the `neighbor` grant, else `policy denied`. Charged to the same
+  daily budget as `blossom-local` (see Budget).
+- The file is kept in that neighborhood's scoped store
+  (`neighborhood-blobs/`), not in this device's own Blossom.
+- It is not pushed to peers: the neighborhood's blob push hops setting is
+  stored but links do not forward blobs yet. See
+  [nap-neighbor/](../nap-neighbor/README.md).
+- A peer address (`neighborhood://<n>/<p>`) is refused.
 
 ## This device's store
 
@@ -59,7 +79,7 @@ store `resource.keep` writes to). Kept means not cache: nothing evicts it.
   disk does not undo the upload.
 - **`blossom` that no server could take** (offline-only, no internet, no
   server, every one refused): `failed`, and a copy is kept anyway, for a
-  retry or a Circle peer. The napplet is not told: it can't share that copy
+  retry or an app peer. The napplet is not told: it can't share that copy
   publicly. A napplet that wants it shared on the mesh uploads again with
   `blossom-local` (the copy already here makes that free).
 - **An upload that never ran keeps nothing:** unsigned for any reason (the
@@ -71,10 +91,10 @@ More:
 
 - It is the file exactly as the napplet sent it, so the hash is the same
   here and on the servers.
-- Circle peers can fetch it by hash over the mesh, from `:24243`, the
-  paired-only Blossom server. `mesh.blobs` on their side counts this phone
-  among those that hold it. That server answers from the kept store and the
-  cache together.
+- App peers ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)) can
+  fetch it by hash over the mesh, from `:24243`, the Blossom server that
+  admits only them. That server answers from the kept store and the cache
+  together.
 - With a custom blob store set in Settings, "this device's Blossom" is that
   store, and the phone runs no mesh Blossom server. Peers then cannot fetch
   it from this phone.
@@ -245,7 +265,7 @@ Per napplet, the spec's three policies are:
 - Plain spec fields. `complete` because this device's store confirmed the
   bytes.
 - `url` is `blossom:sha256:<hex>`, which NAP-RESOURCE resolves (this device
-  first, then Circle peers). It is not a link anyone on the web can open,
+  first, then reachable app peers). It is not a link anyone on the web can open,
   and few Nostr clients read `blossom:`, so it is for the mesh, not for a
   public note.
 - No `fallbackUrls`. `dimensions` as for `blossom`.
@@ -253,7 +273,7 @@ Per napplet, the spec's three policies are:
 
 ## Not built
 
-- NIP-96, and any rail but the two Blossom ones.
+- NIP-96, and any rail but the three Blossom ones.
 - Progress (`uploading`, `upload.status.changed`).
 - Blurhash. Dimensions beyond PNG and GIF headers.
 - Metadata stripping. That is the napplet's job (see Metadata).

@@ -7,7 +7,7 @@
 //! and refuses, **at the dial**, anything outside it.
 //!
 //! - [`Reach::Internet`] — the public internet only. The default.
-//! - [`Reach::Mesh`] — a Circle peer over FIPS: `.fips` names and the mesh's
+//! - [`Reach::Mesh`] — an app peer over FIPS: `.fips` names and the mesh's
 //!   `fd00::/8` addresses, nothing else.
 //! - [`Reach::Configured`] — a server the user typed in themselves (a custom
 //!   Blossom store), which may well be on their own network. The one
@@ -101,12 +101,12 @@ impl HttpClient {
         Self::build(Reach::Internet, Redirects::None, builder, cfg!(test))
     }
 
-    /// A Circle peer over the mesh only.
+    /// An app peer over the mesh only.
     pub(crate) fn mesh(builder: reqwest::ClientBuilder) -> Self {
         Self::build(Reach::Mesh, Redirects::Judged, builder, cfg!(test))
     }
 
-    /// A Circle peer over the mesh only, redirects not followed.
+    /// An app peer over the mesh only, redirects not followed.
     pub(crate) fn mesh_unredirected(builder: reqwest::ClientBuilder) -> Self {
         Self::build(Reach::Mesh, Redirects::None, builder, cfg!(test))
     }

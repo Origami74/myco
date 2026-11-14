@@ -14,14 +14,14 @@
 //!
 //! - **`blossom`** (the default): the user's servers. `complete` only when one
 //!   confirmed the file, with an `https` URL anyone can open. The file is also
-//!   kept in this device's own Blossom store, which nothing evicts and Circle
+//!   kept in this device's own Blossom store, which nothing evicts and app
 //!   peers read over the mesh — after a failure too, when no server could take
 //!   it, so a retry or a peer still finds it. The napplet is not told: it can't
 //!   share that copy publicly.
 //! - **`blossom-local`**: this device's store only, asked for on purpose. No
 //!   signature, no internet, works with offline-only on; `complete` with a
 //!   `blossom:sha256:<hex>` URL, which NAP-RESOURCE resolves here and from
-//!   Circle peers. A rail of the shell's own, as the spec allows.
+//!   app peers. A rail of the shell's own, as the spec allows.
 //!
 //! Keeping without a signature is free for the napplet, so each may keep only
 //! [`LOCAL_BUDGET_BYTES`] that way a day ([`LocalUploads`]). An upload the user
@@ -689,7 +689,7 @@ mod tests {
     /// No server took it — offline-only, no internet, no server, every one
     /// refusing: `failed` with the spec's error string and no URL, since the
     /// napplet can't share a copy here publicly. That copy is kept anyway,
-    /// for a retry or a Circle peer.
+    /// for a retry or an app peer.
     #[tokio::test]
     async fn an_upload_no_server_took_fails_but_is_kept_here() {
         let mut s = session(&["upload"]);

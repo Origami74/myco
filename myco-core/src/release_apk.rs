@@ -44,7 +44,6 @@ use serde::Serialize;
 
 use crate::content::Content;
 use crate::ip_source::IpPeerSource;
-use crate::mesh_wire::{new_query_id, MeshMeta};
 use crate::software_release::{self as release, tag_values, PUBLISHER};
 
 /// SHA-256 of the certificate Myco releases are signed with — the one pin:
@@ -95,7 +94,7 @@ pub struct ReleaseFile {
 pub struct Prepared {
     #[serde(flatten)]
     pub file: ReleaseFile,
-    /// Where the bytes came from this time: `kept`, `installed`, `circle`
+    /// Where the bytes came from this time: `kept`, `installed`, `app-peer`
     /// or `internet`.
     pub source: &'static str,
 }
@@ -210,12 +209,7 @@ async fn release_file(
     if let Some((file, _)) = pick(kept) {
         return Ok(file);
     }
-    let meta = MeshMeta::pull(1, new_query_id(), crate::content::PULL_BUDGET_MS);
-    let mut found = pick(
-        content
-            .pull_from_peers(vec![filter.clone()], meta, None)
-            .await,
-    );
+    let mut found = pick(content.pull_from_peers(vec![filter.clone()]).await);
     if found.is_none() && online {
         found = pick(release::from_zapstore(filter).await.unwrap_or_default());
     }
@@ -260,8 +254,8 @@ async fn prepare_unbounded(
     } else {
         let (bytes, source) = if let Some(bytes) = from_installed(installed, &file).await {
             (bytes, "installed")
-        } else if let Some(bytes) = from_circle(&content, &file).await {
-            (bytes, "circle")
+        } else if let Some(bytes) = from_app_peers(&content, &file).await {
+            (bytes, "app-peer")
         } else if let Some(bytes) = from_internet(&file, internet).await {
             (bytes, "internet")
         } else {
@@ -349,7 +343,7 @@ fn remember_peer_failure(npub: &str, sha256: &str) {
 /// peer would fetch it from all of them, over BLE), starting at a rotating
 /// offset so one bad peer is not always first; a peer that fails is skipped
 /// for a while.
-async fn from_circle(content: &Arc<Content>, file: &ReleaseFile) -> Option<Vec<u8>> {
+async fn from_app_peers(content: &Arc<Content>, file: &ReleaseFile) -> Option<Vec<u8>> {
     let probe = crate::mesh_blobs::MeshBlobs::new(Arc::new(crate::mesh_blobs::HttpProbe::new(
         content.clone(),
     )));

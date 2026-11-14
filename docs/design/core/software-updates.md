@@ -2,7 +2,7 @@
 
 The Android app looks for NIP-82 kind 30063 release announcements for
 `app.myco`, restricted to the publisher in `zapstore.yaml`, in three places at
-once: its own store, its Circle (one forwarded hop, the ordinary mesh pull),
+once: its own store, its app peers (asked directly over the mesh relay),
 and `wss://relay.zapstore.dev` unless mesh-only mode is on. Filtering is not authentication: Rust's existing `nostr`
 implementation verifies both the event ID and BIP-340 signature against the
 pinned publisher key before validating the announcement in Rust. Wrong publishers,
@@ -12,24 +12,25 @@ notice. The highest stable numeric version is compared with the installed build.
 There is no GitHub metadata fallback that could bypass signature verification.
 
 This authenticates a release announcement. Tapping the notice opens the fixed
-official Zapstore listing, unless the Circle has already brought the APK (see
+official Zapstore listing, unless an app peer has already brought the APK (see
 [Carrying the APK](#carrying-the-apk)). No user identity or private signing key
 is sent to the relay.
 
-## Asking the Circle
+## Asking app peers
 
 Every check keeps the newest verified announcement in the device's own relay,
-so the device answers its Circle's next check. One phone that reaches Zapstore
-is enough for the room: a mesh-only phone asks its peers, and their peers, and
-gets the same signed event. A peer can withhold a release but cannot forge or
+so the device answers its app peers' next check. App peers are linked devices
+in neighborhoods with Apps on ([nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)).
+One phone that reaches Zapstore is enough for the room: a mesh-only phone asks
+its app peers, and each of them keeps the answer for its own app peers. A peer can withhold a release but cannot forge or
 alter one; the event is verified against the pinned key as if it came from
-Zapstore. The Circle is asked only while the core runs (the mesh service or the
+Zapstore. App peers are asked only while the core runs (the mesh service or the
 UI); a background check in a process without one asks only Zapstore.
 
 ## Carrying the APK
 
-Each phone keeps the newest release APK in its kept Blossom store, so the
-Circle updates with no internet (`myco-core/src/release_apk.rs`).
+Each phone keeps the newest release APK in its kept Blossom store, so app
+peers update with no internet (`myco-core/src/release_apk.rs`).
 
 ### What vouches for it
 
@@ -44,7 +45,7 @@ accepts one only if:
   64 MiB.
 
 The file event is kept beside the announcement, so the phone answers its
-Circle's next pull for it.
+app peers' next pull for it.
 
 ### Where the bytes come from
 
@@ -53,7 +54,7 @@ In order, stopping at the first that works:
 1. **Kept already.**
 2. **This phone's installed APK**, when it hashes to `x` — a phone updated
    through Zapstore carries the release it runs for free.
-3. **A Circle peer's Blossom** (`http://<npub>.fips:24243/<x>`). Only the
+3. **An app peer's Blossom** (`http://<npub>.fips:24243/<x>`). Only the
    peers `mesh_blobs` finds holding `x` are asked, one at a time, from a
    rotating start. A peer that fails is skipped for three hours.
 4. **The file event's Blossom URLs** (`https://…/<x>`, Zapstore's CDN), only
@@ -129,14 +130,14 @@ and Zapstore, and neither restricts it.
 
 ### Scheduling the carry
 
-Every check starts a carry, due or not (Circle members come and go), while
+Every check starts a carry, due or not (app peers come and go), while
 the core runs; one carry runs at a time. With automatic checks off, the
-carry still runs but never downloads from the internet: it serves the
-Circle what this phone has, or gets from it. Background work waits for the
+carry still runs but never downloads from the internet: it serves
+app peers what this phone has, or gets from it. Background work waits for the
 carry it started.
 
 A carry with the release already kept is cheap: a few kept-store queries.
-One without it asks each reachable Circle member once (`HEAD`, remembered
+One without it asks each reachable app peer once (`HEAD`, remembered
 briefly), then downloads from a holder if there is one.
 
 ## Scheduling
@@ -145,7 +146,7 @@ Automatic checks default on; saved choices are preserved. Outside mesh-only
 they contact `wss://relay.zapstore.dev` daily, including with the UI closed.
 The relay sees the phone's IP address and a Myco release query. Check now runs
 even with automatic checks off. A unique WorkManager task wakes approximately
-hourly with no network constraint, since the Circle needs none,
+hourly with no network constraint, since app peers need none,
 sharing the foreground check's persisted daily success / hourly failure gate
 and one process-wide SoftwareUpdates instance. Concurrent callers join the
 same in-flight check, and the UI observes background progress and results
@@ -198,9 +199,9 @@ Publisher key rotation requires updating the pinned trust anchor deliberately.
 5. Deny notifications: the banner still works. Grant permission, reopen, and
    confirm one notice. Disable the channel: no crash or repeated alert.
 6. Automatic off: no active periodic worker. Offline: no crash; reconnect and
-   retry. Mesh-only with a Circle peer that has checked online: Check now finds
+   retry. Mesh-only with an app peer that has checked online: Check now finds
    the release with no internet. Mesh-only with no core running: "Start the
-   mesh to ask your Circle for updates".
+   mesh to ask your neighbors for updates".
 7. A test build at the latest version should report up to date. Rust tests use
    a real public signed 0.11.0 fixture, reject content/key tampering and valid
    attacker signatures. Rust tests cover announcement fields and authentication; Kotlin tests cover

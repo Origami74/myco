@@ -16,8 +16,8 @@ is one Myco decided to grant, implemented by Myco, on the napplet's behalf.
 Related docs: [./nsite-layer.md](../nsite/nsite-layer.md) (the content layer this builds on),
 [./app-shell.md](../core/app-shell.md) (the per-app window model),
 [./deep-links.md](../core/deep-links.md) (the existing `myco://app/…` link),
-[./identity-pairing.md](../core/identity-pairing.md) (the device key this deliberately does not
-reuse), [../circle/circle.md](../circle/circle.md) (what "everyone nearby" means),
+[./identity.md](../core/identity.md) (the device key this deliberately does not
+reuse), [nap-neighbor/](../nap-neighbor/README.md) (who "people nearby" are),
 [../reference/nostr-kinds.md](../../reference/nostr-kinds.md) (event kinds).
 
 > Status: built through S2, S3's `NAP-OUTBOX`, `NAP-RESOURCE` (`blossom:`
@@ -81,11 +81,11 @@ transport-neutral; the *web projection* binds them to iframes, `postMessage`, an
 | D2 | Rendering | One shell WebView per napplet; the napplet itself in a `sandbox="allow-scripts"` `srcdoc` iframe. |
 | D3 | Identity | A user key **separate** from the mesh device key, generated as a guest on first launch; the person can log in with their own `nsec`, reveal it, or log out. |
 | D4 | Relay scope | Local relay, mesh peers, and internet relays when reachable. |
-| D5 | Mesh | Standard NAPs behave exactly as specified. Mesh rides those contracts through `<npub>.fips` relay URLs (§7.4); a Myco mesh NAP covers only what has no standard equivalent. |
+| D5 | Mesh | Standard NAPs behave exactly as specified. People nearby are reached through NAP-NEIGHBOR's `neighborhood://` addresses, handed to those contracts (S5, §7.4). |
 | D6 | First milestone | A full verified resolve — manifest, blobs, aggregate, `srcdoc`, handshake. No shortcuts that get thrown away. |
 | D7 | Specification drift | Pin one `napplet/naps` revision and re-audit deliberately (§8). |
 | D8 | Capability policy | An install-time review screen; grants stored per library entry as two sets — `granted` and `denied` — and switchable per capability on the app's sheet afterwards (live — an open window obeys on its next call, and relaunches). A launch may grant a declared domain this build newly implements, but never one the user switched off: "never decided" and "said no" are different slots — and only if the domain was on the list the review sheet showed; a later manifest declaring more goes back through the review sheet, drawn over the napplet's own window, before it gets it. Preinstalled napplets carry the permissions Myco vetted them for as their reviewed list (§7.3). A granted `relay` covers publishing with no per-event prompt, except — interim, until the permission model adds prompts — kinds 0, 3, 5 and 10000–19999, which are refused per call. |
-| D9 | Acquisition | Fetch when added by `naddr` — from the sharer and Circle members in reach, then online; local and mesh-replicable from then on. |
+| D9 | Acquisition | Fetch when added by `naddr` — from the sharer and app peers in reach, then online; local and mesh-replicable from then on. |
 | D10 | Crate | A new `myco-napplet-runtime`, over shared NIP-5A primitives in `nsite-deck`. |
 | D11 | Intents | Android Intents and NAP-INTENT resolve through one shared resolver, bridged both ways, landed early. Claiming the `nostr:` URI scheme is deferred. |
 | D12 | Shell origin | One loopback origin per napplet, `<pubkeyB36><dTag>.localhost`, mirroring nsite hosts. |
@@ -106,8 +106,8 @@ Most of the runtime is wiring. The parts that carry over unchanged:
 - **`nsite-deck`** — the shape to follow, and now a shared dependency: trait seams
   (`RelayBackend`, `BlobStore`, `PeerSource`, `FanoutSink`), manifest parsing, verified
   sync, and the base36 host-label encoder. Transport-agnostic and testable off-device.
-- **`MeshGossiper` / `PeerRelayPool`** — event fanout and per-peer subscriptions. Once a
-  napplet manifest reaches the local relay, mesh replication is nearly free.
+- **`MeshGossiper` / `PeerRelayPool`** — manifest forwarding and per-peer connections to
+  app peers. Once a napplet manifest reaches the local relay, passing updates on is nearly free.
 - **`remote_backend.rs` / `remote_blobs.rs`** — the online relay and Blossom fetch paths
   that D9 needs.
 - **`NsiteActivity`** — not the class, but the technique: a chrome-less WebView task that
@@ -168,12 +168,12 @@ return to Myco. An icon never blocks a load and is not part of the identity.
 **Capabilities.** The install sheet lists `R` and `O` domains together, marks the
 optional ones, and warns when a required domain is one this build cannot provide.
 Install and Permissions sheets group the domains as Android groups permissions
-(`PermissionGroups.kt`): Post as you (`relay`, `outbox`), Nearby devices (`mesh`),
+(`PermissionGroups.kt`): Post as you (`relay`, `outbox`), Nearby devices (`neighbor`),
 Files & media (`resource`, `local`, `fs`, `upload`), Profile (`identity`), Apps & links
 (`intent`, `inc`, `link`), Notifications (`notify`), and Other for domains this build
 doesn't know; `shell`, `theme` and `config` are Basics, always granted. Each group has
 one switch and its parts behind a tap, and is sorted by level: **acts as you**
-(`relay`, `outbox`, `upload`), **sensitive** (`mesh`, `fs`, `notify`), **standard**
+(`relay`, `outbox`, `upload`), **sensitive** (`neighbor`, `fs`, `notify`), **standard**
 (the rest, folded into one row at install). A group takes the level of its most
 sensitive part the app gets. What the install switches leave on is what is granted; a
 required domain is labelled and may still be switched off, with a warning.
@@ -490,11 +490,12 @@ Apps panel grows a type discriminant and its 🦆 / ＠ annotations.
 Review and "Add" ask the same sources, in order:
 
 1. **The mesh, all at once** (`ip_source::FirstOf`): the sharer, when the pointer names
-   one (`holder`), and every other Circle member in reach (`Content::reachable_npubs`).
+   one (`holder`), and every other app peer in reach (`Content::reachable_npubs`; see
+   [nap-neighbor/app-peers.md](../nap-neighbor/app-peers.md)).
    This is what finds a napplet opened from a bare `naddr` link, which names no sharer.
    The first manifest signed by the author for the asked slot wins; a peer with nothing,
    or with a forged answer, is passed over, and a dead peer — a sharer who has walked
-   off included — does not hold up a live one. Only Circle members: no one else's relay
+   off included — does not hold up a live one. Only app peers: no one else's relay
    or Blossom lets this phone pull.
 2. **The public relays** — the pointer's hints, the author's NIP-65 relays and the
    defaults — unless offline-only is on. The mesh is not the internet, so offline-only
@@ -512,8 +513,8 @@ first answer wins rather than the newest: getting the app onto the phone comes f
 and a newer version reaches it later the way updates do (§7.3).
 
 Whatever answers is untrusted: `fetch_manifest` checks signature, author, address and `d`
-tag, and every blob is verified against the manifest before it is kept. Asking the Circle
-tells its members which napplet you are looking at — the disclosure §7.11 describes, for
+tag, and every blob is verified against the manifest before it is kept. Asking app peers
+tells them which napplet you are looking at — the disclosure §7.11 describes, for
 an app you chose to install rather than an attachment a feed showed you. The update check
 (§7.2) still asks the public relays only.
 
@@ -533,7 +534,7 @@ never a bare pubkey and every event they publish carries an invitation.
 `NAP-RESOURCE`, `NAP-RELAY` (`subscribe`, `publish`, `query`) and a read-only
 `NAP-IDENTITY` come up. `NAP-RESOURCE` serves `blossom:` and `https:` (`nap/resource.rs`).
 For `blossom:`, every ask reads this device's Blossom store first; a miss goes through the `BlobFetcher`
-seam — the Circle's stores over the mesh and, unless offline-only, the internet, asked
+seam — app peers' stores over the mesh and, unless offline-only, the internet, asked
 **at once** with the first bytes winning. The internet side asks the servers a BUD-10 URL
 names (`blossom:<sha>.<ext>?xs=<domain>&as=<pubkey>`: `xs` servers, then the `as`
 author's kind 10063 servers as held here, https only, four of each at most), then the
@@ -590,7 +591,7 @@ sees a key. A `relay` grant accepted at install covers publishing, with no per-e
 prompt (D8) — which means a granted napplet can publish as you at will, so the review
 screen has to say so in words a person understands, and revoking a grant has to be
 reachable. Interim, until the permission model has per-event prompts, the one parser
-behind `relay.publish`, `outbox.publish` and `mesh.publish` (`sign_template`) refuses
+behind `relay.publish` and `outbox.publish` (`sign_template`) refuses
 kinds 0, 3, 5 and 10000–19999: a napplet may post as you, not rewrite your profile,
 contacts or relay list, or delete your events. The refusal is `ok: false` with the
 reason on the `.result` frame. The runtime's own first-use kind 0 and 10002 do not go
@@ -603,15 +604,16 @@ refused. On the way back, every frame that leaves the host for a window (call re
 pushed deliveries) passes through one rule (`nap::encrypted::reveal`). An event the user
 signed, whose signature verifies and whose content is a NIP-44 payload the user
 encrypted to themselves, reaches the napplet in plaintext, as NAP-RELAY requires. That
-covers any kind and any napplet that can read events (`relay`, `outbox` or `mesh`),
+covers any kind and any napplet that can read events (`relay` or `outbox`),
 whichever app wrote it, NIP-78 app data and the private halves of NIP-51 lists alike:
 which kinds a protocol keeps private is the protocol's business, not the shell's. The
 install sheet says so for each of those grants. Logged in with a signer app, encrypting and decrypting go
 through it (NIP-55 `nip44_encrypt` / `nip44_decrypt`). Decrypting what others encrypted
 to the user (DMs) is not built.
 
-Relay access sits behind one resolver with three lanes: the local relay, mesh relays
-addressed as `ws://<npub>.fips:4870`, and internet relays when reachable (§7.4).
+Relay access sits behind one resolver with two lanes: the local relay and internet relays
+when reachable (§7.4). A `neighborhood://` address is caught before the resolver and goes
+to the NAP-NEIGHBOR host.
 `relay.query` reads the whole pool — the local relay and the configured relays unless
 offline-only — bounded and deduplicated by id, and answers early (see "Local first" below);
 `relay.subscribe` answers the local backlog, sends `EOSE`, and pulls the pool into the local
@@ -652,9 +654,9 @@ What the specs allow shapes how:
   closing the window tear the streams down.
   - Bounded: 16 open streams per napplet, 64 for the app. A lane past the bound is pulled
     once instead.
-  - A mesh lane has no `REQ` of its own to hold — the Circle pool keeps one connection per
-    peer — so it is re-asked every 45 s (plus jitter). What Circle members publish reaches
-    this device through the flood anyway.
+  - There are no mesh lanes: a `.fips` relay is refused. What people nearby share
+    travels through NAP-NEIGHBOR addresses, which `relay.subscribe` hands to the host
+    ([nap-neighbor/napplet-api.md](../nap-neighbor/napplet-api.md)).
 - **`EOSE` marks the end of this device's backlog.** NAP-RELAY sends it "when stored events
   are exhausted"; the local relay is the shell's store, so it goes right after the backlog,
   pushed by the same task on the same channel after every event that task delivered. A
@@ -700,8 +702,8 @@ What the specs allow shapes how:
 - **An outbox plan is made behind the answer.** An outbox subscription plans
   (`pull_plan_into_local`) after its backlog has gone out. A plan looks up every author
   with no relay list here in one round, one `REQ` per relay (100 authors per filter), on:
-  the configured relays, the indexers (`ip_source::indexer_relays`), the relays the napplet
-  named, and every Circle member's relay. An author another plan is already looking up is
+  the configured relays, the indexers (`ip_source::indexer_relays`), and the relays the napplet
+  named. An author another plan is already looking up is
   waited for, not asked for twice. Stored lists, the indexers and the memory of authors
   with no list are `ip_source::AuthorOutbox`'s, shared with the manifest lookups. An
   author is remembered as having no list for ten minutes only when the napplet named no
@@ -759,14 +761,14 @@ lookups (`ip_source`), account publishes, and public Blossom fetches.
   at least 8 s. A napplet's short `timeoutMs` and a round's shared cutoff never count, and
   a relay that connected and was slow to answer is slow, not gone. 30 s, doubling, up to
   5 min.
-- **A success clears the entry.** Mesh successes (`.fips`, `fd00::/8`, a Circle member's
+- **A success clears the entry.** Mesh successes (`.fips`, `fd00::/8`, an app peer's
   Blossom) do not count as "online". Blossom counts a 404 as an answer ("not here"), never
   a failure.
 - **A skipped relay is finished, with nothing, at once** — not dialled, not even resolved —
   so it never costs a round time. A round of only skipped relays does not trip the internet
   breaker. A lane skipped (or not usable) when a subscription opens takes no stream slot;
   it gets its one pull, which costs nothing.
-- **Never listed:** Circle members' relays and Blossom, and the custom relay and Blossom
+- **Never listed:** app peers' relays and Blossom, and the custom relay and Blossom
   set in Storage — their clients never consult the list.
 - **Bounded:** keys are normalised as `ip_source::same_relay` does, plus the default port
   dropped; spent entries are pruned on insert and the map holds at most 512.
@@ -791,8 +793,8 @@ and a stream held back by the breaker waits without growing its backoff.
 groups are its example) and says "the shell controls which relays the napplet can access";
 NAP-OUTBOX says `options.relays` "never bypasses shell ACLs" and napplets "MUST NOT be able
 to force connections to private network relays or disallowed hosts". Myco's policy, in one
-place (`validate_relay_url` and `OutboxService::allowed`): a `.fips` host is a mesh lane
-only when its npub is a Circle member and not our own; loopback, link-local, private and
+place (`validate_relay_url` and `OutboxService::allowed`): a `.fips` host is refused (people
+nearby are reached through `neighborhood:` addresses, not relay URLs); loopback, link-local, private and
 `.local`/`.localhost` hosts are refused; any other `wss://`/`ws://` host is allowed while
 the internet is; offline-only refuses them all. Note what that permits: a napplet with the
 `relay` grant can make this phone open a connection to a public relay of its choosing and
@@ -806,8 +808,7 @@ How the URL check works: `validate_relay_url` parses with the `url` crate (no ha
 prefix matching), refuses any userinfo, unwraps a v4-mapped v6 address before judging it,
 and counts CGNAT (`100.64/10`) and multicast as private beside loopback, link-local and
 RFC 1918; the parser normalises `127.1`, decimal and hex shorthand, so those need no
-special case. A `.fips` host is accepted only as `ws://<npub>.fips`, optionally `:4870` or
-a bare `/`, and is always dialled as the rebuilt `ws://<npub>.fips:4870` (§7.4). At most
+special case. A `.fips` host is refused (§7.4). At most
 ten relays may be named per call. The outbox resolves an internet lane before dialling
 and refuses it when any resolved address is private (the connect re-resolves; a
 pre-connected stream is the follow-up).
@@ -872,8 +873,8 @@ subscribe answers the local backlog and pulls the remote lanes *into* the local 
 by lane as each answers, which is what delivers them live (the spec has no `outbox.eose`,
 and this is why). Napplet-supplied
 relay URLs are validated: `ws`/`wss` only, never loopback or a private network. An author
-whose kind 10002 the local store lacks is looked up in the pool once (the configured relays
-and every Circle member's mesh relay, bounded), stored — the local relay is the cache — and
+whose kind 10002 the local store lacks is looked up in the pool once (the configured relays,
+bounded), stored — the local relay is the cache — and
 a miss remembered for ten minutes; a list older than a day is served as `source: cache` and
 refreshed behind the answer. NIP-66 relay intelligence is not used: it is a MAY, and the
 offline case has no monitors to ask.
@@ -947,24 +948,11 @@ implements; a switch turned off on the app's sheet stays off. The vendored
 `@napplet/shim` already installs `window.napplet.link` and `window.napplet.theme`, so
 the Myco prelude supplement needed nothing for either.
 
-**`mesh` is a default grant too — for now.** The upstream napplet tooling (the Vite
-plugin and `napplet deploy`) keeps only upstream NAP domains in a manifest's
-`requires` and drops Myco-only ones, so a napplet published with it cannot ask for
-`mesh`, and a grant that can only come from `requires` could never be given.
-Until the tooling keeps extension domains, `mesh` is in `DEFAULT_GRANTS`. It is
-still listed on the install sheet (NAP-MESH's "acting as the user" warning holds),
-capped by the user's App reach setting, and switchable off per app. Existing
-installs pick it up at their next open unless the user switched it off — silently,
-with no sheet, deliberately: a default is never reviewed, and asking about one would
-be a sheet for every installed app at once. Remove it from the defaults once the
-tooling is fixed — and note that removal alone does not revoke it: the widened grant
-is persisted in each entry's `granted`, so taking `mesh` out of the defaults needs a
-migration that drops it where it was never reviewed.
-
-With `mesh` on for every app, the roadmap's
-[mesh rate limits](../../roadmap.md#later) item (a per-session token bucket on
-`mesh.publish` / `mesh.subscribe`) is more urgent: any installed napplet can now flood
-the Circle up to the user's App reach cap.
+**`neighbor` is a default grant.** NAP-NEIGHBOR tells a napplet only which
+neighborhoods it was granted, and none are granted without the user: a napplet's
+`neighbor.create` asks first, and neighborhoods the user starts in the shell are
+granted to no napplet. Using an address needs `neighbor` as well as the calling
+domain's grant. See [nap-neighbor/napplet-api.md](../nap-neighbor/napplet-api.md).
 
 **`NAP-UPLOAD` shipped** (upstream draft, [napplet/naps PR #33](https://github.com/napplet/naps/pull/33), not merged; Myco's notes in [`NAP-UPLOAD.md`](NAP-UPLOAD.md)), Blossom only. A
 napplet hands over bytes; the shell finds the user's servers (kind 10063, else
@@ -993,31 +981,27 @@ Several napplets in one window: layout strategy, and INC channels held open betw
 napplets. NAP-INTENT and NAP-INC already exist by then; this is about napplets sharing a
 surface rather than replacing each other's windows.
 
-### S5 — Mesh as a NAP
+### S5 — Neighborhoods as a NAP
 
-**Shipped as NAP-MESH** ([`NAP-MESH.md`](NAP-MESH.md)), in the registry's template form so
-it can be proposed upstream. Narrower than first sketched, and differently shaped: not a
-peer directory but **hop-limited publish and subscribe**. A relay publish is "put this on
-my relays"; a mesh publish is "flood this to the people near me, this far". The hop budget
-is the whole difference, and it is the one thing a napplet may choose here that it may
-choose nowhere else — within a cap the user sets (Settings › App reach; publish default 3,
-backlog pull default 2, the mesh's own `EVENT_TTL` / `MAX_REQ_TTL`). `mesh.info` reports
-only a peer *count*; presence, transports and circle membership stay behind the seam and
-would be a separate NAP.
+**Shipped as NAP-NEIGHBOR** (upstream draft,
+[napplet/naps PR #146](https://github.com/napplet/naps/pull/146), not merged; Myco's
+side in [nap-neighbor/](../nap-neighbor/README.md)). It replaces NAP-MESH, Myco's
+earlier hop-limited `mesh.publish` / `mesh.subscribe` domain, which is gone along with
+its App reach setting.
 
-Runtime: `MeshSink` seam (`limits` / `reach` / `publish` / `pull` / `blob_holders`),
-`nap/mesh.rs`, domain-scoped session subscriptions. Core: `NappletMeshSink` over the relay hub and the
-Circle pool; `RelayHub::accept_local_with_ttl` and `accept_pulled`. Web projection: the
-vendored `@napplet/shim` filters unknown domains, so `assets/myco-prelude.js` installs
-`window.napplet.mesh` — and `window.napplet.shell`, which the vendored build also lacks —
-after it.
+The `neighbor` domain carries no data. It lists the neighborhoods a napplet was granted,
+the peers carrying each, and a `neighborhood://` address per neighborhood, minted per
+napplet. The napplet hands that address to `relay.subscribe`, `outbox.publish`,
+`resource` (`xs=`) or `upload` (`destination`), and the host routes it — caught before
+lane validation, never dialled.
 
-With `mesh` in place, `relay.publish` means what NAP-RELAY says: the shell's relay pool —
-this device's own relay (so its live subscriptions hear it) plus the internet relays when
-reachable, best-effort and off the napplet's result — and never the Circle flood. The two
-domains now say what they mean, and a `relay` grant is no longer a back door to the mesh.
-`RelayPoolSink` in `myco-core/src/napplet.rs`. Outbox-model relay selection (NIP-65) is
-NAP-OUTBOX's and still to come; until then the pool is the default relay set.
+Runtime: `nap/neighbor/` (wire, `NeighborHost` seam, `address.rs`, `route.rs`). Core:
+`myco-core/src/neighbor/` (`Neighbors`, links, the scoped store).
+
+`relay.publish` means what NAP-RELAY says: the shell's relay pool — this device's own
+relay (so its live subscriptions hear it) plus the internet relays when reachable,
+best-effort and off the napplet's result — and never people nearby. `RelayPoolSink` in
+`myco-core/src/napplet.rs`.
 
 ### S6 — Keep and pass on
 
@@ -1025,8 +1009,8 @@ NAP-OUTBOX's and still to come; until then the pool is the default relay set.
 shell cache in place, what a napplet reads is remembered only until it is evicted.
 `local.publish` keeps an event in the local relay and sends it nowhere;
 `resource.keep` keeps a blob in the local Blossom. Every publish also accepts a
-signed event and sends it as it is — `mesh.publish` then floods it again even if
-this phone has seen it. Both are honoured only for what the napplet was
+signed event and sends it as it is — to relays again, even if this phone has
+seen it. Both are honoured only for what the napplet was
 delivered, remembered in a per-napplet scalable bloom filter shared by its
 windows (`delivered.rs`). `local` is a default grant.
 
@@ -1036,7 +1020,7 @@ windows (`delivered.rs`). `local` is a default grant.
 
 ### 7.1 Two identities on one device
 
-D3 keeps two keys apart: the device key signs mesh traffic, pairing and gossip, and the
+D3 keeps two keys apart: the device key is the mesh identity, and the
 user key signs only napplet-originated events. Settings keeps them apart too: the account
 header at the top is the user key, and "Device name" below it is the device.
 
@@ -1109,8 +1093,8 @@ landing in the relay with no blob behind it — pulled by a subscription, floode
 — does not displace the one that opens. The pin moves when a fetch brings the new bytes:
 "Check for updates" refreshes every installed napplet from its pointer's relays beside
 the nsite check (`NappletHost::refresh`, bytes first, manifest, then pin), and a version
-it brings in is passed on to the Circle, as an nsite update found by the check is (§7.3).
-A newer version pushed by a Circle peer moves the pin the same way (§7.3). The tile
+it brings in is passed on to app peers, as an nsite update found by the check is (§7.3).
+A newer version pushed by an app peer moves the pin the same way (§7.3). The tile
 reports `ready` or `missing` from the same pin. The same check also runs on its own, on
 foreground and every 6 h, through the throttle in `nsite-updates.md` §3.1; under
 offline-only the napplet half is skipped (counted as checked, none updated). An open
@@ -1133,9 +1117,9 @@ across versions is still open: napplets have no storage capability yet.
 
 ### 7.3 Mesh replication of the new kinds
 
-**Updates travel the Circle the way nsite updates do.** The gossiper routes the napplet
-manifest kinds `15129` / `35129` to their own handler (`Content::on_napplet_manifest_event`)
-instead of plain-flooding them. It is the nsite policy
+**Updates travel between app peers the way nsite updates do.** The mesh relay hook
+(`MeshGossiper`) routes the napplet manifest kinds `15129` / `35129` to their own handler
+(`Content::on_napplet_manifest_event`). It is the nsite policy
 ([nsite-updates.md §4](../nsite/nsite-updates.md)) — the same hop budget, split-horizon
 and multihop clamp — with the napplet's checks in front:
 
@@ -1193,8 +1177,8 @@ and marks the entry `preinstalled`:
 | DingDong | `d=dingdong` | none | `mesh` |
 | AppStore | `d=discover` | `outbox`, `theme` | `mesh`, `outbox`, `theme` |
 
-Both expected sets add `mesh`, which the napplet tooling drops from `requires` (§S3, the
-`mesh` default). So the first open, and any update from the same author that declares no
+Both expected sets still list `mesh`, from when NAP-MESH existed. This build no longer
+implements it, so it grants nothing. The first open, and any update from the same author that declares no
 more than the expected set, is granted what it declares with no sheet; anything beyond it
 goes through the sheet above. The expected set is also read at every open and review
 (`library_grants`), for any entry still marked preinstalled: an expected set widened in a
@@ -1209,7 +1193,7 @@ reviewed like any other. Entries seeded before this existed (defaults granted, r
 list empty, no mark) are adopted at startup (`adopt_legacy_seeded_napplet`); one with a
 non-empty reviewed list went through the sheet and is left alone. The one case the two
 cannot be told apart — a user who installed DingDong by hand before it was seeded — gains
-only `mesh`, which every napplet already has by default.
+nothing it can use.
 
 **Snapshots (`5129`) stay plain events.** A snapshot is an immutable build: nothing in the
 Library installs by it, so there is nothing to update, and the not-installed branch
@@ -1217,45 +1201,23 @@ would pass it on unchanged anyway.
 
 Still not done: first delivery to a phone that has never had the napplet. It arrives by
 the share handoff (bump, QR) and the public relays; AppStore's "Around you" list of
-napplets nearby phones hold is the start of a Circle listing (roadmap N5).
+napplets nearby phones hold is the start of a listing of what people nearby hold (roadmap N5).
 
-### 7.4 The outbox model over the mesh
+### 7.4 The outbox model and the mesh
 
-"Offline" is the wrong frame in a mesh. NIP-65 does not require the internet; it requires
-*reachable relay URLs* — and Myco already gives every device one: `<npub>.fips`, resolved
-over FIPS, serving a relay on `:4870`.
+**Superseded.** An earlier build let a kind 10002 list name `ws://<npub>.fips:4870`, and
+NAP-OUTBOX turned such a URL into a mesh lane to a paired peer's relay. That is gone:
+`validate_relay_url` refuses any `.fips` host, and an outbox plan has two lanes only,
+this device's relay and internet relays (`outbox.rs`).
 
-So a kind 10002 relay list can name `ws://npub1….fips:4870` alongside `wss://` internet
-relays, and the outbox model works unmodified. Same NIP-65 logic, same NAP-OUTBOX
-contract, same napplet code — the URLs simply happen to resolve over the mesh. A napplet
-written for the open web works in a room with no internet, and neither the napplet nor the
-specification needs to know why.
+What people nearby share now travels through NAP-NEIGHBOR. A napplet gets a
+`neighborhood://` address and hands it to `relay.subscribe` or `outbox.publish`; the host
+routes it over links ([nap-neighbor/](../nap-neighbor/README.md)). Outbox reads refuse
+addresses.
 
-The work this implied is done with NAP-OUTBOX (S3): a `.fips` URL in a relay list becomes a
-`RelayLane::Mesh` and is reached through `PeerRelayPool` — and only ever as
-`ws://<npub>.fips:4870` rebuilt from its npub, never as the string given, so a list or a
-napplet cannot smuggle userinfo, a path or another port into the pool's dial; the user's own kind 10002 — the
-guest relays (§7.1) — is published beside the guest profile on first launch, so the
-user's own outbox plan resolves as NIP-65; per-lane reachability is reported
-(`incomplete`, the per-relay map on publish — for the lanes that answered by the quorum)
-rather than failing hard. Policy lives in one
-place (`outbox.rs`): a mesh relay is a lane only if its npub is a Circle member, our own is
-never one, and internet lanes go when offline-only.
-
-The user's own list names **no** `.fips` relay. A `ws://<npub>.fips` URL is the device key,
-and the list is signed by the user key: one inside the other is the link D3 keeps apart,
-published in an event anyone may keep. Circle members reach this device's relay by policy
-— they are paired, they know the device — and need no tag to say so. A peer's list *may*
-name its `.fips` relay if that peer chooses to; Myco reads such lists, and does not write one.
-
-The open question is answered by not hiding it: a mesh relay's URL is a `ws://<npub>.fips`
-URL, and `relayHints` and `resolveRelays` show it as such. A napplet cannot do anything with
-the address that it could not already do by asking — it still never opens a socket — and
-hiding it would make the plan a lie about where an event was seen.
-
-What NAP-OUTBOX does **not** do is flood. A mesh lane is one directed connection to one
-peer's relay, exactly as a `wss://` lane is; reaching everyone nearby with a hop budget is
-NAP-MESH's (S5), behind its own grant.
+The user's own list still names **no** `.fips` relay. A `ws://<npub>.fips` URL is the device
+key, and the list is signed by the user key: one inside the other is the link D3 keeps
+apart, published in an event anyone may keep.
 
 ### 7.5 The WebView floor
 
@@ -1315,24 +1277,24 @@ nothing here should make it impossible later.
 ### 7.11 Pulling blobs over the mesh leaks what you are looking at
 
 **Open.** NAP-RESOURCE (S2) fetches a `blossom:` blob the local store lacks from every
-reachable Circle member at once, and from the internet at the same time. Asking the room
+reachable app peer at once, and from the internet at the same time. Asking the room
 at all is the right choice
 for availability — the room is what this app is for — and the wrong one for privacy, in
 three ways.
 
 **The ask is a disclosure.** "Do you have `<sha>`?" tells every phone in the room which
 picture or file you are opening, tied to your device npub, at that moment. A public server
-learns the same, but a public server is a stranger; a Circle member is someone who knows
+learns the same, but a public server is a stranger; an app peer is someone who knows
 you, and the hash is trivially matched to the event that referenced it — they hold the
 same event. Interest in a specific message's attachment is a specific fact about you.
 
 **The keep is a broadcast.** "Anything queried is saved" means a blob you merely viewed is
-now served from your phone to anyone in your Circle who asks (the mesh Blossom gates on
-Circle membership, not on why you hold it). You become a host of content you did not
+now served from your phone to any app peer who asks (the mesh Blossom gates on
+being an app peer, not on why you hold it). You become a host of content you did not
 publish and may not endorse, and a peer probing your store learns what you have looked at.
 
 **The serve is a probe.** The inverse of the first point: answering "yes" reveals what you
-hold, to anyone paired with you, for the cost of a hash. Hashes of well-known files are
+hold, to any app peer, for the cost of a hash. Hashes of well-known files are
 well known.
 
 None of this is new to the mesh — nsite sync pulls blobs from peers too — but an nsite's
@@ -1351,7 +1313,7 @@ Options, roughly in order of how much they cost:
    mark that the mesh Blossom refuses to serve until the user shares or the blob is
    referenced by something they published. Breaks "anything queried is saved" as a mesh
    promise, keeps it as a local cache.
-4. **A per-napplet or per-Circle switch.** Honest, and one more thing nobody sets.
+4. **A per-napplet or per-neighborhood switch.** Honest, and one more thing nobody sets.
 
 Recommendation: (1) as the default — it is the one that leaks nothing new — with (2) as the
 fallback path, and (3) worth doing regardless, since it closes the serve-side leak for
@@ -1382,11 +1344,12 @@ Per D7, freeze against a specific `napplet/naps` revision and record it here on 
 - `napplet/naps` — master at `a040914` (2026-09-15), checked out at
   `reference/naps`; the drafts this runtime implements are open pull requests,
   pinned as copies in `reference/naps/drafts/`: NAP-RELAY (#2), NAP-OUTBOX
-  (#32), NAP-RESOURCE (#13). NAP-MESH is Myco's own, in this tree.
+  (#32), NAP-RESOURCE (#13). NAP-NEIGHBOR is
+  [#146](https://github.com/napplet/naps/pull/146).
 - NAP-GAMEPAD — `19de5ce1cea40cd4c76089cdd8126e9f87648049` (2026-10-15),
   implemented by the Myco supplement and trusted shell (controller section below).
 - `@napplet/shim` — `0.29.2`, vendored verbatim (`assets/vendor/README.md`), with
-  Myco's supplement (`assets/myco-prelude.js`) for `shell` and `mesh`, and one
+  Myco's supplement (`assets/myco-prelude.js`) for `shell` and `neighbor`, and one
   override: `outbox.publish` (see below).
 - NIP-5D — `nostr-protocol/nips` PR #2303 (living), read 2026-08-19 at blob `2e8fcc4657`.
 - NIP-5A — `nostr-protocol/nips` master.
@@ -1409,7 +1372,7 @@ failure while the user was still approving, and the event could go out anyway.
 The supplement replaces `window.napplet.outbox.publish` with a copy that posts the same
 `outbox.publish` envelope and resolves the same object (`ok`, `event`, `eventId`,
 `relays`, `error`), but waits **5 minutes** (`SIGNING_TIMEOUT_MS`, mirrored as
-`myco_napplet_runtime::SIGNING_TIMEOUT`). `mesh.publish` gets the same wait. The vendored
+`myco_napplet_runtime::SIGNING_TIMEOUT`). The vendored
 router ignores our results: it resolves only ids in its own pending map. `relay.publish`
 and `relay.publishEncrypted` need nothing — the vendored ones set no timer.
 

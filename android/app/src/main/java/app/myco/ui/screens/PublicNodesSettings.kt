@@ -34,8 +34,8 @@ import app.myco.ui.SectionCard
 import app.myco.ui.theme.StatusConnected
 
 /**
- * Settings › Internet: peer with public FIPS nodes over the internet, so the
- * Circle reaches members who are not in the same room (roadmap N10).
+ * Settings › Internet: peer with public FIPS nodes over the internet, so
+ * neighborhoods reach members who are not in the same room (roadmap N10).
  *
  * Off by default, and the page says what turning it on costs before the
  * switch: a public node learns this phone's IP address and which mesh

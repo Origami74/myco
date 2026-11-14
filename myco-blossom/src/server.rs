@@ -3,7 +3,7 @@
 //! blobs to mesh peers at `http://[fd00::self]:24243`. Blobs are
 //! self-authenticating, so there is no per-blob auth; access is decided per
 //! request by an [`AccessFn`] taking the [`BlobOp`], which is how `myco-core`
-//! grants reads to paired peers while withholding uploads. Routes:
+//! grants reads to app peers while withholding uploads. Routes:
 //!
 //! - `GET  /<sha256>` → blob bytes (`application/octet-stream`; the gateway infers
 //!   the real content-type from the manifest path, not from Blossom). A client
@@ -40,9 +40,9 @@ pub enum BlobOp {
 }
 
 /// Decides whether a non-loopback (mesh) source may perform `op` on our Blossom.
-/// `myco-core` backs this with the Circle and its per-peer permissions, so only
-/// paired peers can pull, and only peers granted upload can push; loopback (the
-/// in-app gateway) always bypasses it. Behind an `Arc` so the **live** Circle is
+/// `myco-core` backs this with its app peers and their per-peer permissions, so
+/// only app peers can pull, and only peers granted upload can push; loopback (the
+/// in-app gateway) always bypasses it. Behind an `Arc` so the **live** set is
 /// consulted per request — membership and permissions change at runtime.
 pub type AccessFn = Arc<dyn Fn(IpAddr, BlobOp) -> bool + Send + Sync>;
 
@@ -108,7 +108,7 @@ pub async fn serve_on(
 
 /// Serve on an already-bound listener, restricting **mesh** sources to those that
 /// pass `access` (loopback is always allowed). The runtime uses this so only
-/// paired (Circle) peers can pull/push blobs. `precompressed` is the store's
+/// app peers can pull/push blobs. `precompressed` is the store's
 /// [`FsBlobStore::zstd_dir`], when it keeps zstd variants.
 ///
 /// Any listener that names its peers by socket address will do — a kernel
@@ -243,7 +243,7 @@ async fn upload(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     body: Bytes,
 ) -> Response {
-    // Uploads are the one operation a paired peer is not granted by default:
+    // Uploads are the one operation an app peer is not granted by default:
     // nothing in normal operation pushes blobs to a peer, and it costs us disk.
     if !st.allows(addr, BlobOp::Write) {
         return StatusCode::FORBIDDEN.into_response();

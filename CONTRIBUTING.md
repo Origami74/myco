@@ -8,10 +8,10 @@ shared with people nearby over a Bluetooth LE mesh. The codebase spans
 an Android app and a Rust core, top to bottom:
 
 - **Android app** (`android/`) — the Kotlin / Jetpack Compose shell:
-  Apps, Circle, Settings, and Dev; it pairs with peers (QR, NFC
-  tap, nearby) and renders each nsite in its own chrome-less WebView.
+  Apps, Neighbors, Settings, and Dev; it invites people into
+  neighborhoods (QR, share link, NFC tap) and renders each nsite in its own chrome-less WebView.
 - **`myco-core`** (Rust) — the brains, driven from the app over a JNI
-  bridge: device identity, the pairing/Circle state machine, content
+  bridge: device identity, neighborhoods and links, content
   sync, and the embedded gateway. It hosts an embedded FIPS mesh node.
 - **`myco-relay` / `myco-blossom`** (Rust) — the embedded NIP-01 relay
   and Blossom blob store that serve an nsite's signed manifest and
@@ -21,10 +21,10 @@ an Android app and a Rust core, top to bottom:
   transport, IPv6 ULA addressing), consumed as a path dependency.
 
 Most non-trivial changes affect behavior that only shows up on a real
-device — or across two paired phones: pairing, BLE/NFC discovery, mesh
-sync. A host `cargo test` run is necessary but not sufficient for that
+device — or across two linked phones: neighborhood links, BLE/NFC
+discovery, mesh sync. A host `cargo test` run is necessary but not sufficient for that
 class of change; testing on a physical device (and a second one for
-anything pairing-related) is where regressions actually surface.
+anything link- or neighborhood-related) is where regressions actually surface.
 Protocol and design depth lives in [docs/design/](docs/design/).
 
 ## Quick start
@@ -71,8 +71,8 @@ When you open a bug report, please include:
 - **What actually happened** — the observed behavior, including the
   surprise.
 - **Reproduction steps** — minimal and deterministic if you can.
-  Pairing/mesh bugs should note how many devices were involved and what
-  each was doing (which tab, NFC vs QR, online/offline).
+  Neighborhood/mesh bugs should note how many devices were involved and
+  what each was doing (which tab, NFC vs QR, online/offline).
 - **Evidence** — relevant `adb logcat` excerpts, and a screen recording
   or screenshots for UI issues.
 
@@ -135,7 +135,7 @@ Running it yourself saves a review round trip.
 ### Additional requirements for feature PRs
 
 - **Test coverage where practical.** Add `cargo test` coverage for new
-  core logic. Behavior that can only be exercised on-device (pairing,
+  core logic. Behavior that can only be exercised on-device (links,
   BLE/NFC, WebView) should be described in the PR with the manual test
   you ran (which devices, what you observed).
 - **Documentation updated alongside the code.** Design-affecting

@@ -12,9 +12,9 @@ data. A source can withhold or lie about *availability*, but it cannot forge
 content. There is no network-membership question: FIPS links to whoever is in
 range, and that says nothing. The questions that matter are "is this packet
 from who it claims" (yes, by FIPS transport crypto), "is this content what it
-claims" (yes, by signature/hash), and "is this person in my Circle" (yes or no,
-by a pairing two people made) — which is what admits a peer to the content
-ports. A fourth question arrived with napplets: "may this *program* do that"
+claims" (yes, by signature/hash), and "do I have a link with this person"
+(yes or no, set up from an invitation two people exchanged) — which is what
+admits a peer to the content ports and to neighborhood traffic. A fourth question arrived with napplets: "may this *program* do that"
 (yes or no, by a grant the user made; §5).
 
 > **Note on the name "FIPS".** Throughout Myco, *FIPS* is the **Free
@@ -71,7 +71,7 @@ signed the event**, because peers routinely hand us events authored by third
 parties they have never met.
 
 Manifests are the sharp case. An nsite manifest is authored by its publisher and
-the peer relaying it is only a courier, so without verification any paired peer
+the peer relaying it is only a courier, so without verification any app peer
 could hand us a forged manifest for anyone's nsite and we would stage and
 activate it as that publisher's site. Content-addressing does not save us: blob
 hashes are checked against the manifest, and the manifest is the forged part.
@@ -143,36 +143,35 @@ The crucial inherited principle, carried over verbatim from FIPS:
 > should act on it
 > ([../../reference/fips/docs/design/fips-security.md](../../../reference/fips/docs/design/fips-security.md)).
 
-## 3. No membership gate on the mesh — a Circle gate on the content
+## 3. No membership gate on the mesh — links gate the content
 
 The mesh is not private. Any FIPS node in range gets a Noise-authenticated
 link and may route your encrypted datagrams; there is no roster, no admin, no
-join event, and nothing to gate. What *is* gated is the content: the relay and
-Blossom servers check every mesh connection against the **Circle** — the list
-of people this phone has paired with — and refuse everyone else before the
-WebSocket upgrade or the first byte of a blob. That check is not a roster: it
-is a purely local list, symmetric, with no signer and no authority beyond this
-device. See [../circle/circle.md](../circle/circle.md) for what the Circle is
-and is not.
+join event, and nothing to gate. What *is* gated is the content, by **links**
+([nap-neighbor/](../nap-neighbor/README.md)): pairwise relationships two people
+set up from a one-time invitation.
 
 What this means:
 
-- **Being a peer confers nothing.** A phone can hold a link to yours for an
-  hour and never read a byte of content. It reaches exactly one service: the
-  auth port, to ask to pair (§3.2).
-- **Being paired confers the data relationship.** A Circle member may read your
-  relay and store, receive your gossip, offer you apps, send you files. All of
-  it is self-authenticating (§1), so what a member is "authorized" to do is
-  narrow: exchange verifiable artifacts, and be believed about *having* them.
-- **Not conferred by pairing:** reading your end-to-end payloads to others,
+- **Being a FIPS peer confers nothing.** A phone can hold a transport link to
+  yours for an hour and never read a byte of content. It reaches exactly one
+  service: the link service on `:4873`, and only to set up a link it holds an
+  invitation for.
+- **A link confers the neighborhoods it carries.** A linked peer may read and
+  write the neighborhoods both sides agreed to on that link, through the
+  scoped relay. Nothing else.
+- **An app peer gets Myco's own basics.** A linked device in a neighborhood
+  with **Apps** on may read your mesh relay and Blossom, offer you apps and
+  updates, and send you files.
+- **Not conferred by a link:** reading your end-to-end payloads to others,
   forging or altering content, learning your identity from a passive BLE scan,
   reaching arbitrary localhost services on your phone (§3.1).
 
 **The FIPS optional peer ACL still exists upstream** (`peers.allow` /
 `peers.deny`, evaluated at the Noise IK handshake;
 [../../reference/fips/docs/reference/security.md](../../../reference/fips/docs/reference/security.md)).
-Myco does not use it: pairing is the gesture. A "block this peer" control that
-re-exposes it is a later item.
+Myco does not use it: the invitation is the gesture. A "block this peer"
+control that re-exposes it is a later item.
 
 ### 3.1 Inbound surface on the mesh
 
@@ -185,135 +184,101 @@ mitigation is to expose *only* its own ports over the mesh — the VpnService/TU
 routes only `fd00::/8` and answers `*.fips` DNS; it does **not**
 capture `0.0.0.0/0`, and the WebView never resolves `.fips`.
 
-Three ports are exposed, and only one of them answers a stranger.
+Three ports are exposed:
 
 | Port | Service | Who may reach it |
 | --- | --- | --- |
-| `4870` | Relay (the mesh proxy's NIP-01 socket) | Circle members only |
-| `24243` | Blossom blob store | Circle members only |
-| `4873` | Auth service — `POST /pair`, nothing else | **Anyone** |
+| `4870` | Relay (the mesh proxy's NIP-01 socket) | App peers only |
+| `24243` | Blossom blob store | App peers only |
+| `4873` | Link service, `/nh/{pk}/…` | `setup`: anyone holding a valid invitation. Everything else: a linked peer, by NIP-98 with its link key |
 
 **Open question:** confirm that no other localhost service on the phone is
-inadvertently reachable via FSP port-multiplexing on a paired path, and whether
-the app should enforce an explicit port allowlist on the inbound mesh side.
+inadvertently reachable via FSP port-multiplexing, and whether the app should
+enforce an explicit port allowlist on the inbound mesh side.
 
-### 3.2 One open port, one membership predicate
+### 3.2 The app peer gate
 
-The content ports have **no exceptions**. Pairing used to need one — an unpaired
-peer had to be able to publish the three handshake kinds so pairing could
-bootstrap — which meant a kind whitelist inside the relay's frame handling.
-Pairing now terminates at its own service ([identity-pairing.md
-§6.2](./identity-pairing.md)), so:
+The content ports have **no exceptions**. Link setup terminates on `:4873`, so
+nothing about bootstrapping needs a hole in the relay.
 
-- **Admission is one predicate:** is this mesh address in my circle? The same
-  question answers for relay and Blossom alike.
-- **It is checked at accept, not per frame.** An unpaired peer is refused
+- **Admission is one predicate:** is this mesh address an app peer — a linked
+  device, by the device npub in its offer's `.fips` URL, in a neighborhood
+  with Apps on (`AppPeerGate`)? The same question answers for relay and
+  Blossom alike.
+- **It is checked at accept, not per frame.** Anyone else is refused
   **before** the WebSocket upgrade, with a plain `403`. A stranger costs a TCP
   accept and one small response rather than an upgrade and a round of frames,
   which matters on a BLE link.
-- **The relay refuses the pairing kinds from every source**, paired or not.
-  Nothing writes control traffic into the event store.
-- **`:4873` is the only unauthenticated surface in the app**, so hardening and
-  rate limiting have a single address instead of emerging from a whitelist.
+- **Revocation closes live connections.** The app peer set is consulted live,
+  so ending a link, leaving a neighborhood or turning Apps off drops the
+  connections a peer already holds rather than only blocking the next
+  request.
 
-**Revocation closes live connections.** Because admission is checked once, at the
-upgrade, removing a peer also drops the connections it already holds rather than
-only blocking the next request. Membership is consulted live, so the change takes
-effect immediately.
+Each app peer also carries per-peer flags (relay read/write and their
+multihop clamps, Blossom read on, **Blossom write off**). They are not editable
+today; every app peer gets the defaults. Uploads are therefore not accepted
+from peers: nothing in normal operation pushes blobs, so accepting bytes onto
+the disk stays opt-in.
 
-### 3.3 Per-peer permissions
+### 3.3 The link service
 
-Paired is no longer all-or-nothing. Each circle contact carries six flags —
-relay read, relay read-multihop, relay write, relay write-multihop, Blossom read,
-Blossom write — all on by default **except Blossom write**, which is off. Full
-table and rationale: [nsite-permissions.md §2](../nsite/nsite-permissions.md).
+Everything on `:4873` lives under `/nh/{pk}/…`, where `{pk}` is this side's
+link key for that link.
 
-Two consequences worth stating here:
+- **Setup** needs the invitation's one-time secret: the joiner sends
+  `HMAC-SHA256(s, A.pk ‖ B.pk ‖ url)`. The secret is single use and expires
+  (15 minutes by default).
+- **Everything after setup** carries a NIP-98 header signed by the caller's
+  link key, fresh within 60 s, for that exact URL. The signer must be the
+  link held on that `{pk}`.
+- **Every refusal says only `refused`.** A stranger learns nothing about which
+  check failed.
+- **Bodies are capped at 8 KiB.** A setup or offer is a few signed events.
 
-- **Uploads are not granted by default.** Nothing in normal operation pushes
-  blobs to a peer (propagation is pull-based), so accepting bytes onto our disk
-  is opt-in. A missing field in an older `circle.json` cannot silently grant it.
-- **Relaying for a peer is a separate grant from talking to it.** The two
-  multihop flags are per-peer clamps on the hop budgets, so "I will hold your
-  data but not carry it further" is expressible.
+### 3.4 What a linked peer can still learn
 
-The flags are stored per peer today but **not exposed in the UI**; every peer gets
-the defaults.
+- **An app peer** can issue a broad `REQ` on your mesh relay and **enumerate
+  your manifest set**: which sites you hold, installed, or cached for others.
+  That is metadata, not a content leak — manifests are author-signed and
+  public by design (see [propagation.md](../nsite/propagation.md)).
+- **A linked peer** sees what you publish into the neighborhoods you share
+  with them, and what others pass on. Neighborhoods are **not private**: the
+  join sheet says so. Anyone in a neighborhood can pass posts on, even
+  outside it.
+- **Link keys stop correlation by key.** Each link has its own key, so two of
+  your peers cannot tie their links to you by comparing keys. Over FIPS the
+  transport still shows the device key, so this holds only off the mesh
+  today.
 
-### 3.4 What a circle member can still learn
+The coarse knobs are ending a link, dropping a neighborhood from a link,
+turning Apps off, and the FIPS peer ACL ("block this peer", above).
 
-Read access is deliberately broad for members, because a peer *must* be able to
-read your relay/Blossom to become a new source, and the data is public-by-design
-(author-signed manifests, content-addressed blobs) — so it leaks no secret.
+## 4. Link trust: an invitation handed over in person
 
-The honest exposure is **metadata, not confidentiality**: a member can issue a
-broad `REQ` and **enumerate your whole manifest set**, learning *which sites you
-hold, installed, or cached for others*. That is the same privacy signal as *which
-manifests you choose to replicate* (see [propagation.md](../nsite/propagation.md)), not a
-content leak. Narrower read scoping — unlisted/private nsites, selective
-replication, filtering by kind per peer — remains **additive and deferred**. The
-coarse knobs today are unpairing, the per-peer read flag, and the FIPS peer ACL
-("block this peer", above).
+Setting up a link is the one moment a human asserts "this is who I think it
+is."
 
-## 4. Pairing trust: scan-and-confirm, mutual by default
-
-Pairing is the one moment a human asserts "this is who I think it is."
-
-- The QR payload is `myco://pair/<base64>` carrying JSON
-  **`{ npub, name, pairSecret }`** — the inviter's npub, an optional memorable
-  name, and a **`pairSecret`**: a long, high-entropy random string (≈256 bits),
-  single-use, that the scanning peer echoes back to complete the handshake. There
-  is still no MAC and no PSM in the payload (those are
-  learned later over BLE adverts; see
-  [diagrams/02-pairing-transitive-discovery.svg](../diagrams/02-pairing-transitive-discovery.svg)).
-  The same payload is presented as an NFC tag, so a bump is a scan
-  ([identity-pairing.md §7](./identity-pairing.md)).
-- **The trust model is scan-and-confirm over an already-encrypted channel, not
-  bare TOFU.** Scanning the QR does not merely bind an npub on faith — it initiates
-  the mandatory **invite-pairing handshake** against the inviter's on-device auth
-  service at `<npub>.fips:4873`. That channel is already **Noise-XK authenticated and
-  encrypted** to the inviter's device key, so the scanner just **echoes the
-  `pairSecret` back** inside it; the inviter matches the (single-use) secret and the
-  human taps **OK** to confirm the memorable name
-  ([identity-pairing.md § 6.1](./identity-pairing.md)). No password-authenticated
-  key exchange is needed — FIPS already supplies the authenticated, confidential
-  channel, and the long random secret is simply an unguessable proof-of-scan.
-  Completing the handshake makes the two devices **mutual sources** of each other.
-  This is the only pairing path; pairing is **always mutual** and **always
-  handshake-gated**. The cryptographic guarantee afterward is strong: every later
-  BLE/mesh contact is Noise-authenticated against that exact pubkey, so a
-  man-in-the-middle without the private key cannot impersonate the paired peer on
-  subsequent connections.
-- **The handshake closes the relay-MITM / malicious-QR gap by default.** Three
-  things stack up: the channel to `<npub>.fips:4873` is Noise-authenticated to the
-  inviter's key (a passive relay between the two devices learns nothing and cannot
-  impersonate either end), the `pairSecret` is a single-use, unguessable random
-  string echoed *inside* that encrypted channel (a captured or relayed invite cannot
-  reproduce or replay it), and the inviter's **OK prompt** shows the scanner's npub +
-  memorable name so the human rejects a wrong or racing peer. This is a meaningful
-  improvement over the old bare-TOFU posture, where scanning an attacker's npub
-  silently authenticated every later session *to the attacker*. Pairing still rests
-  on the human scanning the intended invite. **Open:** whether to add an
-  *additional* out-of-band step (e.g. comparing a short authentication string) for
-  higher-assurance pairing on top of the OK confirmation.
-- **Both devices must be reachable at pairing time.** The handshake is a live
-  round-trip, so inviter and scanner must both be online to each other when the
-  QR is scanned. In practice they are physically together, so the BLE link is up
-  — the handshake runs over BLE (or IP). There is no deferred / offline pairing:
-  if the inviter's auth service is not reachable, pairing does not complete. It
-  does, however, survive a broken content plane: a taken relay port or a
-  misconfigured store does not stop two phones pairing, which is the one
-  operation that could repair the situation.
-- **`pairSecret` authenticates, it does not authorize.** Holding the secret lets
-  a peer complete the handshake; it confers **no membership and no admin
-  authority** (there is no roster or admin to join — §3). After pairing, the
-  relationship is exactly "mutual data source," nothing more.
-- **Transitive discovery.** Once paired, peers may learn of *further* peers
-  through the mesh. Discovery is not the same as pairing: a transitively
-  discovered npub is still just a data source whose every artifact you verify,
-  and it has **not** completed the mutual handshake with you. No transitively
-  discovered peer gains any authority a directly paired one lacks, because
-  pairing confers no authority beyond "exchange verifiable data."
+- **The invitation is a bearer secret.** `myco://link/…` carries the inviter's
+  link service URLs, link public key, a one-time 32-byte secret, the
+  neighborhoods offered, an expiry and the inviter's name. Whoever holds it
+  first can join. Hand it over in person (QR, NFC tap) or over a channel you
+  trust.
+- **The proof binds both keys and the URL.** A party that relays the
+  invitation cannot reuse the joiner's answer at another endpoint or with
+  another key.
+- **The channel is authenticated.** Over FIPS, `<npub>.fips:4873` is reached
+  over Noise; an on-path party cannot impersonate the inviter's endpoint.
+- **Both devices must be reachable at setup time.** There is no deferred,
+  offline setup.
+- **Names are display hints.** The inviter's name rides in the invitation and
+  the joiner's in its setup request, to that one person only. Nothing
+  advertises a name over Bluetooth.
+- **Adding neighborhoods later asks the user.** A peer can propose a new
+  neighborhood on an existing link; it waits until this side's user accepts.
+  Removals take effect at once.
+- **No transitive authority.** Your peer's peers gain nothing from your link.
+  They may receive what your peer passes on in a shared neighborhood, within
+  each device's hop limits.
 
 ## 5. Two sandboxes: the nsite's and the napplet's
 
@@ -333,10 +298,9 @@ surface is the ordinary web-content surface, scoped down:
   site; each launches as its own `NsiteActivity` and WebView.
 - The WebView never resolves `.fips`, which keeps nsite JS off the sync
   transport. What it *can* reach is `ws://localhost:4870` — the embedded relay,
-  as any local web page could. Today an event published there is gossiped to
-  the Circle at the default hop budget; that is being removed (roadmap N3), so
-  that reaching the room is a *granted* capability (below) rather than a side
-  effect of a loopback socket.
+  as any local web page could. Events published there stay on this phone:
+  reaching other people is a *granted* capability (NAP-NEIGHBOR, below), not
+  a side effect of a loopback socket.
 - No `file://`, no Myco chrome to redirect, no shared navigation surface.
 
 ### 5.2 The napplet sandbox — a program behind a permission model
@@ -372,14 +336,16 @@ security shape is:
   is the session identity; a different build is a different napplet, and a
   manifest whose files do not hash to it never gets a session.
 - **What a grant lets a napplet do to you** is said plainly on the review
-  screen because it is real: `relay` and `mesh` let it publish *as you*, to
-  your relays or to everyone in your Circle, with no per-event prompt.
+  screen because it is real: `relay`, `outbox` and `neighbor` let it publish
+  *as you*, to your relays or into the neighborhoods it was granted, with no
+  per-event prompt.
   `resource` lets it fetch content by hash — and, because fetched blobs are
   kept and served, makes you a holder of what it looked at (the open privacy
   question in the runtime design, §7.11).
 - **Napplet-supplied addresses are validated.** A relay URL a napplet names
   must be `ws`/`wss` and may not point at loopback or a private network; a
-  `.fips` URL is honoured only for a Circle member. Blob fetches are content
+  `.fips` URL is refused. People nearby are reached through `neighborhood://`
+  addresses the runtime minted for that napplet, and refused in any other. Blob fetches are content
   addressed, so there is no address to abuse.
 
 ## 6. Threats and mitigations
@@ -388,19 +354,19 @@ security shape is:
 | ------ | ---------------------- | ---------- |
 | **Malicious / forging relay or peer** | Tries to serve forged content | **Cannot forge.** Signatures + SHA-256 verified locally (§1); bad artifacts are rejected. |
 | **Withholding / availability attack** | Refuses to serve, serves stale, hides a newer event | Pull-from-many: query all reachable relays, keep newest valid event; manifests flood widely (announce-wide) while large blobs are pulled on demand. Best-effort, no freshness guarantee (§1). |
-| **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | Only Circle members reach the content ports at all, and **blob upload is off by default per peer** (§3.3), so a peer cannot push bytes onto your disk unless you grant it. Junk that fails verification is never stored (§1). What a peer pushes, and what it uploads, lands in the **shell cache**, which evicts to its budget (500 MB of events, 1.5 GB of blobs by default; [architecture.md](./architecture.md), "Kept and cached"). What this phone **keeps** — its own publishes, installed and opened apps, private messages addressed through it — is still unbounded until the user clears it. |
-| **Identity / link spoofing** | Pretends to be a paired peer | Noise IK/XK over secp256k1; identity is pubkey not MAC; spoof cannot complete handshake (§2). |
+| **Storage-exhaustion DoS** | Floods your cache with junk blobs/events to evict your data or fill the disk | Only app peers reach the content ports at all, and **blob upload is off for every peer** (§3.2), so a peer cannot push bytes onto your disk. Neighborhood events land in their own scoped store, only from links carrying that neighborhood. Junk that fails verification is never stored (§1). What a peer pushes, and what it uploads, lands in the **shell cache**, which evicts to its budget (500 MB of events, 1.5 GB of blobs by default; [architecture.md](./architecture.md), "Kept and cached"). What this phone **keeps** — its own publishes, installed and opened apps, private messages addressed through it — is still unbounded until the user clears it. |
+| **Identity / link spoofing** | Pretends to be a linked peer | Noise IK/XK over secp256k1; identity is pubkey not MAC; spoof cannot complete handshake (§2). |
 | **Replay** | Re-injects captured datagrams | 2048-entry sliding replay window at both FMP and FSP layers (§2). |
-| **Malicious / relayed QR at pairing** | Tries to bind the attacker's npub as your paired peer | Scan-and-confirm over Noise: the single-use, unguessable `pairSecret` is echoed back inside the Noise-authenticated channel to the inviter's `<npub>.fips:4873` and confirmed by the inviter's OK prompt, so a captured/relayed invite cannot bind (§4). Optional out-of-band safety-string check on top is an open proposal (§4). |
-| **DoS on the auth port** | Floods `:4873`, the one port open to strangers, to burn a BLE radio | Per-source token bucket (1/s, burst 5), a global in-flight ceiling of 8, and an 8 KiB body cap. Over-limit is a delay, not a ban — there is no identity to ban that costs a mesh peer anything to replace (§3.2, [identity-pairing.md §6.2](./identity-pairing.md)). |
-| **Stranger writing to your event store** | Gets data into a store you may not own | Pairing kinds are refused on the relay from every source; the handshake never touches the store. Unpaired peers are refused before the WebSocket upgrade (§3.2). |
-| **Revoked peer keeps reading** | An unpaired peer's open subscription keeps streaming | Membership is re-checked on delivery and the connection is dropped, so revocation reaches connections that already exist (§3.2). |
+| **Stolen or relayed invitation** | Joins a link meant for someone else | The secret is single use and expires in 15 minutes; the setup proof binds both link keys and the URL, so a relayed answer is useless elsewhere (§4). A stolen, unused invitation still works: it is a bearer secret, so hand it over in person. Out-of-band verification is an open proposal. |
+| **DoS on the link service** | Floods `:4873`, the one port open to strangers, to burn a BLE radio | An 8 KiB body cap; setup costs one HMAC check, and every other route a Schnorr check before anything is stored (§3.3). There is no rate limit on `:4873` today. |
+| **Stranger writing to your event store** | Gets data into a store you may not own | Link setup never touches the event store. Anyone but an app peer is refused before the WebSocket upgrade (§3.2); the scoped relay admits only a link carrying the neighborhood named. |
+| **Revoked peer keeps reading** | A peer whose link ended keeps streaming | The app peer set is re-checked on delivery and the connection is dropped, so revocation reaches connections that already exist (§3.2). |
 | **Malicious nsite content** | Untrusted JS in the WebView | Pure-static, no capability API; per-nsite origin isolation; WebView never resolves `.fips` (§5.1). |
 | **Malicious napplet** | Untrusted program asks for more than it should, or tries to go around the seam | Opaque-origin iframe; every capability mediated and checked per call against the user's grants; no key material in the iframe; refused calls are logged (§5.2). |
-| **A napplet publishing as you** | A granted `relay`/`mesh` napplet posts without asking | By design and said in words at install; revocable per capability, effective on the next call; the hop budget is capped by the user (NAP-MESH). |
-| **Napplet-named relay as SSRF** | A napplet points the shell at a private host | Relay URLs validated: `ws`/`wss` only, no loopback or private ranges; `.fips` only for Circle members (§5.2). |
+| **A napplet publishing as you** | A granted `relay`/`outbox`/`neighbor` napplet posts without asking | By design and said in words at install; revocable per capability, effective on the next call; how far a neighborhood post travels is the neighborhood's reach, set by the user. |
+| **Napplet-named relay as SSRF** | A napplet points the shell at a private host | Relay URLs validated: `ws`/`wss` only, no loopback or private ranges; `.fips` refused (§5.2). |
 | **Malicious Myco update** | Gets a phone to keep, serve or install an APK that isn't the release | The release APK is accepted only as exactly the bytes a publisher-signed file event names (size and SHA-256), from any source; the file event must be named by the newest publisher-signed announcement and name the release key. Android re-checks package, a higher `versionCode` and the signing key before its own install prompt, and refuses another key regardless ([software-updates.md](./software-updates.md), "Carrying the APK"). |
-| **Update withholding or stalling** | A Circle peer refuses the update, drips it, or serves junk, so others don't update | Only peers that hold it are asked, one at a time from a rotating start; each download has a size-based time budget and the carry a 15-minute deadline; a peer that fails is skipped for hours; the carry never holds the update check. A peer can delay an update, never forge it; any other holder or (online) the CDN still serves it. |
+| **Update withholding or stalling** | An app peer refuses the update, drips it, or serves junk, so others don't update | Only peers that hold it are asked, one at a time from a rotating start; each download has a size-based time budget and the carry a 15-minute deadline; a peer that fails is skipped for hours; the carry never holds the update check. A peer can delay an update, never forge it; any other holder or (online) the CDN still serves it. |
 | **Propagation-privacy leak** | Observers learn what you host / re-serve | See below — partial mitigation only (open). |
 | **Metadata / traffic analysis** | A forwarding peer sees who-talks-to-whom | FIPS routes on `node_addr`, payload is end-to-end encrypted; FIPS rejects onion routing, so traffic-graph metadata is visible to forwarders by design ([../../reference/fips/docs/design/fips-mesh-operation.md](../../../reference/fips/docs/design/fips-mesh-operation.md)). |
 
@@ -414,10 +380,10 @@ the point of the mesh, but it has a privacy cost:
   i.e. infer what you have browsed or chosen to cache. Hosting a site is
   observable.
 - Since the shell cache, the same holds for **notes your apps read**: every
-  answer a napplet fetched from a public relay is cached and served to paired
+  answer a napplet fetched from a public relay is cached and served to app
   peers through the same gate, so a broad `REQ` enumerates what you looked at
   recently (within the cache budget). Private-message kinds are never taken
-  from a query answer. A setting not to serve the cache to the Circle is an
+  from a query answer. A setting not to serve the cache to app peers is an
   open follow-up.
 - Re-serving signed content does not implicate you as its author (signatures
   attribute it to the original author, not the re-server), but *possession* is
@@ -474,7 +440,8 @@ is saved, so a crash cannot leave a message the sweep never hears of.
   "you are in `<host>`" signal without re-imposing chrome is unresolved.
 - **Open:** explicit inbound port allowlist on the FSP-multiplexed mesh surface
   on Android (§3).
-- **Open:** optional out-of-band pairing verification (§4).
+- **Open:** optional out-of-band link verification (§4).
+- **Open:** rate limiting on the link service (`:4873`).
 - **Open:** propagation-privacy controls and default manifest-replication posture (§6).
 - **Open:** whether to re-surface the FIPS peer ACL as a "block peer" control
   (§3).
@@ -495,6 +462,5 @@ is saved, so a crash cannot leave a message the sweep never hears of.
   — nsite manifest event format (signed events, path→hash tags).
 - Diagrams:
   [01-system-layering.svg](../diagrams/01-system-layering.svg) ·
-  [02-pairing-transitive-discovery.svg](../diagrams/02-pairing-transitive-discovery.svg) ·
   [03-offline-propagation.svg](../diagrams/03-offline-propagation.svg) ·
   [04-nsite-browse-flow.svg](../diagrams/04-nsite-browse-flow.svg).

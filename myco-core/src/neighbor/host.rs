@@ -96,7 +96,7 @@ pub struct Target {
 
 impl Neighbors {
     /// Open `neighborhoods.json` under `data_dir`, dropping the Everyone
-    /// neighborhood an older version kept for the Circle.
+    /// neighborhood an older version kept for its paired devices.
     pub fn open(data_dir: &std::path::Path, seams: Seams) -> Self {
         let file = store::path(data_dir);
         let mut s = store::load(&file);
@@ -336,8 +336,9 @@ fn widens(old: &Offer, new: &Offer) -> bool {
 impl NeighborHost for Neighbors {
     async fn info(&self) -> NeighborInfo {
         NeighborInfo {
-            // `invite` needs links (to reach anyone new); `nearby` needs the
-            // proximity extension. Neither exists yet.
+            // `invite` and `nearby` are not offered to napplets: the shell
+            // itself does invitations (over links), and nothing yet exposes
+            // either through NAP-NEIGHBOR.
             features: vec![
                 Feature::Create,
                 Feature::Leave,

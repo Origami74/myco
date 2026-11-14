@@ -281,7 +281,7 @@ pub struct AppRuntime {
     /// header. `None` only on a startup error.
     account: Option<crate::account::Account>,
     /// The relay hub, once the content layer has stood it up. Napplet publishes
-    /// go through it so they fan out to the Circle exactly as a socket-borne
+    /// go through it so they reach live subscriptions exactly as a socket-borne
     /// event does.
     relay_hub: Arc<std::sync::Mutex<Option<Arc<crate::mesh_relay::RelayHub>>>>,
     /// Neighborhood links and the service that sets them up (`/nh` on the
@@ -427,8 +427,8 @@ impl AppRuntime {
             });
         }
 
-        // The device keypair (same nsec the node uses) is the pairing identity —
-        // pair request/accept events are signed with it.
+        // The device keypair (same nsec the node uses) signs Myco's own mesh
+        // traffic: file-transfer messages and the like.
         if let Ok(nsec) = identity_store::load_or_generate(Path::new(data_dir)) {
             content.set_device_keys(&nsec);
         }
@@ -523,9 +523,9 @@ impl AppRuntime {
 
             // One shared relay hub backs both the mesh socket and a loopback socket,
             // so a chat event a peer pushes over `.fips` reaches the in-app nsite's
-            // live subscription on localhost (shared store + live bus + gossiper).
-            // The gossiper fans this device's own nsite events out to Circle peers
-            // (docs/design/core/event-gossip.md).
+            // live subscription on localhost (shared store + live bus + hook).
+            // The hook (`MeshGossiper`) acts on what app peers push: file
+            // messages and nsite/napplet manifest updates.
             let gossiper: Arc<dyn crate::mesh_relay::Gossiper> =
                 Arc::new(crate::gossip::MeshGossiper::new(content.clone()));
             // Restrict mesh access to app peers — linked devices in
@@ -665,10 +665,10 @@ impl AppRuntime {
                 }
             }
 
-            // Keepwarm: proactively hold a live relay connection to every Circle
-            // member (respawn a dropped one promptly, not lazily on the next send)
-            // and resubscribe on each peer's reconnect edge. This is what restores a
-            // Circle relay link *mutually and fast* after a mid-chain node flaps —
+            // Keepwarm: proactively hold a live relay connection to every app
+            // peer (respawn a dropped one promptly, not lazily on the next send)
+            // and resubscribe on each peer's reconnect edge. This is what restores an
+            // app peer relay link *mutually and fast* after a mid-chain node flaps —
             // independent of chat traffic and of where the peer sits in the mesh.
             //
             // The tick also feeds the node's connected-peer view into the content
@@ -739,10 +739,10 @@ impl AppRuntime {
                                 content.set_connected_peers(connected.clone());
                                 known = connected;
                                 // Who is directly linked changed, so routes to
-                                // Circle members — most of them reached through
+                                // app peers — most of them reached through
                                 // a direct peer, not as one — may have changed
                                 // too. Forget every dial backoff and dial the
-                                // Circle now, rather than at the next keepwarm
+                                // app peers now, rather than at the next keepwarm
                                 // tick (8 s) behind a backoff armed while the
                                 // route was missing (up to 180 s).
                                 if changed {
@@ -2186,7 +2186,7 @@ impl AppRuntime {
                 offline_only,
             );
             let mut found = Err(anyhow::anyhow!(if offline_only && sources.is_empty() {
-                "Offline-only is on and nobody in your Circle is nearby"
+                "Offline-only is on and nobody from your neighborhoods is nearby"
             } else {
                 "no source had this napplet"
             }));
@@ -2222,7 +2222,7 @@ impl AppRuntime {
                         crate::napplet::review_standing(&content, &addr, &found.requires, &event)
                             .await;
                     // The manifest only, verified by `fetch_manifest`: the
-                    // next look at this napplet, and a Circle peer asking,
+                    // next look at this napplet, and an app peer asking,
                     // find it here. Its bytes still wait for the user's yes,
                     // and keeping it installs nothing — the Library is.
                     content.keep_seen([&event]);
@@ -2480,7 +2480,7 @@ impl AppRuntime {
         };
         // Napplet authors publish to public relays and the sharer is not
         // recorded, so offline-only has nowhere to ask: counted as checked,
-        // none updated. The nsite half asks Circle peers' mesh relays only.
+        // none updated. The nsite half asks app peers' mesh relays only.
         let offline_only = content.is_offline_only();
         let forwarder = content.clone();
         let napplet_check = async move {
@@ -2489,7 +2489,7 @@ impl AppRuntime {
                 return Some((0, napplets.len()));
             }
             let (updated, checked) = crate::napplet::refresh_all(&host, &napplets).await;
-            // We hold the new bytes now: pass each update on to the Circle, as
+            // We hold the new bytes now: pass each update on to app peers, as
             // an nsite update found here is.
             for manifest in &updated {
                 forwarder.forward_updated_manifest(manifest);
@@ -3124,7 +3124,7 @@ impl AppRuntime {
         );
 
         // Feed the connected-peer npubs to the content layer so `open_site` can
-        // pull from currently-reachable Circle members (and skip offline ones).
+        // pull from currently-reachable app peers (and skip offline ones).
         if let Some(content) = self.content.as_ref() {
             let connected: Vec<String> = ble_peers
                 .iter()
@@ -3133,9 +3133,6 @@ impl AppRuntime {
                 .collect();
             content.set_connected_peers(connected);
 
-            // Backlog resync is driven by the keepwarm loop's reconnect edge
-            // (`Content::keepwarm_tick`), which recreates each in-app subscription
-            // against an app peer as it (re)appears — direct *or* multi-hop.
             if let Some(rt) = self.rt.as_ref() {
                 // Retry not-ready downloads whenever there are app peers.
                 // open_site(_, None) tries every member — hop count is FIPS's
@@ -3417,9 +3414,8 @@ pub(crate) struct DefaultNapplet {
     /// update from the same author. A version declaring anything else still
     /// goes through the sheet, and what the user switched off stays off.
     ///
-    /// Kept to what the app does today (its published `requires`, plus
-    /// `mesh`, which the napplet tooling drops from `requires` — see
-    /// `DEFAULT_GRANTS`). Widening one here reaches every install still on
+    /// Kept to what the app does today (its published `requires`; see
+    /// `DEFAULT_GRANTS` for what every napplet gets anyway). Widening one here reaches every install still on
     /// the seeded entry at its next open, so it is a review in itself.
     pub expected: &'static [&'static str],
     /// Only a fresh install gets it. An install that has seeded before (its
@@ -3434,20 +3430,18 @@ pub(crate) struct DefaultNapplet {
 /// install; one added here later still reaches devices that were seeded
 /// before it, unless it is [`DefaultNapplet::new_installs_only`].
 pub(crate) const DEFAULT_NAPPLETS: &[DefaultNapplet] = &[
-    // Its published manifest declares no `requires`; its source asks for
-    // `mesh`, which the tooling drops.
+    // Its published manifest declares no `requires`.
     DefaultNapplet {
         title: "DingDong",
         pointer: "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9hxwer0denstp6v0k",
-        expected: &["mesh"],
+        expected: &[],
         new_installs_only: false,
     },
-    // d=discover. Its published manifest declares `outbox` and `theme`;
-    // "Around you" uses `mesh`.
+    // d=discover. Its published manifest declares `outbox` and `theme`.
     DefaultNapplet {
         title: "AppStore",
         pointer: "naddr1qvzqqqyf8ypzpwa4mkswz4t8j70s2s6q00wzqv7k7zamxrmj2y4fs88aktcfuf68qyt8wumn8ghj7un9d3shjtnswf5k6ctv9ehx2aqpp4mhxue69uhkummn9ekx7mqpz4mhxue69uhhyetvv9ujuerfw36x7tnsw43qqzryd9ekxmmkv4eqc3hahf",
-        expected: &["mesh", "outbox", "theme"],
+        expected: &["outbox", "theme"],
         new_installs_only: false,
     },
     // d=chronofeed: follows' notes and reposts, newest first. Its published
@@ -3954,14 +3948,14 @@ impl crate::intent::HintResolver for HintSources {
 #[derive(Debug, PartialEq)]
 struct NappletAsk {
     /// The phones asked over the mesh, all at once: the sharer first, if the
-    /// pointer named one, then the other Circle members in reach.
+    /// pointer named one, then the other app peers in reach.
     mesh: Vec<String>,
     /// The public relays, after the mesh.
     public: bool,
 }
 
-/// The plan behind [`napplet_sources`]: the sharer and every other Circle
-/// member in reach (`reachable`), then — unless offline-only is on — the
+/// The plan behind [`napplet_sources`]: the sharer and every other app
+/// peer in reach (`reachable`), then — unless offline-only is on — the
 /// public relays. The mesh is not the internet, so offline-only leaves it in.
 fn napplet_ask(holder: Option<&str>, reachable: &[String], offline_only: bool) -> NappletAsk {
     let mut mesh: Vec<String> = holder.map(str::to_string).into_iter().collect();
@@ -3978,13 +3972,13 @@ fn napplet_ask(holder: Option<&str>, reachable: &[String], offline_only: bool) -
 
 /// Where to look for a napplet, in the order worth trying. The mesh first:
 /// the peer who handed it over (they demonstrably have it, and a napplet
-/// shared by a tap should not need the internet) and the Circle members in
+/// shared by a tap should not need the internet) and the app peers in
 /// reach (`reachable`, from [`Content::reachable_npubs`]) — a bare `naddr`
 /// from a link names no sharer, and a phone in the room may still hold it.
 /// They are asked at once, first good answer wins, so a sharer who has
 /// walked off does not hold up a phone that is still here; the bytes then
 /// come from that one phone (see [`crate::ip_source::FirstOf`]). Only
-/// Circle members: no one else's relay or Blossom lets this phone pull.
+/// app peers: no one else's relay or Blossom lets this phone pull.
 /// Last the pointer's own relay hints, the author's NIP-65 relays and the
 /// defaults — unless offline-only is on, when the mesh is the only source,
 /// as it is for every other acquisition path.
@@ -4301,7 +4295,7 @@ mod tests {
         );
         assert_eq!(
             item.reviewed,
-            vec!["mesh".to_string()],
+            Vec::<String>::new(),
             "the seed records the expected set, and only that"
         );
         assert!(item.preinstalled);
@@ -4366,7 +4360,7 @@ mod tests {
         };
         let seeded = discover(&third);
         assert_eq!(seeded.len(), 1, "Discover seeded: {seeded:?}");
-        assert_eq!(seeded[0].reviewed, vec!["mesh", "outbox", "theme"]);
+        assert_eq!(seeded[0].reviewed, vec!["outbox", "theme"]);
         assert!(seeded[0].preinstalled);
         let marker = dir.join("seeded-napplets");
         let before = std::fs::read_to_string(&marker).unwrap();
@@ -4450,7 +4444,7 @@ mod tests {
         let npub = appstore.author.to_bech32().unwrap();
         assert_eq!(
             default_napplet_expected(&npub, Some("discover")),
-            Some(vec!["mesh".into(), "outbox".into(), "theme".into()])
+            Some(vec!["outbox".into(), "theme".into()])
         );
         assert_eq!(default_napplet_expected(&npub, Some("other")), None);
         let stranger = nostr::Keys::generate().public_key().to_bech32().unwrap();
@@ -4520,7 +4514,7 @@ mod tests {
             .find(|i| i.d_tag.as_deref() == Some("discover"))
             .unwrap();
         assert!(appstore.preinstalled);
-        assert_eq!(appstore.reviewed, vec!["mesh", "outbox", "theme"]);
+        assert_eq!(appstore.reviewed, vec!["outbox", "theme"]);
         assert_eq!(
             appstore.granted,
             crate::napplet::effective_grants(&[]),
@@ -4734,7 +4728,7 @@ mod tests {
             .find(|i| i.d_tag.as_deref() == Some("discover"))
             .unwrap();
         assert_eq!(appstore.title, "AppStore");
-        assert_eq!(appstore.reviewed, vec!["mesh", "outbox", "theme"]);
+        assert_eq!(appstore.reviewed, vec!["outbox", "theme"]);
 
         let marker = std::fs::read_to_string(dir.join("seeded-napplets")).unwrap();
         assert!(
@@ -5634,7 +5628,7 @@ mod tests {
         assert!(!current.loading);
     }
 
-    /// A bare `naddr` names no sharer: the Circle members in reach are
+    /// A bare `naddr` names no sharer: the app peers in reach are
     /// asked, then the public relays.
     #[test]
     fn a_napplet_with_no_sharer_is_asked_of_the_peers_in_reach() {

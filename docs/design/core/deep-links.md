@@ -24,17 +24,19 @@ in the WebView. The path is left exactly as written.
 
 ## §1 It carries no secrets
 
-Deliberately: **no holder npub, no pairing secret, no token Myco interprets.**
+Deliberately: **no holder npub, no invitation secret, no token Myco interprets.**
 
 A deep link goes places nobody controls — a chat message, a printed QR on a wall, a
 URL bar, a screenshot in someone's camera roll. Anything inside it is public, durable
-and replayable, which is the exact opposite of what a one-time pairing secret needs to
-be. Pairing keeps its own carrier: the scanned or tapped `myco://pair/…` and
-`myco://share/…` payloads (`docs/design/identity-pairing.md`), exchanged face to face,
-one-shot, and short-lived.
+and replayable, which is the exact opposite of what a one-time secret needs to
+be. Invitations keep their own carrier: the scanned or tapped `myco://link/…`
+payload ([nap-neighbor/links.md](../nap-neighbor/links.md)), exchanged
+face to face, one-shot, and short-lived. `myco://share/…` (an app shared face to
+face) carries the sharer's npub as the holder to try first. `myco://pair/…` is
+gone with pairing.
 
 Dropping the holder hint costs a retry and nothing else. `Content::open_site` with
-`holder = None` already walks every Circle peer in turn and then the public IP source
+`holder = None` already walks every app peer in turn and then the public IP source
 (`myco-core/src/content.rs`), so a link with no sharer attached still finds the app
 through whoever nearby happens to have it.
 

@@ -16,7 +16,7 @@ terminated them, and ordinary sockets did the rest:
 
 - the relay on `[::]:4870`
 - Blossom on `[::]:24243`
-- pairing on `[::]:4873`
+- the link service on `[::]:4873`
 - dials to `[fd00::peer]:…`
 
 Android has **one** VPN slot. Myco took it for traffic that never leaves the
@@ -71,7 +71,7 @@ app is logged, not shown: peers are unaffected. A port peers can't reach — the
 stack's listener failed, or, with no stack, the kernel socket — is shown as a
 warning. `mesh_net::peer_listeners` binds every server's ports the same way.
 
-The stack hands axum the peer's `fd00::` address, so the Circle gate reads it
+The stack hands axum the peer's `fd00::` address, so the app peer gate reads it
 as before.
 
 ## Clients

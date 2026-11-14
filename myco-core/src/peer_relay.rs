@@ -6,8 +6,9 @@
 //!   peers.
 //! - **pull** ([`PeerRelayPool::request_stream`]): open a `REQ` and hand on
 //!   each matching event the moment it arrives, until `EOSE`/`CLOSED`, then
-//!   close the subscription. [`PeerRelayPool::request`] collects that stream
-//!   for a caller that wants a batch.
+//!   close the subscription — a plain NIP-01 `REQ`, answered from the peer's
+//!   own store. [`PeerRelayPool::request`] collects that stream for a caller
+//!   that wants a batch.
 //!
 //! A Nostr relay connection is two-way, so there is no reason to hold more than one
 //! socket per destination: event fan-out, every REQ + its event replies, and the
@@ -53,7 +54,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Dial backoff: after consecutive connect failures to a peer, hold off dialing
 /// 8s → 16 → 32 → 64 → 128 → capped 180s. Two jobs: stop burning radio on an
-/// unreachable Circle member every keepwarm tick, and **starve a wedged FSP
+/// unreachable app peer every keepwarm tick, and **starve a wedged FSP
 /// session** — once our dials pause for longer than the node's 90s idle purge,
 /// the stale session (e.g. one stuck mid-rekey) is reclaimed and the next dial
 /// establishes a fresh one. Cleared on connect success or a mesh reconnect edge
@@ -127,12 +128,10 @@ enum Command {
     Publish(String),
     /// Open a `REQ` for `filters` and send each matching event down `events`
     /// as it arrives; `EOSE`/`CLOSED` drops the sender, which ends the stream,
-    /// and closes the subscription (the pull plane).
+    /// and closes the subscription. Always a plain NIP-01 `REQ`, answered
+    /// from the peer's own store.
     Request {
         filters: Vec<serde_json::Value>,
-        /// Mesh state for this pull, carried in the envelope around the `REQ`.
-        /// `None` sends a plain NIP-01 `REQ`: single hop, no query id.
-        meta: Option<crate::mesh_wire::MeshMeta>,
         events: mpsc::UnboundedSender<Event>,
     },
 }
@@ -212,7 +211,7 @@ impl PeerRelayPool {
     }
 
     /// Forget every peer's dial backoff — called when the set of direct mesh
-    /// peers changes. A Circle member is often reached *through* a direct
+    /// peers changes. An app peer is often reached *through* a direct
     /// peer rather than as one, so its own reconnect edge never fires; a
     /// change in who is directly linked is the signal that routes to it may
     /// have appeared, and a backoff armed while they were missing (up to
@@ -222,8 +221,8 @@ impl PeerRelayPool {
     }
 
     /// Ensure `npub` has a running actor (which lazily connects) at `url`, without
-    /// sending anything. The runtime's keepwarm loop calls this for every Circle
-    /// member so a dropped connection is respawned promptly — not lazily on the next
+    /// sending anything. The runtime's keepwarm loop calls this for every app
+    /// peer so a dropped connection is respawned promptly — not lazily on the next
     /// outbound frame — restoring both directions fast after a mesh flap.
     pub fn ensure(&self, npub: &str, url: &str) {
         let mut peers = self.peers.lock().unwrap();
@@ -290,23 +289,24 @@ impl PeerRelayPool {
     /// buffered in the channel and flushed on connect.
     pub fn send(&self, npub: &str, url: &str, frame: String) {
         let mut peers = self.peers.lock().unwrap();
-        // In dial backoff → drop the frame (push is best-effort; the pull plane
-        // recovers backlog once the peer reconnects).
+        // In dial backoff → drop the frame (push is best-effort).
         let Some(tx) = self.spawn_or_get(&mut peers, npub, url) else {
             return;
         };
         // Lost the race with a task that just exited: drop the entry so the next
-        // publish respawns. Rare, and the push plane is best-effort (the pull plane
-        // recovers backlog on reconnect).
+        // publish respawns. Rare, and the push plane is best-effort.
         if tx.send(Command::Publish(frame)).is_err() {
             peers.remove(npub);
         }
     }
 
-    /// Query a peer's relay (pull plane): open a `REQ` for `filters` over the shared
+    /// Query a peer's relay: open a `REQ` for `filters` over the shared
     /// connection and collect its matching events until `EOSE`. Bounded by
     /// `timeout` — a slow/dead peer yields an empty batch rather than stalling.
-    /// Events are returned as received; the caller verifies signatures.
+    ///
+    /// Collected from [`request_stream`](Self::request_stream): what arrived
+    /// by the deadline is returned even when `EOSE` did not come — a slow
+    /// peer's first two hundred events are still two hundred events.
     pub async fn request(
         &self,
         npub: &str,
@@ -314,25 +314,7 @@ impl PeerRelayPool {
         filters: Vec<serde_json::Value>,
         timeout: Duration,
     ) -> Vec<Event> {
-        self.request_with(npub, url, filters, None, timeout).await
-    }
-
-    /// As [`request`](Self::request), but carrying mesh state — a hop budget,
-    /// query id, and time budget — in the envelope around the `REQ`. Used by the
-    /// core-driven multi-hop pulls (discovery, update checks).
-    ///
-    /// Collected from [`request_stream`](Self::request_stream): what arrived
-    /// by the deadline is returned even when `EOSE` did not come — a slow
-    /// peer's first two hundred events are still two hundred events.
-    pub async fn request_with(
-        &self,
-        npub: &str,
-        url: &str,
-        filters: Vec<serde_json::Value>,
-        meta: Option<crate::mesh_wire::MeshMeta>,
-        timeout: Duration,
-    ) -> Vec<Event> {
-        let mut events = self.request_stream(npub, url, filters, meta);
+        let mut events = self.request_stream(npub, url, filters);
         let mut out = Vec::new();
         let deadline = tokio::time::Instant::now() + timeout;
         while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
@@ -356,7 +338,6 @@ impl PeerRelayPool {
         npub: &str,
         url: &str,
         filters: Vec<serde_json::Value>,
-        meta: Option<crate::mesh_wire::MeshMeta>,
     ) -> mpsc::UnboundedReceiver<Event> {
         let (events, rx) = mpsc::unbounded_channel();
         let mut peers = self.peers.lock().unwrap();
@@ -365,14 +346,7 @@ impl PeerRelayPool {
         let Some(tx) = self.spawn_or_get(&mut peers, npub, url) else {
             return rx;
         };
-        if tx
-            .send(Command::Request {
-                filters,
-                meta,
-                events,
-            })
-            .is_err()
-        {
+        if tx.send(Command::Request { filters, events }).is_err() {
             peers.remove(npub);
         }
         rx
@@ -493,20 +467,14 @@ async fn run(
                         break;
                     }
                 }
-                Some(Command::Request { filters, meta, events }) => {
+                Some(Command::Request { filters, events }) => {
                     let sub_id = format!("r{next_sub}");
                     next_sub += 1;
                     let mut req: Vec<serde_json::Value> = Vec::with_capacity(filters.len() + 2);
                     req.push(serde_json::Value::from("REQ"));
                     req.push(serde_json::Value::from(sub_id.clone()));
                     req.extend(filters);
-                    let req = serde_json::Value::Array(req);
-                    // The filters stay canonical NIP-01; anything mesh-specific
-                    // rides the envelope around them.
-                    let frame = match &meta {
-                        Some(meta) => crate::mesh_wire::wrap(meta, req),
-                        None => req.to_string(),
-                    };
+                    let frame = serde_json::Value::Array(req).to_string();
                     if sink.send(Message::Text(frame)).await.is_err() {
                         reason = "write failed (request)";
                         break;
@@ -792,7 +760,7 @@ mod tests {
     }
 
     /// A change in direct mesh peers clears every peer's backoff, not just the
-    /// one that reconnected: Circle members reached through a direct peer
+    /// one that reconnected: app peers reached through a direct peer
     /// have no reconnect edge of their own.
     #[test]
     fn reset_all_backoff_clears_every_peer() {

@@ -52,7 +52,7 @@ import androidx.compose.ui.unit.dp
 
 /**
  * Shared building blocks for the modal bottom-sheet menus (app long-press,
- * circle-person long-press) and the QR surfaces (pair / share).
+ * neighbor long-press) and the QR surfaces (invite / share).
  */
 
 @OptIn(ExperimentalFoundationApi::class)

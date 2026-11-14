@@ -75,7 +75,7 @@ const RESPONDER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// npubs already resolved through the responder since the current node started.
 ///
-/// `keepwarm_tick` calls [`warm_route`] for every Circle member every 8s. That
+/// `keepwarm_tick` calls [`warm_route`] for every app peer every 8s. That
 /// used to be an in-memory channel send; it is a UDP round trip now, on the
 /// battery-sensitive background path, so it happens once per npub per node.
 static WARMED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -218,7 +218,7 @@ fn register_route(npub: &str, addr: SocketAddr) -> bool {
 ///
 /// `keepwarm_tick`'s dials register their peer themselves, right before they
 /// connect ([`mesh_literal_url`]). This is the cheap once-per-node head start
-/// for every Circle member, so a route is already known when something other
+/// for every app peer, so a route is already known when something other
 /// than a dial (a napplet, a pull) reaches for it. Fire-and-forget on its own
 /// thread: the caller is a tokio task and this must not be what stalls the
 /// keepwarm loop.
