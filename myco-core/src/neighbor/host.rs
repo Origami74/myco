@@ -129,7 +129,8 @@ impl Neighbors {
         out
     }
 
-    /// The neighborhood a napplet's id names, if it was granted it.
+    /// The neighborhood a napplet's id names. Every napplet with the
+    /// `neighbor` domain may use every neighborhood; the ids are its own.
     fn granted(&self, napplet: &str, id_token: &str) -> Result<Record, NeighborError> {
         let s = self.store.lock().unwrap();
         let id = s
@@ -138,10 +139,7 @@ impl Neighbors {
             .and_then(|t| t.neighborhoods.get(id_token))
             .copied()
             .ok_or(NeighborError::NotFound)?;
-        s.get(id)
-            .filter(|r| r.grants.allows(napplet))
-            .cloned()
-            .ok_or(NeighborError::NotFound)
+        s.get(id).cloned().ok_or(NeighborError::NotFound)
     }
 
     /// `record` as `napplet` sees it, minting its tokens.
@@ -195,7 +193,7 @@ impl Neighbors {
         let s = self.store.lock().unwrap();
         let mine = s.tokens.get(&key)?;
         let id = *mine.neighborhoods.get(&tokens.neighborhood)?;
-        s.get(id).filter(|r| r.grants.allows(&key))?;
+        s.get(id)?;
         let peer = match tokens.peer {
             None => None,
             Some(p) => {
@@ -299,17 +297,6 @@ impl Neighbors {
         });
     }
 
-    /// Grant a neighborhood to a napplet, for tests.
-    #[cfg(test)]
-    pub fn grant_for_test(&self, id: NeighborhoodId, napplet: &NappletIdentity) {
-        let key = napplet_key(napplet);
-        self.change(|s| {
-            if let Some(r) = s.get_mut(id) {
-                r.grants.napplets.insert(key);
-            }
-        });
-    }
-
     /// The neighborhoods on this device, for the shell's own UI.
     pub fn records(&self) -> Vec<Record> {
         self.store.lock().unwrap().neighborhoods.clone()
@@ -351,15 +338,7 @@ impl NeighborHost for Neighbors {
 
     async fn list(&self, napplet: &NappletIdentity) -> Vec<Neighborhood> {
         let key = napplet_key(napplet);
-        let records: Vec<Record> = self
-            .store
-            .lock()
-            .unwrap()
-            .neighborhoods
-            .iter()
-            .filter(|r| r.grants.allows(&key))
-            .cloned()
-            .collect();
+        let records: Vec<Record> = self.store.lock().unwrap().neighborhoods.clone();
         records.iter().map(|r| self.view(&key, r)).collect()
     }
 
@@ -414,9 +393,7 @@ impl NeighborHost for Neighbors {
                 s.neighborhoods
                     .push(Record::new(id, &name, request.auto_accept));
             }
-            let r = s.get_mut(id).expect("just ensured");
-            r.grants.napplets.insert(key.clone());
-            r.clone()
+            s.get(id).expect("just ensured").clone()
         });
         Ok(self.view(&key, &record))
     }
@@ -631,7 +608,6 @@ mod tests {
         let d = dir();
         let mut old = Record::new(NeighborhoodId::random(), "Everyone", false);
         old.role = store::Role::Everyone;
-        old.grants.all = true;
         let club = Record::new(NeighborhoodId::random(), "Club", false);
         let s = Store {
             neighborhoods: vec![old, club.clone()],
@@ -696,16 +672,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_asks_and_grants_only_the_caller() {
+    async fn create_asks_and_every_napplet_sees_it() {
         let (n, asker, _) = open(true);
         let club = n.create(&app("chat"), new(" Club ", false)).await.unwrap();
         assert_eq!(club.name, "Club");
         assert!(matches!(asker.1.lock().unwrap()[0], Ask::Create { .. }));
         assert_eq!(n.list(&app("chat")).await.len(), 1);
-        assert!(
-            n.list(&app("map")).await.is_empty(),
-            "map wasn't granted Club"
-        );
+        let theirs = n.list(&app("map")).await;
+        assert_eq!(theirs.len(), 1, "map uses Club too");
+        assert_ne!(theirs[0].id, club.id, "under its own token");
     }
 
     #[tokio::test]
@@ -716,10 +691,9 @@ mod tests {
         n.create(&app("chat"), new("Lowlands", true)).await.unwrap();
         n.create(&app("map"), new("lowlands", true)).await.unwrap();
         let names: Vec<_> = n.records().into_iter().map(|r| r.name).collect();
-        assert_eq!(names, ["Home", "Home", "Lowlands"]);
         assert_eq!(
-            n.list(&app("map")).await.len(),
-            1,
+            names,
+            ["Home", "Home", "Lowlands"],
             "map joined the same Lowlands"
         );
     }

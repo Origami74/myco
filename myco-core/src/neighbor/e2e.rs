@@ -128,7 +128,6 @@ async fn linked_club() -> (Device, Device, String, String) {
         id,
         name: "Club".into(),
     });
-    bob.neighbors.grant_for_test(id, &app());
     let bob_addr = bob
         .neighbors
         .list(&app())

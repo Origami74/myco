@@ -54,25 +54,6 @@ impl Default for Policy {
     }
 }
 
-/// Who may see a neighborhood through NAP-NEIGHBOR.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Grants {
-    /// Every napplet with the `neighbor` domain. Only the dropped Everyone
-    /// neighborhood was granted this way; kept so old files still read.
-    #[serde(default)]
-    pub all: bool,
-    /// Napplet keys (see [`napplet_key`]).
-    #[serde(default)]
-    pub napplets: BTreeSet<String>,
-}
-
-impl Grants {
-    pub fn allows(&self, napplet: &str) -> bool {
-        self.all || self.napplets.contains(napplet)
-    }
-}
-
 /// What makes a neighborhood special to this device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,8 +80,6 @@ pub struct Record {
     /// Authors (hex keys) whose events are hidden and not passed on here.
     #[serde(default)]
     pub muted: BTreeSet<String>,
-    #[serde(default)]
-    pub grants: Grants,
 }
 
 impl Record {
@@ -114,7 +93,6 @@ impl Record {
             policy: Policy::default(),
             offer: default_offer(),
             muted: BTreeSet::new(),
-            grants: Grants::default(),
         }
     }
 }
@@ -191,7 +169,7 @@ impl Store {
     }
 }
 
-/// The key a napplet's grants and tokens are filed under: author and `d`
+/// The key a napplet's tokens are filed under: author and `d`
 /// tag, so they survive a new version of the napplet.
 pub fn napplet_key(napplet: &myco_napplet_runtime::NappletIdentity) -> String {
     format!("{}:{}", napplet.author, napplet.d_tag)

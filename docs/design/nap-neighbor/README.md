@@ -64,7 +64,7 @@ See [../core/identity.md](../core/identity.md) for the device key.
 
 | File | Holds |
 | --- | --- |
-| `neighborhoods.json` | Each neighborhood: id, local name, policy, offer, mutes, napplet grants and tokens |
+| `neighborhoods.json` | Each neighborhood: id, local name, policy, offer, mutes, and each napplet's tokens |
 | `links.json` | Links and open invitations, with link secret keys |
 | `neighborhood-relay/` | Neighborhood events |
 | `neighborhood-blobs/` | Neighborhood blobs |

@@ -8,7 +8,7 @@
 //!
 //! - [`id`] — neighborhood ids: random, or derived from a name.
 //! - [`store`] — `neighborhoods.json`: records, policy, offers, mutes,
-//!   grants, and each napplet's tokens.
+//!   and each napplet's tokens.
 //! - [`data`] — the data plane: each neighborhood in its own scoped store,
 //!   carried over links.
 //! - [`link`] — links: link keys, the one-time-secret setup, signed offers,

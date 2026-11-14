@@ -358,7 +358,7 @@ security shape is:
 | **Identity / link spoofing** | Pretends to be a linked peer | Noise IK/XK over secp256k1; identity is pubkey not MAC; spoof cannot complete handshake (§2). |
 | **Replay** | Re-injects captured datagrams | 2048-entry sliding replay window at both FMP and FSP layers (§2). |
 | **Stolen or relayed invitation** | Joins a link meant for someone else | The secret is single use and expires in 15 minutes; the setup proof binds both link keys and the URL, so a relayed answer is useless elsewhere (§4). A stolen, unused invitation still works: it is a bearer secret, so hand it over in person. Out-of-band verification is an open proposal. |
-| **DoS on the link service** | Floods `:4873`, the one port open to strangers, to burn a BLE radio | An 8 KiB body cap; setup costs one HMAC check, and every other route a Schnorr check before anything is stored (§3.3). There is no rate limit on `:4873` today. |
+| **DoS on the link service** | Floods `:4873`, the one port open to strangers, to burn a BLE radio | Per-address pacing (2 requests/s, bursts of 20, then 429) and an 8 KiB body cap; setup costs one HMAC check, and every other route a Schnorr check before anything is stored (§3.3). |
 | **Stranger writing to your event store** | Gets data into a store you may not own | Link setup never touches the event store. Anyone but an app peer is refused before the WebSocket upgrade (§3.2); the scoped relay admits only a link carrying the neighborhood named. |
 | **Revoked peer keeps reading** | A peer whose link ended keeps streaming | The app peer set is re-checked on delivery and the connection is dropped, so revocation reaches connections that already exist (§3.2). |
 | **Malicious nsite content** | Untrusted JS in the WebView | Pure-static, no capability API; per-nsite origin isolation; WebView never resolves `.fips` (§5.1). |
@@ -441,7 +441,6 @@ is saved, so a crash cannot leave a message the sweep never hears of.
 - **Open:** explicit inbound port allowlist on the FSP-multiplexed mesh surface
   on Android (§3).
 - **Open:** optional out-of-band link verification (§4).
-- **Open:** rate limiting on the link service (`:4873`).
 - **Open:** propagation-privacy controls and default manifest-replication posture (§6).
 - **Open:** whether to re-surface the FIPS peer ACL as a "block peer" control
   (§3).

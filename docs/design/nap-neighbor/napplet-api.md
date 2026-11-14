@@ -60,6 +60,9 @@ neighborhood://<n>/<p>    one peer in it
 
 ## Grants
 
-A napplet sees only the neighborhoods it was granted. Today that means
-ones it created. Neighborhoods the user starts or joins in the shell are
-granted to no napplet, and there is no UI to grant them yet.
+Neighborhoods are not tied to napplets. Any napplet with the `neighbor`
+domain sees and uses every neighborhood on the device — the ones the user
+starts or joins in the Neighbors tab and the ones any napplet created.
+
+Each napplet still gets its own ids and `neighborhood://` addresses for
+them, so an id one napplet holds means nothing to another.
