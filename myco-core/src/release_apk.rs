@@ -254,6 +254,8 @@ async fn prepare_unbounded(
     } else {
         let (bytes, source) = if let Some(bytes) = from_installed(installed, &file).await {
             (bytes, "installed")
+        } else if let Some(bytes) = from_neighborhoods(&content, &file).await {
+            (bytes, "neighborhood")
         } else if let Some(bytes) = from_app_peers(&content, &file).await {
             (bytes, "app-peer")
         } else if let Some(bytes) = from_internet(&file, internet).await {
@@ -263,6 +265,7 @@ async fn prepare_unbounded(
         };
         nsite_deck::seams::BlobStore::put(&*store, &bytes).await?;
         tracing::info!(version = %file.version, source, "release apk: kept");
+        share(&content, &file).await;
         source
     };
     write_variant(&store, &file.sha256).await;
@@ -386,6 +389,44 @@ async fn from_app_peers(content: &Arc<Content>, file: &ReleaseFile) -> Option<Ve
         }
     }
     None
+}
+
+/// The release from the neighborhoods with `myco-release` on, where a
+/// neighbor shared it ([`crate::neighbor::updates`]). Every byte is checked
+/// against the signed hash by the source.
+async fn from_neighborhoods(content: &Content, file: &ReleaseFile) -> Option<Vec<u8>> {
+    let source = content.release_source()?;
+    let bytes = source.fetch_blob(&file.sha256, &[]).await.ok().flatten()?;
+    (bytes.len() as u64 == file.size).then_some(bytes)
+}
+
+/// A release this phone now keeps: hand its signed events to the runtime,
+/// which shares them with the APK under `myco-release`.
+async fn share(content: &Content, file: &ReleaseFile) {
+    let Some(announcement) = kept_announcement(content).await else {
+        return;
+    };
+    let Some(files) =
+        file_filter(&announcement).and_then(|f| serde_json::from_value::<Filter>(f).ok())
+    else {
+        return;
+    };
+    let file_events: Vec<Event> = content
+        .relay()
+        .query(&[files])
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| tag_values(e, "x").contains(&file.sha256.as_str()))
+        .collect();
+    content.release_kept(announcement, file_events, file.sha256.clone());
+}
+
+/// Whether `event` is one of the publisher's signed release events: an
+/// announcement or a file event. What a neighbor shares under `myco-release`
+/// is kept only if it is.
+pub fn is_release_event(event: &Event) -> bool {
+    release::authenticated(event) || publisher_file(event)
 }
 
 /// The Blossom servers among the file event's URLs: `https://…/<sha256>`.

@@ -2591,8 +2591,36 @@ impl AppRuntime {
         content: &Arc<crate::content::Content>,
         neighbors: &Arc<crate::neighbor::Neighbors>,
     ) {
-        use crate::neighbor::extensions::{NAPPLET_UPDATES, NSITE_UPDATES};
+        use crate::neighbor::extensions::{MYCO_RELEASE, NAPPLET_UPDATES, NSITE_UPDATES};
         neighbors.set_kept_blobs(content.blobs());
+        content.set_release_source(Arc::new(crate::neighbor::updates::ExtensionSource {
+            neighbors: Arc::downgrade(neighbors),
+            extension: MYCO_RELEASE,
+        }));
+
+        // A release: the file events with the APK, then the announcement.
+        let mut releases = content.release_updates();
+        let sharing = Arc::downgrade(neighbors);
+        handle.spawn(async move {
+            loop {
+                let (announcement, files, sha256) = match releases.recv().await {
+                    Ok(r) => r,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                };
+                let Some(neighbors) = sharing.upgrade() else {
+                    return;
+                };
+                for file in files {
+                    neighbors
+                        .share_update(MYCO_RELEASE, file, std::slice::from_ref(&sha256))
+                        .await;
+                }
+                neighbors
+                    .share_update(MYCO_RELEASE, announcement, &[])
+                    .await;
+            }
+        });
 
         // Sharing: one task per extension, each turning a manifest into the
         // files it names.
@@ -2651,6 +2679,15 @@ impl AppRuntime {
                 let source: Arc<dyn nsite_deck::PeerSource> =
                     Arc::new(crate::neighbor::updates::NeighborhoodSource { neighbors, n });
                 let id = manifest.id;
+                if extension == MYCO_RELEASE {
+                    // Kept for the release check; the APK is fetched from the
+                    // neighborhoods when the phone carries the update.
+                    if crate::release_apk::is_release_event(&manifest) {
+                        let kept = content.relay().publish(manifest).await.is_ok();
+                        tracing::info!(event = %id, kept, "release event from a neighborhood");
+                    }
+                    return;
+                }
                 if extension == NSITE_UPDATES {
                     let activated = content.apply_site_update(manifest, source).await;
                     tracing::info!(event = %id, activated, "nsite update from a neighborhood");

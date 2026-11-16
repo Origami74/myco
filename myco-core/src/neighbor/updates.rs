@@ -1,6 +1,9 @@
 //! The update extensions over links ([`super::extensions`]):
-//! `napplet-updates` and `nsite-updates` work the same way, described here
-//! for napplets.
+//! `napplet-updates`, `nsite-updates` and `myco-release` work the same way,
+//! described here for napplets. A release is its signed announcement and
+//! file event plus the APK; one received is kept for the release check, and
+//! the APK is fetched when the phone carries the update
+//! ([`ExtensionSource`]).
 //!
 //! **Pushing.** When this device moves an installed napplet to a newer
 //! version, the runtime calls [`Neighbors::share_update`]: in every
@@ -23,7 +26,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use nostr::{Event, PublicKey};
 
-use super::extensions::{shared, NAPPLET_UPDATES, NSITE_UPDATES};
+use super::extensions::{shared, MYCO_RELEASE, NAPPLET_UPDATES, NSITE_UPDATES};
 use super::id::NeighborhoodId;
 use super::store::Record;
 use super::Neighbors;
@@ -32,6 +35,11 @@ use super::Neighbors;
 /// the extension it came under, manifest.
 pub type UpdateSink = Arc<dyn Fn(NeighborhoodId, &'static str, Event) + Send + Sync>;
 
+/// Zapstore's release announcement and file event: what `myco-release`
+/// carries, with the APK.
+const RELEASE_ANNOUNCEMENT: u16 = 30063;
+const RELEASE_FILE: u16 = 3063;
+
 /// The update extension an event kind travels under, if any: napplet
 /// manifests under `napplet-updates`, nsite manifests under `nsite-updates`.
 pub fn extension_for(kind: u16) -> Option<&'static str> {
@@ -39,6 +47,8 @@ pub fn extension_for(kind: u16) -> Option<&'static str> {
         Some(NAPPLET_UPDATES)
     } else if kind == nsite_deck::KIND_ROOT || kind == nsite_deck::KIND_NAMED {
         Some(NSITE_UPDATES)
+    } else if kind == RELEASE_ANNOUNCEMENT || kind == RELEASE_FILE {
+        Some(MYCO_RELEASE)
     } else {
         None
     }
@@ -158,5 +168,69 @@ impl nsite_deck::PeerSource for NeighborhoodSource {
             .neighbors
             .blob_from_links(self.n, sha256_hex, None)
             .await)
+    }
+}
+
+/// A [`nsite_deck::PeerSource`] over every neighborhood with `extension` on:
+/// each one's scope here, then its links, until one has the blob.
+pub struct ExtensionSource {
+    pub neighbors: std::sync::Weak<Neighbors>,
+    pub extension: &'static str,
+}
+
+#[async_trait]
+impl nsite_deck::PeerSource for ExtensionSource {
+    async fn fetch_manifest(
+        &self,
+        _author: &PublicKey,
+        _d_tag: Option<&str>,
+    ) -> anyhow::Result<Option<Event>> {
+        Ok(None)
+    }
+
+    async fn fetch_blob(
+        &self,
+        sha256_hex: &str,
+        _servers: &[String],
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        let Some(neighbors) = self.neighbors.upgrade() else {
+            return Ok(None);
+        };
+        for record in neighbors.records() {
+            if !record.policy.has(self.extension) {
+                continue;
+            }
+            if let Some(bytes) = neighbors.link_blob(record.id, sha256_hex).await {
+                return Ok(Some(bytes));
+            }
+            if let Some(bytes) = neighbors.blob_from_links(record.id, sha256_hex, None).await {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_update_kind_has_its_extension() {
+        assert_eq!(
+            extension_for(myco_napplet_runtime::KIND_NAMED),
+            Some(NAPPLET_UPDATES)
+        );
+        assert_eq!(
+            extension_for(myco_napplet_runtime::KIND_ROOT),
+            Some(NAPPLET_UPDATES)
+        );
+        assert_eq!(extension_for(nsite_deck::KIND_NAMED), Some(NSITE_UPDATES));
+        assert_eq!(extension_for(nsite_deck::KIND_ROOT), Some(NSITE_UPDATES));
+        assert_eq!(extension_for(30063), Some(MYCO_RELEASE));
+        assert_eq!(extension_for(3063), Some(MYCO_RELEASE));
+        // A napplet snapshot names no slot to update; a note is no update.
+        assert_eq!(extension_for(myco_napplet_runtime::KIND_SNAPSHOT), None);
+        assert_eq!(extension_for(1), None);
     }
 }

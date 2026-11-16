@@ -76,8 +76,22 @@ The same, for nsites in the Library: an update activated here is shared
 with every file its manifest names; a shared one is applied if the site is
 in the Library and the version is newer than the active one.
 
+## myco-release
+
+A release is Zapstore's signed announcement (kind 30063) and file event
+(kind 3063, naming the APK's sha256), plus the APK.
+
+- **Sharing.** When the phone keeps a new release APK (from the installed
+  APK, a neighbor, an app peer or the internet), it shares the file events
+  with the APK in scope, then the announcement.
+- **Receiving.** Events from the pinned publisher are kept in the phone's
+  own relay, where the release check finds them. Nothing is downloaded
+  then: the APK is fetched when the phone carries the update, from the
+  neighborhoods with `myco-release` on first (`release_apk.rs`,
+  `from_neighborhoods`), then app peers, then the internet.
+
 ## Status
 
-`napplet-updates` and `nsite-updates` are built. `myco-release` has its
-switch and agreement but pushes nothing yet; release updates still travel
-to app peers ([app-peers.md](app-peers.md)).
+All three extensions are built. Myco's updates still also travel to app
+peers over the mesh relay ([app-peers.md](app-peers.md)) until that path
+is removed.

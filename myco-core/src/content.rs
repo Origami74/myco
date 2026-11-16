@@ -539,6 +539,12 @@ pub struct Content {
     /// catalog is the Library, so a write may change what an archetype
     /// resolves to. One waiter; a write while nobody waits leaves a permit.
     library_changed: Arc<tokio::sync::Notify>,
+    /// Releases as this phone keeps a new one ([`Content::release_updates`]):
+    /// announcement, file events, APK sha256.
+    release_updates: tokio::sync::broadcast::Sender<(Event, Vec<Event>, String)>,
+    /// Where a release APK is looked for in the neighborhoods
+    /// ([`Content::set_release_source`]).
+    release_source: Mutex<Option<Arc<dyn PeerSource>>>,
     /// Nsite updates as they are activated ([`Content::site_updates`]).
     site_updates: tokio::sync::broadcast::Sender<Event>,
     /// Napplet updates as they are pinned ([`Content::napplet_updates`]).
@@ -905,6 +911,8 @@ impl Content {
             app_peers: Mutex::new(Vec::new()),
             napplet_updates: tokio::sync::broadcast::channel(32).0,
             site_updates: tokio::sync::broadcast::channel(32).0,
+            release_updates: tokio::sync::broadcast::channel(4).0,
+            release_source: Mutex::new(None),
             connected_peers: Mutex::new(Vec::new()),
             sites: Mutex::new(HashMap::new()),
             forgotten: Mutex::new(std::collections::HashSet::new()),
@@ -3986,6 +3994,26 @@ impl Content {
             let _ = self.napplet_updates.send(manifest.clone());
         }
         true
+    }
+
+    /// A release this phone now keeps, for the `myco-release` extension.
+    pub(crate) fn release_kept(&self, announcement: Event, files: Vec<Event>, sha256: String) {
+        let _ = self.release_updates.send((announcement, files, sha256));
+    }
+
+    /// Releases as this phone keeps a new one.
+    pub fn release_updates(&self) -> tokio::sync::broadcast::Receiver<(Event, Vec<Event>, String)> {
+        self.release_updates.subscribe()
+    }
+
+    /// Where `release_apk` looks for a release APK neighbors shared. Set
+    /// once by the runtime.
+    pub fn set_release_source(&self, source: Arc<dyn PeerSource>) {
+        *self.release_source.lock().unwrap() = Some(source);
+    }
+
+    pub(crate) fn release_source(&self) -> Option<Arc<dyn PeerSource>> {
+        self.release_source.lock().unwrap().clone()
     }
 
     /// Nsite manifests as an update is activated — this device now holds
