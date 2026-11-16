@@ -342,7 +342,11 @@ async fn a_napplet_update_is_pushed_and_its_files_fetched_over_the_link() {
         .unwrap();
     let sent = alice
         .neighbors
-        .share_update(NAPPLET_UPDATES, manifest.clone(), &[sha.clone()])
+        .share_update(
+            NAPPLET_UPDATES,
+            manifest.clone(),
+            std::slice::from_ref(&sha),
+        )
         .await;
     assert_eq!(sent, 1, "pushed to Bob's link");
 
