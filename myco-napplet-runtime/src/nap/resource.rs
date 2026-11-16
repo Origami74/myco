@@ -947,6 +947,12 @@ pub fn sniff_mime(bytes: &[u8]) -> &'static str {
         // the window — a character the cut split, not bad UTF-8.
         Err(e) => e.error_len().is_none() && head.len() - e.valid_up_to() < 4,
     };
+    // An HTML document is HTML, whatever icons it inlines: one that opens
+    // as a document is told apart before the `<svg` search. A standalone
+    // SVG never opens with a doctype or `<html`.
+    if head_is_text && opens_as_html(head) {
+        return "text/html";
+    }
     if head_is_text && bytes.windows(4).any(|w| w.eq_ignore_ascii_case(b"<svg")) {
         return "image/svg+xml";
     }
@@ -966,6 +972,19 @@ pub fn sniff_mime(bytes: &[u8]) -> &'static str {
         return "text/plain";
     }
     "application/octet-stream"
+}
+
+/// Whether `head` opens, after a BOM and whitespace, with `<!doctype html`
+/// or `<html`, in any case.
+fn opens_as_html(head: &[u8]) -> bool {
+    let head = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(head);
+    let start = head
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(head.len());
+    let rest = &head[start..];
+    let opens = |p: &[u8]| rest.len() >= p.len() && rest[..p.len()].eq_ignore_ascii_case(p);
+    opens(b"<!doctype html") || opens(b"<html")
 }
 
 /// The domain's error envelope: `<type>.error` with `error` and, when there is
@@ -1234,6 +1253,28 @@ mod tests {
         )
         .await;
         assert_eq!(r["error"], "blocked-by-policy");
+    }
+
+    /// An HTML page with inline SVG icons is HTML, and delivered: the
+    /// `<svg` search is for standalone SVGs.
+    #[test]
+    fn an_html_page_with_inline_svg_is_html() {
+        let page = b"<!doctype html>\n<html><body><svg viewBox='0 0 1 1'></svg></body></html>";
+        assert_eq!(sniff_mime(page), "text/html");
+        assert_eq!(
+            sniff_mime(b"\xEF\xBB\xBF  <HTML><svg/></HTML>"),
+            "text/html"
+        );
+        assert_eq!(
+            sniff_mime(b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>"),
+            "image/svg+xml",
+            "a standalone SVG is still refused"
+        );
+        assert_eq!(
+            sniff_mime(b"<p>hi</p><svg/>"),
+            "image/svg+xml",
+            "not a document: refused"
+        );
     }
 
     /// `<svg` past the first kilobyte is still SVG: the sniff runs over the
