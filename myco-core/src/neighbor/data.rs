@@ -208,7 +208,15 @@ impl Neighbors {
         if !record.offer.blob_read {
             return None;
         }
-        self.scoped.blob(n, sha256).await.ok().flatten()
+        if let Some(bytes) = self.scoped.blob(n, sha256).await.ok().flatten() {
+            return Some(bytes);
+        }
+        if record.policy.shares(super::extensions::NAPPLET_UPDATES) {
+            if let Some(held) = self.held.get() {
+                return held.file(sha256).await;
+            }
+        }
+        None
     }
 
     /// Ask the links carrying `n` (or only `peer`'s) for a blob, one after
@@ -257,13 +265,26 @@ impl Neighbors {
             return Vec::new();
         };
         let keep = unmuted(&record);
-        self.scoped
+        let mut events: Vec<Event> = self
+            .scoped
             .backlog(n, filters)
             .await
             .unwrap_or_default()
             .into_iter()
             .filter(|e| keep(e))
-            .collect()
+            .collect();
+        // Napplets held here are answered too, without having been pushed:
+        // exposed, not shared, where this device sends napplet updates.
+        if record.policy.shares(super::extensions::NAPPLET_UPDATES) {
+            if let Some(held) = self.held.get() {
+                for event in held.manifests(filters).await {
+                    if keep(&event) && !events.iter().any(|e| e.id == event.id) {
+                        events.push(event);
+                    }
+                }
+            }
+        }
+        events
     }
 
     /// An event a linked peer sent into `n` with `ttl` hops left: checked,

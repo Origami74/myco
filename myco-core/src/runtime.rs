@@ -2282,6 +2282,10 @@ impl AppRuntime {
     ) {
         use crate::neighbor::extensions::{MYCO_RELEASE, NAPPLET_UPDATES, NSITE_UPDATES};
         neighbors.set_kept_blobs(content.blobs());
+        neighbors.set_held(crate::neighbor::updates::HeldNapplets {
+            relay: content.cache_relay(),
+            blobs: content.cache_blobs(),
+        });
         // Where each extension's apps are looked for: opening a site,
         // installing a napplet, carrying the release APK.
         for extension in [MYCO_RELEASE, NAPPLET_UPDATES, NSITE_UPDATES] {

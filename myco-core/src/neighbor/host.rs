@@ -75,6 +75,9 @@ pub struct Neighbors {
     /// Told of an update manifest a linked peer shared under an extension
     /// both ends have on (see [`super::updates`]).
     pub(super) on_update: std::sync::OnceLock<super::updates::UpdateSink>,
+    /// The napplets this device holds, exposed to linked neighbors where it
+    /// shares `napplet-updates` (see [`super::updates::HeldNapplets`]).
+    pub(super) held: std::sync::OnceLock<Arc<super::updates::HeldNapplets>>,
 }
 
 /// What [`Neighbors::open`] reaches the world through.
@@ -120,6 +123,7 @@ impl Neighbors {
             )),
             links: seams.links,
             on_update: std::sync::OnceLock::new(),
+            held: std::sync::OnceLock::new(),
         }
     }
 

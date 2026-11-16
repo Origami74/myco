@@ -475,3 +475,75 @@ async fn an_app_not_here_is_found_through_the_neighborhoods() {
         .unwrap()
         .is_none());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_napplet_held_but_never_pushed_is_exposed_where_updates_are_sent() {
+    use super::extensions::NAPPLET_UPDATES;
+    use nsite_deck::{BlobStore as _, RelayBackend as _};
+    let (alice, bob, _, bob_addr) = linked_club().await;
+    let id = bob.neighbors.records()[0].id;
+
+    // Alice holds a napplet (its manifest and file), never shared.
+    let held = myco_napplet_runtime::testing::build_test_napplet();
+    let relay = Arc::new(nsite_deck::testing::MemRelay::new());
+    let blobs = Arc::new(nsite_deck::testing::MemBlobs::new());
+    relay.publish(held.manifest.clone()).await.unwrap();
+    for (_, bytes) in &held.blobs {
+        blobs.put(bytes).await.unwrap();
+    }
+    // A manifest whose file is not here is not exposed.
+    let missing = myco_napplet_runtime::testing::NappletBuilder::new()
+        .d_tag(Some("elsewhere"))
+        .files(&[("/index.html", b"<!doctype html><p>not here</p>".as_slice())])
+        .build();
+    relay.publish(missing.manifest.clone()).await.unwrap();
+    alice
+        .neighbors
+        .set_held(super::updates::HeldNapplets { relay, blobs });
+
+    let napplets = vec![Filter::new().kinds([
+        Kind::from(myco_napplet_runtime::KIND_ROOT),
+        Kind::from(myco_napplet_runtime::KIND_NAMED),
+    ])];
+    let feed = bob
+        .neighbors
+        .subscribe(&app(), &bob_addr, napplets.clone())
+        .await
+        .unwrap();
+    drop(feed);
+    let mut got = Vec::new();
+    for _ in 0..100 {
+        got = bob.neighbors.link_backlog(id, &napplets).await;
+        if got.iter().any(|e| e.id == held.manifest.id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        got.iter().any(|e| e.id == held.manifest.id),
+        "Bob's pull brought it"
+    );
+    assert!(
+        !got.iter().any(|e| e.id == missing.manifest.id),
+        "files not here: not exposed"
+    );
+
+    let (sha, bytes) = held.blobs[0].clone();
+    assert_eq!(
+        bob.neighbors.blob(&app(), &bob_addr, &sha).await.unwrap(),
+        Some(bytes),
+        "and its file"
+    );
+
+    // With sending off, Alice exposes it no more.
+    alice
+        .neighbors
+        .set_extension(id, NAPPLET_UPDATES, true, false);
+    assert!(!alice
+        .neighbors
+        .link_backlog(id, &napplets)
+        .await
+        .iter()
+        .any(|e| e.id == held.manifest.id));
+    assert_eq!(alice.neighbors.link_blob(id, &sha).await, None);
+}

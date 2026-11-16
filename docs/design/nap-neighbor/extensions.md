@@ -66,7 +66,15 @@ neighborhood event. Where this device gets `napplet-updates`, then:
   manifest stays in the neighborhood, so an app store reading it sees that
   someone around holds that napplet.
 
-Only the files of versions this device pushed are reachable this way. If
+**Exposing what is held.** Where this device sends `napplet-updates`, it
+also answers for every napplet it holds — manifest stored and `index.html`
+in storage, installed or not — without pushing anything:
+
+- a linked neighbor's backlog request for napplet manifests gets them;
+- its blob request gets their `index.html` and icon.
+
+Code: `HeldNapplets` in `updates.rs`. Only napplets: no nsites, and no
+other file in storage, is reachable this way. If
 the neighborhood can't supply them, the public servers are tried, unless
 the phone is mesh-only.
 

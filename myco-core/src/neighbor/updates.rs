@@ -113,6 +113,83 @@ impl Neighbors {
     }
 }
 
+/// The napplets this device holds — its manifest stored and its files in
+/// storage, installed or not — exposed to linked neighbors in each
+/// neighborhood where it shares `napplet-updates`. Nothing is pushed: a
+/// neighbor's backlog request is answered with the manifests, and its blob
+/// request with their files (`index.html` and icon). Nothing else in
+/// storage is reachable this way.
+pub struct HeldNapplets {
+    /// Manifests: kept and cached, read as one.
+    pub relay: Arc<dyn nsite_deck::RelayBackend>,
+    /// Files: kept and cached, read as one.
+    pub blobs: Arc<dyn nsite_deck::BlobStore>,
+}
+
+/// The napplet manifest kinds that name a slot.
+fn napplet_kinds() -> [nostr::Kind; 2] {
+    [
+        nostr::Kind::from(myco_napplet_runtime::KIND_ROOT),
+        nostr::Kind::from(myco_napplet_runtime::KIND_NAMED),
+    ]
+}
+
+impl HeldNapplets {
+    /// Napplet manifests matching `filters` whose entry file is here.
+    pub async fn manifests(&self, filters: &[nostr::Filter]) -> Vec<Event> {
+        let narrowed: Vec<nostr::Filter> = filters
+            .iter()
+            .filter_map(|f| {
+                let kinds: Vec<nostr::Kind> = match &f.kinds {
+                    Some(asked) => napplet_kinds()
+                        .into_iter()
+                        .filter(|k| asked.contains(k))
+                        .collect(),
+                    None => napplet_kinds().to_vec(),
+                };
+                (!kinds.is_empty()).then(|| f.clone().kinds(kinds))
+            })
+            .collect();
+        if narrowed.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for event in self.relay.query(&narrowed).await.unwrap_or_default() {
+            let Ok(m) = myco_napplet_runtime::NappletManifest::from_event(event.clone()) else {
+                continue;
+            };
+            if self.blobs.has(&m.artifact).await {
+                out.push(event);
+            }
+        }
+        out
+    }
+
+    /// A file of a napplet held here: its `index.html` or icon.
+    pub async fn file(&self, sha256: &str) -> Option<Vec<u8>> {
+        let all = [nostr::Filter::new().kinds(napplet_kinds())];
+        let named = self
+            .relay
+            .query(&all)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| myco_napplet_runtime::NappletManifest::from_event(e).ok())
+            .any(|m| m.artifact == sha256 || m.icon.as_ref().is_some_and(|i| i.sha256 == sha256));
+        if !named {
+            return None;
+        }
+        self.blobs.get(sha256).await.ok().flatten()
+    }
+}
+
+impl Neighbors {
+    /// Expose the napplets this device holds. Set once by the runtime.
+    pub fn set_held(&self, held: HeldNapplets) {
+        let _ = self.held.set(Arc::new(held));
+    }
+}
+
 /// A [`nsite_deck::PeerSource`] over one neighborhood: blobs come from its
 /// scope here, then from the links carrying it. Manifests are not asked for:
 /// an update arrives with its manifest.
