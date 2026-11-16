@@ -57,6 +57,7 @@ neighborhood://<n>/<p>    one peer in it
 | `mute` | yes |
 | `invite` | no (invitations are made in the Neighbors tab) |
 | `nearby` (proximity extension) | no |
+| `napplet-updates` (extension) | yes ([extensions.md](extensions.md)) |
 
 ## Grants
 

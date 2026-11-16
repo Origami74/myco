@@ -344,6 +344,7 @@ impl NeighborHost for Neighbors {
                 Feature::Leave,
                 Feature::Offer,
                 Feature::Mute,
+                Feature::NappletUpdates,
             ],
             services: vec!["relay".into(), "blossom".into()],
         }

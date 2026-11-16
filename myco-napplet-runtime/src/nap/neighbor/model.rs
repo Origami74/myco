@@ -24,6 +24,10 @@ pub enum Feature {
     /// The proximity extension: the `nearby` neighborhood and
     /// `link: "proximity"`.
     Nearby,
+    /// The napplet-updates extension: newer manifests of installed napplets
+    /// arrive in neighborhoods, with that version's files fetchable there.
+    #[serde(rename = "napplet-updates")]
+    NappletUpdates,
 }
 
 impl Feature {
